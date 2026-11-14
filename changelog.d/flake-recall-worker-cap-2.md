@@ -1,1 +1,0 @@
-- Test only: the abandoned recall worker cap test holds every worker in a stub search, so a thread that starts after its 0.1 s deadline on a loaded runner no longer frees its slot early and changes the worker count.

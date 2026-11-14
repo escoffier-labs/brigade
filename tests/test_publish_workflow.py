@@ -527,7 +527,7 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     assert 'test "$GITHUB_REF" = refs/heads/main' in publish
     assert 'test "$GITHUB_SHA" = "$EXPECTED_SHA"' in publish
     assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in publish
-    assert 'test "$RELEASE_TAG" = v0.30.0' in publish
+    assert 'test "$RELEASE_TAG" = v0.31.0' in publish
     guard = next(step for step in jobs["publish"]["steps"] if "EXPECTED_SHA" in step.get("env", {}))
     assert guard["env"]["EXPECTED_SHA"] == "${{ inputs.expected_sha }}"
     assert guard["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
@@ -964,3 +964,11 @@ def test_published_acceptance_has_read_only_attestation_access():
     for name in ("Run published artifact acceptance (Unix)", "Run Windows native acceptance (published CLI)"):
         env = steps[name]["env"]
         assert any(env.get(key) == "${{ github.token }}" for key in ("GITHUB_TOKEN", "GH_TOKEN")), name
+
+
+def test_acceptance_scripts_accept_the_same_checksum_inventories() -> None:
+    windows = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    posix = (ROOT / "scripts/published-artifact-acceptance.py").read_text()
+    assert "if len(checksums) not in (41, 43):" in posix
+    assert "if ($checksums.Count -notin @(41, 43)) {" in windows
+    assert "$checksums.Count -ne 41" not in windows

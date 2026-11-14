@@ -1,1 +1,0 @@
-- Brigade now requires Python 3.11 or newer. Python 3.10 users should upgrade the interpreter before upgrading Brigade.

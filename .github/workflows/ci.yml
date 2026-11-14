@@ -908,8 +908,9 @@ jobs:
         run: python tests/fleet_hub_container_smoke.py --platform "${{ matrix.platform }}"
 
   hub-rust:
-    # Rust hub suite (stable and MSRV 1.85.0) lives in hub.yml. Calling it here
-    # puts it under ci-gate and the merge queue.
+    # Rust hub suite lives in hub.yml. Calling it here puts it under ci-gate
+    # and the merge queue. It runs the suite on stable and compiles on MSRV
+    # 1.85.0; hub-nightly.yml runs the suite on both.
     needs: changes
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.hub == 'true' }}
     permissions:
@@ -1185,6 +1186,10 @@ jobs:
           BRIGADE_EXTRAS: "1"
       - name: Template Audit
         run: brigade security template-audit --target . --json
+      # Ungated, so a documentation-only diff cannot add a retired engine name
+      # that the pytest ratchet would only reject on the next code PR.
+      - name: Retired Engine Names
+        run: python3 scripts/retired_engine_names.py
 
   changelog-fragments:
     runs-on: ubuntu-latest

@@ -1,1 +1,0 @@
-- Raise the recall time budget in the dispatch memory 2,000-card bounds test so a slow CI runner no longer answers with no packet before the bounds are checked. The budget keeps its own tests.

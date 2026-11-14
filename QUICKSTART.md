@@ -4,7 +4,7 @@ Install stable 0.30.0, then configure one repository and record a check. Brigade
 
 ## 1. Install
 
-Choose one route. Git is required for the repository walkthrough. These commands install the published stable bridge, while `main` contains the unreleased 0.31 preview. See [update channels](docs/update-channels.md) before choosing a development build.
+Choose one route. Git is required for the repository walkthrough. These commands install the published stable bridge (0.30.0). `brigade-cli` 0.31.0 is on PyPI, and `main` is the 0.32 preview. See [update channels](docs/update-channels.md) before choosing a development build.
 
 ### npm
 

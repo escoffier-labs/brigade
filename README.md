@@ -26,7 +26,7 @@ Brigade Stack is an open-source coordination layer for AI coding agents. It sits
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-**Stable:** v0.30.0 on PyPI and npm. **Beta:** main is the 0.31 preview line. [Channels](docs/update-channels.md)
+**Stable:** v0.31.0 as `brigade-cli` on PyPI. npm and the `brigadestack` bridge still serve 0.30.0 until promotion. **Beta:** main is the 0.32 preview line. [Channels](docs/update-channels.md)
 
 ## Why Brigade Stack
 
@@ -86,7 +86,7 @@ Generated agent instructions and CLI suggestions still use `brigade`. On a bridg
 | **T3 Code** | Remote execution and session visibility. Full child-task governance is in progress. |
 | **OpenClaw, Hermes** | Memory-owner workflows, writer handoffs, and memory care. |
 | **Dot** | Memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
-| **Duet** (0.31 beta) | Memory, skills, Hub messaging, and read-only fleet views. |
+| **Duet** | Memory, skills, Hub messaging, and read-only fleet views. |
 
 Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), [Duet guide](docs/duet-connector.md), and [generic connector guide](docs/duet-connector.md#generic-cloud-agent-profile).
 
@@ -105,7 +105,7 @@ brigadestack skills serve-mcp --stdio
 <!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
 <!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
 
-## In the 0.31 beta
+## New in 0.31
 
 - **Parallel workers.** Dispatch ready tasks into separate worktrees, supervise them, and keep results for review.
 - **Memory reflection.** Evidence-backed consolidation proposals for review. Nothing is rewritten automatically.

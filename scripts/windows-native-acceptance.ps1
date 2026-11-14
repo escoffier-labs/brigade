@@ -970,7 +970,10 @@ function Invoke-VerifiedCanonicalSmoke {
     param([string]$Version, [string]$ReleaseDirectory, [string]$GhExe)
     $checksums = @(Get-Content -LiteralPath (Join-Path $ReleaseDirectory "checksums.txt"))
     if ($checksums.Count -eq 26) { return }
-    if ($checksums.Count -ne 41) { throw "invalid cached release inventory" }
+    # 40 native assets and the manifest, plus brigade-hub's two Linux assets
+    # from the release that first ships it. Keep in step with
+    # scripts/published-artifact-acceptance.py.
+    if ($checksums.Count -notin @(41, 43)) { throw "invalid cached release inventory" }
     $paths = @("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence") | ForEach-Object {
         $path = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "$_-windows-amd64.exe"))
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing canonical host asset in additive release" }

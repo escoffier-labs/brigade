@@ -69,11 +69,11 @@ def test_npm_version_check_acceptance_offline(tmp_path):
     assert all(check["exit"] == 0 for check in receipt["checks"])
 
 
-def wheel(tmp_path, *, metadata="", extra=None, version="0.30.0.dev1"):
+def wheel(tmp_path, *, metadata="", extra=None, version="0.31.0.dev1"):
     filename = tmp_path / f"brigade_cli-{version}-py3-none-any.whl"
     dist = f"brigade_cli-{version}.dist-info"
     files = {
-        "brigade/__init__.py": b'__version__ = "0.30.0.dev1"\n',
+        "brigade/__init__.py": b'__version__ = "0.31.0.dev1"\n',
         f"{dist}/METADATA": (
             f"Metadata-Version: 2.4\nName: brigade-cli\nVersion: {version}\n"
             "License-Expression: MIT\nProvides-Extra: dev\n" + metadata + "\n"
@@ -103,12 +103,12 @@ def wheel(tmp_path, *, metadata="", extra=None, version="0.30.0.dev1"):
         ('Requires-Dist: forbidden; extra == "dev" or sys_platform == "win32"\n', None),
         ("Version: 9.0\n", None),
         ("", {"../escape": b"unsafe"}),
-        ("", {"brigade_cli-0.30.0.dev1.dist-info/WHEEL": b"Tag: cp312-none-any\n"}),
+        ("", {"brigade_cli-0.31.0.dev1.dist-info/WHEEL": b"Tag: cp312-none-any\n"}),
     ],
 )
 def test_wheel_rejects_unsafe_metadata_on_every_supported_platform(tmp_path, metadata, extra):
     with pytest.raises(ValueError):
-        prepare.validate_wheel(wheel(tmp_path, metadata=metadata, extra=extra), "0.30.0.dev1")
+        prepare.validate_wheel(wheel(tmp_path, metadata=metadata, extra=extra), "0.31.0.dev1")
 
 
 def test_wheel_record_corruption_is_rejected(tmp_path):
@@ -120,12 +120,12 @@ def test_wheel_record_corruption_is_rejected(tmp_path):
         for name, data in files.items():
             archive.writestr(name, data)
     with pytest.raises(ValueError, match="RECORD"):
-        prepare.validate_wheel(payload, "0.30.0.dev1")
+        prepare.validate_wheel(payload, "0.31.0.dev1")
 
 
 def test_pure_wheel_extra_dependency_is_allowed(tmp_path):
     payload = wheel(tmp_path, metadata='Requires-Dist: pytest; extra == "dev"\n')
-    result = prepare.validate_wheel(payload, "0.30.0.dev1")
+    result = prepare.validate_wheel(payload, "0.31.0.dev1")
     assert result["sha256"] == hashlib.sha256(payload.read_bytes()).hexdigest()
     assert result["bytes"] == payload.stat().st_size
 
@@ -173,7 +173,7 @@ def test_pack_preserves_registry_integrity_of_original_archive(tmp_path):
 
     package = tmp_path / "package"
     package.mkdir()
-    (package / "package.json").write_text(json.dumps({"name": "@example/brigade", "version": "0.30.0"}))
+    (package / "package.json").write_text(json.dumps({"name": "@example/brigade", "version": "0.31.0"}))
     artifact = prepare.pack(package, tmp_path)
     data = (tmp_path / artifact["filename"]).read_bytes()
     assert artifact["integrity"] == "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
@@ -190,24 +190,27 @@ def test_pack_refuses_clearly_when_npm_is_missing(tmp_path, monkeypatch):
         prepare.pack(tmp_path, tmp_path)
 
 
-@pytest.mark.parametrize("mutation", [None, "drift", "addition", "missing", "manifest", "revision"])
+@pytest.mark.parametrize("mutation", [None, "drift", "addition", "missing", "manifest", "revision", "hub-revision"])
 def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_path, mutation):
     import json
 
     commit = "a" * 40
     source = tmp_path / "source"
     (source / "src/brigade").mkdir(parents=True)
-    (source / "src/brigade/__init__.py").write_bytes(b'__version__ = "0.30.0.dev1"\n')
+    (source / "src/brigade/__init__.py").write_bytes(b'__version__ = "0.31.0.dev1"\n')
     manifest = {
-        "brigade_version": "0.30.0",
-        "manifest_revision": "v0.30.0+" + commit,
-        "components": {"example": {"component_revision": commit}},
+        "brigade_version": "0.31.0",
+        "manifest_revision": "v0.31.0+" + commit,
+        "components": {
+            "example": {"component_revision": commit},
+            "brigade-hub": {"component_revision": commit, "assets": {"linux-amd64": {}, "linux-arm64": {}}},
+        },
     }
     data = json.dumps(manifest).encode()
     release = tmp_path / "manifest.json"
     release.write_bytes(data)
     extra = {"brigade/templates/components/manifest-v1.json": data}
-    reference = wheel(tmp_path, version="0.30.0", extra=extra)
+    reference = wheel(tmp_path, version="0.31.0", extra=extra)
     reference = reference.rename(tmp_path / "reference.whl")
     if mutation == "drift":
         extra["brigade/__init__.py"] = b"unexpected"
@@ -217,16 +220,16 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         extra = {}
     elif mutation == "manifest":
         extra["brigade/templates/components/manifest-v1.json"] = b"{}"
-    elif mutation == "revision":
-        manifest["components"]["example"]["component_revision"] = "b" * 40
+    elif mutation in {"revision", "hub-revision"}:
+        manifest["components"]["example" if mutation == "revision" else "brigade-hub"]["component_revision"] = "b" * 40
         release.write_text(json.dumps(manifest))
         extra["brigade/templates/components/manifest-v1.json"] = release.read_bytes()
-    payload = wheel(tmp_path, version="0.30.0", extra=extra)
+    payload = wheel(tmp_path, version="0.31.0", extra=extra)
     if mutation:
         with pytest.raises(ValueError):
-            prepare.audit_stable_payload(payload, reference, source, release, "0.30.0", commit)
+            prepare.audit_stable_payload(payload, reference, source, release, "0.31.0", commit)
     else:
-        result = prepare.audit_stable_payload(payload, reference, source, release, "0.30.0", commit)
+        result = prepare.audit_stable_payload(payload, reference, source, release, "0.31.0", commit)
         assert result["packageEntries"] == 2
         assert result["componentManifestSha256"] == hashlib.sha256(data).hexdigest()
 
@@ -285,7 +288,7 @@ def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_pa
             artifact["platform"] = f"test-{i}"
         packages.append(artifact)
     metadata = {
-        "runtime": {"version": "0.30.0", "payloadVersion": "0.30.0"},
+        "runtime": {"version": "0.31.0", "payloadVersion": "0.31.0"},
         "sourceCommit": "a" * 40,
         "artifacts": packages,
     }
@@ -307,7 +310,7 @@ if args[0]=='view':
     published=(root/(a['filename']+'.published')).exists()
     if args[2]=='versions':
         values={'string':'0.0.0-bootstrap','array':['0.0.0-bootstrap','0.28.0'],
-                'present':['0.0.0-bootstrap','0.30.0'],'null':None,'empty-array':[],
+                'present':['0.0.0-bootstrap','0.31.0'],'null':None,'empty-array':[],
                 'mixed-array':['0.0.0-bootstrap',None],'invalid-string':'unknown',
                 'invalid-semver':'0.0.0-01'}
         kind=mode.removeprefix('blank-versions-')
@@ -335,8 +338,8 @@ if args[0]=='view':
     if mode in ['absent','uncertain','no-attestation','deadline-after-read','slow-pre-publish-read'] and not published:
         print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
     if args[2]=='dist.integrity': print(json.dumps('sha512-wrong' if mode=='mismatch' else a['integrity']))
-    elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.30.0'}))
-    elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0' if mode=='latest-mismatch' else '0.30.0'))
+    elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.31.0'}))
+    elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0' if mode=='latest-mismatch' else '0.31.0'))
 else:
     assert args[0]=='publish' and '--provenance' in args and '--access' in args and 'public' in args
     archive=Path(args[1]); assert archive.read_bytes().startswith(b'original-')
@@ -477,11 +480,11 @@ def test_registry_acceptance_retries_only_missing_metadata(tmp_path, state, fiel
     packages = [f"@escoffier-labs/brigade-uv-test-{i}" for i in range(5)] + ["@escoffier-labs/brigade"]
     payload = b"registry-only fixture; never installed"
     runtime = {
-        "version": "0.30.0",
-        "payloadVersion": "0.30.0",
+        "version": "0.31.0",
+        "payloadVersion": "0.31.0",
         "platforms": {platform: {"package": packages[0]}},
         "payload": {
-            "version": "0.30.0",
+            "version": "0.31.0",
             "sourceCommit": "a" * 40,
             "wheel": "fixture.whl",
             "bytes": len(payload),
@@ -492,7 +495,7 @@ def test_registry_acceptance_retries_only_missing_metadata(tmp_path, state, fiel
     for i, name in enumerate(packages):
         manifest = {
             "name": name,
-            "version": "0.30.0",
+            "version": "0.31.0",
             "publishConfig": {"access": "public"},
             "repository": {
                 "type": "git",
@@ -502,7 +505,7 @@ def test_registry_acceptance_retries_only_missing_metadata(tmp_path, state, fiel
         }
         files = {}
         if i == 5:
-            manifest["optionalDependencies"] = {packages[0]: "0.30.0"}
+            manifest["optionalDependencies"] = {packages[0]: "0.31.0"}
             files = {"runtime.json": json.dumps(runtime).encode(), "wheel/fixture.whl": payload}
         files["package.json"] = json.dumps(manifest).encode()
         archive = tmp_path / f"package-{i}.tgz"
@@ -536,7 +539,7 @@ const calls=fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').ma
 fs.appendFileSync(log,JSON.stringify(args)+'\n');
 if(args[0]!=='view') throw new Error('unexpected registry write or install');
 const metadata=JSON.parse(fs.readFileSync(path.join(root,'artifacts.json')));
-if(args[2]==='dist-tags.latest') {console.log(JSON.stringify('0.30.0'));process.exit(0);}
+if(args[2]==='dist-tags.latest') {console.log(JSON.stringify('0.31.0'));process.exit(0);}
 const name=args[1].slice(0,args[1].lastIndexOf('@'));
 const artifact=metadata.artifacts.find(a=>a.name===name);
 const count=calls.filter(c=>c[0]==='view' && c[1]===args[1] && c[2]===args[2]).length;
@@ -548,7 +551,7 @@ if(args[2]===process.env.LOOKUP_FIELD) {
   if(process.env.PUBLISH_STATE==='malformed') {console.log('{');process.exit(0);}
 }
 console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
-  {url:'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.30.0'}));
+  {url:'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.31.0'}));
 """
     )
     (tmp_path / "npx-cli.js").write_text("console.error('registry metadata complete');process.exit(79);")
@@ -561,7 +564,7 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
         "--out",
         str(out),
         "--registry-spec",
-        "@escoffier-labs/brigade@0.30.0",
+        "@escoffier-labs/brigade@0.31.0",
     ]
     if state.startswith("explicit"):
         argv += ["--expected-packaging-sha", ("c" if state == "explicit-mismatch" else "a") * 40]
@@ -608,7 +611,7 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
         )
         calls_file = tmp_path / "calls.jsonl"
         calls = [json.loads(line) for line in calls_file.read_text().splitlines()] if calls_file.exists() else []
-        first = f"{packages[0]}@0.30.0"
+        first = f"{packages[0]}@0.31.0"
         lookups = [c for c in calls if c[:3] == ["view", first, field]]
         assert len(lookups) == attempts, receipt["error"]
         assert all(c[0] in {"view", "verify"} for c in calls), "metadata tests must never install or publish"
@@ -657,8 +660,8 @@ def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tm
 
     platforms = ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64")
     runtime = {
-        "version": "0.30.0",
-        "payloadVersion": "0.30.0",
+        "version": "0.31.0",
+        "payloadVersion": "0.31.0",
         "platforms": {
             platform: {
                 "package": "@escoffier-labs/brigade-uv-" + platform,
@@ -668,7 +671,7 @@ def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tm
         },
         "payloadWheel": {
             "sha256": hashlib.sha256(b"fixture release wheel").hexdigest(),
-            "releaseTag": "v0.30.0",
+            "releaseTag": "v0.31.0",
             "sourceCommit": "a" * 40,
             "componentManifest": {"sha256": hashlib.sha256(b"fixture release manifest").hexdigest()},
         },
@@ -677,11 +680,11 @@ def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tm
     source.mkdir()
     (source / "runtime.json").write_text(json.dumps(runtime))
     runtime["payload"] = {
-        "wheel": "brigade_cli-0.30.0-py3-none-any.whl",
+        "wheel": "brigade_cli-0.31.0-py3-none-any.whl",
         "sha256": runtime["payloadWheel"]["sha256"],
         "componentManifestSha256": runtime["payloadWheel"]["componentManifest"]["sha256"],
         "sourceCommit": "a" * 40,
-        "releaseTag": "v0.30.0",
+        "releaseTag": "v0.31.0",
     }
     identity = {
         "sourceCommit": "b" * 40,
@@ -697,7 +700,7 @@ def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tm
         name = runtime["platforms"][platform]["package"] if platform else "@escoffier-labs/brigade"
         filename = f"package-{i}.tgz"
         with tarfile.open(tmp_path / filename, "w:gz") as archive:
-            content = json.dumps({"name": name, "version": "0.30.0"}).encode()
+            content = json.dumps({"name": name, "version": "0.31.0"}).encode()
             entry = tarfile.TarInfo("package/package.json")
             entry.size = len(content)
             archive.addfile(entry, io.BytesIO(content))
@@ -973,9 +976,9 @@ def test_source_provenance_crypto_gate_cannot_be_skipped_or_env_configured():
 def candidate_source(tmp_path, monkeypatch):
     root = tmp_path / "source"
     (root / "src/brigade").mkdir(parents=True)
-    (root / "src/brigade/__init__.py").write_text('__version__ = "0.30.0"\n')
+    (root / "src/brigade/__init__.py").write_text('__version__ = "0.31.0"\n')
     (root / "src/brigade/current.py").write_bytes(b"CURRENT = True\n")
-    (root / "pyproject.toml").write_text('version = "0.30.0"\n')
+    (root / "pyproject.toml").write_text('version = "0.31.0"\n')
     (root / "scripts").mkdir()
     (root / "scripts/prepare_dev_wheel.py").write_bytes(
         (SOURCE.parents[2] / "scripts/prepare_dev_wheel.py").read_bytes()
@@ -1225,7 +1228,7 @@ def test_candidate_numeric_commit_prefix_is_valid_npm_semver(candidate_source):
     _, reviewed, identity, _ = candidate_source
     runtime = prepare.candidate_runtime(reviewed, {**identity, "sourceCommit": "012345678901" + "a" * 28})
     assert runtime["version"].endswith(".g012345678901")
-    assert runtime["payloadVersion"].startswith("0.30.0.dev")
+    assert runtime["payloadVersion"].startswith("0.31.0.dev")
     package = prepare.REPO.parent / "numeric-package"
     package.mkdir()
     prepare.write_json(package / "package.json", {"name": "candidate-semver-fixture", "version": runtime["version"]})
@@ -1251,7 +1254,7 @@ def test_candidate_builder_stages_current_source_and_refuses_changes(tmp_path, m
             staged = Path(argv[-1])
             assert staged != root
             assert (staged / "src/brigade/current.py").read_bytes() == b"CURRENT = True\n"
-            assert (root / "src/brigade/__init__.py").read_text() == '__version__ = "0.30.0"\n'
+            assert (root / "src/brigade/__init__.py").read_text() == '__version__ = "0.31.0"\n'
             version = prepare.candidate_version(identity)
             assert (staged / "src/brigade/__init__.py").read_text() == f'__version__ = "{version}"\n'
             assert (staged / "pyproject.toml").read_text() == f'version = "{version}"\n'
@@ -1325,7 +1328,7 @@ def test_candidate_audit_matches_helper_first_version_stamp(tmp_path, candidate_
     import os
 
     root, _, identity, paths = candidate_source
-    original = b'__version__ = "0.30.0 label"\n__version__ = "retained"\n'.replace(b"\n", newline)
+    original = b'__version__ = "0.31.0 label"\n__version__ = "retained"\n'.replace(b"\n", newline)
     (root / "src/brigade/__init__.py").write_bytes(original)
     version = prepare.candidate_version(identity)
     prepare.dev_helper().prepare_dev_wheel(root, version)

@@ -2,6 +2,13 @@ name: Hub
 # Reusable workflow: ci.yml calls it as the hub-rust job so ci-gate covers it.
 on:
   workflow_call:
+    inputs:
+      msrv_full:
+        # true: the 1.85.0 toolchain runs the whole suite (hub-nightly.yml).
+        # false: ci.yml runs the suite on stable and only compiles on 1.85.0.
+        description: Run the full hub suite on the 1.85.0 toolchain too
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -12,8 +19,11 @@ jobs:
     # so the limits live here. Measured 2026-11-05 to 11-09: max 15.2 min.
     timeout-minutes: 45
     strategy:
+      # The nightly is the only run of the suite on 1.85.0. A failure on
+      # stable must not cancel that leg.
+      fail-fast: false
       matrix:
-        toolchain: [stable, '1.85.0']
+        toolchain: ${{ fromJSON(inputs.msrv_full && '["stable", "1.85.0"]' || '["stable"]') }}
     defaults:
       run:
         working-directory: engines/hub
@@ -106,6 +116,35 @@ jobs:
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract --profile memory --memory-absent
           --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native'
+
+  hub-msrv:
+    # The release binaries are built on stable, so 1.85.0 is a promise that the
+    # source still compiles there. Pull requests and merge groups check that
+    # promise without repeating the suite: clippy and a build of every test
+    # target and the binary. Measured 2026-11-13, the full 1.85.0 leg took 13.9
+    # to 15.5 min and repeated what the stable leg runs. hub-nightly.yml still
+    # runs the whole suite on 1.85.0 (msrv_full).
+    name: hub (Rust 1.85.0 compile)
+    if: ${{ !inputs.msrv_full }}
+    runs-on: ubuntu-latest
+    # A cold build of every test target; a warm cache takes a few minutes.
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: engines/hub
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: '1.85.0'
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: engines/hub
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --no-run
+      - name: The build without the memory scanner compiles
+        run: cargo check --locked --no-default-features
 
   hub-arm64:
     # The release ships brigade-hub for linux-amd64 (the job above) and

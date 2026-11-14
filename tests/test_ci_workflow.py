@@ -432,6 +432,15 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
     assert "--baseline .content-guard-baseline.json" in text
 
 
+def test_repo_metadata_job_is_ungated_and_runs_the_retired_name_ratchet():
+    section = _workflow_job_section((ROOT / ".github/workflows/ci.yml").read_text(), "repo-metadata")
+
+    # Docs-only diffs skip pytest, so the ratchet must run here to catch a retired name in prose.
+    assert "\n    if:" not in section
+    assert "\n    needs:" not in section
+    assert "run: python3 scripts/retired_engine_names.py" in section
+
+
 def test_changelog_fragments_job_checks_fragments_and_guards_changelog_edits_on_every_diff():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "changelog-fragments")
@@ -2167,9 +2176,16 @@ def test_ci_runs_the_rust_hub_suite_through_the_gate_via_the_reusable_workflow()
     assert "  workflow_call:\n" in header
     assert "push:" not in header
     assert "pull_request:" not in header
-    # `hub` runs the suite; `hub-arm64` builds the release's second Linux target.
-    assert re.findall(r"^  ([a-z0-9-]+):$", reusable.split("jobs:\n", 1)[1], re.MULTILINE) == ["hub", "hub-arm64"]
-    assert "toolchain: [stable, '1.85.0']" in reusable
+    # `hub` runs the suite; `hub-msrv` compiles on 1.85.0; `hub-arm64` builds
+    # the release's second Linux target.
+    assert re.findall(r"^  ([a-z0-9-]+):$", reusable.split("jobs:\n", 1)[1], re.MULTILINE) == [
+        "hub",
+        "hub-msrv",
+        "hub-arm64",
+    ]
+    _assert_hub_msrv_split(reusable)
+    # ci.yml takes the default: the suite on stable, a compile on 1.85.0.
+    assert "with:" not in hub
 
 
 @pytest.mark.parametrize("event", ["pull_request", "push", "merge_group"])
@@ -2205,6 +2221,30 @@ def test_ci_hub_output_selects_the_suite_unless_its_selector_says_exactly_false(
         assert value == expected, (selected, value)
 
 
+def _assert_hub_msrv_split(reusable):
+    """1.85.0 runs the whole suite only when the caller sets msrv_full.
+
+    Otherwise hub-msrv compiles there, so exactly one of the two covers the
+    old toolchain in every run.
+    """
+    header = reusable.split("jobs:\n", 1)[0]
+    assert "      msrv_full:\n" in header
+    assert "        type: boolean\n        default: false\n" in header
+    suite = _workflow_job_section(reusable, "hub")
+    assert 'toolchain: ${{ fromJSON(inputs.msrv_full && \'["stable", "1.85.0"]\' || \'["stable"]\') }}' in suite
+    assert "\n    if:" not in suite
+    # A stable failure in the nightly must not cancel the only 1.85.0 suite run.
+    assert "    strategy:\n" in suite and "      fail-fast: false\n" in suite
+    msrv = _workflow_job_section(reusable, "hub-msrv")
+    assert "    if: ${{ !inputs.msrv_full }}\n" in msrv
+    assert "          toolchain: '1.85.0'\n" in msrv
+    assert "- run: cargo clippy --locked --all-targets -- -D warnings\n" in msrv
+    assert "- run: cargo test --locked --no-run\n" in msrv
+    assert "run: cargo check --locked --no-default-features\n" in msrv
+    assert "        if:" not in msrv
+    assert "continue-on-error" not in reusable
+
+
 def test_hub_nightly_runs_the_full_reusable_hub_suite_on_main():
     text = (ROOT / ".github/workflows/hub-nightly.yml").read_text()
     header, jobs = text.split("jobs:\n", 1)
@@ -2227,14 +2267,15 @@ def test_hub_nightly_runs_the_full_reusable_hub_suite_on_main():
     assert "uses: ./.github/workflows/hub.yml" in job
     assert "    permissions:\n      contents: read\n" in job
     assert "needs:" not in job
-    assert "with:" not in job
+    # The nightly is the only run of the suite on 1.85.0, so it must ask for it.
+    assert job.rstrip().endswith("uses: ./.github/workflows/hub.yml\n    with:\n      msrv_full: true")
     assert "continue-on-error" not in text
     # The nightly calls the same reusable workflow ci.yml gates on, so both
     # toolchains and the arm64 build run without a second copy of the suite.
     reusable = (ROOT / ".github/workflows/hub.yml").read_text()
-    assert "toolchain: [stable, '1.85.0']" in reusable
+    _assert_hub_msrv_split(reusable)
     # A calling job cannot set timeout-minutes, so every hub.yml job does.
-    for name in ("hub", "hub-arm64"):
+    for name in ("hub", "hub-msrv", "hub-arm64"):
         assert re.search(r"^    timeout-minutes: \d+$", _workflow_job_section(reusable, name), re.MULTILINE), name
 
 
@@ -2522,6 +2563,13 @@ def test_authoritative_event_range_includes_all_changes(history, event):
         ("docs/guide with spaces.md", True),
         ("docs/diagram.png", True),
         ("docs/phase-hub-contract.md", True),
+        ("changelog.d/2542.md", True),
+        ("changelog.d/ci-docs-only-fragments.md", True),
+        ("changelog.d/README.md", True),
+        ("changelog.d/sub/x.md", False),
+        ("changelog.d/x.py", False),
+        ("changelog.d/.hidden.md", False),
+        ("changelog.d/.md", False),
         ("docs/AGENTS.md", False),
         ("AGENTS.md", False),
         ("src/brigade/templates/README.md", False),
@@ -2539,6 +2587,59 @@ def test_documentation_allowlist(history, path, expected):
     head = commit(repo, git, path)
     result = classify(repo, "push", {"before": base, "after": head}, head)
     assert result["docs_only"] == str(expected).lower()
+
+
+def test_a_documentation_file_with_its_changelog_fragment_is_documentation_only(history):
+    repo, git, base = history
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "docs/guide.md").write_text("new\n")
+    (repo / "changelog.d").mkdir(exist_ok=True)
+    (repo / "changelog.d/1.md").write_text("- Doc.\n")
+    git("add", "--", "docs/guide.md", "changelog.d/1.md")
+    git("commit", "-qm", "docs and fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
+
+
+def test_a_fragment_beside_code_is_not_documentation_only(history):
+    repo, git, base = history
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src/mod.py").write_text("x = 1\n")
+    (repo / "changelog.d").mkdir(exist_ok=True)
+    (repo / "changelog.d/1.md").write_text("- Fix.\n")
+    git("add", "--", "src/mod.py", "changelog.d/1.md")
+    git("commit", "-qm", "code and fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable bits and symlinks")
+def test_an_executable_or_symlinked_fragment_is_not_documentation_only(history):
+    repo, git, base = history
+    head = commit(repo, git, "changelog.d/1.md", "- Doc.\n")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
+    base = head
+    (repo / "changelog.d/1.md").chmod(0o755)
+    git("add", "changelog.d/1.md")
+    git("commit", "-qm", "executable fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+    base = head
+    (repo / "changelog.d/1.md").unlink()
+    (repo / "changelog.d/1.md").symlink_to("../README.md")
+    git("add", "changelog.d/1.md")
+    git("commit", "-qm", "symlink fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+
+
+def test_a_fragment_deletion_is_documentation_only(history):
+    repo, git, _ = history
+    base = commit(repo, git, "changelog.d/1.md", "- Doc.\n")
+    git("rm", "-q", "changelog.d/1.md")
+    git("commit", "-qm", "delete fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
 
 
 def test_deletion_and_both_sides_of_renames(history):

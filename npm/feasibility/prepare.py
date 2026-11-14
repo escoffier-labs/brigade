@@ -531,8 +531,8 @@ def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
         ):
             raise ValueError("candidate payload version mismatch")
     elif (
-        runtime["version"] != "0.30.0"
-        or runtime["payloadVersion"] != "0.30.0"
+        runtime["version"] != "0.31.0"
+        or runtime["payloadVersion"] != "0.31.0"
         or payload["sourceCommit"] != pin["sourceCommit"]
         or payload["releaseTag"] != pin["releaseTag"]
         or payload["sha256"] != pin["sha256"]

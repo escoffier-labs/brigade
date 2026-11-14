@@ -76,6 +76,10 @@ def documentation_path(path: bytes) -> bool:
     if name in ROOT_DOCS:
         return True
     parts = PurePosixPath(name).parts
+    # A changelog fragment is inert prose that every PR must add, so it must not
+    # turn a documentation PR into a full CI run. Exactly one level, no dotfiles.
+    if len(parts) == 2 and parts[0] == "changelog.d" and parts[1].endswith(".md") and not parts[1].startswith("."):
+        return True
     return (
         len(parts) > 1
         and parts[0] == "docs"

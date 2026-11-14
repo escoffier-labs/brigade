@@ -28,7 +28,7 @@ It always runs and requires success from the 9 jobs behind the former 20
 required statuses plus their 4 dependencies. A missing or extra dependency
 fails closed. Fleet Hub container may skip only after successful classification
 marks it unchanged, and never in a merge group. The Rust hub suite (`hub-rust`,
-the reusable `hub.yml` on stable and 1.85.0) may skip only when successful
+the reusable `hub.yml`: the suite on stable and a compile on 1.85.0) may skip only when successful
 classification sets `hub` to exactly `false`, in a merge group too, where that
 flag comes from the trusted selector. A failing hub job still blocks the merge.
 `hub-nightly.yml` runs the full suite on `main` every night. The

@@ -1,1 +1,0 @@
-- `brigade fleet serve --engine rust` no longer exits with `schema-changed` on a hub that Python upgraded across several releases. The schema gate now ignores whitespace that SQLite's ADD COLUMN leaves before a comma, and it accepts the `model_policy` column order produced by upgrading through v14, v15 and v21. Schemas with a missing column or a changed type are still refused.
