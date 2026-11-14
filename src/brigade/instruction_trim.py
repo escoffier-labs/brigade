@@ -18,6 +18,8 @@ from .instruction_overflow import card_trust_problem
 from .instruction_reconcile import card_body
 from .instruction_sections import (
     FILE_KEY,
+    KEEP,
+    KEEP_UNTIL,
     POINTER_LINE,
     SectionDocument,
     Unit,
@@ -240,8 +242,15 @@ def plan_append(
         for index in order_units(doc):
             unit = doc.units[index]
             text = data[unit.start : unit.end].decode("utf-8")
-            if _pin_active(unit, today) or _config_pinned(unit, wanted):
-                skip = "pinned"
+            raw = data[unit.start : unit.end]
+            if (
+                _pin_active(unit, today)
+                or _config_pinned(unit, wanted)
+                or not _pins_kept(raw, b"", config_pins=config_pins, today=today)
+            ):
+                skip = (
+                    "pinned"  # the last test: any active keep marker line in the unit's raw bytes, as `check` reads it
+                )
             elif unit.blocked is not None:
                 skip = "blocked"
             elif unit.sha256 in held:
@@ -389,6 +398,30 @@ def card_overhead() -> int:
     return max(CARD_OVERHEAD, _largest_frontmatter())
 
 
+def _pins_kept(before: bytes, after: bytes, *, config_pins: tuple[str, ...], today: date) -> bool:
+    """Whether `after` holds at least as many of each active keep marker line and each config-pinned heading
+    line as `before`, compared as raw lines with surrounding whitespace removed."""
+
+    def lines(data: bytes) -> list[bytes]:
+        return [line.strip() for line in data.splitlines()]
+
+    old, new = lines(before), lines(after)
+    wanted = {pin.encode("utf-8").strip() for pin in config_pins}
+    for line in set(old):
+        until = KEEP_UNTIL.fullmatch(line)
+        active = line == KEEP.encode("ascii") or (until is not None and _date_on_or_after(until.group(1), today))
+        if (active or line in wanted) and new.count(line) < old.count(line):
+            return False
+    return True
+
+
+def _date_on_or_after(text: bytes, today: date) -> bool:
+    try:
+        return date.fromisoformat(text.decode("ascii")) >= today
+    except ValueError:
+        return True  # an unreadable date is a hard pin, as `_pin_active` reads it
+
+
 def _pinned_unit(unit: Unit, today: date, wanted: frozenset[bytes]) -> bool:
     return _config_pinned(unit, wanted) or _pin_active(unit, today)
 
@@ -465,6 +498,10 @@ def check(
                 continue
             moved = any(run.start < unit.end and unit.start < run.end for run in plan.runs)
             fixed_ok = fixed_ok and not moved and before[unit.start : unit.end] in after
+    # A backstop that does not trust the parse: every active keep marker and every config-pinned heading line
+    # is counted as raw bytes, so a misread of the file's Markdown can never carry a pin out.
+    if not _pins_kept(before, after, config_pins=config_pins, today=today):
+        fixed_ok = False
     if not fixed_ok:
         failed.append("fixed-and-pinned")
     new = parse(after)

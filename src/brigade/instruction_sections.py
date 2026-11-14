@@ -32,7 +32,8 @@ MAX_OPEN_BLOCKS = 32
 _KEEP = KEEP.encode("ascii")
 # ATX as CommonMark reads it: up to three spaces, one to six `#`, then a space, a tab or the end of the line.
 _HEADING = re.compile(rb" {0,3}(#{1,6})(?:[ \t]|$)")
-_FENCE_OPEN = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
+# A fence opens and closes with at most three spaces of indentation. Four spaces or a tab is indented code.
+_FENCE_OPEN = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
 _COMMENT = re.compile(rb"<!--((?:(?!-->).)*)-->")
 _COLON_MARKER = re.compile(rb"(\S+):(start|end)", re.IGNORECASE)
 _BRIGADE_BEGIN = re.compile(rb"BEGIN BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s.*)?")
@@ -156,7 +157,7 @@ def _scan(data: bytes) -> _Scan:
         in_managed = bool(stack)
         kind = "other"
         if fence is not None:
-            closing = rb"[ \t]*" + re.escape(bytes([fence[0]])) + (rb"{%d,}[ \t]*" % fence[1])
+            closing = rb" {0,3}" + re.escape(bytes([fence[0]])) + (rb"{%d,}[ \t]*" % fence[1])
             if re.fullmatch(closing, clean):
                 fence = None
         else:

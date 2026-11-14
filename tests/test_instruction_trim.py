@@ -616,3 +616,36 @@ def test_yaml_loaders_keep_the_source_file_encoded(name):  # review of #2567: no
     front = yaml.safe_load(card.split("---\n")[1])
     assert front["source_file"] == encode_value(name) and "\\" in front["source_file"]
     assert card_trust_problem(card) is None
+
+
+def test_check_keeps_pins_even_when_the_parse_misses_them():  # review of #2567: a raw backstop for pins
+    marker = KEEP.encode()
+    body = b"# T\n\n## A\n```\n%s\n```\n" + b"word " * 900 + b"\n## B\nb\n"
+    hidden = body.replace(b"%s", marker)  # the parse sees no pin: the marker is inside a fence
+    filler = body.replace(b"%s", b"x" * len(marker))  # same offsets, nothing to keep
+    plan = _plan(filler)
+    assert plan.runs and plan.runs[0].start <= hidden.index(marker) < plan.runs[0].end
+    forged = dataclasses.replace(plan, before=hidden)
+    cards = {
+        run.card_rel: card_bytes(
+            file_key="user-md",
+            slug=run.slug,
+            section=hidden[run.start : run.end],
+            source_name="USER.md",
+            decision_id=ID,
+            today=TODAY,
+            fresh_until=None,
+            card_id=CARD_ID,
+        )
+        for run in forged.runs
+    }
+    assert check(forged, cards, config_pins=(), today=TODAY, limits=LIMITS) == ["fixed-and-pinned"]
+
+
+def test_planner_skips_a_unit_holding_a_keep_marker_in_a_code_example():  # matches the backstop
+    data = b"# T\n\n## A\n```\n" + KEEP.encode() + b"\n```\n" + b"word " * 900 + b"\n## B\nb\n"
+    plan = _plan(data)
+    doc = parse(data)
+    a = next(i for i, unit in enumerate(doc.units) if unit.heading == b"## A")
+    assert (a, "pinned") in plan.skipped
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []

@@ -278,3 +278,10 @@ def test_inline_code_or_escaped_comment_openers_open_nothing(prose):  # review o
     doc = parse(data)
     assert [u.heading for u in doc.units] == [b"## A", b"## Pinned"]
     assert doc.units[1].pin == "marker"
+
+
+def test_an_indented_fence_is_indented_code_not_a_fence():  # review of #2567: pins after it hold
+    data = b"# T\n## A\nexample:\n\n    ```python\n    x = 1\n\n## Pinned\n" + KEEP.encode() + b"\nkept\n"
+    doc = parse(data)
+    assert [u.heading for u in doc.units] == [b"## A", b"## Pinned"] and doc.units[1].pin == "marker"
+    assert doc.eof_in_fence is False
