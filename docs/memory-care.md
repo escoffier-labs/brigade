@@ -491,6 +491,8 @@ Machine-local config key: `memory_recall_target` in `.brigade/config.json`.
   deadline and 5 match / 10 line caps. It adds one recall subprocess per prompt
   and does nothing unless a recall target is active.
 
+A file that is in the report only because `[instructions.files]` enrolled it is shown in the brief, in doctor and in `budgets check` text by an id such as `configured-file-1a2b3c4d5e6f`. Its name was chosen by whoever wrote the configuration, and a name can read as a sentence even when it holds only path characters. The JSON output carries the same id as `text_name` beside the display path. The brief also prints one `loader-config-unreadable` line when a harness configuration cannot be read, because the limits then fall back to Brigade's own targets and may be looser than the harness's real cap.
+
 ### Operator smoke (before merge)
 
 Use a temp target, never the real home directory:

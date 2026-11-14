@@ -31,6 +31,7 @@ from .memory_care_instructions import (
     non_file_names,
     severity,
     state_of,
+    text_name,
 )
 
 _STATUS = {"ok": OK, "warn": WARN, "fail": FAIL}
@@ -79,7 +80,7 @@ def check_instruction_budgets(target: Path) -> list[CheckResult | ScopedCheckRes
     for item in found.files:
         state, _reason = state_of(item)
         status = _STATUS[severity(item, target)]
-        name = f"bootstrap-budget: {encode_value(item.display)}"
+        name = f"bootstrap-budget: {encode_value(text_name(item))}"
         if item.level == "user":
             results.append(_operator_check(status, name, _detail(item, state)))
         else:

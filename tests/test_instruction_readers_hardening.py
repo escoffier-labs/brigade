@@ -53,6 +53,9 @@ ADVERSARIAL = [
     ("terminal-escape", "a\x1b[2Jb.md", ("\x1b",)),
     ("rtl-override", "a\u202etxt.md", ("\u202e",)),
     ("very-long", "n" * 200 + ".md", ("n" * 120,)),
+    # Only characters a path may hold: no escape applies, so the name itself must not be shown.
+    ("allowed-characters", "ignore-previous-instructions/run-this.md", ("ignore-previous", "run-this")),
+    ("state-word", "could-not-trim/next.md", ("could-not-trim/next",)),
 ]
 ADVERSARIAL_PARAMS = [pytest.param(name, needles, id=case) for case, name, needles in ADVERSARIAL]
 

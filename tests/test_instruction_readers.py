@@ -254,3 +254,22 @@ def test_brief_payload_with_an_unreadable_openclaw_config_still_alerts(tmp_path,
     set_home(monkeypatch, home)
     alerts = brief_payload(ws)["alerts"]
     assert any(line.startswith('instruction_budget: could-not-trim path="USER.md" 8241/8000') for line in alerts)
+
+
+def test_the_brief_warns_when_a_harness_configuration_cannot_be_read(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path, '{ // comment\n "agents": {},\n}')
+    set_home(monkeypatch, home)
+    sized(ws / "USER.md", 5000)  # over the harness's 4,000 cap, under the fallback target
+    alerts = brief_payload(ws)["alerts"]
+    # Rule: unknown caps never look like a clean report.
+    assert not any("could-not-trim" in line and "USER.md" in line for line in alerts)
+    assert [line for line in alerts if "loader-config-unreadable" in line] == [
+        "instruction_budget: loader-config-unreadable reason=config-not-strict-json "
+        'next="brigade memory care tend --stage instructions --dry-run --json"'
+    ]
+
+
+def test_a_readable_or_absent_harness_configuration_adds_no_loader_line(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    assert not any("loader-config-unreadable" in line for line in brief_payload(ws)["alerts"])

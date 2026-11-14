@@ -18,6 +18,7 @@ from .memory_care_instructions import (
     non_file_names,
     severity,
     state_of,
+    text_name,
     total_row,
 )
 
@@ -58,6 +59,7 @@ def _check_row(item: InstructionFile, target: Path) -> dict[str, Any]:
     status = "missing" if not item.exists else severity(item, target)
     row: dict[str, Any] = {
         "name": item.display,
+        "text_name": text_name(item),
         # The display path, never the real path: no home or target directory in the output.
         "path": item.display,
         "exists": item.exists,
@@ -101,7 +103,7 @@ def _non_file_row(name: str, why: str) -> dict[str, Any]:
 
 
 def _row_text(row: dict[str, Any]) -> str:
-    path = field("path", row["name"])
+    path = field("path", row.get("text_name") or row["name"])
     if row["state"] in (NOT_A_FILE, "stat-failed"):
         return f"[fail] {path}: {'not a file' if row['state'] == NOT_A_FILE else 'could not stat'}"
     if row["size_bytes"] is None and row["exists"]:

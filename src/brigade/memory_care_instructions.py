@@ -29,6 +29,7 @@ one `config-changed` line while any of them holds.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
@@ -137,6 +138,40 @@ def config_error_detail(exc: ValueError, *, home: Path | None = None, target: Pa
     return encode_value(shorten(message, home=home, target=target))
 
 
+CONFIGURED_PREFIX = "configured-file-"
+
+
+def text_name(file: InstructionFile) -> str:
+    """The name of a file in text an agent reads.
+
+    A file Brigade finds by itself is named from fixed lists (`USER.md`, a harness's own
+    instruction path), so its display path is shown. A file that is in the inventory only
+    because configuration enrolled it has a name somebody chose, and a name made only of
+    path characters can still read as a sentence (`ignore-previous-instructions/run-this`).
+    Such a row is shown by an opaque id. The JSON payloads carry the same id beside the
+    real display path, so an agent can look the file up as data.
+    """
+    if file.level != "config":
+        return file.display
+    digest = hashlib.sha256(str(file.real_path).encode("utf-8", "surrogatepass")).hexdigest()
+    return f"{CONFIGURED_PREFIX}{digest[:12]}"
+
+
+LOADER_CONFIG_UNREADABLE = "loader-config-unreadable"
+
+
+def loader_config_line(inventory: Inventory) -> str | None:
+    """One line when a harness configuration could not be read, so its caps are unknown.
+
+    Without it the limits fall back to Brigade's own targets, which can be looser than the
+    harness's real cap, and a file the harness is already cutting would look within budget.
+    """
+    reason = inventory.loader_reason
+    if reason is None or reason in QUIET_LOADER_REASONS:
+        return None
+    return f"instruction_budget: {LOADER_CONFIG_UNREADABLE} reason={code(reason)} {_NEXT}"
+
+
 def _resolved(path: Path) -> Path:
     try:
         return path.resolve()
@@ -236,6 +271,7 @@ def file_row(file: InstructionFile, *, target: Path) -> dict[str, Any]:
     state, reason = state_of(file)
     row: dict[str, Any] = {
         "path": file.display,
+        "text_name": text_name(file),
         "paths": list(file.paths),
         "level": file.level,
         "loaders": list(file.loaders),
@@ -321,12 +357,12 @@ def file_alert_lines(inventory: Inventory) -> list[str]:
         state, reason = state_of(item)
         if state == "could-not-trim":
             lines.append(
-                f"instruction_budget: could-not-trim {field('path', item.display)} {item.size}/{item.limit} "
+                f"instruction_budget: could-not-trim {field('path', text_name(item))} {item.size}/{item.limit} "
                 f"reason={code(reason or '')} {_NEXT}"
             )
         elif state == SIZE_UNKNOWN:
             lines.append(
-                f"instruction_budget: size-unknown {field('path', item.display)} limit={item.limit} "
+                f"instruction_budget: size-unknown {field('path', text_name(item))} limit={item.limit} "
                 f"reason={code(reason or '')} {_NEXT}"
             )
     for total in inventory.totals:
@@ -340,7 +376,8 @@ def file_alert_lines(inventory: Inventory) -> list[str]:
 def alert_lines(inventory: Inventory) -> list[str]:
     """Every alert line for an enabled report: file and total alerts, then the config-changed line."""
     change = config_change_line(inventory)
-    return [*file_alert_lines(inventory), *([change] if change else [])]
+    loader = loader_config_line(inventory)
+    return [*file_alert_lines(inventory), *([loader] if loader else []), *([change] if change else [])]
 
 
 def total_row(total: Any, loader_reason: str | None) -> dict[str, Any]:
