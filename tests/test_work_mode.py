@@ -125,7 +125,7 @@ def test_yolo_session_runs_raw_checks_and_finishes_without_block(tmp_path: Path,
     runtime.handle_payload("PostToolUse", _write(target))
     failure = runtime.handle_payload("PostToolUseFailure", _bash(target, "PostToolUseFailure", "pytest -q"))
     assert failure is None
-    assert runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)) is None
+    _assert_yolo_handoff_note(runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)))
     assert "UserPromptSubmit" in delivered
 
 
@@ -217,7 +217,17 @@ def test_yolo_only_session_finishes_with_stop_installed(tmp_path: Path, monkeypa
     monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
     runtime.handle_payload("PostToolUse", _write(target))
-    assert runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)) is None
+    _assert_yolo_handoff_note(runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)))
+    closed = _payload(target, "Stop", stop_hook_active=False, last_assistant_message="Nothing durable: typo fix")
+    assert runtime.handle_payload("Stop", closed) is None
+
+
+def _assert_yolo_handoff_note(result) -> None:
+    """Yolo never blocks Stop, but a writing session still gets the engineer-mode handoff note."""
+    assert result is not None and "decision" not in result
+    text = json.dumps(result)
+    assert "Memory Handoff" in text and "Nothing durable: <reason>" in text
+    assert "Verification is recorded" not in text
 
 
 def test_init_yolo_installs_every_managed_event(tmp_path: Path, capsys) -> None:

@@ -78,7 +78,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     mode_group.add_argument(
         "--yolo",
         action="store_true",
-        help="Keep shared context (brief, recall, Fleet Hub, handoffs on request) without verification "
+        help="Keep shared context (brief, recall, Fleet Hub, Memory Handoffs) without verification "
         "enforcement. Switch back with `brigade work mode set engineer`.",
     )
     mode_group.add_argument(

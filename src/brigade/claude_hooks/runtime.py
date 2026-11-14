@@ -2514,6 +2514,7 @@ def _handle_event(
         blocking_failures: list[str] = []
         shared_tree_notes: list[str] = []
         handoff_target: Path | None = None
+        handoff_verified = True
         context_target: Path | None = None
         closed_without_handoff = _closes_nothing_durable(payload)
         for stop_target in _stop_targets(payload, session_id, task_epoch=task_epoch):
@@ -2523,7 +2524,12 @@ def _handle_event(
             stop_state = _normalize_state(
                 stop_target, session_id, stop_state, task_epoch=task_epoch, fingerprint=event_fingerprint
             )
-            if not stop_state.get("write_observed") or work_mode.is_yolo(stop_target):
+            if not stop_state.get("write_observed"):
+                continue
+            if work_mode.is_yolo(stop_target):
+                # Yolo drops the receipt gate but keeps the handoff note: memory still matters.
+                if not _handoff_since(stop_target, stop_state.get("started_at")):
+                    handoff_target, handoff_verified = stop_target, False
                 continue
             fingerprint = stop_state.get("session_fingerprint")
             if not isinstance(fingerprint, str):
@@ -2543,7 +2549,7 @@ def _handle_event(
                     )
                     context_target = stop_target
                     if not _handoff_since(stop_target, stop_state.get("started_at")):
-                        handoff_target = stop_target
+                        handoff_target, handoff_verified = stop_target, True
                     continue
                 exercised = stop_state.get("exercised_artifact_id")
                 replacement = _verify_replacement(
@@ -2554,7 +2560,7 @@ def _handle_event(
                 )
                 blocking_failures.append(f"{stop_target}: run `{replacement}`")
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
-                handoff_target = stop_target
+                handoff_target, handoff_verified = stop_target, True
         if blocking_failures:
             return {
                 "decision": "block",
@@ -2586,7 +2592,11 @@ def _handle_event(
                 "",
                 target=handoff_target,
                 session_id=session_id,
-                records=[f"Verification is recorded. {_handoff_stop_note(handoff_target)}"],
+                records=[
+                    f"Verification is recorded. {_handoff_stop_note(handoff_target)}"
+                    if handoff_verified
+                    else _handoff_stop_note(handoff_target)
+                ],
             )
     return None
 

@@ -51,10 +51,8 @@ _SESSION_CLOSE_ITEMS: tuple[str, ...] = (
     "Outcome recorded? (`brigade outcome capture <skill-or-card-id> --run-id latest`)",
     "Memory Handoff written only for durable knowledge, or closed with `Nothing durable: <reason>`?",
 )
-# Yolo mode (#2233) keeps handoffs available on request and drops verification wording.
-_YOLO_SESSION_CLOSE_ITEMS: tuple[str, ...] = (
-    "Memory Handoff written if this work produced durable knowledge? (optional in yolo mode)",
-)
+# Yolo mode (#2233) drops verification wording and keeps the same handoff rule as engineer mode.
+_YOLO_SESSION_CLOSE_ITEMS: tuple[str, ...] = (_SESSION_CLOSE_ITEMS[-1],)
 
 
 def normalize_profile(value: str | None, *, default: str = DEFAULT_PROFILE) -> str:

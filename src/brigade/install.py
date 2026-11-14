@@ -530,7 +530,9 @@ def install_selection(
             print("Agent: yolo work mode - verification is not enforced here -")
             print("  1. `brigade work brief --target .`                                  (see pending work)")
             print("  2. run checks directly; `brigade work verify run` still records a receipt when you want one")
-            print("  3. write a Memory Handoff only if the session learned something durable (optional).")
+            print(
+                "  3. write a Memory Handoff only if the session learned something durable, else end with `Nothing durable: <reason>`."
+            )
             print("  `brigade work mode set engineer` restores the verification loop.")
         else:
             print("Agent: each work session, follow the `brigade-work` skill -")
