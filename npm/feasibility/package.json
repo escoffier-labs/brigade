@@ -1,6 +1,6 @@
 {
   "name": "@escoffier-labs/brigade",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "description": "Brigade CLI with a verified bundled Python wheel and managed runtime",
   "license": "MIT",
   "homepage": "https://brigadestack.com",
@@ -18,11 +18,11 @@
     "wheel/"
   ],
   "optionalDependencies": {
-    "@escoffier-labs/brigade-uv-linux-x64": "0.30.0",
-    "@escoffier-labs/brigade-uv-linux-arm64": "0.30.0",
-    "@escoffier-labs/brigade-uv-darwin-x64": "0.30.0",
-    "@escoffier-labs/brigade-uv-darwin-arm64": "0.30.0",
-    "@escoffier-labs/brigade-uv-win32-x64": "0.30.0"
+    "@escoffier-labs/brigade-uv-linux-x64": "0.31.0",
+    "@escoffier-labs/brigade-uv-linux-arm64": "0.31.0",
+    "@escoffier-labs/brigade-uv-darwin-x64": "0.31.0",
+    "@escoffier-labs/brigade-uv-darwin-arm64": "0.31.0",
+    "@escoffier-labs/brigade-uv-win32-x64": "0.31.0"
   },
   "publishConfig": {
     "access": "public"
