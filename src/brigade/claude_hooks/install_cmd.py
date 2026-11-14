@@ -488,8 +488,9 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
         "sidecar": sidecar,
         "error": error,
     }
-    # Yolo keeps every managed event: a session started here can write into an enforced
-    # child repository, and the runtime skips Stop and failure checks per target (#2233).
+    # observe and off keep every managed event: a session started here can write into a strict
+    # child repository. The runtime skips the Stop receipt check and the failure nag per target,
+    # and still gives the handoff note (#2233).
     if layout.scope == "project" and not work_mode.is_strict(layout.root):
         result["work_mode"] = work_mode.resolve_mode(layout.root)
     if layout.scope == "user":

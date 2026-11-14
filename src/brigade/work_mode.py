@@ -5,7 +5,7 @@ The two settings are independent and live in different places:
 - ``work.mode`` in ``.brigade/config.json``: ``strict`` (default) keeps the
   verification loop: hooks route raw checks through ``brigade work verify run``
   and the Stop gate wants a receipt. ``off`` keeps shared context (brief,
-  recall, Fleet Hub messages, handoffs on request) and drops verification
+  recall, Fleet Hub messages, Memory Handoffs for durable knowledge) and drops verification
   enforcement. ``observe`` enforces nothing either. Leak checks are unaffected,
   so a committed off or observe setting is an acceptable repository choice.
 - Safety rails: on by default. They keep the content guard, secret and
@@ -383,7 +383,7 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
     mode = resolve_mode(target)
     if mode == MODE_OFF:
         mode_detail = (
-            "off: shared context stays on (brief, recall, Fleet Hub, handoffs on request); "
+            "off: shared context stays on (brief, recall, Fleet Hub, Memory Handoffs for durable knowledge); "
             "verification is not enforced and missing receipts are not reported; "
             "`brigade work mode set strict` restores the loop"
         )

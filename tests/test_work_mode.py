@@ -126,7 +126,7 @@ def test_yolo_session_runs_raw_checks_and_finishes_without_block(tmp_path: Path,
     runtime.handle_payload("PostToolUse", _write(target))
     failure = runtime.handle_payload("PostToolUseFailure", _bash(target, "PostToolUseFailure", "pytest -q"))
     assert failure is None
-    assert runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)) is None
+    _assert_unverified_handoff_note(runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)))
     assert "UserPromptSubmit" in delivered
 
 
@@ -218,7 +218,74 @@ def test_yolo_only_session_finishes_with_stop_installed(tmp_path: Path, monkeypa
     monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
     runtime.handle_payload("PostToolUse", _write(target))
+    _assert_unverified_handoff_note(runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)))
+    closed = _payload(target, "Stop", stop_hook_active=False, last_assistant_message="Nothing durable: typo fix")
+    assert runtime.handle_payload("Stop", closed) is None
+
+
+def _assert_unverified_handoff_note(result) -> None:
+    """observe and off never block Stop, but a writing session still gets the strict-mode handoff note."""
+    assert result is not None and "decision" not in result
+    text = json.dumps(result)
+    assert "Memory Handoff" in text and "Nothing durable: <reason>" in text
+    assert "Verification is recorded" not in text
+
+
+@pytest.mark.parametrize("mode", ["observe", "off"])
+def test_unenforced_session_with_a_handoff_gets_no_stop_note(tmp_path: Path, monkeypatch, capsys, mode) -> None:
+    target = _wired(tmp_path)
+    _set_mode(target, mode, capsys)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: test")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
+    runtime.handle_payload("PostToolUse", _write(target))
+    inbox = target / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "2026-11-14-durable.md").write_text("# handoff\n", encoding="utf-8")
     assert runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)) is None
+
+
+def test_strict_workspace_replaces_an_off_child_note(tmp_path: Path, monkeypatch, capsys) -> None:
+    # Session repos are visited before the cwd, so the off child claims the note first
+    # and the receipted strict workspace replaces it.
+    workspace = _wired(tmp_path, name="workspace")
+    child = workspace / "child"
+    assert install_selection(child, Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])) == 0
+    _set_mode(child, "off", capsys)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: test")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: True)
+    runtime.handle_payload("SessionStart", _payload(workspace, "SessionStart", session_id="mixed"))
+    for path in (child / "src.py", workspace / "notes.py"):
+        write = {"file_path": str(path), "content": "x\n"}
+        runtime.handle_payload(
+            "PostToolUse", _payload(workspace, "PostToolUse", session_id="mixed", tool_name="Write", tool_input=write)
+        )
+    result = runtime.handle_payload("Stop", _payload(workspace, "Stop", session_id="mixed", stop_hook_active=False))
+    assert result is not None and "decision" not in result
+    text = json.dumps(result)
+    assert text.count("Memory Handoff") == 1 and "Verification is recorded" in text
+
+
+def test_off_workspace_with_receipted_strict_child_keeps_the_strict_note(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = _wired(tmp_path, name="workspace")
+    _set_mode(workspace, "off", capsys)
+    child = workspace / "child"
+    assert install_selection(child, Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: test")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: True)
+    runtime.handle_payload("SessionStart", _payload(workspace, "SessionStart", session_id="mixed"))
+    for path in (child / "src.py", workspace / "notes.py"):
+        write = {"file_path": str(path), "content": "x\n"}
+        runtime.handle_payload(
+            "PostToolUse", _payload(workspace, "PostToolUse", session_id="mixed", tool_name="Write", tool_input=write)
+        )
+    result = runtime.handle_payload("Stop", _payload(workspace, "Stop", session_id="mixed", stop_hook_active=False))
+    assert result is not None and "decision" not in result
+    text = json.dumps(result)
+    assert text.count("Memory Handoff") == 1 and "Verification is recorded" in text
 
 
 def test_init_yolo_installs_every_managed_event(tmp_path: Path, capsys) -> None:

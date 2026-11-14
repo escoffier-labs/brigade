@@ -46,15 +46,14 @@ FULL_SECTIONS: tuple[str, ...] = (
     SECTION_WORK_LOOP,
 )
 
+HANDOFF_CLOSE_ITEM = "Memory Handoff written only for durable knowledge, or closed with `Nothing durable: <reason>`?"
 _SESSION_CLOSE_ITEMS: tuple[str, ...] = (
     'Verify captured through Brigade? (`brigade work verify run --target . --command "..." --capture brigade-work`)',
     "Outcome recorded? (`brigade outcome capture <skill-or-card-id> --run-id latest`)",
-    "Memory Handoff written only for durable knowledge, or closed with `Nothing durable: <reason>`?",
+    HANDOFF_CLOSE_ITEM,
 )
-# Yolo mode (#2233) keeps handoffs available on request and drops verification wording.
-_UNENFORCED_SESSION_CLOSE_ITEMS: tuple[str, ...] = (
-    "Memory Handoff written if this work produced durable knowledge? (optional in unenforced modes)",
-)
+# observe and off (#2233) drop verification wording and keep the strict-mode handoff rule.
+_UNENFORCED_SESSION_CLOSE_ITEMS: tuple[str, ...] = (HANDOFF_CLOSE_ITEM,)
 
 
 def normalize_profile(value: str | None, *, default: str = DEFAULT_PROFILE) -> str:
