@@ -4,6 +4,16 @@
 paths that reach the same file, and gives each file one limit: the smallest of
 its loader caps and Brigade's own target budget. It writes nothing, starts no
 subprocess, and measures sizes in UTF-8 bytes.
+
+Nothing a configuration file says removes a file from the inventory or turns its
+protection off without a trace. An excluded file stays as a row marked
+`excluded`, with the source of the exclusion. An override that names a path
+outside the target and the user's home, or an absolute path that is not already
+a discovered instruction file, is rejected: the row is forced to class `report`
+and the rejection is listed. Every row carries the class and limit that were
+requested beside the effective ones, and where each came from. Consumers must
+skip rows marked `excluded` when they raise alerts or tend, and still count
+them in loader totals, because the harness loads them either way.
 """
 
 from __future__ import annotations
@@ -19,6 +29,7 @@ from typing import Any
 
 from . import budgets
 from . import harness_profiles as hp
+from .bounded_read import read_regular_file
 from .instruction_loaders import (
     LoaderCap,
     codex_project_cap,
@@ -39,6 +50,12 @@ CLASSES = ("append", "policy", "report")
 INSPECTION_CEILING = 1024 * 1024  # context_preview.RESOURCE_MAX_BYTES
 _MARKER_LINES = 5
 _CONFIG_REL = ".brigade/memory-care.toml"
+CONFIG_MAX_BYTES = 1024 * 1024
+EXTERNAL_MARKER = "<external>"
+EXCLUSION_SOURCE = "config:instructions.exclude"
+OVERRIDE_SOURCE = "config:instructions.files"
+# Per-name root files a loader reads: Brigade's table, OpenClaw's bootstrap list and Codex's override.
+ROOT_NAMES = (*dict.fromkeys((*budgets.BOOTSTRAP_BUDGETS, *hp.OPENCLAW_BOOTSTRAP_FILES, CODEX_OVERRIDE_NAME)),)
 
 
 @dataclass(frozen=True)
@@ -76,7 +93,25 @@ class InstructionFile:
     trim_to: int
     size: int  # bytes, 0 when missing
     exists: bool
-    skip_reason: str | None  # "not-utf8" | "over-1-mib" | None
+    skip_reason: str | None  # "not-utf8" | "over-1-mib" | "not-regular" | "unreadable" | None
+    # Audit fields. `file_class` and `limit` are the effective values.
+    excluded: bool = False  # named by [instructions].exclude: never tended, still counted in totals
+    exclusion_source: str | None = None
+    requested_class: str | None = None  # what [instructions.files] asked for, even when not applied
+    requested_limit_bytes: int | None = None
+    requested_source: str | None = None  # where the request came from
+    class_source: str = "default"  # config | marker | repository-depth | memory-index | name-table
+    # | default | excluded | rejected-override
+    override_reason: str | None = None  # why the override on this row was rejected, else None
+
+
+@dataclass(frozen=True)
+class OverrideNote:
+    """A `[instructions.files]` entry that was rejected or ignored, and why."""
+
+    name: str  # display form of the configured path
+    reason: str  # "outside-target-and-home" | "absolute-path-not-discovered" | "matches-no-file"
+    action: str  # "forced-report" | "ignored"
 
 
 @dataclass(frozen=True)
@@ -93,6 +128,7 @@ class Inventory:
     files: tuple[InstructionFile, ...]  # sorted by display
     totals: tuple[LoaderTotal, ...]  # sorted by loader
     repository_depth: bool
+    override_notes: tuple[OverrideNote, ...] = ()
 
 
 # --- configuration ---------------------------------------------------------
@@ -114,12 +150,30 @@ def _positive(value: object, name: str) -> int:
 def load_instructions_config(target: Path) -> InstructionsConfig:
     """Read the `[instructions]` table of `.brigade/memory-care.toml`.
 
-    Unknown keys are ignored. A wrong value raises `ValueError` naming its key.
+    A missing file gives the defaults. Unknown keys are ignored. Every other
+    problem raises `ValueError`: a wrong value names its key, and a file that is
+    unreadable, not a regular file, over 1 MiB, not UTF-8 or not TOML says so
+    without echoing its content. Callers treat the `ValueError` as an invalid
+    table (the plan's decision 10): they use `InstructionsConfig()` and report
+    `config-invalid`, so a handoff is never lost. `discover` does not call this.
     """
-    path = target / _CONFIG_REL
-    if not path.is_file():
+    read = read_regular_file(target / _CONFIG_REL, max_bytes=CONFIG_MAX_BYTES, require_stable=True)
+    if read.reason == "missing":
         return InstructionsConfig()
-    table = tomllib.loads(path.read_text(encoding="utf-8-sig")).get("instructions", {})
+    problem = {
+        "too-large": "is over 1 MiB",
+        "not-regular": "is not a regular file",
+    }.get(read.reason or "", "could not be read")
+    if read.data is None:
+        raise ValueError(f"invalid instructions: {_CONFIG_REL} {problem}")
+    try:
+        # utf-8-sig: a leading byte-order mark is dropped, as in memory_cmd.
+        parsed = tomllib.loads(read.data.decode("utf-8-sig"))
+    except UnicodeDecodeError:
+        raise ValueError(f"invalid instructions: {_CONFIG_REL} is not UTF-8") from None
+    except (tomllib.TOMLDecodeError, RecursionError):
+        raise ValueError(f"invalid instructions: {_CONFIG_REL} is not valid TOML") from None
+    table = parsed.get("instructions", {})
     if not isinstance(table, dict):
         raise ValueError("invalid instructions")
     defaults = InstructionsConfig()
@@ -161,7 +215,11 @@ def _slug(text: str) -> str:
 
 
 def display_path(path: Path, *, target: Path, home: Path) -> str:
-    """Relative POSIX path inside the target, `~/...` under home, else absolute."""
+    """Relative POSIX path inside the target, `~/...` under home, else a fixed marker and the file name.
+
+    A path outside both (a symlink target, say) never shows its directories. Code that
+    needs the real path reads `InstructionFile.real_path`.
+    """
     for base in (target, _resolved(target)):
         try:
             return path.relative_to(base).as_posix()
@@ -172,7 +230,7 @@ def display_path(path: Path, *, target: Path, home: Path) -> str:
             return "~/" + path.relative_to(base).as_posix()
         except ValueError:
             pass
-    return str(path)
+    return f"{EXTERNAL_MARKER}/{path.name}"
 
 
 def file_key(workspace_relative: str | None, harness: str | None, real_path: Path) -> str:
@@ -203,17 +261,23 @@ def _expand(value: str, home: Path, target: Path) -> Path:
 
 @dataclass
 class _Group:
-    real: Path
+    reals: set[Path]
     exists: bool = True
     root_names: list[str] | None = None
     harnesses: set[str] | None = None
     configured: bool = False
     candidates: list[Path] | None = None
+    exclusion: str | None = None
+    rejected: str | None = None
 
     def __post_init__(self) -> None:
         self.root_names = []
         self.harnesses = set()
         self.candidates = []
+
+    @property
+    def real(self) -> Path:
+        return min(self.reals, key=str)
 
 
 def _repository_depth(target: Path) -> bool:
@@ -229,28 +293,42 @@ def _repository_depth(target: Path) -> bool:
 def _index_paths(target: Path) -> set[Path]:
     from . import memory_cmd
 
-    try:
-        names = memory_cmd._config_or_default(target).index_paths
-    except ValueError:
-        names = memory_cmd.MemoryCareConfig().index_paths
+    names = memory_cmd.MemoryCareConfig().index_paths
+    # Check the file with the bounded reader first: the memory-care loader reads it
+    # without a ceiling. An unreadable, oversized or non-regular file means defaults.
+    if read_regular_file(target / _CONFIG_REL, max_bytes=CONFIG_MAX_BYTES).reason in (None, "missing"):
+        try:
+            names = memory_cmd._config_or_default(target).index_paths
+        except (ValueError, OSError):
+            pass
     return {_resolved(target / name) for name in names}
 
 
+def _identity(real: Path) -> tuple[int, int] | None:
+    """Device and inode, so two hard links to one file group together."""
+    try:
+        info = os.stat(real)
+    except (OSError, ValueError):
+        return None
+    return (info.st_dev, info.st_ino) if info.st_ino else None
+
+
 def _read_state(real: Path, *, missing: bool) -> tuple[int, str | None, list[str]]:
-    """Size in bytes, a skip reason, and the first lines when the file can be read as text."""
+    """Size in bytes, a skip reason, and the first lines when the file can be read as text.
+
+    One bounded, nonblocking open: the size and the bytes come from the same descriptor.
+    """
     if missing:
         return 0, None, []
+    read = read_regular_file(real, max_bytes=INSPECTION_CEILING)
+    if read.data is None:
+        skip = {"too-large": "over-1-mib", "not-regular": "not-regular"}.get(read.reason or "", "unreadable")
+        return read.size, skip, []
     try:
-        size = real.stat().st_size
-    except OSError:
-        return 0, None, []
-    if size > INSPECTION_CEILING:
-        return size, "over-1-mib", []
-    try:
-        text = real.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        return size, "not-utf8", []
-    return size, None, text.splitlines()[:_MARKER_LINES]
+        text = read.data.decode("utf-8")
+    except UnicodeDecodeError:
+        return read.size, "not-utf8", []
+    return read.size, None, text.splitlines()[:_MARKER_LINES]
 
 
 def discover(
@@ -261,6 +339,13 @@ def discover(
     environ: Mapping[str, str] | None = None,
     include_missing: bool = False,
 ) -> Inventory:
+    """Find every always-loaded instruction file and give each one limit.
+
+    It never raises for a file it cannot read: that file stays a row with a
+    `skip_reason`. It does not read the `[instructions]` table (callers pass
+    `config`, from `load_instructions_config`). It does read `.brigade/memory-care.toml`
+    for the memory index paths, and uses the defaults when that file is unreadable.
+    """
     home = Path.home() if home is None else home
     environ = os.environ if environ is None else environ
     repository_depth = _repository_depth(target)
@@ -269,10 +354,19 @@ def discover(
     excluded = [_expand(name, home, target) for name in config.exclude]
     excluded_real = {_resolved(path) for path in excluded}
     excluded_plain = {Path(os.path.abspath(path)) for path in excluded}
+    notes: list[OverrideNote] = []
 
-    groups: dict[Path, _Group] = {}
+    groups: dict[object, _Group] = {}
+    standard: set[object] = set()
 
-    def add(path: Path, *, root_name: str | None = None, harness: str | None = None, configured: bool = False) -> None:
+    def add(
+        path: Path,
+        *,
+        root_name: str | None = None,
+        harness: str | None = None,
+        configured: bool = False,
+        rejected: str | None = None,
+    ) -> None:
         try:
             real = path.resolve(strict=True)
         except (OSError, RuntimeError):
@@ -284,9 +378,14 @@ def discover(
             if not real.is_file():
                 return
             exists = True
-        if real in excluded_real or Path(os.path.abspath(path)) in excluded_plain:
-            return
-        group = groups.setdefault(real, _Group(real, exists))
+        if root_name is None:
+            # A configured path that is a known per-name file at the root is that root file.
+            relative = _inside(path, target)
+            if relative in ROOT_NAMES:
+                root_name = relative
+        key: object = (_identity(real) if exists else None) or real
+        group = groups.setdefault(key, _Group({real}, exists))
+        group.reals.add(real)
         assert group.candidates is not None and group.root_names is not None and group.harnesses is not None
         group.candidates.append(path)
         if root_name is not None:
@@ -294,16 +393,44 @@ def discover(
         if harness is not None:
             group.harnesses.add(harness)
         group.configured = group.configured or configured
+        group.rejected = group.rejected or rejected
+        if real in excluded_real or Path(os.path.abspath(path)) in excluded_plain:
+            group.exclusion = EXCLUSION_SOURCE
 
-    for name in (*budgets.BOOTSTRAP_BUDGETS, CODEX_OVERRIDE_NAME):
+    def add_configured(name: str) -> None:
+        path = _expand(name, home, target)
+        shown = display_path(path, target=target, home=home)
+        try:
+            real = path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            notes.append(OverrideNote(shown, "matches-no-file", "ignored"))
+            return
+        if not real.is_file():
+            notes.append(OverrideNote(shown, "matches-no-file", "ignored"))
+            return
+        if (_identity(real) or real) in standard:
+            add(path, configured=True)  # already a discovered instruction file
+            return
+        if not name.startswith("~") and Path(name).is_absolute():
+            reason = "absolute-path-not-discovered"
+        elif _inside(real, target) is None and _under_home(real, home) is None:
+            reason = "outside-target-and-home"
+        else:
+            add(path, configured=True)
+            return
+        add(path, configured=True, rejected=reason)
+        notes.append(OverrideNote(shown, reason, "forced-report"))
+
+    for name in ROOT_NAMES:
         add(target / name, root_name=name)
     # A missing override is not a row: only an existing one changes what Codex loads.
     for profile in hp.resolve_user_profiles(harness="all", home=home, workspace=target):
         if profile.instruction_mode == "managed-file":
             continue
         add(profile.instruction_path, harness=profile.harness)
+    standard.update(groups)  # what discovery finds without any configuration
     for name, _override in config.files:
-        add(_expand(name, home, target), configured=True)
+        add_configured(name)
 
     openclaw = openclaw_loaders(target, home=home, environ=environ)
     codex_cap = codex_project_cap(home=home, environ=environ)
@@ -337,7 +464,9 @@ def discover(
         )
         for entry in sorted(openclaw.totals, key=lambda item: item.loader)
     )
-    return Inventory(target, tuple(files), totals, repository_depth)
+    return Inventory(
+        target, tuple(files), totals, repository_depth, tuple(sorted(set(notes), key=lambda n: (n.name, n.reason)))
+    )
 
 
 def _build(
@@ -365,15 +494,18 @@ def _build(
     if any(name in hp.OPENCLAW_BOOTSTRAP_FILES for name in root_names):
         loaders.update(cap.loader for cap in openclaw_per_file)
         caps.extend(openclaw_per_file)
-    if any(path.name.lower() == "user.md" for path in group.candidates):
+    if "USER.md" in root_names:
+        # OpenClaw's fixed cap is on the workspace's own USER.md, not on any file named USER.md.
         caps.extend(openclaw_user_caps)
     if codex_name in root_names:
         loaders.add(codex_cap.loader)
         caps.append(codex_cap)
 
-    override = overrides.get(real) or next(
+    requested = next((found for found in map(overrides.get, group.reals) if found is not None), None) or next(
         (found for path in group.candidates if (found := overrides.get(_resolved(path))) is not None), None
     )
+    # A rejected override is recorded but applies nothing.
+    override = None if group.rejected else requested
     table_budget = next(
         (budgets.BOOTSTRAP_BUDGETS[name] for name in root_names if name in budgets.BOOTSTRAP_BUDGETS), None
     )
@@ -390,16 +522,22 @@ def _build(
 
     size, skip_reason, head = _read_state(real, missing=not group.exists)
     relative = _relative_names(group.candidates, target)
-    if override is not None and override.file_class is not None:
-        file_class = override.file_class
+    if group.rejected:
+        file_class, class_source = "report", "rejected-override"
+    elif group.exclusion:
+        file_class, class_source = "report", "excluded"
+    elif override is not None and override.file_class is not None:
+        file_class, class_source = override.file_class, "config"
     elif any(REPORT_MARKER in line for line in head):
-        file_class = "report"
-    elif repository_depth or real in index or any(_resolved(path) in index for path in group.candidates):
-        file_class = "report"
+        file_class, class_source = "report", "marker"
+    elif repository_depth:
+        file_class, class_source = "report", "repository-depth"
+    elif any(item in index for item in group.reals) or any(_resolved(path) in index for path in group.candidates):
+        file_class, class_source = "report", "memory-index"
     elif any(name in APPEND_NAMES for name in relative):
-        file_class = "append"
+        file_class, class_source = "append", "name-table"
     else:
-        file_class = "policy"
+        file_class, class_source = "policy", "default"
 
     workspace_relative = root_names[0] if has_root else None
     if workspace_relative is None and group.configured:
@@ -424,11 +562,27 @@ def _build(
         size=size,
         exists=group.exists,
         skip_reason=skip_reason,
+        excluded=group.exclusion is not None,
+        exclusion_source=group.exclusion,
+        requested_class=requested.file_class if requested is not None else None,
+        requested_limit_bytes=requested.limit_bytes if requested is not None else None,
+        requested_source=OVERRIDE_SOURCE if requested is not None else None,
+        class_source=class_source,
+        override_reason=group.rejected,
     )
 
 
 def _inside(path: Path, target: Path) -> str | None:
     for base in (target, _resolved(target)):
+        try:
+            return path.relative_to(base).as_posix()
+        except ValueError:
+            pass
+    return None
+
+
+def _under_home(path: Path, home: Path) -> str | None:
+    for base in (home, _resolved(home)):
         try:
             return path.relative_to(base).as_posix()
         except ValueError:
