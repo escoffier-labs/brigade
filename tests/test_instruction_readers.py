@@ -310,7 +310,22 @@ def test_the_brief_names_a_blocked_overflow_card_by_id_and_count(tmp_path, monke
     assert line.endswith('next="brigade memory care tend --stage inbox"')
 
 
-@pytest.mark.parametrize("content", ["{", "[]", '{"cards": "x"}', '{"cards": [{"path": 1, "held_drafts": "2"}]}'])
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{",
+        "[]",
+        '{"cards": "x"}',
+        '{"cards": [{"path": 1, "held_drafts": "2"}]}',
+        # No version, a wrong version, and a record far larger than any real one.
+        '{"cards": [{"path": "memory/cards/instructions/a--overflow-note.md", "held_drafts": 1}]}',
+        '{"version": 2, "cards": [{"path": "memory/cards/instructions/a--overflow-note.md", "held_drafts": 1}]}',
+        '{"version": 1, "cards": [{"path": "memory/cards/instructions/a--overflow-note.md", "held_drafts": 1}], "pad": "'
+        + "x" * 70_000
+        + '"}',
+        "[" * 5000,
+    ],
+)
 def test_a_damaged_blocked_card_record_adds_no_line_and_never_raises(tmp_path, monkeypatch, content):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)

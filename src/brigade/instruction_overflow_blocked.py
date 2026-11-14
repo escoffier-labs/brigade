@@ -22,6 +22,8 @@ from .memory_hub_store import write_json
 
 BLOCKED_REL = ".brigade/memory-care/inbox/blocked-cards.json"
 CODE = "overflow-card-untrusted"
+RECORD_MAX_BYTES = 64 * 1024  # a record of a few cards is a few hundred bytes
+RECORD_MAX_ROWS = 200
 
 
 def refresh(target: Path, *, routing: instruction_overflow.RouteContext | None = None) -> list[dict[str, Any]]:
@@ -80,6 +82,13 @@ def load(target: Path) -> list[dict[str, Any]]:
     """The recorded blocked cards, for the report. Empty when there is no record."""
     from .memory_hub_store import read_json
 
-    value = read_json(journal.safe_path(target, BLOCKED_REL))
-    cards = value.get("cards") if isinstance(value, dict) else None
-    return [row for row in cards if isinstance(row, dict)] if isinstance(cards, list) else []
+    # The work brief reads this at the start of every session, and the file sits in the
+    # workspace: the read is bounded, and anything unreadable or oversized is no record.
+    try:
+        value = read_json(journal.safe_path(target, BLOCKED_REL), max_bytes=RECORD_MAX_BYTES)
+    except (OSError, ValueError, RuntimeError, RecursionError):
+        return []
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return []
+    cards = value.get("cards")
+    return [row for row in cards[:RECORD_MAX_ROWS] if isinstance(row, dict)] if isinstance(cards, list) else []
