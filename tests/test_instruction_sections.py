@@ -303,3 +303,12 @@ def test_raw_html_blocks_are_never_section_boundaries(tag):  # review of #2567
     assert [u.heading for u in parse(b"# T\n<" + tag + b">x</" + tag + b">\n## A\nb\n").units] == [b"## A"]
     open_end = parse(b"# T\n## A\nx\n<" + tag + b">\n## B\ny\n")
     assert [u.heading for u in open_end.units] == [b"## A"] and open_end.eof_in_fence is True
+
+
+def test_a_unit_holding_one_tag_of_an_html_pair_is_blocked():  # review of #2567: never split a pair
+    # In CommonMark a <details> block ends at a blank line, so `## Inner` is a real heading here.
+    data = b"# T\n## A\n<details>\n<summary>More</summary>\n\n## Inner\ntext\n</details>\n## B\nb\n"
+    doc = parse(data)
+    blocked = {u.heading: u.blocked for u in doc.units}
+    assert blocked == {b"## A": "html-block", b"## Inner": "html-block", b"## B": None}
+    assert parse(b"# T\n## A\n<div>x</div>\n## B\nb\n").units[0].blocked is None  # a balanced pair is fine

@@ -36,6 +36,8 @@ _HEADING = re.compile(rb" {0,3}(#{1,6})(?:[ \t]|$)")
 _FENCE_OPEN = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
 # CommonMark HTML block type 1: raw text that runs to the line holding its end tag.
 _RAW_OPEN = re.compile(rb" {0,3}<(pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
+# Block elements a move must never split. Counted on raw bytes, whatever the Markdown parse says.
+HTML_BLOCK_TAGS = (b"pre", b"script", b"style", b"textarea", b"details", b"div", b"table")
 _COMMENT = re.compile(rb"<!--((?:(?!-->).)*)-->")
 _COLON_MARKER = re.compile(rb"(\S+):(start|end)", re.IGNORECASE)
 _BRIGADE_BEGIN = re.compile(rb"BEGIN BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s.*)?")
@@ -53,7 +55,7 @@ class Unit:
     heading: bytes  # the heading line, no newline
     headings: tuple[bytes, ...]  # this heading and every subheading, in order
     pin: str | None  # "marker", "until:YYYY-MM-DD" or None, from this heading or any subheading
-    blocked: str | None  # "managed-block" | "pointer" | None
+    blocked: str | None  # "managed-block" | "pointer" | "html-block" | None
     links: bool  # more than half of the non-blank body lines hold a link or a backticked path
     sha256: str  # of data[start:end]
 
@@ -304,6 +306,8 @@ def parse(data: bytes) -> SectionDocument:
             blocked = "managed-block"
         elif any(line.kind == "pointer" for line in span):
             blocked = "pointer"
+        elif not html_balanced(data[start:end]):
+            blocked = "html-block"  # it holds one tag of an HTML pair: moving it would split the pair
         body = [line for line in span[1:] if line.text.strip() and _pin_of(line) is None]
         links = bool(body) and 2 * sum(1 for line in body if _LINK_LINE.search(line.text)) > len(body)
         units.append(
@@ -356,6 +360,18 @@ def whole_section_spans(doc: SectionDocument, body: bytes) -> tuple[tuple[int, i
 def whole_section_count(doc: SectionDocument, body: bytes) -> int:
     """How many times `body` is a whole section run of `doc` (see `whole_section_spans`)."""
     return len(whole_section_spans(doc, body))
+
+
+def html_balanced(data: bytes) -> bool:
+    """Whether every tag in `HTML_BLOCK_TAGS` opens as often as it closes in `data` (raw bytes, any case).
+    A unit or a moved run that fails this would split an HTML pair, so it never moves."""
+    lowered = data.lower()
+    for tag in HTML_BLOCK_TAGS:
+        opens = len(re.findall(rb"<" + tag + rb"(?=[\s>/])", lowered))
+        closes = len(re.findall(rb"</" + tag + rb"\s*>", lowered))
+        if opens != closes:
+            return False
+    return True
 
 
 def heading_lines(data: bytes) -> tuple[bytes, ...]:

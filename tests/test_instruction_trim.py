@@ -649,3 +649,33 @@ def test_planner_skips_a_unit_holding_a_keep_marker_in_a_code_example():  # matc
     a = next(i for i, unit in enumerate(doc.units) if unit.heading == b"## A")
     assert (a, "pinned") in plan.skipped
     assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+def test_check_refuses_a_run_that_splits_an_html_pair():  # review of #2567: structure on raw bytes
+    open_tag, close_tag = b"<details>", b"</details>"
+    body = b"# T\n\n## A\n%o\n" + b"word " * 900 + b"\n## B\n%c\n" + KEEP.encode() + b"\nb\n"  # B stays
+    tagged = body.replace(b"%o", open_tag).replace(b"%c", close_tag)
+    filler = body.replace(b"%o", b"x" * len(open_tag)).replace(b"%c", b"y" * len(close_tag))
+    plan = _plan(filler)
+    assert plan.runs and plan.runs[0].start <= tagged.index(open_tag) < plan.runs[0].end
+    assert all(run.end <= tagged.index(close_tag) for run in plan.runs)  # the run holds only one half
+    forged = dataclasses.replace(plan, before=tagged)
+    cards = {
+        run.card_rel: card_bytes(
+            file_key="user-md",
+            slug=run.slug,
+            section=tagged[run.start : run.end],
+            source_name="USER.md",
+            decision_id=ID,
+            today=TODAY,
+            fresh_until=None,
+            card_id=CARD_ID,
+        )
+        for run in forged.runs
+    }
+    assert "structure" in check(forged, cards, config_pins=(), today=TODAY, limits=LIMITS)
+    # The planner itself never picks either half.
+    real = _plan(tagged)
+    assert all(not run.units for run in real.runs) or all(
+        parse(tagged).units[i].blocked is None for run in real.runs for i in run.units
+    )
