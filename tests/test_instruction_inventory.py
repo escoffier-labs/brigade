@@ -822,3 +822,16 @@ def test_an_exclusion_that_matches_no_file_is_listed(tmp_path):
         ("SOUL.md", "exclude-matches-no-file", "ignored")
     ]
     assert find(inv, "AGENTS.md").excluded
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_a_second_name_for_one_file_never_loosens_its_limit(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        (ws / name).unlink(missing_ok=True)
+    sized(ws / "CLAUDE.md", 7_000)
+    alone = find(discover(ws, InstructionsConfig(), home=home, environ=env), "CLAUDE.md")
+    (ws / "AGENTS.md").symlink_to(ws / "CLAUDE.md")
+    (row,) = [item for item in discover(ws, InstructionsConfig(), home=home, environ=env).files if item.size == 7_000]
+    # Rule: grouping two names into one row takes the smaller table target.
+    assert row.target_budget <= alone.target_budget and row.limit <= alone.limit

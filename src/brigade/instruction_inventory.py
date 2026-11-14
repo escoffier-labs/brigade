@@ -646,8 +646,10 @@ def _build(
     )
     # A rejected override is recorded but applies nothing.
     override = None if group.rejected else requested
-    table_budget = next(
-        (budgets.BOOTSTRAP_BUDGETS[name] for name in root_names if name in budgets.BOOTSTRAP_BUDGETS), None
+    # One file reached by several per-name files keeps the smallest of their targets,
+    # so a second name pointing at it can never loosen the first name's limit.
+    table_budget = min(
+        (budgets.BOOTSTRAP_BUDGETS[name] for name in root_names if name in budgets.BOOTSTRAP_BUDGETS), default=None
     )
     # The baseline comes first: the table target for the name, else the default. A configured
     # limit applies only when it is smaller, so no configuration value can raise a limit.
