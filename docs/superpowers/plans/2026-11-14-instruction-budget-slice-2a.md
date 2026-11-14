@@ -1126,7 +1126,7 @@ The same amendments are written into the design document in this pull request, m
 2. **Matrix.** 94 rows, every one names a test, and every test name in the matrix appears in a task. Twelve rows are guards, labelled in the Kind column.
 3. **Pure functions.** `parse`, `plan_append`, `check`, `reconcile` and `plan_restore` take bytes and plain values. No test of them touches the filesystem.
 4. **Numbers.** Every acceptance number is computed in "Acceptance fixture" from the pointer formula and the section table.
-5. **Citations.** Every `path:line` is checked against `main` at `acbc78d01`, the base of this plan. They were first read on `origin/overhaul` at `470d14aea`; only `memory_care_tend.py` moved when the overhaul landed (one line, all its citations updated).
+5. **Citations.** Every `path:line` is checked against `main` at `acbc78d01`, the base of this plan. They were first read on `origin/overhaul` at `470d14aea`. Only `memory_care_tend.py` moved when the overhaul landed (one line, all its citations updated).
 
 ## Changes after review
 
