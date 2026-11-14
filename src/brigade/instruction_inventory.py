@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tomllib
 from collections import Counter
 from collections.abc import Mapping
@@ -101,7 +102,7 @@ class InstructionFile:
     limit_reason: str | None
     act_at: int
     trim_to: int
-    size: int  # bytes, 0 when missing
+    size: int  # bytes, 0 when missing or when `size_known` is False
     exists: bool
     skip_reason: str | None  # "not-utf8" | "over-1-mib" | "not-regular" | "unreadable" | None
     # Audit fields. `file_class` and `limit` are the effective values.
@@ -115,6 +116,9 @@ class InstructionFile:
     override_reason: str | None = None  # why the override on this row was rejected, else None
     limit_clamped: bool = False  # a configured limit_bytes was larger than the baseline target and was not applied
     bootstrap_names: tuple[str, ...] = ()  # OpenClaw bootstrap names that resolve to this file, sorted
+    # False only for a file that exists and whose size neither the read nor `stat` could give:
+    # `size` is 0 then and means "unknown". Every other `skip_reason` leaves a trustworthy size.
+    size_known: bool = True
 
 
 CODEX_HOME_OUTSIDE = "codex-home-outside-home"
@@ -133,7 +137,7 @@ class OverrideNote:
 @dataclass(frozen=True)
 class LoaderTotal:
     loader: str
-    total: int  # bytes across the files that list this loader
+    total: int  # bytes across the files that list this loader; a file of unknown size counts 0
     cap: int | None
     label: str | None
 
@@ -370,22 +374,40 @@ def _identity(real: Path) -> tuple[int, int] | None:
     return (info.st_dev, info.st_ino) if info.st_ino else None
 
 
-def _read_state(real: Path, *, missing: bool) -> tuple[int, str | None, list[str]]:
-    """Size in bytes, a skip reason, and the first lines when the file can be read as text.
+def _stat_size(real: Path) -> int | None:
+    """The on-disk size of a regular file, or None when `stat` cannot give one."""
+    try:
+        info = os.stat(real)
+    except (OSError, ValueError):
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
+
+
+def _read_state(real: Path, *, missing: bool) -> tuple[int, str | None, list[str], bool]:
+    """Size in bytes, a skip reason, the first lines when the file can be read as text, and whether the size is known.
 
     One bounded, nonblocking open: the size and the bytes come from the same descriptor.
+    The size is trustworthy for every skip reason but two. `over-1-mib` and `not-utf8`
+    report the bytes read or the descriptor's size. `unreadable` (the open failed, as for
+    a file with no read permission) takes the size from `stat`, which needs no read
+    permission: the file is as big as it is on disk whether or not this process can open
+    it. When `stat` fails too, and for `not-regular` (the opened descriptor is not a
+    regular file, so it has no size), the size is unknown: 0 with the flag False.
     """
     if missing:
-        return 0, None, []
+        return 0, None, [], True
     read = read_regular_file(real, max_bytes=INSPECTION_CEILING)
     if read.data is None:
         skip = {"too-large": "over-1-mib", "not-regular": "not-regular"}.get(read.reason or "", "unreadable")
-        return read.size, skip, []
+        if skip == "unreadable":
+            size = _stat_size(real)
+            return (size or 0), skip, [], size is not None
+        return read.size, skip, [], skip != "not-regular"
     try:
         text = read.data.decode("utf-8")
     except UnicodeDecodeError:
-        return read.size, "not-utf8", []
-    return read.size, None, text.splitlines()[:_MARKER_LINES]
+        return read.size, "not-utf8", [], True
+    return read.size, None, text.splitlines()[:_MARKER_LINES], True
 
 
 def discover(
@@ -691,7 +713,7 @@ def _build(
     limit, limit_source = budgets.limit_for(target_budget, target_source, usable)
     limit_reason = next((cap.reason for cap in caps if cap.cap is None), None)
 
-    size, skip_reason, head = _read_state(real, missing=not group.exists)
+    size, skip_reason, head, size_known = _read_state(real, missing=not group.exists)
     relative = _relative_names(group.candidates, target)
     if group.rejected:
         file_class, class_source = "report", "rejected-override"
@@ -742,6 +764,7 @@ def _build(
         override_reason=group.rejected,
         limit_clamped=limit_clamped,
         bootstrap_names=tuple(name for name in root_names if name in hp.OPENCLAW_BOOTSTRAP_FILES),
+        size_known=size_known,
     )
 
 

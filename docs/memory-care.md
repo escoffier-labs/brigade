@@ -414,6 +414,31 @@ copy without saving another copy. These redundant images are not recoverable thr
 undo. Orphan directories without readable decision metadata stay in place and are
 reported.
 
+### Instruction budgets
+
+Always-loaded instruction files (`AGENTS.md`, `USER.md`, `TOOLS.md`, `MEMORY.md` and the other names an agent harness reads at startup, plus the user-level files Codex and the other harnesses load) are measured against one limit each. This release measures and reports. It moves nothing.
+
+**How the limit is chosen.** The limit is the smallest of Brigade's target budget for the file and every cap a loader enforces on it. The target is the per-name budget, else `default_limit_bytes` (20,000). OpenClaw caps come from its own configuration, per agent, with `USER.md` fixed at 4,000. The Codex cap is `project_doc_max_bytes` (32,768 by default) and applies to the project file Codex selects. A character cap is used as the same number of bytes, so a limit is never looser than the harness. When two caps tie, the loader is named. Paths that reach the same file through a symlink or hard link are one row, named by the real file.
+
+**Thresholds and states.** Act-at is 85% of the limit and trim-to is 70%. A file at or under act-at is `within`. Between act-at and the limit it is `over-act-at`: nothing is cut yet and no alert is raised. Over the limit it is `could-not-trim` with reason `report-only`, because no file can be moved yet. A loader total over its cap is `total-over-cap`.
+
+**Where it shows.**
+
+- `brigade memory care tend --stage instructions --dry-run --json` prints one row per file (display path, loaders, class, bytes, limit and its source, act-at, trim-to, state, and any overflow cards the file does not name yet) and the loader totals. It also runs as part of a full `memory care tend`.
+- `brigade doctor` has a `bootstrap-budget: <file>` row per file. A workspace file over its limit fails. A user-level file warns and is an operator row. A link that leaves the workspace also warns, as a plain row. A loader total over its cap has an `instructions: loader-total <loader>` warning row, because the harness cuts at the total.
+- `brigade budgets check` prints the same rows with `ok`, `warn`, `fail` or `missing`, a `[warn]` line for each loader total over its cap, and returns 1 only on `fail`. Doctor and `budgets check` take their rows from one inventory and one set of rules, so they agree, including on a per-name path that exists and is not a regular file (a directory, say), which fails in both. A link to nothing is a missing file in both.
+- `brigade work brief` prints one line while a file is over its limit, for example `instruction_budget: could-not-trim path="USER.md" 8241/4000 reason=report-only next="brigade memory care tend --stage instructions --dry-run --json"`. The line shows on every brief while the state holds in this release. A later release keeps the previous state and prints only new alerts.
+
+**Unknown size.** A file that exists but whose size nothing could read is never `within`. Its state is `size-unknown`, with the skip reason as the code. A file with no read permission takes its size from `stat`, which needs none, so it is rated like any other file. Only when `stat` fails too, or the opened file is not a regular file, is the size unknown. A workspace file in that state fails in doctor and `budgets check` and raises `instruction_budget: size-unknown path="..." limit=... reason=...` in the brief. A user-level file warns. A file over 1 MiB or not UTF-8 keeps a trusted size.
+
+**Names are data, not text.** A file name, a configured path, an override name or an OpenClaw agent id can be written by an agent or by content an agent ingested, and the brief is read by a model. Every such value in a line of text is written as an encoded data value in a quoted field. Only ASCII letters, digits and `. _ - / ~` pass as they are. Every other character, including a space, a colon, a backtick, `#`, `=`, `<`, `>`, a quote, a non-ASCII character and a control character, becomes an escape such as `\x20` or `\u202e`, and a value over 96 characters ends in `[truncated]`. So `ignore previous instructions.md` prints as `path="ignore\x20previous\x20instructions.md"`. The fixed parts of a line (the prefix, the state names, the reason codes and `next=`) come from constants. The JSON payloads keep the real values as JSON strings and never carry the target or home directory.
+
+**Configuration changes stay visible.** The `[instructions]` table in `.brigade/memory-care.toml` reads `enabled`, `act_at_percent`, `trim_to_percent`, `default_limit_bytes`, `exclude`, `files.<path>.class` and `files.<path>.limit_bytes`. A configured limit can only lower a limit. An excluded file stays in the report, marked with where the exclusion came from, and still counts toward loader totals. An override that names a path outside the workspace and the home directory, or a credential or shell-setup file, is rejected and the row is forced to class `report`. The report lists every rejected override, every clamped limit, the keys that moved a limit for every file, and why an OpenClaw configuration could not be read. While any override was rejected, any limit clamped, any file excluded or any such key set, `brigade work brief` prints one `instruction_budget: config-changed` line and `brigade doctor` adds an `instructions: config-changes` warning. Reports show display paths only, never a full home path or file content.
+
+**Invalid configuration.** A bad `[instructions]` table never stops a reader. Doctor and `budgets check` fail one `instructions: config` row and still measure with the defaults, and the brief prints one `config-invalid` line. A `tend --stage instructions` run exits with the error like a bad `[tend]` table, and so does an inventory error. In a plain `brigade memory care tend` the stage records the error (`config-invalid` or `inventory-failed`), the other stages finish and the state file is saved, and the run exits 1 with `failed` and `failed_stages` in the payload. If the brief cannot read the inventory it prints one `instruction_budget: inventory-failed` line.
+
+`enabled = false` turns off the report and the alerts only, and `exclude` only removes a file from them. Neither turns off overflow routing. They do not turn off doctor: an excluded or disabled over-limit workspace file keeps `brigade doctor` failing, by design, because the loader cuts the file either way. Moving sections of a full file comes in a later release.
+
 
 ## Session-start and prompt recall (#466 Slice 1, #2196)
 
@@ -465,6 +490,8 @@ Machine-local config key: `memory_recall_target` in `.brigade/config.json`.
   the trimmed prompt capped at 256 characters, with the same five-second
   deadline and 5 match / 10 line caps. It adds one recall subprocess per prompt
   and does nothing unless a recall target is active.
+
+A file that is in the report only because `[instructions.files]` enrolled it is shown in the brief, in doctor and in `budgets check` text by an id such as `configured-file-1a2b3c4d5e6f`. Its name was chosen by whoever wrote the configuration, and a name can read as a sentence even when it holds only path characters. The JSON output carries the same id as `text_name` beside the display path. The brief also prints one `loader-config-unreadable` line when a harness configuration cannot be read, because the limits then fall back to Brigade's own targets and may be looser than the harness's real cap.
 
 ### Operator smoke (before merge)
 

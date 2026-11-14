@@ -14,7 +14,7 @@ from typing import Any, Sequence
 from . import memory_archive, memory_care_hub, memory_care_journal as journal, memory_care_retire, memory_cmd
 from . import memory_hub_store as store
 
-STAGES = ("hub", "fixes", "retire", "inbox")
+STAGES = ("hub", "fixes", "retire", "inbox", "instructions")
 STATE_REL = ".brigade/memory-care/tend/latest.json"
 
 
@@ -74,6 +74,20 @@ def run(
                 deadline_days=tend.deadline_days,
                 dry_run=dry_run,
             )
+        elif stage == "instructions":
+            from . import memory_care_instructions as instructions
+
+            # A stage named on the command line fails fast, like a bad [tend] table. In a default
+            # run a bad [instructions] table or an inventory error is recorded, so the stages
+            # after it finish and the state file is written, and the run is marked failed so the
+            # exit status and the payload say so. (`after_command` runs the inbox stage only.)
+            result = instructions.run_stage(
+                target, today=today or memory_cmd._today(), dry_run=dry_run, fail_fast=stages is not None
+            )
+            payload["stages"][stage] = result
+            if result.get("error"):
+                payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
+                payload["failed"] = len(payload["failed_stages"])
         else:
             payload["stages"][stage] = memory_care_retire.apply(
                 target, memory_cmd._config_or_default(target), tend, today=today or memory_cmd._today(), dry_run=dry_run

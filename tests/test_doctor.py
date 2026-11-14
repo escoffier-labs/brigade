@@ -13,6 +13,7 @@ import pytest
 
 from brigade import proc
 
+from brigade import budgets
 from brigade import cli
 from brigade import context_preview
 from brigade import dirfd
@@ -63,7 +64,7 @@ def test_fresh_quickstart_workspace_passes_doctor(tmp_target: Path, capsys):
         ),
     )
     agents = (tmp_target / "AGENTS.md").read_text(encoding="utf-8")
-    limit = doctor_mod.BOOTSTRAP_BUDGETS["AGENTS.md"]
+    limit = budgets.BOOTSTRAP_BUDGETS["AGENTS.md"]
     assert _crlf_projected_size(agents) <= limit
     card = tmp_target / "memory" / "cards" / "workspace-file-maintenance.md"
     assert card.is_file()
@@ -92,7 +93,7 @@ def test_rendered_agents_md_stays_under_budget_for_all_harnesses(tmp_path: Path)
         ),
     )
     agents = (target / "AGENTS.md").read_text(encoding="utf-8")
-    assert _crlf_projected_size(agents) <= doctor_mod.BOOTSTRAP_BUDGETS["AGENTS.md"]
+    assert _crlf_projected_size(agents) <= budgets.BOOTSTRAP_BUDGETS["AGENTS.md"]
 
 
 def test_doctor_memory_care_freshness_compares_in_utc(monkeypatch):
@@ -655,7 +656,7 @@ def test_doctor_fails_when_bootstrap_file_exceeds_budget(tmp_target: Path, capsy
         tmp_target,
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
     )
-    limit = doctor_mod.BOOTSTRAP_BUDGETS["MEMORY.md"]
+    limit = budgets.BOOTSTRAP_BUDGETS["MEMORY.md"]  # the table lives in budgets; doctor no longer imports it
     (tmp_target / "MEMORY.md").write_text("x" * (limit + 1))
 
     rc = doctor_mod.run(target=tmp_target, harness="generic")
@@ -663,7 +664,7 @@ def test_doctor_fails_when_bootstrap_file_exceeds_budget(tmp_target: Path, capsy
     assert rc == 1
     assert "[fail]" in out
     assert "bootstrap-budget: MEMORY.md" in out
-    assert "over hard limit" in out
+    assert "over limit" in out  # the row says over limit: slice 1 has one limit per file
 
 
 def test_doctor_reports_bootstrap_budget_ok(tmp_target: Path, capsys):
@@ -3371,7 +3372,7 @@ def _codex_truncated_preview(tmp_path: Path) -> dict:
                 "consumed_raw_bytes": cap,
                 "rendered_utf8_bytes": cap,
                 "contribution": "truncated",
-                "brigade_advisory_budget_bytes": doctor_mod.BOOTSTRAP_BUDGETS["AGENTS.md"],
+                "brigade_advisory_budget_bytes": budgets.BOOTSTRAP_BUDGETS["AGENTS.md"],
             }
         ]
     return result
