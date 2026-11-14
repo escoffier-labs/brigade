@@ -36,8 +36,8 @@ and launches one ready wave, then supervises its children until they finish.
 and fills available capacity before waiting. Hub summary mirroring remains
 follow-up work. Initial run-patrol and memory-reflection slices are available
 since 0.31.0. Remaining work is tracked in
-[#1850](https://github.com/escoffier-labs/brigade/issues/1850) and
-[#1856](https://github.com/escoffier-labs/brigade/issues/1856).
+[#1850](https://github.com/escoffier-labs/brigadestack/issues/1850) and
+[#1856](https://github.com/escoffier-labs/brigadestack/issues/1856).
 
 ## Kinds of delegated work
 

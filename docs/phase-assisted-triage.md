@@ -1,4 +1,4 @@
-# Brigade Stack assisted diagnosis: first proof
+# BrigadeStack assisted diagnosis: first proof
 
 Status: fixture-only design approved on 2026-10-28. Product investigation and
 native activation remain outside the first proof.

@@ -295,7 +295,7 @@ High-traffic contracts are pinned in `tests/test_error_refusal_copy.py`.
 
 ## Where things go
 
-Questions (setup, behavior, how do I) and ideas go to [Discussions](https://github.com/escoffier-labs/brigade/discussions). Reproducible bugs go to Issues, using the bug form under `.github/ISSUE_TEMPLATE/`. Security reports follow [SECURITY.md](SECURITY.md) and never go in a public thread.
+Questions (setup, behavior, how do I) and ideas go to [Discussions](https://github.com/escoffier-labs/brigadestack/discussions). Reproducible bugs go to Issues, using the bug form under `.github/ISSUE_TEMPLATE/`. Security reports follow [SECURITY.md](SECURITY.md) and never go in a public thread.
 
 For agents:
 

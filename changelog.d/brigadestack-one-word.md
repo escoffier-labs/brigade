@@ -1,0 +1,1 @@
+- Write the product name as BrigadeStack in the guides, CLI help, roster comments, and packaged skills. Update live documentation links to the renamed GitHub repository.

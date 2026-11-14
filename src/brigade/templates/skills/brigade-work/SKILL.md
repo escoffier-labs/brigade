@@ -1,17 +1,17 @@
 ---
 name: brigade-work
-description: Use at the start of any work session and whenever you verify a change in a Brigade Stack-wired repo or workspace - routes work through Brigade Stack so verification, outcomes, evidence export, and handoffs are captured (verify with capture → outcome from run → evidence brief next time) instead of leaving Brigade Stack installed-but-dormant. Triggers on starting a task, running tests/checks, or finishing a session.
+description: Use at the start of any work session and whenever you verify a change in a BrigadeStack-wired repo or workspace - routes work through BrigadeStack so verification, outcomes, evidence export, and handoffs are captured (verify with capture → outcome from run → evidence brief next time) instead of leaving BrigadeStack installed-but-dormant. Triggers on starting a task, running tests/checks, or finishing a session.
 ---
 
 # brigade-work
 
-Brigade Stack only earns its keep if real work flows through it. Installed and never used, it is dead weight: the daily brief is empty, the outcome ledger never fills, and `outcome rank` says "ranking: none". This skill is the loop that feeds it. Check what is pending, run your verification *through* Brigade Stack so it produces a signed receipt, record the outcome against the skill or card that did the work, export receipts so the next run gets an evidence brief, and hand off what you learned.
+BrigadeStack only earns its keep if real work flows through it. Installed and never used, it is dead weight: the daily brief is empty, the outcome ledger never fills, and `outcome rank` says "ranking: none". This skill is the loop that feeds it. Check what is pending, run your verification *through* BrigadeStack so it produces a signed receipt, record the outcome against the skill or card that did the work, export receipts so the next run gets an evidence brief, and hand off what you learned.
 
-**Core principle:** the model never grades its own work. Receipts record observed exit codes; ad hoc verify receipts provide audit evidence, while eligible manifest-backed receipts can score an artifact. Route verification through Brigade Stack, capture the outcome, and feed receipts forward via brigade-evidence when installed. Check scoreability before claiming a result affects ranking.
+**Core principle:** the model never grades its own work. Receipts record observed exit codes; ad hoc verify receipts provide audit evidence, while eligible manifest-backed receipts can score an artifact. Route verification through BrigadeStack, capture the outcome, and feed receipts forward via brigade-evidence when installed. Check scoreability before claiming a result affects ranking.
 
 ## When this applies
 
-The repo or workspace is Brigade Stack-wired: a `.brigade/` directory exists, or `brigade status --target .` succeeds. If neither is true, this skill does not apply (run `brigade init` first only if the user wants Brigade Stack here).
+The repo or workspace is BrigadeStack-wired: a `.brigade/` directory exists, or `brigade status --target .` succeeds. If neither is true, this skill does not apply (run `brigade init` first only if the user wants BrigadeStack here).
 
 ## The loop
 
@@ -22,8 +22,8 @@ brigade work brief --target .        # pending work, imports, warnings, suggeste
 ```
 In a memory/operator workspace, `brigade daily status --target .` is the lighter equivalent. Read it first.
 
-### 2. Verify THROUGH Brigade Stack, not raw
-When you would run tests or a check to confirm a change, run it through Brigade Stack so it records the exit code:
+### 2. Verify THROUGH BrigadeStack, not raw
+When you would run tests or a check to confirm a change, run it through BrigadeStack so it records the exit code:
 ```bash
 brigade work verify run --target . --command "<your test command>" --capture auto   # e.g. "pytest -q tests/test_example.py", "npm test", "go test ./..."
 ```
@@ -53,7 +53,7 @@ brigade outcome capture <skill-or-card-id> --run-id latest --kind skill
 ```
 Ad hoc `--command` and `--argv-json` receipts are audit-only evidence and cannot score an artifact. Scoreable evidence requires a registered verifier manifest tracked under `verify/manifests/` with subject/check metadata and artifact attribution. Inspect the receipt eligibility and reason. Capture observed failures too; capture does not make an audit receipt scoreable.
 
-**Name an id you actually have.** Capturing against an id Brigade Stack does not recognize prints a warning and pollutes the ranking. The id is whatever genuinely guided the change:
+**Name an id you actually have.** Capturing against an id BrigadeStack does not recognize prints a warning and pollutes the ranking. The id is whatever genuinely guided the change:
 - the actual installed skill that guided the work;
 - a memory card under `memory/cards/` (use `--kind card`);
 - `brigade-work` itself - a fresh repo always has this one, so when nothing else applies, capture against `brigade-work`.
@@ -97,7 +97,7 @@ brigade outcome reconcile --target .       # dry-run; --apply promotes a proven 
 - Running tests raw leaves no Brigade receipt. Capturing an ad hoc receipt records audit evidence but does not supply a score for `outcome rank`.
 - Capturing against a skill you did not actually use, which poisons the ranking.
 - Skipping capture on failures loses audit evidence. Failures can affect artifact ranking only when the receipt meets the scoring and attribution requirements.
-- Treating Brigade Stack as install-and-forget. It is dormant until work flows through it; this skill is how the work flows.
+- Treating BrigadeStack as install-and-forget. It is dormant until work flows through it; this skill is how the work flows.
 - Stopping at capture without export: receipts pile up locally and the next `brigade run` has no brigade-evidence evidence brief to attach.
 - Putting shell operators in the verify command. `brigade work verify run` splits `--command` with `shlex` and runs it with `shell=False` in the `--target` directory, so `cd x && pytest`, pipes, and `&&` do NOT work. Set the working directory with `--target <dir>` and pass a single command, e.g. `--target ./pkg --command "pytest -q tests/test_example.py"`.
 

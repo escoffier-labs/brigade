@@ -22,5 +22,5 @@ Requires Python 3.11 or newer.
 
 [Homepage](https://brigadestack.com) |
 [Documentation](https://brigade.tools/docs) |
-[Source](https://github.com/escoffier-labs/brigade) |
-[Issues](https://github.com/escoffier-labs/brigade/issues)
+[Source](https://github.com/escoffier-labs/brigadestack) |
+[Issues](https://github.com/escoffier-labs/brigadestack/issues)

@@ -49,7 +49,7 @@ def test_bare_invocation_prints_start_here_then_usage_error(capsys):
 def test_top_level_help_has_start_here_block():
     parser = cli._build_parser()
     help_text = parser.format_help()
-    assert "Brigade Stack:" in help_text
+    assert "BrigadeStack:" in help_text
     assert "Start here:" in help_text
     assert "operator quickstart" in help_text
 

@@ -105,7 +105,7 @@ def render_session_close_section(*, heading: str = "## Session close") -> str:
 def render_identity_section() -> str:
     return (
         "## Brigade\n\n"
-        "Brigade Stack is the local work loop for this workspace: briefs, verification "
+        "BrigadeStack is the local work loop for this workspace: briefs, verification "
         "receipts, outcomes, and Memory Handoffs.\n"
     )
 

@@ -1,18 +1,18 @@
-# First 10 Minutes With Brigade Stack
+# First 10 Minutes With BrigadeStack
 
-Start with one Git repository you control. This walkthrough uses the published 0.31.0 bridge and records a check you can inspect afterward. It needs no model credentials, services, or schedulers.
+Start with one Git repository you control. This walkthrough uses the published 0.32.0 package and records a check you can inspect afterward. It needs no model credentials, services, or schedulers.
 
 ## 1. Install and check the command
 
 Choose an install route in [Quickstart](../QUICKSTART.md#1-install). For npm:
 
 ```bash
-npm install --global brigadestack@0.31.0
+npm install --global brigadestack@0.32.0
 brigadestack --version
 brigadestack --help
 ```
 
-Expected version: `brigade 0.31.0`. The bridge exposes `brigadestack` and delegates to the compatible Brigade CLI. Existing users can use their `brigade` command throughout. With npx, prefix every invocation as described in [Quickstart](../QUICKSTART.md#npm).
+Expected version: `brigade 0.32.0`. The package exposes both `brigade` and `brigadestack`. Existing users can use their `brigade` command throughout. With npx, prefix every invocation as described in [Quickstart](../QUICKSTART.md#npm).
 
 ## 2. Pick a target
 
@@ -114,4 +114,4 @@ brigadestack operator doctor --target . --profile local-operator --json
 brigadestack operator verify-harness --target . --harness codex --json
 ```
 
-Review output before sharing it. Remove tokens, private hostnames, repository names, and absolute personal paths. Use the [setup problem form](https://github.com/escoffier-labs/brigade/issues/new/choose) with the redacted evidence. Do not rerun setup with `--force` to suppress an unexplained failure.
+Review output before sharing it. Remove tokens, private hostnames, repository names, and absolute personal paths. Use the [setup problem form](https://github.com/escoffier-labs/brigadestack/issues/new/choose) with the redacted evidence. Do not rerun setup with `--force` to suppress an unexplained failure.
