@@ -617,3 +617,11 @@ def test_interrupted_restore_of_an_unterminated_tail_is_cleaned_by_reconcile(): 
     assert result.remove_cards == (rel,) and result.completed == (ID,) and result.after == restored.after
     again = plan_restore(restored.after, (run,), (), {rel: card}, file_key=KEY)
     assert isinstance(again, Restore) and again.after == restored.after and again.remove_cards == (rel,)
+
+
+def test_undo_of_a_tail_move_with_an_overflow_pointer_is_byte_for_byte():  # review of #2567
+    data = b"# T\n\n## Tail\n" + b"word " * 800  # unterminated end of file, over the limit
+    moved = _moved(data, overflow=(PREF,))
+    assert moved.runs and moved.pointers and not data.endswith(b"\n")
+    result = _restore(moved.after, moved, runs=moved.runs, pointers=moved.pointers)
+    assert isinstance(result, Restore) and result.after == data

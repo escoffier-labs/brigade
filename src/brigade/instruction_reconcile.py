@@ -9,6 +9,7 @@ whole parsed sections.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import re
 from collections import Counter
@@ -149,12 +150,27 @@ def _swap_end(file: bytes, span: PointerSpan) -> int:
 
 
 def _put_back(file: bytes, span: PointerSpan, body: bytes) -> _Edit:
-    """The edit that swaps a pointer for its section. A section moved from the end of a file with no final
-    newline gets one back only when text now follows it, so it never runs into that text, while a restore
-    at the end of the file stays byte for byte."""
-    end = _swap_end(file, span)
-    text = body if body.endswith(b"\n") or end >= len(file) else body + b"\n"
-    return _Edit(span.start, end, text)
+    """The edit that swaps a pointer for its section. Whether an unterminated section needs a newline is
+    decided over all edits at once (`_line_breaks`)."""
+    return _Edit(span.start, _swap_end(file, span), body)
+
+
+def _line_breaks(file: bytes, edits: Sequence[_Edit]) -> list[_Edit]:
+    """`edits`, where a section put back without a final newline gets one when text still follows it after
+    every other edit is applied. A pointer that the same result removes is not text that follows, so an
+    undo of an unchanged move stays byte for byte."""
+    removals = sorted((edit for edit in edits if not edit.text), key=lambda edit: edit.start)
+    out: list[_Edit] = []
+    for edit in edits:
+        if not edit.text or edit.text.endswith(b"\n"):
+            out.append(edit)
+            continue
+        cursor = edit.end
+        for removal in removals:
+            if removal.start == cursor:
+                cursor = removal.end
+        out.append(dataclasses.replace(edit, text=edit.text + b"\n") if cursor < len(file) else edit)
+    return out
 
 
 def _repeated(runs: Sequence[RecordedRun], pointers: Sequence[RecordedPointer]) -> set[bytes]:
@@ -276,7 +292,7 @@ def reconcile(
         else:
             edits.append(_Edit(outside[0].start, outside[0].end, b"", pointer.separator))
             dropped.append(pointer.card_rel)
-    after, _ = _apply(file, edits)
+    after, _ = _apply(file, _line_breaks(file, edits))
     final = parse(after)
     final_spans = pointer_spans(after)
     completed: list[str] = []
@@ -369,6 +385,9 @@ def plan_restore(
             held_cards.append(pointer.card_rel)
     if good_runs and not edits and not remove:
         return Refusal("already-restored", None)
+    edits = _line_breaks(file, edits)
+    starts = {edit.start for edit in put_back}
+    put_back = [edit for edit in edits if edit.start in starts and edit.text]
     after, applied = _apply(file, edits)
     ranges = [(_shift(applied, edit.start), _shift(applied, edit.start) + len(edit.text)) for edit in put_back]
     ranges += [(_shift(applied, start), _shift(applied, end)) for start, end in back]
