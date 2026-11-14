@@ -347,11 +347,12 @@ def _frontmatter(
 ) -> bytes:
     lines = [
         "---",
-        f"title: {file_key}--{slug}",
+        # Quoted, so a key such as `yes` or `null` stays a string under every YAML loader.
+        f'title: "{file_key}--{slug}"',
         "category: instructions",
-        f"tags: [moved-instructions, {file_key}, moved]",
+        f'tags: [moved-instructions, "{file_key}", moved]',
         "visibility: private",
-        f"source_file: {source_value}",
+        f'source_file: "{source_value}"',
         "archive: never",
         f"moved_on: {today.isoformat()}",
         f"moved_by: {decision_id}",
