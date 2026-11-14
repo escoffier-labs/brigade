@@ -14,11 +14,17 @@ from tests._home import set_home
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _warm_brigade_imports():
+def _warm_brigade_imports(tmp_path_factory):
     # Small Windows selections can reach this file before Brigade has bytecode.
     # Pay compilation/import cost before the security probe's production budget.
     assert compileall.compile_dir(str(trusted_cwd()), quiet=1)
     subprocess.run(module_argv("brigade", "--help"), check=True, capture_output=True, timeout=60)
+    # `--help` does not load what `work brief` loads, and the first SessionStart case runs that brief
+    # under the hook's 10-second budget. A cold Windows runner can spend longer than that on first
+    # imports, so run one brief here with a generous timeout. Its result does not matter.
+    warm = tmp_path_factory.mktemp("warm-brief")
+    write_config(warm, Config(version=1, selection=Selection(depth="repo", harnesses=["claude"], owner="claude")))
+    subprocess.run(module_argv("brigade", "work", "brief", "--target", str(warm)), capture_output=True, timeout=120)
 
 
 @pytest.mark.parametrize("shadow", ["brigade.py", "brigade/__init__.py"])
