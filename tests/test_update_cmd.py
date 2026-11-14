@@ -373,7 +373,7 @@ def test_cache_manifest_rejects_existing_bytes_for_the_same_digest_path(tmp_path
         update_cmd._cache_manifest(paths, release)
 
 
-def test_resolve_beta_cli_version_selects_newest_non_yanked_0_31_dev_wheel():
+def test_resolve_beta_cli_version_selects_newest_non_yanked_current_base_dev_wheel():
     releases = {
         "0.32.0.dev20260801": [_wheel_file("0.32.0.dev20260801")],
         "0.32.0.dev20260810": [_wheel_file("0.32.0.dev20260810", yanked=True)],
@@ -386,7 +386,7 @@ def test_resolve_beta_cli_version_selects_newest_non_yanked_0_31_dev_wheel():
         "0.32.0a1": [_wheel_file("0.32.0a1")],
         "0.32.0rc1": [_wheel_file("0.32.0rc1")],
         "0.32.0.dev20260809.post1": [_wheel_file("0.32.0.dev20260809.post1")],
-        "0.31.1.dev20260811": [_wheel_file("0.31.1.dev20260811")],
+        "0.32.1.dev20260811": [_wheel_file("0.32.1.dev20260811")],
         "1.2.3": [_wheel_file("1.2.3")],
         "main": [_wheel_file("main")],
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [_wheel_file("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")],
@@ -480,11 +480,11 @@ def test_resolve_beta_cli_version_ignores_yanked_sibling_and_keeps_older_wheel()
     assert update_cmd.resolve_beta_cli_version(http) == "0.32.0.dev20260809"
 
 
-def test_parse_beta_dev_version_accepts_only_exact_0_31_daily_form():
+def test_parse_beta_dev_version_accepts_only_exact_current_base_daily_form():
     assert update_cmd._parse_beta_dev_version("0.32.0.dev20260808") == "20260808"
     assert update_cmd._parse_beta_dev_version("0.32.0.dev2026080") is None
     assert update_cmd._parse_beta_dev_version("0.31.0.dev20260808") is None
-    assert update_cmd._parse_beta_dev_version("0.31.0.dev20260808") is None
+    assert update_cmd._parse_beta_dev_version("0.33.0.dev20260808") is None
     assert update_cmd._parse_beta_dev_version("0.32.0a1") is None
     assert update_cmd._parse_beta_dev_version("b" * 40) is None
     assert update_cmd.is_legacy_beta_git_sha("b" * 40)
