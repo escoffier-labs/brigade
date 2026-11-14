@@ -319,7 +319,8 @@ class RecordedRun:
 class RecordedPointer:
     decision_id: str
     card_rel: str
-    data: bytes                      # the overflow pointer bytes the move appended
+    data: bytes                      # the overflow pointer line the move appended, without any separator
+    separator: bool                  # the move added a "\n" before this pointer (AddedPointer.separator, row W29)
 
 @dataclass(frozen=True)
 class Reconciled:
@@ -905,7 +906,7 @@ def recorded_reasons(target: Path) -> dict[str, dict[str, Any]]      # the state
   2. `reconcile`. When any run is kept as `lost` (its pointer is still in the file, its card is missing and its before-image fails its digest), the pass is terminal for that file before anything else: action `reported`, reason `lost`, `lost_decisions` set to the affected original decision ids, nothing committed and no move planned (row P23). A damaged move must stay visible, not be hidden behind a later move. It resolves when an agent deletes that pointer line: the run then counts as `removed_by_edit` (row P24) and the next pass tends the file again. Otherwise, a result whose only effect is a non-empty `completed` (no card to remove, no file change, as in P24) is persisted with `journal.annotate(target, <move id>, instructions_completed=<today>)` on each completed move, at once and outside the quiet window and the spacing, since it writes only under `.brigade/`. The pass then goes on to step 3. A result that only removes cards commits at once, with `metadata["append_guards"] = {file_rel: kernel.content_digest(<the file bytes read in step 1>)}`. The file is not a change, so without the guard nothing would check it. `finish_prepared` abandons on a guard mismatch (`src/brigade/memory_care_journal.py:504-508`) and, as nothing was prepared, removes no card, also when recovery finishes the decision after a crash (row C17). A result that changes the file commits unless the file is inside the quiet window. When it commits, the pass makes no moves in that file and reports action `reconciled`.
   3. Defer `recently-edited` inside `quiet_minutes` of the file's mtime, and `recently-rewritten` inside `min_hours_between_rewrites` of `last_rewrite`, both measured from `_now()`.
   4. Refuse `card-folder-unsafe` when `memory/cards/instructions` or any parent below the target is a symlink or not a folder.
-  5. `plan_append` with `taken` from one listing of the card folder, `held`, `file.pin_headings`, and the overflow cards from `committed_overflow_cards`, less `held_cards`, that no pointer span outside any block (`pointer_spans` with `in_block` false) already names. A pointer-shaped line outside any block that names the card counts as present, so P4's "inert" does not cover this case. The match is by card path, never by whole pointer bytes, because a pointer holds the date and the id of the move that wrote it (row P28). `pending_pointers` uses the same card-path rule.
+  5. `plan_append` with `taken` from one listing of the card folder, `held`, `file.pin_headings`, and the overflow cards from `committed_overflow_cards`, less `held_cards`, that no pointer span outside any block (`pointer_spans` with `in_block` false) already names. A pointer-shaped line outside any block that names the card counts as present, so P4's "inert" does not cover this case. The match is by card path, never by whole pointer bytes, because a pointer holds the date and the id of the move that wrote it (row P28). `pending_pointers` uses the same card-path rule. The decision id it shows for a card can change from one pass to the next (when the oldest decision for that card is undone, P29). Matching is by card path, so that is expected.
   6. `card_bytes` for each run, with `card_identity.mint_card_id()` (`src/brigade/card_identity.py:41`) as `card_id` and `derived_fresh_until` (`src/brigade/memory_care_plan.py:26`), then `check`. A failed check gives `checks-failed` and writes nothing.
   7. Commit the move, then read its phase.
   8. Write the state file row.
@@ -1125,7 +1126,7 @@ The same amendments are written into the design document in this pull request, m
 2. **Matrix.** 94 rows, every one names a test, and every test name in the matrix appears in a task. Twelve rows are guards, labelled in the Kind column.
 3. **Pure functions.** `parse`, `plan_append`, `check`, `reconcile` and `plan_restore` take bytes and plain values. No test of them touches the filesystem.
 4. **Numbers.** Every acceptance number is computed in "Acceptance fixture" from the pointer formula and the section table.
-5. **Citations.** Every `path:line` was read on `origin/overhaul` at `470d14aea`, and read again for the revisions below. Revision 4 re-checked them on `main` at `acbc78d01`: only `memory_care_tend.py` moved (one line, all its citations updated).
+5. **Citations.** Every `path:line` is checked against `main` at `acbc78d01`, the base of this plan. They were first read on `origin/overhaul` at `470d14aea`; only `memory_care_tend.py` moved when the overhaul landed (one line, all its citations updated).
 
 ## Changes after review
 
@@ -1169,3 +1170,4 @@ One line per change, with the input it answers.
 - Revision 7 (Codex on revision 5): the newline added before an overflow pointer on a file without one is recorded as `separator`, and undo removes it when it would end the file, so the restore stays byte for byte (W29). Both cards-only commits guard the file with an `append_guards` digest, so an external edit before `finish` abandons them without removing a card (C17).
 - Codex on revision 6: `plan_restore` answers `already-restored` only when no overflow pointer is left either, so undo can finish a move whose sections reconcile already put back (P27).
 - Security review of revision 7: `finish_prepared` reads `append_guards` paths through `_live`, so a guarded file replaced by a symlink after a crash abandons the cards-only commit instead of making every recovery raise (C17).
+- Fifth code review: `RecordedPointer` carries `separator` too, the citations item names `main` as the base, and `pending_pointers` ids are documented as unstable across passes.
