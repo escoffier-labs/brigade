@@ -432,6 +432,15 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
     assert "--baseline .content-guard-baseline.json" in text
 
 
+def test_repo_metadata_job_is_ungated_and_runs_the_retired_name_ratchet():
+    section = _workflow_job_section((ROOT / ".github/workflows/ci.yml").read_text(), "repo-metadata")
+
+    # Docs-only diffs skip pytest, so the ratchet must run here to catch a retired name in prose.
+    assert "\n    if:" not in section
+    assert "\n    needs:" not in section
+    assert "run: python3 scripts/retired_engine_names.py" in section
+
+
 def test_changelog_fragments_job_checks_fragments_and_guards_changelog_edits_on_every_diff():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "changelog-fragments")
@@ -2664,6 +2673,7 @@ def test_authoritative_event_range_includes_all_changes(history, event):
         ("docs/diagram.png", True),
         ("changelog.d/2542.md", True),
         ("changelog.d/ci-docs-only-fragments.md", True),
+        ("changelog.d/README.md", True),
         ("changelog.d/sub/x.md", False),
         ("changelog.d/x.py", False),
         ("changelog.d/.hidden.md", False),
@@ -2730,6 +2740,15 @@ def test_an_executable_or_symlinked_fragment_is_not_documentation_only(history):
     git("commit", "-qm", "symlink fragment")
     head = git("rev-parse", "HEAD")
     assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+
+
+def test_a_fragment_deletion_is_documentation_only(history):
+    repo, git, _ = history
+    base = commit(repo, git, "changelog.d/1.md", "- Doc.\n")
+    git("rm", "-q", "changelog.d/1.md")
+    git("commit", "-qm", "delete fragment")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
 
 
 def test_deletion_and_both_sides_of_renames(history):
