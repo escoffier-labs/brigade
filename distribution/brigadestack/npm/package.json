@@ -1,6 +1,6 @@
 {
   "name": "brigadestack",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "description": "Brigade Stack command alias for the stable Brigade CLI",
   "license": "MIT",
   "engines": {
@@ -15,7 +15,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@escoffier-labs/brigade": "0.30.0"
+    "@escoffier-labs/brigade": "0.31.0"
   },
   "scripts": {
     "test": "node --test launcher.test.cjs"

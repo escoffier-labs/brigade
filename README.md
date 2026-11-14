@@ -26,7 +26,7 @@ Brigade Stack is an open-source coordination layer for AI coding agents. It sits
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-**Stable:** v0.31.0 as `brigade-cli` on PyPI. npm and the `brigadestack` bridge still serve 0.30.0 until promotion. **Beta:** main is the 0.32 preview line. [Channels](docs/update-channels.md)
+**Stable:** v0.31.0 is on PyPI as `brigade-cli`, on npm as `@escoffier-labs/brigade`, and through the `brigadestack` bridge. **Beta:** main is the 0.32 preview line. [Channels](docs/update-channels.md)
 
 ## Why Brigade Stack
 
@@ -54,7 +54,7 @@ A local setup needs no server. Fleet Hub adds shared ownership, presence, messag
 Install the stable bridge with npm (Node.js `^22.15.0 || >=23.11.0`):
 
 ```bash
-npm install --global brigadestack@0.30.0
+npm install --global brigadestack@0.31.0
 brigadestack --version
 ```
 

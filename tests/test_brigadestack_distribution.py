@@ -22,9 +22,9 @@ BRIDGE = Path(__file__).resolve().parents[1] / "distribution/brigadestack"
 def test_python_bridge_adds_only_an_alias_for_the_exact_stable_dependency():
     manifest = tomllib.loads((BRIDGE / "pypi/pyproject.toml").read_text())
     project = manifest["project"]
-    assert (project["name"], project["version"]) == ("brigadestack", "0.30.0")
+    assert (project["name"], project["version"]) == ("brigadestack", "0.31.0")
     assert project["requires-python"] == ">=3.11"
-    assert project["dependencies"] == ["brigade-cli==0.30.0"]
+    assert project["dependencies"] == ["brigade-cli==0.31.0"]
     assert project["scripts"] == {"brigadestack": "brigade.cli:process_main"}
     # No discovery of a second brigade package or alternate implementation.
     assert manifest["tool"]["setuptools"]["packages"] == []
@@ -33,8 +33,8 @@ def test_python_bridge_adds_only_an_alias_for_the_exact_stable_dependency():
 
 def test_npm_bridge_keeps_existing_global_brigade_bin_and_pins_stable():
     manifest = json.loads((BRIDGE / "npm/package.json").read_text())
-    assert (manifest["name"], manifest["version"]) == ("brigadestack", "0.30.0")
-    assert manifest["dependencies"] == {"@escoffier-labs/brigade": "0.30.0"}
+    assert (manifest["name"], manifest["version"]) == ("brigadestack", "0.31.0")
+    assert manifest["dependencies"] == {"@escoffier-labs/brigade": "0.31.0"}
     assert manifest["bin"] == {"brigadestack": "launcher.cjs"}
     assert manifest["engines"]["node"] == "^22.15.0 || >=23.11.0"
 

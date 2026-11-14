@@ -10,7 +10,7 @@ The full tour: every component, diagram, and workflow. The [README](../README.md
 | Website | [brigade.tools](https://brigade.tools) |
 | PyPI | [`brigade-cli`](https://pypi.org/project/brigade-cli/) |
 | Command | `brigade` |
-| Stable release | v0.31.0 (`brigade-cli` on PyPI, npm still 0.30.0 until promotion) |
+| Stable release | v0.31.0 (`brigade-cli` on PyPI, `@escoffier-labs/brigade` on npm) |
 | Preview line | 0.32 beta (`0.32.0.devYYYYMMDD` wheels) |
 
 This Brigade Stack is the AI-agent operator CLI from Escoffier Labs. It is not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
@@ -88,7 +88,7 @@ Standalone brigade-code-graph or brigade-evidence installs are replaced by `brig
 Install:
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.30.0   # needs Node.js 22+ and npm
+npm install --global @escoffier-labs/brigade@0.31.0   # needs Node.js 22+ and npm
 # alternatives: pipx install brigade-cli, or uv tool install brigade-cli
 brigade setup
 ```

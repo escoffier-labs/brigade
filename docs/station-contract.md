@@ -2,9 +2,10 @@
 
 # Components reference
 
-`brigade components list|discover|verify` shipped in 0.31.0 (`brigade-cli` on
-PyPI). On 0.30 and earlier, including the npm package and the `brigadestack`
-bridge until promotion, use `brigade stations list|discover|verify` instead.
+`brigade components list|discover|verify` shipped in 0.31.0 and is available
+from PyPI (`brigade-cli`), npm (`@escoffier-labs/brigade`) and the
+`brigadestack` bridge. On 0.30 and earlier, use
+`brigade stations list|discover|verify` instead.
 The bridge accepts the same commands when backed by a 0.31.0 or newer CLI.
 
 `stations` remains a supported quiet alias with identical arguments and exit
