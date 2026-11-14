@@ -18,7 +18,7 @@ from brigade.dot import lifecycle
 from brigade.dot.memory_tools import MemoryTools
 from brigade.dot.process import CommandResult
 from brigade.dot.profile import CLOUD_AGENT, runtime_profile
-from tests.dot_support import requires_local_state
+from tests.dot_support import requires_connector_extra, requires_local_state
 from tests.test_dot_adapter import HANDOFF, NOW, FakeRunner, lint_report
 from tests.test_dot_lifecycle import config
 from tests.test_dot_runtime import _document
@@ -42,12 +42,14 @@ def inventory(profile):
     return {tool.name: tool.model_dump(mode="json", by_alias=True)["inputSchema"] for tool in listed}
 
 
+@requires_connector_extra
 def test_cloud_agent_memory_parity():
     snapshot = json.loads((Path(__file__).parent / "fixtures/dot_tools_snapshot.json").read_text())["tools"]
     assert inventory(CLOUD_AGENT) == {name: snapshot[name]["inputSchema"] for name in CLOUD_AGENT.tools}
     assert set(inventory(CLOUD_AGENT)) == {"memory_search", "memory_card", "handoff_write"}
 
 
+@requires_connector_extra
 def test_cloud_agent_message_schema_parity():
     enabled = runtime_profile(CLOUD_AGENT, False, messaging_enabled=True)
     snapshot = json.loads((Path(__file__).parent / "fixtures/dot_tools_snapshot.json").read_text())["tools"]

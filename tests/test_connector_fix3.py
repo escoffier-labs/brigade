@@ -12,7 +12,7 @@ from brigade.dot import connector_registry as registry, lifecycle, token_auth
 from brigade.dot.contracts import DotError
 from brigade.dot.profile import CLOUD_AGENT, DOT, DUET
 from brigade.dot.runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, parse_runtime
-from tests.dot_support import requires_local_state
+from tests.dot_support import requires_connector_extra, requires_local_state
 from tests.test_connector_review_fixes import runtime_file, fleet_home
 from tests.test_cloud_agent_profile import cloud_document
 from tests.test_dot_lifecycle import config, request
@@ -106,6 +106,7 @@ def test_periodic_import_refused(tmp_path, unit):
         token_auth.read_token(path)
 
 
+@requires_connector_extra
 @pytest.mark.parametrize("mode", ["token", "access"])
 def test_valid_auth_during_sustained_failures(tmp_path, monkeypatch, mode):
     from brigade.dot.access_auth import AccessVerifier, AuthError

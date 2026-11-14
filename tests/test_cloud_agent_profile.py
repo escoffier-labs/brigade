@@ -1,6 +1,6 @@
 """Generic connector inventory and authentication boundaries."""
 
-from tests.dot_support import requires_local_state
+from tests.dot_support import requires_connector_extra, requires_local_state
 
 import asyncio
 import json
@@ -35,6 +35,7 @@ def cloud_document(tmp_path):
     return data
 
 
+@requires_connector_extra
 @pytest.mark.parametrize("enabled", [None, False, True])
 def test_inventory_and_direct_refusal(tmp_path, enabled):
     from brigade.dot.adapter import DotTools
@@ -106,6 +107,7 @@ def test_access_configuration_unchanged(tmp_path):
     assert runtime.auth.audience == "c" * 64
 
 
+@requires_connector_extra
 @pytest.mark.parametrize(
     "header,status",
     [(b"Bearer " + ("example-listener-credential-" + "0" * 24).encode(), 200), (b"Bearer wrong", 401), (None, 401)],

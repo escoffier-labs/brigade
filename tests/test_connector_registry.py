@@ -1,6 +1,6 @@
 """Independent connector lifecycle contract."""
 
-from tests.dot_support import requires_local_state
+from tests.dot_support import requires_connector_extra, requires_local_state
 
 import json
 from pathlib import Path
@@ -115,6 +115,7 @@ def test_cloud_agent_rejects_shared_identity(dot_private_dir, shared):
         registry.preview_setup(tmp_path, "cloud-agent", runtime_path=runtime)
 
 
+@requires_connector_extra
 @requires_local_state
 def test_doctor_reports_token_mode_without_access_dependency(dot_private_dir, monkeypatch):
     from brigade.dot import lifecycle

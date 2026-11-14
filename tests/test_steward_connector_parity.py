@@ -3,16 +3,18 @@
 import json
 from pathlib import Path
 
-from tests.dot_support import requires_local_state
+from tests.dot_support import requires_connector_extra, requires_local_state
 from tests.connector_steward_capture import capture
 
 
+@requires_connector_extra
 @requires_local_state
 def test_surviving_connector_lifecycle_matches_base(dot_private_dir):
     expected = json.loads((Path(__file__).parent / "fixtures/steward_connector_base.json").read_text())
     assert capture(dot_private_dir.parent / "capture") == expected
 
 
+@requires_connector_extra
 def test_dot_and_duet_work_without_steward_imports(monkeypatch):
     import builtins
     from tests.test_cloud_agent_parity import inventory
