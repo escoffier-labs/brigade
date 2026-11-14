@@ -964,3 +964,11 @@ def test_published_acceptance_has_read_only_attestation_access():
     for name in ("Run published artifact acceptance (Unix)", "Run Windows native acceptance (published CLI)"):
         env = steps[name]["env"]
         assert any(env.get(key) == "${{ github.token }}" for key in ("GITHUB_TOKEN", "GH_TOKEN")), name
+
+
+def test_acceptance_scripts_accept_the_same_checksum_inventories() -> None:
+    windows = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    posix = (ROOT / "scripts/published-artifact-acceptance.py").read_text()
+    assert "if len(checksums) not in (41, 43):" in posix
+    assert "if ($checksums.Count -notin @(41, 43)) {" in windows
+    assert "$checksums.Count -ne 41" not in windows
