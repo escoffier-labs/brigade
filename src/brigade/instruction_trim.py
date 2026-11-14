@@ -42,7 +42,6 @@ _CARD_SLUG_MAX = SLUG_MAX + 4
 _DECISION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8}")
 _FRESH_UNTIL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _CARD_ID = re.compile(r"card-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-_POINTER_DATE = re.compile(rb"memory (\d{4}-\d{2}-\d{2}):")
 
 
 @dataclass(frozen=True)
@@ -323,9 +322,7 @@ def card_bytes(
     Every frontmatter value is checked, so no string can add a line or a field. Raises `ValueError` otherwise."""
     from .memory_care_instructions import encode_value
 
-    _check_card_values(
-        file_key=file_key, slug=slug, decision_id=decision_id, fresh_until=fresh_until, card_id=card_id
-    )
+    _check_card_values(file_key=file_key, slug=slug, decision_id=decision_id, fresh_until=fresh_until, card_id=card_id)
 
     lines = [
         "---",
@@ -345,18 +342,8 @@ def card_bytes(
     return ("\n".join(lines) + "\n").encode("utf-8") + section
 
 
-def _plan_date(plan: TrimPlan) -> date | None:
-    for pointer in (*(run.pointer for run in plan.runs), *(added.data for added in plan.added)):
-        found = _POINTER_DATE.search(pointer)
-        if found is not None:
-            return date.fromisoformat(found.group(1).decode("ascii"))
-    return None
-
-
-def _pinned_unit(unit: Unit, today: date | None, wanted: frozenset[bytes]) -> bool:
-    if _config_pinned(unit, wanted) or unit.pin == "marker":
-        return True
-    return unit.pin is not None and (today is None or _pin_active(unit, today))
+def _pinned_unit(unit: Unit, today: date, wanted: frozenset[bytes]) -> bool:
+    return _config_pinned(unit, wanted) or _pin_active(unit, today)
 
 
 def _reversible(plan: TrimPlan) -> bool:
@@ -384,15 +371,24 @@ def _reversible(plan: TrimPlan) -> bool:
     return body[cursor:] == plan.before[expected:]
 
 
-def check(plan: TrimPlan, cards: Mapping[str, bytes], *, config_pins: tuple[str, ...]) -> list[str]:
+def check(
+    plan: TrimPlan,
+    cards: Mapping[str, bytes],
+    *,
+    config_pins: tuple[str, ...],
+    today: date,
+    limits: Limits,
+) -> list[str]:
     """One name per failed check, empty when the plan is safe to commit. Eight checks run:
 
     reversible (the design's 1), cards (2), managed-blocks (3), fixed-and-pinned (4), structure (5),
     pointers (6), size (7), and pointer-in-block, which the plan adds: every added pointer must be a
     `pointer_spans` entry of `after` that sits outside any fence or managed block.
 
-    `check` has no `Limits`, so `size` verifies what the planner claims: a known reason, and no change
-    to the file when the reason says nothing was done.
+    `today` and `limits` come from the caller, never from the plan: `today` judges `until=` pins, so a plan
+    cannot release a pin with a forged pointer date, and `limits` bounds the result. `size` verifies a known
+    reason, no change to the file when the reason says nothing was done, and, when the plan changes the
+    file, that `after` is within `limits.limit`.
     """
     before, after = plan.before, plan.after
     failed: list[str] = []
@@ -417,7 +413,6 @@ def check(plan: TrimPlan, cards: Mapping[str, bytes], *, config_pins: tuple[str,
     if old.problem is None:
         fixed_ok = after.startswith(before[: old.fixed_end])
         wanted = frozenset(pin.encode("utf-8").rstrip() for pin in config_pins)
-        today = _plan_date(plan)
         for unit in old.units:
             if not _pinned_unit(unit, today, wanted):
                 continue
@@ -439,7 +434,12 @@ def check(plan: TrimPlan, cards: Mapping[str, bytes], *, config_pins: tuple[str,
     ) and all(run.card_rel in cards and run.card_rel.encode() in run.pointer for run in plan.runs)
     if not pointers_ok:
         failed.append("pointers")
-    if plan.reason not in _REASONS or (plan.reason in _UNCHANGED and (after != before or plan.runs or plan.added)):
+    size_ok = plan.reason in _REASONS and not (
+        plan.reason in _UNCHANGED and (after != before or plan.runs or plan.added)
+    )
+    if after != before and len(after) > limits.limit:
+        size_ok = False
+    if not size_ok:
         failed.append("size")
     spans = {span.start: span for span in pointer_spans(after)}
     start = len(after) - sum(len(pointer.data) for pointer in plan.added)

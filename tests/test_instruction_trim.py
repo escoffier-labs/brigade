@@ -94,7 +94,7 @@ def test_owner_shape_with_pins_moves_seven_sections_into_three_cards():
         assert plan.after.count(heading) == 1
     again = _plan(plan.after)
     assert (again.runs, again.after, again.reason) == ((), plan.after, "nothing-movable")
-    assert check(plan, _cards(plan), config_pins=()) == []
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
 
 
 def test_owner_shape_with_one_overflow_card():
@@ -102,7 +102,7 @@ def test_owner_shape_with_one_overflow_card():
     assert [len(p.data) for p in plan.added] == [138]
     assert len(plan.after) == 3798 and plan.after.endswith(plan.added[0].data)
     assert plan.added[0].separator is False
-    assert check(plan, _cards(plan), config_pins=()) == []
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
 
 
 def test_owner_shape_with_config_pins_only():
@@ -151,7 +151,7 @@ def test_a_pinned_heading_in_the_fixed_text_is_not_missing():
 def test_a_problem_file_is_left_alone(data):
     plan = _plan(data)
     assert (plan.reason, plan.after, plan.runs) == (parse(data).problem, data, ())
-    assert check(plan, {}, config_pins=()) == []
+    assert check(plan, {}, config_pins=(), today=TODAY, limits=LIMITS) == []
 
 
 @pytest.mark.parametrize(
@@ -354,7 +354,7 @@ def test_separator_byte_counts_against_the_limit():  # matrix W29
     plan = _plan(data, limits=roomy, overflow=(PREF,))
     assert plan.added == (AddedPointer(PREF, pointer, True),)
     assert plan.after == data + b"\n" + pointer
-    assert check(plan, {}, config_pins=()) == []
+    assert check(plan, {}, config_pins=(), today=TODAY, limits=roomy) == []
 
 
 def test_pointer_line_at_the_caps_fits():  # matrix S15
@@ -399,9 +399,9 @@ def test_blocked_and_pinned_units_stay():
 def test_checks_pass_on_the_owner_plan_and_catch_a_lost_byte():
     plan = _plan(owner_user_md())
     cards = _cards(plan)
-    assert check(plan, cards, config_pins=()) == []
+    assert check(plan, cards, config_pins=(), today=TODAY, limits=LIMITS) == []
     broken = dataclasses.replace(plan, after=plan.after[:-1])
-    assert check(broken, cards, config_pins=()) != []
+    assert check(broken, cards, config_pins=(), today=TODAY, limits=LIMITS) != []
 
 
 def test_check_names_each_failure():
@@ -410,38 +410,100 @@ def test_check_names_each_failure():
     first = plan.runs[0]
     # A card whose body is not the run, a missing card and an untrusted card.
     bad = {**cards, first.card_rel: cards[first.card_rel] + b"extra\n"}
-    assert check(plan, bad, config_pins=()) == ["cards"]
+    assert check(plan, bad, config_pins=(), today=TODAY, limits=LIMITS) == ["cards"]
     missing = {k: v for k, v in cards.items() if k != first.card_rel}
-    assert check(plan, missing, config_pins=()) == ["cards", "pointers"]  # a pointer must name a card we create
+    assert check(plan, missing, config_pins=(), today=TODAY, limits=LIMITS) == [
+        "cards",
+        "pointers",
+    ]  # a pointer must name a card we create
     untrusted = {**cards, first.card_rel: cards[first.card_rel].replace(b"visibility: private", b"visibility: public")}
-    assert check(plan, untrusted, config_pins=()) == ["cards"]
+    assert check(plan, untrusted, config_pins=(), today=TODAY, limits=LIMITS) == ["cards"]
     # A pinned section that moved, and one the config pins.
     doc = parse(plan.before)
     pinned_run = dataclasses.replace(first, units=(0, 1, 2, 3, 4), end=doc.units[4].end)
     moved_pin = dataclasses.replace(plan, runs=(pinned_run, *plan.runs[1:]))
-    assert "fixed-and-pinned" in check(moved_pin, {}, config_pins=())
-    assert "fixed-and-pinned" in check(plan, cards, config_pins=("## Employment",))
+    assert "fixed-and-pinned" in check(moved_pin, {}, config_pins=(), today=TODAY, limits=LIMITS)
+    assert "fixed-and-pinned" in check(plan, cards, config_pins=("## Employment",), today=TODAY, limits=LIMITS)
     # A pointer line that appears twice, and one longer than 240 bytes.
     doubled = dataclasses.replace(plan, after=plan.after + plan.runs[0].pointer[:-1])
-    assert "pointers" in check(doubled, cards, config_pins=())
+    assert "pointers" in check(doubled, cards, config_pins=(), today=TODAY, limits=LIMITS)
     # The overflow pointer is not the file's tail, or sits inside a fence.
     fenced = dataclasses.replace(plan, after=plan.after[: -len(plan.added[0].data)] + b"```\n" + plan.added[0].data)
-    assert "reversible" in check(fenced, cards, config_pins=())
+    assert "reversible" in check(fenced, cards, config_pins=(), today=TODAY, limits=LIMITS)
     # A plan that says nothing changed, or gives an unknown reason, while it did change the file.
-    assert "size" in check(dataclasses.replace(plan, reason="within"), cards, config_pins=())
-    assert "size" in check(dataclasses.replace(plan, reason="made-up"), cards, config_pins=())
+    assert "size" in check(
+        dataclasses.replace(plan, reason="within"), cards, config_pins=(), today=TODAY, limits=LIMITS
+    )
+    assert "size" in check(
+        dataclasses.replace(plan, reason="made-up"), cards, config_pins=(), today=TODAY, limits=LIMITS
+    )
     # A managed block that changed, and an unbalanced result.
     blocks = b"# T\n\n## A\n<!-- X:START -->\nx\n<!-- X:END -->\n## B\ny\n"
     tampered = _plan(blocks)
-    assert check(dataclasses.replace(tampered, after=blocks.replace(b"x\n", b"changed\n")), {}, config_pins=()) != []
-    assert "managed-blocks" in check(
-        dataclasses.replace(tampered, after=blocks.replace(b"x\n", b"changed\n")), {}, config_pins=()
+    assert (
+        check(
+            dataclasses.replace(tampered, after=blocks.replace(b"x\n", b"changed\n")),
+            {},
+            config_pins=(),
+            today=TODAY,
+            limits=LIMITS,
+        )
+        != []
     )
-    assert "structure" in check(dataclasses.replace(tampered, after=blocks + b"<!-- Y:START -->\n"), {}, config_pins=())
+    assert "managed-blocks" in check(
+        dataclasses.replace(tampered, after=blocks.replace(b"x\n", b"changed\n")),
+        {},
+        config_pins=(),
+        today=TODAY,
+        limits=LIMITS,
+    )
+    assert "structure" in check(
+        dataclasses.replace(tampered, after=blocks + b"<!-- Y:START -->\n"),
+        {},
+        config_pins=(),
+        today=TODAY,
+        limits=LIMITS,
+    )
     # A pointer inside an open fence is caught by the in-block check: eight checks run in all.
     data = b"# T\n\n## A\n" + KEEP.encode() + b"\n```\ntext\n"
     fence_plan = _plan(data)
     assert fence_plan.reason == "within"
     pointer = AddedPointer(PREF, pointer_line(PREF, today=TODAY, decision_id=ID, overflow=True), False)
     forced = dataclasses.replace(fence_plan, added=(pointer,), after=data + pointer.data, reason=None)
-    assert check(forced, {}, config_pins=()) == ["pointer-in-block"]
+    assert check(forced, {}, config_pins=(), today=TODAY, limits=LIMITS) == ["pointer-in-block"]
+
+
+def test_a_forged_pointer_date_does_not_release_a_dated_pin():  # review of #2567: today comes from the caller
+    data = (
+        b"# T\n\n## Dated\n<!-- brigade:keep until=2026-11-20 -->\n"
+        + b"z" * 3500
+        + b"\n## Other\n"
+        + b"w" * 100
+        + b"\n"
+    )
+    later = date(2026, 11, 21)
+    plan = _plan(data, today=later)  # the pin has run out on that day, so the planner moves the section
+    assert any(0 in run.units for run in plan.runs) and b"2026-11-21" in plan.runs[0].pointer
+    cards = _cards(plan)
+    assert check(plan, cards, config_pins=(), today=later, limits=LIMITS) == []
+    assert "fixed-and-pinned" in check(plan, cards, config_pins=(), today=TODAY, limits=LIMITS)
+    pin_day = date(2026, 11, 20)  # a pin holds through the day it names
+    assert "fixed-and-pinned" in check(plan, cards, config_pins=(), today=pin_day, limits=LIMITS)
+
+
+def test_a_changed_file_over_the_limit_fails_the_size_check():  # review of #2567: size enforces the limit
+    plan = _plan(owner_user_md(), overflow=(PREF,))
+    cards = _cards(plan)
+    assert len(plan.after) == 3798 and plan.after != plan.before
+    assert check(plan, cards, config_pins=(), today=TODAY, limits=LIMITS) == []
+    exact = dataclasses.replace(LIMITS, limit=len(plan.after))
+    assert check(plan, cards, config_pins=(), today=TODAY, limits=exact) == []
+    tight = dataclasses.replace(LIMITS, limit=len(plan.after) - 1)
+    assert check(plan, cards, config_pins=(), today=TODAY, limits=tight) == ["size"]
+
+
+def test_an_unchanged_file_over_the_limit_is_not_a_size_failure():
+    data = b"# T\n\n## A\n" + KEEP.encode() + b"\n" + b"x" * 5000 + b"\n"
+    plan = _plan(data)
+    assert (plan.reason, plan.after) == ("nothing-movable", data) and len(data) > LIMITS.limit
+    assert check(plan, {}, config_pins=(), today=TODAY, limits=LIMITS) == []
