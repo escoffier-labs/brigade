@@ -44,14 +44,14 @@ Before implementing overlapping execution, coordination or notification features
 - **In progress, owned by [#2046](https://github.com/escoffier-labs/brigade/issues/2046):** connect app-owned child tasks and explicit task batches to Brigade governance, readiness and retained results. Task-targeted controls [#2100](https://github.com/escoffier-labs/brigade/pull/2100) and dormant launch-permission claims [#2105](https://github.com/escoffier-labs/brigade/pull/2105) are merged foundations. Dormant target/lifecycle contracts are open in [#2113](https://github.com/escoffier-labs/brigade/pull/2113), with execution disabled. The adapter, activation, readiness producers and end-to-end qualification remain with that owner. A smoke batch is not performance qualification.
 - **Research complete, implementation proposed:** a daily source-backed native-alignment watch should compare upstream changes with current owned work and flag duplication or breaking contracts. Prefer a bounded extension of existing daily maintenance, with a manual proof first. No watch was installed or scheduled. Reuse the existing ledger and handoff path, with source failures recorded as unknown. No second scheduler or tracking database.
 
-### Close the 0.31.0 release gate
+### Carry the 0.31.0 gate items into 0.32
 
-The gate lives in [the v2 hub design](docs/phase-v2-hub-architecture.md#release-gate-for-0310). Its slices for the Rust hub, hub memory and connectivity have merged, as the table above lists. Merge is not deployment or release evidence. What remains:
+The 0.31.0 gate in [the v2 hub design](docs/phase-v2-hub-architecture.md#release-gate-for-0310) closed with the release on 2026-11-14. The Rust hub, hub memory and connectivity slices shipped, and the milestone issues [#2364](https://github.com/escoffier-labs/brigade/issues/2364), [#2292](https://github.com/escoffier-labs/brigade/issues/2292) and [#2399](https://github.com/escoffier-labs/brigade/issues/2399) are closed. What carries over:
 
-- **Hybrid retrieval:** S16b and the per-model R1 runs have no merged PR. Setup starts in BM25 mode when no model passes R1.
-- **S31 acceptance:** the dogfood hub's full acceptance record, including the access check tracked in [#2305](https://github.com/escoffier-labs/brigade/issues/2305).
-- **Cutover phase 3:** steps 2a (heartbeat) and 2b (claims) on the production host, per the [cutover runbook](docs/runbooks/fleet-hub-rust-engine.md). S6 throughput is read with pinned-CPU runs, as the design records.
-- **Milestone issues:** [#2364](https://github.com/escoffier-labs/brigade/issues/2364), [#2292](https://github.com/escoffier-labs/brigade/issues/2292), [#2399](https://github.com/escoffier-labs/brigade/issues/2399) and [#1739](https://github.com/escoffier-labs/brigade/issues/1739).
+- **Hybrid retrieval:** 0.31.0 ships it as an opt-in, and setup defaults to BM25. S16b and the per-model R1 runs have no merged PR.
+- **S31 acceptance:** the access check and storage notes tracked in [#2305](https://github.com/escoffier-labs/brigade/issues/2305) stay open.
+- **Cutover phase 3:** step 2a (heartbeat) is done. Step 2b (claims) on the production host follows the [cutover runbook](docs/runbooks/fleet-hub-rust-engine.md).
+- **Moved to 0.32.0:** [#1739](https://github.com/escoffier-labs/brigade/issues/1739), and the cloud landing follow-ups [#2512](https://github.com/escoffier-labs/brigade/issues/2512) and [#2517](https://github.com/escoffier-labs/brigade/issues/2517).
 
 ### Qualify the owned integration and Hub slices
 
