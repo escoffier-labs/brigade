@@ -467,3 +467,12 @@ operator on 2026-11-12.
     sections to a linked file, verbatim, never by rewording.
   - A failed or skipped pass raises one alert through the configured route.
   - The summary reports what moved and how to undo it.
+- **(done)** Instruction budget care, slice 1 ("measure and route"), merged
+  in #2546, #2550 and #2553, from the design in #2540 and the plan in #2544.
+  Brigade now finds the always-loaded files, gives each one limit read from
+  its harness, reports files over their limit in the care pass, doctor,
+  `budgets check` and the work brief, and routes a handoff aimed at a full
+  file into a private overflow card. Still to build: slice 2 (moving sections
+  out of files, and adding the full care pass to the daily schedule), slice 3
+  (shared and user-level files) and slice 4 (the model step). Open
+  follow-ups: #2555 and #2556.
