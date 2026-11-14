@@ -370,7 +370,7 @@ keeps its existing behavior.
 | Disposition | Reason codes | Needs evidence-log proof | Action |
 |---|---|---|---|
 | Resolve | `document-content-present`, `document-anchor-present` | No. Read the destination to prove representation | Record already-applied and move to `memory/handoff-inbox/resolved/` |
-| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable` | Use the fresh outcome's per-code flag | Recheck with the original promotion and routing flags, once per run |
+| Retry | `expected-sha-stale`, `expected-sha-mismatch`, `card-publication-changed`, `card-publication-busy`, `document-destination-unwritable`, `bootstrap-budget-exceeded` | Use the fresh outcome's per-code flag | Recheck with the original promotion and routing flags, once per run |
 | Retain | Injection, content-scan, contradiction, identity migration, collisions and unsafe destinations | Yes for contradiction candidates, otherwise no | Record a trust or security hold and leave the draft untouched |
 | Hold | Proposal notifications, near matches, invalid or missing fields, unapplied knowledge and unknown codes | Yes for near matches, reinforcement records and unknown codes, otherwise no | Leave untouched with a separate hold count and reason |
 | Expire | No current ingest codes qualify | No current codes | The deadline mechanism remains available for future codes that prove knowledge is represented elsewhere or carry nothing durable |
@@ -402,10 +402,64 @@ Retries prepare the journal and save before-images before writing a destination.
 Recovery uses the same prepare-then-finish protocol as card archives. Evidence, document
 and ledger bytes append after finish, with their path, length and digest recorded in the
 decision. Recovery recognizes a published block to avoid duplicate appends. Reprocessing
-keeps ingest's destination, identity, expected-SHA, injection and budget checks, and
+keeps ingest's destination, identity, expected-SHA and injection checks, and
 also honors memory-care read-only paths and archive pins. This drain changes local files
 only. Hub handoff rows remain outside this stage, and an unavailable hub cannot cause a
 hub-side inbox change.
+
+A handoff aimed at a known instruction file goes to that file only while the append
+stays under the file's act-at threshold. Past it, behind a symlink, or when the
+`[instructions]` table cannot be read, the content is appended to a private overflow
+card, `memory/cards/instructions/<file-key>--overflow-<type>.md`, rolling to `-2`, `-3`
+at `max_card_bytes`. Every overflow card is `visibility: private` and `archive: never`.
+Each append is an undoable `card-append` decision, so `brigade memory care undo` removes
+exactly that block and keeps later ones. A replay finds its block in any earlier card of
+that file and type and never writes it twice. Holds from earlier releases that were
+refused for size (`bootstrap-budget-exceeded`) drain the same way on the next run.
+Excluding a file or setting `enabled = false` does not turn this routing off. A handoff
+with an injection signal or an unsafe name is still kept for a person.
+
+The card path is predictable, so the writer trusts a card only when this feature created
+it. Before every append to an existing card it requires one frontmatter block with
+`visibility: private` (read by the same parser the hub push uses), `archive: never`, the
+`moved-instructions` tag and a `source_file`. The `moved-instructions` tag must be an exact member of the `tags` value, not a substring
+of it. A card that fails any of these, or that is too large for the duplicate check to
+read in full, receives nothing: the handoff is held as `overflow-card-untrusted`, with
+the card's path in the reason. That code is a retry code. Each ingest run and each drain
+re-evaluates it, so the draft stays held while the card still fails and is delivered
+with no person involved once the card is repaired or removed. Ingest and the drain write
+`.brigade/memory-care/inbox/blocked-cards.json` (`{"version": 1, "cards": [{"path",
+"problem", "held_drafts"}]}`), one row per card that holds drafts, with its
+workspace-relative path and the count. The file is rewritten every run and empties when
+the card passes. A block
+that cannot fit an empty card, frontmatter included, is kept as `overflow-block-too-large`
+and never written oversize. A configured `max_card_bytes` above the duplicate scan's
+1 MiB read limit is not applied. Retry reads an overflow card with that same limit, so a
+card routing may choose is a card a held draft can be delivered to. The journal decision records both the limit used and the
+requested one. The undo of the append that created a card needs the card's frontmatter
+unchanged, so a later stage that rewrites it (`last_reviewed`, `fresh_until`) makes that
+one undo refuse, and later appends are undone as before.
+
+Every one of these rules is enforced on the exact bytes of the opened destination, under
+the document lock, at the moment of writing, on every path that writes, including
+recovery of a decision that was committed earlier. The writer opens the card read-write
+without following links, and refuses to write when the card is not in the state the
+decision recorded (created or existing), is not one this feature created, no longer has
+the bytes the decision pinned, or would pass `max_card_bytes` with the block. A refused
+recovery is recorded on the decision (`append_refused`), which recovery does not retry,
+and a handoff that was moved aside for the retry goes back to the review inbox. A direct
+append to an instruction file measures the opened file under the lock and goes to the
+overflow card in the same run when the block no longer fits, so two runs cannot both
+decide that a block fits. The file's `(st_dev, st_ino)` is pinned when the route is
+decided and must match at the open, which stops a swapped-in link but still accepts a
+file that was already hard linked. Overflow cards must have a single link.
+
+When the care configuration (`.brigade/memory-care.toml`) cannot be parsed, the card's
+protected paths cannot be read, so nothing is written and the handoff is held as
+`document-destination-unwritable`. That is a retry code: the handoff is retried
+automatically on the next drain once the file parses, and it is never lost. While the
+file does not parse, even a small append to a file far below its act-at goes to this
+hold instead of to the file.
 
 The drain also sweeps redundant before-images of abandoned decisions. A sweep requires
 an exact surviving copy at a recorded path, retains unique or unreadable images and

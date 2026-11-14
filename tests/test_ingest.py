@@ -761,8 +761,8 @@ def test_cursor_handoff_is_ingested(tmp_target: Path):
     assert (inbox / "processed" / "2026-06-08-1230-cursor.md").is_file()
 
 
-def test_no_card_route_to_bootstrap_file_over_budget_goes_to_inbox(tmp_target: Path):
-    """A route that would push a bootstrap file past its budget must inbox, not append."""
+def test_no_card_route_to_bootstrap_file_over_act_at_goes_to_overflow_card(tmp_target: Path):
+    """A capped append goes to the file's overflow card, never to a person (rule: routing owns the guard)."""
     from brigade import budgets
 
     inbox = _seed(tmp_target)
@@ -788,12 +788,10 @@ def test_no_card_route_to_bootstrap_file_over_budget_goes_to_inbox(tmp_target: P
     )
     rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
     assert rc == 0
-    # TOOLS.md untouched (guard refused the append)
     assert (tmp_target / "TOOLS.md").read_text() == existing
-    # content preserved in the review inbox instead
-    drafts = list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
-    assert drafts, "expected the oversized route to land in the inbox"
-    assert any("too-big" in d.name for d in drafts)
+    card = tmp_target / "memory/cards/instructions/tools-md--overflow-project-context.md"
+    assert card.read_text().endswith("\na runbook line that pushes the file past its bootstrap budget\n")
+    assert not list((tmp_target / "memory" / "handoff-inbox").glob("*too-big*.md"))
 
 
 def test_no_card_route_to_learnings_not_size_guarded(tmp_target: Path):

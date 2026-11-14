@@ -249,7 +249,9 @@ def revert(target: Path, decision_id: str, *, reason: str) -> Decision:
     from contextlib import nullcontext
     from .ingest import _document_lock
 
-    documents = any(item["writer"] == "document" for item in _payload(target, decision_id).get("appends", []))
+    from .memory_inbox_append import DOCUMENT_WRITERS
+
+    documents = any(item["writer"] in DOCUMENT_WRITERS for item in _payload(target, decision_id).get("appends", []))
     with _document_lock(target) if documents else nullcontext():
         return _revert_locked(target, decision_id, reason=reason)
 
@@ -505,8 +507,10 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         if kernel.content_digest(current(target, path)) != digest
     )
     # Routed documents are written after finish, so they are not among the changes.
+    from .memory_inbox_append import DOCUMENT_WRITERS
+
     destinations = [c.path for c in changes] + [
-        a["path"] for a in p.get("appends", []) if a.get("writer") == "document"
+        a["path"] for a in p.get("appends", []) if a.get("writer") in DOCUMENT_WRITERS
     ]
     protected = any(read_only_pattern(path, config.read_only_paths) for path in destinations)
     if drift or protected:
@@ -639,9 +643,15 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
         if row["repair"]:
             _repair_indexes(target, decision_id)
         if row["append"]:
+            from .ingest import AppendRefused
             from .memory_inbox_append import publish
 
-            publish(target, decision_id)
+            try:
+                publish(target, decision_id)
+            except AppendRefused as exc:
+                # Recorded on the decision and the handoff is back in the review inbox: not a recovery failure.
+                resolved.append({"decision_id": decision_id, "phase": "append-refused", "reason": exc.reason})
+                continue
         if row["prepared"]:
             finish_prepared(target, decision_id)
             final = _payload(target, decision_id)

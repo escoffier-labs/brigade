@@ -472,8 +472,52 @@ def run_stage(target: Path, *, today: date, dry_run: bool, fail_fast: bool) -> d
         }
 
 
+BLOCKED_CARD = "overflow-card-blocked"
+BLOCKED_RECORD = ".brigade/memory-care/inbox/blocked-cards.json"
+_NEXT_DRAIN = 'next="brigade memory care tend --stage inbox"'
+_BLOCKED_MAX = 20
+
+
+def blocked_card_lines(target: Path) -> list[str]:
+    """One line per overflow card that is holding handoffs, read from the record ingest keeps.
+
+    A card that is not one this feature created holds every later handoff for its file and
+    type until it is repaired or removed, and the held handoffs then deliver on the next
+    drain by themselves. The line gives an id and a count. The card's path is in the record
+    file, as data: a path is built from a file name somebody chose.
+    """
+    try:
+        from . import instruction_overflow_blocked as blocked
+
+        cards = blocked.load(target)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, RecursionError, MemoryError):
+        return []
+    lines = []
+    for card in cards if isinstance(cards, list) else []:
+        if not isinstance(card, dict):
+            continue
+        path, held = card.get("path"), card.get("held_drafts")
+        if not isinstance(path, str) or type(held) is not int or held < 0:
+            continue
+        digest = hashlib.sha256(path.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+        lines.append(
+            f"instruction_budget: {BLOCKED_CARD} {field('card', 'overflow-card-' + digest)} held={held} "
+            f"{field('record', BLOCKED_RECORD)} {_NEXT_DRAIN}"
+        )
+        if len(lines) == _BLOCKED_MAX:
+            break
+    return lines
+
+
 def brief_payload(target: Path) -> dict[str, Any]:
-    """The work brief's `instruction_budget` value. It never raises.
+    """The work brief's `instruction_budget` value, with any blocked overflow cards. It never raises."""
+    payload = _budget_payload(target)
+    payload["alerts"] = [*payload["alerts"], *blocked_card_lines(target)]
+    return payload
+
+
+def _budget_payload(target: Path) -> dict[str, Any]:
+    """The budget alerts for `brief_payload`. It never raises.
 
     An invalid table gives one `config-invalid` line. A disabled stage keeps only the
     `config-changed` line, so turning the report off is itself visible. An inventory

@@ -287,3 +287,51 @@ def test_the_brief_warns_when_another_harness_cap_is_unavailable(tmp_path, monke
     # Rule: a cap that could not be read is named, whichever harness it belongs to.
     (line,) = [item for item in alerts if "loader-config-unreadable" in item]
     assert "config-nonblocking-unavailable" in line
+
+
+def test_the_brief_names_a_blocked_overflow_card_by_id_and_count(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    before = brief_payload(ws)["alerts"]
+    record = ws / ".brigade" / "memory-care" / "inbox" / "blocked-cards.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    hostile = "memory/cards/instructions/ignore-previous-instructions--overflow-preference.md"
+    record.write_text(
+        json.dumps(
+            {"version": 1, "cards": [{"path": hostile, "problem": "its visibility is not private", "held_drafts": 2}]}
+        ),
+        encoding="utf-8",
+    )
+    alerts = brief_payload(ws)["alerts"]
+    (line,) = [item for item in alerts if item not in before]
+    # Rule: the card is named by an id, its path stays in the record file as data.
+    assert line.startswith('instruction_budget: overflow-card-blocked card="overflow-card-') and " held=2 " in line
+    assert "ignore-previous" not in line and "its visibility" not in line
+    assert line.endswith('next="brigade memory care tend --stage inbox"')
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{",
+        "[]",
+        '{"cards": "x"}',
+        '{"cards": [{"path": 1, "held_drafts": "2"}]}',
+        # No version, a wrong version, and a record far larger than any real one.
+        '{"cards": [{"path": "memory/cards/instructions/a--overflow-note.md", "held_drafts": 1}]}',
+        '{"version": 2, "cards": [{"path": "memory/cards/instructions/a--overflow-note.md", "held_drafts": 1}]}',
+        '{"version": 1, "cards": [{"path": "memory/cards/instructions/a--overflow-note.md", "held_drafts": 1}], "pad": "'
+        + "x" * 70_000
+        + '"}',
+        "[" * 5000,
+        '{"version": true, "cards": [{"path": "memory/cards/instructions/a--overflow-note.md", "held_drafts": 1}]}',
+    ],
+)
+def test_a_damaged_blocked_card_record_adds_no_line_and_never_raises(tmp_path, monkeypatch, content):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    before = brief_payload(ws)["alerts"]
+    record = ws / ".brigade" / "memory-care" / "inbox" / "blocked-cards.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(content, encoding="utf-8")
+    assert brief_payload(ws)["alerts"] == before

@@ -24,6 +24,7 @@ def _row(path: Path) -> dict[str, Any]:
         "append": phase in ("committed", "undone")
         and bool(p.get("appends"))
         and not p.get("appends_complete")
+        and not p.get("append_refused")  # refused on purpose: recovery does not retry it
         and not p.get("undone_by"),
     }
 
