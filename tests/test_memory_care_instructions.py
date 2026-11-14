@@ -14,9 +14,11 @@ from brigade.memory_care_instructions import (
     alert_lines,
     apply,
     config_change_line,
+    config_error_detail,
+    encode_value,
     file_row,
-    safe_text,
     severity,
+    shorten,
     state_of,
 )
 from tests._home import set_home
@@ -93,14 +95,14 @@ def test_finding_2_alert_names_the_real_file(tmp_path):
     ws.mkdir()
     payload, _ = _rows(ws, home, env)
     assert payload["alerts"] == [
-        f"instruction_budget: could-not-trim ~/.codex/AGENTS.md 24500/20000 reason=report-only {NEXT}"
+        f'instruction_budget: could-not-trim path="~/.codex/AGENTS.md" 24500/20000 reason=report-only {NEXT}'
     ]
 
 
 def test_total_over_cap_raises_its_own_alert_after_the_file_alerts(tmp_path):
     ws, home, env = field_workspace(tmp_path, lean=True)  # lean shares the workspace: total cap 6000
     payload, _ = _rows(ws, home, env)
-    assert payload["alerts"][-1] == f"instruction_budget: total-over-cap openclaw:lean 20441/6000 {NEXT}"
+    assert payload["alerts"][-1] == f'instruction_budget: total-over-cap loader="openclaw\\x3alean" 20441/6000 {NEXT}'
     assert all(line.startswith("instruction_budget: could-not-trim ") for line in payload["alerts"][:-1])
     assert {"loader": "openclaw:main", "bytes": 20441, "cap": 120000, "state": "within"} in payload["totals"]
 
@@ -160,6 +162,7 @@ def test_a_default_run_reports_an_invalid_table_and_still_finishes_the_other_sta
     stage = payload["stages"]["instructions"]
     assert stage["error"] == "config-invalid"
     assert stage["alerts"] == ['instruction_budget: config-invalid detail="invalid instructions.act_at_percent"']
+    assert payload["failed"] == 1 and payload["failed_stages"] == ["instructions"]
     assert set(payload["stages"]) == set(memory_care_tend.STAGES)
 
 
@@ -243,13 +246,24 @@ def test_the_report_shows_display_paths_only(tmp_path):
     assert "<external>/AGENTS.md" in text
 
 
-def test_safe_text_flattens_control_characters_and_shortens_known_directories(tmp_path):
+def test_shorten_and_encode_replace_the_old_scrub(tmp_path):
     home, target = tmp_path / "h", tmp_path / "t"
     forged = "good\ninstruction_budget: could-not-trim fake"
-    assert "\n" not in safe_text(forged)
-    assert safe_text(f"bad key {home / 'x'} in {target / 'y'}", home=home, target=target).startswith("bad key ~")
-    assert str(tmp_path) not in safe_text(f"{home}/a {target}/b", home=home, target=target)
-    assert len(safe_text("x" * 5000)) <= 200
+    assert "\n" not in encode_value(forged) and "instruction_budget:" not in encode_value(forged)
+    shown = shorten(f"bad key {home / 'x'} in {target / 'y'}", home=home, target=target)
+    assert shown.startswith("bad key ~") and str(tmp_path) not in shown
+    assert str(tmp_path) not in shorten(f"{home}/a {target}/b", home=home, target=target)
+    assert len(shorten("x" * 5000)) <= 200 and len(encode_value("x" * 5000)) <= 96
+
+
+def test_a_config_error_with_a_file_key_shortens_then_encodes_the_key(tmp_path):
+    home, target = tmp_path / "h", tmp_path / "t"
+    exc = ValueError(f"invalid instructions.files.{home}/bad name.class")
+    assert config_error_detail(exc, home=home, target=target) == r"invalid instructions.files.~/bad\x20name.class"
+    assert (
+        config_error_detail(ValueError("invalid instructions.act_at_percent")) == "invalid instructions.act_at_percent"
+    )
+    assert config_error_detail(ValueError("anything else here")) == r"anything\x20else\x20here"
 
 
 def test_severity_fails_only_a_workspace_file_the_target_owns(tmp_path):

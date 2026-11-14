@@ -76,24 +76,18 @@ def run(
             )
         elif stage == "instructions":
             from . import memory_care_instructions as instructions
-            from .instruction_inventory import load_instructions_config
 
-            try:
-                config = load_instructions_config(target)
-            except ValueError as exc:
-                if stages is not None:
-                    raise  # asked for by name: fail like a bad [tend] table
-                # Part of the default run: report it, so the other stages still finish and save.
-                payload["stages"][stage] = {
-                    "enabled": True,
-                    "error": "config-invalid",
-                    "detail": instructions.safe_text(str(exc), home=Path.home(), target=target),
-                    "alerts": [instructions.invalid_config_line(exc, target=target)],
-                }
-                continue
-            payload["stages"][stage] = instructions.apply(
-                target, config, today=today or memory_cmd._today(), dry_run=dry_run
+            # A stage named on the command line fails fast, like a bad [tend] table. In a default
+            # run a bad [instructions] table or an inventory error is recorded, so the stages
+            # after it finish and the state file is written, and the run is marked failed so the
+            # exit status and the payload say so. (`after_command` runs the inbox stage only.)
+            result = instructions.run_stage(
+                target, today=today or memory_cmd._today(), dry_run=dry_run, fail_fast=stages is not None
             )
+            payload["stages"][stage] = result
+            if result.get("error"):
+                payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
+                payload["failed"] = len(payload["failed_stages"])
         else:
             payload["stages"][stage] = memory_care_retire.apply(
                 target, memory_cmd._config_or_default(target), tend, today=today or memory_cmd._today(), dry_run=dry_run

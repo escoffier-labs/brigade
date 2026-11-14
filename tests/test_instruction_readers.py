@@ -155,7 +155,10 @@ def test_budgets_check_text_line(tmp_path, monkeypatch, capsys):
     sized(ws / "USER.md", 3500)
     sized(ws / "AGENTS.md", 100)
     assert budgets_cmd.check(target=ws) == 0
-    assert "[warn] USER.md: 3500/4000 bytes (act-at 3400, loader:openclaw:user-md-fixed-cap)" in capsys.readouterr().out
+    assert (
+        '[warn] path="USER.md": 3500/4000 bytes (act-at 3400, loader:openclaw:user-md-fixed-cap)'
+        in capsys.readouterr().out
+    )
 
 
 def test_budgets_check_with_an_invalid_table_still_reports_and_fails(tmp_path, monkeypatch, capsys):
@@ -198,7 +201,7 @@ def test_brief_prints_the_alert_lines(tmp_path, monkeypatch, capsys):
     dogfood_cmd.init(target=ws)
     assert work_cmd.brief(target=ws, limit=2) == 0
     assert (
-        f"instruction_budget: could-not-trim ~/.codex/AGENTS.md 24500/20000 reason=report-only {NEXT}"
+        f'instruction_budget: could-not-trim path="~/.codex/AGENTS.md" 24500/20000 reason=report-only {NEXT}'
         in capsys.readouterr().out
     )
 
@@ -240,11 +243,14 @@ def test_brief_payload_never_raises(tmp_path, monkeypatch):
         raise OSError("disk went away")
 
     monkeypatch.setattr(memory_care_instructions, "discover", boom)
-    assert brief_payload(ws) == {"alerts": [], "error": "OSError"}
+    assert brief_payload(ws) == {
+        "alerts": [f"instruction_budget: inventory-failed reason=OSError {NEXT}"],
+        "error": "OSError",
+    }
 
 
 def test_brief_payload_with_an_unreadable_openclaw_config_still_alerts(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path, '{ // comment\n "agents": {},\n}')
     set_home(monkeypatch, home)
     alerts = brief_payload(ws)["alerts"]
-    assert any(line.startswith("instruction_budget: could-not-trim USER.md 8241/8000") for line in alerts)
+    assert any(line.startswith('instruction_budget: could-not-trim path="USER.md" 8241/8000') for line in alerts)

@@ -9,7 +9,17 @@ from typing import Any
 
 from . import budgets
 from .instruction_inventory import InstructionFile, InstructionsConfig, Inventory, discover, load_instructions_config
-from .memory_care_instructions import config_change_summary, inside_target, safe_text, severity, state_of
+from .memory_care_instructions import (
+    NOT_A_FILE,
+    code,
+    config_change_summary,
+    config_error_detail,
+    field,
+    non_file_names,
+    severity,
+    state_of,
+    total_row,
+)
 
 
 def _budget_payload() -> dict[str, Any]:
@@ -48,10 +58,10 @@ def _check_row(item: InstructionFile, target: Path) -> dict[str, Any]:
     status = "missing" if not item.exists else severity(item, target)
     row: dict[str, Any] = {
         "name": item.display,
-        # The real path only for a file inside the target. A link that leaves it shows its display form.
-        "path": str(item.real_path) if inside_target(item, target) else item.display,
+        # The display path, never the real path: no home or target directory in the output.
+        "path": item.display,
         "exists": item.exists,
-        "size_bytes": item.size,
+        "size_bytes": item.size if item.size_known else None,
         "budget_bytes": item.limit,
         "status": status,
         "limit_source": item.limit_source,
@@ -71,7 +81,38 @@ def _check_row(item: InstructionFile, target: Path) -> dict[str, Any]:
         "requested_limit_bytes": item.requested_limit_bytes,
     }
     row.update({key: value for key, value in optional.items() if value is not None})
+    if not item.size_known:
+        row["size_known"] = False
     return row
+
+
+def _non_file_row(name: str, why: str) -> dict[str, Any]:
+    """A per-name path that is not a regular file fails, as it does in doctor (one shared function)."""
+    return {
+        "name": name,
+        "path": name,
+        "exists": True,
+        "size_bytes": None,
+        "budget_bytes": budgets.BOOTSTRAP_BUDGETS[name],
+        "status": "fail",
+        "state": why,
+        "level": "workspace",
+    }
+
+
+def _row_text(row: dict[str, Any]) -> str:
+    path = field("path", row["name"])
+    if row["state"] in (NOT_A_FILE, "stat-failed"):
+        return f"[fail] {path}: {'not a file' if row['state'] == NOT_A_FILE else 'could not stat'}"
+    if row["size_bytes"] is None and row["exists"]:
+        return (
+            f"[{row['status']}] {path}: size unknown ({code(row.get('skip_reason') or 'unreadable')}), "
+            f"limit {row['budget_bytes']} bytes ({code(row['limit_source'])})"
+        )
+    return (
+        f"[{row['status']}] {path}: {row['size_bytes']}/{row['budget_bytes']} bytes "
+        f"(act-at {row['act_at_bytes']}, {code(row['limit_source'])})"
+    )
 
 
 def check(*, target: Path, json_output: bool = False) -> int:
@@ -85,22 +126,27 @@ def check(*, target: Path, json_output: bool = False) -> int:
     try:
         config = load_instructions_config(target)
     except ValueError as exc:
-        config_error = safe_text(str(exc), home=Path.home(), target=target)
+        config_error = config_error_detail(exc, home=Path.home(), target=target)
     found: Inventory | None = None
     inventory_error: str | None = None
     try:
         found = discover(target, config, include_missing=True)
     except (OSError, ValueError, RuntimeError, RecursionError) as exc:
-        inventory_error = f"could not read: {type(exc).__name__}"
+        inventory_error = f"could not read: {code(type(exc).__name__)}"
 
     checks = [_check_row(item, target) for item in found.files] if found is not None else []
+    checks.extend(_non_file_row(name, why) for name, why in non_file_names(target))
+    checks.sort(key=lambda row: row["name"])
+    totals = [total_row(total, found.loader_reason) for total in found.totals] if found is not None else []
     hard_fail = (
         any(row["status"] == "fail" for row in checks) or config_error is not None or inventory_error is not None
     )
     payload = {
-        "target": str(target),
+        # The target is the directory the command ran in. Real paths stay internal.
+        "target": ".",
         "valid": not hard_fail,
         "checks": checks,
+        "totals": totals,
         "config_error": config_error,
         "inventory_error": inventory_error,
         "override_notes": [
@@ -114,14 +160,14 @@ def check(*, target: Path, json_output: bool = False) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["valid"] else 1
 
-    print(f"budget check: {target}")
+    print("budget check: .")
     for row in checks:
-        print(
-            f"[{row['status']}] {safe_text(row['name'])}: {row['size_bytes']}/{row['budget_bytes']} bytes "
-            f"(act-at {row['act_at_bytes']}, {row['limit_source']})"
-        )
+        print(_row_text(row))
+    for total in totals:
+        if total["state"] == "over-cap":
+            print(f"[warn] {field('loader', total['loader'])}: {total['bytes']}/{total['cap']} bytes (over cap)")
     if config_error is not None:
-        print(f"[fail] instructions: config: {config_error}")
+        print(f'[fail] instructions: config: detail="{config_error}"')
     if inventory_error is not None:
         print(f"[fail] instructions: inventory: {inventory_error}")
     summary = config_change_summary(found) if found is not None else None
