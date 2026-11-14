@@ -23,6 +23,10 @@ POINTER_LINE = re.compile(
     rb" \(undo: (?P<undo>[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8})\)"
 )
 
+# Managed blocks may nest this deep. A start marker past it marks the file unbalanced and is not tracked, so
+# the pairing work per line stays bounded however many distinct markers a file holds.
+MAX_OPEN_BLOCKS = 32
+
 _KEEP = KEEP.encode("ascii")
 _HEADING = re.compile(rb"(#{1,6})(?: |$)")
 _FENCE_OPEN = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
@@ -135,8 +139,11 @@ def _scan(data: bytes) -> _Scan:
                     if role == "bad":
                         unbalanced = True
                     elif role == "start":
-                        unbalanced = unbalanced or name in stack
-                        stack.append(name)
+                        if len(stack) >= MAX_OPEN_BLOCKS:
+                            unbalanced = True  # too deep: not tracked, so `stack` and its scans stay small
+                        else:
+                            unbalanced = unbalanced or name in stack
+                            stack.append(name)
                     elif stack and stack[-1] == name:
                         stack.pop()
                     else:

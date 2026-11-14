@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import random
 
+import pytest
+
 from brigade.instruction_sections import (
     KEEP,
+    MAX_OPEN_BLOCKS,
     PointerSpan,
     heading_lines,
     managed_blocks,
@@ -88,6 +91,27 @@ def test_managed_block_pairing_by_name():
         parse(b"## A\n<!-- A:START -->\n<!-- B:START -->\n<!-- A:END -->\n<!-- B:END -->\n").problem
         == "unbalanced-markers"
     )
+
+
+def _nested(depth: int) -> bytes:
+    starts = b"".join(b"<!-- N%d:START -->\n" % n for n in range(depth))
+    ends = b"".join(b"<!-- N%d:END -->\n" % n for n in reversed(range(depth)))
+    return b"## A\n" + starts + ends
+
+
+def test_managed_blocks_nest_to_a_fixed_depth():  # review of #2567: bounded nesting
+    assert MAX_OPEN_BLOCKS == 32
+    assert parse(_nested(MAX_OPEN_BLOCKS)).problem is None
+    assert parse(_nested(MAX_OPEN_BLOCKS + 1)).problem == "unbalanced-markers"
+
+
+@pytest.mark.parametrize("count", [MAX_OPEN_BLOCKS + 1, 20_000])
+def test_many_unique_start_markers_with_mismatched_ends_stop_the_file(count):
+    starts = b"".join(b"<!-- S%d:START -->\n" % n for n in range(count))
+    ends = b"".join(b"<!-- E%d:END -->\n" % n for n in range(count))
+    doc = parse(b"## A\n" + starts + ends)
+    assert (doc.problem, doc.units) == ("unbalanced-markers", ())
+    assert pointer_spans(b"## A\n" + starts + ends) == ()
 
 
 def test_managed_block_rule_edges():
