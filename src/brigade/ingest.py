@@ -408,12 +408,6 @@ class Outcome:
     overflow: instruction_overflow.OverflowRoute | None = None
 
 
-def _normalize_for_dedupe(text: str) -> str:
-    """Collapse whitespace and drop blank lines for content-equality checks."""
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-    return "\n".join(line for line in lines if line)
-
-
 def _first_meaningful_line(text: str) -> str:
     """First non-blank, stripped line of `text`, or '' if there is none."""
     for line in text.splitlines():
@@ -562,23 +556,34 @@ def decide(
         # Without this, a re-routed handoff duplicates its content on every run. A routed
         # append also looks in every overflow card of the file and type, so a block already
         # published to card 1 is found when card 2 would be chosen.
+        # A known file's overflow cards are searched on both paths: a person may have trimmed the file
+        # after a block was published to a card and before a replay.
         if overflow is None:
             existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
-            held = [existing]
+            held = [
+                existing,
+                *instruction_overflow.direct_card_text(
+                    target, document, instruction_overflow.handoff_type(sections), context=routing
+                ),
+            ]
         else:
             # The file may be reached through a link: read it bounded and never write to it.
             read = read_regular_file(dest, max_bytes=INSPECTION_CEILING)
             existing = read.data.decode("utf-8", "replace") if read.data is not None else ""
             held = [existing, *instruction_overflow.existing_card_text(target, overflow)]
-        normalized_suggested = _normalize_for_dedupe(content)
-        if normalized_suggested and any(normalized_suggested in _normalize_for_dedupe(text) for text in held):
+        normalized_suggested = instruction_overflow.normalize_for_dedupe(content)
+        if normalized_suggested and any(
+            normalized_suggested in instruction_overflow.normalize_for_dedupe(text) for text in held
+        ):
             return Outcome(
                 "inboxed",
                 code="document-content-present",
                 reason="document content already present in the target document",
             )
+        # The anchor is a line match, and cards only grow: a line of an unrelated card must not hold
+        # a new handoff forever, so only the file itself is searched.
         anchor = _first_meaningful_line(content)
-        if anchor and any(anchor in text for text in held):
+        if anchor and anchor in existing:
             return Outcome(
                 "inboxed",
                 code="document-anchor-present",
@@ -592,8 +597,9 @@ def decide(
                 reason=f"injection signal in document content ({sig.count} marker(s))",
             )
         if overflow is not None:
-            if overflow.card_problem:
-                return Outcome("inboxed", code="document-destination-unsafe", reason=overflow.card_problem)
+            held_for_person = overflow.hold()
+            if held_for_person:
+                return Outcome("inboxed", code=held_for_person.code, reason=held_for_person.reason)
             return Outcome(
                 "routed-card",
                 code="document-routed-to-card",
@@ -871,8 +877,12 @@ def _append_document_locked(target: Path, dest: Path, text: str) -> None:
     try:
         descriptor = dirfd.open_child_file(parent, resolved.name, flags, 0o644)
         try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
                 raise OSError("target document is not a regular file")
+            if opened.st_nlink != 1:
+                # A hard link swapped in after the destination check would send this append to another file.
+                raise OSError("target document has more than one hard link")
             if dirfd.posix_available():
                 os.set_blocking(descriptor, True)
             with os.fdopen(descriptor, "ab") as handle:
@@ -1047,7 +1057,7 @@ def _execute_routed_card(
 ) -> Action:
     """Append the handoff's content to its file's overflow card through the journal."""
     from .inbox_lock import InboxLockTimeout
-    from .memory_care_journal import JournalConflict
+    from .memory_care_journal import JournalConflict, ReadOnlyPath
     from .memory_inbox_append import commit_card_append
 
     overflow = outcome.overflow
@@ -1060,29 +1070,55 @@ def _execute_routed_card(
     content = sections.get("suggested document content", "")
     kind = instruction_overflow.handoff_type(sections)
     duplicate = False
+    held: Outcome | None = None
     try:
         # The document lock comes first, as retry and revert take it, then the journal.
         with _document_lock(target):
-            # decide() ran without the lock: read the cards again, so the block matches the card now
-            # and a concurrent run that already published this content is not written over.
+            # decide() ran without the lock: read the cards again, so the block matches the card now,
+            # the card is still one this feature created, and a concurrent run that already
+            # published this content is not written over.
             overflow = instruction_overflow.refresh(target, overflow, content, kind)
-            if overflow.card_problem:
-                raise OSError(overflow.card_problem)
-            duplicate = instruction_overflow.contains_block(target, overflow, content)
-            if not duplicate:
+            problem = overflow.hold()
+            if problem is not None:
+                held = Outcome("inboxed", code=problem.code, reason=problem.reason)
+            elif instruction_overflow.contains_block(target, overflow, content):
+                duplicate = True
+            else:
                 block, header_bytes = instruction_overflow.card_block(
                     target, overflow, content, kind, today=date.today()
                 )
-                commit_card_append(
-                    target, overflow.card_rel, block, header_bytes=header_bytes, reason="ingest:document-routed-to-card"
-                )
-    except (OSError, InboxLockTimeout, JournalConflict, ValueError):
+                try:
+                    commit_card_append(
+                        target,
+                        overflow.card_rel,
+                        block,
+                        header_bytes=header_bytes,
+                        reason="ingest:document-routed-to-card",
+                        card_limit=overflow.card_limit,
+                        limit_requested=overflow.limit_requested,
+                    )
+                except ValueError as exc:
+                    # A protected card path, or a care configuration that does not parse. Both are
+                    # retry codes: the drain delivers the handoff once the cause is fixed.
+                    cause = (
+                        "the card path is protected"
+                        if isinstance(exc, ReadOnlyPath)
+                        else "the memory care configuration could not be parsed"
+                    )
+                    held = Outcome(
+                        "inboxed",
+                        code="document-destination-unwritable",
+                        reason=f"{cause}; the handoff is retried automatically once that is fixed",
+                    )
+    except (OSError, InboxLockTimeout, JournalConflict):
+        held = Outcome(
+            "inboxed",
+            code="document-destination-unwritable",
+            reason="overflow card is linked, protected or unwritable; requires review",
+        )
+    if held is not None:
         return _execute(
-            Outcome(
-                "inboxed",
-                code="document-destination-unwritable",
-                reason="overflow card is linked, protected or unwritable; requires review",
-            ),
+            held,
             handoff_path,
             target,
             sections,

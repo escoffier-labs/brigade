@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from . import instruction_overflow
 from . import memory_care_journal as journal
 
 # Writers whose bytes land in a workspace document through the no-follow appender.
@@ -111,12 +112,34 @@ def _contains(target: Path, rel: str, data: bytes) -> bool:
 
 
 @journal.serialized
-def commit_card_append(owner: Path, card_rel: str, block: bytes, *, header_bytes: int, reason: str) -> journal.Decision:
+def commit_card_append(
+    owner: Path,
+    card_rel: str,
+    block: bytes,
+    *,
+    header_bytes: int,
+    reason: str,
+    card_limit: int | None = None,
+    limit_requested: int | None = None,
+) -> journal.Decision:
     """Journal one append to an overflow card and publish it with exact-block undo.
 
     Callers hold ``ingest._document_lock(owner)`` first, the order retry and revert use.
+    `limit_requested` is the configured card limit when it was clamped to `card_limit`.
     """
     before = journal.current(owner, card_rel)
+    if before is not None and (problem := instruction_overflow.untrusted_bytes(before)):
+        # The bytes the append guard pins: the last look at the card before anything is written to it.
+        raise journal.JournalConflict(f"overflow card is not one this feature created: {problem}")
+    if (before is None) != (header_bytes > 0):
+        # The block was built for a card that was missing (or present) and the card is not as it was then.
+        raise journal.JournalConflict("overflow card changed since the block was built")
+    metadata: dict[str, Any] = {
+        "appends": [plan_append(card_rel, block, "card-append", created=before is None, header_bytes=header_bytes)],
+        "append_guards": {card_rel: journal.kernel.content_digest(before)},
+    }
+    if limit_requested is not None:
+        metadata["card_limit"], metadata["card_limit_requested"] = card_limit, limit_requested
     decision = journal.commit_phased(
         owner,
         kind="inbox",
@@ -125,10 +148,7 @@ def commit_card_append(owner: Path, card_rel: str, block: bytes, *, header_bytes
         changes=[],
         prepared_paths=[],
         hub={},
-        metadata={
-            "appends": [plan_append(card_rel, block, "card-append", created=before is None, header_bytes=header_bytes)],
-            "append_guards": {card_rel: journal.kernel.content_digest(before)},
-        },
+        metadata=metadata,
     )
     if journal._payload(owner, decision.decision_id).get("phase") != "committed":
         raise journal.JournalConflict("card append abandoned")

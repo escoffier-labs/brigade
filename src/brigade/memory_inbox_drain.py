@@ -29,6 +29,9 @@ HUMAN_CODES = frozenset(
         "document-destination-unsafe",
         "unsafe-target-document",
         "unsafe-card-name",
+        # The overflow card is not one this feature created, or the block cannot fit any card.
+        "overflow-card-untrusted",
+        "overflow-block-too-large",
     }
 )
 RESOLVE_CODES = {
@@ -101,6 +104,8 @@ NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "missing-action": False,
     "missing-target-document": False,
     "near-match-proposal": True,
+    "overflow-block-too-large": False,
+    "overflow-card-untrusted": False,
     "proposal-notification": False,
     "unknown-sections": False,
     "unsafe-card-name": False,

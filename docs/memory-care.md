@@ -419,6 +419,26 @@ refused for size (`bootstrap-budget-exceeded`) drain the same way on the next ru
 Excluding a file or setting `enabled = false` does not turn this routing off. A handoff
 with an injection signal or an unsafe name is still kept for a person.
 
+The card path is predictable, so the writer trusts a card only when this feature created
+it. Before every append to an existing card it requires one frontmatter block with
+`visibility: private` (read by the same parser the hub push uses), `archive: never`, the
+`moved-instructions` tag and a `source_file`. A card that fails any of these, or that is
+too large for the duplicate check to read in full, receives nothing: the handoff is kept
+for a person as `overflow-card-untrusted`, with the card's path in the reason. A block
+that cannot fit an empty card, frontmatter included, is kept as `overflow-block-too-large`
+and never written oversize. A configured `max_card_bytes` above the duplicate scan's
+1 MiB read limit is not applied. The journal decision records both the limit used and the
+requested one. The undo of the append that created a card needs the card's frontmatter
+unchanged, so a later stage that rewrites it (`last_reviewed`, `fresh_until`) makes that
+one undo refuse, and later appends are undone as before.
+
+When the care configuration (`.brigade/memory-care.toml`) cannot be parsed, the card's
+protected paths cannot be read, so nothing is written and the handoff is held as
+`document-destination-unwritable`. That is a retry code: the handoff is retried
+automatically on the next drain once the file parses, and it is never lost. While the
+file does not parse, even a small append to a file far below its act-at goes to this
+hold instead of to the file.
+
 The drain also sweeps redundant before-images of abandoned decisions. A sweep requires
 an exact surviving copy at a recorded path, retains unique or unreadable images and
 restorable decisions, and records each removed path, size, digest and surviving live

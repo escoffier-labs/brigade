@@ -14,6 +14,7 @@ from brigade.handoff_cmd import linting
 from brigade.instruction_overflow import CARDS_REL, handoff_type, route
 from tests._home import set_home
 from tests._instruction_fixtures import (
+    CARD_HEAD,
     INJECTION,
     field_workspace,
     handoff_text,
@@ -135,7 +136,7 @@ def test_overflow_card_rolls_at_max_card_bytes(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
     _cap_cards(ws)
-    sized(ws / CARDS_REL / "user-md--overflow-preference.md", 590, head="---\ntitle: t\n---\n")
+    sized(ws / CARDS_REL / "user-md--overflow-preference.md", 590, head=CARD_HEAD)
     outcome = _decide(ws, _sections("USER.md", NOTE))
     assert outcome.dest.name == "user-md--overflow-preference-2.md"
     assert outcome.overflow.cards == (f"{CARDS_REL}/user-md--overflow-preference.md",)
@@ -148,7 +149,7 @@ def test_replay_across_the_rollover_never_writes_the_block_twice(
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
     _cap_cards(ws)
-    card = sized(ws / CARDS_REL / "user-md--overflow-preference.md", 540, head="---\ntitle: t\n---\n")
+    card = sized(ws / CARDS_REL / "user-md--overflow-preference.md", 540, head=CARD_HEAD)
     if archive_fails:  # publication succeeds, archiving the source fails once
         real, calls = ingest._archive, []
 
@@ -480,7 +481,7 @@ def test_a_card_created_between_decide_and_write_gets_a_plain_block(tmp_path, mo
     sections = ingest.parse(handoff)
     outcome = _decide(ws, sections)
     assert outcome.kind == "routed-card" and outcome.overflow.cards == ()
-    card = sized(ws / CARDS_REL / "user-md--overflow-preference.md", 80, head="---\ntitle: t\n---\n")
+    card = sized(ws / CARDS_REL / "user-md--overflow-preference.md", 200, head=CARD_HEAD)
     action = ingest._execute(
         outcome,
         handoff,
@@ -502,7 +503,7 @@ def test_content_published_by_a_concurrent_run_is_not_written_twice(tmp_path, mo
     handoff = write_handoff(ws, "2026-11-13-pref.md", handoff_text("USER.md", NOTE, type_="preference"))
     sections = ingest.parse(handoff)
     outcome = _decide(ws, sections)
-    card = sized(ws / CARDS_REL / "user-md--overflow-preference.md", 80, head="---\ntitle: t\n---\n")
+    card = sized(ws / CARDS_REL / "user-md--overflow-preference.md", 200, head=CARD_HEAD)
     with card.open("a", encoding="utf-8") as handle:
         handle.write("\n\n" + NOTE + "\n")  # the other run published it after our decide()
     size = card.stat().st_size

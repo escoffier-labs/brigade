@@ -11,7 +11,7 @@ from brigade import ingest, memory_care_tend, memory_inbox_retry
 from brigade import memory_care_journal as journal
 from brigade import memory_inbox_drain as drain
 from tests._home import set_home
-from tests._instruction_fixtures import INJECTION, field_workspace, handoff_text, sized, write_handoff
+from tests._instruction_fixtures import CARD_HEAD, INJECTION, field_workspace, handoff_text, sized, write_handoff
 
 TODAY = date(2026, 11, 13)
 NOTE = "Prefer one-line status updates."
@@ -75,7 +75,7 @@ def test_held_copy_of_published_content_resolves_without_a_second_card(tmp_path,
     set_home(monkeypatch, home)
     (ws / ".brigade").mkdir()
     (ws / ".brigade" / "memory-care.toml").write_text("max_card_bytes = 600\n")
-    card = sized(ws / CARD, 580, head="---\ntitle: t\n---\n")
+    card = sized(ws / CARD, 580, head=CARD_HEAD)
     with card.open("a", encoding="utf-8") as handle:
         handle.write("\n\n" + NOTE + "\n")  # 614 bytes: card 1 is full
     _held(ws)
@@ -153,3 +153,17 @@ def test_retry_with_an_invalid_instructions_table_still_routes_the_handoff(tmp_p
     action = memory_inbox_retry.reprocess(ws, _held(ws))
     assert action.kind == "routed" and (ws / CARD).is_file()
     assert (ws / "USER.md").stat().st_size == 100
+
+
+def test_a_committed_retry_is_not_reported_skipped_when_the_card_id_index_cannot_read_the_card(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+
+    def unreadable(self, rel, text):
+        raise OSError("card unreadable after the commit")
+
+    monkeypatch.setattr(ingest.CardIdIndex, "register", unreadable)
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+    assert result["retried"] == 1 and not result.get("skipped"), result
+    assert (ws / CARD).read_text().endswith("\n" + NOTE + "\n") and not draft.exists()

@@ -86,8 +86,9 @@ def reprocess(
             if not dry_run:
                 # decide() ran before the document lock: read the cards as they are under it.
                 overflow = instruction_overflow.refresh(owner, overflow, content, card_type)
-                if overflow.card_problem:
-                    return ingest.Action("inboxed", "document-destination-unsafe")
+                problem = overflow.hold()
+                if problem is not None:
+                    return ingest.Action("inboxed", problem.code)
                 if instruction_overflow.contains_block(owner, overflow, content):
                     return ingest.Action("inboxed", "document-content-present")
                 outcome.overflow, outcome.dest = overflow, owner / overflow.card_rel
@@ -97,7 +98,10 @@ def reprocess(
             before = read(owner, dest_rel)
         except ValueError:
             return ingest.Action("inboxed", "destination-unreadable-or-oversized")
-        # Every overflow card is pinned `archive: never` and the writer only appends to it.
+        # Every overflow card is pinned `archive: never` and the writer only appends to it. The bytes read
+        # here are the ones the append guard pins, so this is the last check before the write.
+        if outcome.kind == "routed-card" and before is not None and instruction_overflow.untrusted_bytes(before):
+            return ingest.Action("inboxed", "overflow-card-untrusted")
         if before is not None and outcome.kind != "routed-card":
             refusal = memory_archive.frontmatter_refusal(before.decode("utf-8"))
             if refusal:
@@ -164,6 +168,9 @@ def reprocess(
         else:
             # Guard the observed destination until finish without replacing it.
             metadata["append_guards"] = {dest_rel: journal.kernel.content_digest(before)}
+            if outcome.overflow is not None and outcome.overflow.limit_requested is not None:
+                metadata["card_limit"] = outcome.overflow.card_limit
+                metadata["card_limit_requested"] = outcome.overflow.limit_requested
         # A card append counts as a routed action, so every caller that counts routed ones counts it unchanged.
         kind = "routed" if outcome.kind == "routed-card" else outcome.kind
         if dry_run:
@@ -185,5 +192,8 @@ def reprocess(
         if outcome.kind in ("promoted", "reinforced") and card_ids is not None:
             card_ids.register(dest_rel, after.decode("utf-8"))
         elif outcome.kind == "routed-card" and card_ids is not None:
-            card_ids.register(dest_rel, (owner / dest_rel).read_text(encoding="utf-8"))
+            try:
+                card_ids.register(dest_rel, (owner / dest_rel).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                pass  # committed: the id index only guards later promotions in this run
         return ingest.Action(kind, decision.decision_id, dest_rel)
