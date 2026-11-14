@@ -320,7 +320,7 @@ class RecordedPointer:
     decision_id: str
     card_rel: str
     data: bytes                      # the overflow pointer line the move appended, without any separator
-    separator: bool                  # the move added a "\n" before this pointer (AddedPointer.separator, row W29)
+    separator: bool = False          # the move added a "\n" before this pointer (AddedPointer.separator, row W29)
 
 @dataclass(frozen=True)
 class Reconciled:
@@ -700,7 +700,8 @@ def test_overflow_pointer_that_would_cross_the_limit_waits():             # matr
 
 def test_separator_byte_counts_against_the_limit():                       # matrix W29
     # A file with no final newline whose size plus one pointer is exactly the limit: the separator
-    # would make it one byte over, so the pointer waits and its card stays pending.
+    # would make it one byte over, so the pointer waits and its card stays pending. With one byte more
+    # room the pointer is added with separator=True, and check(plan, cards, config_pins=()) == [].
     ...
 
 def test_pointer_line_at_the_caps_fits():                                 # matrix S15
