@@ -24,6 +24,28 @@ INSTRUCTION_PROFILE = INSTRUCTION_PROFILE_FULL
 # Their static block defaults to the minimal pointer when hooks are active.
 HOOK_BRIEF_HARNESSES = frozenset({"claude"})
 
+# OpenClaw bootstrap caps, as read from the OpenClaw 2026.10.5 bootstrap module
+# constants. `OPENCLAW_BOOTSTRAP_FILES` is its `WORKSPACE_BOOTSTRAP_FILENAMES`
+# list: the only per-name files OpenClaw loads. Counts are characters there and
+# are used here as bytes, which is never looser.
+OPENCLAW_CAPS_RELEASE = "2026.10.5"
+OPENCLAW_BOOTSTRAP_MAX_CHARS = 20_000
+OPENCLAW_BOOTSTRAP_TOTAL_MAX_CHARS = 60_000
+OPENCLAW_USER_BOOTSTRAP_MAX_CHARS = 4_000
+OPENCLAW_BOOTSTRAP_FILES = (
+    "AGENTS.md",
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "BOOTSTRAP.md",
+    "MEMORY.md",
+)
+OPENCLAW_PER_FILE_KEY = "bootstrapMaxChars"
+OPENCLAW_TOTAL_KEY = "bootstrapTotalMaxChars"
+OPENCLAW_CONFIG_ENV = "OPENCLAW_CONFIG_PATH"
+OPENCLAW_STATE_DIR_ENV = "OPENCLAW_STATE_DIR"
+OPENCLAW_CONFIG_NAME = "openclaw.json"
+
 
 @dataclass(frozen=True)
 class GeneratedFile:

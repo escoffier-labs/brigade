@@ -758,6 +758,13 @@ def _resolves(records: list[dict[str, Any]], card: dict[str, Any], head: dict[st
     return True
 
 
+def publication_collision(card_id: str, path: str, local: list[dict[str, Any]], base: dict[str, Any] | None) -> bool:
+    """A publication has one source path and no other local holder."""
+    return bool(base is not None and base.get("path") != path) or any(
+        card["card_id"] == card_id and card["rel"] != path for card in local
+    )
+
+
 def _publishable(
     target: Path,
     settings: hubc.HubSettings,
@@ -792,9 +799,6 @@ def _publishable(
     adopted: list[dict] = []
     resolved: list[str] = []
     local = _local_cards(target)
-    counts: dict[str, int] = {}
-    for card in local:
-        counts[card["card_id"]] = counts.get(card["card_id"], 0) + 1
     for card in local:
         if card["private"]:
             skipped.append({"path": card["rel"], "reason": card["withheld"]})
@@ -802,7 +806,7 @@ def _publishable(
         if not hubc.valid_card_id(card["card_id"]):
             skipped.append({"path": card["rel"], "reason": "card-id-invalid"})
             continue
-        if counts[card["card_id"]] > 1:
+        if publication_collision(card["card_id"], card["rel"], local, None):
             skipped.append({"path": card["rel"], "card_id": card["card_id"], "reason": "card-id-collision"})
             continue
         key = (scope, card["card_id"])
@@ -821,7 +825,7 @@ def _publishable(
             skipped.append({"path": card["rel"], "reason": "pending"})
             continue
         last = state.get(card["card_id"])
-        if card["derived_id"] and isinstance(last, dict) and last.get("path") != card["rel"]:
+        if card["derived_id"] and publication_collision(card["card_id"], card["rel"], [], last):
             skipped.append({"path": card["rel"], "card_id": card["card_id"], "reason": "card-id-collision"})
             continue
         if isinstance(last, dict) and epoch and last.get("log_epoch") and last.get("log_epoch") != epoch:

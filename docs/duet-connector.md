@@ -1,5 +1,10 @@
 # Duet connector pack
 
+> Retired queue listeners: removal messages keep the bare-unit disable command and
+> show separate stop and list commands for client-scoped units. Inspect the listed
+> concrete unit names before disabling them. Quoted patterns work with `stop` and
+> `list-unit-files`, but `disable --now` requires concrete names.
+
 The duet pack connects Claude Duet, a hosted agent that runs tasks on its own
 cloud machine, to Brigade memory, skills and the Fleet Hub inbox. It runs the
 Dot connector code under a separate profile, so it shares Dot's origin
@@ -189,7 +194,7 @@ Dot's runtime also accepts an optional `messaging_enabled`. When Dot omits it,
 
 ## Setup
 
-Install the MCP SDK with `pip install brigade-cli[grokbot]`, plus `uvicorn` and
+Install the MCP SDK with `pip install brigade-cli[connector]` (the `grokbot` extra remains an alias during the removal window), plus `uvicorn` and
 `PyJWT[crypto]`. Before setup, prepare:
 
 - a Cloudflare Access application for the Duet host, separate from Dot's.
@@ -340,3 +345,50 @@ To disable dispatch while keeping reads and messaging, remove `dispatch_enabled`
 tools and builds no fleet client. Running tasks continue. the operator must
 interrupt them separately if needed. Retain Duet's SQLite state for audit and
 admission accounting if dispatch is enabled again.
+
+## Generic cloud-agent profile
+
+`brigade hub connector` manages `dot`, `duet` and `cloud-agent` independently
+of the worker queue. Existing Dot and Duet commands remain compatibility paths.
+The generic profile exposes `memory_search`, `memory_card` and `handoff_write`.
+Setting `messaging_enabled` to `true` adds `inbox_list`, `inbox_ack`,
+`inbox_reply` and `message_send`, with existing recipient grants and send limits.
+Dispatch, fleet, event and skill tools are unavailable.
+
+Use runtime schema `brigade.cloud-agent.runtime.v1` with hosted `paths` and
+`hub` sections as above. Set `hub.principal` to `agent:cloud-agent`. Use a
+separate state directory and hub principal credential. The default listener
+bind is `127.0.0.1:8783`.
+
+Token authentication is the default. Set `auth` to
+`{"mode": "token", "token_file": "/var/lib/brigade-cloud-agent/listener-token"}`.
+The listener token must be an owned, private regular file containing 43 to 512
+characters matching `[A-Za-z0-9_-]`, excluding short-period repetition. It must differ from the hub
+principal credential, node and admin credentials, and every other connector credential. Send it in the
+`Authorization: Bearer <token>` header. Both authentication modes require a
+loopback bind. Remote access uses an operator-managed TLS tunnel or reverse
+proxy connecting to loopback. `doctor` reports token mode as healthy configuration.
+For a signed-identity front, use `auth.mode: "access"` with the existing
+issuer, team domain, audience, approved email and resource fields. Dot and
+Duet continue to require Access.
+
+Preview setup with `brigade hub connector setup --id cloud-agent --target
+<target> --runtime-path <protected-runtime.json>`. Add `--apply` to write the
+instance configuration. Applied token-mode setup generates a random token in a
+new 0600 file when the configured token path is absent, and reports only its path.
+After ten failed authentications within 60 seconds, failed requests receive a
+bare 429 response for 60 seconds. Valid credentials remain usable. Authentication failures are counted without headers
+or credentials in the call log. Inspect it with `show`, validate it with `doctor` and
+`canary`, then preview `install-service`. Installation requires `--apply` and
+an explicit `--out-dir`. These commands do not start services. `update` and
+`remove` also preview by default. Removal preserves runtime files, credentials
+and stored data. New units use `brigade hub connector serve --id cloud-agent`.
+
+Setup-generated listener tokens are the supported path. Imported tokens must use
+URL-safe characters and cannot repeat a unit of eight characters or fewer.
+The failed-auth budget penalizes failed verification only. Valid credentials
+remain usable during a cooldown in either authentication mode.
+
+When cloud-agent is installed, the other connector profiles' isolation check
+also reads the machine's fleet credentials. Those profiles refuse to run if the
+credentials cannot be read.

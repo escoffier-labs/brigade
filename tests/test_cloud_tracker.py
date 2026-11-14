@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 
-from brigade import cli, cloud_tracker, codex_cloud, cursor_cloud, fleet_client, grokbot_jobs
+from brigade import cli, cloud_tracker, codex_cloud, cursor_cloud, fleet_client
+from tests import legacy_job_seed as grokbot_jobs
 from brigade.cli import run_cloud
 
 

@@ -617,6 +617,9 @@ class MemoryTools:
             refusal = egress_refusal([text])
             if refusal:
                 return {"card_id": name, **refusal}
+        from ..memory_card_reads import record_content
+
+        record_content(self.workspace, text, (self.cards.relative_to(self.workspace) / (name + ".md")).as_posix())
         chunk = text[offset : offset + CARD_CHUNK_CHARS]
         following = offset + len(chunk)
         # A remote connector sees the path under the workspace, never the local absolute one.

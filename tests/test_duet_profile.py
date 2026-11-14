@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from brigade import fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages, grokbot_packs
+from brigade import fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages
+from brigade.dot import legacy_registry as grokbot_packs
 from brigade.dot import lifecycle as m
 from brigade.dot import watch as w
 from brigade.dot.access_auth import AccessVerifier, AuthError
@@ -716,13 +717,17 @@ def test_duet_isolation_fails_when_sharing_dot_identity(duet_configured, dot_pri
 
 
 @requires_local_state
-@pytest.mark.parametrize("pack_id", ["grokbot-memory", "grokbot-inbox"])
+@pytest.mark.parametrize("pack_id", ["cloud-agent"])
 def test_duet_isolation_names_a_neighbour_it_cannot_load(duet_configured, pack_id):
     target, runtime, instance = duet_configured
     assert m._isolated_from_dot(target, runtime) is True
     payload = json.loads(instance.read_text())
     payload.update(pack_id=pack_id, bind="127.0.0.1:8781", runtime_path=str(instance.parent / "missing-runtime.json"))
-    instance.with_name(f"{pack_id}.json").write_text(json.dumps(payload))
+    from brigade.dot.connector_registry import instance_config_path
+
+    neighbor = instance_config_path(target, pack_id)
+    neighbor.parent.mkdir(parents=True, exist_ok=True)
+    neighbor.write_text(json.dumps(payload))
     # Duet's own config is fine, so the refusal names the neighbour instead of surfacing its invalid_config.
     with pytest.raises(DotError) as refused:
         m._isolated_from_dot(target, runtime)

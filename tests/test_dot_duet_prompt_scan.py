@@ -13,7 +13,7 @@ from brigade import memory_hub_client
 
 from brigade.dot.memory_tools import MemoryTools
 from brigade.dot.process import CommandResult
-from brigade.dot.profile import DOT, DUET, GROKBOT_MEMORY, PROFILES
+from brigade.dot.profile import DOT, DUET, CLOUD_AGENT, PROFILES
 from tests.test_dot_adapter import HANDOFF, NOW, Fixture, lint_report
 
 # Built at runtime so this file carries no literal private address, address book entry or injection phrase.
@@ -37,7 +37,7 @@ CARDS = {
 }
 REMOTE = (DOT, DUET)
 # The Grok memory profile serves hub memory only, so its scan is tested on hub shaped answers in
-# test_grokbot_s26_profiles.py. These cases use local cards, which it never serves.
+# test_cloud_agent_memory_contract.py. These cases use local cards, which it never serves.
 EVERY_PROFILE = (DOT, DUET)
 SHA = "ab" * 32
 CONNECTOR_HUB = "https://memory-hub.invalid:3774"
@@ -97,7 +97,7 @@ class Scan(Fixture):
 
 
 def test_both_profiles_scan_and_every_profile_does():
-    assert DOT.prompt_load_scan and DUET.prompt_load_scan and GROKBOT_MEMORY.prompt_load_scan
+    assert DOT.prompt_load_scan and DUET.prompt_load_scan and CLOUD_AGENT.prompt_load_scan
     # A new profile serves a remote audience too: it must opt in on purpose, not by omission.
     assert all(profile.prompt_load_scan for profile in PROFILES.values())
 

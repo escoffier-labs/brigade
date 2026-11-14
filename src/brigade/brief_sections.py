@@ -46,13 +46,14 @@ FULL_SECTIONS: tuple[str, ...] = (
     SECTION_WORK_LOOP,
 )
 
+HANDOFF_CLOSE_ITEM = "Memory Handoff written only for durable knowledge, or closed with `Nothing durable: <reason>`?"
 _SESSION_CLOSE_ITEMS: tuple[str, ...] = (
     'Verify captured through Brigade? (`brigade work verify run --target . --command "..." --capture brigade-work`)',
     "Outcome recorded? (`brigade outcome capture <skill-or-card-id> --run-id latest`)",
-    "Memory Handoff written only for durable knowledge, or closed with `Nothing durable: <reason>`?",
+    HANDOFF_CLOSE_ITEM,
 )
-# Yolo mode (#2233) drops verification wording and keeps the same handoff rule as engineer mode.
-_YOLO_SESSION_CLOSE_ITEMS: tuple[str, ...] = (_SESSION_CLOSE_ITEMS[-1],)
+# observe and off (#2233) drop verification wording and keep the strict-mode handoff rule.
+_UNENFORCED_SESSION_CLOSE_ITEMS: tuple[str, ...] = (HANDOFF_CLOSE_ITEM,)
 
 
 def normalize_profile(value: str | None, *, default: str = DEFAULT_PROFILE) -> str:
@@ -89,9 +90,9 @@ def profiles_for_depth(profile: str) -> tuple[str, ...]:
     return FULL_SECTIONS
 
 
-def session_close_items(*, mode: str = "engineer") -> tuple[str, ...]:
+def session_close_items(*, mode: str = "strict") -> tuple[str, ...]:
     """Checklist items that lead the live brief and the full static profile."""
-    return _YOLO_SESSION_CLOSE_ITEMS if mode == "yolo" else _SESSION_CLOSE_ITEMS
+    return _UNENFORCED_SESSION_CLOSE_ITEMS if mode in {"off", "observe"} else _SESSION_CLOSE_ITEMS
 
 
 def render_session_close_section(*, heading: str = "## Session close") -> str:
@@ -187,13 +188,16 @@ def render_static_instruction(profile: str = DEFAULT_PROFILE) -> str:
     return render_sections(profiles_for_depth(profile))
 
 
-def render_brief_session_close_lines(*, mode: str = "engineer") -> list[str]:
+def render_brief_session_close_lines(*, mode: str = "strict") -> list[str]:
     """Lines printed at the top of live ``brigade work brief`` text output."""
     lines = ["session_close:"]
     lines.extend(f"  - [ ] {item}" for item in session_close_items(mode=mode))
-    if mode == "yolo":
+    if mode == "observe":
+        lines.append("work_mode: observe (checks are not enforced. Recording requires `brigade work verify run`)")
+        lines.append("observed_checks: `brigade work checks` shows supported hook observations")
+    elif mode == "off":
         lines.append(
-            "work_mode: yolo (verification is not enforced; "
+            "work_mode: off (verification is not enforced; "
             "`brigade work verify run` still works by hand and records a receipt)"
         )
     return lines

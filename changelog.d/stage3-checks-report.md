@@ -1,0 +1,2 @@
+- Add `brigade work checks` with text and versioned JSON reports of observed first attempts by harness and model, unknown counts, a five-result minimum for rates, time filtering, and visible reader skips.
+- Recover the newest bounded tail of oversized observed-check generations and validate each read record once.

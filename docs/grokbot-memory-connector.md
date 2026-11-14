@@ -1,5 +1,12 @@
 # Grok Bot memory connector pack
 
+> This profile is retired. Use `brigade hub connector setup --id cloud-agent`
+> with independent credentials. Enable messaging in its runtime only when needed.
+> Stop installed units with `systemctl --user disable --now brigade-grokbot-memory.service brigade-grokbot-memory-watch.service brigade-grokbot-memory-watch.timer`.
+> Preview unit-only cleanup with `brigade hub connector remove --id grokbot-memory --unit-dir <unit-directory>`. Add `--apply` to remove them. The legacy `run cloud grokbot pack remove` route also accepts `--unit-dir`.
+> Existing configuration, runtime, state and token files are retained.
+
+
 The `grokbot-memory` pack gives Grok Bot a read view of hub memory and a way to
 submit handoffs for review. It runs the Dot connector code under its own
 profile, like the [duet pack](duet-connector.md), and shares Dot's origin

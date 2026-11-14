@@ -352,24 +352,6 @@ def test_require_fleet_claim_under_a_relative_home_fails_cleanly(relative_home_w
     assert dispatched == []
 
 
-def test_grokbot_takes_no_claim_under_a_relative_home(relative_home_workspace, monkeypatch, no_requests):
-    from types import SimpleNamespace
-
-    from brigade import grokbot_jobs, grokbot_mcp
-
-    # `_fleet_acquire` swallows every exception, so record attempts instead of raising.
-    attempts: list[object] = []
-    monkeypatch.setattr(fleet_client, "acquire_claim", lambda *args, **kwargs: attempts.append(args))
-    monkeypatch.setattr(grokbot_jobs, "lease_claim_target", lambda *args: None)
-    owner = SimpleNamespace(
-        config=SimpleNamespace(target=relative_home_workspace, bot_id="bot", lease_seconds=60, instance="builder")
-    )
-    decision, target, from_row = grokbot_mcp.GrokbotAdapter._fleet_acquire(owner, "job", "lease", "holder", "session")
-    assert decision.granted is False and target is None and from_row is False
-    assert attempts == []
-    assert not no_requests
-
-
 def test_one_home_resolution_serves_the_section_and_its_token_files(tmp_path, monkeypatch, no_fleet_env):
     first, second = tmp_path / "first" / ".brigade", tmp_path / "second" / ".brigade"
     for home, label in ((first, "first"), (second, "second")):
@@ -461,59 +443,6 @@ def test_no_fleet_claim_never_resolves_a_claim_target(relative_home_workspace, m
 
     assert cli.main([*argv, "--no-fleet-claim"]) == 0
     assert dispatched == [1]
-
-
-@pytest.fixture
-def stored_lease(relative_home_workspace, monkeypatch, no_requests):
-    """A Grok Bot lease whose claim key was stored before the home turned relative, with an env hub."""
-    from types import SimpleNamespace
-
-    from brigade import grokbot_jobs
-
-    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", USER_HUB)
-    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", "fixture-node-credential")
-    monkeypatch.setattr(grokbot_jobs, "lease_claim_target", lambda *args: "stored-key")
-    calls: list[str] = []
-    for name in ("acquire_claim", "renew_claim", "release_claim", "report_external_event"):
-        monkeypatch.setattr(fleet_client, name, lambda *args, _name=name, **kwargs: calls.append(_name))
-    owner = SimpleNamespace(
-        config=SimpleNamespace(target=relative_home_workspace, bot_id="bot", lease_seconds=60, instance="builder")
-    )
-    owner._lease_target = lambda job_id, lease_id: grokbot_mcp_adapter()._lease_target(owner, job_id, lease_id)
-    return owner, calls
-
-
-def grokbot_mcp_adapter():
-    from brigade import grokbot_mcp
-
-    return grokbot_mcp.GrokbotAdapter
-
-
-def test_grokbot_never_acquires_a_stored_key_under_a_relative_home(stored_lease, no_requests):
-    owner, calls = stored_lease
-    decision, target, _from_row = grokbot_mcp_adapter()._fleet_acquire(owner, "job", "lease", "holder", "session")
-    assert decision.granted is False and target is None
-    assert calls == [] and not no_requests
-
-
-def test_grokbot_never_renews_a_stored_key_under_a_relative_home(stored_lease, no_requests):
-    owner, calls = stored_lease
-    decision = grokbot_mcp_adapter()._fleet_renew(owner, "job", "lease", "holder")
-    assert decision.granted is False
-    assert calls == [] and not no_requests
-
-
-@pytest.mark.parametrize("target", [None, "stored-key"], ids=["from-row", "explicit"])
-def test_grokbot_never_releases_a_stored_key_under_a_relative_home(stored_lease, no_requests, target):
-    owner, calls = stored_lease
-    grokbot_mcp_adapter()._fleet_release(owner, "job", "lease", "holder", target)
-    assert calls == [] and not no_requests
-
-
-def test_grokbot_never_reports_an_event_for_a_stored_key_under_a_relative_home(stored_lease, no_requests):
-    owner, calls = stored_lease
-    grokbot_mcp_adapter()._fleet_event(owner, "job", "lease", "session", "running")
-    assert calls == [] and not no_requests
 
 
 @pytest.mark.parametrize("operation", ["acquire", "renew", "release", "inspect"])

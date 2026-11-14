@@ -2,12 +2,12 @@
 
 The two settings are independent and live in different places:
 
-- ``work.mode`` in ``.brigade/config.json``: ``engineer`` (default) keeps the
+- ``work.mode`` in ``.brigade/config.json``: ``strict`` (default) keeps the
   verification loop: hooks route raw checks through ``brigade work verify run``
-  and the Stop gate wants a receipt. ``yolo`` keeps shared context (brief,
+  and the Stop gate wants a receipt. ``off`` keeps shared context (brief,
   recall, Fleet Hub messages, Memory Handoffs for durable knowledge) and drops verification
-  enforcement. Leak checks are unaffected, so a committed yolo setting is an
-  acceptable repository choice.
+  enforcement. ``observe`` enforces nothing either. Leak checks are unaffected,
+  so a committed off or observe setting is an acceptable repository choice.
 - Safety rails: on by default. They keep the content guard, secret and
   credential scanning, and pre-push publication checks. The opt-out lives only
   in a per-user record outside every repository (``rails_record_path``), keyed
@@ -16,7 +16,7 @@ The two settings are independent and live in different places:
   Guard policies and baselines are never touched.
 
 Every hook adapter reads the settings through this module. Readers fail safe:
-an unreadable or invalid config resolves to ``engineer``, and an unreadable or
+an unreadable or invalid config resolves to ``strict``, and an unreadable or
 invalid rails record leaves rails ``on``.
 """
 
@@ -34,17 +34,19 @@ from typing import Any
 from . import component_paths, localio
 from .config import (
     CONFIG_REL_PATH,
-    DEFAULT_WORK_MODE,
+    ABSENT_WORK_MODE,
     LEGACY_WORKSPACE_DIRNAMES,
     SUPPORTED_VERSIONS,
     WORK_MODES,
+    config_path,
     load_config,
     validate_work_mode,
     write_config,
 )
 
-MODE_ENGINEER = "engineer"
-MODE_YOLO = "yolo"
+MODE_STRICT = "strict"
+MODE_OBSERVE = "observe"
+MODE_OFF = "off"
 RAILS_STATES = ("on", "off")
 # Exit status of `brigade work rails check` when rails are off for the target.
 RAILS_OFF_EXIT = 3
@@ -73,7 +75,7 @@ def _work_settings_with_source(target: Path) -> tuple[dict[str, Any], Path | Non
         except (OSError, ValueError):
             return {}, path
         # Match load_config: a config with an unsupported version is invalid, so its
-        # settings must not switch anything off (engineer, rails on).
+        # settings must not switch anything off (strict, rails on).
         if not isinstance(data, dict) or data.get("version") not in SUPPORTED_VERSIONS:
             return {}, path
         work = data.get("work")
@@ -86,15 +88,92 @@ def _work_settings(target: Path) -> dict[str, Any]:
 
 
 def resolve_mode(target: Path) -> str:
-    """Return the persisted work mode, or ``engineer`` when unset or unreadable."""
+    """Return the persisted work mode, or ``strict`` when unset or unreadable."""
     try:
-        return validate_work_mode(_work_settings(target).get("mode", DEFAULT_WORK_MODE))
+        return validate_work_mode(_work_settings(target).get("mode", ABSENT_WORK_MODE))
     except ValueError:
-        return MODE_ENGINEER
+        return MODE_STRICT
 
 
-def is_yolo(target: Path) -> bool:
-    return resolve_mode(target) == MODE_YOLO
+def is_strict(target: Path) -> bool:
+    return resolve_mode(target) == MODE_STRICT
+
+
+def is_observe(target: Path) -> bool:
+    return resolve_mode(target) == MODE_OBSERVE
+
+
+def pin_explicit_mode(target: Path, *, errors: list[str] | None = None) -> str | None:
+    """Pin a readable, untracked keyless config without changing its behavior."""
+    _, path = _work_settings_with_source(target)
+    if path != config_path(target) or path.is_symlink():
+        return None
+    try:
+        original = path.read_bytes().decode("utf-8")
+        data = json.loads(original, object_pairs_hook=_unique_config_keys)
+        if not isinstance(data, dict) or data.get("version") not in SUPPORTED_VERSIONS:
+            return None
+        work = data.get("work", {})
+        if not isinstance(work, dict) or "mode" in work:
+            return None
+        tracked = subprocess.run(
+            ["git", "-C", str(target), "ls-files", "--error-unmatch", path.relative_to(target).as_posix()],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if tracked.returncode == 0:
+        return None
+    # Insert at the object boundary, preserving all existing bytes and key order.
+    end = len(original.rstrip()) - 1
+    value = '"work": {"mode": "strict"}'
+    nonempty = bool(data)
+    if "work" in data:
+        decoder = json.JSONDecoder()
+        pos = original.index("{") + 1
+        while True:
+            pos = _skip_json_space(original, pos)
+            key, pos = decoder.raw_decode(original, pos)
+            pos = _skip_json_space(original, pos) + 1  # colon
+            _, end = decoder.raw_decode(original, _skip_json_space(original, pos))
+            if key == "work":
+                end -= 1  # closing brace of work
+                break
+            pos = _skip_json_space(original, end) + 1  # comma
+        value = '"mode": "strict"'
+        nonempty = bool(work)
+    updated = original[:end] + ("," if nonempty else "") + value + original[end:]
+    try:
+        # Validate the edit before replacing the canonical file atomically.
+        expected = {**data, "work": {**work, "mode": MODE_STRICT}}
+        if json.loads(updated) != expected or path.read_bytes().decode("utf-8") != original:
+            return None
+        permissions = path.stat().st_mode & 0o777
+        localio.write_text_atomic(path, updated)
+        # The atomic writer creates an owner-only file; keep the config's own mode.
+        os.chmod(path, permissions)
+    except (OSError, ValueError) as exc:
+        if errors is not None:
+            errors.append(f"unable to pin work.mode: {exc}")
+        return None
+    return MODE_STRICT
+
+
+def _skip_json_space(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in " \t\r\n":
+        pos += 1
+    return pos
+
+
+def _unique_config_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate config key")
+        result[key] = value
+    return result
 
 
 def _case_insensitive_paths() -> bool:
@@ -302,21 +381,39 @@ def pre_push_hook_gated(target: Path) -> bool | None:
 def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
     """Doctor rows that state the mode and rails plainly."""
     mode = resolve_mode(target)
-    if mode == MODE_YOLO:
+    if mode == MODE_OFF:
         mode_detail = (
-            "yolo: shared context stays on (brief, recall, Fleet Hub, Memory Handoffs for durable knowledge); "
+            "off: shared context stays on (brief, recall, Fleet Hub, Memory Handoffs for durable knowledge); "
             "verification is not enforced and missing receipts are not reported; "
-            "`brigade work mode set engineer` restores the loop"
+            "`brigade work mode set strict` restores the loop"
         )
+    elif mode == MODE_OBSERVE:
+        mode_detail = "observe: checks are not enforced. Recording requires `brigade work verify run`"
     else:
-        mode_detail = "engineer: checks route through `brigade work verify run` and the Stop gate wants a receipt"
+        mode_detail = "strict: checks route through `brigade work verify run` and the Stop gate wants a receipt"
     checks = [("INFO", "work mode", mode_detail)]
-    settings = _work_settings(target)
-    if "mode" in settings:
+    from .observed_checks import recording_unavailable_reason
+
+    reason = recording_unavailable_reason(target) if mode == MODE_OBSERVE else None
+    if reason is not None:
+        checks.append(("WARN", "observed checks", f"recording unavailable: {reason}"))
+    settings, path = _work_settings_with_source(target)
+    readable = True
+    if path is not None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            readable = isinstance(data, dict) and data.get("version") in SUPPORTED_VERSIONS
+        except (OSError, ValueError):
+            readable = False
+    if not readable:
+        checks.append(("WARN", "work.mode", "config cannot be read or is unsupported; using strict"))
+    if readable and "mode" in settings:
         try:
             validate_work_mode(settings["mode"])
         except ValueError:
-            checks.append(("WARN", "work.mode", "invalid value ignored; using the engineer default"))
+            checks.append(("WARN", "work.mode", "invalid value ignored; using strict"))
+    if readable and "mode" not in settings:
+        checks.append(("INFO", "work.mode", "unpinned; use `brigade work mode set strict` to pin it"))
     ignored = ignored_repo_rails_note(target)
     if ignored is not None:
         checks.append(("WARN", "work.rails", ignored))

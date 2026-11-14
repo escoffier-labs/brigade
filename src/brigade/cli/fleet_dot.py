@@ -42,7 +42,7 @@ def dispatch(args: argparse.Namespace) -> int:
         if args.publish and args.holder_file is not None:
             if not (parsed.snapshot.cloud_context or {}).get("work_id"):
                 raise DotReportError("holder-file requires an explicit work_id")
-            from ..grokbot_mcp import ConfigurationError, load_hub_token_file
+            from ..dot.transport import ConfigurationError, load_hub_token_file
 
             try:
                 # Existing owner-private, no-follow descriptor reader. Never

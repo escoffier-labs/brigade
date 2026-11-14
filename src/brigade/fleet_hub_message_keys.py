@@ -57,6 +57,12 @@ def decode_binary(value: Any, size: int) -> bytes:
     return raw
 
 
+def fingerprint(sig_pub: bytes) -> str:
+    """Project a public signing key using the existing directory encoding."""
+    text = base64.b32encode(hashlib.sha256(sig_pub).digest()).decode("ascii").rstrip("=")
+    return "-".join(text[i : i + 4] for i in range(0, len(text), 4))
+
+
 def timestamp(value: Any) -> datetime:
     if (
         not isinstance(value, str)

@@ -447,6 +447,9 @@ def _replica_card(
         # What the hub's own read carries. A replica pulled before these were kept lacks them.
         **{name: head[name] for name in ("scan_state", "writer", "updated_at") if name in head},
     }
+    from .memory_card_reads import record_content
+
+    record_content(target, text, args.card_id)
     return {"ok": True, "card": card, "log_epoch": replica.meta.get("log_epoch"), "source": "replica"}
 
 

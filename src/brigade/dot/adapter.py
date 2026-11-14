@@ -108,7 +108,7 @@ class DotTools:
             runtime,
             state,
             clock,
-            runtime_profile(profile, runtime.dispatch_enabled),
+            runtime_profile(profile, runtime.dispatch_enabled, messaging_enabled=bool(runtime.messaging_enabled)),
         )
         self.fleet, self.hub, self.memory, self.inbox = fleet, hub, memory, inbox
         self.push = MemoryPush(
@@ -376,7 +376,7 @@ class DotTools:
 
 def build_tools(runtime: Runtime, profile: ConnectorProfile = DOT) -> tuple[DotTools, BridgeState, HubInbox]:
     require(runtime.schema == profile.runtime_schema, "invalid_config")
-    profile = runtime_profile(profile, runtime.dispatch_enabled)
+    profile = runtime_profile(profile, runtime.dispatch_enabled, messaging_enabled=bool(runtime.messaging_enabled))
     state = BridgeState(runtime.paths.state_dir)
     try:
         commands = CommandRunner()

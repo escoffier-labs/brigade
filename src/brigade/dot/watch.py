@@ -187,6 +187,9 @@ def read_bridge(
 
 
 def probe_route(config: DotListenerConfig, runtime: Runtime) -> list[str]:
+    if runtime.auth.mode == "token":
+        status, _ = _probe(_base(config) + "/mcp", method="POST")
+        return [] if status == 401 else ["origin"]
     verifier_base = runtime.auth.resource.rsplit("/", 1)[0]
     failed = []
     for name, url in (("origin", _base(config) + METADATA_PATH), ("edge", verifier_base + METADATA_PATH)):

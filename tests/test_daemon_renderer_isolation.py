@@ -14,19 +14,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from brigade import care_cmd, grokbot_ops, grokbot_pack_relay
+from brigade import care_cmd
+from brigade.dot import service_render as grokbot_ops
 
 RENDERERS = (
     "dot",
     "dot-watch",
-    "t3",
-    "t3-watch",
-    "t3-intake",
-    "ops",
-    "pack-relay",
-    "operations-relay",
-    "obsidian",
-    "fleet",
 )
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="systemd service renderers require POSIX")
 
@@ -47,23 +40,6 @@ def _render(name, target, python, monkeypatch):
         "upstream_key": {"kind": "env", "name": "TEST_UPSTREAM_KEY"},
         "staging_dir": str(target / "staging"),
     }
-    if name == "ops":
-        return grokbot_ops.render_unit(
-            {
-                "schema": grokbot_ops.CONFIG_SCHEMA,
-                "instance": "operator",
-                **{key: instance[key] for key in ("bind", "allowed_hosts", "allowed_origins", "bearer")},
-            },
-            python=python,
-            exec_root=target,
-        )
-    if name == "pack-relay":
-        monkeypatch.setattr(grokbot_pack_relay, "load_relay_config", lambda _: instance)
-        monkeypatch.setattr(grokbot_pack_relay, "_optional_instance", lambda *_: None)
-        out = target / "units"
-        out.mkdir()
-        paths = grokbot_pack_relay.write_relay_units(target, out, python=python)
-        return next(path.read_text() for path in paths if path.suffix == ".service")
     base = name.split("-", 1)[0]
     module = importlib.import_module(
         "brigade.dot.lifecycle"
@@ -78,10 +54,8 @@ def _render(name, target, python, monkeypatch):
         monkeypatch.setattr(module, "_load_config", lambda _, **__: None)
     else:
         monkeypatch.setattr(module, "_load_validated_instance", lambda _: instance)
-    if base in {"dot", "t3"}:
+    if base == "dot":
         monkeypatch.setattr(module, "load_runtime", lambda _, **__: SimpleNamespace())
-    if base == "t3":
-        monkeypatch.setattr(module, "_hardening", lambda _: "NoNewPrivileges=yes\n")
     method = "render_unit"
     if name.endswith("-watch"):
         method = "render_watch_units"
@@ -109,13 +83,7 @@ def test_service_argv_preserves_override_target_and_safe_workdir(renderer, relat
     assert argv[:3] == [python, "-I", "-c"]
     assert "\n" not in argv[3]
     assert Path(argv[4]).is_absolute() and Path(argv[4]).name == "__init__.py"
-    assert argv[5] == (
-        "brigade.dot"
-        if renderer == "dot-watch"
-        else "brigade.grokbot_t3"
-        if renderer in {"t3-watch", "t3-intake"}
-        else "brigade"
-    )
+    assert argv[5] == ("brigade.dot" if renderer == "dot-watch" else "brigade")
     assert argv[argv.index("--target") + 1] == str(target)
     cwd_lines = [
         line.removeprefix("WorkingDirectory=") for line in unit.splitlines() if line.startswith("WorkingDirectory=")
@@ -221,3 +189,25 @@ def test_care_scheduler_escapes_expansions_and_recovers_workspace(backend, tmp_p
     else:
         body = care_cmd._cron_command(entry, workspace=workspace)
     assert care_cmd._workspace_from_care_body(body) == workspace
+
+
+def test_shared_rendered_writer_preserves_files_and_refuses_overwrite(tmp_path):
+    from brigade.dot.rendered_files import _write_rendered
+
+    path = tmp_path / "example.service"
+    assert _write_rendered(path, "original\n", force=False) == path
+    assert _write_rendered(path, "original\n", force=False) == path
+    with pytest.raises(grokbot_ops.ServiceRenderError, match="refusing to overwrite"):
+        _write_rendered(path, "changed\n", force=False)
+    assert path.read_text() == "original\n"
+    _write_rendered(path, "changed\n", force=True)
+    assert path.read_text() == "changed\n"
+    target = tmp_path / "user-owned"
+    target.write_text("retained\n")
+    path.unlink()
+    path.symlink_to(target)
+    with pytest.raises(grokbot_ops.ServiceRenderError, match="refusing unsafe"):
+        _write_rendered(path, "new\n", force=False)
+    _write_rendered(path, "new\n", force=True)
+    assert not path.is_symlink()
+    assert target.read_text() == "retained\n"

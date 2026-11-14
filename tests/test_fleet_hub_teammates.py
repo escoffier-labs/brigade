@@ -87,7 +87,6 @@ def test_replayed_revocation_does_not_duplicate_removal_audit(mesh, principal):
 
 
 def test_teammate_directory_exposes_public_key_fingerprint_without_key_material(mesh):
-    from brigade.fleet_mesh_crypto import decode_binary, fingerprint
     from tests.test_fleet_hub_message_keys import publish, record
 
     conn, _ = mesh
@@ -95,7 +94,9 @@ def test_teammate_directory_exposes_public_key_fingerprint_without_key_material(
     publish(conn, value)
     page = messages.handle(conn, {"action": "who"}, caller="agent:guest")[1]
     node = next(row for row in page["nodes"] if row["node_id"] == "node-a")
-    assert node["keys"] == [{"kid": value["kid"], "fingerprint": fingerprint(decode_binary(value["sig_pub"], 32))}]
+    assert node["keys"] == [
+        {"kid": value["kid"], "fingerprint": "OLGW-5BBC-YQD7-W3IJ-Q2IP-CEYL-PXWX-5QXX-6XQ5-GC6Z-2UQ7-AFJW-G6JQ"}
+    ]
 
 
 @pytest.fixture

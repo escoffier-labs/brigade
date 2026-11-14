@@ -18,11 +18,28 @@ from .dispatching import dispatch
 from .phases import _register_phases
 
 
+def _check_days(value: str) -> int:
+    try:
+        days = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("days must be an integer from 0 to 365000") from None
+    if not 0 <= days <= 365000:
+        raise argparse.ArgumentTypeError("days must be an integer from 0 to 365000")
+    return days
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     # work
     p_work = sub.add_parser("work", help="Inspect and manage a daily Brigade work session.")
     work_sub = p_work.add_subparsers(dest="work_command", metavar="<work-command>")
     work_sub.required = True
+    p_checks = work_sub.add_parser("checks", help="Report observed first-pass checks.")
+    p_checks.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace to inspect.")
+    p_checks.add_argument("--since", type=_check_days, default=None, help="Include first attempts in the last N days.")
+    p_checks.add_argument(
+        "--group-by", choices=("harness", "model"), default="model", help="Group by harness or harness and model."
+    )
+    p_checks.add_argument("--json", action="store_true", help="Print brigade.work_checks.v1 JSON.")
     p_work_status = work_sub.add_parser("status", help="Show current repo and dogfood work state.")
     p_work_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_status.add_argument("--limit", type=int, default=12, help="Maximum dirty file entries to show.")
@@ -111,15 +128,14 @@ def register(sub: argparse._SubParsersAction) -> None:
             )
     p_work_mode = work_sub.add_parser(
         "mode",
-        help="Show or set the work-loop mode: engineer (default, verification on) or yolo (no verification enforcement).",
+        help="Show or set the work-loop mode: strict (default), observe or off. Aliases: engineer/enforced=strict, yolo=off.",
     )
     mode_sub = p_work_mode.add_subparsers(dest="mode_command", metavar="<mode-command>")
     mode_sub.required = True
     p_mode_show = mode_sub.add_parser("show", help="Print the work mode and safety-rails state.")
     p_mode_set = mode_sub.add_parser("set", help="Persist the work mode and reconcile managed Claude hooks.")
-    # No argparse choices: set_mode validates and also accepts "enforced", the earlier
-    # name for engineer, without listing it in help or invalid-choice errors.
-    p_mode_set.add_argument("mode", metavar="{engineer,yolo}")
+    # No argparse choices: set_mode accepts legacy aliases and lists canonical names.
+    p_mode_set.add_argument("mode", metavar="{strict,observe,off}")
     p_work_rails = work_sub.add_parser(
         "rails", help="Show or switch safety rails (content guard and pre-push scanning); independent of the mode."
     )

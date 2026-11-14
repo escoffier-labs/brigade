@@ -361,7 +361,7 @@ def _merged_config(target: Path, selection: Selection, *, work_mode: str | None 
         existing = None
     merged = Config(version=1, selection=selection) if existing is None else existing
     merged = dataclasses.replace(merged, version=1, selection=selection)
-    # None keeps a recorded mode; `brigade init --yolo` passes "yolo" and `--engineer` passes "engineer" (#2233).
+    # None preserves the recorded mode; explicit flags select canonical values.
     return merged if work_mode is None else dataclasses.replace(merged, work_mode=work_mode)
 
 
@@ -526,14 +526,15 @@ def install_selection(
         )
         from .work_mode import resolve_mode
 
-        if resolve_mode(target) == "yolo":
-            print("Agent: yolo work mode - verification is not enforced here -")
+        mode = resolve_mode(target)
+        if mode in {"off", "observe"}:
+            print(f"Agent: {mode} work mode - verification is not enforced here -")
             print("  1. `brigade work brief --target .`                                  (see pending work)")
             print("  2. run checks directly; `brigade work verify run` still records a receipt when you want one")
             print(
                 "  3. write a Memory Handoff only if the session learned something durable, else end with `Nothing durable: <reason>`."
             )
-            print("  `brigade work mode set engineer` restores the verification loop.")
+            print("  `brigade work mode set strict` restores the verification loop.")
         else:
             print("Agent: each work session, follow the `brigade-work` skill -")
             print("  1. `brigade work brief --target .`                                  (see pending work)")

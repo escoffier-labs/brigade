@@ -84,12 +84,11 @@ Generated agent instructions and CLI suggestions still use `brigade`. On a bridg
 | --- | --- |
 | **Codex, Claude Code, Cursor, OpenCode** | Workspace instructions, handoff inboxes, and tool and skill configuration. Hooks vary by tool. |
 | **T3 Code** | Remote execution and session visibility. Full child-task governance is in progress. |
-| **Grok Bot** | Role-scoped connector packs for bounded jobs. |
 | **OpenClaw, Hermes** | Memory-owner workflows, writer handoffs, and memory care. |
 | **Dot** | Memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
 | **Duet** | Memory, skills, Hub messaging, and read-only fleet views. |
 
-Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), [Duet guide](docs/duet-connector.md), and [Grok Bot memory guide](docs/grokbot-memory-connector.md).
+Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), [Duet guide](docs/duet-connector.md), and [generic connector guide](docs/duet-connector.md#generic-cloud-agent-profile).
 
 ## MCP servers
 
@@ -111,7 +110,7 @@ brigadestack skills serve-mcp --stdio
 - **Parallel workers.** Dispatch ready tasks into separate worktrees, supervise them, and keep results for review.
 - **Memory reflection.** Evidence-backed consolidation proposals for review. Automatic apply is off by default. A hub policy can turn it on, behind further gates, for two low-risk operations: appending evidence and merging exact duplicates.
 - **Run patrol.** Detects local lane states and offers explicit repair actions.
-- **In progress:** [fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121), [governed T3 delegation](https://github.com/escoffier-labs/brigade/issues/2046), [cross-repository campaigns](https://github.com/escoffier-labs/brigade/issues/1128), and the [agent mesh](docs/phase-agent-mesh.md).
+- **In progress:** [fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121), [governed T3 delegation](https://github.com/escoffier-labs/brigade/issues/2046), [cross-repository campaigns](https://github.com/escoffier-labs/brigade/issues/1128).
 
 ## Reference
 

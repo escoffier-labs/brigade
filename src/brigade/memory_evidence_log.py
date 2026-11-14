@@ -94,6 +94,16 @@ def append_evidence(
     data = io.json_bytes(row)
     if len(data) > MAX_LINE_BYTES:
         raise ValueError("evidence log line size limit exceeded")
+    append_log_row(target, data)
+
+
+def append_log_row(target: Path, data: bytes) -> None:
+    """Append an evidence or retraction row using the shared safe writer."""
+    from .memory_log_retractions import retraction
+
+    row = json.loads(data)
+    if len(data) > MAX_LINE_BYTES or not data.endswith(b"\n") or not (_valid(row) or retraction(row)):
+        raise ValueError("invalid evidence log row")
     path = target / LOG_PATH
     with io.directory(path.parent, create=True, private=True) as parent:
         fd = os.open(
@@ -452,7 +462,9 @@ def read_evidence(target: Path) -> tuple[list[dict[str, Any]], int, bool]:
     if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         return [], 0, True
     path = target / LOG_PATH
-    rows: list[dict[str, Any]] = []
+    from .memory_log_retractions import active, retraction
+
+    rows: list[tuple[dict[str, Any], bytes]] = []
     warnings = 0
     try:
         with io.directory(path.parent) as parent:
@@ -488,17 +500,17 @@ def read_evidence(target: Path) -> tuple[list[dict[str, Any]], int, bool]:
                         continue
                     try:
                         row = json.loads(line)
-                        if not _valid(row):
+                        if not (_valid(row) or retraction(row)):
                             raise ValueError("invalid evidence log row")
                     except (ValueError, UnicodeError, RecursionError):
                         warnings += 1
                         continue
-                    rows.append(row)
+                    rows.append((row, line))
     except FileNotFoundError:
         pass
     except (OSError, ValueError):
         warnings += 1
-    return rows, warnings, False
+    return active(rows), warnings, False
 
 
 class EvidenceLog:

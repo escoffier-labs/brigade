@@ -24,6 +24,7 @@ from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
 from . import (
     anchored_io,
+    check_events,
     compaction_marker,
     dependencies,
     envelope,
@@ -35,7 +36,12 @@ from . import (
     write_attribution,
 )
 from .fingerprint import repo_worktree_fingerprint
-from .handoff_close import closes_nothing_durable as _closes_nothing_durable, handoff_stop_note as _handoff_stop_note
+from .handoff_close import (
+    closes_nothing_durable as _closes_nothing_durable,
+    handoff_since as _handoff_since,
+    handoff_stop_note as _handoff_stop_note,
+    handoff_stop_record as _handoff_stop_record,
+)
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
 from .session_state import (
@@ -1976,10 +1982,12 @@ def _normalize_state(
         # State written by an earlier dispatched task under the same reused
         # session id. ``write_observed`` must be re-earned by this task's own
         # writes and another task's repo graph must not re-arm this task's
-        # stop gate (#992). Only the brief marker survives: the session id
-        # already received its once-per-repo brief injection.
+        # stop gate (#992). The brief marker and bounded identity survive.
+        # The session already received its once-per-repo brief injection.
         normalized["briefed"] = payload.get("briefed") is True
+        check_events.restore_identity(normalized, payload)
         return normalized
+    check_events.restore_identity(normalized, payload)
     now = localio.utc_now()
     started = localio.parse_iso_datetime(payload.get("started_at"))
     if started is not None and started <= now:
@@ -2060,22 +2068,6 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
     if drifted and session_id:
         earliest = min(drifted)
         if _foreign_write_since(target, session_id, earliest, session_fingerprint=session_fingerprint):
-            return True
-    return False
-
-
-def _handoff_since(target: Path, started_at: object) -> bool:
-    started = localio.parse_iso_datetime(started_at)
-    if started is None:
-        return False
-    for path in (p for inbox in handoff_worktrees.handoff_inboxes(target) for p in inbox.glob("*.md")):
-        if path.name == "TEMPLATE.md":
-            continue
-        try:
-            modified = path.stat().st_mtime
-        except OSError:
-            continue
-        if modified >= started.timestamp():
             return True
     return False
 
@@ -2249,6 +2241,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
     hub_recall.start_event(_hook_timeout_seconds())  # recall gets only what the brief leaves (S24)
     pin = pin if pin is not None else _hook_pin_from_env()
     result = write_attribution.handle_event(event, payload, pin=pin)
+    check_events.after_handling(event, payload, pin=pin)
     # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
     # It only gets what the event left of the hook budget, so a slow brief still
     # returns its claim path to the parent before the outer timeout kills the worker.
@@ -2370,7 +2363,7 @@ def _handle_event(
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        if not is_raw_verification(command) or verification_mode.verification_in_yolo(
+        if not is_raw_verification(command) or not verification_mode.verification_enforced(
             command, payload.get("cwd"), target
         ):
             return None
@@ -2480,33 +2473,7 @@ def _handle_event(
         return None
 
     if event == "PostToolUseFailure":
-        raw_tool_input = payload.get("tool_input")
-        tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
-        command = tool_input.get("command")
-        verifier = is_raw_verification(command) or _is_routed_verify(command)
-        if (
-            payload.get("tool_name") == "Bash"
-            and verifier
-            and not verification_mode.verification_in_yolo(command, payload.get("cwd"), target)
-        ):
-            from .. import outcome_cmd
-
-            capture_id = outcome_cmd.resolve_capture_artifact_id(
-                _parse_capture_flag(command),
-                state.get("exercised_artifact_id") if isinstance(state.get("exercised_artifact_id"), str) else None,
-            )
-            return _additional_context(
-                "PostToolUseFailure",
-                "",
-                target=target,
-                session_id=session_id,
-                records=[
-                    "The failed or rejected verification must remain recorded in Brigade before retrying. "
-                    "Inspect the receipt, fix the cause, then rerun through "
-                    f"`brigade work verify run --capture {capture_id}`.",
-                ],
-            )
-        return None
+        return check_events.failure_followup(payload, target, session_id, state)
 
     if event == "Stop":
         if payload.get("stop_hook_active") is True:
@@ -2514,7 +2481,7 @@ def _handle_event(
         blocking_failures: list[str] = []
         shared_tree_notes: list[str] = []
         handoff_target: Path | None = None
-        handoff_verified = True
+        unverified_handoff: Path | None = None
         context_target: Path | None = None
         closed_without_handoff = _closes_nothing_durable(payload)
         for stop_target in _stop_targets(payload, session_id, task_epoch=task_epoch):
@@ -2526,10 +2493,10 @@ def _handle_event(
             )
             if not stop_state.get("write_observed"):
                 continue
-            if work_mode.is_yolo(stop_target):
-                # Yolo drops the receipt gate but keeps the handoff note: memory still matters.
-                if not _handoff_since(stop_target, stop_state.get("started_at")):
-                    handoff_target, handoff_verified = stop_target, False
+            if not work_mode.is_strict(stop_target):
+                # observe and off skip the receipt gate but keep the handoff note; strict targets win.
+                if handoff_target is None and not _handoff_since(stop_target, stop_state.get("started_at")):
+                    handoff_target = unverified_handoff = stop_target
                 continue
             fingerprint = stop_state.get("session_fingerprint")
             if not isinstance(fingerprint, str):
@@ -2549,7 +2516,7 @@ def _handle_event(
                     )
                     context_target = stop_target
                     if not _handoff_since(stop_target, stop_state.get("started_at")):
-                        handoff_target, handoff_verified = stop_target, True
+                        handoff_target = stop_target
                     continue
                 exercised = stop_state.get("exercised_artifact_id")
                 replacement = _verify_replacement(
@@ -2560,7 +2527,7 @@ def _handle_event(
                 )
                 blocking_failures.append(f"{stop_target}: run `{replacement}`")
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
-                handoff_target, handoff_verified = stop_target, True
+                handoff_target = stop_target
         if blocking_failures:
             return {
                 "decision": "block",
@@ -2592,11 +2559,7 @@ def _handle_event(
                 "",
                 target=handoff_target,
                 session_id=session_id,
-                records=[
-                    f"Verification is recorded. {_handoff_stop_note(handoff_target)}"
-                    if handoff_verified
-                    else _handoff_stop_note(handoff_target)
-                ],
+                records=[_handoff_stop_record(handoff_target, verified=handoff_target != unverified_handoff)],
             )
     return None
 

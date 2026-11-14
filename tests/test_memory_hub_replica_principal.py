@@ -17,7 +17,7 @@ from tests.test_memory_hub_client import (  # noqa: F401
     workspace,
 )
 
-PINNED = "agent:grokbot-memory"
+PINNED = "agent:cloud-agent"
 
 
 @pytest.fixture
@@ -56,6 +56,9 @@ def test_search_with_a_pin_for_the_pulling_principal_still_serves_it(hub, pulled
 def test_card_with_a_pin_for_another_principal_has_no_replica_fallback(hub, pulled, capsys, monkeypatch):  # noqa: F811
     code, payload, _ = _card_x(pulled, capsys)
     assert code == 0 and payload["source"] == "replica"
+    from brigade import memory_card_reads
+
+    assert memory_card_reads.load(pulled).last_read
     monkeypatch.setenv(hubc.ENV_REPLICA_PRINCIPAL, PINNED)
     code, payload, output = _card_x(pulled, capsys)
     assert code == 1 and payload.get("hub") == "unavailable"
@@ -66,3 +69,6 @@ def test_card_with_a_pin_for_the_pulling_principal_still_serves_it(hub, pulled, 
     monkeypatch.setenv(hubc.ENV_REPLICA_PRINCIPAL, "node-1")
     code, payload, _ = _card_x(pulled, capsys)
     assert code == 0 and payload["source"] == "replica"
+    from brigade import memory_card_reads
+
+    assert memory_card_reads.load(pulled).last_read

@@ -1,5 +1,10 @@
 # Dot connector pack
 
+> Retired queue listeners: removal messages keep the bare-unit disable command and
+> show separate stop and list commands for client-scoped units. Inspect the listed
+> concrete unit names before disabling them. Quoted patterns work with `stop` and
+> `list-unit-files`, but `disable --now` requires concrete names.
+
 The dot pack connects a ChatGPT dot to T3 fleet dispatch, Brigade memory,
 and the Fleet Hub inbox. It exposes 32 closed tool contracts. Its default bind
 is `127.0.0.1:8779`. Its registry `public_route` is empty. Configure a dedicated
@@ -94,7 +99,7 @@ one with `message_send`.
 
 ## Setup and service units
 
-Install the MCP SDK with `pip install brigade-cli[grokbot]`. The listener also
+Install the MCP SDK with `pip install brigade-cli[connector]` (the `grokbot` extra remains an alias during the removal window). The listener also
 requires `uvicorn` and `PyJWT[crypto]` in its Python environment.
 Prepare the runtime, enrolled Hub credential, and private state directory first.
 Use `--id dot` for pack commands, matching the other registered packs.

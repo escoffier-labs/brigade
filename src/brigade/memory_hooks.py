@@ -334,6 +334,15 @@ def _recall_cards_payload_impl(
             }
         )
     matches = memory_hook_hub.without_ids(matches, excluded)[:capped]
+    if query_source not in QUERY_TEXT_SOURCES:
+        try:
+            from . import memory_card_reads, memory_cmd
+
+            memory_card_reads.record(
+                memory_root, memory_cmd._search_log_card_ids(matches) + memory_cmd._search_log_aliases(matches)
+            )
+        except Exception:  # noqa: BLE001 - read accounting must not fail recall
+            pass
     if query_source in QUERY_TEXT_SOURCES:
         memory_recall_log.record_recall(memory_root, query=query, query_source=query_source, matches=matches)
     if audience is not None:

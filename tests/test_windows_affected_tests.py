@@ -28,17 +28,17 @@ def test_added_modified_deleted_and_empty(tmp_path):
 @pytest.mark.parametrize(
     "statement",
     [
-        "import brigade.grokbot_t3.ledger as ledger",
-        "from brigade.grokbot_t3.ledger import read",
-        "from brigade.grokbot_t3 import ledger",
-        "import brigade.grokbot_t3",
-        "from brigade import grokbot_t3",
+        "import brigade.dot.fleet_runner as ledger",
+        "from brigade.dot.fleet_runner import read",
+        "from brigade.dot import fleet_runner",
+        "import brigade.dot",
+        "from brigade import dot",
     ],
 )
 def test_module_imports_and_parent_packages(tmp_path, statement):
     write(tmp_path, "tests/test_match.py", statement)
     write(tmp_path, "tests/test_other.py", "import brigade.other")
-    assert selector.select_tests(tmp_path, ["src/brigade/grokbot_t3/ledger.py"]) == ["test_match.py"]
+    assert selector.select_tests(tmp_path, ["src/brigade/dot/fleet_runner.py"]) == ["test_match.py"]
 
 
 def test_package_init_and_deleted_module_still_select_importers(tmp_path):
@@ -97,7 +97,7 @@ def test_git_diff_cli_uses_explicit_base_and_head(tmp_path):
 
 def test_named_root_import_does_not_select_unrelated_siblings(tmp_path):
     write(tmp_path, "tests/test_cli.py", "from brigade import cli")
-    write(tmp_path, "tests/test_parent.py", "import brigade.grokbot_t3")
+    write(tmp_path, "tests/test_parent.py", "import brigade.dot")
     write(tmp_path, "tests/test_roster.py", "from brigade import roster")
     assert selector.select_tests(tmp_path, ["src/brigade/roster.py"]) == ["test_roster.py"]
 

@@ -1,7 +1,8 @@
 import json
 from datetime import datetime, timezone
 
-from brigade import center_cmd, cli, grokbot_jobs
+from brigade import center_cmd, cli
+from tests import legacy_job_seed as grokbot_jobs
 
 
 def _write_command_inventory(path):

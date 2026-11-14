@@ -24,6 +24,31 @@ def handoff_stop_note(target: Path) -> str:
     return HANDOFF_STOP_NOTE.replace(_OWN_INBOX, handoff_worktrees.stop_hint(target), 1)
 
 
+def handoff_stop_record(target: Path, *, verified: bool) -> str:
+    """The Stop record for ``target``; strict targets also say verification is recorded."""
+    note = handoff_stop_note(target)
+    return f"Verification is recorded. {note}" if verified else note
+
+
+def handoff_since(target: Path, started_at: object) -> bool:
+    """Whether a handoff (other than TEMPLATE.md) landed in ``target``'s inboxes since ``started_at``."""
+    from .. import handoff_worktrees, localio
+
+    started = localio.parse_iso_datetime(started_at)
+    if started is None:
+        return False
+    for path in (p for inbox in handoff_worktrees.handoff_inboxes(target) for p in inbox.glob("*.md")):
+        if path.name == "TEMPLATE.md":
+            continue
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            continue
+        if modified >= started.timestamp():
+            return True
+    return False
+
+
 def closes_nothing_durable(payload: dict[str, Any]) -> bool:
     """True when the final assistant line is a ``Nothing durable: <reason>`` close.
 
