@@ -12,6 +12,7 @@ from brigade.instruction_sections import (
     parse,
     pointer_spans,
     whole_section_count,
+    whole_section_spans,
 )
 
 POINTER = (
@@ -184,3 +185,11 @@ def test_managed_blocks_are_the_outermost_marker_to_marker_spans():
     other = b"<!-- BEGIN BRIGADE X v:1 profile:full hash:ab -->\nx\n<!-- END BRIGADE X -->\n"
     assert managed_blocks(b"## A\n" + block + b"text\n" + other) == (block, other)
     assert managed_blocks(b"## A\ntext\n") == ()
+
+
+def test_whole_section_spans_give_each_match_location():
+    one, two = b"## A\nx\n", b"## B\ny\n"
+    doc = parse(b"# T\n\n" + one + two + b"## C\nz\n")
+    assert whole_section_spans(doc, one + two) == ((5, 5 + len(one + two)),)
+    assert whole_section_spans(doc, b"## C\nz\n") == ((5 + len(one + two), len(doc.data)),)
+    assert whole_section_spans(doc, b"nope") == ()

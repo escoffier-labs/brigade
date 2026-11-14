@@ -252,12 +252,13 @@ def pointer_spans(data: bytes) -> tuple[PointerSpan, ...]:
     )
 
 
-def whole_section_count(doc: SectionDocument, body: bytes) -> int:
-    """How many times `body` equals the bytes from one unit's start to a later or the same unit's end, with
-    no gap between the spans. A substring, text inside a fence and text that runs past a unit's end never count."""
+def whole_section_spans(doc: SectionDocument, body: bytes) -> tuple[tuple[int, int], ...]:
+    """The `(start, end)` of every place where `body` equals the bytes from one unit's start to a later or the
+    same unit's end, with no gap between the spans. A substring, text inside a fence and text that runs past
+    a unit's end never match."""
     if not body:
-        return 0
-    count = 0
+        return ()
+    found: list[tuple[int, int]] = []
     units = doc.units
     for first, unit in enumerate(units):
         if not doc.data.startswith(body, unit.start):
@@ -267,8 +268,13 @@ def whole_section_count(doc: SectionDocument, body: bytes) -> int:
         while units[last].end < stop and last + 1 < len(units) and units[last].end == units[last + 1].start:
             last += 1
         if units[last].end == stop:
-            count += 1
-    return count
+            found.append((unit.start, stop))
+    return tuple(found)
+
+
+def whole_section_count(doc: SectionDocument, body: bytes) -> int:
+    """How many times `body` is a whole section run of `doc` (see `whole_section_spans`)."""
+    return len(whole_section_spans(doc, body))
 
 
 def heading_lines(data: bytes) -> tuple[bytes, ...]:

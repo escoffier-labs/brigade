@@ -14,6 +14,7 @@ from datetime import date
 from .guard.engine import scan_text
 from .guard.types import ScanOptions
 from .instruction_overflow import card_trust_problem
+from .instruction_reconcile import card_body
 from .instruction_sections import (
     POINTER_LINE,
     SectionDocument,
@@ -315,14 +316,6 @@ def card_bytes(
     return ("\n".join(lines) + "\n").encode("utf-8") + section
 
 
-def _card_body(card: bytes, section: bytes) -> bool:
-    """Whether `card` is one frontmatter block followed by exactly `section`."""
-    if not card.endswith(section) or not card.startswith(b"---\n"):
-        return False
-    head = card[: len(card) - len(section)].split(b"\n")[:-1]
-    return head[-1:] == [b"---"] and all(line.strip() != b"---" for line in head[1:-1])
-
-
 def _plan_date(plan: TrimPlan) -> date | None:
     for pointer in (*(run.pointer for run in plan.runs), *(added.data for added in plan.added)):
         found = _POINTER_DATE.search(pointer)
@@ -379,7 +372,7 @@ def check(plan: TrimPlan, cards: Mapping[str, bytes], *, config_pins: tuple[str,
     cards_ok = True
     for run in plan.runs:
         card = cards.get(run.card_rel)
-        if card is None or not _card_body(card, before[run.start : run.end]):
+        if card is None or card_body(card) != before[run.start : run.end]:
             cards_ok = False
             continue
         try:
