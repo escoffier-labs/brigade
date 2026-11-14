@@ -1208,6 +1208,10 @@ jobs:
           BRIGADE_EXTRAS: "1"
       - name: Template Audit
         run: brigade security template-audit --target . --json
+      # Ungated, so a documentation-only diff cannot add a retired engine name
+      # that the pytest ratchet would only reject on the next code PR.
+      - name: Retired Engine Names
+        run: python3 scripts/retired_engine_names.py
 
   changelog-fragments:
     runs-on: ubuntu-latest

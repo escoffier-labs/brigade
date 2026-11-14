@@ -540,6 +540,19 @@ runs in the window (the failed one in the `all` view, the retry in either
 view), not in `reruns` or `runner_minutes_all_attempts`, which count Actions
 re-runs of the same run id only.
 
+### Changelog fragments count as documentation
+
+Every pull request with a user-visible effect must add a changelog fragment,
+`changelog.d/<name>.md`. Until this change the docs classifier rejected that
+path, so a documentation pull request carrying its required fragment ran the
+full suite (for example #2543, 36 jobs). The classifier now accepts a fragment
+as documentation when it sits directly in `changelog.d/`, ends in `.md` and has
+no leading dot. A fragment is inert prose that only the release cut reads, and
+it still needs mode 100644 like any other documentation file. The
+`changelog-fragments` job keeps running on every diff and validates the file.
+Merge groups load the classifier from `main`, so the rule applies to a pull
+request only after this change has merged.
+
 ### Review gates and account identity
 
 Agents in this repository open pull requests and push from the maintainer's
