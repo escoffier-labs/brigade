@@ -1,6 +1,6 @@
 # Memory Care
 
-Brigade memory care is a local, read-only scanner for durable memory cards. It detects cards that need review, writes a refresh queue, and routes review tasks into the existing work inbox.
+Brigade memory care scans durable memory cards and tends them. The scan is local and read-only. It detects cards that need review, writes a refresh queue, and routes review tasks into the existing work inbox. Tending then applies an allowlist of derived fixes, archives eligible cards and drains the review inbox. Every automatic change is recorded with undo. See [Safe Fix Planning](#safe-fix-planning), [Boundary](#boundary) and [Tending](#tending).
 
 ## Commands
 
@@ -268,7 +268,7 @@ Ingest appends body-free near-match, opposite-polarity, and reinforcement record
 
 Contradiction detection is deliberately conservative. Brigade only flags explicit duplicate card identities or metadata hints, not LLM-inferred factual conflicts.
 
-`status` and JSON output summarize freshness metadata coverage: reviewed dates present, missing, and stale, freshness dates present, missing, and expired, confidence distribution, and evidence metadata present or missing. These checks only explain review needs. Brigade does not edit memory cards automatically.
+`status` and JSON output summarize freshness metadata coverage: reviewed dates present, missing, and stale, freshness dates present, missing, and expired, confidence distribution, and evidence metadata present or missing. These checks only explain review needs. `status` and `scan` do not edit memory cards. Automatic edits come only from tending, described below.
 
 `status` reports `archive_candidates` schema 2 from the latest tend result, without walking the card tree. It reports use-and-subject retirement candidates, `approval_required=false` and whether tending is enabled. Status itself never writes or archives cards.
 

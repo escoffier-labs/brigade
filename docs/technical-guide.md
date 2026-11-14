@@ -166,7 +166,7 @@ work alongside migration of the three existing GitHub read implementations.
 
 ### Grok Bot local job queue
 
-Removed in 0.32.0. The local queue and its worker paths no longer ship. `brigade run cloud grokbot enqueue`, `claim`, `status` and `reconcile-reports` print migration guidance and exit 2. Use `brigade hub connector setup --id cloud-agent` with independent credentials. See [Generic cloud-agent profile](duet-connector.md#generic-cloud-agent-profile).
+Removed in 0.32.0. The local queue and its worker paths no longer ship. `brigade run cloud grokbot enqueue`, `claim`, `status`, `reconcile-reports` and the other queue commands print migration guidance and exit 2. Use `brigade hub connector setup --id cloud-agent` with independent credentials. See [Generic cloud-agent profile](duet-connector.md#generic-cloud-agent-profile).
 
 For a remote T3 controller journal already available locally, configure an alias and a repo-relative journal path in `.brigade/center/agent-activity-sources.json`:
 
