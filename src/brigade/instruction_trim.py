@@ -1,0 +1,544 @@
+"""Plan the moves for an append-class instruction file, build the card bytes and run the offline checks.
+
+Pure functions over bytes. No function reads a file, the clock or the environment. The caller passes
+the date, the decision id and every set the plan depends on (see the slice 2 plan, "Planner decisions").
+"""
+
+from __future__ import annotations
+
+import functools
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date
+
+from .guard.engine import scan_text
+from .guard.types import ScanOptions
+from .instruction_overflow import card_trust_problem
+from .instruction_reconcile import card_body
+from .instruction_sections import (
+    FILE_KEY,
+    KEEP,
+    KEEP_UNTIL,
+    POINTER_LINE,
+    SectionDocument,
+    Unit,
+    heading_lines,
+    html_balanced,
+    managed_blocks,
+    parse,
+    pointer_spans,
+)
+
+CARD_OVERHEAD = 512
+SLUG_MAX = 48
+POINTER_MAX = 240
+CARD_DIR = "memory/cards/instructions/"
+# Reasons that mean the file is left exactly as it was.
+_UNCHANGED = frozenset({"within", "unbalanced-markers", "not-utf8", "pinned-heading-missing", "unsafe-key"})
+_REASONS = _UNCHANGED | {None, "nothing-movable", "still-over-after-moves"}
+_NON_SLUG = re.compile(r"[^a-z0-9]+")
+# Card frontmatter values. A card name is a slug of at most 48 characters plus a `-<n>` name number, and the
+# card id is the form `card_identity.mint_card_id` makes. `fullmatch` is used throughout: `$` would let a
+# trailing newline through.
+_CARD_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+_CARD_SLUG_MAX = SLUG_MAX + 4
+_DECISION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[a-z]{1,24}-[0-9a-f]{8}")
+_FRESH_UNTIL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_CARD_ID = re.compile(r"card-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+@dataclass(frozen=True)
+class Limits:
+    limit: int
+    act_at: int
+    trim_to: int
+
+
+@dataclass(frozen=True)
+class Run:
+    units: tuple[int, ...]  # indexes into doc.units, adjacent, in file order
+    start: int
+    end: int
+    slug: str  # the card's file stem after `<file-key>--`, so it ends in `-<n>` when the name was taken
+    card_rel: str
+    pointer: bytes  # pointer_line (ends in "\n") plus one more "\n"
+
+
+@dataclass(frozen=True)
+class AddedPointer:
+    card_rel: str
+    data: bytes  # the pointer line appended at the end, ending in its "\n"
+    separator: bool  # a "\n" was added before this pointer because the file did not end in one
+    # (only ever the first added pointer, row W29)
+
+
+@dataclass(frozen=True)
+class TrimPlan:
+    before: bytes
+    after: bytes
+    runs: tuple[Run, ...]  # in file order
+    added: tuple[AddedPointer, ...]
+    reason: str | None  # "within" | "nothing-movable" | "still-over-after-moves"
+    # | "unbalanced-markers" | "not-utf8" | "pinned-heading-missing" | None
+    skipped: tuple[tuple[int, str], ...]  # (unit index, "pinned" | "held" | "secret" | "blocked"
+    # | "too-large-for-card" | "small-run")
+
+
+def slug(heading: bytes) -> str:
+    """A card name part from a heading: `[a-z0-9-]` only, at most 48 characters, never empty, never `overflow...`."""
+    text = heading.decode("utf-8", "replace").lstrip().lstrip("#").lower()
+    name = _NON_SLUG.sub("-", text).strip("-") or "section"
+    if name.startswith("overflow"):
+        name = "section-" + name
+    return name[:SLUG_MAX].strip("-")
+
+
+def card_rel(file_key: str, slug: str, n: int) -> str:
+    return f"{CARD_DIR}{file_key}--{slug}{'' if n == 1 else f'-{n}'}.md"
+
+
+def pointer_line(card_rel: str, *, today: date, decision_id: str, overflow: bool = False) -> bytes:
+    kind = "Overflow in" if overflow else "Moved to"
+    return f"- {kind} memory {today.isoformat()}: {card_rel} (undo: {decision_id})\n".encode()
+
+
+def order_units(doc: SectionDocument) -> tuple[int, ...]:
+    """Units that are mostly links from the last to the first, then every other unit from the last to the first."""
+    indexes = range(len(doc.units) - 1, -1, -1)
+    return (*(i for i in indexes if doc.units[i].links), *(i for i in indexes if not doc.units[i].links))
+
+
+def _pin_active(unit: Unit, today: date) -> bool:
+    if unit.pin is None:
+        return False
+    if unit.pin == "marker":
+        return True
+    return date.fromisoformat(unit.pin.removeprefix("until:")) >= today
+
+
+def _config_pinned(unit: Unit, wanted: frozenset[bytes]) -> bool:
+    return any(heading.rstrip() in wanted for heading in unit.headings)
+
+
+def _groups(doc: SectionDocument, indexes: Sequence[int], cap: int) -> list[tuple[int, ...]]:
+    """Maximal groups of chosen units whose spans touch, split before a unit that would pass the card cap."""
+    groups: list[list[int]] = []
+    for index in sorted(indexes):
+        unit = doc.units[index]
+        if groups:
+            first, last = doc.units[groups[-1][0]], doc.units[groups[-1][-1]]
+            if last.end == unit.start and unit.end - first.start <= cap:
+                groups[-1].append(index)
+                continue
+        groups.append([index])
+    return [tuple(group) for group in groups]
+
+
+def _runs(
+    doc: SectionDocument,
+    groups: Sequence[tuple[int, ...]],
+    *,
+    file_key: str,
+    today: date,
+    decision_id: str,
+    taken: frozenset[str],
+) -> tuple[Run, ...]:
+    used = set(taken)
+    runs = []
+    for group in groups:
+        base = slug(doc.units[group[0]].heading)
+        number = 1
+        while card_rel(file_key, base, number).rsplit("/", 1)[1] in used:
+            number += 1
+        rel = card_rel(file_key, base, number)
+        used.add(rel.rsplit("/", 1)[1])
+        pointer = pointer_line(rel, today=today, decision_id=decision_id) + b"\n"
+        runs.append(
+            Run(
+                units=group,
+                start=doc.units[group[0]].start,
+                end=doc.units[group[-1]].end,
+                slug=rel.removeprefix(f"{CARD_DIR}{file_key}--").removesuffix(".md"),
+                card_rel=rel,
+                pointer=pointer,
+            )
+        )
+    return tuple(runs)
+
+
+def _replace(data: bytes, runs: Sequence[Run]) -> bytes:
+    out: list[bytes] = []
+    cursor = 0
+    for run in runs:
+        out += [data[cursor : run.start], run.pointer]
+        cursor = run.end
+    out.append(data[cursor:])
+    return b"".join(out)
+
+
+def _with_pointers(
+    body: bytes,
+    overflow: Sequence[str],
+    *,
+    today: date,
+    decision_id: str,
+    limit: int | None,
+) -> tuple[bytes, tuple[AddedPointer, ...]]:
+    """`body` with a pointer appended for each overflow card. With a `limit`, a pointer that would take the
+    result over it is left out. Its separator byte counts, as the first added pointer carries it."""
+    out = body
+    added: list[AddedPointer] = []
+    for rel in overflow:
+        line = pointer_line(rel, today=today, decision_id=decision_id, overflow=True)
+        separator = not added and bool(out) and not out.endswith(b"\n")
+        if limit is not None and len(out) + separator + len(line) > limit:
+            continue
+        out = out + (b"\n" if separator else b"") + line
+        added.append(AddedPointer(rel, line, separator))
+    return out, tuple(added)
+
+
+def plan_append(
+    doc: SectionDocument,
+    *,
+    file_key: str,
+    limits: Limits,
+    today: date,
+    decision_id: str,
+    taken: frozenset[str],
+    held: frozenset[str],
+    config_pins: tuple[str, ...],
+    overflow: Sequence[str],
+    max_moves: int,
+    max_card_bytes: int,
+) -> TrimPlan:
+    data = doc.data
+
+    def unchanged(reason: str, skipped: Sequence[tuple[int, str]] = ()) -> TrimPlan:
+        return TrimPlan(data, data, (), (), reason, tuple(skipped))
+
+    if doc.problem is not None:
+        return unchanged(doc.problem)
+    if FILE_KEY.fullmatch(file_key) is None:
+        return unchanged("unsafe-key")  # no card can be named for it, so the file is left alone
+    wanted = frozenset(pin.encode("utf-8").rstrip() for pin in config_pins)
+    if wanted - {heading.rstrip() for heading in heading_lines(data)}:
+        return unchanged("pinned-heading-missing")
+    # A pointer appended inside an unclosed fence would sit where restore and reconcile never look (row W30).
+    due = () if doc.eof_in_fence else tuple(overflow)
+    moving = len(data) > limits.act_at
+    if not moving and not due:
+        return unchanged("within")
+
+    def finish(runs: tuple[Run, ...]) -> tuple[bytes, tuple[AddedPointer, ...]]:
+        return _with_pointers(_replace(data, runs), due, today=today, decision_id=decision_id, limit=limits.limit)
+
+    skipped: list[tuple[int, str]] = []
+    runs: tuple[Run, ...] = ()
+    unused = False
+    if moving:
+        cap = max_card_bytes - card_overhead()
+        candidates: list[int] = []
+        for index in order_units(doc):
+            unit = doc.units[index]
+            text = data[unit.start : unit.end].decode("utf-8")
+            raw = data[unit.start : unit.end]
+            if (
+                _pin_active(unit, today)
+                or _config_pinned(unit, wanted)
+                or not _pins_kept(raw, b"", config_pins=config_pins, today=today)
+            ):
+                skip = (
+                    "pinned"  # the last test: any active keep marker line in the unit's raw bytes, as `check` reads it
+                )
+            elif unit.blocked is not None:
+                skip = "blocked"
+            elif unit.sha256 in held:
+                skip = "held"
+            elif unit.end - unit.start > cap:
+                skip = "too-large-for-card"
+            elif scan_text(text, options=ScanOptions(honor_allow_comments=False)).blocked:
+                skip = "secret"
+            else:
+                candidates.append(index)
+                continue
+            skipped.append((index, skip))
+
+        def build(chosen: Sequence[int]) -> tuple[Run, ...]:
+            return _runs(
+                doc,
+                _groups(doc, chosen, cap),
+                file_key=file_key,
+                today=today,
+                decision_id=decision_id,
+                taken=taken,
+            )
+
+        def projected(chosen: Sequence[int]) -> int:
+            body = _replace(data, build(chosen))
+            return len(_with_pointers(body, due, today=today, decision_id=decision_id, limit=None)[0])
+
+        chosen: list[int] = []
+        queue = list(candidates)
+        while queue and len(chosen) < max_moves and projected(chosen) > limits.trim_to:
+            chosen.append(queue.pop(0))
+        unused = bool(queue)
+        # The three-times rule applies per run, once. A dropped run is reported and nothing refills its place.
+        kept = []
+        for group in _groups(doc, chosen, cap):
+            probe = build(group)[0]
+            if probe.end - probe.start < 3 * len(probe.pointer):
+                skipped.extend((index, "small-run") for index in group)
+            else:
+                kept.append(group)
+        runs = _runs(doc, kept, file_key=file_key, today=today, decision_id=decision_id, taken=taken)
+    after, added = finish(runs)
+    if not moving:
+        reason = None if added else "within"
+    elif len(after) > limits.trim_to and unused:
+        reason = "still-over-after-moves"
+    elif len(after) > limits.act_at and not unused:
+        reason = "nothing-movable"
+    else:
+        reason = None
+    return TrimPlan(data, after, runs, added, reason, tuple(sorted(skipped)))
+
+
+def _check_card_values(*, file_key: str, slug: str, decision_id: str, fresh_until: str | None, card_id: str) -> None:
+    if FILE_KEY.fullmatch(file_key) is None:
+        raise ValueError("file_key is not a safe key")
+    if len(slug) > _CARD_SLUG_MAX or _CARD_SLUG.fullmatch(slug) is None:
+        raise ValueError("slug is not a card name part")
+    if _DECISION_ID.fullmatch(decision_id) is None:
+        raise ValueError("decision_id is not a decision id")
+    if _CARD_ID.fullmatch(card_id) is None:
+        raise ValueError("card_id is not a card id")
+    if fresh_until is not None:
+        if _FRESH_UNTIL.fullmatch(fresh_until) is None:
+            raise ValueError("fresh_until is not a date")
+        date.fromisoformat(fresh_until)  # a ValueError of its own for 2026-13-45
+
+
+def card_bytes(
+    *,
+    file_key: str,
+    slug: str,
+    section: bytes,
+    source_name: str,
+    decision_id: str,
+    today: date,
+    fresh_until: str | None,
+    card_id: str,
+) -> bytes:
+    """The private card for one moved run: frontmatter, then the run's bytes unchanged. No heading text enters it.
+    Every frontmatter value is checked, so no string can add a line or a field. Raises `ValueError` otherwise."""
+    from .memory_care_instructions import encode_value
+
+    _check_card_values(file_key=file_key, slug=slug, decision_id=decision_id, fresh_until=fresh_until, card_id=card_id)
+
+    return (
+        _frontmatter(
+            file_key=file_key,
+            slug=slug,
+            source_value=encode_value(source_name),
+            today=today,
+            decision_id=decision_id,
+            fresh_until=fresh_until,
+            card_id=card_id,
+        )
+        + section
+    )
+
+
+def _frontmatter(
+    *, file_key: str, slug: str, source_value: str, today: date, decision_id: str, fresh_until: str | None, card_id: str
+) -> bytes:
+    lines = [
+        "---",
+        # Single-quoted: a key such as `yes` or `null` stays a string under every YAML loader, and YAML processes
+        # no escapes in single quotes, so encoded values stay visibly encoded. No value can hold a `'`.
+        f"title: '{file_key}--{slug}'",
+        "category: instructions",
+        f"tags: [moved-instructions, '{file_key}', moved]",
+        "visibility: private",
+        f"source_file: '{source_value}'",
+        "archive: never",
+        f"moved_on: {today.isoformat()}",
+        f"moved_by: {decision_id}",
+        f"last_reviewed: {today.isoformat()}",
+    ]
+    if fresh_until is not None:
+        lines.append(f"fresh_until: {fresh_until}")
+    lines += [f"id: {card_id}", "---"]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _largest_frontmatter() -> int:
+    """The longest frontmatter `card_bytes` can write: every value at its grammar's maximum. `encode_value`
+    caps the source name at `VALUE_MAX` characters, all ASCII."""
+    from .memory_care_instructions import VALUE_MAX
+
+    return len(
+        _frontmatter(
+            file_key="k" * 64,
+            slug="s" * _CARD_SLUG_MAX,
+            source_value="v" * VALUE_MAX,
+            today=date(2026, 12, 31),
+            decision_id="20261231T235959Z-" + "k" * 24 + "-ffffffff",
+            fresh_until="2026-12-31",
+            card_id="card-00000000-0000-4000-8000-000000000000",
+        )
+    )
+
+
+@functools.cache
+def card_overhead() -> int:
+    """Bytes a card's frontmatter can take: the plan's `CARD_OVERHEAD`, or the longest valid frontmatter when
+    that is larger, so a card never ends over `max_card_bytes`."""
+    return max(CARD_OVERHEAD, _largest_frontmatter())
+
+
+def _pins_kept(before: bytes, after: bytes, *, config_pins: tuple[str, ...], today: date) -> bool:
+    """Whether `after` holds at least as many of each active keep marker line and each config-pinned heading
+    line as `before`, compared as raw lines with surrounding whitespace removed."""
+
+    def lines(data: bytes) -> list[bytes]:
+        return [line.strip() for line in data.splitlines()]
+
+    old, new = lines(before), lines(after)
+    wanted = {pin.encode("utf-8").strip() for pin in config_pins}
+    for line in set(old):
+        until = KEEP_UNTIL.fullmatch(line)
+        active = line == KEEP.encode("ascii") or (until is not None and _date_on_or_after(until.group(1), today))
+        if (active or line in wanted) and new.count(line) < old.count(line):
+            return False
+    return True
+
+
+def _date_on_or_after(text: bytes, today: date) -> bool:
+    try:
+        return date.fromisoformat(text.decode("ascii")) >= today
+    except ValueError:
+        return True  # an unreadable date is a hard pin, as `_pin_active` reads it
+
+
+def _pinned_unit(unit: Unit, today: date, wanted: frozenset[bytes]) -> bool:
+    return _config_pinned(unit, wanted) or _pin_active(unit, today)
+
+
+def _reversible(plan: TrimPlan) -> bool:
+    """`after` is `before` with each run replaced by its pointer, then the added pointers at the end."""
+    added = plan.added
+    if any(pointer.separator for pointer in added[1:]):
+        return False
+    tail = (b"\n" if added and added[0].separator else b"") + b"".join(pointer.data for pointer in added)
+    body = plan.after
+    if tail:
+        if not body.endswith(tail):
+            return False
+        body = body[: -len(tail)]
+    cursor = 0
+    expected = 0
+    for run in plan.runs:
+        gap = plan.before[expected : run.start]
+        if run.start < expected or run.end > len(plan.before) or body[cursor : cursor + len(gap)] != gap:
+            return False
+        cursor += len(gap)
+        if body[cursor : cursor + len(run.pointer)] != run.pointer:
+            return False
+        cursor += len(run.pointer)
+        expected = run.end
+    return body[cursor:] == plan.before[expected:]
+
+
+def check(
+    plan: TrimPlan,
+    cards: Mapping[str, bytes],
+    *,
+    config_pins: tuple[str, ...],
+    today: date,
+    limits: Limits,
+) -> list[str]:
+    """One name per failed check, empty when the plan is safe to commit. Eight checks run:
+
+    reversible (the design's 1), cards (2), managed-blocks (3), fixed-and-pinned (4), structure (5),
+    pointers (6), size (7), and pointer-in-block, which the plan adds: every added pointer must be a
+    `pointer_spans` entry of `after` that sits outside any fence or managed block.
+
+    `today` and `limits` come from the caller, never from the plan: `today` judges `until=` pins, so a plan
+    cannot release a pin with a forged pointer date, and `limits` bounds the result. `size` verifies a known
+    reason, no change to the file when the reason says nothing was done, and, when the plan changes the
+    file and leaves it over `limits.limit`, that it shrank and that no overflow pointer was added.
+    """
+    before, after = plan.before, plan.after
+    failed: list[str] = []
+    if not _reversible(plan):
+        failed.append("reversible")
+    cards_ok = True
+    for run in plan.runs:
+        card = cards.get(run.card_rel)
+        if card is None or card_body(card) != before[run.start : run.end]:
+            cards_ok = False
+            continue
+        try:
+            cards_ok = cards_ok and card_trust_problem(card.decode("utf-8")) is None
+        except UnicodeDecodeError:
+            cards_ok = False
+    if not cards_ok:
+        failed.append("cards")
+    if managed_blocks(before) != managed_blocks(after):
+        failed.append("managed-blocks")
+    old = parse(before)
+    fixed_ok = True
+    if old.problem is None:
+        fixed_ok = after.startswith(before[: old.fixed_end])
+        wanted = frozenset(pin.encode("utf-8").rstrip() for pin in config_pins)
+        for unit in old.units:
+            if not _pinned_unit(unit, today, wanted):
+                continue
+            moved = any(run.start < unit.end and unit.start < run.end for run in plan.runs)
+            fixed_ok = fixed_ok and not moved and before[unit.start : unit.end] in after
+    # A backstop that does not trust the parse: every active keep marker and every config-pinned heading line
+    # is counted as raw bytes, so a misread of the file's Markdown can never carry a pin out.
+    if not _pins_kept(before, after, config_pins=config_pins, today=today):
+        fixed_ok = False
+    if not fixed_ok:
+        failed.append("fixed-and-pinned")
+    new = parse(after)
+    if plan.reason in {"unbalanced-markers", "not-utf8"}:
+        structure_ok = after == before
+    else:
+        structure_ok = new.problem is None and (old.eof_in_fence or not new.eof_in_fence)
+        # No run may carry one tag of an HTML pair away from the other, whatever the parse says.
+        structure_ok = structure_ok and all(html_balanced(before[run.start : run.end]) for run in plan.runs)
+    if not structure_ok:
+        failed.append("structure")
+    lines = [run.pointer[:-1] for run in plan.runs] + [pointer.data for pointer in plan.added]
+    pointers_ok = all(
+        POINTER_LINE.fullmatch(line[:-1]) is not None and len(line) <= POINTER_MAX and after.count(line) == 1
+        for line in lines
+    ) and all(run.card_rel in cards and run.card_rel.encode() in run.pointer for run in plan.runs)
+    if not pointers_ok:
+        failed.append("pointers")
+    size_ok = plan.reason in _REASONS and not (
+        plan.reason in _UNCHANGED and (after != before or plan.runs or plan.added)
+    )
+    # A plan may leave a file far over the limit still over it (partial progress), but never grow a file
+    # that is over the limit.
+    if after != before and len(after) > limits.limit and len(after) >= len(before):
+        size_ok = False
+    # Overflow pointers are added only when the result fits, whatever the source of the plan.
+    if plan.added and len(after) > limits.limit:
+        size_ok = False
+    if not size_ok:
+        failed.append("size")
+    spans = {span.start: span for span in pointer_spans(after)}
+    start = len(after) - sum(len(pointer.data) for pointer in plan.added)
+    for pointer in plan.added:
+        span = spans.get(start)
+        if span is None or span.in_block or after[span.start : span.end] != pointer.data:
+            failed.append("pointer-in-block")
+            break
+        start += len(pointer.data)
+    return failed
