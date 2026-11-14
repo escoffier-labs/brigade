@@ -557,8 +557,10 @@ def test_document_swapped_for_a_symlink_after_decide_is_not_written_through(tmp_
     (ws / "USER.md").unlink()
     (ws / "USER.md").symlink_to(outside / "target.md")
     action = _execute(ws, handoff, outcome)
-    assert action.kind == "inboxed"
+    # The locked write decides again: a symlinked root file goes to its private card, and is never written through.
+    assert action.kind == "routed"
     assert (outside / "target.md").read_text(encoding="utf-8") == "outside\n"
+    assert "A note." in (ws / "memory/cards/instructions/user-md--overflow-workflow.md").read_text(encoding="utf-8")
 
 
 def test_document_append_creates_missing_directories_and_appends(tmp_path: Path):
