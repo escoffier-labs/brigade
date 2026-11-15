@@ -797,6 +797,8 @@ class Item:
     values: tuple[str, ...] = field(default=(), repr=False)
     # True for material that may reach the prompt but never meets the corroboration rule.
     context_only: bool = False
+    # Digest of the complete file before rendering or excerpt cuts, for local review freshness.
+    file_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -852,6 +854,7 @@ def _item(
         observed_ms=observed,
         compare=raw + b"\n" + text.encode() + plain,
         lineage=lineage | (frozenset({f"run:{run_id}"}) if run_id else frozenset()),
+        file_sha256=io.sha256(raw) if source.startswith("file:") else None,
         values=values,
     )
 

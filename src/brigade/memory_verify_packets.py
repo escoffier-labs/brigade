@@ -20,7 +20,9 @@ that name is never replaced: when its bytes differ, finalize reports
 has no result yet stays, so the next run replays the identical request
 through the request id ledger.
 
-An open proposal's packet is `<proposal id>.json`. When a run sees the
+An open proposal's packet is `<proposal id>.json`. Its retained manifest is
+`<proposal id>.manifest.json`, written before the stage is removed. Both
+artifacts share the cap, terminal timestamp, expiry and eviction. When a run sees the
 proposal is no longer open, the packet becomes `<proposal id>.t<ms>.json`, and
 it is deleted 14 days after that time. The directory never grows past 64 MiB:
 the oldest terminal packets go first, and a new packet that still does not fit
@@ -62,6 +64,8 @@ WORKSPACE_ID = "memory-verify"
 MISMATCH = "verify_packet_mismatch"
 OPEN_PACKET = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})\.json")
 DONE_PACKET = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})\.t([0-9]{1,16})\.json")
+OPEN_ARTIFACT = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})(\.manifest)?\.json")
+DONE_ARTIFACT = re.compile(r"([0-9A-HJKMNP-TV-Z]{26})\.t([0-9]{1,16})(\.manifest)?\.json")
 STAGED = re.compile(r"staged-([0-9a-f]{64})\.json")
 TEMPORARY = re.compile(r"\.packet-[0-9a-f]{32}\.tmp")
 STAGE_KEYS = frozenset(
@@ -309,21 +313,31 @@ def staged(target: Path, submission_digest: Any) -> tuple[list[Stage], int]:
 
 
 def finalize(target: Path, record: Stage, proposal_id: str) -> str | None:
-    """Publish the staged packet as `<proposal id>.json`, then remove the stage.
+    """Publish the staged packet and manifest, then remove the stage.
 
-    A packet already under that name is kept as it is. Returns `MISMATCH`
-    when its bytes differ from the staged packet, else None.
+    Existing artifacts are kept as they are. Returns `MISMATCH` when their
+    bytes differ from the stage, else None. An interrupted write retains the
+    stage so the next run can publish the missing artifact.
     """
     final = f"{proposal_id}.json"
     if not OPEN_PACKET.fullmatch(final):
         raise ValueError("a packet is named by a proposal id")
     with directory(target) as fd:
+        manifest_name = f"{proposal_id}.manifest.json"
+        manifest = read(fd, manifest_name)
+        if manifest is not None and io.sha256(manifest) != io.sha256(record.manifest):
+            _unlink(fd, record.name)
+            os.fsync(fd)
+            return MISMATCH
         existing = read(fd, final)
         if existing is None:
             atomic_write(fd, final, record.packet)
             result = None
         else:
             result = None if io.sha256(existing) == io.sha256(record.packet) else MISMATCH
+        if result is None and manifest is None:
+            # The stage remains until both artifacts are durable, so replay repairs a crash here.
+            atomic_write(fd, manifest_name, record.manifest)
         _unlink(fd, record.name)
         os.fsync(fd)
     return result
@@ -343,16 +357,23 @@ def maintain(target: Path, open_ids: set[str], now: int) -> dict[str, int]:
             if stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid():
                 _unlink(fd, name)
                 counts["packets_temporary_removed"] += 1
-        for name, _size in listing(fd):
-            opened = OPEN_PACKET.fullmatch(name)
+        entries = listing(fd)
+        settled_at = {done[1]: int(done[2]) for name, _ in entries if (done := DONE_ARTIFACT.fullmatch(name))}
+        for name, _size in entries:
+            opened = OPEN_ARTIFACT.fullmatch(name)
             if opened and opened[1] not in open_ids:
-                os.rename(name, f"{opened[1]}.t{now}.json", src_dir_fd=fd, dst_dir_fd=fd)
-                counts["packets_settled"] += 1
+                os.rename(
+                    name,
+                    f"{opened[1]}.t{settled_at.get(opened[1], now)}{opened[2] or ''}.json",
+                    src_dir_fd=fd,
+                    dst_dir_fd=fd,
+                )
+                counts["packets_settled"] += int(opened[2] is None)
                 continue
-            done = DONE_PACKET.fullmatch(name)
+            done = DONE_ARTIFACT.fullmatch(name)
             if done and now - int(done[2]) >= PACKET_DAYS * DAY_MS:
                 os.unlink(name, dir_fd=fd)
-                counts["packets_expired"] += 1
+                counts["packets_expired"] += int(done[3] is None)
         os.fsync(fd)
     return counts
 
@@ -365,11 +386,17 @@ def room(target: Path, size: int) -> bool:
         terminal = sorted(
             (int(done[2]), name, entry_size)
             for name, entry_size in entries
-            if (done := DONE_PACKET.fullmatch(name)) is not None
+            if (done := DONE_ARTIFACT.fullmatch(name)) is not None
         )
-        for _, name, entry_size in terminal:
+        remaining = dict(entries)
+        for _, name, _ in terminal:
             if total + size <= PACKET_CAP:
                 break
-            os.unlink(name, dir_fd=fd)
-            total -= entry_size
+            packet = name.replace(".manifest.json", ".json")
+            manifest = packet.removesuffix(".json") + ".manifest.json"
+            for artifact in (packet, manifest):
+                if artifact in remaining:
+                    os.unlink(artifact, dir_fd=fd)
+                    total -= remaining.pop(artifact)
+        os.fsync(fd)
         return total + size <= PACKET_CAP
