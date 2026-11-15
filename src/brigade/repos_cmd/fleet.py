@@ -657,7 +657,7 @@ def _repo_suggested_command(repo_id: str, pending_imports: list[dict[str, Any]],
     return f"brigade repos show {repo_id}"
 
 
-def _handoff_backlog(repo: Path) -> tuple[int, int | None]:
+def _handoff_backlog(repo: Path, *, health_cache: dict[Path, Any] | None = None) -> tuple[int, int | None]:
     """Total pending handoffs across a repo's inboxes and the oldest age in days.
 
     Surfaces the silent pile-up where handoffs are written but never ingested,
@@ -670,7 +670,12 @@ def _handoff_backlog(repo: Path) -> tuple[int, int | None]:
     pending = 0
     oldest_seconds: int | None = None
     try:
-        health = handoff_cmd.inspect(repo)
+        if health_cache is not None and repo in health_cache:
+            health = health_cache[repo]
+        else:
+            health = handoff_cmd.inspect(repo)
+            if health_cache is not None:
+                health_cache[repo] = health
     except (ValueError, OSError):
         return 0, None
     for inbox in health.inboxes:
@@ -682,7 +687,9 @@ def _handoff_backlog(repo: Path) -> tuple[int, int | None]:
     return pending, oldest_days
 
 
-def _handoff_source_coverage(repo: Path) -> tuple[list[str], list[str], list[str]]:
+def _handoff_source_coverage(
+    repo: Path, *, health_cache: dict[Path, Any] | None = None
+) -> tuple[list[str], list[str], list[str]]:
     if not repo.is_dir():
         return [], [], []
     try:
@@ -698,7 +705,12 @@ def _handoff_source_coverage(repo: Path) -> tuple[list[str], list[str], list[str
     from .. import handoff_cmd
 
     try:
-        health = handoff_cmd.inspect(repo)
+        if health_cache is not None and repo in health_cache:
+            health = health_cache[repo]
+        else:
+            health = handoff_cmd.inspect(repo)
+            if health_cache is not None:
+                health_cache[repo] = health
     except (OSError, ValueError):
         return expected, missing, []
     watched = {inbox.inbox for inbox in health.inboxes if inbox.watched}
@@ -712,8 +724,9 @@ def _repo_summary(entry: constants.RepoEntry) -> dict[str, Any]:
     has_agents = (repo / "AGENTS.md").is_file()
     has_claude = (repo / "CLAUDE.md").is_file() or (repo / ".claude" / "CLAUDE.md").is_file()
     handoff_inboxes = [inbox for inbox in WRITER_INBOXES.values() if (repo / inbox).is_dir()]
-    handoff_expected, handoff_missing, handoff_unwatched = _handoff_source_coverage(repo)
-    handoff_pending, handoff_backlog_oldest_days = _handoff_backlog(repo)
+    health_cache: dict[Path, Any] = {}
+    handoff_expected, handoff_missing, handoff_unwatched = _handoff_source_coverage(repo, health_cache=health_cache)
+    handoff_pending, handoff_backlog_oldest_days = _handoff_backlog(repo, health_cache=health_cache)
     hooks = repo / ".git" / "hooks"
     publish_guard_hooks = (
         [hook.name for hook in (hooks / "pre-commit", hooks / "pre-push") if hook.is_file()] if hooks.is_dir() else []

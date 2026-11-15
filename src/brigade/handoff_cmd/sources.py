@@ -501,7 +501,9 @@ def _short(text: str, limit: int = 96) -> str:
     return rendered[: limit - 3].rstrip() + "..."
 
 
-def _inspect_inbox(root: Path, rel: str, watched: tuple[WatchedInbox, ...]) -> InboxHealth:
+def _inspect_inbox(
+    root: Path, rel: str, watched: tuple[WatchedInbox, ...], *, watched_paths: set[Path] | None = None
+) -> InboxHealth:
     path = root / rel
     return InboxHealth(
         inbox=rel,
@@ -509,7 +511,7 @@ def _inspect_inbox(root: Path, rel: str, watched: tuple[WatchedInbox, ...]) -> I
         exists=path.is_dir(),
         pending=_count_pending(path),
         processed=_count_processed(path),
-        watched=_is_watched(root, rel, watched),
+        watched=_is_watched(root, rel, watched, watched_paths=watched_paths),
         oldest_pending_age_seconds=_oldest_pending_age_seconds(path),
     )
 
@@ -521,15 +523,16 @@ def _collect_inbox_health(target: Path, watched: tuple[WatchedInbox, ...]) -> tu
     indexes remain stable. Extra configured roots are appended, keyed by the
     resolved inbox path so a second root is not collapsed into the target.
     """
+    watched_paths = {(item.root / item.inbox).resolve() for item in watched}
     seen: dict[str, InboxHealth] = {}
     for rel in WRITER_INBOXES:
-        health = _inspect_inbox(target, rel, watched)
+        health = _inspect_inbox(target, rel, watched, watched_paths=watched_paths)
         seen[str((target / rel).resolve())] = health
     for item in watched:
         key = str((item.root / item.inbox).resolve())
         if key in seen:
             continue
-        seen[key] = _inspect_inbox(item.root, item.inbox, watched)
+        seen[key] = _inspect_inbox(item.root, item.inbox, watched, watched_paths=watched_paths)
     return tuple(seen.values())
 
 
@@ -571,8 +574,12 @@ def _count_processed(path: Path) -> int:
     return len([candidate for candidate in processed.glob("*.md") if candidate.is_file()])
 
 
-def _is_watched(root: Path, rel: str, watched: tuple[WatchedInbox, ...]) -> bool:
+def _is_watched(
+    root: Path, rel: str, watched: tuple[WatchedInbox, ...], *, watched_paths: set[Path] | None = None
+) -> bool:
     resolved_inbox = (root / rel).resolve()
+    if watched_paths is not None:
+        return resolved_inbox in watched_paths
     return any((item.root / item.inbox).resolve() == resolved_inbox for item in watched)
 
 
