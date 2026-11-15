@@ -390,6 +390,56 @@ def ingest_into(
     return 0
 
 
+def ingest_lesson(*, source: Path, path: Path, expected_digest: str, admitted_origin: str) -> None:
+    """Deliver exactly one admitted lesson to review, pending the #2577 origin gate.
+
+    This entry point confers no promotion authority. Add automatic promotion
+    only when the trusted-origin gate can authenticate this admission.
+    """
+    from . import lesson_io as io
+
+    relative = path.relative_to(source)
+    if (
+        relative.parent.as_posix() not in WRITER_INBOXES.values()
+        or not path.name.endswith(".md")
+        or not SHA256_RE.fullmatch(expected_digest)
+        or admitted_origin != "brigade.lesson-review.v1"
+    ):
+        raise ValueError("invalid admitted lesson path or origin")
+    with io.directory(path.parent) as parent:
+        snapshot = io.read_bytes(path)
+        if snapshot is None or sha256_hex(snapshot) != expected_digest:
+            raise ChangedHandoffError("lesson draft digest mismatch")
+        sections = parse(path, snapshot)
+        if f"Machine origin: {admitted_origin}," not in sections.get("evidence", ""):
+            raise ValueError("lesson draft origin mismatch")
+        if _is_tracked(path, _git_tracked_files(path.parent)):
+            raise TrackedHandoffError("refusing tracked lesson draft")
+        review = source / "memory/handoff-inbox" / f"lesson-{expected_digest}.md"
+        existing = io.read_bytes(review, absent=True)
+        if existing is None:
+            io.write(review, snapshot, exclusive=True)
+        elif existing != snapshot:
+            raise ChangedHandoffError("lesson review differs from prepared draft")
+        # Archive under held descriptors, refusing replaced or linked components.
+        with io.directory(path.parent / "processed", create=True) as processed:
+            if io.read_bytes(path) != snapshot:
+                raise ChangedHandoffError("lesson changed before archive")
+            named = dirfd.stat_child(parent, path.name)
+            with io.directory(path.parent) as live:
+                if os.fstat(parent).st_ino != os.fstat(live).st_ino:
+                    raise ChangedHandoffError("lesson parent changed before archive")
+            if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+                raise ChangedHandoffError("lesson path is linked")
+            try:
+                archived = dirfd.stat_child(processed, path.name)
+            except FileNotFoundError:
+                archived = None
+            if archived is not None:
+                raise ChangedHandoffError("lesson archive already exists")
+            dirfd.rename_child(parent, path.name, processed, path.name)
+
+
 def strip_section_blank_lines(text: str) -> str:
     """Remove section delimiters without changing whitespace on content lines."""
     lines = text.splitlines()

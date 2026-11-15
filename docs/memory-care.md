@@ -597,8 +597,10 @@ judgment and does not consult reads.
 
 `brigade memory lessons run` reviews local work-hook activity after 20 tool
 calls and five minutes of idle time. The existing post-tool hooks supply the
-counter and a scanned digest of at most 32 observations. User prompts can supply
-correction evidence. Review workers do not count their own calls.
+counter and a scanned digest of at most 96 observations, retaining failure
+events ahead of routine activity. User prompts supply correction evidence
+through a private hook cache without writing into the workspace.
+Review workers do not count their own calls.
 
 Install unattended execution once with
 `brigade care install --entry lesson-review --target <scope>`. This selectable
@@ -615,22 +617,31 @@ pending work. `enable` resumes it. Uninstalling the `lesson-review` care entry
 removes its schedule.
 
 Admission accepts a verified fix, a workaround that worked or a correction
-quoted from a user prompt. Fixes and workarounds must cite a completed passing
-verification receipt observed in this digest. Unresolved dead ends, transient
+quoted from a user prompt with at least 24 bytes and five tokens. Lesson content
+must derive from that quote. Fixes and workarounds require registered card
+verification receipts from `brigade work verify run` observations, independent
+verifier sessions, and an exact fingerprint of the proposed card content. An
+earlier failing receipt and a later passing receipt must have different tree
+fingerprints and complete after the earliest unreviewed activity.
+Unresolved dead ends, transient
 and infrastructure failures that cleared, and tool-broken claims are excluded.
 An empty review creates no handoff or card. Updating a card requires its current
 bytes in the final worker prompt and an unchanged hash at admission.
 
-The coordinator writes through `brigade handoff draft`, then calls normal
-ingest, including its near-duplicate checks. The draft names machine origin
+The coordinator writes through `brigade handoff draft`, then delivers only
+that draft to the review inbox through descriptor-bound ingest. The draft names
+machine origin
 `brigade.lesson-review.v1` and a local review receipt that binds the session
 digest and draft hash. This marker grants no interactive-origin authority.
 Automatic filing depends on #2577 accepting a receipt-bound machine origin.
-That gate may send a lesson to review instead of filing it.
+The trusted-origin interface is absent in this version, so every admitted lesson
+stays in `memory/handoff-inbox/` for review. Other pending handoffs stay untouched.
 
 The observed counter and committed watermark survive restart under
 `.brigade/lesson-review/`. New activity during review preserves the counter for
 the next idle window. A prepared draft is recovered before another review can
 publish one. Rapid and concurrent triggers share one run lock. The digest keeps
-only its newest bounded observations, so older details may require a normal
-handoff rather than automatic extraction.
+bounded observations, so older details may require a normal handoff. Each digest
+has a persisted three-attempt budget and exponential backoff. A rejected or stuck
+publication is quarantined with a body-free reason after that bound, advancing
+only its own watermark so newer activity can proceed.

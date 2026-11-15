@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
-from . import lesson_activity as activity, lesson_review, localio
+from . import lesson_activity as activity, lesson_review, lesson_io as io
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -21,11 +22,17 @@ def register(sub: argparse._SubParsersAction) -> None:
 def dispatch(args: argparse.Namespace) -> int:
     target = args.target.expanduser().resolve()
     try:
-        cfg = activity.config(target)
+        cfg: dict[str, Any]
+        try:
+            cfg = activity.config(target)
+        except ValueError:
+            if args.lesson_command != "disable":
+                raise
+            cfg = {"enabled": False}
         if args.lesson_command in {"enable", "disable"}:
             cfg["enabled"] = args.lesson_command == "enable"
-            localio.write_json(target / ".brigade/lesson-review.json", cfg)
-            payload = {"status": "enabled" if cfg["enabled"] else "disabled"}
+            io.write(target / ".brigade/lesson-review.json", io.json_bytes(cfg))
+            payload: dict[str, Any] = {"status": "enabled" if cfg["enabled"] else "disabled"}
         elif args.lesson_command == "run":
             payload = lesson_review.run(target)
         else:

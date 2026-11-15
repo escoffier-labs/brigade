@@ -8,11 +8,12 @@ threshold is 20 calls. Configuration can disable review or select a roster seat.
 State records observed and committed sequence numbers under
 `.brigade/lesson-review/`. A run lock coalesces concurrent care invocations.
 Activity recording uses a separate short lock, so new work can interrupt a
-review. Only a committed review advances the watermark. Failed or interrupted
-reviews retain their activity. A prepared draft survives process interruption
+review. Committed reviews and quarantined digests advance their own watermark.
+Failures retain activity within a three-attempt budget with persisted backoff.
+A prepared draft survives process interruption
 and is recovered before another worker is dispatched.
 
-The digest contains at most 32 observations of 2 KiB each. Content scanning and
+The digest contains at most 96 observations of 2 KiB each. Content scanning and
 injection checks happen before storage and dispatch. The review uses the existing
 read-only single-seat dispatcher with a bounded timeout, without a new provider
 adapter. A first response requests up to four cards. Their current bytes are read,
@@ -27,11 +28,11 @@ prompt instructions. Empty results commit the review without creating memory.
 
 The coordinator executes the implementation behind `brigade handoff draft` as
 the worker's only memory write path. A prepared record binds the draft bytes to
-the digest and review ID before publication. Normal ingest handles the result,
-including near-duplicate detection. Canonical cards are never written directly.
+the digest and review ID before publication. Descriptor-bound ingest
+delivers only that draft to review. Canonical cards are never written directly.
 Machine origin `brigade.lesson-review.v1` identifies review evidence only.
 Automatic filing depends on #2577 accepting a receipt-bound machine origin.
-This slice does not change its origin rules.
+That interface is absent, so automatic promotion stays disabled.
 
 Install with `brigade care install --entry lesson-review`. Disable with
 `brigade memory lessons disable`, or uninstall the care entry. Repository and hub

@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import time
 from pathlib import Path
 from typing import Any
 
-from . import guard, localio, memory_proposal_io as io
+from . import guard, lesson_io as io
+from .component_paths import cache_root
+from .handoff_ingest_rules import sha256_hex
 from .guard.types import ScanOptions
-from .inbox_lock import held_file_lock
+from .lesson_io import held_file_lock
 from .untrusted import scan_untrusted
 
 ROOT = ".brigade/lesson-review"
 ORIGIN = "brigade.lesson-review.v1"
-MAX_EVENTS = 32
+MAX_EVENTS = 96
 MAX_TEXT = 2048
 
 
@@ -40,7 +44,7 @@ def config(target: Path) -> dict[str, Any]:
 
 
 def load(target: Path) -> dict[str, Any]:
-    raw = io.text(target / ROOT / "state.json", absent=True, limit=128 * 1024, private=True)
+    raw = io.text(target / ROOT / "state.json", absent=True, limit=512 * 1024, private=True)
     if raw is None:
         return {"sequence": 0, "reviewed": 0, "last_activity": 0, "events": []}
     state = json.loads(raw)
@@ -58,8 +62,7 @@ def load(target: Path) -> dict[str, Any]:
 
 
 def save(target: Path, state: dict[str, Any]) -> None:
-    localio.write_bytes_atomic(root(target) / "state.json", io.json_bytes(state))
-    io.protect_file(target / ROOT / "state.json")
+    io.write(root(target) / "state.json", io.json_bytes(state))
 
 
 def scanned(text: str) -> str:
@@ -77,9 +80,20 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
     if not config(target)["enabled"]:
         return
     # Review workers do not feed their own activity back into the trigger.
-    import os
-
     if os.environ.get("BRIGADE_RUN_ID", "").startswith("lesson-"):
+        return
+    if event == "UserPromptSubmit":
+        spool = prompt_path(target)
+        with held_file_lock(spool.with_suffix(".lock"), deadline_seconds=1):
+            io.write(
+                spool,
+                io.json_bytes(
+                    {
+                        "prompt": scanned(str(payload.get("prompt", "")).encode()[:MAX_TEXT].decode(errors="ignore")),
+                        "at": time.time() if now is None else now,
+                    }
+                ),
+            )
         return
     fields = ("prompt",) if event == "UserPromptSubmit" else ("tool_input", "tool_response", "tool_output", "error")
     values = [str(payload[key]) for key in fields if key in payload]
@@ -98,16 +112,32 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
         text = scanned(text)
     except ValueError:
         text = "[observation withheld by scanner]"
-    with held_file_lock(root(target) / "state.lock", deadline_seconds=0.1):
+    with held_file_lock(root(target) / "state.lock", deadline_seconds=1):
         state = load(target)
+        prompt = take_prompt(target)
+        if prompt is not None:
+            append_event(state, "UserPromptSubmit", prompt["prompt"], prompt["at"])
         # Pre-tool activity invalidates an in-flight review without counting twice.
-        state["sequence"] += 1
-        count = state.get("calls", 0) + int(event in {"PostToolUse", "PostToolUseFailure"})
-        state["calls"] = count
-        state["last_activity"] = time.time() if now is None else now
-        state["events"] = (state["events"] + [{"id": state["sequence"], "kind": event, "text": text}])[-MAX_EVENTS:]
-        while len(io.json_bytes(state)) > 96 * 1024:
-            state["events"].pop(0)
+        at = time.time() if now is None else now
+        append_event(state, event, text, at)
+        if event in {"PostToolUse", "PostToolUseFailure"}:
+            state["calls"] = state.get("calls", 0) + 1
+        command = payload.get("tool_input")
+        command = command.get("command", command.get("cmd")) if isinstance(command, dict) else command
+        if event == "PostToolUse" and isinstance(command, str):
+            try:
+                lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+                lexer.whitespace_split = True
+                argv = list(lexer)
+                if any(token in {";", "&&", "||", "|", "&", ">", "<", "(", ")"} for token in argv):
+                    argv = []
+            except ValueError:
+                argv = []
+            if argv[:4] == ["brigade", "work", "verify", "run"]:
+                state["events"][-1]["verify_command"] = True
+        session = payload.get("session_id")
+        if isinstance(session, str):
+            state["events"][-1]["session_id"] = sha256_hex(session.encode())
         save(target, state)
 
 
@@ -117,3 +147,30 @@ def on_event(target: Path, event: str, payload: dict[str, Any]) -> None:
         record_event(target, event, payload)
     except Exception:
         pass
+
+
+def prompt_path(target: Path) -> Path:
+    return Path(cache_root()) / "brigade/lesson-prompts" / (sha256_hex(str(target.resolve()).encode()) + ".json")
+
+
+def take_prompt(target: Path) -> dict[str, Any] | None:
+    path = prompt_path(target)
+    with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1):
+        raw = io.text(path, absent=True, private=True)
+        if raw is None:
+            return None
+        value = json.loads(raw)
+        io.write(path, b"null\n")
+        return value if isinstance(value, dict) else None
+
+
+def append_event(state: dict[str, Any], kind: str, text: str, at: float) -> None:
+    state["sequence"] += 1
+    state.setdefault("earliest_unreviewed_at", at)
+    state["last_activity"] = at
+    state["events"].append({"id": state["sequence"], "kind": kind, "text": text, "at": at})
+    # Keep the failure side of a fix even in long sessions. Other observations
+    # are bounded to over twenty complete pre/post tool pairs plus prompts.
+    while len(state["events"]) > MAX_EVENTS or len(io.json_bytes(state)) > 256 * 1024:
+        index = next((i for i, e in enumerate(state["events"]) if e["kind"] != "PostToolUseFailure"), 0)
+        state["events"].pop(index)

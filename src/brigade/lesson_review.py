@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
+import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from . import ingest, lesson_activity as activity, lesson_admission as admission
-from . import localio, memory_proposal_io as io, proc, roster, run_seat
+from . import lesson_io as io, proc, roster, run_seat
 from .handoff_cmd import drafts
 from .handoff_ingest_rules import safe_card_name, sha256_hex
-from .inbox_lock import InboxLockTimeout, held_file_lock
+from .inbox_lock import InboxLockTimeout
+from .lesson_io import held_file_lock
 from .untrusted import wrap_untrusted
 from .config import load_config
 from .selection import WRITER_INBOXES
@@ -49,14 +52,26 @@ def _invoke(target: Path, seat: str, run_id: str, prompt: str, phase: str) -> di
     if agent is None or not agent.read_only_capable:
         raise ValueError("lesson review requires a configured read-only seat")
     seat = agent.name
-    invoker = run_seat.SeatInvoker(
-        roster=resolved,
-        cwd=target,
-        run_id=run_id,
-        process_registry=proc.ProcessRegistry(),
-        output_dir=activity.root(target) / "runs" / run_id / phase,
-    )
-    result = invoker.invoke(seat=seat, phase=phase, prompt=prompt, timeout=120, deadline_ceiling=True)
+    destination = activity.root(target) / "runs" / run_id / phase
+    with io.directory(destination, create=True, private=True):
+        pass
+    # The transport uses pathname-based logs. Give it a private staging tree,
+    # then publish logs only via descriptor-relative writes in the lesson tree.
+    with tempfile.TemporaryDirectory(prefix="brigade-lesson-") as staging:
+        output = Path(staging) / "output"
+        invoker = run_seat.SeatInvoker(
+            roster=resolved,
+            cwd=target,
+            run_id=run_id,
+            process_registry=proc.ProcessRegistry(),
+            output_dir=output,
+        )
+        result = invoker.invoke(seat=seat, phase=phase, prompt=prompt, timeout=120, deadline_ceiling=True)
+        for path in islice(output.rglob("*"), 64):
+            if path.is_file():
+                data = io.read_bytes(path, limit=256 * 1024)
+                if data is not None:
+                    io.write(destination / path.relative_to(output), data)
     if not result.ok or len(result.text.encode()) > 32 * 1024:
         raise ValueError("lesson worker failed or exceeded output limit")
     value = json.loads(result.text)
@@ -66,7 +81,9 @@ def _invoke(target: Path, seat: str, run_id: str, prompt: str, phase: str) -> di
 
 
 def _review(target: Path, cfg: dict[str, Any], snapshot: dict[str, Any], run_id: str) -> dict[str, Any] | None:
-    events = [e for e in snapshot["events"] if e["id"] > snapshot["reviewed"]]
+    events = [dict(e) for e in snapshot["events"] if e["id"] > snapshot["reviewed"]]
+    for event in events:
+        event["earliest_unreviewed_at"] = snapshot.get("earliest_unreviewed_at", event.get("at"))
     digest = activity.scanned(json.dumps(events, ensure_ascii=False))
     framed = wrap_untrusted(digest, source_kind="tool-output")
     names = sorted(p.name for p in islice((target / "memory/cards").glob("*.md"), 64) if safe_card_name(p.name))
@@ -101,9 +118,10 @@ def _review(target: Path, cfg: dict[str, Any], snapshot: dict[str, Any], run_id:
         + (
             'Return {"lessons":[]} or one lesson with kind (verified-fix, worked-workaround, user-correction), '
             "title, summary, content (complete card with YAML frontmatter), action (create-card or update-card), "
-            "target_card, evidence (passing verification receipt path), event (observation id), quote "
-            "(exact resolution quote), resolved:true, transient:false, infrastructure:false, tool_broken:false. "
-            "Updates may name only cards read below. Fixes require a passing verification receipt.\n"
+            "target_card, evidence (passing verification receipt path), failure_evidence (earlier failing receipt), event (observation id), quote "
+            "(at least 24 bytes and five tokens, content must derive from it). "
+            "Updates may name only cards read below. Fixes require registered independently verified card receipts, "
+            "exact content binding, and different failing and passing tree fingerprints.\n"
         )
         + framed
         + wrap_untrusted(
@@ -129,7 +147,7 @@ def _draft_args(target: Path, pending: dict[str, Any]) -> dict[str, Any]:
         handoff_type="workflow",
         action=lesson["action"],
         target_card=lesson["target_card"],
-        fact=[lesson["quote"]],
+        fact=["Admitted lesson from bounded session observations."],
         evidence=[origin, str(lesson.get("evidence") or "user correction")],
         expected_sha=lesson.get("expected_sha"),
         draft_id=pending["run_id"],
@@ -157,6 +175,10 @@ def _draft_text(target: Path, pending: dict[str, Any]) -> str:
 def _publish(target: Path, pending: dict[str, Any]) -> None:
     if pending["lesson"] is None:
         return
+    if not re.fullmatch(r"lesson-[0-9a-f]{32}", str(pending.get("run_id", ""))) or pending.get("inbox") != _inbox(
+        target
+    ):
+        raise ValueError("invalid pending lesson publication")
     args = _draft_args(target, pending)
     lesson = pending["lesson"]
     text = _draft_text(target, pending)
@@ -172,13 +194,23 @@ def _publish(target: Path, pending: dict[str, Any]) -> None:
             current = admission.read_card(target, lesson["target_card"])
             if current is None or sha256_hex(current) != lesson["expected_sha"]:
                 raise StaleLesson("lesson card changed before publication")
-        drafts.build_draft(**args)
-    receipt = {**pending, "origin": activity.ORIGIN, "draft_sha256": sha256_hex(text.encode())}
-    localio.write_json(activity.root(target) / "runs" / pending["run_id"] / "review.json", receipt)
-    stats = ingest.IngestStats()
-    rc = ingest.ingest_into(source=target, owner=target, stats=stats, promote_cards=True)
-    if rc or stats.failed:
-        raise OSError("lesson draft ingest incomplete")
+        # Use the draft entry point for validation and rendering in private
+        # staging, then publish under a held no-follow inbox descriptor.
+        with tempfile.TemporaryDirectory(prefix="brigade-lesson-draft-") as staging:
+            staged = drafts.build_draft(**{**args, "target": Path(staging), "workspace": target})
+            data = io.read_bytes(Path(staged["path"]))
+            if data != text.encode():
+                raise ValueError("lesson draft differs from prepared content")
+            io.write(inbox / Path(staged["path"]).name, data, exclusive=True)
+    digest = sha256_hex(text.encode())
+    receipt = {key: pending[key] for key in ("run_id", "digest", "sequence")}
+    receipt.update(origin=activity.ORIGIN, draft_sha256=digest, status="held-for-origin-review")
+    io.write(activity.root(target) / "runs" / pending["run_id"] / "review.json", io.json_bytes(receipt))
+    matches = list(inbox.glob(f"*-{pending['run_id']}.md"))
+    if matches:
+        if len(matches) != 1:
+            raise ValueError("lesson publication is ambiguous")
+        ingest.ingest_lesson(source=target, path=matches[0], expected_digest=digest, admitted_origin=activity.ORIGIN)
 
 
 def run(target: Path, *, now: float | None = None) -> dict[str, Any]:
@@ -197,7 +229,7 @@ def run(target: Path, *, now: float | None = None) -> dict[str, Any]:
         return {"status": "rejected", "reason": str(exc)}
 
 
-def _run(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
+def _attempt(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
     with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
         snapshot = activity.load(target)
     pending = snapshot.get("pending")
@@ -247,9 +279,74 @@ def _run(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
         state["reviewed"] = pending["sequence"]
         state["reviewed_calls"] = pending["calls"]
         state.pop("pending", None)
-        localio.write_json(
+        state.pop("attempt", None)
+        remaining = [e["at"] for e in state["events"] if e["id"] > state["reviewed"] and "at" in e]
+        state.pop("earliest_unreviewed_at", None)
+        if remaining:
+            state["earliest_unreviewed_at"] = min(remaining)
+        io.write(
             activity.root(target) / "latest.json",
-            {"run_id": pending["run_id"], "status": "committed", "sequence": pending["sequence"]},
+            io.json_bytes({"run_id": pending["run_id"], "status": "committed", "sequence": pending["sequence"]}),
         )
         activity.save(target, state)
     return {"status": "committed", "run_id": pending["run_id"], "drafted": pending["lesson"] is not None}
+
+
+MAX_ATTEMPTS = 3
+
+
+def _run(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
+    with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
+        snapshot = activity.load(target)
+        prompt = activity.take_prompt(target)
+        if prompt is not None:
+            activity.append_event(snapshot, "UserPromptSubmit", prompt["prompt"], prompt["at"])
+            activity.save(target, snapshot)
+        pending = snapshot.get("pending")
+        if now - snapshot["last_activity"] < cfg["idle_seconds"]:
+            return {"status": "waiting"}
+        if pending is None and snapshot.get("calls", 0) - snapshot.get("reviewed_calls", 0) < cfg["threshold"]:
+            return {"status": "waiting"}
+        digest = pending["digest"] if pending else sha256_hex(io.json_bytes(snapshot["events"]))
+        attempt = snapshot.get("attempt", {})
+        if attempt.get("digest") != digest:
+            attempt = {
+                "digest": digest,
+                "count": 0,
+                "next_at": 0,
+                "sequence": snapshot["sequence"],
+                "calls": snapshot.get("calls", 0),
+            }
+        if now < attempt["next_at"]:
+            return {"status": "backoff"}
+        if attempt["count"] >= MAX_ATTEMPTS:
+            return _quarantine(target, snapshot, pending, attempt)
+        attempt["count"] += 1
+        attempt["next_at"] = now + 300 * 2 ** (attempt["count"] - 1)
+        snapshot["attempt"] = attempt
+        activity.save(target, snapshot)
+    try:
+        return _attempt(target, cfg, now)
+    except (ValueError, OSError, RuntimeError, KeyError, TypeError, AttributeError) as exc:
+        reason = "admission-rejected" if isinstance(exc, ValueError) else "publication-or-worker-failed"
+        with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
+            state = activity.load(target)
+            if attempt["count"] >= MAX_ATTEMPTS:
+                return _quarantine(target, state, state.get("pending"), attempt)
+        return {"status": "rejected" if isinstance(exc, ValueError) else "retry", "reason": reason}
+
+
+def _quarantine(
+    target: Path, state: dict[str, Any], pending: dict[str, Any] | None, attempt: dict[str, Any]
+) -> dict[str, Any]:
+    state["quarantine"] = {"digest": attempt["digest"], "attempts": attempt["count"], "reason": "attempt-limit"}
+    state["reviewed"] = pending["sequence"] if pending else attempt["sequence"]
+    state["reviewed_calls"] = pending["calls"] if pending else attempt["calls"]
+    state.pop("pending", None)
+    state.pop("attempt", None)
+    state.pop("earliest_unreviewed_at", None)
+    remaining = [e["at"] for e in state["events"] if e["id"] > state["reviewed"] and "at" in e]
+    if remaining:
+        state["earliest_unreviewed_at"] = min(remaining)
+    activity.save(target, state)
+    return {"status": "quarantined", "reason": "attempt-limit"}
