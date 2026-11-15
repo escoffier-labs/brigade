@@ -1,5 +1,7 @@
 """Ingest uses reflect's deterministic near-duplicate policy."""
 
+import os
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -268,3 +270,99 @@ def test_invalid_reflect_threshold_routes_create_card_for_review(tmp_target: Pat
     text = drafts[0].read_text()
     assert drain.parse_header(text)[0] == "near-duplicate-config-invalid"
     assert drain.classify("near-duplicate-config-invalid", text) == "human"
+
+
+@pytest.fixture(params=["dir_fd", "nofollow"])
+def portable_config(monkeypatch, request):
+    if request.param == "dir_fd":
+        monkeypatch.setattr(os, "supports_dir_fd", set())
+    else:
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+
+def test_portable_reflect_defaults_without_config(tmp_target: Path, portable_config):
+    from brigade import memory_reflect_near as near
+
+    assert not (tmp_target / near.CONFIG).exists()
+    assert near.settings(tmp_target) == (near.DEFAULT_THRESHOLD, near.DEFAULT_MAX_PROPOSALS)
+    assert ingest._decide_create_card_match(card(BODY), target=tmp_target) is None
+
+
+def test_portable_reflect_threshold_honored(tmp_target: Path, portable_config):
+    existing = tmp_target / "memory/cards/original.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(card(BODY))
+    config = tmp_target / ".brigade/memory-care.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[reflect]\nnear_duplicate_threshold = 0.85\n")
+    content = card(BODY + " " + " ".join(f"extra{i}" for i in range(15)))
+    outcome = ingest._decide_create_card_match(content, target=tmp_target)
+    assert outcome is not None
+    assert outcome.code == "near-match-proposal"
+
+
+@pytest.mark.parametrize("config_text", ["[reflect]\nnear_duplicate_threshold = 1.1\n", "[reflect"])
+def test_portable_invalid_reflect_config_routes_for_review(tmp_target: Path, portable_config, config_text: str):
+    config = tmp_target / ".brigade/memory-care.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(config_text)
+    outcome = ingest._decide_create_card_match(card(BODY), target=tmp_target)
+    assert outcome is not None
+    assert outcome.code == "near-duplicate-config-invalid"
+
+
+def test_portable_symlinked_reflect_config_refused(tmp_target: Path, portable_config):
+    config = tmp_target / ".brigade/memory-care.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    source = tmp_target / "settings.toml"
+    source.write_text("[reflect]\nnear_duplicate_threshold = 0.85\n")
+    try:
+        config.symlink_to(source)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    outcome = ingest._decide_create_card_match(card(BODY), target=tmp_target)
+    assert outcome is not None
+    assert outcome.code == "near-duplicate-config-invalid"
+
+
+def test_portable_nonregular_reflect_config_refused(tmp_target: Path, portable_config):
+    (tmp_target / ".brigade/memory-care.toml").mkdir(parents=True)
+    outcome = ingest._decide_create_card_match(card(BODY), target=tmp_target)
+    assert outcome is not None
+    assert outcome.code == "near-duplicate-config-invalid"
+
+
+def test_portable_oversized_reflect_config_refused(tmp_target: Path, portable_config, monkeypatch):
+    from brigade import memory_proposal_io as io
+
+    config = tmp_target / ".brigade/memory-care.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("#" * 65)
+    monkeypatch.setattr(io, "MAX_INPUT_BYTES", 64)
+    outcome = ingest._decide_create_card_match(card(BODY), target=tmp_target)
+    assert outcome is not None
+    assert outcome.code == "near-duplicate-config-invalid"
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="POSIX reader")
+def test_posix_reflect_read_error_routes_for_review(tmp_target: Path, monkeypatch):
+    from brigade import memory_proposal_io as io
+
+    def unavailable(*args, **kwargs):
+        raise OSError("fixture config read failed")
+
+    monkeypatch.setattr(io, "read_bytes", unavailable)
+    outcome = ingest._decide_create_card_match(card(BODY), target=tmp_target)
+    assert outcome is not None
+    assert outcome.code == "near-duplicate-config-invalid"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ingest regression")
+def test_windows_create_card_without_reflect_config(tmp_target: Path):
+    inbox = seed(tmp_target)
+    assert not (tmp_target / ".brigade/memory-care.toml").exists()
+    handoff(inbox, "distinct", "A separate fact about preparing a fresh testing database.")
+    assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    assert (tmp_target / "memory/cards/distinct.md").is_file()
+    for draft in (tmp_target / drain.INBOX_REL).glob("*.md"):
+        assert drain.parse_header(draft.read_text())[0] != "near-duplicate-config-invalid"

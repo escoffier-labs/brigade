@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
+import stat
 import tomllib
 from array import array
 from dataclasses import dataclass, field
@@ -49,9 +51,40 @@ class ThresholdError(ValueError):
     """A [reflect] setting is missing a valid value. The link-repair pass reuses it."""
 
 
+def _read_config(path: Path) -> bytes | None:
+    """Keep descriptor-safe POSIX reads and bound reads on portable ingest hosts."""
+    if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        return io.read_bytes(path, absent=True)
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise OSError("config must be regular and single-link")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError("config changed before read")
+        if opened.st_size > io.MAX_INPUT_BYTES:
+            raise ValueError("file size limit exceeded")
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            raw = handle.read(io.MAX_INPUT_BYTES + 1)
+        if len(raw) > io.MAX_INPUT_BYTES:
+            raise ValueError("file size limit exceeded")
+        after, live = os.fstat(fd), os.lstat(path)
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, key) != getattr(snapshot, key) for snapshot in (opened, after, live) for key in fields):
+            raise OSError("config changed during read")
+        return raw
+    finally:
+        os.close(fd)
+
+
 def reflect_table(target: Path) -> dict[str, Any]:
     """Read the `[reflect]` table from memory-care.toml. Every pass validates its own keys."""
-    raw = io.read_bytes(target / CONFIG, absent=True)
+    raw = _read_config(target / CONFIG)
     if raw is None:
         return {}
     try:
