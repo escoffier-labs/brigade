@@ -1,6 +1,7 @@
 """Bridge behavior ported to isolated Dot tools."""
 
 from tests.dot_support import requires_local_state
+from tests.memory_read_fixtures import signing_key
 
 import hashlib
 import json
@@ -54,6 +55,7 @@ class MemoryChecks(Fixture):
 
     @requires_local_state
     def test_memory_card_reads_chunks_and_rejects_links(self):
+        signing_key(self.workspace)
         text = "---\ntitle: big\n---\n" + "abcdefghij" * 7000
         (self.cards / "big-card.md").write_text(text)
         (self.cards / "good-card.md").write_text("hello card /srv/repos/example " + SHA)

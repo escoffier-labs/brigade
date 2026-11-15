@@ -1,5 +1,7 @@
 """Hub read-stat paging and index line-boundary regressions."""
 
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 from datetime import date, timedelta
 
 from tests.test_memory_lifecycle_security import cover

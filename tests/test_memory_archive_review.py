@@ -1,5 +1,7 @@
 """Review regressions for archive safety and publication."""
 
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 import json
 from datetime import date
 
