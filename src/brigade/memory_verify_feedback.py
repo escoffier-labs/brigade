@@ -103,6 +103,27 @@ def legacy_record(target: Path, proposal_id: str, scope: str, key: str, entry: d
         return None
 
 
+MAX_CASES = 128
+# Readers load the feedback file through io.read_bytes, which refuses files over
+# MAX_INPUT_BYTES, so the written file must stay under that size.
+MAX_FEEDBACK_BYTES = io.MAX_INPUT_BYTES
+
+
+def bounded_feedback(values: list[dict[str, Any]], limit: int) -> bytes | None:
+    """Serialize feedback, evicting the oldest cases until it fits in ``limit`` bytes."""
+    values = list(values)
+    while values:
+        counts: dict[str, dict[str, int]] = {}
+        for row in values:
+            bucket = counts.setdefault(row["source_class"], {"accepted": 0, "rejected": 0})
+            bucket["accepted" if row["decision"] == "applied" else "rejected"] += 1
+        payload = io.json_bytes({"cases": values, "counts": counts})
+        if len(payload) <= limit:
+            return payload
+        values.pop(0)
+    return None
+
+
 def retain_case(target: Path, proposal_id: str, decision: str, shown: dict[str, Any]) -> None:
     """Keep bounded private labels from authenticated packets, excluding self-decisions.
 
@@ -140,12 +161,10 @@ def retain_case(target: Path, proposal_id: str, decision: str, shown: dict[str, 
         old = io.read_bytes(target / gate.FEEDBACK, absent=True, private=True)
         values = json.loads(old)["cases"] if old else []
         values = [v for v in values if v["id"] != proposal_id] + [case]
-        values = values[-128:]
-        counts: dict[str, dict[str, int]] = {}
-        for row in values:
-            bucket = counts.setdefault(row["source_class"], {"accepted": 0, "rejected": 0})
-            bucket["accepted" if row["decision"] == "applied" else "rejected"] += 1
+        payload = bounded_feedback(values[-MAX_CASES:], MAX_FEEDBACK_BYTES)
+        if payload is None:
+            return  # One case alone exceeds what every feedback reader accepts.
         with io.directory((target / gate.FEEDBACK).parent, create=True, private=True) as fd:
-            packets.atomic_write(fd, gate.FEEDBACK.name, io.json_bytes({"cases": values, "counts": counts}))
+            packets.atomic_write(fd, gate.FEEDBACK.name, payload)
     except (OSError, ValueError, KeyError, TypeError):
         return  # Packet retention or legacy data can make a label unavailable.

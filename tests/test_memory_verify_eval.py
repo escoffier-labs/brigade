@@ -508,3 +508,19 @@ def test_forged_local_streak_does_not_advance_evaluator_admission(tmp_path):
     second = gate.record(tmp_path, report, pair=pair, binding="a" * 64, now_ms=1001)
     assert second["classes"]["correct"]["decision"] == "no-go"
     assert second["classes"]["correct"]["streak"] == 1
+
+
+def test_feedback_is_bounded_by_serialized_size():
+    from brigade import memory_verify_feedback as feedback
+
+    def case(index, size):
+        return {"id": f"p{index}", "source_class": "correct", "decision": "applied", "blob": "x" * size}
+
+    cases = [case(i, 1000) for i in range(10)]
+    payload = feedback.bounded_feedback(cases, 4500)
+    assert payload is not None and len(payload) <= 4500
+    kept = json.loads(payload)["cases"]
+    assert kept and kept[-1]["id"] == "p9" and len(kept) < 10
+    assert json.loads(payload)["counts"]["correct"]["accepted"] == len(kept)
+    assert feedback.bounded_feedback([case(0, 5000)], 4500) is None
+    assert feedback.MAX_FEEDBACK_BYTES <= feedback.io.MAX_INPUT_BYTES
