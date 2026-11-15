@@ -1037,6 +1037,7 @@ def install(
     entry_ids: list[str] | None = None,
     schedule_specs: list[str] | None = None,
     scope: str | None = None,
+    reflect_auto_apply: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1103,10 +1104,10 @@ def install(
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if not dry_run and any(entry.kind == "reflect" for entry in entries):
-        from .memory_reflect_policy import ensure
+    if not dry_run and reflect_auto_apply and any(entry.kind == "reflect" for entry in entries):
+        from .memory_reflect_policy import set_enabled
 
-        ensure(target)
+        set_enabled(target, True)
 
     if _uses_schtasks(backend):
         if not dry_run:

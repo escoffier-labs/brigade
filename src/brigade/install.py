@@ -408,7 +408,9 @@ def install_selection(
                 print(f"  file  {dst}")
         return 0
 
-    new_workspace = not any((target / name).exists() for name in (".brigade/config.json", ".solo-mise/config.json"))
+    new_workspace = not any(
+        (target / name).exists() or (target / name).is_symlink() for name in (".brigade", ".solo-mise")
+    )
     target.mkdir(parents=True, exist_ok=True)
 
     for d in dirs:
@@ -443,9 +445,9 @@ def install_selection(
     # retention, run-lock wait, recall target, ...); only the selection changes.
     write_config(target, _merged_config(target, selection, work_mode=work_mode))
     if new_workspace and not projection_only:
-        from .memory_reflect_policy import ensure
+        from .memory_reflect_policy import initialize
 
-        ensure(target)
+        initialize(target)
     _write_surface_evidence(target, selection, projection_only=projection_only)
 
     # Wire Brigade's built-in skills into each harness's skills directory so

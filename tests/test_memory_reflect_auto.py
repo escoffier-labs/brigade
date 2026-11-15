@@ -168,12 +168,123 @@ def test_policy_seed_preserves_portable_init(tmp_path, monkeypatch):
     assert policy.allowed(tmp_path, []) == "reflect_policy_unavailable"
 
 
-def test_care_install_seeds_policy_and_preserves_off(setup, capsys):
+def test_care_reinstall_preserves_missing_policy(setup, capsys):
     from brigade import care_cmd
 
     target, _, home = setup
+    # Simulate an older initialized workspace upgrading before its care reinstall.
+    (target / ".brigade/config.json").write_text('{"depth":"repo","harnesses":[],"owner":"none","includes":[]}')
+    assert cli.main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "none"]) == 0
+    assert not (target / policy.NEW_WORKSPACE_PATH).exists()
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["memory-reflect"]) == 0
-    assert policy.load(target)["auto_apply"] is True
+    assert not (target / policy.PATH).exists()
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["memory-reflect"]) == 0
+    capsys.readouterr()
+    assert run(target, capsys, "run", "--scheduled")[0] == 0
+    assert [c["action"] for c in writes(setup[1])] == ["propose"]
     policy.set_enabled(target, False)
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["memory-reflect"]) == 0
     assert policy.load(target)["auto_apply"] is False
+
+
+def test_existing_state_without_config_is_not_new(tmp_path):
+    (tmp_path / ".brigade/memory").mkdir(parents=True)
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "none"]) == 0
+    assert not (tmp_path / policy.PATH).exists()
+
+
+def test_init_writes_versioned_marker(tmp_path):
+    import json
+
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "none"]) == 0
+    assert json.loads((tmp_path / policy.NEW_WORKSPACE_PATH).read_text())["schema"] == "brigade.new-workspace.v1"
+
+
+def test_explicit_care_flag_and_command_enable(setup, capsys):
+    target, _, home = setup
+    assert (
+        cli.main(
+            [
+                "care",
+                "install",
+                "--target",
+                str(target),
+                "--entry",
+                "memory-reflect",
+                "--reflect-auto-apply",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert not (target / policy.PATH).exists()
+    from brigade import care_cmd
+
+    assert (
+        care_cmd.install(
+            target=target, backend="systemd", home=home, entry_ids=["memory-reflect"], reflect_auto_apply=True
+        )
+        == 0
+    )
+    assert policy.load(target)["auto_apply"] is True
+    capsys.readouterr()
+    assert run(target, capsys, "auto-apply", "off")[0] == 0
+    assert run(target, capsys, "auto-apply", "on")[0] == 0
+    assert policy.load(target)["auto_apply"] is True
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cached_proposals_do_not_starve_new_work(setup, capsys, enabled):
+    target, hub, _ = setup
+    if enabled:
+        policy.set_enabled(target, True)
+        hub.do_auto_apply = lambda body: (200, {"state": "pending"})
+    for ident in ("c", "d"):
+        hub._commit(
+            "card.put", "fleet", ident, "---\nevidence: []\n---\nSame claim. ^c-abcdef\n", "live", "event-" + ident
+        )
+    for _ in range(3):
+        assert run(target, capsys, "run", "--scheduled", "--limit", "1")[0] == 0
+    assert len([c for c in writes(hub) if c["action"] == "propose"]) == 3
+
+
+def test_off_repairs_invalid_policy(tmp_path):
+    policy.ensure(tmp_path)
+    (tmp_path / policy.PATH).write_text("invalid")
+    assert policy.set_enabled(tmp_path, False)["auto_apply"] is False
+
+
+def test_hub_diagnostics_are_bounded(tmp_path):
+    policy.set_enabled(tmp_path, True)
+
+    class Client:
+        def call(self, *args, **kwargs):
+            return {
+                "state": "untrusted text",
+                "reason": "untrusted text",
+                "auto_apply_gates": [
+                    {"gate": "retrieval", "state": "held", "code": "safe_code", "text": "untrusted text"}
+                ]
+                * 100,
+            }
+
+    result = policy.attempt(tmp_path, Client(), "proposal", [], "epoch")
+    assert result["state"] == "pending"
+    assert result["reason"] is None
+    assert len(result["checks"]) <= 32
+    assert "untrusted text" not in str(result)
+
+
+def test_lost_hub_reply_is_unknown(tmp_path):
+    from brigade.memory_hub_client import HubUnavailable
+
+    policy.set_enabled(tmp_path, True)
+
+    class Client:
+        def call(self, *args, **kwargs):
+            raise HubUnavailable("response lost")
+
+    assert policy.attempt(tmp_path, Client(), "proposal", [], "epoch") == {
+        "state": "unknown",
+        "reason": "auto_apply_unavailable",
+    }

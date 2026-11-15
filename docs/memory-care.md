@@ -22,13 +22,17 @@ brigade memory care closeout
 New `brigade init` and setup installs create
 `.brigade/memory/reflect/policy.json` with `auto_apply: true` and
 `tier0_op_classes: ["append_evidence", "merge_exact_duplicates"]`.
+Initialization records these defaults in `.brigade/new-workspace.v1.json`.
+Existing Brigade or legacy workspace state prevents new-workspace seeding.
 Reinitializing an existing workspace does not opt it in or change its policy.
 `brigade care install --target .` now includes the daily `memory-reflect`
 entry. Selecting `--entry memory-reflect` installs just that entry. Care
-installation creates a missing reflect policy and preserves an existing one.
+installation leaves a missing reflect policy off and preserves an existing one.
+The explicit `--reflect-auto-apply` install flag enables the workspace policy.
 Installing OS timers remains an explicit care-install action.
 
-The entry runs `memory reflect run --scheduled --apply`. On a configured hub,
+The entry runs `memory reflect run --scheduled` and checks workspace intent
+before automatic application. On a configured hub,
 it opens pinned proposals and calls the hub's `auto_apply` path. The hub checks
 Tier 0 class, cited proof, trusted scan-clean sources, ownership, retrieval
 evaluation, blast caps, cooldown and policy bindings before changing cards.
@@ -52,6 +56,8 @@ already sent to the hub can finish. Existing workspaces opt in with
 `--scheduled` also honor this opt-in without reinstallation. Workspace intent cannot override
 the hub's fleet memory policy or its kill switch.
 
+Without a configured hub, scheduled runs derive local candidates and record
+holds.
 Local repository candidates remain proposal-only while their evidence,
 ownership, retrieval and cooldown authority contracts are unbound. Their
 `automatic.json` run artifact records the preflight holds. Hub runs retain the
@@ -633,3 +639,9 @@ instrument. Hub read counts have budgets and can miss reads. Reads therefore
 only ever protect a card. Missing, incomplete, or too-young read history blocks
 automatic retirement. `memory care archive --from-file` applies an outside
 judgment and does not consult reads.
+
+Cached automatic attempts have a separate per-run budget bounded by `--limit`.
+They cannot consume slots for new proposals. A lost hub response records an
+unknown result. The hub refuses repeated application of a decided proposal.
+Client tests verify request behavior and fallback. Hub transactional tests
+provide the card-write atomicity coverage.

@@ -532,13 +532,20 @@ def _reflect(
     live = {(head["scope"], head["card_id"]): head["revision"] for head in heads}
     previous = {d: p for d, p in previous.items() if ledger.current(p, live, _now_ms(), settings.read_scopes)}
 
+    retries: list[tuple[str, list[dict[str, Any]]]] = []
+
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []
         for ops in submissions:
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
             if remembered.get("proposal_id") and apply and not dry_run:
-                fresh.append((digest, ops))
+                from .memory_reflect_policy import allowed
+
+                if allowed(target, ops) is None:
+                    retries.append((digest, ops))
+                else:
+                    skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
             elif remembered.get("proposal_id"):
                 skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
             elif remembered.get("refused"):
@@ -595,7 +602,8 @@ def _reflect(
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
     remaining = unremembered(exact) + alternating
-    selected = remaining[:limit]
+    # Retry budget is separate so held proposals cannot consume new-work slots.
+    selected = remaining[:limit] + retries[:limit]
     proposals = []
     refused: list[dict[str, str]] = []
     error = None

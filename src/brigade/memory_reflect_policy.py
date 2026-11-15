@@ -11,6 +11,7 @@ from typing import Any
 from . import memory_hub_client as hubc, memory_proposal_io as io
 
 PATH = ".brigade/memory/reflect/policy.json"
+NEW_WORKSPACE_PATH = ".brigade/new-workspace.v1.json"
 CLASSES = ["append_evidence", "merge_exact_duplicates"]
 DEFAULT = {"schema": "brigade.memory-reflect-policy.v1", "auto_apply": True, "tier0_op_classes": CLASSES}
 
@@ -28,22 +29,31 @@ def load(target: Path) -> dict[str, Any]:
     return value
 
 
+def initialize(target: Path) -> None:
+    """Record new-workspace defaults once, only from initialization."""
+    _seed(target / NEW_WORKSPACE_PATH, {"schema": "brigade.new-workspace.v1", "reflect_auto_apply": True})
+    ensure(target)
+
+
 def ensure(target: Path) -> None:
     """Create new intent without changing any existing policy, including off."""
+    _seed(target / PATH, DEFAULT)
+
+
+def _seed(path: Path, value: dict[str, Any]) -> None:
     if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         # Init is portable even where the reflection engine itself fails closed.
         # This policy grants intent only. It cannot bypass the engine's IO gates.
         from .managed_block import WRITE_WRITTEN, write_text_nofollow_atomic
 
-        path = target / PATH
         if path.exists() or path.is_symlink():
             return
-        result = write_text_nofollow_atomic(path, io.json_bytes(DEFAULT).decode())
+        result = write_text_nofollow_atomic(path, io.json_bytes(value).decode())
         if result.status != WRITE_WRITTEN:
             raise OSError("reflect policy could not be installed safely")
         return
     try:
-        io.write_exclusive(target / PATH, io.json_bytes(DEFAULT))
+        io.write_exclusive(path, io.json_bytes(value))
     except FileExistsError:
         pass
 
@@ -51,7 +61,9 @@ def ensure(target: Path) -> None:
 def set_enabled(target: Path, enabled: bool) -> dict[str, Any]:
     try:
         value = load(target)
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
+        if enabled and (target / PATH).exists():
+            raise
         value = dict(DEFAULT)
     value["auto_apply"] = enabled
     path = target / PATH
@@ -82,6 +94,20 @@ def allowed(target: Path, ops: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _code(value: Any) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value) else None
+
+
+def _checks(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {key: code for key in ("gate", "state", "code") if (code := _code(item.get(key))) is not None}
+        for item in value[:32]
+        if isinstance(item, dict)
+    ]
+
+
 def attempt(
     target: Path, client: hubc.MemoryHubClient, proposal_id: str, ops: list[dict[str, Any]], epoch: str
 ) -> dict[str, Any]:
@@ -93,9 +119,9 @@ def attempt(
         # are rechecked transactionally by the hub. Never turn a hold into decide.
         result = client.call("auto_apply", proposal_id=proposal_id, base_epoch=epoch, client_event_id=hubc.event_id())
         return {
-            "state": result.get("state", "pending"),
-            "checks": result.get("auto_apply_gates", []),
-            "reason": result.get("reason"),
+            "state": result.get("state") if result.get("state") in ("pending", "applied", "rejected") else "pending",
+            "checks": _checks(result.get("auto_apply_gates")),
+            "reason": _code(result.get("reason")),
         }
     except hubc.HubRefusal as exc:
         code = exc.code if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", exc.code) else "hub_refused"
