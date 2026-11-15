@@ -69,6 +69,10 @@ jobs:
             console.log(`::error::brigadestack@${version} is already on npm; bump distribution/brigadestack/npm first`);
             process.exit(1);
           }
+          if (!/^\d+\.\d+\.\d+/.test(latest)) {
+            console.log(`::error::cannot read the current brigadestack latest dist-tag (got '${latest}')`);
+            process.exit(1);
+          }
           const triple = v => v.split(/[.-]/).slice(0, 3).map(Number);
           const [a, b] = [triple(version), triple(latest)];
           const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
