@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Enable configured memory verification by default and add offline labeled evaluation, decision-feedback replay and digest-bound per-class go/no-go records. Scheduled verification applies admitted corrections through a separate scoped reviewer credential, with proposal-only fallback and the existing compensating rollback path.
-
 ## [0.31.0] - 2026-11-14
 
 - Add explicit opt-in Duet dispatch with seven fleet tools, repository and prompt bounds, and atomic open-request and daily-attempt limits in private state. Approval, answer and doctor relays remain unavailable; default discovery stays at 22 tools.
