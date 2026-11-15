@@ -128,6 +128,32 @@ def test_retry_decision_undoes_by_exact_block(tmp_path, monkeypatch):
     assert not (ws / CARD).exists()
 
 
+def test_retry_claim_failure_abandons_without_writing_card(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    data = draft.read_bytes()
+    finish = journal.finish_prepared
+    prepared = []
+
+    def block_claim(target, decision_id):
+        prepared.append(decision_id)
+        # Verification succeeds, but the durable claim cannot be written.
+        (ws / ".brigade/handoffs/consumed-stamps").write_text("not a directory")
+        return finish(target, decision_id)
+
+    monkeypatch.setattr(journal, "finish_prepared", block_claim)
+    with pytest.raises(journal.JournalConflict, match="retry abandoned"):
+        memory_inbox_retry.reprocess(ws, draft)
+    assert not (ws / CARD).exists()
+    assert draft.read_bytes() == data
+    (decision_id,) = prepared
+    payload = journal._payload(ws, decision_id)
+    assert payload["phase"] == payload["status"] == "abandoned"
+    assert payload["abandoned_reason"] == "review origin stamp missing or unavailable"
+    assert journal.resolve_prepared(ws) == []
+
+
 def test_retry_journals_a_card_append_and_dry_run_writes_nothing(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)

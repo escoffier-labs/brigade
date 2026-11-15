@@ -2,3 +2,4 @@
 - Ingest refuses linked handoffs, cleans the exact verified sidecar, and consumes origin and review retry stamps before canonical writes to prevent replay after archive or a crash.
 - Drain revokes review stamps for drafts observed missing, so restoring the same bytes after manual removal requires review.
 - Ingest archives handoffs after review stamp storage fails, retaining one unsigned draft for a person with a fixed failure reason.
+- Recovery abandons prepared review decisions without usable origin claims and retains or restores their drafts for human review before any card or document write.

@@ -513,13 +513,26 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         a["path"] for a in p.get("appends", []) if a.get("writer") in DOCUMENT_WRITERS
     ]
     protected = any(read_only_pattern(path, config.read_only_paths) for path in destinations)
-    if drift or protected:
+    # Older review decisions have no stamp field. Recognize their source drafts
+    # independently of that field, while allowing undo and draft-only restoration.
+    drafts = {c.path for c in changes if c.before is not None and c.path.startswith("memory/handoff-inbox/")}
+    drafts.update(a["draft"] for a in p.get("appends", []) if a.get("draft"))
+    origin_refused = False
+    if (drafts and d.kind != "undo") or "origin_stamp_mac" in p:
+        from .handoff_origin import claim_review_stamp
+
+        origin_refused = not claim_review_stamp(target, p.get("origin_stamp_mac", ""), decision_id)
+    if drift or protected or origin_refused:
         # Discard only our unchanged safety copy. Never overwrite an edited card or archive.
         final = {
             **p,
             "phase": "abandoned",
             "status": "abandoned",
-            "abandoned_reason": ("read-only paths changed" if protected else f"changed: {', '.join(drift)}"),
+            "abandoned_reason": (
+                "review origin stamp missing or unavailable"
+                if origin_refused
+                else ("read-only paths changed" if protected else f"changed: {', '.join(drift)}")
+            ),
         }
         original_missing = any(
             c.before is not None and c.after is None and current(target, c.path) is None for c in changes
@@ -532,12 +545,13 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         )
         if any(c.path in prepared and c.after is None for c in pending):
             final["restorable"] = False
+        if origin_refused and not protected:
+            pending.extend(
+                Change(c.path, None, c.before, c.mode)
+                for c in changes
+                if c.path in drafts and c.before is not None and current(target, c.path) is None
+            )
     else:
-        if "origin_stamp_mac" in p:
-            from .handoff_origin import claim_review_stamp
-
-            if not claim_review_stamp(target, p["origin_stamp_mac"], decision_id):
-                raise JournalConflict("review origin stamp already consumed or unavailable")
         final = {**p, "phase": "undone" if d.kind == "undo" else "committed", "status": "committed"}
         pending = [c for c in changes if c.path not in prepared]
         if d.undoes:
