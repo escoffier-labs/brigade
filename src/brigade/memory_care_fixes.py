@@ -33,6 +33,33 @@ class FixRefused(ValueError):
     """Fixed reason words only, suitable for summaries."""
 
 
+class UndoneFixIndex:
+    """One plan's journal snapshot, including a read failure for per-item refusals.
+
+    Never retain this across writes. Standalone preparation constructs a fresh one.
+    """
+
+    def __init__(self, target: Path) -> None:
+        self._entries: dict[tuple[str, str], list[journal.Decision]] = {}
+        self._error: OSError | ValueError | None = None
+        try:
+            for decision in journal.entries(target):
+                if decision.kind != "fix" or not decision.undone_by:
+                    continue
+                for kind in AUTO_FIXES:
+                    if f"{kind}:" in decision.reason:
+                        for rel in decision.paths:
+                            self._entries.setdefault((rel, kind), []).append(decision)
+        except (OSError, ValueError) as exc:
+            self._error = exc
+
+    def decisions(self, rel: str, kind: str) -> list[journal.Decision]:
+        if self._error is not None:
+            # A fresh traceback each time, so raising once per item does not grow one shared traceback.
+            raise self._error.with_traceback(None)
+        return self._entries.get((rel, kind), [])
+
+
 def read(target: Path, rel: str) -> bytes:
     try:
         from .memory_inbox_io import read as bounded_read
@@ -160,6 +187,7 @@ def prepare(
     today: date,
     *,
     context: tuple[set[str], bool | None] | None = None,
+    undone_index: UndoneFixIndex | None = None,
 ) -> dict[str, Any]:
     from .memory_care_plan import derived_fresh_until
 
@@ -180,14 +208,14 @@ def prepare(
     if item.get("content_digest") and item["content_digest"] != digest:
         raise FixRefused("changed")
     # An undone fix stays undone while the card is still as the undo left it.
-    for decision in journal.entries(target):
-        if decision.kind == "fix" and decision.undone_by and rel in decision.paths and f"{kind}:" in decision.reason:
-            try:
-                restored = journal.before_bytes(target, decision, rel)
-            except (OSError, ValueError):
-                restored = None
-            if restored is None or restored == before:
-                raise FixRefused("undone")
+    snapshot = undone_index if undone_index is not None else UndoneFixIndex(target)
+    for decision in snapshot.decisions(rel, kind):
+        try:
+            restored = journal.before_bytes(target, decision, rel)
+        except (OSError, ValueError):
+            restored = None
+        if restored is None or restored == before:
+            raise FixRefused("undone")
     text = before.decode("utf-8")
     meta = plain_frontmatter(text)
     if memory_archive.frontmatter_refusal(text):
@@ -234,6 +262,9 @@ def apply_fixes(
             result.update(skipped=1, reasons={"scan-unreadable": 1})
             return result
     context = plan_context(target, config)
+    # One journal read for the whole apply. Fixes committed in this loop carry no undone_by, so the snapshot
+    # cannot go stale for the undone check.
+    undone_index = UndoneFixIndex(target)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in plan["items"]:
         if item.get("blockers"):
@@ -252,7 +283,9 @@ def apply_fixes(
             for item in items:
                 if not isinstance(item.get("content_digest"), str):
                     raise FixRefused("unbound-plan")
-                prepared.append((item, prepare(target, config, item, today, context=context)))
+                prepared.append(
+                    (item, prepare(target, config, item, today, context=context, undone_index=undone_index))
+                )
             before = prepared[0][1]["before"]
             fields = {k: v for _, p in prepared for k, v in p["candidate_fields"].items()}
             # Insert only: preserve the BOM, every existing byte, and the physical newline style.
