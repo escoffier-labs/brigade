@@ -1,0 +1,1 @@
+- Session presence skips dirty paths containing control characters or invalid UTF-8 and marks the snapshot truncated so other dirty paths can still be reported.

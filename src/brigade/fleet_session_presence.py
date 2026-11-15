@@ -450,6 +450,12 @@ def _is_excluded_brigade_path(path: str) -> bool:
 
 
 def _normalize_dirty_path(path: str) -> str | None:
+    if _contains_controls(path):
+        return None
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
     normalized = path.replace("\\", "/")
     while normalized.startswith("./"):
         normalized = normalized[2:]
