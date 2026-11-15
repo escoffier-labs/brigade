@@ -473,6 +473,21 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
         pass
     from ..memory_review import note_open
 
+    if not (
+        os.environ.get("BRIGADE_RUN_ID")
+        or os.environ.get("BRIGADE_SCANNER_RUN_ID")
+        or payload.get("agent_id")
+        or payload.get("agent_type", "main") not in ("main", "claude")
+        or payload.get("session_kind", "interactive") != "interactive"
+    ):
+        from ..memory_retrieval_eval.live import record_use
+
+        opened_text = read_card_bounded(found[0], found[2])
+        if opened_text is not None:
+            record_use(target, card_id, opened_text)
+            if found[1] != target:
+                record_use(found[1], card_id, opened_text)
+
     def observed(ledger: dict[str, Any]) -> None:
         _append(ledger, "opened", [card_id])
         note_open(ledger, card_id, payload)

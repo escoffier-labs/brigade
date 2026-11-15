@@ -252,6 +252,16 @@ def search_payload(
         retrieval.update(hub="unavailable", degraded=True, reason="hub-config-invalid")
         retrieval["fallback"] = sorted(lists)
     matches = fuse(lists, limit, home_scope=settings.scope)
+    if query_source == "explicit" and not retrieval.get("degraded") and not retrieval.get("stale"):
+        from .memory_retrieval_eval.live import record_search
+
+        record_search(
+            target,
+            query,
+            [m for m in matches if m.get("source") == "hub"],
+            hub=hub,
+            epoch=str(body.get("log_epoch") or ""),
+        )
     payload: dict[str, Any] = {
         "target": str(target),
         "query": query,
@@ -288,7 +298,9 @@ def search(*, target: Path, query: str, limit: int = 20, json_output: bool = Fal
     except OSError as exc:
         print(f"error: hub memory state under .brigade/memory/hub is unusable: {exc}", file=sys.stderr)
         return 2
-    memory_cmd._record_search_log(target.expanduser().resolve(), query=query, matches=payload["matches"])
+    memory_cmd._record_search_log(
+        target.expanduser().resolve(), query=query, matches=payload["matches"], private_query=True
+    )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

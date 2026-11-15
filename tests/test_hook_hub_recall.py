@@ -1074,3 +1074,24 @@ def test_the_hook_identity_equals_search_identity(wired, kind):
     found = hub_recall.card_under_roots(memory, card)
     assert found is not None
     assert hub_recall.opened_card_id(*found) == searched["card_id"]
+
+
+def test_private_eval_use_joins_the_wired_search_target(wired, tmp_path, monkeypatch):
+    from brigade.memory_retrieval_eval import live
+
+    target, memory = wired
+    private_home = tmp_path / "eval-home"
+    private_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: private_home)
+    card = memory / "memory/cards/comet.md"
+    text = card.read_text()
+    live.record_search(
+        target,
+        "rotation query",
+        [{"scope": "fleet", "card_id": "comet", "content_hash": live.text_hash(text)}],
+        hub="test-hub",
+        epoch="test-epoch",
+    )
+    assert _read(target, card)
+    [entry] = json.loads(live.state_path(target).read_text())
+    assert entry["gold"] == entry["results"]

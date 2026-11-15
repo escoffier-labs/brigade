@@ -1741,8 +1741,15 @@ def _record_search_log(
     query: str,
     matches: list[dict[str, Any]],
     ts: str | None = None,
+    private_query: bool = False,
 ) -> None:
     """Append one search event; fail-open so logging never breaks search."""
+    # Hub query text belongs only in private use-derived evaluation state.
+    if private_query:
+        from .memory_recall_log import record_recall
+
+        record_recall(target, query=query, query_source="explicit", matches=matches, ts=ts)
+        return
     from .memory_card_reads import record
 
     # The read ledger counts every returned card, whatever the search log caps or skips.

@@ -1401,3 +1401,79 @@ async fn hybrid_vector_change_after_snapshot_is_rechecked_under_apply_lock() {
     assert_eq!(&before[..2], &after[..2]);
     assert_eq!(h.events(), events);
 }
+
+#[tokio::test]
+async fn live_scope_eval_binds_candidate_and_rejects_metric_mutations() {
+    let (h, id) = ready().await;
+    let before = card(&h, "fleet", "a").await;
+    let shown = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    let reader = h
+        .call(
+            NODE_TOKEN,
+            json!({"action":"proposal_show","proposal_id":id}),
+        )
+        .await;
+    assert!(reader.body.get("retrieval_eval_targets").is_none());
+    let targets = shown.body["retrieval_eval_targets"]
+        .as_array()
+        .expect("reviewer candidate texts");
+    let mut safe_targets = targets.clone();
+    for target in &mut safe_targets {
+        target.as_object_mut().unwrap().remove("after_text");
+    }
+    let fixture = gate_report(&h).await;
+    let metrics =
+        json!({"query_count":20,"hit_rate":1.0,"mrr":1.0,"precision_at_k":0.2,"recall_at_k":1.0});
+    let mut live = json!({"evaluation_id":h.id(),"k":5,"query_set_digest":ids::sha256_hex(b"private judgments"),
+        "gate":{"name":"Live-R0","passed":true,"failures":[]},
+        "live":{"proposal_id":id,"targets":safe_targets,"replay_matches":true,"binding":fixture["adapters"]["hub-lexical"]["binding"]},
+        "adapters":{"before":{"available":true,"overall":metrics},"candidate":{"available":true,"overall":metrics}}});
+    assert_eq!(record(&h, &live).await.status, 201);
+    let preflight = report(&h, &id).await;
+    assert!(preflight::all_satisfied(&preflight.body), "{preflight:?}");
+    // A caller cannot arm a regression by leaving the pass bit true.
+    h.set_clock(h.now() + 1);
+    live["evaluation_id"] = json!(h.id());
+    live["adapters"]["candidate"]["overall"]["recall_at_k"] = json!(0.95);
+    assert_eq!(record(&h, &live).await.status, 201);
+    assert!(
+        report(&h, &id).await.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_failed")
+    );
+    assert_eq!(
+        h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await.body["state"],
+        "pending"
+    );
+    assert_eq!(card(&h, "fleet", "a").await, before);
+    live["adapters"]["candidate"]["overall"]["recall_at_k"] = json!(1.0);
+    for mutation in ["count", "target", "proposal", "parity"] {
+        h.set_clock(h.now() + 1);
+        let mut changed = live.clone();
+        changed["evaluation_id"] = json!(h.id());
+        match mutation {
+            "count" => changed["adapters"]["before"]["overall"]["query_count"] = json!(19),
+            "target" => {
+                changed["live"]["targets"][0]["after_hash"] =
+                    json!(ids::sha256_hex(b"wrong candidate"))
+            }
+            "proposal" => changed["live"]["proposal_id"] = json!(h.id()),
+            _ => changed["live"]["replay_matches"] = json!(false),
+        }
+        assert_eq!(record(&h, &changed).await.status, 201);
+        let preflight = report(&h, &id).await;
+        assert!(!preflight::all_satisfied(&preflight.body), "{preflight:?}");
+    }
+    h.set_clock(h.now() + 60_001);
+    live["evaluation_id"] = json!(h.id());
+    assert_eq!(record(&h, &live).await.status, 201);
+    let applied = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+}

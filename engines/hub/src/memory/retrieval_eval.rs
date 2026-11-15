@@ -140,6 +140,9 @@ fn positive_string(v: &Json) -> bool {
         .is_some_and(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
 }
 fn binding(r: &Report) -> &Json {
+    if r.body["gate"]["name"] == "Live-R0" {
+        return &r.body["live"]["binding"];
+    }
     &r.body["adapters"][if r.mode == "lexical" {
         "hub-lexical"
     } else {
@@ -174,11 +177,22 @@ pub fn prepare(request: &Json) -> Result<Report, Reply> {
         ));
     }
     let body: Json = serde_json::from_str(raw).map_err(|_| invalid())?;
-    if !body.is_object() || body.get("digest").is_some() || !hex(&body["fixture_digest"]) {
+    if !body.is_object()
+        || body.get("digest").is_some()
+        || !(if body["gate"]["name"] == "Live-R0" {
+            hex(&body["query_set_digest"])
+                && ids::parse_event_id(string(&body["live"], "proposal_id")).is_some()
+                && body["live"]["targets"]
+                    .as_array()
+                    .is_some_and(|t| !t.is_empty())
+        } else {
+            hex(&body["fixture_digest"])
+        })
+    {
         return Err(invalid());
     }
     let mode = match body["gate"]["name"].as_str() {
-        Some("R0") => "lexical",
+        Some("R0" | "Live-R0") => "lexical",
         Some("R1-public") => "hybrid",
         _ => return Err(invalid()),
     };
@@ -194,14 +208,19 @@ pub fn prepare(request: &Json) -> Result<Report, Reply> {
         passed,
     };
     let b = binding(&report);
-    let available = report.body["adapters"][if mode == "lexical" {
-        "hub-lexical"
+    let available = if report.body["gate"]["name"] == "Live-R0" {
+        report.body["adapters"]["before"]["available"] == true
+            && report.body["adapters"]["candidate"]["available"] == true
     } else {
-        "hub-hybrid"
-    }]["available"]
-        .as_bool()
-        == Some(true)
-        && report.body["adapters"]["bm25"]["available"].as_bool() == Some(true);
+        report.body["adapters"][if mode == "lexical" {
+            "hub-lexical"
+        } else {
+            "hub-hybrid"
+        }]["available"]
+            .as_bool()
+            == Some(true)
+            && report.body["adapters"]["bm25"]["available"].as_bool() == Some(true)
+    };
     let passed = report.body["gate"]["passed"]
         .as_bool()
         .ok_or_else(invalid)?;
@@ -364,6 +383,12 @@ pub fn hold<T: ReadTx + ?Sized>(
             }
         }
     }
+    if r.body["gate"]["name"] == "Live-R0"
+        && (r.body["live"]["proposal_id"] != proposal["proposal_id"]
+            || r.body["live"]["targets"] != live_targets(proposal, false))
+    {
+        return Ok(Some("retrieval_eval_candidate_mismatch"));
+    }
     let reason = if r.mode != mode {
         Some("retrieval_eval_mode_mismatch")
     } else if !r.passed {
@@ -493,4 +518,14 @@ pub(super) fn expires<T: ReadTx + ?Sized>(tx: &T, a: &Authority) -> rusqlite::Re
             None
         }
     }))
+}
+
+/// Exact candidate binding shared by review-readable inputs and apply checks.
+pub(super) fn live_targets(proposal: &Json, include_text: bool) -> Json {
+    json!(super::proposals::cards(proposal).iter().map(|c| {
+        let mut target = json!({"scope":c["scope"],"card_id":c["card_id"],
+            "before_hash":c["before_hash"],"after_hash":c["after_hash"],"after_state":c["after_state"]});
+        if include_text { target["after_text"] = c["after_text"].clone(); }
+        target
+    }).collect::<Vec<_>>())
 }
