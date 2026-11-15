@@ -58,3 +58,10 @@ scanner refusal, crash recovery and the off switch. Existing hook, draft, ingest
 and scheduler tests cover shared integration paths. Graph lookup was attempted
 before changes but this worktree has no graph database. Source-traced impact:
 post-tool hooks, memory CLI registration, care catalog and pinned launchers.
+
+Known limits. A review reads only observations newer than the last committed
+review, so a failure and its fix that land in different review windows cannot
+back a verified-fix lesson. The failing evidence has already been reviewed by
+then. Fix evidence also requires both observations to carry the same non-empty
+harness session id. A watched handoff source may not point at the lesson review
+outbox, because a promoting sweep there would file drafts without review.

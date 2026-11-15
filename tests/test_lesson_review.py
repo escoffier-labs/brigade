@@ -487,3 +487,19 @@ def test_stale_prepared_draft_retries_review(scope, monkeypatch):
     assert "pending" not in activity.load(scope)
     assert activity.load(scope)["reviewed"] == 0
     assert not (scope / ".claude").exists()
+
+
+@pytest.mark.parametrize("inbox", [".brigade/lesson-review/outbox", ".brigade/lesson-review"])
+def test_sources_refuse_the_lesson_outbox(tmp_path, inbox):
+    import json as _json
+
+    from brigade.handoff_cmd import sources
+
+    path = tmp_path / ".brigade/handoff-sources.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(_json.dumps({"sources": [{"root": ".", "inboxes": [inbox]}]}))
+    with pytest.raises(ValueError, match="lesson review outbox"):
+        sources._load_sources(tmp_path, path)
+    path.write_text(_json.dumps({"sources": [{"root": ".brigade", "inboxes": ["lesson-review/outbox"]}]}))
+    with pytest.raises(ValueError, match="lesson review outbox"):
+        sources._load_sources(tmp_path, path)

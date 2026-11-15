@@ -199,6 +199,7 @@ def admit(target: Path, candidate: Any, events: list[dict[str, Any]], reads: dic
             or not passed["tree_fingerprint"]
             or failed["tree_fingerprint"] == passed["tree_fingerprint"]
             or failed.get("producer_work_session_id") != passed.get("producer_work_session_id")
+            or not failed.get("_observation_session")
             or failed.get("_observation_session") != passed.get("_observation_session")
             or failed.get("verify_manifest_id") != passed.get("verify_manifest_id")
         ):

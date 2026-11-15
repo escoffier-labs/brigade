@@ -73,10 +73,7 @@ def keygen(*, target: Path, force: bool = False) -> int:
         return 1
     print(f"receipt signing key: {path}")
     print(f"key_id: {key_id}")
-    print(
-        "lesson authority uses only .brigade/receipt-signing-key. "
-        "Unset BRIGADE_RECEIPT_SIGNING_KEY_FILE when generating that key."
-    )
+    print("lesson authority reads only .brigade/receipt-signing-key. Unset BRIGADE_RECEIPT_SIGNING_KEY_FILE for it.")
     print("reminder: keep this key gitignored. Brigade's .brigade/ ignore convention covers it.")
     return 0
 
