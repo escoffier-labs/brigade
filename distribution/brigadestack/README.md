@@ -77,10 +77,20 @@ After the stable `@escoffier-labs/brigade` release is on npm and the bridge
 `package.json` pins that same exact version, select **Brigade Stack npm
 publication** in GitHub Actions and run it on `main`. The workflow reads the
 version from `distribution/brigadestack/npm/package.json`, so a release needs no
-workflow edit. It stops when the dependency version is not on npm or the bridge
-version already exists. The build job runs the launcher tests, checks that the
+workflow edit. It stops before any registry write when the dependency version is
+not on npm, the bridge version already exists, or the bridge version is not above
+the current `latest`, since publishing would otherwise move `latest` backwards.
+The build job runs the launcher tests, checks that the
 tarball holds only `LICENSE`, `README.md`, `launcher.cjs` and `package.json`,
 installs it with the real dependency and checks `brigadestack --version` and
 `--help`. Only the publish job, in the `npm` environment, can request an OIDC
-token. It publishes that checked tarball with provenance and waits until
-`latest` points at the new version.
+token. It publishes that checked tarball with provenance and waits up to five
+minutes until `latest` points at the new version.
+
+If only that final confirmation fails, the package may already be published.
+Check `npm view brigadestack dist-tags` before dispatching again; a second run
+stops at the "already on npm" check once the version exists.
+
+Like the PyPI bridge, this workflow publishes the `main` commit current at
+dispatch and takes no reviewed-SHA input, unlike `npm-publish.yml`. The bridge is
+four files with an exact dependency, so review the `main` head before dispatch.

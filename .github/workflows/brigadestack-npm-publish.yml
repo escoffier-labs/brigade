@@ -55,16 +55,28 @@ jobs:
           )
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Bridge brigadestack@$version depends on @escoffier-labs/brigade@$version"
-      - name: Require the published dependency and an unused bridge version
+      - name: Require the published dependency and a new bridge version above latest
         env:
           VERSION: ${{ steps.identity.outputs.version }}
         run: |
           test "$(npm view "@escoffier-labs/brigade@$VERSION" version)" = "$VERSION"
           versions=$(npm view brigadestack versions --json)
-          if node -e 'process.exit(JSON.parse(process.argv[1]).includes(process.argv[2]) ? 0 : 1)' "$versions" "$VERSION"; then
-            echo "::error::brigadestack@$VERSION is already on npm; bump distribution/brigadestack/npm first"
-            exit 1
-          fi
+          latest=$(npm view brigadestack dist-tags.latest)
+          node - "$VERSION" "$versions" "$latest" <<'JS'
+          const [version, versionsJson, latest] = process.argv.slice(2);
+          // npm prints a bare string instead of an array when only one version exists.
+          if ([].concat(JSON.parse(versionsJson)).includes(version)) {
+            console.log(`::error::brigadestack@${version} is already on npm; bump distribution/brigadestack/npm first`);
+            process.exit(1);
+          }
+          const triple = v => v.split(/[.-]/).slice(0, 3).map(Number);
+          const [a, b] = [triple(version), triple(latest)];
+          const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+          if (cmp <= 0) {
+            console.log(`::error::brigadestack@${version} is not above latest ${latest}; publishing it with --tag latest would move latest backwards`);
+            process.exit(1);
+          }
+          JS
       - name: Run launcher contract tests
         working-directory: ${{ env.BRIDGE_DIR }}
         run: node --test launcher.test.cjs
@@ -123,7 +135,7 @@ jobs:
         run: npm publish "brigadestack-npm/brigadestack-$VERSION.tgz" --provenance --access public --tag latest --ignore-scripts
       - name: Confirm the registry serves the new version as latest
         run: |
-          for attempt in $(seq 1 12); do
+          for attempt in $(seq 1 30); do
             if test "$(npm view brigadestack dist-tags.latest 2>/dev/null)" = "$VERSION"; then
               npm view "brigadestack@$VERSION" name version dependencies dist.integrity
               exit 0

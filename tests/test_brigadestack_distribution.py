@@ -11,12 +11,38 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests._posix import requires_process_groups
 
 import tomllib
 
-BRIDGE = Path(__file__).resolve().parents[1] / "distribution/brigadestack"
+ROOT = Path(__file__).resolve().parents[1]
+BRIDGE = ROOT / "distribution/brigadestack"
+MAIN_DISPATCH = (
+    "github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main'"
+    " && github.event_name == 'workflow_dispatch'"
+)
+
+
+@pytest.mark.parametrize(
+    ("workflow_file", "environment"),
+    [("brigadestack-publish.yml", "pypi"), ("brigadestack-npm-publish.yml", "npm")],
+)
+def test_bridge_publication_keeps_oidc_in_the_main_only_publish_job(workflow_file, environment):
+    # The registry trust entries name these files and environments.
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_file).read_text())
+    assert set(workflow.get("on", workflow.get(True))) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read"}
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"build", "publish"}
+    assert jobs["publish"]["needs"] == "build"
+    assert jobs["publish"]["environment"] == environment
+    assert jobs["publish"]["permissions"]["id-token"] == "write"
+    assert set(jobs["publish"]["permissions"]) <= {"contents", "id-token"}
+    assert "permissions" not in jobs["build"] and "environment" not in jobs["build"]
+    for job in jobs.values():
+        assert job["if"] == MAIN_DISPATCH
 
 
 def test_python_bridge_adds_only_an_alias_for_the_exact_stable_dependency():
