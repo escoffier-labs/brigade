@@ -149,7 +149,8 @@ def _refuse(target: Path, decision_id: str, payload: dict[str, Any], exc: Any) -
         data = base64.b64decode(row["data"])
         if not _contains(target, row["path"], data):  # a repeated refusal never withdraws twice
             append(target, row["path"], data)
-    detail = refusal_reason or exc.reason
+    # Keep the refusal that started this, so a digest mismatch does not hide the real cause.
+    detail = f"{refusal_reason} (cause: {exc.reason})" if refusal_reason else exc.reason
     journal.annotate(target, decision_id, append_refused=f"{exc.code}: {detail}")
     if refusal_reason:
         exc.code = refusal_reason

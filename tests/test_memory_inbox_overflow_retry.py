@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from datetime import date
 
@@ -211,7 +212,9 @@ def test_refused_retry_keeps_changed_resolved_copy_and_reports_reason(tmp_path, 
     assert draft.exists() and list((ws / drain.RESOLVED_REL).glob("*.md"))
     assert result["decisions"][0]["reason"] == "hold:resolved-copy-digest-mismatch"
     retry = next(item for item in journal.entries(ws) if item.reason.startswith("retry:"))
-    assert "resolved-copy-digest-mismatch" in journal._payload(ws, retry.decision_id)["append_refused"]
+    refused = journal._payload(ws, retry.decision_id)["append_refused"]
+    assert "resolved-copy-digest-mismatch" in refused
+    assert re.search(r"\(cause: \S.*\)$", refused), refused
 
 
 def test_refused_retry_does_not_overwrite_occupied_inbox_and_cleanup_undoes(tmp_path, monkeypatch):
