@@ -787,9 +787,12 @@ def test_search_cli_labels_a_degraded_answer(hub, tmp_path, capsys):
     assert "[local]" in out
 
 
-def test_search_cli_json_preserves_hub_lineage_and_ranking(hub, tmp_path, capsys):
-    target = workspace(tmp_path, mode="read")
-    lineage = [{"scope": "fleet", "card_id": "ancestor", "revision": 1}]
+@pytest.mark.parametrize(
+    ("lineage", "source_demoted", "ranks"),
+    [([{"scope": "fleet", "card_id": "ancestor", "revision": 1}], True, {"lexical": 2, "dense": 1}), ([], False, {})],
+)
+def test_search_cli_json_preserves_hub_lineage_and_ranking(hub, tmp_path, capsys, lineage, source_demoted, ranks):
+    target = workspace(tmp_path, mode="read", mine="# Mine\ncurrent\n")
     hub.search_reply = (
         200,
         {
@@ -800,11 +803,17 @@ def test_search_cli_json_preserves_hub_lineage_and_ranking(hub, tmp_path, capsys
                     "title": "Current",
                     "content_hash": "hash-current",
                     "lineage": lineage,
-                    "source_demoted": True,
-                    "ranks": {"lexical": 2, "dense": 1},
-                }
+                    "source_demoted": source_demoted,
+                    "ranks": ranks,
+                },
+                {
+                    "scope": "fleet",
+                    "card_id": "plain",
+                    "title": "Plain",
+                    "content_hash": "hash-plain",
+                },
             ],
-            "match_count": 1,
+            "match_count": 2,
             "retrieval": {"mode": "hybrid", "stale": False},
         },
     )
@@ -812,11 +821,17 @@ def test_search_cli_json_preserves_hub_lineage_and_ranking(hub, tmp_path, capsys
     code, out, err = run(["memory", "search", "--target", str(target), "--json", "current"], capsys)
 
     assert code == 0 and err == ""
-    [match] = json.loads(out)["matches"]
+    matches = {m["card_id"]: m for m in json.loads(out)["matches"]}
+    assert set(matches) == {"current", "plain", "mine"}
+    match = matches["current"]
     assert match["lineage"] == lineage
-    assert match["source_demoted"] is True
+    assert match["source_demoted"] is source_demoted
     assert match["ranks"] == {"hub": 1}
-    assert match["hub_ranks"] == {"dense": 1, "lexical": 2}
+    assert match["hub_ranks"] == ranks
+    for card_id in ("plain", "mine"):
+        assert "lineage" not in matches[card_id]
+        assert "source_demoted" not in matches[card_id]
+        assert "hub_ranks" not in matches[card_id]
 
 
 def test_off_mode_output_is_byte_identical(hub, tmp_path, capsys):

@@ -39,6 +39,34 @@ def switch(project, mode):
     return setup.main(["--project-dir", str(project), "switch", "--to", mode], run=gpu_host())
 
 
+@pytest.mark.parametrize("image", ["abcdef0123456789", "ABCDEF0123456789", "a" * 64, "sha256:" + "a" * 64])
+def test_init_refuses_bare_hub_image_id_without_writes(project, tmp_path, capsys, image):
+    before = _tree(project, tmp_path / "backups")
+
+    assert _init(project, tmp_path, "--hub-image", image) == 1
+
+    assert _tree(project, tmp_path / "backups") == before
+    assert (
+        capsys.readouterr().err.strip()
+        == "error: --hub-image takes a name:tag or a name@sha256 digest reference, not a bare image id"
+    )
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "hub:latest",
+        "example/hub:latest",
+        "example/hub@sha256:" + "a" * 64,
+        "registry.example.com:5000/name:tag",
+        "registry.example.com:5000/name@sha256:" + "a" * 64,
+    ],
+)
+def test_init_accepts_named_hub_image_references(project, tmp_path, image):
+    assert _init(project, tmp_path, "--hub-image", image) == 0
+    assert _env(project)["BRIGADE_HUB_IMAGE"] == image
+
+
 @pytest.mark.parametrize("action", ["init", "hybrid", "lexical"])
 def test_operator_override_survives_each_setup_command(project, tmp_path, action):
     if action != "init":
