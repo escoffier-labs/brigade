@@ -60,7 +60,9 @@ def apply_pending(
                 reply = client.call(
                     "verify_auto_apply",
                     proposal_id=ident,
-                    expected_op_types=[op["type"] for op in ops],
+                    # _propose appends exactly one manifest binding to the packet's corrections.
+                    # The hub authenticates that binding and admits correction classes separately.
+                    expected_op_types=[op["type"] for op in ops] + ["append_evidence"],
                     binding_sha256=gate.binding_digest(target, pair, state["binding"]),
                     policy_sha256=policy_digest,
                     base_epoch=source_status["log_epoch"],

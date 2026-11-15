@@ -112,6 +112,44 @@ pub fn record(
     Ok(Reply::new(201, json!({"verify_evaluation":body})))
 }
 
+/// Recognize only _manifest_op's exact trailing shape and its authenticated binding.
+/// Other evidence appends, including mixed ids or duplicate bindings, remain corrections.
+fn has_manifest_binding(tx: &dyn WriteTx, body: &Json, ops: &[Json]) -> rusqlite::Result<bool> {
+    let Some((binding, corrections)) = ops.split_last().filter(|(_, rest)| !rest.is_empty()) else {
+        return Ok(false);
+    };
+    let first = &corrections[0];
+    let Some(evidence) = binding["evidence_ids"]
+        .as_array()
+        .filter(|ids| ids.len() == 1)
+    else {
+        return Ok(false);
+    };
+    let Some(id) = evidence[0].as_str() else {
+        return Ok(false);
+    };
+    if *binding
+        != json!({"type":"append_evidence","scope":first["scope"],
+        "card_id":first["card_id"],"base_revision":first["base_revision"],
+        "block_id":first["block_id"],"expected_block_hash":first["expected_block_hash"],
+        "evidence_ids":[id]})
+    {
+        return Ok(false);
+    }
+    let rows = tx.query(
+        "SELECT b.evidence_id FROM memory_evidence_bindings b JOIN memory_evidence e USING(evidence_id)
+         WHERE b.evidence_id=?1 AND b.proposal_id=?2 AND b.principal=?3
+         AND b.state='pending_review' AND b.purged_ms IS NULL
+         AND b.scope=?4 AND b.base_revision=?5 AND e.card_id=?6
+         AND e.principal=b.principal AND e.scope=b.scope AND e.tombstoned=0
+         AND e.artifact_kind='memory-verify-manifest'",
+        &[t(id), t(string(body,"proposal_id")), t(string(body,"proposer")),
+          t(string(first,"scope")), rusqlite::types::Value::Integer(first["base_revision"].as_i64().unwrap_or(0)),
+          t(string(first,"card_id"))],
+    )?;
+    Ok(!rows.is_empty())
+}
+
 /// Invoked under the writer transaction immediately before any card head changes.
 pub fn check(
     tx: &dyn WriteTx,
@@ -133,10 +171,13 @@ pub fn check(
         )?
         .first()
         .is_some_and(|r| s(&r[0]) != "true");
-    let op_types: Vec<_> = body["ops"]
-        .as_array()
-        .map(|ops| ops.iter().map(|op| op["type"].clone()).collect())
-        .unwrap_or_default();
+    let ops = body["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let op_types: Vec<_> = ops.iter().map(|op| op["type"].clone()).collect();
+    let corrections = if has_manifest_binding(tx, body, ops)? {
+        &op_types[..op_types.len() - 1]
+    } else {
+        &op_types
+    };
     let class = |op: &Json| match op.as_str() {
         Some("append_evidence") => "confirm",
         Some("replace_block") => "correct",
@@ -171,9 +212,9 @@ pub fn check(
         })
     {
         Some("verify_admission_missing_or_stale")
-    } else if op_types.is_empty()
+    } else if corrections.is_empty()
         || cmd.request["expected_op_types"] != json!(op_types)
-        || op_types
+        || corrections
             .iter()
             .any(|op| r["classes"][class(op)]["decision"] != "go")
     {

@@ -41,6 +41,92 @@ async fn publish(h: &Hub, token: &str, class: &str) -> Reply {
 async fn apply(h: &Hub, id: &Json, types: Json) -> Reply {
     h.call(AGENT_TOKEN, json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,"binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),"expected_op_types":types,"client_event_id":h.id()})).await
 }
+
+#[tokio::test]
+async fn only_the_exact_proposal_manifest_is_exempt_from_class_admission() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    for shape in [
+        "binding",
+        "ordinary",
+        "mixed",
+        "duplicate",
+        "not_trailing",
+        "extra_correction",
+        "wrong_pin",
+    ] {
+        let (h, _) = ready().await;
+        let before = card(&h, "fleet", "a").await;
+        if shape == "wrong_pin" {
+            h.put(
+                ADMIN_TOKEN,
+                "fleet",
+                "a",
+                before["revision"].as_i64(),
+                &format!("{OLD}\n\nOther claim. ^c-fedcba"),
+            )
+            .await;
+        }
+        let before = card(&h, "fleet", "a").await;
+        let revision = before["revision"].as_i64().unwrap();
+        let bytes = json!({"schema":"brigade.memory-verify-manifest.v1",
+            "card":{"scope":"fleet","card_id":"a","base_revision":revision}})
+        .to_string();
+        let evidence = "agent:dot/workspace-a/manifest";
+        let attached = h.call(AGENT_TOKEN, json!({"action":"evidence.attach","scope":"fleet","card_id":"a",
+            "workspace_id":"workspace-a","evidence_id":evidence,"artifact_kind":"memory-verify-manifest",
+            "artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(&bytes),
+            "observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
+        assert_eq!(attached.status, 201, "{attached:?}");
+        let correction = op("fleet", "a", revision);
+        let mut binding = correction.clone();
+        binding.as_object_mut().unwrap().remove("text");
+        binding["type"] = json!("append_evidence");
+        binding["evidence_ids"] = json!([evidence]);
+        let mut ordinary = binding.clone();
+        ordinary["evidence_ids"] = json!(["hub:admin/workspace-a/other"]);
+        let ops = match shape {
+            "ordinary" => vec![correction, ordinary],
+            "mixed" => {
+                binding["evidence_ids"] = json!([evidence, "hub:admin/workspace-a/other"]);
+                vec![correction, binding]
+            }
+            "duplicate" => {
+                // A second authenticated manifest has a real delta and also binds this proposal.
+                // Citing the identical id twice would be refused earlier as a no-delta op.
+                let second = "agent:dot/workspace-a/manifest-two";
+                let attached = h.call(AGENT_TOKEN, json!({"action":"evidence.attach","scope":"fleet","card_id":"a",
+                    "workspace_id":"workspace-a","evidence_id":second,"artifact_kind":"memory-verify-manifest",
+                    "artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(&bytes),
+                    "observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
+                assert_eq!(attached.status, 201, "{attached:?}");
+                let mut duplicate = binding.clone();
+                duplicate["evidence_ids"] = json!([second]);
+                vec![correction, duplicate, binding]
+            }
+            "not_trailing" => vec![correction, binding, ordinary],
+            "extra_correction" => vec![correction, ordinary, binding],
+            "wrong_pin" => {
+                // A second real block allows a different valid pin, rather than an invalid proposal.
+                binding["block_id"] = json!("c-fedcba");
+                binding["expected_block_hash"] = json!(ids::sha256_hex(b"Other claim. ^c-fedcba"));
+                vec![correction, binding]
+            }
+            _ => vec![correction, binding],
+        };
+        let types: Vec<_> = ops.iter().map(|op| op["type"].clone()).collect();
+        let opened = submit(&h, AGENT_TOKEN, ops).await;
+        assert_eq!(opened.status, 201, "{shape}: {opened:?}");
+        assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+        let current = card(&h, "fleet", "a").await;
+        let applied = apply(&h, &opened.body["proposal_id"], json!(types)).await;
+        if shape == "binding" {
+            assert_eq!(applied.body["state"], "applied", "{applied:?}");
+        } else {
+            assert_eq!(applied.status, 409, "{shape}: {applied:?}");
+            assert_eq!(card(&h, "fleet", "a").await, current, "{shape}");
+        }
+    }
+}
 #[tokio::test]
 async fn evaluator_authority_and_append_only_admission() {
     let (h, id) = ready().await;

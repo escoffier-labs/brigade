@@ -600,6 +600,11 @@ Existing verify configurations that omit `enabled` remain disabled. Run
 New memory-care configurations carry `new_workspace_version = 1` in `[verify]`.
 Only that versioned initialization marker enables an omitted `enabled` field.
 Set `[verify] enabled = false` to stop model calls.
+`memory care init --force` replaces an existing configuration and drops its
+`[verify]` table, including the new-workspace marker. Verification then defaults
+to disabled, even if it was previously enabled. Rebind the workspaces and use
+`memory verify enable` explicitly after reinitializing. Reinitialization cannot
+silently opt an existing workspace into scheduled model calls.
 The scheduled `memory-verify` care entry checks existing hub admission and uses
 `verify_auto_apply`. It never calls the human `decide` action or runs evaluation.
 A class without current hub admission stays proposal-only. Failed or invalid
@@ -671,6 +676,11 @@ records an automatic application only after the hub reports it applied.
 Deleting or forging that journal cannot change feedback classification.
 Feedback retains the latest 128 cases. Text stays in private packets and evaluation
 inputs, never the text-free decision record or run summary.
+Replay labels cover cards where the verifier proposed a change. They do not
+measure missed corrections on cards where it proposed nothing. Replay and
+synthetic cases currently share the metric pool, so accepted replays can raise
+reported recall without measuring those misses. The reported recall describes
+this combined corpus and omits unproposed production corrections.
 
 The explicit gate command requires an evaluator admin credential held outside
 workspace worker access. Configure its absolute token path in user-level
@@ -681,13 +691,35 @@ and needs `review` to authenticate the retained manifest hash chain.
 The hub transaction checks the current curation owner, fleet auto-apply policy,
 kill switch, verifier authority, policy digest, epoch, record lifetime, exact
 operation classes and pinned card snapshot. Automatic changes retain prior trust.
+The client sends the full stored operation-type list, including the trailing
+manifest attachment. Class admission excludes only that exact attachment when
+the hub's authenticated evidence binding names the same proposal, proposer,
+card, scope and base revision, with the first correction's block pin. Ordinary
+evidence appends still require `confirm=go`. A correction and its manifest can
+apply with only `correct=go`.
 The existing human review and rollback actions remain available.
+
+The hub cannot recompute `binding_sha256` from its stored state. That digest also
+covers local seat identities, corpus and feedback bytes, prompt and implementation
+hashes. The client recomputes it before applying, so local seat, corpus, feedback,
+prompt and implementation changes revoke admission through the client. The hub
+compares the submitted digest with the admin evaluator's admitted digest, but a
+worker can read and echo that value. This comparison does not attest the worker's
+current local files. The hub independently enforces evaluator credential rotation,
+principal, epoch, fleet policy revision and digest, the admitted policy snapshot
+and record expiry. Treat the scheduled client and its local files as trusted for
+the local revocation checks.
+
+Keep the admin evaluator credential outside the scheduled worker's OS access.
+A separate path under the same OS user does not provide that isolation. Use a
+separate OS identity or equivalent credential isolation. The CLI does not prove
+that the scheduler cannot read the evaluator token file.
 
 Before applying, Brigade rechecks admission, authenticates the manifest and packet,
 checks local evidence freshness and acknowledges the hub policy digest. Existing
 proposal caps, revision checks and cooldowns remain. The private applications
-journal keeps stable request ids for 35 days, up to 4096 entries. A replay uses the
-same id. Application uses `decide accept`, which retains before-state and supports
+journal retains up to 4096 diagnostic entries and does not authorize application.
+Application uses `verify_auto_apply`, which retains before-state and supports
 `brigade memory reflect rollback <proposal-id>`. That opens a compensating proposal
 under the existing rollback checks. No direct card write or Tier 2 floor bypass is
 introduced. The maintainer soak remains tracked separately by #762.

@@ -220,7 +220,7 @@ def test_mutation_unadmitted_class_cannot_apply(verify_hub, resolver, capsys, mo
     assert bool(result) == admit
     if admit:
         assert applied[0]["action"] == "verify_auto_apply"
-        assert applied[0]["expected_op_types"] == ["replace_block"]
+        assert applied[0]["expected_op_types"] == ["replace_block", "append_evidence"]
         assert "binding_sha256" in applied[0]
 
 
