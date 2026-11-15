@@ -679,3 +679,104 @@ def test_check_refuses_a_run_that_splits_an_html_pair():  # review of #2567: str
     assert all(not run.units for run in real.runs) or all(
         parse(tagged).units[i].blocked is None for run in real.runs for i in run.units
     )
+
+
+@pytest.mark.parametrize("reference", [b"[policy][DEPLOY]", b"[Deploy][]", b"[deploy]"])
+@pytest.mark.parametrize("indent", [b"", b"   "])
+def test_reference_definition_stays_with_kept_references(reference, indent):
+    definition = indent + b"[Deploy]: guide.md\n"
+    data = b"# T\n" + reference + b"\n## Notes\n" + definition + b"word " * 900 + b"\n"
+    plan = _plan(data)
+    assert parse(data).units[0].blocked == "link-definition"
+    assert not plan.runs and (0, "blocked") in plan.skipped
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+@pytest.mark.parametrize("reference", [b"[policy][DEPLOY]", b"[Deploy][]", b"[deploy]"])
+def test_check_refuses_reference_definition_used_in_after(reference):
+    definition = b"   [Deploy]: guide.md\n"
+    data = b"# T\n" + reference + b"\n## Notes\n" + definition + b"word " * 900 + b"\n"
+    # Forge a plan from equal-length filler so check cannot trust the planner's guard.
+    filler = data.replace(definition, b"x" * (len(definition) - 1) + b"\n")
+    unsafe = _plan(filler)
+    assert unsafe.runs
+    forged = dataclasses.replace(unsafe, before=data)
+    assert check(forged, _cards(forged), config_pins=(), today=TODAY, limits=LIMITS) == ["structure"]
+
+
+@pytest.mark.parametrize("opener,closer", [(b"<?", b"?>"), (b"<!DOCTYPE", b">"), (b"<![CDATA[", b"]]>")])
+def test_html_types_three_to_five_hide_boundaries_and_overflow(opener, closer):
+    hidden = b"## Hidden\n```\n<!-- X:START -->\n" + b"word " * 900 + b"\n"
+    data = b"# T\n" + opener + b"\n" + hidden + closer + b"\n## Live\nshort\n"
+    doc = parse(data)
+    assert doc.problem is None and [u.heading for u in doc.units] == [b"## Live"]
+    plan = _plan(data)
+    assert not plan.runs
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+    unclosed = b"# T\n" + opener + b"\n## Hidden\n"
+    plan = _plan(unclosed, overflow=(PREF,))
+    assert parse(unclosed).eof_in_fence and not plan.added
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+    filler = unclosed.replace(opener, b"x" * len(opener))
+    unsafe = _plan(filler, overflow=(PREF,))
+    assert unsafe.added
+    forged = dataclasses.replace(unsafe, before=unclosed, after=unclosed + unsafe.added[0].data)
+    assert "pointer-in-block" in check(forged, {}, config_pins=(), today=TODAY, limits=LIMITS)
+    one_line = b"# T\n" + opener + b" x " + closer + b"\n## Live\nshort\n"
+    assert not parse(one_line).eof_in_fence
+    assert [u.heading for u in parse(one_line).units] == [b"## Live"]
+
+
+def test_comment_opener_closes_at_backticked_end_and_preserves_live_pin():
+    data = b"# T\n<!-- note `-->`\n## Live\n" + KEEP.encode() + b"\n" + b"word " * 900 + b"\n"
+    doc = parse(data)
+    assert not doc.eof_in_fence and [u.heading for u in doc.units] == [b"## Live"]
+    assert doc.units[0].pin == "marker"
+    plan = _plan(data, overflow=(PREF,))
+    assert not plan.runs
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+    for opener in (b"`<!--`", b"\\<!--"):
+        example = data.replace(b"<!-- note `-->`", opener)
+        assert not parse(example).eof_in_fence
+        safe = _plan(example)
+        assert check(safe, _cards(safe), config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+def test_indented_code_comment_does_not_hide_live_heading():
+    data = (
+        b"# T\nexample:\n\n    <!--\n    ## Example\n    ```\n\n## Live\n"
+        + KEEP.encode()
+        + b"\n"
+        + b"word " * 900
+        + b"\n"
+    )
+    doc = parse(data)
+    assert not doc.eof_in_fence and [u.heading for u in doc.units] == [b"## Live"]
+    assert doc.units[0].pin == "marker"
+    plan = _plan(data, overflow=(PREF,))
+    assert not plan.runs
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+@pytest.mark.parametrize("opener,closer", [(b"<?", b"?>"), (b"<!DOCTYPE", b">"), (b"<![CDATA[", b"]]>")])
+def test_html_special_opener_line_keeps_comment_text_inert(opener, closer):
+    data = b"# T\n" + opener + b" <!-- " + closer + b"\n## Live\n" + KEEP.encode() + b"\n" + b"word " * 900 + b"\n"
+    assert [u.heading for u in parse(data).units] == [b"## Live"]
+    plan = _plan(data)
+    assert not plan.runs
+    assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+@pytest.mark.parametrize(
+    ("definition", "reference"),
+    [
+        (b"[Deploy  Guide]: guide.md\n", b"see [deploy guide]"),  # whitespace collapses before comparing
+        (b"[deploy]:\n  guide.md\n", b"see [deploy]"),  # destination on the next line
+        (b"[deploy]: guide.md\n", b"see [see [deploy]]"),  # the innermost of nested brackets
+        (b"[deploy guide]: guide.md\n", b"see [deploy\nguide]"),  # a label that wraps across lines
+    ],
+)
+def test_reference_labels_match_as_commonmark_compares_them(definition, reference):  # review of #2572
+    data = b"# T\n" + reference + b"\n## Notes\n" + definition + b"word " * 900 + b"\n"
+    assert parse(data).units[0].blocked == "link-definition"
+    assert not _plan(data).runs
