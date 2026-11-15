@@ -16,7 +16,6 @@ import stat
 import sys
 import re
 from dataclasses import asdict, dataclass
-from collections.abc import Iterator
 from pathlib import Path
 
 from . import dirfd, handoff_publish, receipt_signing
@@ -136,28 +135,50 @@ class VerifiedStamp:
         return _claim(self.consumed)
 
 
-def _claim_temporaries(parent: int, *, limit: int | None = None) -> Iterator[str]:
-    # Bound orphan maintenance by names visited, including consumed markers.
-    scan = os.open(".", dirfd.directory_flags(), dir_fd=parent)
+def _temporary_name(marker: str) -> str:
+    return f".claim-{marker}.tmp"
+
+
+def _temporary_directory(parent: int) -> int:
+    # A separate namespace keeps permanent markers out of the maintenance budget.
     try:
-        with os.scandir(scan) as entries:
-            for entry in islice(entries, limit):
-                if entry.name.startswith(".claim-") and entry.name.endswith(".tmp"):
-                    yield entry.name
-    finally:
-        os.close(scan)
+        dirfd.mkdir_child(parent, "temporaries")
+        dirfd.fsync_directory(parent)
+    except FileExistsError:
+        pass
+    return dirfd.open_child_directory(parent, "temporaries")
 
 
 def _sweep_claim_temporaries(parent: int) -> None:
-    for name in _claim_temporaries(parent, limit=64):
+    temporary_parent = _temporary_directory(parent)
+    try:
+        scan = os.open(".", dirfd.directory_flags(), dir_fd=temporary_parent)
         try:
-            info = dirfd.stat_child(parent, name)
-            # A one-link temp never published a marker. Linked temps are handled
-            # only when resuming the matching marker, not another decision's.
-            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
-                dirfd.unlink_child(parent, name)
-        except FileNotFoundError:
-            pass
+            with os.scandir(scan) as entries:
+                for entry in islice(entries, 64):
+                    name = entry.name
+                    if not name.startswith(".claim-") or not name.endswith(".tmp"):
+                        continue
+                    try:
+                        info = dirfd.stat_child(temporary_parent, name)
+                        if not stat.S_ISREG(info.st_mode):
+                            continue
+                        if info.st_nlink == 2:
+                            marker = dirfd.stat_child(parent, name[7:-4])
+                            if (marker.st_dev, marker.st_ino) != (info.st_dev, info.st_ino):
+                                continue
+                        elif info.st_nlink != 1:
+                            continue
+                        # Under the claim lock, every valid temporary is crash debris.
+                        # Removing each visited entry makes successive batches progress.
+                        dirfd.unlink_child(temporary_parent, name)
+                    except FileNotFoundError:
+                        pass
+        finally:
+            os.close(scan)
+        dirfd.fsync_directory(temporary_parent)
+    finally:
+        os.close(temporary_parent)
 
 
 def _resume_claim(parent: int, name: str, data: bytes) -> bool:
@@ -167,13 +188,16 @@ def _resume_claim(parent: int, name: str, data: bytes) -> bool:
         if not stat.S_ISREG(info.st_mode) or info.st_nlink not in (1, 2) or os.read(fd, 257) != data:
             return False
         if info.st_nlink == 2:
-            for temporary in _claim_temporaries(parent):
-                sibling = dirfd.stat_child(parent, temporary)
-                if (sibling.st_dev, sibling.st_ino) == (info.st_dev, info.st_ino):
-                    dirfd.unlink_child(parent, temporary)
-                    break
-            else:
-                return False
+            temporary_parent = _temporary_directory(parent)
+            try:
+                temporary = _temporary_name(name)
+                sibling = dirfd.stat_child(temporary_parent, temporary)
+                if (sibling.st_dev, sibling.st_ino) != (info.st_dev, info.st_ino):
+                    return False
+                dirfd.unlink_child(temporary_parent, temporary)
+                dirfd.fsync_directory(temporary_parent)
+            finally:
+                os.close(temporary_parent)
         if os.fstat(fd).st_nlink != 1:
             return False
         os.fsync(fd)
@@ -225,8 +249,23 @@ def _claim(consumed: Path, *, decision_id: str = "") -> bool:
                 # so a live temporary cannot be mistaken for crash debris.
                 fcntl.flock(parent, fcntl.LOCK_EX)
                 _sweep_claim_temporaries(parent)
-                temporary = f".claim-{secrets.token_hex(16)}.tmp"
-                fd = dirfd.open_child_file(parent, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                data = decision_id.encode("ascii")
+                try:
+                    dirfd.stat_child(parent, consumed.name)
+                except FileNotFoundError:
+                    pass
+                else:
+                    owned = bool(decision_id) and _resume_claim(parent, consumed.name, data)
+                    os.fsync(parent)
+                    os.fsync(state)
+                    return owned
+                temporary_parent = _temporary_directory(parent)
+                temporary = _temporary_name(consumed.name)
+                try:
+                    fd = dirfd.open_child_file(temporary_parent, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except BaseException:
+                    os.close(temporary_parent)
+                    raise
                 try:
                     try:
                         data = decision_id.encode("ascii")
@@ -236,14 +275,24 @@ def _claim(consumed: Path, *, decision_id: str = "") -> bool:
                     finally:
                         os.close(fd)
                     try:
-                        os.link(temporary, consumed.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                        os.link(
+                            temporary,
+                            consumed.name,
+                            src_dir_fd=temporary_parent,
+                            dst_dir_fd=parent,
+                            follow_symlinks=False,
+                        )
                     except FileExistsError:
                         if not decision_id:
                             return False
                         if not _resume_claim(parent, consumed.name, data):
                             return False
                 finally:
-                    dirfd.unlink_child(parent, temporary)
+                    try:
+                        dirfd.unlink_child(temporary_parent, temporary)
+                        os.fsync(temporary_parent)
+                    finally:
+                        os.close(temporary_parent)
                 os.fsync(parent)
                 os.fsync(state)
             finally:

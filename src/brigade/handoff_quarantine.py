@@ -24,7 +24,7 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
 
 def _private_hold(target: Path, token: str) -> tuple[int, int]:
     """Return the held parent and fresh child, persisting each new directory."""
-    parent = dirfd.open_directory_chain(target.resolve())
+    parent = dirfd.open_directory_chain(target.absolute())
     try:
         for name in (".brigade", "handoffs", "held"):
             try:
@@ -127,6 +127,9 @@ def hold(target: Path, source: Path, *, dry_run: bool = False) -> None:
                 {
                     "filename": source.name,
                     "size": before.st_size,
+                    "dev": before.st_dev,
+                    "ino": before.st_ino,
+                    "mtime_ns": before.st_mtime_ns,
                     "digest": {
                         "algorithm": "sha256-size-first-last-v1",
                         "chunk_bytes": CHUNK_BYTES,
@@ -162,6 +165,10 @@ def hold(target: Path, source: Path, *, dry_run: bool = False) -> None:
                     else:
                         raise OSError("no-follow handoff move is unavailable")
                     moved = True
+                    held = dirfd.stat_child(destination, source.name)
+                    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+                    if any(getattr(held, field) != getattr(before, field) for field in fields):
+                        raise ingest.ChangedHandoffError("oversized handoff changed during quarantine")
                 except OSError:
                     try:
                         dirfd.unlink_child(review_parent, draft_name)

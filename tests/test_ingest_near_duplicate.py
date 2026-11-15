@@ -487,3 +487,9 @@ def test_windows_create_card_without_reflect_config(tmp_target: Path):
     assert not (tmp_target / "memory/cards/distinct.md").exists()
     for draft in (tmp_target / drain.INBOX_REL).glob("*.md"):
         assert drain.parse_header(draft.read_text())[0] == "origin-review-required"
+
+
+def test_portable_create_card_match_without_reflect_config(tmp_target: Path):
+    assert not (tmp_target / ".brigade/memory-care.toml").exists()
+    outcome = ingest._decide_create_card_match(card(BODY), target=tmp_target)
+    assert outcome is None or outcome.code != "near-duplicate-config-invalid"

@@ -322,7 +322,11 @@ def ingest_into(
 
                     try:
                         hold(owner, path, dry_run=dry_run)
-                    except (TrackedHandoffError, ChangedHandoffError):
+                    except TrackedHandoffError:
+                        stats.skipped += 1
+                        stats.actions.append(_summary("skip", path.name, _TRACKED_SKIP_CODE))
+                        continue
+                    except ChangedHandoffError:
                         raise
                     except OSError as exc:
                         _record_failure(stats, path, "handoff-hold-failed")

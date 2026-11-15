@@ -624,25 +624,28 @@ def test_claim_write_failure_never_publishes_partial_marker(tmp_path, monkeypatc
         patch.setattr(os, "write", fail)
         assert not origin._claim(consumed, decision_id="first-decision")
     assert not consumed.exists()
-    assert not list(consumed.parent.iterdir())
+    assert not list((consumed.parent / "temporaries").iterdir())
     assert origin._claim(consumed, decision_id="first-decision")
     assert consumed.read_bytes() == b"first-decision" and consumed.stat().st_nlink == 1
     assert origin._claim(consumed, decision_id="first-decision")
     assert not origin._claim(consumed, decision_id="second-decision")
-    assert list(consumed.parent.iterdir()) == [consumed]
+    assert set(consumed.parent.iterdir()) == {consumed, consumed.parent / "temporaries"}
+    assert not list((consumed.parent / "temporaries").iterdir())
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX origin claim recovery until #2588")
 def test_claim_link_crash_resumes_own_marker(tmp_path):
     consumed = tmp_path / "handoffs/consumed-stamps/claim"
     consumed.parent.mkdir(parents=True)
-    temporary = consumed.parent / (".claim-" + "a" * 32 + ".tmp")
+    temporary = consumed.parent / "temporaries" / origin._temporary_name(consumed.name)
+    temporary.parent.mkdir()
     temporary.write_bytes(b"first-decision")
     os.link(temporary, consumed)
     assert origin._claim(consumed, decision_id="first-decision")
     assert consumed.read_bytes() == b"first-decision"
     assert consumed.stat().st_nlink == 1
-    assert list(consumed.parent.iterdir()) == [consumed]
+    assert set(consumed.parent.iterdir()) == {consumed, consumed.parent / "temporaries"}
+    assert not list((consumed.parent / "temporaries").iterdir())
     assert not origin._claim(consumed, decision_id="other-decision")
 
 
@@ -662,7 +665,8 @@ def test_claim_foreign_second_link_is_refused(tmp_path, location):
 def test_orphan_claim_temporary_files_are_swept(tmp_path):
     consumed = tmp_path / "handoffs/consumed-stamps/claim"
     consumed.parent.mkdir(parents=True)
-    orphan = consumed.parent / (".claim-" + "b" * 32 + ".tmp")
+    orphan = consumed.parent / "temporaries" / (".claim-" + "b" * 32 + ".tmp")
+    orphan.parent.mkdir()
     orphan.write_bytes(b"abandoned-decision")
     unrelated = consumed.parent / "unrelated.tmp"
     unrelated.write_bytes(b"keep")
@@ -732,7 +736,8 @@ def test_sparse_hold_has_a_total_read_bound(tmp_path, monkeypatch):
 
     path = handoff(tmp_path)
     os.truncate(path, 1 << 40)
-    identity = path.stat().st_ino
+    before = path.stat()
+    identity = before.st_ino
     real_read = os.read
     total = 0
 
@@ -748,6 +753,11 @@ def test_sparse_hold_has_a_total_read_bound(tmp_path, monkeypatch):
     (draft,) = (tmp_path / "memory/handoff-inbox").glob("*.md")
     metadata = json.loads(draft.read_text().split("```json\n")[1].split("\n```")[0])
     assert metadata["size"] == 1 << 40
+    assert (metadata["dev"], metadata["ino"], metadata["mtime_ns"]) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+    )
     assert metadata["digest"]["algorithm"] == "sha256-size-first-last-v1"
     assert metadata["digest"]["max_read_bytes"] == 131072
     assert "sha256" not in metadata
@@ -868,3 +878,108 @@ def test_claim_orphan_sweep_has_a_bounded_batch(tmp_path, monkeypatch, resume):
         assert origin.owns_review_claim(tmp_path, consumed.name, "same-decision")
     else:
         assert origin._claim(consumed, decision_id="same-decision")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX Git staging and hold race")
+def test_tracked_oversized_handoff_does_not_abort_batch(tmp_path, monkeypatch):
+    import subprocess
+    from brigade import handoff_quarantine
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    oversized = handoff(tmp_path)
+    oversized.rename(oversized.with_name("a-oversized.md"))
+    oversized = oversized.with_name("a-oversized.md")
+    os.truncate(oversized, ingest.INSPECTION_CEILING + 1)
+    second = handoff(tmp_path)
+    second.rename(second.with_name("z-second.md"))
+    second = second.with_name("z-second.md")
+    stamp(tmp_path, second)
+    real_hold = handoff_quarantine.hold
+
+    def stage_then_hold(target, source, **kwargs):
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "--", str(source)], check=True)
+        return real_hold(target, source, **kwargs)
+
+    monkeypatch.setattr(handoff_quarantine, "hold", stage_then_hold)
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, route_documents=True) == 0
+    assert stats.skipped == 1 and stats.routed == 1 and stats.failed == 0
+    assert oversized.exists() and not second.exists()
+    assert "a-oversized.md" in stats.actions[0]
+    assert (tmp_path / "TOOLS.md").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative rename race")
+def test_hold_rejects_swap_at_rename(tmp_path, monkeypatch):
+    from brigade import handoff_quarantine, dirfd
+
+    source = handoff(tmp_path)
+    original = source.stat()
+    replacement = source.with_suffix(".replacement")
+    replacement.write_bytes(b"replacement")
+    real_rename = os.rename
+
+    def swap_then_rename(src, dst, **kwargs):
+        replacement.replace(source)
+        return real_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr(dirfd, "posix_available", lambda: True)
+    monkeypatch.setattr(os, "rename", swap_then_rename)
+    with pytest.raises(ingest.ChangedHandoffError, match="during quarantine"):
+        handoff_quarantine.hold(tmp_path, source)
+    assert not list((tmp_path / "memory/handoff-inbox").glob("*.md"))
+    (held,) = (tmp_path / ".brigade/handoffs/held").rglob("*.md")
+    assert held.read_bytes() == b"replacement" and held.stat().st_ino != original.st_ino
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow target components")
+def test_hold_refuses_symlinked_target(tmp_path):
+    from brigade import handoff_quarantine
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(owner, target_is_directory=True)
+    source = handoff(tmp_path / "source")
+    with pytest.raises(OSError):
+        handoff_quarantine.hold(alias, source)
+    assert source.exists() and not (owner / ".brigade").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX bounded claim recovery")
+def test_claim_recovery_opens_known_temporary_with_many_markers(tmp_path, monkeypatch):
+    consumed = tmp_path / ".brigade/handoffs/consumed-stamps" / ("a" * 64)
+    consumed.parent.mkdir(parents=True)
+    for number in range(1000):
+        (consumed.parent / f"marker-{number}").touch()
+    temporary = consumed.parent / "temporaries" / origin._temporary_name(consumed.name)
+    temporary.parent.mkdir()
+    temporary.write_bytes(b"same-decision")
+    os.link(temporary, consumed)
+
+    def no_scan(*args):
+        raise AssertionError("recovery scanned a directory")
+
+    monkeypatch.setattr(os, "scandir", no_scan)
+    parent = origin.dirfd.open_directory_chain(consumed.parent)
+    try:
+        assert origin._resume_claim(parent, consumed.name, b"same-decision")
+    finally:
+        os.close(parent)
+    assert not temporary.exists() and consumed.stat().st_nlink == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX bounded orphan maintenance")
+def test_claim_orphan_sweep_eventually_reaches_late_orphan(tmp_path):
+    consumed = tmp_path / "handoffs/consumed-stamps/claim"
+    temporaries = consumed.parent / "temporaries"
+    temporaries.mkdir(parents=True)
+    for number in range(150):
+        (temporaries / origin._temporary_name(str(number))).write_bytes(b"orphan")
+    order = list(temporaries.iterdir())
+    late = order[100]
+    assert origin._claim(consumed, decision_id="same-decision")
+    assert late.exists()
+    for _ in range(3):
+        assert origin._claim(consumed, decision_id="same-decision")
+    assert not late.exists() and not list(temporaries.iterdir())
