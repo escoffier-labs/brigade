@@ -304,7 +304,7 @@ def drain(
         # A truncated or unsupported evidence scan cannot prove a path is unreferenced.
         preserve_all = evidence_uncertain(target, warnings, unsupported)
         cited = {row["evidence_id"] for row in evidence}
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, journal.kernel.ProjectionError) as exc:
         result["error"] = str(exc)
         return result
     card_ids = ingest.CardIdIndex(target)

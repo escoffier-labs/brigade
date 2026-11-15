@@ -382,3 +382,78 @@ def test_finish_validates_decision_fields_before_writes(tmp_path, monkeypatch, f
     with pytest.raises(journal.JournalConflict, match=f"invalid decision record: {field}$"):
         journal.finish_prepared(tmp_path, ID)
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def _fix(target):
+    return journal.commit(
+        target,
+        kind="fix",
+        reason="test",
+        card_id=None,
+        changes=[journal.Change("other.md", None, b"other")],
+        hub={},
+    )
+
+
+def test_unphased_commit_records_leave_nothing_pending(tmp_path, monkeypatch):
+    from brigade import memory_care_pending
+
+    _fix(tmp_path)
+    entered = lock_spy(monkeypatch)
+    assert memory_care_pending.scan(tmp_path) == {}
+    assert journal.resolve_prepared(tmp_path) == []
+    assert entered == []
+
+
+def test_undo_without_appends_leaves_nothing_pending(tmp_path, monkeypatch):
+    from brigade import memory_care_pending
+
+    decision = _fix(tmp_path)
+    journal.revert(tmp_path, decision.decision_id, reason="undo")
+    entered = lock_spy(monkeypatch)
+    assert memory_care_pending.scan(tmp_path) == {}
+    assert journal.resolve_prepared(tmp_path) == []
+    assert journal.resolve_prepared(tmp_path) == []
+    assert entered == []
+
+
+def test_unreadable_kernel_journal_still_quarantines(tmp_path, monkeypatch):
+    crash(tmp_path, monkeypatch, "finish", 1)
+    (tmp_path / journal.JOURNAL_REL / ID / "decision.json").write_text("{}")
+    operation = journal.kernel.unfinished_operations(tmp_path)[0]
+
+    def refuse(operation_id, **kw):
+        (journal.kernel.operation_dir(tmp_path, operation_id) / "journal.json").write_text("[]")
+        raise journal.kernel.ProjectionError("unreadable kernel journal")
+
+    monkeypatch.setattr(journal.kernel, "recover", refuse)
+    monkeypatch.setattr(journal.kernel, "supersede", lambda *a, **kw: None)
+    result = journal.resolve_prepared(tmp_path)
+    assert result[0]["decision_id"] == ID and result[0]["phase"] == "quarantined"
+    assert result[0]["committed_destinations"] == []
+    assert operation.operation_id.startswith(f"care-{ID}-")
+    assert not (tmp_path / journal.JOURNAL_REL / ID / "decision.json").exists()
+
+
+@pytest.mark.parametrize("damage", [None, [True], ["yes", False, False], "missing"])
+def test_finish_validates_before_absent(tmp_path, monkeypatch, damage):
+    crash(tmp_path, monkeypatch)
+    p = journal._payload(tmp_path, ID)
+    if damage == "missing":
+        del p["before_absent"]
+    else:
+        p["before_absent"] = damage
+    journal.store.write_json(tmp_path / journal.JOURNAL_REL / ID / "decision.json", p)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(journal.JournalConflict, match="invalid decision record: before_absent$"):
+        journal.finish_prepared(tmp_path, ID)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_drain_reports_kernel_projection_error(tmp_path, monkeypatch):
+    def refuse(target):
+        raise journal.kernel.ProjectionError("kernel journal unreadable")
+
+    monkeypatch.setattr(journal, "resolve_prepared", refuse)
+    result = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 14), deadline_days=30)
+    assert result["error"] == "kernel journal unreadable"

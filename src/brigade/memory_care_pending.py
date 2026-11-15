@@ -17,10 +17,15 @@ def _row(path: Path) -> dict[str, Any]:
     from . import memory_care_journal as journal
 
     try:
-        p = journal._validated_payload(path.parents[4], path.parent.name)
-    except (journal.JournalConflict, store.StoreError) as exc:
-        if str(exc).startswith("symlink path: "):
-            raise
+        p = journal._payload(path.parents[4], path.parent.name)
+        if "phase" not in p and p.get("status") in ("pending", "committed"):
+            # commit() writes status without a phase and recovers through the kernel
+            # under its own operation id, so care recovery never acts on these records.
+            return dict.fromkeys(("prepared", "document", "repair", "append"), False)
+        journal.validate_record(p)
+    except journal.SymlinkPath:
+        raise
+    except (journal.JournalConflict, store.StoreError):
         # An unreadable record cannot prove that no document recovery is pending.
         return {"prepared": True, "document": True, "repair": False, "append": False}
     phase = p.get("phase")
@@ -37,14 +42,14 @@ def _row(path: Path) -> dict[str, Any]:
 
 
 def _paths(target: Path) -> list[Path]:
-    from .memory_care_journal import JOURNAL_REL, safe_path
+    from .memory_care_journal import DECISION_ID, JOURNAL_REL, safe_path
 
     root = safe_path(target, JOURNAL_REL)
     return (
         [
             safe_path(target, path.relative_to(target).as_posix())
             for path in sorted(root.glob("*/decision.json"))
-            if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8}", path.parent.name)
+            if re.fullmatch(DECISION_ID, path.parent.name)
         ]
         if root.exists()
         else []

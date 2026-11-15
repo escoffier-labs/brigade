@@ -132,7 +132,7 @@ def after_command(target: Path, *, stages: Sequence[str] | None = None) -> None:
         payload = run(target, stages=stages)
         inbox_summary(payload)
     except (ValueError, OSError, journal.kernel.ProjectionError) as exc:
-        reason = str(exc) if str(exc).startswith("symlink path: ") else type(exc).__name__
+        reason = str(exc) if isinstance(exc, journal.SymlinkPath) else type(exc).__name__
         print(f"memory inbox: setup-error skipped=0 held=0 reason={reason}", file=sys.stderr)
 
 

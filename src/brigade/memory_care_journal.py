@@ -63,6 +63,13 @@ class JournalConflict(ValueError):
     """A path no longer has the expected bytes."""
 
 
+class SymlinkPath(JournalConflict):
+    """A journal or live path resolves through a symlink."""
+
+
+DECISION_ID = r"[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8}"
+
+
 class ReadOnlyPath(ValueError):
     """The workspace protects a path."""
 
@@ -98,7 +105,7 @@ def safe_path(target: Path, rel: str) -> Path:
         if part == target.parent:
             break
         if part.is_symlink():
-            raise JournalConflict(
+            raise SymlinkPath(
                 f"symlink path: {rel}; the memory-care journal contains a symlink; inspect and remove it"
                 if rel.startswith(JOURNAL_REL)
                 else f"symlink path: {rel}"
@@ -107,7 +114,7 @@ def safe_path(target: Path, rel: str) -> Path:
 
 
 def _directory(target: Path, decision_id: str) -> Path:
-    if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8}", decision_id):
+    if not re.fullmatch(DECISION_ID, decision_id):
         raise JournalConflict("invalid decision id")
     return safe_path(target, f"{JOURNAL_REL}/{decision_id}")
 
@@ -122,7 +129,10 @@ def _payload(target: Path, decision_id: str) -> dict[str, Any]:
 
 def _validated_payload(target: Path, decision_id: str) -> dict[str, Any]:
     """Validate recovery inputs before any phase can mutate the workspace."""
-    p = _payload(target, decision_id)
+    return validate_record(_payload(target, decision_id))
+
+
+def validate_record(p: dict[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "decision_id": str,
         "kind": str,
@@ -146,6 +156,9 @@ def _validated_payload(target: Path, decision_id: str) -> dict[str, Any]:
         or not set(p["paths"]) <= p["after_sha256"].keys()
     ):
         raise JournalConflict("invalid decision record: after_sha256")
+    absent = p.get("before_absent")
+    if not isinstance(absent, list) or len(absent) != len(p["paths"]) or not all(type(v) is bool for v in absent):
+        raise JournalConflict("invalid decision record: before_absent")
     if p["phase"] == "prepared":
         for field in ("prepared_paths", "after_bytes"):
             if not isinstance(p.get(field), list) or not all(
@@ -199,10 +212,8 @@ LINKED = Linked()
 def _live(target: Path, path: str) -> bytes | None | Linked:
     try:
         return current(target, path)
-    except JournalConflict as exc:
-        if str(exc).startswith("symlink path: "):
-            return LINKED
-        raise
+    except SymlinkPath:
+        return LINKED
 
 
 def commit(
@@ -657,21 +668,28 @@ def _quarantine_decision(target: Path, decision_id: str) -> None:
         store.fsync_dir(directory)
 
 
+def _committed_destinations(target: Path, operation_id: str) -> list[str]:
+    try:
+        op = store.read_json(kernel.operation_dir(target, operation_id) / "journal.json")
+        return [op["mutations"][n]["display_path"] for n in op.get("committed_indexes", [])]
+    except (store.StoreError, OSError, ValueError, LookupError, TypeError, AttributeError):
+        # recover may have failed because this journal is unreadable. Quarantine must still run.
+        return []
+
+
 def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
     """Recover our interrupted kernel plans before interpreting decision phases."""
     resolved = []
     for operation in kernel.unfinished_operations(target):
-        match = re.fullmatch(
-            r"care-([0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8})-(prepare|finish|repair)", operation.operation_id
-        )
+        match = re.fullmatch(rf"care-({DECISION_ID})-(prepare|finish|repair)", operation.operation_id)
         if not match:
             continue
         decision_id = match.group(1)
         try:
             p = _validated_payload(target, decision_id)
-        except (JournalConflict, store.StoreError) as exc:
-            if str(exc).startswith("symlink path: "):
-                raise
+        except SymlinkPath:
+            raise
+        except (JournalConflict, store.StoreError):
             p = {}
         if p.get("phase") == "abandoned" and match.group(2) != "repair":
             kernel.supersede(operation.operation_id, target=target)
@@ -690,8 +708,7 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
             if receipt.terminal_state != "restored":
                 raise JournalConflict(f"kernel {receipt.terminal_state}")
         except (JournalConflict, kernel.ProjectionError):
-            op = store.read_json(kernel.operation_dir(target, operation.operation_id) / "journal.json")
-            committed = [op["mutations"][n]["display_path"] for n in op.get("committed_indexes", [])]
+            committed = _committed_destinations(target, operation.operation_id)
             if not p:
                 # The kernel alone owns the before-images. Do not infer card ownership
                 # or force restoration over drift from an unreadable care record.
@@ -766,9 +783,12 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
         if row["prepared"]:
             try:
                 _validated_payload(target, decision_id)
-            except (JournalConflict, store.StoreError) as exc:
-                if str(exc).startswith("symlink path: "):
-                    raise
+            except SymlinkPath:
+                raise
+            except (JournalConflict, store.StoreError):
+                # Defensive: the kernel loop above already recovered or superseded every
+                # care-<id> operation, so this list is normally empty and the record is
+                # reported, not quarantined. Prepared cards then stay until an operator acts.
                 inflight = [
                     op
                     for op in kernel.unfinished_operations(target)
