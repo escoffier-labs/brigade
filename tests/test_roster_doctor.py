@@ -134,7 +134,7 @@ def test_hung_grok_inventory_surfaces_distinct_timeout_state(monkeypatch):
 def test_ready_inspects_only_selected_seat_without_inference_or_persistent_writes(tmp_path, monkeypatch, capsys):
     import json
 
-    from brigade import agents, seat_health
+    from brigade import agents, fleet_client, fleet_client_policy, fleet_model_admission, seat_health
 
     path = tmp_path / ".brigade" / "roster.toml"
     path.parent.mkdir()
@@ -145,6 +145,12 @@ def test_ready_inspects_only_selected_seat_without_inference_or_persistent_write
         '[agents.unused]\ncli = "codex"\nrole = "research"\n'
     )
     before = {file.relative_to(tmp_path): file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+    fleet_home = fleet_client.brigade_home()
+    before_home = (
+        {file.relative_to(fleet_home): file.read_bytes() for file in fleet_home.rglob("*") if file.is_file()}
+        if fleet_home.exists()
+        else {}
+    )
     probed = []
     original = seat_health.SeatHealthProbe.probe
 
@@ -152,19 +158,35 @@ def test_ready_inspects_only_selected_seat_without_inference_or_persistent_write
         probed.append(seat.name)
         return original(self, seat, roster, **kwargs)
 
-    def forbidden_inference(*args, **kwargs):
-        raise AssertionError("readiness inspection attempted inference")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("readiness inspection attempted inference or hub access")
 
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": ""})
+    monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", forbidden)
+    monkeypatch.setattr(fleet_client, "inspect_claim", forbidden)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", forbidden)
     monkeypatch.setattr(seat_health.SeatHealthProbe, "probe", recording_probe)
-    monkeypatch.setattr(agents, "run_agent", forbidden_inference)
+    monkeypatch.setattr(agents, "run_agent", forbidden)
     rc = roster_cmd.ready(tmp_path, workers=("worker",), json_output=True)
     result = json.loads(capsys.readouterr().out)
     assert rc == 2  # bare-host fixture has no installed worker executable
     assert probed == ["worker"]
     assert result["roster"]["source"] == "workspace"
-    assert result["admitted_capacity"] is None
+    assert result["admitted_capacity"] == 4
     assert any(item["category"] == "model-reachability" and item["status"] == "unknown" for item in result["evidence"])
     assert {file.relative_to(tmp_path): file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()} == before
+    after_home = (
+        {file.relative_to(fleet_home): file.read_bytes() for file in fleet_home.rglob("*") if file.is_file()}
+        if fleet_home.exists()
+        else {}
+    )
+    # Reading the enrollment high-water mark via enrollment_activation_observed() on POSIX takes
+    # _spool_lock, which may create fleet-spool/ (0700) and an empty *.lock file without writing cache content.
+    new_home_files = {rel: data for rel, data in after_home.items() if rel not in before_home}
+    assert all(
+        len(rel.parts) == 2 and rel.parts[0] == "fleet-spool" and rel.name.endswith(".lock") and data == b""
+        for rel, data in new_home_files.items()
+    )
 
 
 @pytest.mark.parametrize("target_kind", ["missing", "file"])
@@ -236,11 +258,11 @@ def test_ready_cli_rejects_unusable_target_before_roster_or_provider_probe(
     "worker,expected,role",
     [
         ("worker", 2, "orchestrator"),
-        ("chef", 3, "worker"),
+        ("chef", 0, "worker"),
     ],
 )
 def test_ready_uses_cached_preference_without_refresh(tmp_path, monkeypatch, capsys, worker, expected, role):
-    from brigade import fleet_client, roster, run_preference, seat_health
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission, roster, run_preference, seat_health
 
     path = tmp_path / "roster.toml"
     path.write_text(
@@ -270,6 +292,11 @@ def test_ready_uses_cached_preference_without_refresh(tmp_path, monkeypatch, cap
                 for name, agent in selected.agents.items()
             ]
 
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": ""})
+    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda: False)
+    monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", forbidden)
+    monkeypatch.setattr(fleet_client, "inspect_claim", forbidden)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", forbidden)
     monkeypatch.setattr(run_preference, "refresh_cache", forbidden)
     monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", forbidden)
     before = path.read_bytes()
@@ -287,7 +314,7 @@ def test_ready_uses_cached_preference_without_refresh(tmp_path, monkeypatch, cap
 def test_ready_missing_local_worker_respects_hub_discovery_uncertainty(
     tmp_path, monkeypatch, capsys, hub_source, expected
 ):
-    from brigade import fleet_client, seat_health
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission, seat_health
 
     path = tmp_path / "roster.toml"
     path.write_text('orchestrator = "chef"\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
@@ -302,6 +329,9 @@ def test_ready_missing_local_worker_respects_hub_discovery_uncertainty(
         raise AssertionError("unresolved local selection attempted provider or Hub discovery")
 
     monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", forbidden)
+    monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", forbidden)
+    monkeypatch.setattr(fleet_client, "inspect_claim", forbidden)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", forbidden)
     monkeypatch.setattr(seat_health, "SeatHealthProbe", forbidden)
     assert roster_cmd.ready(tmp_path, workers=("remote",), roster_path=path, json_output=True) == expected
     report = json.loads(capsys.readouterr().out)
