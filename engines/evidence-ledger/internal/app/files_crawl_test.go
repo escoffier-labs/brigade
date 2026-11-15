@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
 )
 
 func filesExporter(t *testing.T) {
@@ -18,8 +20,9 @@ func filesExporter(t *testing.T) {
 	body := `#!/bin/sh
 path="$2"
 if [ -n "$FILES_CRAWL_SLOW" ] && [ "${path##*/}" = "001.txt" ]; then exec sleep 5; fi
-printf '{"schema":"miseledger.adapter.v1","source":{"kind":"files","name":"files"},"collection":{"external_id":"fixture","kind":"files","name":"fixture"},"item":{"external_id":"%s","kind":"file","created_at":"2026-01-01T00:00:00Z","text":"fixture"},"raw":{"format":"text","path":"%s"}}\n' "$path" "$path"
+printf '{"schema":"@SCHEMA@","source":{"kind":"files","name":"files"},"collection":{"external_id":"fixture","kind":"files","name":"fixture"},"item":{"external_id":"%s","kind":"file","created_at":"2026-01-01T00:00:00Z","text":"fixture"},"raw":{"format":"text","path":"%s"}}\n' "$path" "$path"
 `
+	body = strings.Replace(body, "@SCHEMA@", adapter.SchemaV1, 1)
 	if err := os.WriteFile(filepath.Join(dir, "sourceharvest"), []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
