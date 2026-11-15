@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from . import care_cmd as care, runbook_cmd
+from . import runbook_cmd
+
+if TYPE_CHECKING:
+    from .care_cmd import CareEntry
+
+# care_cmd re-exports this module at import time, so care_cmd is imported
+# inside each function that needs it, never at module top.
 
 
 def _latest_runbook_receipt(target: Path, runbook_id: str) -> dict[str, Any] | None:
@@ -48,8 +54,10 @@ def _receipt_summary(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _entry_status(
-    target: Path, entry: care.CareEntry, *, receipts_by_runbook: dict[str, list[dict[str, Any]]] | None = None
+    target: Path, entry: CareEntry, *, receipts_by_runbook: dict[str, list[dict[str, Any]]] | None = None
 ) -> dict[str, Any]:
+    from . import care_cmd as care
+
     payload: dict[str, Any] = {
         "id": entry.entry_id,
         "schedule": entry.schedule,
@@ -107,6 +115,8 @@ def repeated_failure_summary(target: Path) -> dict[str, Any]:
     catalog (atomic set plus #762 memory jobs) and collapses aliases that
     share a runbook so ``care-scan`` / ``daily-care`` count once.
     """
+    from . import care_cmd as care
+
     target = target.expanduser().resolve()
     # Share one newest-first read across the catalog. Keep the entire leading
     # failure streak so the reported consecutive count remains exact.

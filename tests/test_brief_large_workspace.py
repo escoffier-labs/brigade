@@ -182,3 +182,20 @@ def test_receipt_reader_skips_other_managed_runbooks_by_name(tmp_path, monkeypat
         expected = [item for item in runbook_cmd._run_receipts(tmp_path) if item["runbook_id"] == "wanted"]
         assert actual == expected
     assert counts[1] / counts[0] == 1
+
+
+def test_care_receipts_imports_on_its_own():
+    import subprocess
+    import sys
+
+    import brigade
+
+    src = str(Path(brigade.__file__).resolve().parents[1])
+    for module in ("brigade.care_receipts", "brigade.care_cmd"):
+        result = subprocess.run(
+            [sys.executable, "-c", f"import sys; sys.path.insert(0, {src!r}); import {module}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
