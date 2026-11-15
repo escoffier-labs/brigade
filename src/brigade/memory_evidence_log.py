@@ -385,6 +385,14 @@ def log_outcome(target: Path, record: OutcomeRecord, receipt: dict[str, Any]) ->
     """Admit a durable card outcome, preserving original time and distinct proof."""
     from . import outcome_cmd, scorecard, verify_trial
 
+    if record.source == "run" and record.artifact_kind == "card":
+        from .memory_lesson_rows import log_captured_run
+
+        try:
+            log_captured_run(target, record, receipt)
+        except TimeoutError:
+            raise ValueError("memory failure evidence lock unavailable") from None
+        return
     if record.source != "verify" or record.artifact_kind != "card":
         return
     if receipt.get("status") not in {"completed", "failed"} or receipt.get("reused_from"):

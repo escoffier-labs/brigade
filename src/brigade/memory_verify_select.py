@@ -155,6 +155,7 @@ def select(
     now_ms: int,
     min_interval_days: int,
     evidence: Mapping[str, Evidence] | None = None,
+    negative_keys: set[str] | None = None,
 ) -> Selection:
     """Pick up to `slots` cards: a staleness lane of a quarter, rounded up, then the highest scores.
 
@@ -199,10 +200,29 @@ def select(
         )
     if slots <= 0:
         return Selection(selected=[], eligible=len(candidates), skipped=skipped)
-    lane_slots = -(-slots // STALENESS_SHARE)
+    # At most half the batch gets failure priority. Existing eligibility and
+    # cooldown still apply, including for a one-slot batch and a noisy card.
+    negative = sorted(
+        (card for card in candidates if card.key in (negative_keys or set())),
+        key=lambda card: (card.verified_day if card.verified_day is not None else -1, card.order),
+    )
+    # With one slot there is no room to reserve a second lane. A previously
+    # verified negative waits behind any card with an older verification day.
+    if slots == 1:
+        oldest = (
+            min((-1 if card.verified_day is None else card.verified_day) for card in candidates) if candidates else -1
+        )
+        negative = [card for card in negative if (-1 if card.verified_day is None else card.verified_day) <= oldest]
+    priority = [(card, "negative_outcome") for card in negative[: (slots + 1) // 2]]
+    priority_keys = {card.key for card, _ in priority}
+    remaining = slots - len(priority)
+    lane_slots = -(-remaining // STALENESS_SHARE)
     # Oldest verification first, never verified before everything, regardless of reads.
-    stale = sorted(candidates, key=lambda card: (-1 if card.verified_day is None else card.verified_day, card.order))
-    chosen = [(card, STALENESS_LANE) for card in stale[:lane_slots]]
+    stale = sorted(
+        (card for card in candidates if card.key not in priority_keys),
+        key=lambda card: (-1 if card.verified_day is None else card.verified_day, card.order),
+    )
+    chosen = priority + [(card, STALENESS_LANE) for card in stale[:lane_slots]]
     taken = {card.key for card, _ in chosen}
     rest = sorted((card for card in candidates if card.key not in taken), key=lambda card: (-card.score, card.order))
     chosen.extend((card, SCORE_LANE) for card in rest[: slots - len(chosen)])

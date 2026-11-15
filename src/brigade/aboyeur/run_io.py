@@ -494,6 +494,14 @@ def _write_json(path: Path, payload: object) -> None:
     ):
         with run_lifecycle.checkpoint_event_pair():
             _write_json_inner(path, payload)
+        from .. import memory_lesson_rows as lessons
+
+        cwd = payload.get("cwd")
+        if isinstance(cwd, str):
+            try:
+                lessons.log_run_receipt(Path(cwd), {**payload, "run_id": path.parent.name})
+            except (OSError, ValueError, TimeoutError):
+                lessons.warn_append_failed()
         return
     _write_json_inner(path, payload)
 

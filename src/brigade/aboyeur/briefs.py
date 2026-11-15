@@ -217,11 +217,17 @@ def with_memory_context(evidence: EvidenceBrief, cwd: Path | None, task: str) ->
     """
     from .. import dispatch_memory
 
-    block = dispatch_memory.block_text(cwd, task, audience=dispatch_memory.CONNECTOR)
-    if not block:
+    packet = dispatch_memory.build(cwd, task, audience=dispatch_memory.CONNECTOR)
+    if packet is None:
         return evidence
+    block = packet.block
+    refs = tuple(
+        {key: item[key] for key in ("scope", "card_id", "hash")}
+        for item in packet.context["items"]
+        if "blocked" not in item
+    )
     text = f"{block}\n{evidence.text}" if evidence.attached and evidence.text else block
-    return EvidenceBrief(attached=True, text=text, bytes=_brief_bytes(text))
+    return EvidenceBrief(attached=True, text=text, bytes=_brief_bytes(text), memory_refs=refs)
 
 
 def _prepend_brief(prompt: str, *, heading: str, text: str) -> str:

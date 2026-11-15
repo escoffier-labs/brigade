@@ -348,6 +348,14 @@ def select_cards(
         per_scope_since[scope] = since
     if pending is not None:
         entries.update(pending)
+    from .memory_lesson_rows import pending_keys
+
+    negative_keys = pending_keys(target, valid)
+    for workspace in settings.workspaces:
+        if config.revalidate(workspace) is None:
+            negative_keys.update(
+                pending_keys(Path(workspace.resolved), [head for head in valid if head["scope"] == workspace.scope])
+            )
     selection = pick.select(
         [
             head
@@ -359,6 +367,7 @@ def select_cards(
         slots=settings.cards_per_run,
         now_ms=now,
         min_interval_days=settings.min_interval_days,
+        negative_keys=negative_keys,
     )
     for scope in scopes:
         scoped = [head for head in valid if head["scope"] == scope]
