@@ -75,7 +75,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     evaluate = commands.add_parser("eval", help="Score labeled cards offline with the configured seats.")
     evaluate.add_argument("--corpus", type=Path, required=True)
     gate = commands.add_parser("gate", help="Run evaluation and record per-class go/no-go automatically.")
-    for command in (status, run, doctor, show, evaluate, gate):
+    enable = commands.add_parser("enable", help="Explicitly enable verification for an existing workspace.")
+    for command in (status, run, doctor, show, evaluate, gate, enable):
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     run.add_argument("--dry-run", action="store_true", help="Submit, attach and write nothing, and leave the pause.")
@@ -490,6 +491,9 @@ def dispatch(args: argparse.Namespace) -> int:
             from . import memory_verify_show
 
             payload = memory_verify_show.show_payload(target, args.proposal_id)
+        elif args.memory_verify_command == "enable":
+            config.enable(target)
+            payload = {"status": "ok", "enabled": True}
         elif args.memory_verify_command in ("eval", "gate"):
             from . import memory_verify_gate, memory_verify_eval, memory_verify_run
 
@@ -502,7 +506,27 @@ def dispatch(args: argparse.Namespace) -> int:
                     hub_settings, client = _hub(target)
                     status = memory_verify_run._preflight(client, hub_settings)
                     binding = _binding(client.identity, status["principal"], status["log_epoch"])
-                    payload = memory_verify_gate.run(target, pair=pair, binding=binding, now_ms=int(time.time() * 1000))
+                    evaluator = memory_verify_gate.evaluator(target, client)
+                    payload = memory_verify_gate.run(
+                        target,
+                        pair=pair,
+                        binding=binding,
+                        now_ms=int(time.time() * 1000),
+                        previous=status.get("verify_evaluation"),
+                    )
+                    if payload["binding_sha256"] != memory_verify_gate.binding_digest(target, pair, binding):
+                        raise ValueError("verify_eval_inputs_changed")
+                    policy_bytes = memory_verify_gate.policy_bytes(target)
+                    if io.sha256(policy_bytes) != payload["policy_sha256"]:
+                        raise ValueError("verify_eval_inputs_changed")
+                    evaluator.call(
+                        "verify_eval.record",
+                        principal=status["principal"],
+                        record=payload,
+                        policy=policy_bytes.decode("utf-8"),
+                        base_epoch=status["log_epoch"],
+                        client_event_id=hubc.event_id(),
+                    )
                 payload["status"] = "completed"
             else:
                 cases = memory_verify_eval.read_corpus(args.corpus.absolute())
@@ -552,7 +576,7 @@ def dispatch(args: argparse.Namespace) -> int:
         from . import memory_verify_show
 
         memory_verify_show.print_review(payload)
-    elif args.memory_verify_command in ("eval", "gate"):
+    elif args.memory_verify_command in ("eval", "gate", "enable"):
         print(json.dumps(payload, sort_keys=True, indent=2))
     elif args.memory_verify_command == "status":
         state = payload.get("state", {})

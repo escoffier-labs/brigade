@@ -566,7 +566,7 @@ def test_status_reports_configuration_counts(verify_setup, capsys):
     assert report == {
         "status": "ok",
         "configured": True,
-        "enabled": True,
+        "enabled": False,
         "scopes": 1,
         "workspaces": 1,
         "cards_per_run": config.DEFAULT_CARDS_PER_RUN,

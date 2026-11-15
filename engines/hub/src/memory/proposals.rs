@@ -33,11 +33,12 @@ impl Command {
             Some("propose") => "propose",
             Some("decide") => "decide",
             Some("auto_apply") => "auto_apply",
+            Some("verify_auto_apply") => "verify_auto_apply",
             _ => "rollback",
         }
     }
     pub fn right(&self) -> &'static str {
-        if matches!(self.name(), "propose" | "auto_apply") {
+        if matches!(self.name(), "propose" | "auto_apply" | "verify_auto_apply") {
             "reflect"
         } else {
             "review"
@@ -121,7 +122,7 @@ pub fn authorize<T: ReadTx + ?Sized>(
     let right = match request["action"].as_str() {
         Some("propose") => "reflect",
         Some("preflight") => "read",
-        Some("auto_apply") => "reflect",
+        Some("auto_apply" | "verify_auto_apply") => "reflect",
         _ => "review",
     };
     if request["action"] == "propose" {
@@ -508,7 +509,7 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
 pub(super) fn reply(body: &Json, status: u16) -> Reply {
     Reply::new(
         status,
-        json!({"proposal_id":body["proposal_id"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),
+        json!({"proposal_id":body["proposal_id"],"decision_mode":body["decision_mode"],"state":body["state"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),
     )
 }
 /// Automatic calls may be made by reflect-only callers, including replays.
@@ -609,7 +610,10 @@ fn apply_cards(
     authority: &Authority,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Option<Reply>> {
-    let automatic = matches!(&p.action,ops::Action::Proposal(c) if c.name()=="auto_apply");
+    let verify_automatic =
+        matches!(&p.action,ops::Action::Proposal(c) if c.name()=="verify_auto_apply");
+    let automatic =
+        verify_automatic || matches!(&p.action,ops::Action::Proposal(c) if c.name()=="auto_apply");
     for card in cards(body) {
         if !scoped_right(
             tx,
@@ -640,7 +644,12 @@ fn apply_cards(
     }
     // Keep diagnostics before blocker returns. Reusing the later apply-loop
     // scans would move scan work before those checks or need a second report path.
-    if automatic {
+    if verify_automatic {
+        if let Some(refusal) = super::verify_eval::check(tx, p, body, authority)? {
+            return Ok(Some(refusal));
+        }
+        body["preflight"] = json!({"checks":[{"gate":"verify_evaluation","state":"satisfied"}]});
+    } else if automatic {
         let snapshot = match &p.action {
             ops::Action::Proposal(c) => c.draft.as_ref().ok().map(|b| &b["_auto_snapshot"]),
             _ => None,
@@ -677,7 +686,7 @@ fn apply_cards(
     if automatic {
         body["auto_apply_gates"] = body["preflight"]["checks"].clone();
     }
-    if automatic && !super::preflight::all_satisfied(&body["preflight"]) {
+    if automatic && !verify_automatic && !super::preflight::all_satisfied(&body["preflight"]) {
         // A failed automatic attempt leaves human review available.
         body["state"] = json!("pending");
         body["reason"] = json!("auto_apply_held");
@@ -706,6 +715,16 @@ fn apply_cards(
     // All blockers and scans are checked before the first head changes.
     let mut scans = Vec::new();
     for card in cards(body) {
+        if verify_automatic
+            && (card["before_scan"] != "clean"
+                || !matches!(scanner.scan(string(card, "before_text")), Scan::Clean {ruleset} if !ruleset.is_empty()))
+        {
+            return Ok(Some(error(
+                409,
+                "memory_verify_auto_held",
+                "input_scan_not_clean",
+            )));
+        }
         let scan = scanner.scan(string(card, "after_text"));
         if automatic && !matches!(&scan,Scan::Clean{ruleset} if !ruleset.is_empty()) {
             body["state"] = json!("pending");
@@ -934,8 +953,8 @@ pub fn run(
         }
         return open(tx, p, inverse, authority, "proposal.rollback", scanner);
     }
-    if cmd.name() == "auto_apply" {
-        if body["verifier"] == true {
+    if matches!(cmd.name(), "auto_apply" | "verify_auto_apply") {
+        if cmd.name() == "auto_apply" && body["verifier"] == true {
             return Ok(error(
                 409,
                 "memory_verifier_floor",

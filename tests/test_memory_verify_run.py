@@ -864,9 +864,8 @@ def test_the_temporary_file_is_owner_only_inside_the_packet_directory(verify_hub
     assert verify(target, capsys)[0] == 0
     # The stage, the stage again with its attach time, then the packet and manifest: each through its own
     # temporary file in the packet directory.
-    assert len(seen) == 5
-    assert seen[:4] == [(target / pk.PACKETS, 0o600)] * 4
-    assert seen[4] == (target / vstate.ROOT, 0o600)  # The automatic no-go record.
+    assert seen == [(target / pk.PACKETS, 0o600)] * 4
+    assert not (target / vstate.ROOT / "decision.json").exists()  # Scheduled runs cannot publish admission.
     assert not list(target.rglob(".packet-*.tmp"))
 
 

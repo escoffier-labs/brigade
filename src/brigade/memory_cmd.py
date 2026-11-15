@@ -344,7 +344,8 @@ def init(
         if rc != 0:
             return rc
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, _format_config())
+    fresh = not path.exists()
+    atomic_write_text(path, _format_config() + ("\n[verify]\nnew_workspace_version = 1\n" if fresh else ""))
     if update_gitignore:
         apply_gitignore(target, Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]))
     print(f"memory_care_config: {path}")

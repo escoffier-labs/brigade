@@ -595,12 +595,16 @@ judgment and does not consult reads.
 
 ## Model-backed verification admission
 
-Verify is enabled by default when its workspace and isolated seats are configured.
-Set `[verify] enabled = false` in `.brigade/memory-care.toml` to stop model calls.
-The scheduled `memory-verify` care entry runs evaluation and go/no-go without a
-person. An admitted operation class applies automatically through the hub's
-transactional decision path. A class without a current go record stays
-proposal-only. Failed or invalid runs do not apply corrections.
+Existing verify configurations that omit `enabled` remain disabled. Run
+`brigade memory verify enable --target <verify-folder>` to opt in explicitly.
+New memory-care configurations carry `new_workspace_version = 1` in `[verify]`.
+Only that versioned initialization marker enables an omitted `enabled` field.
+Set `[verify] enabled = false` to stop model calls.
+The scheduled `memory-verify` care entry checks existing hub admission and uses
+`verify_auto_apply`. It never calls the human `decide` action or runs evaluation.
+A class without current hub admission stays proposal-only. Failed or invalid
+runs do not apply corrections. A valid run may apply pending proposals retained
+from earlier valid runs.
 
 `brigade memory verify eval --corpus <directory> --target <verify-folder> --json`
 scores labeled cards with the production two-seat contract, without contacting
@@ -614,8 +618,11 @@ adversarial, shared-source, history and supersede outcomes.
 
 `brigade memory verify gate --target <verify-folder> --json` reads
 `.brigade/memory/verify/eval/cases.json`, adds retained decision-feedback cases,
-runs the harness and writes `.brigade/memory/verify/decision.json`. The scheduled
-run does this automatically when admission is missing, stale or invalidated.
+runs the harness and writes a diagnostic `.brigade/memory/verify/decision.json`.
+The explicit gate command publishes its policy digest and go/no-go record through
+hub admin-authenticated `verify_eval.record`. Records are append-only in the hub.
+Local files cannot grant admission or advance the consecutive-pass streak.
+Run the gate separately whenever admission expires or inputs change.
 The report contains precision, recall, true positives, false positives and false
 negatives per class and operation type, repeat agreement and unsafe proposals.
 Operation metrics count emitted operations separately from verdicts. Confirming
@@ -650,24 +657,31 @@ exact policy bytes, corpus and feedback bytes, prompt contract, seat fingerprint
 hub identity, principal, log epoch and verifier implementation digests. A policy edit, changed input, expired record,
 changed seat or invalid digest removes admission immediately. A no-go record names
 the failed bars for every class. Set policy `auto_apply` to false to retain model
-verification and proposals while stopping automatic decisions.
+verification and proposals while stopping new local attempts. For an authoritative
+off switch that also holds requests already in flight, use the hub admin
+`auto_apply_switch` action with `enabled: false`. That switch is rechecked inside
+the automatic application transaction.
 
 New private review packets retain replayable card and evidence inputs. A subsequent
 external applied or rejected decision supplies a labeled case when its manifest
 and packet hashes match. Legacy packets still supply slice 10's verdict counters
-but cannot supply replay inputs. Automatic decisions are journaled before sending
-and excluded from labels, so the verifier cannot grade its own corrections.
+but cannot supply replay inputs. The hub's immutable `decision_mode` excludes
+automatic applications from labels and verdict counters. A diagnostic journal
+records an automatic application only after the hub reports it applied.
+Deleting or forging that journal cannot change feedback classification.
 Feedback retains the latest 128 cases. Text stays in private packets and evaluation
 inputs, never the text-free decision record or run summary.
 
-Automatic application requires a separate non-admin memory principal with `read`
-and `review` on every addressed scope. The hub continues to refuse self-review.
-Configure its private token file in user-level `fleet.toml` under
-`[memory_verify] review_token_file`, or set
-`BRIGADE_MEMORY_VERIFY_REVIEW_TOKEN_FILE` to its absolute path. Workspace policy
-never names credentials. The verifier needs `review` to authenticate its retained
-manifest hash chain. Both principals must address the same hub and epoch.
-Missing credentials or grants keep corrections proposal-only.
+The explicit gate command requires an evaluator admin credential held outside
+workspace worker access. Configure its absolute token path in user-level
+`fleet.toml` under `[memory_verify] eval_token_file`, or set
+`BRIGADE_MEMORY_VERIFY_EVAL_TOKEN_FILE`. Scheduled runs never load this credential.
+The verifier uses its own `read` and `reflect` grants for automatic application,
+and needs `review` to authenticate the retained manifest hash chain.
+The hub transaction checks the current curation owner, fleet auto-apply policy,
+kill switch, verifier authority, policy digest, epoch, record lifetime, exact
+operation classes and pinned card snapshot. Automatic changes retain prior trust.
+The existing human review and rollback actions remain available.
 
 Before applying, Brigade rechecks admission, authenticates the manifest and packet,
 checks local evidence freshness and acknowledges the hub policy digest. Existing

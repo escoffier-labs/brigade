@@ -55,6 +55,7 @@ but attaches, submits and writes nothing, and leaves the pause counter alone.
 from __future__ import annotations
 
 import base64
+
 import contextlib
 import os
 import re
@@ -264,16 +265,21 @@ def _refresh(
                 continue
             if current in OPEN_STATES:
                 continue
-            # Exclude journaled automatic decisions from replay labels.
+            # Classify feedback from hub decisions, never a workspace journal.
             if retain and current in ("applied", "rejected"):
                 from .memory_verify_auto import automated
 
-                if not automated(target, proposal):
+                if not automated(reply):
                     feedback.retain_case(target, proposal, current, reply)
-            settled = {name: value for name, value in entry.items() if name != "pending"}
+            automatic_decision = current == "applied" and reply.get("decision_mode") == "automatic"
+            settled = {
+                name: value
+                for name, value in entry.items()
+                if name != "pending" and (not automatic_decision or name != "review")
+            }
             if current == "rejected":
                 settled["verdict"] = "rejected"
-            if "review" not in settled:
+            if "review" not in settled and not automatic_decision:
                 recovered_review = feedback.legacy_record(target, proposal, scope, key, entry)
                 if recovered_review is not None:
                     settled["review"] = recovered_review
@@ -582,6 +588,7 @@ def review(
                 {
                     **{key: value for key, value in asdict(item).items() if key not in ("compare", "lineage")},
                     "lineage": sorted(item.lineage),
+                    "compare_base64": base64.b64encode(item.compare).decode("ascii"),
                 }
                 for item in items
             ],
@@ -1358,11 +1365,9 @@ def run_payload(
             payload = _failure(exc)
         pair = payload.pop("_verify_pair", None)
         if not dry_run and payload.get("status") == "completed" and pair is not None:
-            from . import memory_verify_gate as gate, memory_verify_auto as automatic
+            from . import memory_verify_auto as automatic
 
             try:
-                if not gate.allowed(target, pair=pair, binding=state["binding"], now_ms=now):
-                    gate.run(target, pair=pair, binding=state["binding"], now_ms=now)
                 # No corrections apply after any failed or malformed model call in this run.
                 if payload["calls"]["ok"] == payload["calls"]["made"] and not any(
                     row.get("abstain") in (contract.SEAT_FAILED, contract.OUTPUT_INVALID, contract.CARD_INVALID)

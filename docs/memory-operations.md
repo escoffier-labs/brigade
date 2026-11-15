@@ -2807,4 +2807,4 @@ its type, so an explicit `null` is malformed. Only a scope's `since_day` and
 
 ## Verify evaluation and automatic admission
 
-The [model-backed admission workflow](memory-care.md#model-backed-verification-admission) documents `memory verify eval`, `memory verify gate`, the unattended care path, policy thresholds, off switches and rollback. Configured verify passes are enabled by default. Classes apply automatically only with current digest-bound admission and a separate scoped reviewer credential. Deferred history and supersede classes remain proposal-only until the contract can meet their recall bars.
+The [model-backed admission workflow](memory-care.md#model-backed-verification-admission) documents `memory verify eval`, `memory verify gate`, the unattended care path, policy thresholds, off switches and rollback. Existing verify configurations require explicit enablement. Classes apply automatically only with current hub admin-authenticated admission through the dedicated verifier automatic action. Deferred history and supersede classes remain proposal-only until the contract can meet their recall bars.

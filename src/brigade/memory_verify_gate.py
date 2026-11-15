@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
 from . import memory_proposal_io as io
+from . import memory_hub_client as hubc
 from . import memory_verify_contract as vc
 from . import memory_verify_eval as evaluation
 from . import memory_verify_seat as seats
@@ -20,9 +22,13 @@ DEFAULT_POLICY = json.loads((Path(__file__).parent / "fixtures/memory-verify-pol
 DAY_MS = 86_400_000
 
 
-def policy(target: Path) -> tuple[dict[str, Any], str]:
+def policy_bytes(target: Path) -> bytes:
     raw = io.read_bytes(target / POLICY, absent=True)
-    raw = raw if raw is not None else io.json_bytes(DEFAULT_POLICY)
+    return raw if raw is not None else io.json_bytes(DEFAULT_POLICY)
+
+
+def policy(target: Path) -> tuple[dict[str, Any], str]:
+    raw = policy_bytes(target)
     value = json.loads(raw)
     if not isinstance(value, dict) or set(value) != set(DEFAULT_POLICY) or value["schema"] != DEFAULT_POLICY["schema"]:
         raise ValueError("verify_eval_policy_invalid")
@@ -57,43 +63,31 @@ def binding_digest(target: Path, pair: Sequence[seats.Seat], binding: str) -> st
                 "harness": "v1",
                 "implementation": [
                     io.sha256(Path(__file__).with_name(name).read_bytes())
-                    for name in (
-                        "memory_verify_contract.py",
-                        "memory_verify_eval.py",
-                        "memory_verify_gate.py",
-                        "memory_verify_auto.py",
-                    )
+                    for name in sorted(p.name for p in Path(__file__).parent.glob("memory_verify_*.py"))
+                    + ["memory_hub_client.py"]
                 ],
             }
         )
     )
 
 
-def _read(target: Path) -> dict[str, Any]:
-    raw = io.read_bytes(target / RECORD, absent=True, private=True)
-    value = json.loads(raw) if raw else {}
-    if not isinstance(value, dict):
-        raise ValueError("verify_decision_invalid")
-    return value
-
-
 def record(
-    target: Path, report: dict[str, Any], *, pair: Sequence[seats.Seat], binding: str, now_ms: int
+    target: Path,
+    report: dict[str, Any],
+    *,
+    pair: Sequence[seats.Seat],
+    binding: str,
+    now_ms: int,
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     settings, policy_digest = policy(target)
     bound = binding_digest(target, pair, binding)
-    try:
-        old = _read(target)
-    except (OSError, ValueError):
-        old = {}
-    old_digest = old.pop("digest", None)
+    # Only a hub-authenticated previous admission may advance the streak.
+    old = (previous or {}).get("record", {})
     previous = (
         old.get("classes", {})
-        if (
-            old_digest == io.sha256(io.json_bytes(old))
-            and old.get("binding_sha256") == bound
-            and 0 <= now_ms - old.get("created_ms", 0) <= settings["max_age_days"] * DAY_MS
-        )
+        if old.get("binding_sha256") == bound
+        and 0 <= now_ms - (previous or {}).get("created_ms", -DAY_MS * 31) <= settings["max_age_days"] * DAY_MS
         else {}
     )
     classes = {}
@@ -146,25 +140,32 @@ def record(
     return value
 
 
-def allowed(target: Path, *, pair: Sequence[seats.Seat], binding: str, now_ms: int) -> set[str]:
+def allowed(
+    target: Path, *, pair: Sequence[seats.Seat], binding: str, now_ms: int, client: hubc.MemoryHubClient | None = None
+) -> set[str]:
     try:
-        settings, _ = policy(target)
-        value = _read(target)
-        digest = value.pop("digest", None)
+        settings, policy_digest = policy(target)
+        if client is None:
+            return set()
+        admission = client.call("status").get("verify_evaluation") or {}
+        value = admission.get("record", {})
         if (
             not settings["auto_apply"]
             or value.get("schema") != "brigade.memory-verify-decision.v1"
-            or digest != io.sha256(io.json_bytes(value))
+            or admission.get("evaluator") != "admin"
+            or value.get("policy_sha256") != policy_digest
             or value.get("binding_sha256") != binding_digest(target, pair, binding)
-            or not 0 <= now_ms - value["created_ms"] <= settings["max_age_days"] * DAY_MS
+            or not 0 <= now_ms - admission["created_ms"] <= settings["max_age_days"] * DAY_MS
         ):
             return set()
         return {name for name in evaluation.CLASSES if value["classes"][name]["decision"] == "go"}
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, hubc.HubUnavailable, hubc.HubRefusal):
         return set()
 
 
-def run(target: Path, *, pair: Sequence[seats.Seat], binding: str, now_ms: int) -> dict[str, Any]:
+def run(
+    target: Path, *, pair: Sequence[seats.Seat], binding: str, now_ms: int, previous: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Evaluate with isolated seats, then persist a decision even when evaluation fails."""
     from . import memory_verify_run as runner
 
@@ -187,4 +188,17 @@ def run(target: Path, *, pair: Sequence[seats.Seat], binding: str, now_ms: int) 
             raise ValueError("verify_eval_inputs_changed")
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, runner.SeatStop):
         report = {"status": "failed", "code": "verify_eval_unavailable"}
-    return record(target, report, pair=pair, binding=binding, now_ms=now_ms)
+    return record(target, report, pair=pair, binding=binding, now_ms=now_ms, previous=previous)
+
+
+def evaluator(target: Path, verifier: hubc.MemoryHubClient) -> hubc.MemoryHubClient:
+    """Only the explicit gate command loads the separate admin evaluator credential."""
+    from . import fleet_home_guard
+
+    settings = hubc._user_config(fleet_home_guard.fleet_config_path(strict=True))
+    raw = os.environ.get("BRIGADE_MEMORY_VERIFY_EVAL_TOKEN_FILE") or settings.get("memory_verify", {}).get(
+        "eval_token_file"
+    )
+    if not isinstance(raw, str) or not Path(raw).is_absolute():
+        raise ValueError("verify_eval_admin_credential_required")
+    return hubc.client_for(hubc.load_settings(target, credential_pair=(verifier.hub_url, Path(raw))))

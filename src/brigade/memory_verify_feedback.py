@@ -107,7 +107,7 @@ def retain_case(target: Path, proposal_id: str, decision: str, shown: dict[str, 
     """Keep bounded private labels from authenticated packets, excluding self-decisions.
 
     Legacy packets lack replayable inputs and supply counts only. The caller
-    excludes journaled automatic decisions, preventing automatic corrections
+    excludes hub-recorded automatic decisions, preventing automatic corrections
     from grading themselves.
     """
     from . import memory_verify_eval as evaluation, memory_verify_gate as gate

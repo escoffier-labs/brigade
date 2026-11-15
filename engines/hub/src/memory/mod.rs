@@ -58,6 +58,9 @@ pub mod text;
 pub mod verifier;
 #[cfg(test)]
 mod verifier_tests;
+mod verify_eval;
+#[cfg(test)]
+mod verify_eval_tests;
 pub mod writer;
 
 #[cfg(test)]
@@ -1013,7 +1016,7 @@ impl Store {
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
-            "propose" | "decide" | "rollback" | "auto_apply" => {
+            "propose" | "decide" | "rollback" | "auto_apply" | "verify_auto_apply" => {
                 self.proposal_request(credential, action, map, &raw).await
             }
             "put"
@@ -1026,7 +1029,8 @@ impl Store {
             | "evidence.attach"
             | "evidence.purge"
             | "auto_apply_switch"
-            | "retrieval_eval.record" => match self.prepare(credential, action, map, &raw) {
+            | "retrieval_eval.record"
+            | "verify_eval.record" => match self.prepare(credential, action, map, &raw) {
                 Ok(prepared) => self.write(prepared).await,
                 Err(reply) => reply,
             },
@@ -1164,6 +1168,23 @@ impl Store {
                 "tier",
                 "workspace_id",
             ],
+            "verify_auto_apply" => &[
+                "action",
+                "proposal_id",
+                "base_epoch",
+                "client_event_id",
+                "binding_sha256",
+                "policy_sha256",
+                "expected_op_types",
+            ],
+            "verify_eval.record" => &[
+                "action",
+                "principal",
+                "record",
+                "policy",
+                "base_epoch",
+                "client_event_id",
+            ],
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "auto_apply_switch" => &["action", "enabled", "client_event_id"],
             "verifier" => &["action", "principal", "verifier", "client_event_id"],
@@ -1243,6 +1264,7 @@ impl Store {
                 | "auto_apply_switch"
                 | "evidence.purge"
                 | "retrieval_eval.record"
+                | "verify_eval.record"
         ) && *credential != Credential::Admin
         {
             return Err(error(
@@ -1327,6 +1349,7 @@ impl Store {
             }
         };
         let action = match action {
+            "verify_eval.record" => Action::VerifyEval(raw.clone()),
             "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
             "verifier_resync" => Action::VerifierResync { generation: 0 },
@@ -1379,7 +1402,7 @@ impl Store {
                     after,
                 }
             }
-            "propose" | "decide" | "rollback" | "auto_apply" => {
+            "propose" | "decide" | "rollback" | "auto_apply" | "verify_auto_apply" => {
                 if action != "propose"
                     && str_field("proposal_id")
                         .and_then(ids::parse_event_id)
@@ -1974,6 +1997,7 @@ fn reads<T: ReadTx + ?Sized>(
                     "principal": credential.principal(),
                     "credential": credential.class(),
                     "verifier": verifier::flagged(tx, credential.principal())?,
+                    "verify_evaluation": verify_eval::latest(tx, credential.principal())?,
                     "verifier_generation": {"memory": verifier::db_generation(tx)?},
                     "capabilities": [verifier::CAPABILITY, manifest_binding::CAPABILITY],
                 }),

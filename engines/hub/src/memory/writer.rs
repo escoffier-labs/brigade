@@ -450,7 +450,7 @@ fn apply_one(
     let deadline = super::hardening::deadline(authority.proposal_limits.lock_ms);
     // Review and ordinary writes retain their existing admission contracts.
     // The resource guard covers reflect-controlled automatic work and admission.
-    if matches!(&p.action,ops::Action::Proposal(c) if matches!(c.name(),"auto_apply"|"propose"))
+    if matches!(&p.action,ops::Action::Proposal(c) if matches!(c.name(),"auto_apply"|"verify_auto_apply"|"propose"))
         && db
             .progress_handler(1000, Some(move || Instant::now() >= deadline))
             .is_err()
@@ -877,6 +877,7 @@ pub(crate) fn run(
                             ops::Action::Proposal(_)
                                 | ops::Action::Evidence(_)
                                 | ops::Action::RetrievalEval(_)
+                                | ops::Action::VerifyEval(_)
                         ) {
                             p.command.now_ms = config.clock.now_ms();
                         }

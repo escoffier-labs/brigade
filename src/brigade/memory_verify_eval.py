@@ -7,6 +7,7 @@ No hub client, workspace evidence reader or submission path is used here.
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 from pathlib import Path
@@ -61,12 +62,16 @@ def inputs(case: dict[str, Any]) -> tuple[vc.CardInput, ev.Assembly]:
     if not isinstance(evidence, list) or len(evidence) > 64:
         raise ValueError("verify_eval_evidence_limit")
     for value in evidence:
+        if len(value.get("compare_base64", "")) > 4 * ev.READ_LIMIT:
+            raise ValueError("verify_eval_comparison_limit")
         item = ev.Item(
             **{
-                **value,
+                **{k: v for k, v in value.items() if k != "compare_base64"},
                 "lineage": frozenset(value.get("lineage", [])),
                 "values": tuple(value.get("values", [])),
-                "compare": value["text"].encode(),
+                "compare": base64.b64decode(value["compare_base64"], validate=True)
+                if "compare_base64" in value
+                else value["text"].encode(),
             }
         )
         if item.sha256 != io.sha256(item.text.encode()):
