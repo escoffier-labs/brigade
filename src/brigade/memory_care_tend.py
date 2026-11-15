@@ -102,8 +102,8 @@ def run(
 def undo(target: Path, decision_id: str) -> journal.Decision:
     recovery = journal.resolve_prepared(target)
     for item in recovery:
-        if item["phase"] == "abandoned":
-            print(f"memory care: abandoned {item['decision_id']}: {item['reason']}", file=sys.stderr)
+        if item["phase"] in ("abandoned", "quarantined", "unreadable"):
+            print(f"memory care: {item['phase']} {item['decision_id']}: {item['reason']}", file=sys.stderr)
     d = journal.load(target, decision_id)
     if d.kind == "undo":
         raise journal.JournalConflict("cannot undo an undo decision")
@@ -132,7 +132,8 @@ def after_command(target: Path, *, stages: Sequence[str] | None = None) -> None:
         payload = run(target, stages=stages)
         inbox_summary(payload)
     except (ValueError, OSError, journal.kernel.ProjectionError) as exc:
-        print(f"memory inbox: setup-error skipped=0 held=0 reason={type(exc).__name__}", file=sys.stderr)
+        reason = str(exc) if str(exc).startswith("symlink path: ") else type(exc).__name__
+        print(f"memory inbox: setup-error skipped=0 held=0 reason={reason}", file=sys.stderr)
 
 
 @journal.serialized

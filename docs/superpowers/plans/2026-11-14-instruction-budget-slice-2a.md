@@ -12,7 +12,9 @@
 
 ## Threat model
 
-The attacker is untrusted text that passes through Brigade: handoff text, section text, headings, file names and configuration values. An actor that can write arbitrary bytes under `.brigade/` can already edit the instruction file and the cards directly, so `.brigade/` is not a boundary for this feature. What this plan guarantees instead is that a forged or damaged journal record gains nothing over such a direct write. Recovery (`reconcile` and `restore`) may:
+The attacker is untrusted text that passes through Brigade: handoff text, section text, headings, file names and configuration values. An actor that can write arbitrary bytes under `.brigade/` can already edit the instruction file and the cards directly, so `.brigade/` is not a boundary for this feature. What this plan guarantees instead is that a forged or damaged journal record gains nothing over such a direct write. Recovery fails closed with a named error when the journal or a record inside it is a symlink, because following it would be the real violation.
+
+Recovery (`reconcile` and `restore`) may:
 
 - write only the tended file, the one the inventory resolved for this pass, never a path read from a record.
 - remove only cards under `memory/cards/instructions/<file-key>--*`, for the key of that file.

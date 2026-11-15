@@ -286,9 +286,9 @@ def drain(
     )
     if deadline_days < 1:
         raise ValueError("deadline_days must be positive")
-    if not dry_run:
-        result["recovery"] = journal.resolve_prepared(target)
     try:
+        if not dry_run:
+            result["recovery"] = journal.resolve_prepared(target)
         paths = pending(target)
         for inbox in ingest._resolve_inbox_paths(target):
             try:

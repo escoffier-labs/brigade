@@ -255,3 +255,130 @@ def test_generated_id_preserves_creation_timestamp_precision(tmp_path, monkeypat
         tmp_path, kind="instructions", reason="test", card_id=None, changes=[], prepared_paths=[], hub={}
     )
     assert decision.created_at == stamp.isoformat()
+
+
+@pytest.mark.parametrize("payload", ['{"phase":"prepared"}', "{}"])
+@pytest.mark.parametrize("route", ["pending", "kernel-refused"])
+def test_partial_inflight_record_is_quarantined(tmp_path, monkeypatch, payload, route):
+    crash(tmp_path, monkeypatch, "finish", 1)
+    record = tmp_path / journal.JOURNAL_REL / ID / "decision.json"
+    record.write_text(payload)
+    if route == "pending":
+        # Hide operations only from the kernel-recovery loop, leaving the real
+        # unfinished operation available when the pending row is classified.
+        unfinished = journal.kernel.unfinished_operations
+        calls = 0
+
+        def pending_only(target):
+            nonlocal calls
+            calls += 1
+            return [] if calls == 2 else unfinished(target)
+
+        monkeypatch.setattr(journal.kernel, "unfinished_operations", pending_only)
+    else:
+        (tmp_path / "USER.md").write_bytes(b"drift")
+    result = journal.resolve_prepared(tmp_path)
+    assert result[0]["phase"] == "quarantined"
+    assert result[0]["reason"] == "unreadable decision record quarantined"
+    assert not record.exists()
+    assert journal.resolve_prepared(tmp_path) == []
+
+
+def test_damaged_history_is_reported_without_quarantine(tmp_path):
+    source(tmp_path)
+    move(tmp_path)
+    record = tmp_path / journal.JOURNAL_REL / ID / "decision.json"
+    record.write_bytes(b"broken history")
+    result = journal.resolve_prepared(tmp_path)
+    assert result == [{"decision_id": ID, "phase": "unreadable", "reason": "unreadable decision record retained"}]
+    assert record.read_bytes() == b"broken history"
+    assert not list(record.parent.glob("decision.quarantined-*.json"))
+
+
+def test_pending_skips_non_decision_directories(tmp_path):
+    directory = tmp_path / journal.JOURNAL_REL / "not-a-decision"
+    directory.mkdir(parents=True)
+    (directory / "decision.json").write_text("{}")
+    assert journal.resolve_prepared(tmp_path) == []
+
+
+def test_undo_prints_quarantine_reason(tmp_path, monkeypatch, capsys):
+    from brigade import memory_care_tend
+
+    valid = journal.commit(
+        tmp_path,
+        kind="fix",
+        reason="test",
+        card_id=None,
+        changes=[journal.Change("other.md", None, b"other")],
+        hub={},
+    )
+    crash(tmp_path, monkeypatch, "finish", 1)
+    (tmp_path / journal.JOURNAL_REL / ID / "decision.json").write_text("{}")
+    memory_care_tend.undo(tmp_path, valid.decision_id)
+    assert "unreadable decision record quarantined" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+@pytest.mark.parametrize("linked", ["journal", "decision.json"])
+@pytest.mark.parametrize("caller", ["tend", "undo", "drain"])
+def test_journal_symlink_named_error(tmp_path, monkeypatch, capsys, linked, caller):
+    from argparse import Namespace
+    from brigade import memory_care_tend
+
+    crash(tmp_path, monkeypatch)
+    path = tmp_path / journal.JOURNAL_REL
+    if linked == "decision.json":
+        path = path / ID / linked
+    saved = tmp_path / "saved"
+    path.rename(saved)
+    path.symlink_to(saved, target_is_directory=linked == "journal")
+    if caller == "drain":
+        error = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 14), deadline_days=30)["error"]
+    else:
+        args = Namespace(
+            memory_care_command=caller, target=tmp_path, decision_id=ID, stage=[], dry_run=False, json=True
+        )
+        assert memory_care_tend.dispatch(args) == 1
+        error = capsys.readouterr().err
+    assert "symlink path:" in error
+    assert journal.JOURNAL_REL in error
+    assert "the memory-care journal contains a symlink; inspect and remove it" in error
+    assert path.is_symlink()
+
+
+def test_refused_restore_reports_all_unrestored_destinations(tmp_path, monkeypatch):
+    crash(tmp_path, monkeypatch, "prepare", 2)
+    operation = journal.kernel.unfinished_operations(tmp_path)[0]
+    op = journal.store.read_json(journal.kernel.operation_dir(tmp_path, operation.operation_id) / "journal.json")
+    committed = [op["mutations"][n]["display_path"] for n in op["committed_indexes"]]
+    (tmp_path / committed[-1]).write_bytes(b"drift")
+    result = journal.resolve_prepared(tmp_path)[0]
+    assert result["committed_destinations"] == committed
+    assert result["unrestored_destinations"] == committed
+
+
+def test_sweep_reports_quarantined_retention(tmp_path, monkeypatch):
+    from brigade.memory_inbox_sweep import sweep
+
+    crash(tmp_path, monkeypatch, "finish", 1)
+    record = tmp_path / journal.JOURNAL_REL / ID / "decision.json"
+    record.write_text("{}")
+    journal.resolve_prepared(tmp_path)
+    assert sweep(tmp_path)["retentions"] == [{"decision_id": ID, "reason": "quarantined decision record"}]
+
+
+@pytest.mark.parametrize("field", list(journal.Decision.__dataclass_fields__))
+@pytest.mark.parametrize("damage", ["missing", "wrong-type"])
+def test_finish_validates_decision_fields_before_writes(tmp_path, monkeypatch, field, damage):
+    crash(tmp_path, monkeypatch)
+    p = journal._payload(tmp_path, ID)
+    if damage == "missing":
+        del p[field]
+    else:
+        p[field] = 42
+    journal.store.write_json(tmp_path / journal.JOURNAL_REL / ID / "decision.json", p)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(journal.JournalConflict, match=f"invalid decision record: {field}$"):
+        journal.finish_prepared(tmp_path, ID)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before

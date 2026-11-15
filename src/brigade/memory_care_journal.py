@@ -98,7 +98,11 @@ def safe_path(target: Path, rel: str) -> Path:
         if part == target.parent:
             break
         if part.is_symlink():
-            raise JournalConflict(f"symlink path: {rel}")
+            raise JournalConflict(
+                f"symlink path: {rel}; the memory-care journal contains a symlink; inspect and remove it"
+                if rel.startswith(JOURNAL_REL)
+                else f"symlink path: {rel}"
+            )
     return path
 
 
@@ -109,10 +113,48 @@ def _directory(target: Path, decision_id: str) -> Path:
 
 
 def _payload(target: Path, decision_id: str) -> dict[str, Any]:
-    value = store.read_json(_directory(target, decision_id) / "decision.json")
+    _directory(target, decision_id)
+    value = store.read_json(safe_path(target, f"{JOURNAL_REL}/{decision_id}/decision.json"))
     if not isinstance(value, dict):
         raise JournalConflict("decision not found")
     return value
+
+
+def _validated_payload(target: Path, decision_id: str) -> dict[str, Any]:
+    """Validate recovery inputs before any phase can mutate the workspace."""
+    p = _payload(target, decision_id)
+    fields: dict[str, Any] = {
+        "decision_id": str,
+        "kind": str,
+        "reason": str,
+        "card_id": (str, type(None)),
+        "created_at": str,
+        "paths": list,
+        "after_sha256": dict,
+        "hub": (dict, type(None)),
+        "undoes": (str, type(None)),
+        "undone_by": (str, type(None)),
+        "phase": str,
+    }
+    for field, expected in fields.items():
+        if field not in p or not isinstance(p[field], expected):
+            raise JournalConflict(f"invalid decision record: {field}")
+    if not all(isinstance(path, str) for path in p["paths"]):
+        raise JournalConflict("invalid decision record: paths")
+    if (
+        not all(isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in p["after_sha256"].items())
+        or not set(p["paths"]) <= p["after_sha256"].keys()
+    ):
+        raise JournalConflict("invalid decision record: after_sha256")
+    if p["phase"] == "prepared":
+        for field in ("prepared_paths", "after_bytes"):
+            if not isinstance(p.get(field), list) or not all(
+                isinstance(v, str) or (field == "after_bytes" and v is None) for v in p[field]
+            ):
+                raise JournalConflict(f"invalid decision record: {field}")
+        if len(p["after_bytes"]) != len(p["paths"]):
+            raise JournalConflict("invalid decision record: after_bytes")
+    return p
 
 
 def load(target: Path, decision_id: str) -> Decision:
@@ -491,8 +533,8 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
 
     from .memory_cmd import _config_or_default
 
-    d = load(target, decision_id)
-    p = _payload(target, decision_id)
+    p = _validated_payload(target, decision_id)
+    d = Decision(**{**{k: p[k] for k in Decision.__dataclass_fields__}, "paths": tuple(p["paths"])})
     config = _config_or_default(target)
     changes = [
         Change(
@@ -601,7 +643,8 @@ def resolve_prepared(target: Path) -> list[dict[str, Any]]:
                 needs_lock = True
     from .memory_care_pending import load as pending_index
 
-    needs_lock = needs_lock or any(row["document"] for row in pending_index(target).values())
+    rows = pending_index(target)  # Check all journal paths before kernel recovery can write.
+    needs_lock = needs_lock or any(row["document"] for row in rows.values())
     with _document_lock(target) if needs_lock else nullcontext():
         return _resolve_prepared_locked(target)
 
@@ -625,8 +668,10 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
             continue
         decision_id = match.group(1)
         try:
-            p = _payload(target, decision_id)
-        except (JournalConflict, store.StoreError):
+            p = _validated_payload(target, decision_id)
+        except (JournalConflict, store.StoreError) as exc:
+            if str(exc).startswith("symlink path: "):
+                raise
             p = {}
         if p.get("phase") == "abandoned" and match.group(2) != "repair":
             kernel.supersede(operation.operation_id, target=target)
@@ -645,15 +690,23 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
             if receipt.terminal_state != "restored":
                 raise JournalConflict(f"kernel {receipt.terminal_state}")
         except (JournalConflict, kernel.ProjectionError):
+            op = store.read_json(kernel.operation_dir(target, operation.operation_id) / "journal.json")
+            committed = [op["mutations"][n]["display_path"] for n in op.get("committed_indexes", [])]
             if not p:
                 # The kernel alone owns the before-images. Do not infer card ownership
                 # or force restoration over drift from an unreadable care record.
                 kernel.supersede(operation.operation_id, target=target)
                 _quarantine_decision(target, decision_id)
-                resolved.append({"decision_id": decision_id, "phase": "abandoned"})
+                resolved.append(
+                    {
+                        "decision_id": decision_id,
+                        "phase": "quarantined",
+                        "reason": "unreadable decision record quarantined",
+                        "committed_destinations": committed,
+                        "unrestored_destinations": committed,
+                    }
+                )
                 continue
-            op = store.read_json(kernel.operation_dir(target, operation.operation_id) / "journal.json")
-            committed = [op["mutations"][n]["display_path"] for n in op.get("committed_indexes", [])]
             reason = "kernel recovery could not complete safely. Operation superseded, before-images retained"
             annotate(
                 target,
@@ -678,6 +731,7 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
                     "phase": "abandoned",
                     "reason": reason,
                     "committed_destinations": committed,
+                    "unrestored_destinations": committed,
                 }
             )
         else:
@@ -685,6 +739,13 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
                 # recover checks every destination before writing. Invalid decision
                 # bytes cannot match either JSON digest, so it cannot overwrite them.
                 _quarantine_decision(target, decision_id)
+                resolved.append(
+                    {
+                        "decision_id": decision_id,
+                        "phase": "quarantined",
+                        "reason": "unreadable decision record quarantined",
+                    }
+                )
             elif match.group(2) == "repair":
                 _repair_indexes(target, decision_id)
     from .memory_care_pending import load as pending_index
@@ -704,13 +765,37 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
                 continue
         if row["prepared"]:
             try:
-                _payload(target, decision_id)
-            except (JournalConflict, store.StoreError):
-                _quarantine_decision(target, decision_id)
-                resolved.append({"decision_id": decision_id, "phase": "abandoned"})
+                _validated_payload(target, decision_id)
+            except (JournalConflict, store.StoreError) as exc:
+                if str(exc).startswith("symlink path: "):
+                    raise
+                inflight = [
+                    op
+                    for op in kernel.unfinished_operations(target)
+                    if re.fullmatch(rf"care-{re.escape(decision_id)}-(prepare|finish|repair)", op.operation_id)
+                ]
+                if inflight:
+                    for op in inflight:
+                        kernel.supersede(op.operation_id, target=target)
+                    _quarantine_decision(target, decision_id)
+                    resolved.append(
+                        {
+                            "decision_id": decision_id,
+                            "phase": "quarantined",
+                            "reason": "unreadable decision record quarantined",
+                        }
+                    )
+                else:
+                    resolved.append(
+                        {
+                            "decision_id": decision_id,
+                            "phase": "unreadable",
+                            "reason": "unreadable decision record retained",
+                        }
+                    )
                 continue
             finish_prepared(target, decision_id)
-            final = _payload(target, decision_id)
+            final = _validated_payload(target, decision_id)
             resolved.append(
                 {"decision_id": decision_id, "phase": final["phase"], "reason": final.get("abandoned_reason", "")}
             )

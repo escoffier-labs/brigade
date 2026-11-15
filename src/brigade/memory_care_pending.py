@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,10 @@ def _row(path: Path) -> dict[str, Any]:
     from . import memory_care_journal as journal
 
     try:
-        p = journal._payload(path.parents[4], path.parent.name)
-    except (journal.JournalConflict, store.StoreError):
+        p = journal._validated_payload(path.parents[4], path.parent.name)
+    except (journal.JournalConflict, store.StoreError) as exc:
+        if str(exc).startswith("symlink path: "):
+            raise
         # An unreadable record cannot prove that no document recovery is pending.
         return {"prepared": True, "document": True, "repair": False, "append": False}
     phase = p.get("phase")
@@ -37,7 +40,15 @@ def _paths(target: Path) -> list[Path]:
     from .memory_care_journal import JOURNAL_REL, safe_path
 
     root = safe_path(target, JOURNAL_REL)
-    return sorted(root.glob("*/decision.json")) if root.exists() else []
+    return (
+        [
+            safe_path(target, path.relative_to(target).as_posix())
+            for path in sorted(root.glob("*/decision.json"))
+            if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-z]+-[0-9a-f]{8}", path.parent.name)
+        ]
+        if root.exists()
+        else []
+    )
 
 
 def scan(target: Path) -> dict[str, dict[str, Any]]:
