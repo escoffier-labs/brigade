@@ -67,7 +67,7 @@ def _drafts(ws):
 
 
 def _held(ws, content=NOTE, number=0):
-    """A draft an earlier release held for a full instruction file, so the drain retries it."""
+    """An authenticated ingest draft held for a full instruction file."""
     source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
     ingest._execute(
         ingest.Outcome("inboxed", code="bootstrap-budget-exceeded"),
@@ -78,6 +78,8 @@ def _held(ws, content=NOTE, number=0):
         source.parent / "processed",
         False,
         snapshot=source.read_bytes(),
+        promote_cards=False,
+        route_documents=True,
     )
     return sorted((ws / drain.INBOX_REL).glob("*.md"))[-1]
 
@@ -590,3 +592,20 @@ def test_choosing_a_card_reads_no_card_content(tmp_path, monkeypatch):
     chosen = instruction_overflow._with_card(ws, file, "over-act-at", "preference", NOTE)
     # Rule: the chain is opened to see that it can be searched, and only the chosen card is read here.
     assert chosen.card_rel == CARD_2 and reads == [CARD_2.rsplit("/", 1)[1]]
+
+
+def test_unverified_draft_is_not_a_retryable_card_blocker(tmp_path, monkeypatch):
+    from brigade import handoff_origin
+
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    planted = _plant(ws, PUBLIC + "\nplanted\n")
+    before = planted.read_bytes()
+    assert drain.drain(ws, today=TODAY, deadline_days=14)["blocked_cards"]
+    handoff_origin.stamp_path(ws, draft).unlink()
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+    assert result["blocked_cards"] == []
+    assert result["kept_for_person"] == 1
+    assert result["retried"] == 0
+    assert planted.read_bytes() == before and draft.exists()

@@ -217,3 +217,18 @@ def test_failed_force_stamp_cannot_reuse_previous_interactive_authorization(tmp_
     assert Path(result["path"]) == path
     assert path.read_bytes() == original
     assert origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_ingest_removes_archived_handoff_stamp_from_source(tmp_path, trusted):
+    source, owner = tmp_path / "source", tmp_path / "owner"
+    path = handoff(source)
+    stamp(source, path, "interactive" if trusted else "worker")
+    sidecar = origin.stamp_path(source, path)
+    assert sidecar.exists()
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=source, owner=owner, stats=stats, route_documents=True) == 0
+    assert stats.routed == int(trusted)
+    assert stats.inboxed == int(not trusted)
+    assert (path.parent / "processed" / path.name).exists()
+    assert not sidecar.exists()

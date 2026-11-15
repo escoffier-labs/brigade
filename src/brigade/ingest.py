@@ -319,6 +319,7 @@ def ingest_into(
                 if trusted_origin and sha in stats.seen_digests:
                     if not dry_run:
                         _archive(path, processed_dir, sha)
+                        handoff_origin.remove_stamp(source, path)
                     stats.skipped += 1
                     stats.actions.append(_summary("skip", path.name, "duplicate-content"))
                     continue
@@ -361,6 +362,8 @@ def ingest_into(
                     route_documents=route_documents,
                     routing=routing,
                 )
+                if not dry_run and action.kind in _HANDLED_KINDS:
+                    handoff_origin.remove_stamp(source, path)
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
             except ChangedHandoffError:
@@ -1147,6 +1150,13 @@ def _execute(
                 flags = f"promote={str(promote_cards).lower()} route={str(route_documents).lower()}"
                 header = header.replace(f"routed-at: {slug} -->", f"routed-at: {slug}\n     retry-flags: {flags} -->")
             dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
+            if promote_cards is not None and route_documents is not None:
+                handoff_origin.stamp_review_draft(
+                    target,
+                    dest,
+                    (header + original).encode("utf-8"),
+                    handoff_origin.ReviewDraft(outcome.code, promote_cards, route_documents),
+                )
             log_match(target, outcome.match, dest)
             _archive(handoff_path, processed_dir, snapshot_sha)
         # Both inboxed and skipped are now archived; classify them uniformly.

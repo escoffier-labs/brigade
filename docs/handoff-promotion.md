@@ -146,6 +146,14 @@ rules. Worker, cron, subagent, unknown, and tool-touched origins go to
 `memory/handoff-inbox/` with reason `origin-review-required`. The inbox drain
 classifies that reason as human review and cannot retry it automatically.
 
+Ingest also signs each review draft's final bytes, path, routing reason, and
+promotion and document-routing flags with the memory owner's key. The drain and
+direct reprocessing require that record before retrying. Headers are display
+text, never retry authority. Missing, legacy, altered, or unverifiable records
+stay in human review with `origin-review-required`. Files in a writer inbox's
+`malformed/` folder always require human review. Ingest removes source stamps
+after archiving, and the drain removes review stamps after resolution or retry.
+
 The tooling API `brigade.handoff_origin.stamp_handoff` writes a private,
 atomically published sidecar under `.brigade/handoffs/origins/`, outside the
 writer inbox. A hash of the full handoff path selects the sidecar.

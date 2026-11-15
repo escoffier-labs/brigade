@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import ingest, instruction_overflow, memory_archive, memory_cmd
+from . import handoff_origin, ingest, instruction_overflow, memory_archive, memory_cmd
 from . import memory_care_journal as journal
 from .memory_inbox_io import read
 
@@ -27,7 +27,6 @@ def reprocess(
         disposition_metadata,
         classify,
         parse_header,
-        retry_flags,
         evidence_uncertain,
         NEEDS_EVIDENCE_PROOF,
     )
@@ -41,13 +40,15 @@ def reprocess(
     data = read(owner, rel)
     if data is None:
         raise ValueError("review draft missing")
+    review = handoff_origin.verify_review_draft(owner, draft, data)
+    if review is None:
+        return ingest.Action("inboxed", "origin-review-required")
     text = data.decode("utf-8")
-    code, routed = parse_header(text)
+    _, routed = parse_header(text)
+    code = review.code
     if not code or routed is None or classify(code, text) in ("human", "hold"):
         return ingest.Action("inboxed", "unsafe-review-draft")
-    flags = retry_flags(code, text)
-    if flags is None:
-        return ingest.Action("inboxed", "retry-flags-unknown")
+    flags = review.promote_cards, review.route_documents
     evidence, warnings, unsupported = read_evidence(owner)
     cited = evidence_uncertain(owner, warnings, unsupported) or any(
         row["evidence_id"] in (rel, str(draft)) for row in evidence
@@ -229,6 +230,7 @@ def reprocess(
             return ingest.Action("inboxed", exc.code)
         if journal._payload(owner, decision.decision_id).get("phase") != "committed":
             raise journal.JournalConflict("retry abandoned")
+        handoff_origin.remove_stamp(owner, draft)
         if outcome.kind in ("promoted", "reinforced") and card_ids is not None:
             card_ids.register(dest_rel, after.decode("utf-8"))
         elif outcome.kind == "routed-card" and card_ids is not None:

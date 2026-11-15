@@ -17,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from . import instruction_overflow, memory_care_journal as journal
+from . import handoff_origin, instruction_overflow, memory_care_journal as journal
 from .memory_hub_store import write_json
 
 BLOCKED_REL = ".brigade/memory-care/inbox/blocked-cards.json"
@@ -47,13 +47,17 @@ def refresh(target: Path, *, routing: instruction_overflow.RouteContext | None =
             data = read(target, draft.relative_to(target).as_posix())
             if data is None:
                 continue
-            code, routed = drain.parse_header(data.decode("utf-8"))
+            review = handoff_origin.verify_review_draft(target, draft, data)
+            if review is None:
+                continue
+            _, routed = drain.parse_header(data.decode("utf-8"))
+            code = review.code
             # A draft keeps the code it was first held with (`document-destination-unwritable`, an old budget
             # hold), so every draft the drain would retry as a document append is judged as it is now.
             if code not in drain.RETRY_CODES or routed is None:
                 continue
-            flags = drain.retry_flags(code, data.decode("utf-8"))
-            if flags is None or not flags[1]:
+            flags = review.promote_cards, review.route_documents
+            if not flags[1]:
                 continue
             outcome = ingest.decide(
                 ingest.parse(draft, data),

@@ -72,14 +72,7 @@ def _mac(payload: dict, key: bytes) -> str:
     return hmac.new(key, (SCHEMA + "\n" + encoded).encode("ascii"), hashlib.sha256).hexdigest()
 
 
-def stamp_handoff(target: Path, handoff: Path, snapshot: bytes, origin: Origin) -> bool:
-    """For trusted tooling only. No CLI flag accepts an agent's origin claim.
-
-    Returns False without a usable receipt key. Publish the handoff first. If a
-    reader wins the race before this sidecar exists, it safely routes to review.
-    """
-    if not _valid(origin):
-        raise ValueError("invalid handoff origin")
+def _stamp(target: Path, handoff: Path, snapshot: bytes, claims: dict) -> bool:
     key = _key(target)
     if key is None:
         return False
@@ -89,7 +82,7 @@ def stamp_handoff(target: Path, handoff: Path, snapshot: bytes, origin: Origin) 
         "path_digest": stamp_path(target, handoff).stem,
         "publication": _publication(handoff),
         "sha256": hashlib.sha256(snapshot).hexdigest(),
-        "origin": asdict(origin),
+        **claims,
         "key_id": receipt_signing.key_id(key),
     }
     sidecar = stamp_path(target, handoff)
@@ -100,8 +93,7 @@ def stamp_handoff(target: Path, handoff: Path, snapshot: bytes, origin: Origin) 
     return True
 
 
-def verify_handoff(target: Path, handoff: Path, snapshot: bytes) -> Origin | None:
-    """Verify exactly the bytes ingest parsed. Every unverifiable case is unknown."""
+def _verify(target: Path, handoff: Path, snapshot: bytes, *, bind_publication: bool = True) -> dict | None:
     try:
         key = _key(target)
         if key is None:
@@ -121,15 +113,78 @@ def verify_handoff(target: Path, handoff: Path, snapshot: bytes) -> Origin | Non
             payload.get("schema") != SCHEMA
             or payload.get("handoff_name") != handoff.name
             or payload.get("path_digest") != stamp_path(target, handoff).stem
-            or payload.get("publication") != _publication(handoff)
+            or (bind_publication and payload.get("publication") != _publication(handoff))
             or payload.get("sha256") != hashlib.sha256(snapshot).hexdigest()
             or payload.get("key_id") != receipt_signing.key_id(key)
         ):
             return None
-        origin = Origin(**payload["origin"])
-        return origin if _valid(origin) else None
+        return payload
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return None
+
+
+def stamp_handoff(target: Path, handoff: Path, snapshot: bytes, origin: Origin) -> bool:
+    """For trusted tooling only. Publish first and never create a signing key."""
+    if not _valid(origin):
+        raise ValueError("invalid handoff origin")
+    return _stamp(target, handoff, snapshot, {"origin": asdict(origin)})
+
+
+def verify_handoff(target: Path, handoff: Path, snapshot: bytes) -> Origin | None:
+    """Verify exactly the bytes ingest parsed. Every unverifiable case is unknown."""
+    payload = _verify(target, handoff, snapshot)
+    try:
+        origin = Origin(**payload["origin"]) if payload else None
+        return origin if origin is not None and _valid(origin) else None
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+@dataclass(frozen=True)
+class ReviewDraft:
+    code: str
+    promote_cards: bool
+    route_documents: bool
+
+
+def _valid_review(review: ReviewDraft) -> bool:
+    return (
+        isinstance(review.code, str)
+        and re.fullmatch(r"[a-z0-9-]{1,128}", review.code) is not None
+        and type(review.promote_cards) is bool
+        and type(review.route_documents) is bool
+    )
+
+
+def _review_location(target: Path, draft: Path) -> bool:
+    # Writer inboxes, including malformed/, can never supply retry authority.
+    return draft.absolute().parent == target.resolve() / "memory" / "handoff-inbox"
+
+
+def stamp_review_draft(target: Path, draft: Path, snapshot: bytes, review: ReviewDraft) -> bool:
+    """Ingest's routing decision and flags, bound to this publication's bytes."""
+    if not _valid_review(review) or not _review_location(target, draft):
+        raise ValueError("invalid review draft origin")
+    return _stamp(target, draft, snapshot, {"review": asdict(review)})
+
+
+def verify_review_draft(target: Path, draft: Path, snapshot: bytes) -> ReviewDraft | None:
+    if not _review_location(target, draft):
+        return None
+    # Journal recovery may republish an identical draft at the same path. Its
+    # authenticated bytes and flags remain authoritative across that restoration.
+    # Writer handoffs still require the original publication identity.
+    payload = _verify(target, draft, snapshot, bind_publication=False)
+    try:
+        review = ReviewDraft(**payload["review"]) if payload else None
+        return review if review is not None and _valid_review(review) else None
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def remove_stamp(target: Path, handoff: Path) -> None:
+    """Discard authority only after the handoff is archived or resolved."""
+    stamp_path(target, handoff).unlink(missing_ok=True)
 
 
 def draft_origin() -> Origin:
