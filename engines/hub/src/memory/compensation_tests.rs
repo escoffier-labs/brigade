@@ -77,6 +77,12 @@ async fn verifier_signal(
     );
     let mut manifest = json!({"schema":"brigade.memory-verify-manifest.v1","card":{"scope":"fleet","card_id":"a","base_revision":c["revision"],"content_hash":c["content_hash"]},"blocks":[],"effectiveness":{"status":"failed","verifier_credential":credential,"observed_ms":h.now()}});
     if !negative {
+        manifest.as_object_mut().unwrap().remove("effectiveness");
+        // Match the normal CLI manifest, which binds by immutable revision.
+        manifest["card"]
+            .as_object_mut()
+            .unwrap()
+            .remove("content_hash");
         manifest["blocks"] = json!([{"block_id":"c-abcdef","verdict":"contradicted"}]);
     }
     match drift {
@@ -91,9 +97,25 @@ async fn verifier_signal(
     let id = format!("{principal}/workspace-a/signal-{id}");
     let r=h.call(token,json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a","evidence_id":id,"artifact_kind":"memory-verify-manifest","artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(bytes),"observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
     assert_eq!(r.status, 201, "{r:?}");
-    if state != "pending_review" {
-        // Seed a completed review transition without changing the watched head.
-        rusqlite::Connection::open(h.memory()).unwrap().execute("UPDATE memory_evidence_bindings SET state=?1,proposal_id='review-fixture' WHERE evidence_id=?2",[state,&id]).unwrap();
+    if state != "pending_review" && drift != "revision" {
+        let mut operation = op("fleet", "a", c["revision"].as_i64().unwrap());
+        operation["type"] = json!("append_evidence");
+        operation.as_object_mut().unwrap().remove("text");
+        operation["expected_block_hash"] =
+            proposal_blocks::pins(c["text"].as_str().unwrap())[0]["hash"].clone();
+        operation["evidence_ids"] = json!([id]);
+        let opened = h.call(token, json!({"action":"propose","workspace_id":"workspace-a","base_epoch":h.epoch().await,"ops":[operation],"client_event_id":h.id()})).await;
+        assert_eq!(opened.status, 201, "{opened:?}");
+        let reviewed = h.call(ADMIN_TOKEN, json!({"action":"decide","proposal_id":opened.body["proposal_id"],"decision":if state == "active" {"accept"} else {"reject"},"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+        assert_eq!(
+            reviewed.body["state"],
+            if state == "active" {
+                "applied"
+            } else {
+                "rejected"
+            },
+            "{reviewed:?}"
+        );
     }
     id
 }
@@ -236,6 +258,20 @@ async fn compensation_watch_contradictions_require_active_independent_verifiers(
                     .unwrap()["tier"],
                 2
             );
+            drop(db);
+            assert_eq!(watch(&h).await.body["results"], json!([]));
+            h.set_clock(h.now() + 1001);
+            let refused = h
+                .call(
+                    ADMIN_TOKEN,
+                    attestation_tests::auto_request(&h, proposal).await,
+                )
+                .await;
+            assert_eq!(
+                refused.body["reason"], "compensation_not_exact",
+                "{refused:?}"
+            );
+            assert_eq!(attestation_tests::bytes_snapshot(&h), before);
         }
     }
 }
@@ -508,4 +544,178 @@ async fn compensation_watch_contradictions_on_other_blocks_are_ignored() {
     let before = attestation_tests::bytes_snapshot(&h);
     assert_eq!(watch(&h).await.body["results"], json!([]));
     assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+}
+
+#[tokio::test]
+async fn compensation_review_required_inverse_cannot_auto_apply() {
+    let (h, _, _) = applied().await;
+    h.put(ADMIN_TOKEN, "fleet", "decoy", None, "Another card.")
+        .await;
+    h.set_clock(h.now() + 1);
+    let mut report = retrieval_eval_tests::gate_report(&h).await;
+    report["adapters"]["hub-lexical"]["overall"]["mrr"] = json!(0.25);
+    assert_eq!(retrieval_eval_tests::record(&h, &report).await.status, 201);
+    let referral = watch(&h).await;
+    assert_eq!(referral.body["results"][0]["result"], "review_required");
+    let before = attestation_tests::bytes_snapshot(&h);
+    h.set_clock(h.now() + 1001);
+    let refused = h
+        .call(
+            ADMIN_TOKEN,
+            attestation_tests::auto_request(&h, &referral.body["results"][0]["proposal_id"]).await,
+        )
+        .await;
+    assert_eq!(
+        refused.body["reason"], "compensation_not_exact",
+        "{refused:?}"
+    );
+    assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+}
+
+#[tokio::test]
+async fn compensation_release_can_keep_kill_switch_off() {
+    let (h, id, _) = applied().await;
+    assert_eq!(
+        compensate(&h, &id, ADMIN_TOKEN).await.body["state"],
+        "applied"
+    );
+    let result = h.call(ADMIN_TOKEN, json!({"action":"auto_apply_switch","enabled":false,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()})).await;
+    assert_eq!(result.status, 200, "{result:?}");
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT value FROM memory_meta WHERE key='auto_apply_enabled'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "false"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM memory_meta WHERE key='compensation_hold:fleet/append_evidence'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn compensation_failed_watch_can_retry_after_kill_switch_go() {
+    let (h, _, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
+    )
+    .await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "failed");
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
+    )
+    .await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "applied");
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+}
+
+#[tokio::test]
+async fn compensation_second_active_verifier_can_upgrade_referral() {
+    let (h, id, before) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
+    assert_eq!(
+        watch(&h).await.body["results"][0]["result"],
+        "review_required"
+    );
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
+    let r = watch(&h).await;
+    assert_eq!(r.body["results"][0]["result"], "applied", "{r:?}");
+    assert_eq!(r.body["results"][0]["rollback_of"], id);
+    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let trips: i64 = db.query_row("SELECT count(*) FROM memory_events WHERE kind='proposal.decide' AND json_extract(payload,'$.rollback_of')=?1 AND json_extract(payload,'$.watch_trip.trigger')='contradicted'", [id.as_str().unwrap()], |r| r.get(0)).unwrap();
+    assert!(trips > 0);
+}
+
+#[tokio::test]
+async fn compensation_evidence_appends_do_not_hide_human_edit_and_revert() {
+    let (h, _, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
+    let c = card(&h, "fleet", "a").await;
+    let edited = h
+        .put(
+            ADMIN_TOKEN,
+            "fleet",
+            "a",
+            c["revision"].as_i64(),
+            "A human edit. ^c-abcdef",
+        )
+        .await;
+    h.put(
+        ADMIN_TOKEN,
+        "fleet",
+        "a",
+        Some(rev(&edited)),
+        c["text"].as_str().unwrap(),
+    )
+    .await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
+    let before = attestation_tests::bytes_snapshot(&h);
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "failed");
+    assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_watch:%' OR key LIKE 'compensation_hold:%'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn compensation_contradictions_pin_the_attested_version_hash() {
+    let (h, _, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "wrong-hash", "active", false, "hash").await;
+    verifier_signal(&h, NODE_TOKEN, "wrong-hash", "active", false, "hash").await;
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+}
+
+#[tokio::test]
+async fn compensation_failed_retrieval_trip_retries_and_journal_expires() {
+    let (h, _, _) = applied().await;
+    let mut report = retrieval_eval_tests::gate_report(&h).await;
+    report["adapters"]["hub-lexical"]["overall"]["mrr"] = json!(0.25);
+    assert_eq!(retrieval_eval_tests::record(&h, &report).await.status, 201);
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
+    )
+    .await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "failed");
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
+    )
+    .await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "applied");
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_watch:%'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    h.set_clock(h.now() + 604_800_001);
+    watch(&h).await;
+    assert_eq!(db.query_row("SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_watch:%' OR key LIKE 'compensation_retrieval:%'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn compensation_watch_discovers_attested_failure_without_client_ids() {
+    let (h, _, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "applied");
 }

@@ -1374,9 +1374,6 @@ impl Store {
                             )
                         })
                         .ok_or_else(|| invalid("hold release requires scope and op_type"))?;
-                    if !enabled {
-                        return Err(invalid("hold release requires enabled true"));
-                    }
                     Some((scope.to_string(), op.to_string()))
                 } else {
                     None

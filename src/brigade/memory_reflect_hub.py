@@ -507,7 +507,7 @@ def _reflect(
     if watch and not dry_run:
         from . import memory_compensation_watch
 
-        watched = memory_compensation_watch.run(target, client, settings.read_scopes, heads, report["log_epoch"])
+        watched = memory_compensation_watch.run(client, settings.read_scopes, report["log_epoch"])
         if watched:
             # Rollbacks invalidate the inputs for proposing. Pull their committed heads first.
             report = sync.pull(target, client, settings)

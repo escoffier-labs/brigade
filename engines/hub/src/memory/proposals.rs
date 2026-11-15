@@ -262,7 +262,7 @@ fn snapshot<T: ReadTx + ?Sized>(tx: &T, op: &Json) -> rusqlite::Result<Result<Js
         json!({"scope":scope,"card_id":id,"base_revision":h.revision,"before_hash":h.hash,"before_text":text,"before_trust":h.trust,"before_state":h.state,"before_scan":scan,"after_text":text,"after_state":"live","pins":[]}),
     ))
 }
-fn card_diff(card: &Json) -> String {
+pub(super) fn card_diff(card: &Json) -> String {
     let scope = string(card, "scope");
     let id = string(card, "card_id");
     let mut diff = blocks::diff(
@@ -897,13 +897,14 @@ pub(super) fn compensate(
     authority: &Authority,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Reply> {
-    let mut inverse = rollback(original);
+    let mut inverse = super::compensation::inverse(tx, original)?;
     inverse["proposer"] = json!(p.credential.principal());
     let in_window = super::compensation::in_window(tx, original, authority, p.now_ms)?;
     let policy_actor = original["decision_mode"] == "automatic"
         && super::compensation::actor(original, &p.credential, authority)
         && original["watch_trip"]["review_required"] != true
         && in_window;
+    inverse["watch_trip"] = original["watch_trip"].clone();
     if !in_window {
         inverse["watch_trip"] =
             json!({"trigger":"compensation-window-expired","review_required":true});

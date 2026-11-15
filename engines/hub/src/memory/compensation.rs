@@ -15,6 +15,112 @@ pub const CAPABILITY: &str = "automatic_compensation";
 const DEFAULT_WINDOW: i64 = 86_400;
 const METRIC_TOLERANCE: f64 = 0.01;
 
+/// Rebase only across a bounded, replayable sequence of evidence-only applies.
+/// Every revision is checked, so a human edit followed by a revert still fails.
+fn evidence_head<T: ReadTx + ?Sized>(tx: &T, card: &Json) -> rusqlite::Result<Option<Json>> {
+    let (scope, id) = (string(card, "scope"), string(card, "card_id"));
+    let Some(head) = ops::head(tx, scope, id)? else {
+        return Ok(None);
+    };
+    let mut current = json!({"base_revision":card["applied_revision"],"before_hash":card["after_hash"],"before_text":card["after_text"],"before_state":card["after_state"],"before_trust":card["applied_trust"]});
+    let rows = tx.query("SELECT revision,content_hash,state,trust,proposal_id FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision>?3 ORDER BY revision LIMIT 129", &[t(scope),t(id),Value::Integer(card["applied_revision"].as_i64().unwrap_or(0))])?;
+    if rows.len() > 128 {
+        return Ok(None);
+    }
+    for row in rows {
+        let Some(proposal) = proposals::load(tx, &s(&row[4]))? else {
+            return Ok(None);
+        };
+        if proposal["state"] != "applied"
+            || proposal["compacted"] == true
+            || !proposal["rollback_of"].is_null()
+        {
+            return Ok(None);
+        }
+        let Some(snapshot) = proposals::cards(&proposal)
+            .iter()
+            .find(|c| c["scope"] == scope && c["card_id"] == id)
+        else {
+            return Ok(None);
+        };
+        for key in [
+            "base_revision",
+            "before_hash",
+            "before_text",
+            "before_state",
+            "before_trust",
+        ] {
+            if snapshot[key] != current[key] {
+                return Ok(None);
+            }
+        }
+        let mut text = string(&current, "before_text").to_owned();
+        let Some(operations) = proposal["ops"].as_array().filter(|ops| !ops.is_empty()) else {
+            return Ok(None);
+        };
+        for op in operations {
+            if op["type"] != "append_evidence" || op["scope"] != scope || op["card_id"] != id {
+                return Ok(None);
+            }
+            let Ok(next) = super::proposal_metadata::apply(&text, op, None) else {
+                return Ok(None);
+            };
+            text = next;
+        }
+        if snapshot["after_text"] != text
+            || snapshot["after_hash"] != ids::sha256_hex(text.as_bytes())
+            || snapshot["applied_revision"].as_i64().map(Value::Integer) != Some(row[0].clone())
+            || snapshot["after_hash"] != s(&row[1])
+            || snapshot["after_state"] != s(&row[2])
+            || snapshot["applied_trust"] != s(&row[3])
+            || snapshot["after_state"] != current["before_state"]
+            || snapshot["applied_trust"] != current["before_trust"]
+        {
+            return Ok(None);
+        }
+        current = json!({"base_revision":snapshot["applied_revision"],"before_hash":snapshot["after_hash"],"before_text":text,"before_state":snapshot["after_state"],"before_trust":snapshot["applied_trust"]});
+    }
+    if current["base_revision"] != head.revision
+        || current["before_hash"] != head.hash
+        || current["before_state"] != head.state
+        || current["before_trust"] != head.trust
+    {
+        return Ok(None);
+    }
+    Ok(Some(current))
+}
+
+/// The restored version remains the original snapshot. Later evidence artifacts
+/// remain in the immutable store even when their card citations are reversed.
+pub fn inverse<T: ReadTx + ?Sized>(tx: &T, original: &Json) -> rusqlite::Result<Json> {
+    let mut inverse = proposals::rollback(original);
+    for (card, applied) in inverse["cards"].as_array_mut().unwrap().iter_mut().zip(
+        proposals::cards(original)
+            .iter()
+            .filter(|c| c["applied_revision"].is_i64()),
+    ) {
+        if let Some(current) = evidence_head(tx, applied)? {
+            for key in [
+                "base_revision",
+                "before_hash",
+                "before_text",
+                "before_state",
+                "before_trust",
+            ] {
+                card[key] = current[key].clone();
+            }
+            card["pins"] = json!(super::proposal_blocks::pins(string(card, "before_text")));
+        }
+    }
+    inverse["diff"] = json!(
+        proposals::cards(&inverse)
+            .iter()
+            .map(proposals::card_diff)
+            .collect::<String>()
+    );
+    Ok(inverse)
+}
+
 /// Only hub snapshots supply the inverse. Revisions also reject edit-and-revert.
 pub fn exact<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
     let Some(id) = body["rollback_of"].as_str() else {
@@ -45,7 +151,7 @@ pub fn exact<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> 
     if body["ops"].as_array().is_none_or(|ops| !ops.is_empty()) {
         return Ok(false);
     }
-    let expected = proposals::rollback(&original);
+    let expected = inverse(tx, &original)?;
     let cards = proposals::cards(body);
     if cards.is_empty() || cards.len() != proposals::cards(&expected).len() {
         return Ok(false);
@@ -229,9 +335,12 @@ fn trigger(
     if let Some(trip) = retrieval_trip(tx, body, applied, now)? {
         return Ok(Some(trip));
     }
-    for card in proposals::cards(body) {
+    for card in proposals::cards(body)
+        .iter()
+        .filter(|c| c["applied_revision"].is_i64())
+    {
         let scope = string(card, "scope");
-        let rows = tx.query("SELECT e.evidence_id,e.artifact_bytes,e.artifact_sha256,e.principal,e.credential_id,e.observed_ms,e.credential_class FROM memory_evidence e JOIN memory_evidence_bindings b USING(evidence_id) JOIN memory_verifier_credentials v ON v.credential=e.credential_id AND v.principal=e.principal AND v.verifier=1 JOIN memory_verifiers p ON p.principal=e.principal AND p.verifier=1 WHERE e.scope=?1 AND e.card_id=?2 AND b.base_revision=?3 AND b.state='active' AND e.observed_ms>?4 AND e.observed_ms<=?5 AND e.created_ms>=e.observed_ms AND e.tombstoned=0 AND e.scan_state='clean' AND e.artifact_kind='memory-verify-manifest' ORDER BY e.evidence_id", &[t(scope),t(string(card,"card_id")),Value::Integer(card["applied_revision"].as_i64().unwrap_or(0)),Value::Integer(applied),Value::Integer(now)])?;
+        let rows = tx.query("SELECT e.evidence_id,e.artifact_bytes,e.artifact_sha256,e.principal,e.credential_id,e.observed_ms,e.credential_class,b.base_revision FROM memory_evidence e JOIN memory_evidence_bindings b USING(evidence_id) JOIN memory_verifier_credentials v ON v.credential=e.credential_id AND v.principal=e.principal AND v.verifier=1 JOIN memory_verifiers p ON p.principal=e.principal AND p.verifier=1 WHERE e.scope=?1 AND e.card_id=?2 AND b.base_revision>=?3 AND b.state='active' AND e.observed_ms>?4 AND e.observed_ms<=?5 AND e.created_ms>=e.observed_ms AND e.tombstoned=0 AND e.scan_state='clean' AND e.artifact_kind='memory-verify-manifest' ORDER BY e.evidence_id", &[t(scope),t(string(card,"card_id")),Value::Integer(card["applied_revision"].as_i64().unwrap_or(0)),Value::Integer(applied),Value::Integer(now)])?;
         let mut principals = std::collections::BTreeSet::new();
         let mut evidence_ids = Vec::new();
         let mut kind = "contradicted";
@@ -272,7 +381,28 @@ fn trigger(
             if manifest["schema"] != "brigade.memory-verify-manifest.v1"
                 || manifest["card"]["scope"] != card["scope"]
                 || manifest["card"]["card_id"] != card["card_id"]
-                || manifest["card"]["base_revision"] != card["applied_revision"]
+                || manifest["card"]["base_revision"]
+                    .as_i64()
+                    .map(Value::Integer)
+                    != Some(row[7].clone())
+            {
+                continue;
+            }
+            // Resolve the manifest's exact version, then pin its claim to the
+            // applied block. Evidence appends change whole-card hashes only.
+            let version = tx.query("SELECT r.content_hash,b.bytes FROM memory_card_revisions r JOIN memory_blobs b USING(content_hash) WHERE r.scope=?1 AND r.card_id=?2 AND r.revision=?3", &[t(scope),t(string(card,"card_id")),row[7].clone()])?;
+            let Some(version) = version.first() else {
+                continue;
+            };
+            let Value::Blob(bytes) = &version[1] else {
+                continue;
+            };
+            let Ok(text) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            if (manifest["card"].get("content_hash").is_some()
+                && manifest["card"]["content_hash"] != s(&version[0]))
+                || ids::sha256_hex(bytes) != s(&version[0])
             {
                 continue;
             }
@@ -284,16 +414,28 @@ fn trigger(
                                 op["scope"] == card["scope"]
                                     && op["card_id"] == card["card_id"]
                                     && op["block_id"] == b["block_id"]
+                                    && super::proposal_blocks::pins(string(card, "after_text"))
+                                        .iter()
+                                        .any(|pin| {
+                                            pin["block_id"] == b["block_id"]
+                                                && super::proposal_blocks::pin(
+                                                    text,
+                                                    string(pin, "block_id"),
+                                                    string(pin, "hash"),
+                                                )
+                                                .is_ok()
+                                        })
                             })
                         })
                 })
             });
             let failed = scope == string(request, "scope")
-                && request["negative_outcomes"]
-                    .as_array()
-                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&s(&row[0]))))
+                && (request["negative_outcomes"].is_null()
+                    || request["negative_outcomes"]
+                        .as_array()
+                        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&s(&row[0])))))
+                && manifest["card"]["content_hash"] == s(&version[0])
                 && manifest["effectiveness"]["status"] == "failed"
-                && manifest["card"]["content_hash"] == card["after_hash"]
                 && manifest["effectiveness"]["verifier_credential"] == credential
                 && manifest["effectiveness"]["observed_ms"]
                     .as_i64()
@@ -341,8 +483,9 @@ pub fn watch(
             "rollback watch window must be 1 through 604800 seconds",
         ));
     };
+    tx.execute("DELETE FROM memory_meta WHERE (key LIKE 'compensation_watch:%' OR key LIKE 'compensation_retrieval:%') AND substr(key,instr(key,':')+1) IN (SELECT proposal_id FROM memory_proposals WHERE terminal_ms<?1 OR compacted=1)", &[Value::Integer(p.now_ms.saturating_sub(604_800_000))])?;
     let after = string(request, "after");
-    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id) ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(after),t(scope)])?;
+    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result')='applied') ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(after),t(scope)])?;
     let mut results = Vec::new();
     for row in rows.iter().take(32) {
         let id = s(&row[0]);
@@ -367,17 +510,49 @@ pub fn watch(
         } else {
             continue;
         };
+        let cursor_key = format!("compensation_retrieval:{id}");
+        let cursor = tx.query(
+            "SELECT value FROM memory_meta WHERE key=?1",
+            &[t(&cursor_key)],
+        )?;
         let Some(trip) = trigger(tx, &body, applied, p.now_ms, request, a, scanner)? else {
             continue;
         };
-        body["watch_trip"] = trip.clone();
-        tx.execute(
-            "INSERT INTO memory_meta(key,value) VALUES(?1,?2)",
-            &[t(&format!("compensation_watch:{id}")), t(&trip.to_string())],
+        let journal_key = format!("compensation_watch:{id}");
+        let previous = tx.query(
+            "SELECT value FROM memory_meta WHERE key=?1",
+            &[t(&journal_key)],
         )?;
+        if previous.first().is_some_and(|r| {
+            serde_json::from_str::<Json>(&s(&r[0]))
+                .ok()
+                .is_some_and(|v| v["trip"] == trip && v["result"] == "review_required")
+        }) {
+            continue;
+        }
+        body["watch_trip"] = trip.clone();
         let mut result = proposals::compensate(tx, p, &body, a, scanner)?;
         result.body["rollback_of"] = json!(id);
         result.body["trigger"] = trip["trigger"].clone();
+        let outcome = if result.body["state"] == "applied" {
+            "applied"
+        } else if trip["review_required"] == true && result.body["state"] == "pending" {
+            "review_required"
+        } else {
+            "failed"
+        };
+        if outcome != "failed" {
+            tx.execute("INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &[t(&journal_key),t(&json!({"trip":trip,"result":outcome}).to_string())])?;
+        } else {
+            // A refusal must leave both verifier and retrieval signals retryable.
+            tx.execute("DELETE FROM memory_meta WHERE key=?1", &[t(&cursor_key)])?;
+            if let Some(row) = cursor.first() {
+                tx.execute(
+                    "INSERT INTO memory_meta(key,value) VALUES(?1,?2)",
+                    &[t(&cursor_key), row[0].clone()],
+                )?;
+            }
+        }
         results.push(json!({"rollback_of":id,"proposal_id":result.body["proposal_id"],"trigger":trip["trigger"],"result":if result.body["state"]=="applied" {"applied"} else if trip["review_required"]==true && result.body["state"]=="pending" {"review_required"} else {"failed"},"reason":result.body["reason"]}));
     }
     Ok(Reply::new(
