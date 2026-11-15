@@ -13,6 +13,7 @@ from brigade import dirfd, handoff_worktrees, ingest as ingest_mod, runguard
 from brigade.claude_hooks import runtime as hook_runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
+from tests._handoff_origin_fixtures import trusted_handoff
 
 _HANDOFF = """\
 # Memory Handoff
@@ -260,7 +261,7 @@ def test_handoff_changed_after_read_is_never_archived_undelivered(tmp_target: Pa
 
 def test_guard_failure_in_decide_stays_fatal(tmp_target: Path, monkeypatch):
     inbox = _seed(tmp_target)
-    _handoff(inbox, "2026-11-08-0900-a.md", "a")
+    trusted_handoff(_handoff(inbox, "2026-11-08-0900-a.md", "a"))
 
     def decide(*args, **kwargs):
         raise RuntimeError("guard invariant broken")
@@ -286,6 +287,7 @@ def test_untrusted_fields_stay_out_of_logs_and_receipts(tmp_target: Path, capsys
         "## Suggested card content\n---\ntopic: t\n---\nSENTINEL-CONTENT\n"
     )
 
+    trusted_handoff(inbox / name, tmp_target)
     assert ingest_mod.run(tmp_target, promote_cards=True, route_documents=True) == 0
     out = capsys.readouterr().out
     assert "[unsafe-card-name]" in out
@@ -363,8 +365,9 @@ def test_ingest_discovers_linked_worktree_inbox(tmp_path: Path):
 
 def test_same_handoff_in_two_worktrees_ingests_once(tmp_path: Path):
     main, linked = _repo_with_worktree(tmp_path)
-    _handoff(main / ".claude" / "memory-handoffs", "2026-11-08-0900-same.md", "same")
+    trusted_handoff(_handoff(main / ".claude" / "memory-handoffs", "2026-11-08-0900-same.md", "same"), main)
     copy = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-same.md", "same")
+    trusted_handoff(copy, main)
 
     stats = ingest_mod.IngestStats()
     assert ingest_mod.ingest_into(source=main, owner=main, stats=stats) == 0
@@ -413,6 +416,8 @@ def test_retryable_skip_does_not_mark_identical_handoffs_handled(tmp_path: Path)
     in_linked = linked / ".claude" / "memory-handoffs" / "2026-11-08-0900-card-copy.md"
     in_linked.parent.mkdir(parents=True)
     in_linked.write_text(_CARD)
+    trusted_handoff(in_main, main)
+    trusted_handoff(in_linked, main)
     lock = main / ".brigade/memory/proposals/proposal.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
 

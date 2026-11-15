@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from tests._handoff_origin_fixtures import trusted_handoff
+
 import pytest
 
 from brigade import ingest as ingest_mod
@@ -260,7 +262,7 @@ def _inbox(tmp_path: Path) -> Path:
 def _write(inbox: Path, name: str, card: str, content: str) -> Path:
     path = inbox / name
     path.write_bytes(_handoff("create-card", card=card, content=content).encode("utf-8"))
-    return path
+    return trusted_handoff(path)
 
 
 def _ingest(tmp_path: Path, *, dry_run: bool = False) -> ingest_mod.IngestStats:
@@ -403,6 +405,7 @@ def test_an_update_without_an_id_keeps_the_original_id_claimed(tmp_path: Path, d
         _card_text(topic="claimant", card_id=MINTED, body="claiming card"),
     )
 
+    trusted_handoff(inbox / "2026-11-09-1000-update.md")
     stats = _ingest(tmp_path, dry_run=dry_run)
 
     # The same answer in a dry run and a real run: the update promotes, the create collides.

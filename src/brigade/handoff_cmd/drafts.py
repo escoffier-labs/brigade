@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import scrub
+from .. import handoff_origin, scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
 from ..handoff_ingest_rules import (
@@ -887,6 +887,12 @@ def build_draft(
         _publish_mod.publish_handoff(inbox_path, path.name, text, replace=force)
     except _publish_mod.HandoffNameTaken as exc:
         raise ValueError(str(exc)) from exc
+    # Agent-authored fields never establish origin. Missing observation stays
+    # unknown, even when a signing key is available.
+    try:
+        handoff_origin.stamp_handoff(target, path, text.encode("utf-8"), handoff_origin.draft_origin())
+    except OSError:
+        pass  # A missing sidecar always routes to review.
     lint_result = _linting_mod.lint_file(path, workspace=workspace_root)
     guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     return {

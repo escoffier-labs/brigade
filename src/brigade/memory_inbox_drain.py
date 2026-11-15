@@ -17,6 +17,7 @@ RESOLVED_REL = INBOX_REL + "/resolved"
 LEDGER_REL = ".brigade/memory-care/inbox-ledger.jsonl"
 HUMAN_CODES = frozenset(
     {
+        "origin-review-required",
         "card-injection-signal",
         "document-injection-signal",
         "contradiction-candidate",
@@ -74,6 +75,7 @@ EXPIRE_CODES: frozenset[str] = frozenset()  # No ingest code proves that unappli
 
 # Per-code dependence on usable evidence-log proof, separate from destination reads.
 NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
+    "origin-review-required": False,
     "action-not-auto-handled": False,
     "bootstrap-budget-exceeded": False,
     "card-destination-not-regular": False,

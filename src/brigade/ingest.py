@@ -50,6 +50,7 @@ from .handoff_ingest_rules import (
     sha256_hex,
     sha_matches,
 )
+from . import handoff_origin
 from .bounded_read import read_regular_file
 from .instruction_inventory import INSPECTION_CEILING
 from .selection import WRITER_INBOXES
@@ -313,7 +314,9 @@ def ingest_into(
                 # come from these bytes, so the digest names what was handled.
                 snapshot = path.read_bytes()
                 sha = hashlib.sha256(snapshot).hexdigest()
-                if sha in stats.seen_digests:
+                origin = handoff_origin.verify_handoff(source, path, snapshot)
+                trusted_origin = origin is not None and origin.allows_automatic_filing
+                if trusted_origin and sha in stats.seen_digests:
                     if not dry_run:
                         _archive(path, processed_dir, sha)
                     stats.skipped += 1
@@ -329,14 +332,21 @@ def ingest_into(
                 except ValueError:
                     _record_failure(stats, path, "invalid-content")
                     continue
-                outcome = decide(
-                    sections,
-                    target=owner,
-                    promote_cards=promote_cards,
-                    route_documents=route_documents,
-                    card_ids=card_ids,
-                    routing=routing,
-                )
+                if not trusted_origin:
+                    outcome = Outcome(
+                        "inboxed",
+                        code="origin-review-required",
+                        reason="missing, unverifiable or untrusted origin requires review",
+                    )
+                else:
+                    outcome = decide(
+                        sections,
+                        target=owner,
+                        promote_cards=promote_cards,
+                        route_documents=route_documents,
+                        card_ids=card_ids,
+                        routing=routing,
+                    )
                 action = _execute(
                     outcome,
                     handoff_path=path,
@@ -364,7 +374,7 @@ def ingest_into(
             # Only content that was published, appended or archived counts as
             # handled. A retryable skip leaves the handoff pending, so a later
             # identical copy must not be archived as its duplicate.
-            if action.kind in _HANDLED_KINDS:
+            if trusted_origin and action.kind in _HANDLED_KINDS:
                 stats.seen_digests.add(sha)
             stats.processed += 1
             stats.actions.append(action.summary)

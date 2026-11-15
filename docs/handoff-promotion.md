@@ -123,7 +123,7 @@ OpenClaw receipt writers should use the normalized JSON shape shown in [OpenClaw
 
 Normalized receipts preserve warning events, malformed handoff paths, unreachable source labels, and no-reply state so operators can see when a clean-looking scheduler run still hid skipped, failed, or unreachable work.
 
-Source coverage issues for uncovered writer inboxes include stable source keys and fingerprints. If an operator dismisses an unchanged uncovered-inbox import, Brigade does not recreate it; when the pending inbox coverage state changes, the source fingerprint changes and the repair import can resurface.
+Source coverage issues for uncovered writer inboxes include stable source keys and fingerprints. If an operator dismisses an unchanged uncovered-inbox import, Brigade does not recreate it. When the pending inbox coverage state changes, the source fingerprint changes and the repair import can resurface.
 
 This receipt surface is observability only. It does not run the ingestor, edit canonical memory, promote cards, route documents, or summarize draft content.
 
@@ -136,3 +136,59 @@ current ingest code qualifies for expiry. Trust and security holds stay in place
 with a recorded reason. Evidence-linked drafts retain their
 paths and use a resolved ledger. See [Review inbox](memory-care.md#review-inbox)
 for the disposition table, safe skips and undo behavior.
+
+## Origin gate for automatic filing
+
+Ingest now requires a verified origin before it can promote a card, reinforce an
+existing card, append to a document, or route content to an overflow card. Only
+an `interactive` origin with `untrusted_tools: false` reaches the existing filing
+rules. Worker, cron, subagent, unknown, and tool-touched origins go to
+`memory/handoff-inbox/` with reason `origin-review-required`. The inbox drain
+classifies that reason as human review and cannot retry it automatically.
+
+The tooling API `brigade.handoff_origin.stamp_handoff` writes a private,
+atomically published sidecar under `.brigade/handoffs/origins/`, outside the
+writer inbox. A hash of the full handoff path selects the sidecar.
+It records the session kind, untrusted-tool status, harness, and host label.
+An HMAC-SHA256 covers the canonical JSON payload, including the exact handoff
+SHA-256 digest, path digest, filename, file identity and modification time,
+schema, and receipt key id. The MAC uses a separate
+message domain from receipt signatures. Markdown sections and comments never
+supply origin metadata. Changing either the content or the signed fields
+invalidates the stamp. Replacing, touching, or renaming a handoff also requires
+a new stamp. A failed attempt to stamp a replacement cannot reuse its previous
+publication's authorization.
+
+This reuses the local receipt key configured by `brigade receipts keygen`, at
+`.brigade/receipt-signing-key` or `BRIGADE_RECEIPT_SIGNING_KEY_FILE`. Ingest uses
+the source workspace's key, even when it writes memory into a different owner.
+A missing key, missing sidecar, bad MAC, changed content, malformed stamp, or
+unknown tool status requires review. Neither drafting nor ingest creates a key.
+Stamps are local to the source workspace and path. Worktree rescue and archive
+do not yet carry them, so rescued or renamed handoffs conservatively require
+review.
+
+### Current integration limit
+
+This is the filing gate and stamp format slice of issue #2451. `handoff draft`
+writes a stamp when a usable receipt key exists. It records the detected harness
+and host, but records session kind and tool status as unknown. A Brigade run id
+can mark a draft as worker, which also requires review. There is no draft flag
+that can declare an interactive or clean session.
+
+Claude and Codex hooks do not yet supply complete session-kind and tool-use
+observations to this API. Until that observer integration lands, normal drafts
+require review, including drafts from interactive sessions. Trusted harness
+integration can use the API with observed values. A verified clean interactive
+stamp preserves the existing opt-in filing behavior and all content checks.
+
+### Threat model
+
+The signer, its observations, and the receipt key are trusted. The gate protects
+against forged claims in agent-authored handoff text and against sidecar edits
+made without the key. It does not isolate a process from other processes running
+as the same operating-system user. An agent with shell access to the key or to
+trusted signer code can compute a valid MAC and forge an origin. Deployments
+that need protection from that agent must run the signer and key under a
+separate account or broker and restrict the agent's access. The local host label
+is local metadata and does not prove a remote host identity.

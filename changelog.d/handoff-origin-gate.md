@@ -1,0 +1,1 @@
+- Require a verified clean interactive origin for automatic handoff filing and keep missing or untrusted origins in human review. Drafts record unknown trust until harness session observation is connected.
