@@ -675,3 +675,29 @@ func TestFilesCrawlBusyCacheDeleteDoesNotRepeatWarnings(t *testing.T) {
 		t.Fatalf("warned file cached: %d", cached)
 	}
 }
+
+func TestFilesCrawlOverlappingProfilesShareCache(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "note.txt")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("version A")
+	if got := runJSON(t, "crawl", "files", root, "--glob", "*.txt", "--json"); got["files_parsed"] != float64(1) {
+		t.Fatalf("first crawl: %v", got)
+	}
+	write("version B")
+	if got := runJSON(t, "crawl", "files", root, "--glob", "*.txt,*.md", "--json"); got["files_parsed"] != float64(1) {
+		t.Fatalf("second profile: %v", got)
+	}
+	write("version A")
+	// The archive now holds B, so the first profile must import A again.
+	if got := runJSON(t, "crawl", "files", root, "--glob", "*.txt", "--json"); got["files_parsed"] != float64(1) {
+		t.Fatalf("stale profile cache skipped a changed archive: %v", got)
+	}
+}

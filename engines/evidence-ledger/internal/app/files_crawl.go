@@ -126,6 +126,11 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 	}
 	identity := sha256.Sum256([]byte(strings.Join([]string{root, filepath.Clean(inputPath), *source, *collection, *kind, *glob}, "\x00")))
 	profile := hex.EncodeToString(identity[:])
+	// The cursor belongs to one walk profile, but the cache records what the archive
+	// holds for a file. Archive items are keyed by source, collection and path, not by
+	// glob or root, so profiles that overlap on a file must share its cache entry.
+	cacheIdentity := sha256.Sum256([]byte(strings.Join([]string{*source, *collection, *kind}, "\x00")))
+	cacheProfile := hex.EncodeToString(cacheIdentity[:])
 	cursor := ""
 	err = db.QueryRow(`select path from files_crawl_cursor where profile=?`, profile).Scan(&cursor)
 	if err != nil && err != sql.ErrNoRows {
@@ -182,7 +187,7 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 	warnAndCheckpoint := func(path string, err error) error {
 		warnings = append(warnings, fmt.Sprintf("%s: %s", path, err))
 		if err := retryBusy(func() error {
-			_, err := db.Exec(`delete from files_crawl_cache where profile=? and path=?`, profile, path)
+			_, err := db.Exec(`delete from files_crawl_cache where profile=? and path=?`, cacheProfile, path)
 			return err
 		}); err != nil {
 			return err
@@ -264,7 +269,7 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 		hash := sha256.Sum256(data)
 		digest := hex.EncodeToString(hash[:])
 		known := ""
-		err = db.QueryRow(`select hash from files_crawl_cache where profile=? and path=?`, profile, path).Scan(&known)
+		err = db.QueryRow(`select hash from files_crawl_cache where profile=? and path=?`, cacheProfile, path).Scan(&known)
 		if err != nil && err != sql.ErrNoRows {
 			return err
 		}
@@ -354,7 +359,7 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 			}
 			// Write the cache before the checkpoint. A crash between them leaves
 			// the cursor behind a committed cache hit, avoiding another export.
-			if _, err := db.Exec(`insert into files_crawl_cache values(?,?,?) on conflict(profile,path) do update set hash=excluded.hash`, profile, path, digest); err != nil {
+			if _, err := db.Exec(`insert into files_crawl_cache values(?,?,?) on conflict(profile,path) do update set hash=excluded.hash`, cacheProfile, path, digest); err != nil {
 				return err
 			}
 			if err := checkpoint(path); err != nil {
