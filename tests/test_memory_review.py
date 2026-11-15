@@ -175,3 +175,140 @@ def test_matching_local_scope_and_cached_head_are_one_item(tmp_path):
 def test_invalid_local_scope_does_not_break_listing(tmp_path):
     card(tmp_path, "local", scope="[bad, scope]")
     assert memory_review.review_payload(tmp_path)["items"][0]["scope"] is None
+
+
+def test_redirected_hook_opens_are_reviewed_at_memory_root(tmp_path):
+    from brigade import config
+    from brigade.selection import Selection
+
+    target = tmp_path / "repo"
+    memory = tmp_path / "shared-memory"
+    config.write_config(
+        target,
+        config.Config(
+            version=1,
+            selection=Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[]),
+            memory_recall_target=str(memory),
+        ),
+    )
+    path = card(memory, "opened")
+    assert memory_hooks.resolve_memory_recall_target(target) == (memory, "active")
+    assert hub_recall.observe_read(target, {"session_id": "human", "tool_input": {"file_path": str(path)}})
+    row = memory_review.review_payload(memory)["items"][0]
+    assert row["use"]["interactive_sessions"] == 1
+    assert row["use"]["distinct_days"] == 1
+    assert row["use"]["last_recorded_read"] == date.today().isoformat()
+    # Hub capture still consumes the wired target's opened ledger.
+    assert hub_recall.load(hub_recall.ledger_path(target, "human"))["opened"] == ["opened"]
+
+
+@pytest.mark.parametrize("operation", ["replica", "readable_heads"])
+@pytest.mark.parametrize("error", [OSError, ValueError, memory_hub_store.StoreError])
+def test_replica_errors_preserve_local_queue(tmp_path, monkeypatch, operation, error):
+    replica(tmp_path)
+    card(tmp_path, "local", scope="fleet")
+    opened(tmp_path, "human", "local", [date.today().isoformat()])
+
+    def fail(*args, **kwargs):
+        raise error("unreadable replica")
+
+    if operation == "replica":
+        monkeypatch.setattr(memory_hub_store, operation, fail)
+    else:
+        monkeypatch.setattr(memory_hub_store.Replica, operation, fail)
+    rows = memory_review.review_payload(tmp_path)["items"]
+    assert [row["card_id"] for row in rows] == ["local"]
+    assert rows[0]["use"]["interactive_sessions"] == 1
+    assert rows[0]["use"]["hub_total_reads"] is None
+
+
+def test_corrupt_replica_preserves_local_queue(tmp_path):
+    snapshot = replica(tmp_path)
+    (snapshot.directory / "meta.json").write_text('{"heads_sha256": "invalid"}')
+    card(tmp_path, "local")
+    rows = memory_review.review_payload(tmp_path)["items"]
+    assert [row["card_id"] for row in rows] == ["local"]
+    assert rows[0]["use"]["hub_total_reads"] is None
+
+
+def test_stale_hub_counts_are_unavailable(tmp_path):
+    from brigade.memory_verify_cmd import SNAPSHOT_MAX_AGE_MS
+
+    replica(tmp_path)
+    key = memory_fairness.key_digest("fleet", ["hub-card"])
+    state = memory_verify_state.fresh()
+    state["binding"] = _binding("hub-example", "example", "epoch-example")
+    state["scopes"] = {
+        "fleet": {
+            "counts_ms": int(time.time() * 1000) - SNAPSHOT_MAX_AGE_MS - 1,
+            "cards": {key: {"seen": 1, "proposed": 0, "reads": [1, 1, 20]}},
+        }
+    }
+    memory_verify_state.save(tmp_path, state)
+    use = memory_review.review_payload(tmp_path)["items"][0]["use"]
+    assert use["hub_total_reads"] is None
+    assert use["score"] == 0
+
+
+def test_corrupt_verify_state_drops_hub_counts(tmp_path):
+    replica(tmp_path)
+    path = tmp_path / memory_verify_state.STATE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("invalid json")
+    with pytest.raises(memory_verify_state.VerifyStateError):
+        memory_verify_state.load(tmp_path)
+    rows = memory_review.review_payload(tmp_path)["items"]
+    assert [row["card_id"] for row in rows] == ["hub-card"]
+    assert rows[0]["use"]["hub_total_reads"] is None
+
+
+def test_retired_hub_heads_are_excluded(tmp_path):
+    snapshot = replica(tmp_path)
+    snapshot.heads[snapshot.key("fleet", "retired")] = {
+        "scope": "fleet",
+        "card_id": "retired",
+        "trust": "agent-unreviewed",
+        "state": "retired",
+    }
+    snapshot.save()
+    assert [row["card_id"] for row in memory_review.review_payload(tmp_path)["items"]] == ["hub-card"]
+
+
+def test_duplicate_local_ids_get_no_session_credit(tmp_path):
+    first = card(tmp_path, "shared")
+    duplicate = first.with_name("duplicate.md")
+    duplicate.write_bytes(first.read_bytes())
+    opened(tmp_path, "human", "shared", [date.today().isoformat()])
+    rows = memory_review.review_payload(tmp_path)["items"]
+    assert len(rows) == 2
+    assert all(row["card_id"] == "shared" for row in rows)
+    assert all(row["use"]["interactive_sessions"] == 0 for row in rows)
+    assert all(row["use"]["distinct_days"] == 0 for row in rows)
+    assert all(row["use"]["score"] == 0 for row in rows)
+
+
+def test_interactive_open_key_cap_survives_load_update(tmp_path):
+    path = hub_recall.ledger_path(tmp_path, "human")
+
+    def fill(ledger):
+        for i in range(201):
+            memory_review.note_open(ledger, f"card-{i:03d}", {})
+
+    hub_recall.update(path, fill)
+    ledger = hub_recall.load(path)
+    assert len(ledger["interactive_open_days"]) == 200
+    assert "card-200" not in ledger["interactive_open_days"]
+    ledger = hub_recall.update(path, lambda value: memory_review.note_open(value, "card-000", {}))
+    assert hub_recall.load(path) == ledger
+    assert ledger["interactive_open_days"]["card-000"] == [date.today().isoformat()]
+
+
+def test_interactive_open_days_truncate_and_survive_load_update(tmp_path):
+    path = hub_recall.ledger_path(tmp_path, "human")
+    path.parent.mkdir(parents=True)
+    days = [(date.today() - timedelta(days=i)).isoformat() for i in reversed(range(400))]
+    path.write_text(json.dumps({"v": 1, "opened": ["card"], "interactive_open_days": {"card": days}}))
+    assert hub_recall.load(path)["interactive_open_days"]["card"] == days[-366:]
+    ledger = hub_recall.update(path, lambda value: memory_review.note_open(value, "card", {}))
+    assert ledger["interactive_open_days"]["card"] == days[-366:]
+    assert hub_recall.load(path) == ledger

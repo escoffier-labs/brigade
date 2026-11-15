@@ -477,7 +477,10 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
         _append(ledger, "opened", [card_id])
         note_open(ledger, card_id, payload)
 
-    update(ledger_path(target, session_id), observed)
+    # Stop capture consumes the wired ledger, while review reads beside the cards.
+    if found[1] != target:
+        update(ledger_path(target, session_id), lambda ledger: _append(ledger, "opened", [card_id]))
+    update(ledger_path(found[1], session_id), observed)
     return True
 
 

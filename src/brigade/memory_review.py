@@ -100,18 +100,25 @@ def review_payload(target: Path) -> dict[str, Any]:
                 "scope": scope if memory_hub_client.valid_scope(scope) else None,
             }
         )
-    replica = memory_hub_store.replica(target)
-    # This is an offline snapshot listing, not a fresh hub authorization check.
-    for head in sorted(
-        replica.readable_heads(replica.meta.get("read_scopes") or []).values(), key=lambda h: (h["scope"], h["card_id"])
-    ):
+    try:
+        replica = memory_hub_store.replica(target)
+        # This is an offline snapshot listing, not a fresh hub authorization check.
+        heads = sorted(
+            replica.readable_heads(replica.meta.get("read_scopes") or []).values(),
+            key=lambda h: (h["scope"], h["card_id"]),
+        )
+        counts = _hub_counts(target, replica)
+    except (OSError, ValueError):
+        # StoreError and ReplicaLimitError inherit OSError. Local review remains usable.
+        heads = []
+        counts = {}
+    for head in heads:
         if head.get("trust") == "agent-unreviewed" and head.get("state") != "retired":
             rows.append({"card_id": head["card_id"], "scope": head["scope"], "path": None})
     # A local card with an explicit scope and its cached head are one review
     # item. Keep local path order and avoid counting the same card twice.
     local_keys = {(row["scope"], row["card_id"]) for row in rows if row["path"] is not None}
     rows = [row for row in rows if row["path"] is not None or (row["scope"], row["card_id"]) not in local_keys]
-    counts = _hub_counts(target, replica)
     identities = Counter(row["card_id"] for row in rows)
     for row in rows:
         card_id = row["card_id"]
