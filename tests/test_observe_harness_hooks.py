@@ -411,3 +411,22 @@ def test_broken_codex_hooks_file_does_not_block_claude_uninstall(tmp_path, monke
     assert cli.main(["work", "hooks", "uninstall", "--target", str(target)]) == 2
     assert "brigade work hook-run" not in settings.read_text()
     assert broken.read_text() == "{"
+
+
+@pytest.mark.parametrize("tool", ["Bash", "apply_patch"])
+def test_lesson_contention_preserves_existing_capture(target, monkeypatch, tool):
+    from brigade import lesson_activity
+    from brigade.codex_observe_hooks import observe_session_path
+
+    now = [0.0]
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: now[0])
+
+    def contended(*args, **kwargs):
+        now[0] += 0.4
+
+    monkeypatch.setattr(lesson_activity, "on_event", contended)
+    run(monkeypatch, "codex", payload(target, "codex", tool_name=tool))
+    if tool == "Bash":
+        assert len(observed_checks.read_checks(target)[0]) == 1
+    else:
+        assert observe_session_path(target, "private-session").exists()

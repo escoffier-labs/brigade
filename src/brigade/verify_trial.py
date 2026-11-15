@@ -7,6 +7,8 @@ import json
 import os
 import re
 import shlex
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -393,6 +395,35 @@ def _missing_required_utility_checks(receipt: dict[str, Any]) -> bool:
     return any(not isinstance(check_id, str) or check_id not in utility_ids for check_id in required)
 
 
+def _historical_subject_hash(target: Path, baseline: str, patch_bytes: bytes, subject_path: str) -> str | None:
+    """Reconstruct evidence in a private index, without reading live subject bytes."""
+    if not re.fullmatch(r"[0-9a-f]{40,64}", baseline):
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="brigade-trial-index-") as staging:
+            env = {**os.environ, "GIT_INDEX_FILE": str(Path(staging) / "index")}
+
+            def git(*args: str, data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+                return subprocess.run(
+                    ["git", "-C", str(target), *args],
+                    input=data,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=env,
+                    timeout=30,
+                    check=False,
+                )
+
+            if git("read-tree", baseline).returncode != 0:
+                return None
+            if git("apply", "--cached", "--whitespace=nowarn", "-", data=patch_bytes).returncode != 0:
+                return None
+            result = git("show", ":" + subject_path)
+            return _sha256_prefixed(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def subject_hash_for_path(target: Path, subject_path: str) -> str | None:
     path = target / subject_path
     try:
@@ -740,6 +771,14 @@ def project_trial(
             quarantine_reason = generated_patch_quarantine.generated_patch_eligibility_reason(binding, receipt)
             if quarantine_reason is not None:
                 return TrialProjection(eligible=False, reason=quarantine_reason, attributed=True)
+        if not require_live_subject:
+            historical_hash = (
+                _historical_subject_hash(resolved_target, receipt["baseline_commit"], patch_bytes, subject_path)
+                if resolved_target is not None
+                else None
+            )
+            if historical_hash is None or historical_hash != subject_hash:
+                return TrialProjection(eligible=False, reason="subject_hash_mismatch", attributed=True)
         if resolved_target is not None and require_live_subject:
             live_hash = subject_hash_for_path(resolved_target, subject_path)
             if live_hash is None or live_hash != subject_hash:

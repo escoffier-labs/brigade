@@ -167,7 +167,7 @@ def prompt_path(target: Path) -> Path:
 
 def _verify_run_id(payload: dict[str, Any]) -> str | None:
     """Read the coordinator's run field from output, never from command text."""
-    output = payload.get("tool_response", payload.get("tool_output", ""))
+    output = payload.get("tool_response", payload.get("tool_output", payload.get("error", "")))
     if isinstance(output, dict):
         output = output.get("stdout", output.get("output", ""))
     if not isinstance(output, str) or len(output.encode()) > 256 * 1024:

@@ -197,3 +197,42 @@ def test_real_signed_failure_and_pass_are_admitted(scope, monkeypatch, capsys, b
             events=activity.load(scope)["events"],
             earliest=100,
         )
+
+        # An authentic historical receipt still has to bind its own post-image.
+        path = scope / candidate["failure_evidence"]
+        receipt = json.loads(path.read_text())
+        receipt["subject_binding"]["patch_binding"]["subject_hash"] = "sha256:" + "0" * 64
+        receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+        receipt_signing.stamp_workspace_signature(scope, receipt)
+        path.write_text(json.dumps(receipt))
+        assert receipt_signing.authentic_workspace_receipt(scope, receipt)
+        with pytest.raises(ValueError, match="subject_hash_mismatch"):
+            admission.verified_receipt(
+                scope,
+                candidate["failure_evidence"],
+                content=None,
+                card=card.name,
+                events=activity.load(scope)["events"],
+                earliest=100,
+            )
+
+
+@pytest.mark.parametrize("output", ["Exit code 1\nrun: failed", '{"run_id": "failed"}'])
+def test_failure_error_records_verify_run(scope, output):
+    activity.record_event(
+        scope,
+        "PostToolUseFailure",
+        {"tool_input": {"command": "brigade work verify run"}, "error": output},
+        now=100,
+    )
+    assert activity.load(scope)["events"][-1]["verify_run_id"] == "failed"
+
+
+def test_failure_error_refuses_ambiguous_runs(scope):
+    activity.record_event(
+        scope,
+        "PostToolUseFailure",
+        {"tool_input": {"command": "brigade work verify run"}, "error": "run: first\nrun: second"},
+        now=100,
+    )
+    assert "verify_run_id" not in activity.load(scope)["events"][-1]

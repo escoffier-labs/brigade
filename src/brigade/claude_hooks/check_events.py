@@ -160,9 +160,11 @@ def after_handling(event: str, payload: dict[str, Any], *, pin: Path | None) -> 
             if target is not None and isinstance(session_id, str) and session_id:
                 from .. import lesson_activity
 
-                lesson_activity.on_event(target, event, payload)
                 state = rt.read_session_state(target, session_id)
                 observed_checks.check_capture_deadline()
-                _on_event(event, payload, target, session_id, state, pin)
+                try:
+                    _on_event(event, payload, target, session_id, state, pin)
+                finally:
+                    lesson_activity.on_event(target, event, payload)
     except Exception:
         pass

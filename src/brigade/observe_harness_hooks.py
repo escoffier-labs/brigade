@@ -55,38 +55,39 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
         return
     from . import lesson_activity
 
-    lesson_activity.on_event(target, event, payload)
-    observed_checks.check_capture_deadline()
-    if payload.get("tool_name") == "apply_patch":
-        if work_mode.is_observe(target):
-            from .codex_observe_hooks import record_write
+    try:
+        if payload.get("tool_name") == "apply_patch":
+            if work_mode.is_observe(target):
+                from .codex_observe_hooks import record_write
 
-            record_write(target, session)
-        return
-    if payload.get("tool_name") != "Bash":
-        return
-    tool_input = payload.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or len(command) > 65536 or not runtime.is_raw_verification(command):
-        return
-    identity = codex_identity(payload)
-    for governed, mode in verification_mode.governing_modes(command, cwd, target, harness=harness):
-        observed_checks.check_capture_deadline()
-        if mode != "observe" or not _allowed(governed, harness, pin):
-            continue
-        observed_checks.append_check(
-            governed,
-            observed_checks.build_check(
-                target=governed,
-                command=command,
-                status="unknown",
-                exit_code=None,
-                identity=identity,
-                session_fingerprint=session,
-                fingerprint_tree=False,
-                duration_ms=None,
-            ),
-        )
+                record_write(target, session)
+            return
+        if payload.get("tool_name") != "Bash":
+            return
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if not isinstance(command, str) or len(command) > 65536 or not runtime.is_raw_verification(command):
+            return
+        identity = codex_identity(payload)
+        for governed, mode in verification_mode.governing_modes(command, cwd, target, harness=harness):
+            observed_checks.check_capture_deadline()
+            if mode != "observe" or not _allowed(governed, harness, pin):
+                continue
+            observed_checks.append_check(
+                governed,
+                observed_checks.build_check(
+                    target=governed,
+                    command=command,
+                    status="unknown",
+                    exit_code=None,
+                    identity=identity,
+                    session_fingerprint=session,
+                    fingerprint_tree=False,
+                    duration_ms=None,
+                ),
+            )
+    finally:
+        lesson_activity.on_event(target, event, payload)
 
 
 def after_handling(
