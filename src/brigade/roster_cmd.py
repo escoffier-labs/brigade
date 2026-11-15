@@ -389,12 +389,16 @@ def ready(
             loaded = replace(roster_mod.load_roster(resolution.path), resolution=resolution)
             loaded = run_preference.apply_to_roster(loaded, run_preference.load_cached())
             request = roster_readiness.ReadinessRequest(workers, concurrency, route, isolation, capability)
+            try:
+                hub_discovery_possible = bool(fleet_client.load_fleet_settings()["hub_url"])
+            except (fleet_client.FleetClientError, OSError, ValueError):
+                hub_discovery_possible = False
             report = roster_readiness.inspect_readiness(
                 loaded,
                 request,
                 workspace=target,
                 health_probe=health_probe,
-                hub_discovery_possible=bool(fleet_client.load_fleet_settings()["hub_url"]),
+                hub_discovery_possible=hub_discovery_possible,
             )
         except (OSError, ValueError) as exc:
             report = {
