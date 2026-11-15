@@ -1,11 +1,20 @@
 """Workspace opt-in and candidate-boundary automatic reflection."""
 
+import os
+
 import pytest
 
 from brigade import cli, memory_reflect_policy as policy
 from tests.test_memory_reflect_hub import run, setup as reflect_setup, writes
 
 setup = pytest.fixture(reflect_setup.__wrapped__)
+
+# The reflection policy is written through descriptor-relative I/O, so automatic
+# application stays off where safe directory descriptors are unavailable.
+pytestmark = pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 
 
 def test_new_install_defaults_and_reinstall_preserves_off(tmp_path, capsys):
