@@ -22,6 +22,44 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
     return tuple(getattr(info, name) for name in _STABLE_FIELDS)
 
 
+def _sample(fd: int, size: int) -> str:
+    """Hash at most two 64 KiB reads, independent of the logical file size.
+
+    Domain and size bind the sample without claiming a full-file hash.
+    """
+    from . import ingest
+
+    digest = hashlib.sha256(b"brigade-handoff-sample-v1\0" + str(size).encode("ascii") + b"\0")
+    first = min(CHUNK_BYTES, size)
+    last = min(CHUNK_BYTES, size - first)
+    for offset, length in ((0, first), (size - last, last)):
+        if not length:
+            continue
+        os.lseek(fd, offset, os.SEEK_SET)
+        chunk = os.read(fd, length)
+        if len(chunk) != length:
+            raise ingest.ChangedHandoffError("oversized handoff changed during sampling")
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_held(destination: int, name: str, before: os.stat_result, sample: str) -> None:
+    """Refuse a held file that gained a link or whose sampled bytes changed during the move."""
+    from . import ingest
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = dirfd.open_child_file(destination, name, flags, share_write=False)
+    try:
+        held = os.fstat(fd)
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if held.st_nlink != 1 or any(getattr(held, field) != getattr(before, field) for field in fields):
+            raise ingest.ChangedHandoffError("oversized handoff changed during quarantine")
+        if _sample(fd, held.st_size) != sample:
+            raise ingest.ChangedHandoffError("oversized handoff changed during quarantine")
+    finally:
+        os.close(fd)
+
+
 def _private_hold(target: Path, token: str) -> tuple[int, int]:
     """Return the held parent and fresh child, persisting each new directory."""
     parent = dirfd.open_directory_chain(target.absolute())
@@ -91,19 +129,7 @@ def hold(target: Path, source: Path, *, dry_run: bool = False) -> None:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 raise OSError("oversized handoff is not a single-link regular file")
-            # At most two 64 KiB reads, independent of the logical file size.
-            # Domain and size bind the sample without claiming a full-file hash.
-            digest = hashlib.sha256(b"brigade-handoff-sample-v1\0" + str(before.st_size).encode("ascii") + b"\0")
-            first = min(CHUNK_BYTES, before.st_size)
-            last = min(CHUNK_BYTES, before.st_size - first)
-            for offset, length in ((0, first), (before.st_size - last, last)):
-                if not length:
-                    continue
-                os.lseek(fd, offset, os.SEEK_SET)
-                chunk = os.read(fd, length)
-                if len(chunk) != length:
-                    raise ingest.ChangedHandoffError("oversized handoff changed during sampling")
-                digest.update(chunk)
+            sample = _sample(fd, before.st_size)
             if _identity(before) != _identity(os.fstat(fd)):
                 raise ingest.ChangedHandoffError("oversized handoff changed during sampling")
         finally:
@@ -134,7 +160,7 @@ def hold(target: Path, source: Path, *, dry_run: bool = False) -> None:
                         "algorithm": "sha256-size-first-last-v1",
                         "chunk_bytes": CHUNK_BYTES,
                         "max_read_bytes": 2 * CHUNK_BYTES,
-                        "hex": digest.hexdigest(),
+                        "hex": sample,
                     },
                     "held_path": (held_rel / source.name).as_posix(),
                 },
@@ -165,10 +191,10 @@ def hold(target: Path, source: Path, *, dry_run: bool = False) -> None:
                     else:
                         raise OSError("no-follow handoff move is unavailable")
                     moved = True
-                    held = dirfd.stat_child(destination, source.name)
-                    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
-                    if any(getattr(held, field) != getattr(before, field) for field in fields):
-                        raise ingest.ChangedHandoffError("oversized handoff changed during quarantine")
+                    # A rename may update ctime, so ctime cannot be compared here. A retained
+                    # second link and a rewrite that restores mtime are caught by the link
+                    # count and by resampling the held bytes.
+                    _verify_held(destination, source.name, before, sample)
                 except OSError:
                     try:
                         dirfd.unlink_child(review_parent, draft_name)

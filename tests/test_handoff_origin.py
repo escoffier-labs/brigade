@@ -745,7 +745,8 @@ def test_sparse_hold_has_a_total_read_bound(tmp_path, monkeypatch):
         nonlocal total
         if os.fstat(fd).st_ino == identity:
             total += length
-            assert total <= 131072, "quarantine exceeded its total sample read budget"
+            # Two 64 KiB samples before the move and the same two again after it.
+            assert total <= 262144, "quarantine exceeded its total sample read budget"
         return real_read(fd, length)
 
     monkeypatch.setattr(os, "read", bounded_read)
@@ -930,6 +931,47 @@ def test_hold_rejects_swap_at_rename(tmp_path, monkeypatch):
     assert not list((tmp_path / "memory/handoff-inbox").glob("*.md"))
     (held,) = (tmp_path / ".brigade/handoffs/held").rglob("*.md")
     assert held.read_bytes() == b"replacement" and held.stat().st_ino != original.st_ino
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative rename race")
+def test_hold_rejects_link_retained_at_rename(tmp_path, monkeypatch):
+    from brigade import handoff_quarantine, dirfd
+
+    source = handoff(tmp_path)
+    keep = tmp_path / "kept-link.md"
+    real_rename = os.rename
+
+    def link_then_rename(src, dst, **kwargs):
+        os.link(source, keep)
+        return real_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr(dirfd, "posix_available", lambda: True)
+    monkeypatch.setattr(os, "rename", link_then_rename)
+    with pytest.raises(ingest.ChangedHandoffError, match="during quarantine"):
+        handoff_quarantine.hold(tmp_path, source)
+    assert not list((tmp_path / "memory/handoff-inbox").glob("*.md"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative rename race")
+def test_hold_rejects_rewrite_with_restored_mtime(tmp_path, monkeypatch):
+    from brigade import handoff_quarantine, dirfd
+
+    source = handoff(tmp_path)
+    real_rename = os.rename
+
+    def rewrite_then_rename(src, dst, **kwargs):
+        info = source.stat()
+        data = source.read_bytes()
+        with open(source, "r+b") as handle:
+            handle.write(b"X" if data[:1] != b"X" else b"Y")
+        os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns))
+        return real_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr(dirfd, "posix_available", lambda: True)
+    monkeypatch.setattr(os, "rename", rewrite_then_rename)
+    with pytest.raises(ingest.ChangedHandoffError, match="during quarantine"):
+        handoff_quarantine.hold(tmp_path, source)
+    assert not list((tmp_path / "memory/handoff-inbox").glob("*.md"))
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow target components")
