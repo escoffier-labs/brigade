@@ -21,6 +21,7 @@ gets private-class text (S18).
 from __future__ import annotations
 
 import contextlib
+from datetime import date
 import hashlib
 import hmac
 import json
@@ -97,7 +98,15 @@ def ledger_path(target: Path, session_id: str) -> Path:
 
 
 def _empty() -> dict[str, Any]:
-    return {"v": LEDGER_VERSION, "brief": [], "pushed": [], "opened": [], "captured": [0, 0], "pending": None}
+    return {
+        "v": LEDGER_VERSION,
+        "brief": [],
+        "pushed": [],
+        "opened": [],
+        "captured": [0, 0],
+        "pending": None,
+        "interactive_open_days": {},
+    }
 
 
 def _keys(value: object) -> list[str]:
@@ -118,6 +127,18 @@ def load(path: Path) -> dict[str, Any]:
     ledger = _empty()
     for name in ("brief", "pushed", "opened"):
         ledger[name] = _keys(raw.get(name))
+    days = raw.get("interactive_open_days")
+    if isinstance(days, dict):
+        for key in _keys(list(days)):
+            values = days[key]
+            if isinstance(values, list):
+                valid = []
+                for value in values[-366:]:
+                    try:
+                        valid.append(date.fromisoformat(value).isoformat())
+                    except (ValueError, TypeError):
+                        continue
+                ledger["interactive_open_days"][key] = sorted(set(valid))
     captured = raw.get("captured")
     if isinstance(captured, list) and len(captured) == 2 and all(isinstance(n, int) and n >= 0 for n in captured):
         ledger["captured"] = [min(captured[0], len(ledger["pushed"])), min(captured[1], len(ledger["opened"]))]
@@ -450,7 +471,16 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
         record(found[1], [card_id, found[0].relative_to(found[1]).as_posix()])
     except Exception:  # noqa: BLE001 - accounting must never fail a file read
         pass
-    update(ledger_path(target, session_id), lambda ledger: _append(ledger, "opened", [card_id]))
+    from ..memory_review import note_open
+
+    def observed(ledger: dict[str, Any]) -> None:
+        _append(ledger, "opened", [card_id])
+        note_open(ledger, card_id, payload)
+
+    # Stop capture consumes the wired ledger, while review reads beside the cards.
+    if found[1] != target:
+        update(ledger_path(target, session_id), lambda ledger: _append(ledger, "opened", [card_id]))
+    update(ledger_path(found[1], session_id), observed)
     return True
 
 
