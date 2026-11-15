@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .memory_cmd import MemoryCareConfig
+    from .memory_care_fixes import UndoneFixIndex
 
 PLANABLE_METADATA_FIXES = {"missing-reviewed", "missing-freshness"}
 FRESHNESS_DERIVATION = "last_reviewed+stale_after_days"
@@ -72,6 +73,7 @@ def plan_item(
     scan_date: str,
     config: MemoryCareConfig,
     context: tuple[set[str], bool | None] | None = None,
+    undone_index: UndoneFixIndex | None = None,
 ) -> dict[str, Any]:
     from . import memory_cmd as care
 
@@ -120,7 +122,12 @@ def plan_item(
     if automatic:
         try:
             derived_auto = prepare(
-                target, config, {"card_file": card_file, "issue_type": issue_type}, care._today(), context=context
+                target,
+                config,
+                {"card_file": card_file, "issue_type": issue_type},
+                care._today(),
+                context=context,
+                undone_index=undone_index,
             )
             candidate_fields = derived_auto["candidate_fields"]
             blockers = []
@@ -185,7 +192,7 @@ def plan_payload(target: Path, config: MemoryCareConfig, scan_payload: dict[str,
             if kind in config.enabled_checks and not any(key in meta for key in keys):
                 issues.append({**issue, "issue_type": kind})
 
-    from .memory_care_fixes import AUTO_FIXES, plan_context
+    from .memory_care_fixes import AUTO_FIXES, plan_context, UndoneFixIndex
     from .memory_care_tend import load_config
 
     needs_context = load_config(target).enabled and any(
@@ -196,8 +203,9 @@ def plan_payload(target: Path, config: MemoryCareConfig, scan_payload: dict[str,
         for issue in issues
     )
     context = plan_context(target, config) if needs_context else None
+    undone_index = UndoneFixIndex(target) if needs_context else None
     items = [
-        plan_item(issue, target=target, scan_date=scan_date, config=config, context=context)
+        plan_item(issue, target=target, scan_date=scan_date, config=config, context=context, undone_index=undone_index)
         for issue in issues
         if isinstance(issue, dict)
         and str(issue.get("issue_type") or "") in (PLANABLE_METADATA_FIXES | {"missing-index-link", "orphaned-card"})

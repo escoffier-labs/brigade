@@ -1020,14 +1020,35 @@ def run(
     )
 
 
-def _run_receipts(target: Path) -> list[dict[str, Any]]:
+def _run_receipts(target: Path, *, runbook_ids: set[str] | None = None) -> list[dict[str, Any]]:
     root = _runs_root(target)
     receipts: list[dict[str, Any]] = []
     if not root.is_dir():
         return receipts
-    for path in sorted(root.glob("*/receipt.json")):
+    # glob's wildcard selector computes relative paths for every run directory.
+    # Only one fixed filename per directory can be a receipt.
+    with os.scandir(root) as entries:
+        paths = []
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            match = re.fullmatch(r"[0-9]{8}T[0-9]{6}-(.+)", entry.name)
+            # Managed run directories encode the runbook id. Unknown/imported
+            # names still require reading their payload to determine membership.
+            if (
+                runbook_ids is not None
+                and match
+                and not any(
+                    match[1] == runbook_id or re.fullmatch(re.escape(runbook_id) + r"-[0-9]+", match[1])
+                    for runbook_id in runbook_ids
+                )
+            ):
+                continue
+            paths.append(entry.path + os.sep + "receipt.json")
+        paths.sort()
+    for path in paths:
         try:
-            payload = json.loads(path.read_text())
+            payload = json.loads(Path(path).read_text())
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(payload, dict):

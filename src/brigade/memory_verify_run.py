@@ -74,6 +74,7 @@ from . import memory_verify_cmd as cmd
 from . import memory_verify_config as config
 from . import memory_verify_contract as contract
 from . import memory_verify_evidence as ev
+from . import memory_verify_feedback as feedback
 from . import memory_verify_packets as packets
 from . import memory_verify_resolver as resolver
 from . import memory_verify_seat as seats
@@ -229,7 +230,7 @@ def _hub_ms(status: Mapping[str, Any], fallback: int) -> int:
 
 
 def _refresh(
-    client: hubc.MemoryHubClient, state: dict[str, Any], bound: frozenset[str]
+    target: Path, client: hubc.MemoryHubClient, state: dict[str, Any], bound: frozenset[str]
 ) -> tuple[dict[str, dict[str, Any]], int]:
     """Entries whose remembered proposal is no longer open, with `pending` cleared, and the reads that failed.
 
@@ -265,8 +266,12 @@ def _refresh(
                 continue
             settled = {name: value for name, value in entry.items() if name != "pending"}
             if current == "rejected":
-                # Slice 10 refines this into a per-verdict code. Until then the card waits its interval.
                 settled["verdict"] = "rejected"
+            if "review" not in settled:
+                recovered_review = feedback.legacy_record(target, proposal, scope, key, entry)
+                if recovered_review is not None:
+                    settled["review"] = recovered_review
+            settled["decision"] = current
             updates[key] = settled
     return updates, failed
 
@@ -298,6 +303,7 @@ def _remember(
     """
     if not picked.same_binding:
         state["scopes"], state["submissions"] = {}, {}
+        state.pop("decisions", None)
     state["binding"] = picked.binding
     live: dict[str, set[str]] = {}
     for head in picked.heads:
@@ -313,7 +319,16 @@ def _remember(
             cards.setdefault(key, {"seen": now, "proposed": 0})
         for key, entry in updates.items():
             if key in cards and picked.same_binding:
-                cards[key] = dict(entry)
+                settled_entry = dict(entry)
+                if settled_entry.get("decision") == "rejected":
+                    proposal_id = table.get("cards", {}).get(key, {}).get("pending")
+                    state["submissions"] = {
+                        digest: sent
+                        for digest, sent in state.get("submissions", {}).items()
+                        if sent.get("proposal_id") != proposal_id
+                    }
+                feedback.decide(state, settled_entry)
+                cards[key] = settled_entry
         if scope in picked.complete:
             rows = picked.complete[scope]
             for key in keys:
@@ -527,6 +542,7 @@ def review(
             "counted": not item.context_only and item.kind not in ev.CONTEXT_ONLY,
             "observed_ms": item.observed_ms,
             "sha256": item.sha256,
+            "file_sha256": item.file_sha256,
             "text": item.text,
         }
         for index, item in enumerate(items)
@@ -536,10 +552,12 @@ def review(
     ]
     seat_ids = [{"role": seat.role, "seat": seat.name, "model": seat.model} for seat in pair]
     head = {"scope": card.scope, "card_id": card.card_id, "base_revision": card.revision}
+    assembled = assembly.evidence()
     packet = {
         "schema": PACKET_SCHEMA,
         "card": head,
         "evidence": shown,
+        "evidence_sha256": assembled.digest if assembled else None,
         "findings": findings,
         "seats": seat_ids,
         "calls": calls.records,
@@ -724,8 +742,12 @@ class Sender:
                 entry.pop("verified", None)
         self.save()
 
-    def remember_open(self, staged: packets.Stage, proposal_id: str) -> None:
+    def remember_open(self, staged: packets.Stage, proposal_id: str, *, bound: bool = True) -> None:
         entry = self.entry(staged)
+        if entry is not None and bound:
+            remembered_review = feedback.record(staged.manifest, staged.packet)
+            if remembered_review is not None:
+                entry["review"] = remembered_review
         if entry is not None and entry.get("pending") != proposal_id:
             entry.update(pending=proposal_id, proposed=self.now)
             self.pending += 1
@@ -747,7 +769,7 @@ class Sender:
         records `verify_packet_unbound` and discards the stage. A failed read
         keeps the stage for the next run, until it expires.
         """
-        self.remember_open(staged, proposal_id)
+        self.remember_open(staged, proposal_id, bound=False)
         try:
             shown = self.client.call("proposal_show", proposal_id=proposal_id)
         except hubc.HubRefusal as exc:
@@ -770,6 +792,7 @@ class Sender:
         ]
         self.tally.skip("duplicate_pending")
         if len(matches) == 1:
+            self.remember_open(staged, proposal_id)
             if FINALIZE(self.target, staged, proposal_id) is not None:
                 self.tally.skip(packets.MISMATCH)
             return DUPLICATE
@@ -981,7 +1004,7 @@ def _run(
     pair = READY(target, settings.propose_seat, settings.confirm_seat)
     early = cmd._binding(client.identity, status["principal"], status["log_epoch"])
     bound = frozenset(scope for scope in settings.scopes() if scope in hub_settings.read_scopes)
-    updates, unread = _refresh(client, state, bound) if state.get("binding") == early else ({}, 0)
+    updates, unread = _refresh(target, client, state, bound) if state.get("binding") == early else ({}, 0)
     blocked: frozenset[str] = frozenset()
     if state.get("binding") == early:
         staged_now = packets.staged_digests(target)
@@ -1045,6 +1068,19 @@ def _run(
             entry = tables.get(head["scope"], {}).get(key)
             if entry is not None and entry.get("pending"):
                 tally.skip("pending_proposal")  # Reconcile opened its proposal this run.
+                continue
+            known_entry = entry if entry is not None else picked.entries.get(key, {})
+            if dry_run:
+                # Preview the same feedback guard without persisting the decision or its counters.
+                known_entry = dict(known_entry)
+                feedback.decide({}, known_entry)
+            found_evidence = assembly.evidence()
+            if feedback.unchanged(
+                known_entry, head.get("revision", 0), found_evidence.digest if found_evidence else None
+            ):
+                tally.skip("verify_rejected_unchanged")
+                if entry is not None:
+                    entry["verified"] = today  # The unchanged check completed without a seat call.
                 continue
             calls = Calls(area)
             try:
@@ -1188,7 +1224,7 @@ def _propose(
     )
     record = staged.record()
     # The stage and, later, the packet it publishes both take room until the stage is removed.
-    if not packets.room(sender.target, len(record) + len(shown.packet)):
+    if not packets.room(sender.target, len(record) + len(shown.packet) + len(shown.manifest)):
         tally.skip(DEFERRED_PACKET_CAP)
         return DEFERRED
     # Publish the request id and the digest of the full ops before anything is sent, so a

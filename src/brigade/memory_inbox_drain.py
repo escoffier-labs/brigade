@@ -17,6 +17,7 @@ RESOLVED_REL = INBOX_REL + "/resolved"
 LEDGER_REL = ".brigade/memory-care/inbox-ledger.jsonl"
 HUMAN_CODES = frozenset(
     {
+        "preference-replacement-review",
         "card-injection-signal",
         "document-injection-signal",
         "contradiction-candidate",
@@ -108,6 +109,7 @@ NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "near-match-proposal": True,
     "overflow-block-too-large": False,
     "overflow-card-untrusted": False,
+    "preference-replacement-review": False,
     "proposal-notification": False,
     "resolved-copy-digest-mismatch": False,
     "unknown-sections": False,
@@ -288,9 +290,9 @@ def drain(
     )
     if deadline_days < 1:
         raise ValueError("deadline_days must be positive")
-    if not dry_run:
-        result["recovery"] = journal.resolve_prepared(target)
     try:
+        if not dry_run:
+            result["recovery"] = journal.resolve_prepared(target)
         paths = pending(target)
         for inbox in ingest._resolve_inbox_paths(target):
             try:
@@ -306,7 +308,7 @@ def drain(
         # A truncated or unsupported evidence scan cannot prove a path is unreferenced.
         preserve_all = evidence_uncertain(target, warnings, unsupported)
         cited = {row["evidence_id"] for row in evidence}
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, journal.kernel.ProjectionError) as exc:
         result["error"] = str(exc)
         return result
     card_ids = ingest.CardIdIndex(target)

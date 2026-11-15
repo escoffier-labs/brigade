@@ -358,7 +358,16 @@ def _parse_markdown_sections(text: str) -> dict[str, str]:
             continue
         if current is not None:
             sections[current].append(line)
-    return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+    exact = {"superseded preference", "suggested document content"}
+    if not any(name.casefold() == "superseded preference" for name in sections):
+        return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+    # A preference replacement matches its line exactly, so keep content-line whitespace the way ingest.parse does.
+    from ..ingest import strip_section_blank_lines
+
+    return {
+        name: strip_section_blank_lines("\n".join(lines)) if name.casefold() in exact else "\n".join(lines).strip()
+        for name, lines in sections.items()
+    }
 
 
 def _normalize_section_heading(name: str) -> str:
@@ -377,6 +386,7 @@ CANONICAL_HANDOFF_SECTION_HEADINGS: tuple[str, ...] = (
     "Suggested card content",
     "Target document",
     "Suggested document content",
+    "Superseded preference",
 )
 
 
@@ -559,7 +569,7 @@ def _lint_card_action(
     errors.extend(state_errors)
     warnings.extend(state_warnings)
 
-    for prohibited in ("Target document", "Suggested document content"):
+    for prohibited in ("Target document", "Suggested document content", "Superseded preference"):
         if prohibited in sections:
             errors.append(f"card handoffs must omit the {prohibited} section entirely")
 
@@ -592,6 +602,13 @@ def _lint_no_card_action(
         errors.append("no-card handoffs require Suggested document content")
     elif any(line.startswith("## ") for line in suggested_document.splitlines()):
         errors.append("Suggested document content must not contain level-2 markdown headings")
+    elif "Superseded preference" in sections:
+        from ..preference_replace import replacement_lines
+
+        try:
+            replacement_lines({key.lower(): value for key, value in sections.items()})
+        except ValueError as exc:
+            errors.append(str(exc))
     elif ingest_routes and target_document and _valid_document_target(target_document.splitlines()[0].strip()):
         document = target_document.splitlines()[0].strip()
         # Ingest sends a known instruction file's capped or linked append to its overflow card, so

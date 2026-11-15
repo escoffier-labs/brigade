@@ -98,10 +98,15 @@ def _draft_inbox_specs(
 ) -> tuple[list[tuple[Path, str, bool]], list[str], bool]:
     target = target.expanduser().resolve()
     config, _, errors, loaded = _load_source_config_for_drafts(target, sources=sources)
+    watched_paths = {(item.root / item.inbox).resolve() for item in config.watched}
     specs: dict[tuple[str, str], tuple[Path, str, bool]] = {}
     for rel in WRITER_INBOXES:
         path = (target / rel).resolve()
-        specs[(str(path), rel)] = (path, rel, _sources_mod._is_watched(target, rel, config.watched))
+        specs[(str(path), rel)] = (
+            path,
+            rel,
+            _sources_mod._is_watched(target, rel, config.watched, watched_paths=watched_paths),
+        )
     for watched in config.watched:
         path = (watched.root / watched.inbox).resolve()
         label = watched.inbox if watched.root == target.resolve() else str(path)
@@ -706,15 +711,20 @@ def _slugify(value: str) -> str:
     return slug[:48].strip("-") or "handoff"
 
 
-def _read_suggested_content(content: str | None, content_file: Path | None) -> str:
+def _read_suggested_content(
+    content: str | None, content_file: Path | None, *, preserve_whitespace: bool = False
+) -> str:
+    from ..ingest import strip_section_blank_lines
+
+    clean = strip_section_blank_lines if preserve_whitespace else str.strip
     if content and content_file:
         raise ValueError("pass --content or --content-file, not both")
     if content is not None:
-        return content.strip()
+        return clean(content)
     if content_file is None:
         raise ValueError("--content or --content-file is required")
     try:
-        return content_file.expanduser().read_text(encoding="utf-8", errors="replace").strip()
+        return clean(content_file.expanduser().read_text(encoding="utf-8", errors="replace"))
     except OSError as exc:
         raise ValueError(f"cannot read --content-file: {exc}") from exc
 
@@ -778,6 +788,7 @@ def _render_handoff_draft(
     target_document: str | None,
     suggested_content: str,
     expected_sha: str = "",
+    superseded_preference: str | None = None,
 ) -> str:
     parts = [
         "# Memory Handoff",
@@ -806,8 +817,17 @@ def _render_handoff_draft(
         parts.extend(["", "## Suggested card content", "", suggested_content.strip()])
     else:
         parts.extend(["", "## Target document", "", str(target_document or "").strip()])
-        parts.extend(["", "## Suggested document content", "", suggested_content.strip()])
-    return "\n".join(parts).rstrip() + "\n"
+        parts.extend(
+            [
+                "",
+                "## Suggested document content",
+                "",
+                suggested_content if superseded_preference is not None else suggested_content.strip(),
+            ]
+        )
+    if superseded_preference is not None:
+        parts.extend(["", "## Superseded preference", "", superseded_preference])
+    return "\n".join(parts).rstrip("\r\n") + "\n"
 
 
 def build_draft(
@@ -830,6 +850,7 @@ def build_draft(
     guard_policy: str = "personal",
     workspace: Path | None = None,
     expected_sha: str | None = None,
+    superseded_preference: str | None = None,
 ) -> dict[str, Any]:
     """Write one handoff draft and return its payload. Raises ValueError on bad input.
 
@@ -853,7 +874,9 @@ def build_draft(
         if not target_document:
             raise ValueError("--target-document is required for no-card handoffs")
         target_card = None
-    suggested_content = _read_suggested_content(content, content_file)
+    suggested_content = _read_suggested_content(
+        content, content_file, preserve_whitespace=superseded_preference is not None
+    )
     if not suggested_content:
         raise ValueError("suggested content is empty")
     workspace_root = (workspace or target).expanduser().resolve()
@@ -874,6 +897,7 @@ def build_draft(
         target_document=target_document,
         suggested_content=suggested_content,
         expected_sha=sha,
+        superseded_preference=superseded_preference,
     )
     preflight = _linting_mod.lint_text(text, path=path, workspace=workspace_root)
     if not preflight.valid:
@@ -926,6 +950,7 @@ def draft(
     json_output: bool = False,
     workspace: Path | None = None,
     expected_sha: str | None = None,
+    superseded_preference: str | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -951,6 +976,7 @@ def draft(
             guard_policy=guard_policy,
             workspace=workspace,
             expected_sha=expected_sha,
+            superseded_preference=superseded_preference,
         )
     except HandoffDraftRefused as exc:
         if json_output:

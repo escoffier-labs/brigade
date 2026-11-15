@@ -70,7 +70,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     doctor.add_argument(
         "--timeout", type=int, default=int(seats.PROBE_TIMEOUT), help="Per-probe timeout in seconds (30 to 600)."
     )
-    for command in (status, run, doctor):
+    show = commands.add_parser("show", help="Authenticate a local review packet and print evidence quotes.")
+    show.add_argument("proposal_id")
+    for command in (status, run, doctor, show):
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     run.add_argument("--dry-run", action="store_true", help="Submit, attach and write nothing, and leave the pause.")
@@ -481,6 +483,10 @@ def dispatch(args: argparse.Namespace) -> int:
             payload = status_payload(target)
         elif args.memory_verify_command == "doctor":
             payload = doctor_payload(target, args.timeout)
+        elif args.memory_verify_command == "show":
+            from . import memory_verify_show
+
+            payload = memory_verify_show.show_payload(target, args.proposal_id)
         elif args.dry_run and args.no_model:
             payload = run_payload(target=target, dry_run=True, no_model=True, list_ids=args.list_ids)
         elif args.no_model:
@@ -518,6 +524,10 @@ def dispatch(args: argparse.Namespace) -> int:
         for row in payload.get("seats", []):
             suffix = f" {row['code']}" if "code" in row else ""
             print(f"seat {row['role']} {row['seat']} {row['cli']} {row['model']} {row['status']}{suffix}")
+    elif args.memory_verify_command == "show":
+        from . import memory_verify_show
+
+        memory_verify_show.print_review(payload)
     elif args.memory_verify_command == "status":
         state = payload.get("state", {})
         print(f"paused: {str(state.get('paused')).lower()}  failures: {state.get('consecutive_failures', '-')}")

@@ -2685,14 +2685,15 @@ def test_private_card_collision_with_public_card_fails_closed(hub, tmp_path):
     assert not hub.puts()
 
 
-def test_search_fuses_derived_publication_id_and_retains_old_name(hub, tmp_path):
+def test_search_fuses_derived_publication_id_and_retains_old_name(hub, tmp_path, monkeypatch):
     from brigade import memory_hub_import as importer
 
     target = workspace(tmp_path, mode="sync", **{"My Card": "# My Card\nkoala fixture\n"})
     sync.push(target, client(hub), settings(target), yes=True)
+    _put(hub, "fleet", "other", "koala\n")
     payload = hub_search.search_payload(target, "koala", settings=settings(target))
-    assert payload["match_count"] == 1
-    [match] = payload["matches"]
+    assert payload["match_count"] == 2
+    match = next(item for item in payload["matches"] if "local" in item["ranks"])
     assert match["card_id"] == importer.derive_card_id("memory/cards/My Card.md")
     assert set(match["ranks"]) == {"hub", "local"}
     assert "My Card" in match["card_aliases"]
@@ -2703,7 +2704,20 @@ def test_search_fuses_derived_publication_id_and_retains_old_name(hub, tmp_path)
         # The node wrote it unreviewed, so the connector opens it only once it is reviewed.
         assert _dot_cli(target).memory_card(match["card_id"])["error"] == "card_not_found"
         hub.cards[("repo:test/app", match["card_id"])]["trust"] = "reviewed"
-        opened = _dot_cli(target).memory_card(match["card_id"])
+        # A local-source fused entry with a scope reaches callers of `brigade memory search --json`.
+        # Dot connectors never see it: with the hub on they take the principal path, which never fuses,
+        # and principal profiles drop local-source matches. Turning the hub off for the search and back
+        # on for the read stages that CLI payload, then checks the hinted name and scope open the card.
+        monkeypatch.setattr(hubc, "hub_mode", lambda target: "off")
+        tools = _dot_memory(target, payload)
+        found = tools.memory_search("koala")
+        hinted_match = next(item for item in found["matches"] if item["card_id"] == match["card_id"])
+        assert hinted_match["source"] == "local"
+        assert Path(hinted_match["path"]).stem == "My Card" != hinted_match["card_id"]
+        assert hinted_match["scope"] == "repo:test/app"
+        assert "name=<card_id>, scope=<its scope>" in found["next"]
+        monkeypatch.setattr(hubc, "hub_mode", lambda target: "sync")
+        opened = tools.memory_card(name=hinted_match["card_id"], scope=hinted_match["scope"])
         assert opened["content"] == "# My Card\nkoala fixture\n"
         assert opened["source"] == "hub"
 
@@ -2853,7 +2867,8 @@ def test_unpublished_derived_search_result_keeps_readable_local_id(hub, tmp_path
         assert _dot_cli(target).memory_card(match["card_id"])["content"] == "# My Card\nkoala fixture\n"
 
 
-def test_local_rank_winner_keeps_hub_id_after_publication_fusion():
+@pytest.mark.parametrize("remote_source", ["hub", "replica"])
+def test_local_rank_winner_keeps_remote_id_after_publication_fusion(remote_source):
     hub_match = {
         "card_id": "derived-id",
         "scope": "fleet",
@@ -2868,13 +2883,15 @@ def test_local_rank_winner_keeps_hub_id_after_publication_fusion():
         "card_aliases": ["My Card"],
     }
     unrelated = {"card_id": "other", "scope": "fleet", "content_hash": "other-hash", "path": "cards/other.md"}
-    matches = hub_search.fuse({"hub": [unrelated, hub_match], "local": [local_match]}, 20)
+    matches = hub_search.fuse({remote_source: [unrelated, hub_match], "local": [local_match]}, 20)
     assert len(matches) == 2
     fused = next(m for m in matches if "local" in m["ranks"])
     assert fused["source"] == "local"
     assert fused["card_id"] == "derived-id"
+    assert fused["scope"] == "fleet"
+    assert fused["path"] == "memory/cards/My Card.md"
     assert fused["card_aliases"] == ["My Card"]
-    assert fused["ranks"] == {"hub": 2, "local": 1}
+    assert fused["ranks"] == {remote_source: 2, "local": 1}
 
 
 # -- read_stats (memory verification slice 2) ---------------------------------
