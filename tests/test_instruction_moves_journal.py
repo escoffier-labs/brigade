@@ -217,3 +217,18 @@ def test_linked_guard_path_abandons_after_a_crash(tmp_path, monkeypatch):
     assert (tmp_path / "USER.md").is_symlink()
     assert copy.read_bytes() == BEFORE
     assert journal.resolve_prepared(tmp_path) == []
+
+
+def test_generated_id_preserves_creation_timestamp_precision(tmp_path, monkeypatch):
+    stamp = datetime(2026, 11, 14, 12, 0, 0, 123456, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return stamp
+
+    monkeypatch.setattr(journal, "datetime", Clock)
+    decision = journal.commit_phased(
+        tmp_path, kind="instructions", reason="test", card_id=None, changes=[], prepared_paths=[], hub={}
+    )
+    assert decision.created_at == stamp.isoformat()

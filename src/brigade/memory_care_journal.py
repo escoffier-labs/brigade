@@ -371,12 +371,14 @@ def commit_phased(
 
     from .memory_cmd import _config_or_default
 
-    decision_id = decision_id if decision_id is not None else new_decision_id(kind)
+    stamp = datetime.now(timezone.utc) if decision_id is None else None
+    decision_id = decision_id if decision_id is not None else new_decision_id(kind, now=stamp)
     try:
         directory = _directory(target, decision_id)
         if not re.fullmatch(rf"[0-9]{{8}}T[0-9]{{6}}Z-{re.escape(kind)}-[0-9a-f]{{8}}", decision_id):
             raise ValueError("kind mismatch")
-        stamp = datetime.strptime(decision_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        if stamp is None:
+            stamp = datetime.strptime(decision_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
         if directory.exists():
             raise ValueError("taken")
     except ValueError as exc:
