@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
 )
@@ -26,6 +27,8 @@ for arg in "$@"; do
 case "$arg" in --budget*|--max-files*) exit 2;; esac
 done
 path="$2"
+if [ -n "$FILES_CRAWL_REWRITE" ]; then printf "later" > "$path"; fi
+if [ -n "$FILES_CRAWL_ATTEMPTS" ]; then printf "attempt\n" >> "$FILES_CRAWL_ATTEMPTS"; fi
 if [ -n "$FILES_CRAWL_SLOW" ] && [ "${path##*/}" = "001.txt" ]; then exec sleep 5; fi
 printf '{"schema":"@SCHEMA@","source":{"kind":"files","name":"files"},"collection":{"external_id":"fixture","kind":"files","name":"fixture"},"item":{"external_id":"%s","kind":"file","created_at":"2026-01-01T00:00:00Z","text":"fixture"},"raw":{"format":"text","path":"%s"}}\n' "$path" "$path"
 if [ -n "$FILES_CRAWL_EMIT_SLOW" ]; then exec sleep 5; fi
@@ -383,5 +386,145 @@ func TestFilesCrawlAncestorErrorKeepsCursor(t *testing.T) {
 	}
 	if cursor != first["resume_cursor"] {
 		t.Fatalf("cursor regressed: %q, was %v", cursor, first["resume_cursor"])
+	}
+}
+
+func TestFilesCrawlBusyRetry(t *testing.T) {
+	for _, persistent := range []bool{false, true} {
+		t.Run(fmt.Sprint(persistent), func(t *testing.T) {
+			withTempHome(t)
+			filesExporter(t)
+			root := t.TempDir()
+			for _, name := range []string{"a.txt", "b.txt"} {
+				if err := os.WriteFile(filepath.Join(root, name), []byte("fixture"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := runJSON(t, "crawl", "files", root, "--max-files", "1", "--json")
+			holder, _, err := openMigrated()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer holder.Close()
+			holder.SetMaxOpenConns(1)
+			marker := filepath.Join(t.TempDir(), "attempts")
+			t.Setenv("FILES_CRAWL_ATTEMPTS", marker)
+			locked := false
+			released := make(chan error, 1)
+			open := func(path string) (*os.File, error) {
+				if path == filepath.Join(root, "b.txt") && !locked {
+					if _, err := holder.Exec("BEGIN IMMEDIATE"); err != nil {
+						return nil, err
+					}
+					locked = true
+					if !persistent {
+						go func() {
+							// Release only after a fresh exporter proves the first import retried.
+							deadline := time.Now().Add(2 * time.Second)
+							for time.Now().Before(deadline) {
+								data, _ := os.ReadFile(marker)
+								if bytes.Count(data, []byte("attempt\n")) >= 2 {
+									break
+								}
+								time.Sleep(time.Millisecond)
+							}
+							_, err := holder.Exec("ROLLBACK")
+							released <- err
+						}()
+					}
+				}
+				return os.Open(path)
+			}
+			budget := "3s"
+			if persistent {
+				budget = "250ms"
+			}
+			var out, errw bytes.Buffer
+			started := time.Now()
+			code := crawlFiles([]string{root, "--budget", budget, "--json"}, &out, &errw, filepath.WalkDir, open)
+			elapsed := time.Since(started)
+			if persistent {
+				if _, err := holder.Exec("ROLLBACK"); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := <-released; err != nil {
+				t.Fatal(err)
+			}
+			if code != 0 {
+				t.Fatalf("busy crawl code=%d: %s", code, &errw)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			attempts, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Count(attempts, []byte("attempt\n")) < 2 {
+				t.Fatalf("exporter was not restarted: %s", attempts)
+			}
+			wantItems, wantParsed := 2, float64(1)
+			if persistent {
+				wantItems, wantParsed = 1, 0
+				if elapsed > time.Second {
+					t.Fatalf("busy wait exceeded budget: %s", elapsed)
+				}
+				if got["complete"] != false || got["resume_cursor"] != first["resume_cursor"] {
+					t.Fatalf("busy stop skipped file: %v", got)
+				}
+				var cursor string
+				if err := holder.QueryRow("select path from files_crawl_cursor").Scan(&cursor); err != nil {
+					t.Fatal(err)
+				}
+				if cursor != first["resume_cursor"] {
+					t.Fatalf("persisted cursor advanced: %s", cursor)
+				}
+			} else if got["complete"] != true {
+				t.Fatalf("retry did not finish: %v", got)
+			}
+			if got["files_parsed"] != wantParsed || got["inserted_items"] != wantParsed {
+				t.Fatalf("retry counts: %v", got)
+			}
+			var items, cached int
+			if err := holder.QueryRow("select count(*) from items").Scan(&items); err != nil {
+				t.Fatal(err)
+			}
+			if err := holder.QueryRow("select count(*) from files_crawl_cache").Scan(&cached); err != nil {
+				t.Fatal(err)
+			}
+			if items != wantItems || cached != wantItems {
+				t.Fatalf("items=%d cache=%d want=%d", items, cached, wantItems)
+			}
+			if persistent {
+				resumed := runJSON(t, "crawl", "files", root, "--json")
+				if resumed["files_parsed"] != float64(1) || resumed["inserted_items"] != float64(1) || resumed["complete"] != true {
+					t.Fatalf("resume: %v", resumed)
+				}
+			}
+		})
+	}
+}
+
+func TestFilesCrawlScanUsesCrawlDigest(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	path := filepath.Join(t.TempDir(), "one.txt")
+	if err := os.WriteFile(path, []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FILES_CRAWL_REWRITE", "1")
+	runJSON(t, "crawl", "files", path, "--json")
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	diff, err := scanDiff(db, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff["changed"] != true {
+		t.Fatalf("scan used post-export content: %v", diff)
 	}
 }

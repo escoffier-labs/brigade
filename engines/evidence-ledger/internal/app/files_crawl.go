@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/ingest"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/toolpath"
 )
 
@@ -119,6 +121,12 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 		return fatalf(errw, "crawl files: %s", err)
 	}
 	defer db.Close()
+	// This crawl owns one connection. Let the context-bounded retry loop handle
+	// locks instead of composing the connection's busy timeout with each retry.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("pragma busy_timeout=0"); err != nil {
+		return fatalf(errw, "crawl files: %s", err)
+	}
 	// Separate from source_scans: option changes and collections must not share
 	// cache identities. Existing archive migrations need no rewrite.
 	_, err = db.Exec(`create table if not exists files_crawl_cache (profile text not null, path text not null, hash text not null, primary key(profile,path));
@@ -135,12 +143,30 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *budget)
 	defer cancel()
+	retryBusy := func(fn func() error) error {
+		deadline, _ := ctx.Deadline()
+		return ingest.RetryOnBusy(fn, ingest.BusyRetryOptions{
+			Attempts:     math.MaxInt,
+			MaxTotalWait: max(time.Nanosecond, time.Until(deadline)),
+			Sleep: func(wait time.Duration) {
+				timer := time.NewTimer(wait)
+				defer timer.Stop()
+				select {
+				case <-ctx.Done():
+				case <-timer.C:
+				}
+			},
+		})
+	}
 	exported, parsed, skipped, inserted := 0, 0, 0, 0
 	pending := false
 	entries := 0
 	warnings := []string{}
 	checkpoint := func(path string) error {
-		if _, err := db.Exec(`insert into files_crawl_cursor values(?,?) on conflict(profile) do update set path=excluded.path`, profile, path); err != nil {
+		if err := retryBusy(func() error {
+			_, err := db.Exec(`insert into files_crawl_cursor values(?,?) on conflict(profile) do update set path=excluded.path`, profile, path)
+			return err
+		}); err != nil {
 			return err
 		}
 		cursor = path
@@ -257,74 +283,99 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 				exportPath = inputPath
 			}
 		}
-		cmd := exec.CommandContext(ctx, "sourceharvest", "files", exportPath, "--source", *source, "--collection", *collection, "--collection-kind", *kind, "--glob", *glob, "--out", "-", "--json")
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return err
-		}
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Start(); err != nil {
-			if ctx.Err() != nil {
+		return retryBusy(func() error {
+			if ctx.Err() != nil || exported >= *maxFiles {
 				pending = true
 				return fs.SkipAll
 			}
-			return toolpath.WrapExecErr("sourceharvest", toolpath.HintSourceHarvest, err)
-		}
-		exported++
-		result, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://files "+path, "")
-		if importErr != nil {
-			_ = stdout.Close()
-			cancel()
-		}
-		waitErr := cmd.Wait()
-		inserted += result.Inserted
-		if importErr != nil {
-			return importErr
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			pending = true
-			return fs.SkipAll
-		}
-		if waitErr != nil {
-			return warnAndCheckpoint(path, fmt.Errorf("sourceharvest: %s: %w", strings.TrimSpace(stderr.String()), waitErr))
-		}
-		summary := parseSourceHarvestSummary(stderr.Bytes())
-		warnings = append(warnings, summary.Warnings...)
-		warnings = append(warnings, result.Warnings...)
-		// Bad records and exporter warnings advance traversal but stay uncached.
-		// They are retried on the next sweep, rather than the next run.
-		if len(result.Warnings) > 0 || len(summary.Warnings) > 0 {
-			return warnAndCheckpoint(path, fmt.Errorf("export incomplete, left uncached"))
-		}
-		// Keep scan inspection current as well as the profile-specific crawl cache.
-		summary.Path = path
-		if summary.Records == 0 {
-			summary.Records = result.Inserted
-		}
-		sourceKind := result.SourceKind
-		if sourceKind == "" {
-			sourceKind = *source
-		}
-		if err := recordSourceHarvestScan(db, sourceKind, result.SourceHash, summary); err != nil {
-			return err
-		}
-		parsed++
-		// Write the cache before the checkpoint. A crash between them leaves
-		// the cursor behind a committed cache hit, avoiding another export.
-		if _, err := db.Exec(`insert into files_crawl_cache values(?,?,?) on conflict(profile,path) do update set hash=excluded.hash`, profile, path, digest); err != nil {
-			return err
-		}
-		return checkpoint(path)
+			attemptCtx, cancelAttempt := context.WithCancel(ctx)
+			defer cancelAttempt()
+			cmd := exec.CommandContext(attemptCtx, "sourceharvest", "files", exportPath, "--source", *source, "--collection", *collection, "--collection-kind", *kind, "--glob", *glob, "--out", "-", "--json")
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				return err
+			}
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Start(); err != nil {
+				if ctx.Err() != nil {
+					pending = true
+					return fs.SkipAll
+				}
+				return toolpath.WrapExecErr("sourceharvest", toolpath.HintSourceHarvest, err)
+			}
+			exported++
+			result, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://files "+path, "")
+			if importErr != nil {
+				_ = stdout.Close()
+				cancelAttempt()
+			}
+			waitErr := cmd.Wait()
+			inserted += result.Inserted
+			if importErr != nil {
+				return importErr
+			}
+			if ctx.Err() == context.DeadlineExceeded {
+				pending = true
+				return fs.SkipAll
+			}
+			if waitErr != nil {
+				return warnAndCheckpoint(path, fmt.Errorf("sourceharvest: %s: %w", strings.TrimSpace(stderr.String()), waitErr))
+			}
+			summary := parseSourceHarvestSummary(stderr.Bytes())
+			warnings = append(warnings, summary.Warnings...)
+			warnings = append(warnings, result.Warnings...)
+			// Bad records and exporter warnings advance traversal but stay uncached.
+			// They are retried on the next sweep, rather than the next run.
+			if len(result.Warnings) > 0 || len(summary.Warnings) > 0 {
+				return warnAndCheckpoint(path, fmt.Errorf("export incomplete, left uncached"))
+			}
+			// Keep scan inspection current as well as the profile-specific crawl cache.
+			summary.Path = path
+			if summary.Records == 0 {
+				summary.Records = result.Inserted
+			}
+			sourceKind := result.SourceKind
+			if sourceKind == "" {
+				sourceKind = *source
+			}
+			if err := ingest.RecordSourceScans(db, sourceKind, result.SourceHash, []sources.FileScan{{
+				Path: path, Size: stat.Size(), MTime: stat.ModTime().UTC().Format(time.RFC3339Nano),
+				ContentHash: "sha256:" + digest, Records: summary.Records,
+			}}, true); err != nil {
+				return err
+			}
+			// Write the cache before the checkpoint. A crash between them leaves
+			// the cursor behind a committed cache hit, avoiding another export.
+			if _, err := db.Exec(`insert into files_crawl_cache values(?,?,?) on conflict(profile,path) do update set hash=excluded.hash`, profile, path, digest); err != nil {
+				return err
+			}
+			if err := checkpoint(path); err != nil {
+				return err
+			}
+			parsed++
+			return nil
+		})
 	})
+	if ingest.IsBusy(err) {
+		pending = true
+		err = nil
+	}
 	if err != nil {
 		return fatalf(errw, "crawl files: %s", err)
 	}
+	resumeCursor := cursor
 	if !pending {
 		cursor = ""
 	}
 	if err := checkpoint(cursor); err != nil {
-		return fatalf(errw, "crawl files: %s", err)
+		if !ingest.IsBusy(err) {
+			return fatalf(errw, "crawl files: %s", err)
+		}
+		// A held writer can also prevent the final checkpoint. Keep the safe
+		// in-memory cursor and let the persisted checkpoint replay older work.
+		pending = true
+		cursor = resumeCursor
 	}
 	result := map[string]any{"status": "complete", "inserted_items": inserted, "files_parsed": parsed, "files_skipped": skipped, "warnings": warnings, "complete": !pending, "resume_cursor": cursor}
 	if asJSON {
