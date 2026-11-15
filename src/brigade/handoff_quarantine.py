@@ -60,6 +60,31 @@ def _verify_held(destination: int, name: str, before: os.stat_result, sample: st
         os.close(fd)
 
 
+def _publish_mismatch(review_parent: int, name: str, destination: int, held_name: str) -> None:
+    """Best effort: describe a held file whose identity changed during the move."""
+    try:
+        held = dirfd.stat_child(destination, held_name)
+        observed: dict[str, int] | None = {
+            "dev": held.st_dev,
+            "ino": held.st_ino,
+            "nlink": held.st_nlink,
+            "size": held.st_size,
+            "mtime_ns": held.st_mtime_ns,
+        }
+    except OSError:
+        observed = None
+    note = json.dumps({"reason": "identity-mismatch", "observed": observed}, sort_keys=True, indent=2)
+    text = (
+        "<!-- routed from oversized-handoff\n     reason: handoff-identity-mismatch -->\n\n"
+        "The held oversized handoff changed while it moved. Compare it with the earlier draft before use.\n\n"
+        f"```json\n{note}\n```\n"
+    )
+    try:
+        _publish_metadata(review_parent, name, text)
+    except OSError:
+        pass
+
+
 def _private_hold(target: Path, token: str) -> tuple[int, int]:
     """Return the held parent and fresh child, persisting each new directory."""
     parent = dirfd.open_directory_chain(target.absolute())
@@ -196,6 +221,13 @@ def hold(target: Path, source: Path, *, dry_run: bool = False) -> None:
                     # count and by resampling the held bytes.
                     _verify_held(destination, source.name, before, sample)
                 except OSError:
+                    if moved:
+                        # The file is already held. Keep the review draft and add a
+                        # mismatch note so a person still finds it.
+                        _publish_mismatch(
+                            review_parent, f"{slug}-oversized-{token}-mismatch.md", destination, source.name
+                        )
+                        raise
                     try:
                         dirfd.unlink_child(review_parent, draft_name)
                     except FileNotFoundError:

@@ -928,7 +928,8 @@ def test_hold_rejects_swap_at_rename(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "rename", swap_then_rename)
     with pytest.raises(ingest.ChangedHandoffError, match="during quarantine"):
         handoff_quarantine.hold(tmp_path, source)
-    assert not list((tmp_path / "memory/handoff-inbox").glob("*.md"))
+    drafts_left = sorted(p.name for p in (tmp_path / "memory/handoff-inbox").glob("*.md"))
+    assert len(drafts_left) == 2 and sum(name.endswith("-mismatch.md") for name in drafts_left) == 1
     (held,) = (tmp_path / ".brigade/handoffs/held").rglob("*.md")
     assert held.read_bytes() == b"replacement" and held.stat().st_ino != original.st_ino
 
@@ -949,7 +950,10 @@ def test_hold_rejects_link_retained_at_rename(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "rename", link_then_rename)
     with pytest.raises(ingest.ChangedHandoffError, match="during quarantine"):
         handoff_quarantine.hold(tmp_path, source)
-    assert not list((tmp_path / "memory/handoff-inbox").glob("*.md"))
+    drafts_left = sorted(p.name for p in (tmp_path / "memory/handoff-inbox").glob("*.md"))
+    (note,) = [name for name in drafts_left if name.endswith("-mismatch.md")]
+    assert len(drafts_left) == 2
+    assert "identity-mismatch" in (tmp_path / "memory/handoff-inbox" / note).read_text()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative rename race")
@@ -971,7 +975,10 @@ def test_hold_rejects_rewrite_with_restored_mtime(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "rename", rewrite_then_rename)
     with pytest.raises(ingest.ChangedHandoffError, match="during quarantine"):
         handoff_quarantine.hold(tmp_path, source)
-    assert not list((tmp_path / "memory/handoff-inbox").glob("*.md"))
+    drafts_left = sorted(p.name for p in (tmp_path / "memory/handoff-inbox").glob("*.md"))
+    (note,) = [name for name in drafts_left if name.endswith("-mismatch.md")]
+    assert len(drafts_left) == 2
+    assert "identity-mismatch" in (tmp_path / "memory/handoff-inbox" / note).read_text()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow target components")
