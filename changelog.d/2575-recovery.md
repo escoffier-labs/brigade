@@ -1,0 +1,1 @@
+- Recover interrupted instruction moves with malformed decision records under the document lock, preserving unreadable records in quarantine.

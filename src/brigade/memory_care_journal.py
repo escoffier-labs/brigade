@@ -606,6 +606,14 @@ def resolve_prepared(target: Path) -> list[dict[str, Any]]:
         return _resolve_prepared_locked(target)
 
 
+def _quarantine_decision(target: Path, decision_id: str) -> None:
+    directory = _directory(target, decision_id)
+    path = safe_path(target, f"{JOURNAL_REL}/{decision_id}/decision.json")
+    if path.exists():
+        path.rename(directory / f"decision.quarantined-{uuid.uuid4().hex}.json")
+        store.fsync_dir(directory)
+
+
 def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
     """Recover our interrupted kernel plans before interpreting decision phases."""
     resolved = []
@@ -618,7 +626,7 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
         decision_id = match.group(1)
         try:
             p = _payload(target, decision_id)
-        except JournalConflict:
+        except (JournalConflict, store.StoreError):
             p = {}
         if p.get("phase") == "abandoned" and match.group(2) != "repair":
             kernel.supersede(operation.operation_id, target=target)
@@ -638,7 +646,12 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
                 raise JournalConflict(f"kernel {receipt.terminal_state}")
         except (JournalConflict, kernel.ProjectionError):
             if not p:
-                raise
+                # The kernel alone owns the before-images. Do not infer card ownership
+                # or force restoration over drift from an unreadable care record.
+                kernel.supersede(operation.operation_id, target=target)
+                _quarantine_decision(target, decision_id)
+                resolved.append({"decision_id": decision_id, "phase": "abandoned"})
+                continue
             op = store.read_json(kernel.operation_dir(target, operation.operation_id) / "journal.json")
             committed = [op["mutations"][n]["display_path"] for n in op.get("committed_indexes", [])]
             reason = "kernel recovery could not complete safely. Operation superseded, before-images retained"
@@ -668,7 +681,11 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
                 }
             )
         else:
-            if match.group(2) == "repair":
+            if not p:
+                # recover checks every destination before writing. Invalid decision
+                # bytes cannot match either JSON digest, so it cannot overwrite them.
+                _quarantine_decision(target, decision_id)
+            elif match.group(2) == "repair":
                 _repair_indexes(target, decision_id)
     from .memory_care_pending import load as pending_index
 
@@ -686,6 +703,12 @@ def _resolve_prepared_locked(target: Path) -> list[dict[str, Any]]:
                 resolved.append({"decision_id": decision_id, "phase": "append-refused", "reason": exc.reason})
                 continue
         if row["prepared"]:
+            try:
+                _payload(target, decision_id)
+            except (JournalConflict, store.StoreError):
+                _quarantine_decision(target, decision_id)
+                resolved.append({"decision_id": decision_id, "phase": "abandoned"})
+                continue
             finish_prepared(target, decision_id)
             final = _payload(target, decision_id)
             resolved.append(

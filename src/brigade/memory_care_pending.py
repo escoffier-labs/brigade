@@ -15,7 +15,11 @@ INDEX_REL = ".brigade/memory-care/pending.json"
 def _row(path: Path) -> dict[str, Any]:
     from . import memory_care_journal as journal
 
-    p = journal._payload(path.parents[4], path.parent.name)
+    try:
+        p = journal._payload(path.parents[4], path.parent.name)
+    except (journal.JournalConflict, store.StoreError):
+        # An unreadable record cannot prove that no document recovery is pending.
+        return {"prepared": True, "document": True, "repair": False, "append": False}
     phase = p.get("phase")
     return {
         "prepared": phase == "prepared",

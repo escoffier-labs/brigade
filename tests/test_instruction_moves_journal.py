@@ -153,13 +153,36 @@ def test_move_crash_then_edit_abandons_and_removes_new_cards(tmp_path, monkeypat
     assert (tmp_path / "USER.md").read_bytes() == b"Edited"
 
 
-def test_unreadable_unfinished_instructions_operation_takes_the_document_lock(tmp_path, monkeypatch):
+@pytest.mark.parametrize("drift", ["none", "edited", "linked"])
+def test_unreadable_unfinished_instructions_operation_takes_the_document_lock(tmp_path, monkeypatch, drift):
+    from brigade import memory_care_pending as pending
+
+    if drift == "linked" and os.name == "nt":
+        pytest.skip("POSIX symlinks")
     crash(tmp_path, monkeypatch, "finish", 1)
-    (tmp_path / journal.JOURNAL_REL / ID / "decision.json").write_bytes(b"not json")
+    record = tmp_path / journal.JOURNAL_REL / ID / "decision.json"
+    record.write_bytes(b"not json")
+    if drift == "edited":
+        (tmp_path / "USER.md").write_bytes(b"Edited")
+        (tmp_path / CARDS[0]).write_bytes(b"Unrelated card edit")
+    elif drift == "linked":
+        link_source(tmp_path)
+    assert pending.load(tmp_path)[ID]["document"] is True
     entered = lock_spy(monkeypatch)
-    with pytest.raises((journal.JournalConflict, journal.store.StoreError)):
-        journal.resolve_prepared(tmp_path)
+    journal.resolve_prepared(tmp_path)
     assert entered
+    assert journal.kernel.unfinished_operations(tmp_path) == []
+    assert journal.resolve_prepared(tmp_path) == []
+    assert ID not in pending.load(tmp_path)
+    assert any(p.read_bytes() == b"not json" for p in record.parent.glob("decision.quarantined-*.json"))
+    # Without a readable decision, preparation alone cannot prove card ownership.
+    assert (tmp_path / CARDS[0]).read_bytes() == (b"Unrelated card edit" if drift == "edited" else CARDS[0].encode())
+    assert (tmp_path / CARDS[1]).read_bytes() == CARDS[1].encode()
+    if drift == "edited":
+        assert (tmp_path / "USER.md").read_bytes() == b"Edited"
+    elif drift == "linked":
+        assert (tmp_path / "USER.md").is_symlink()
+        assert (tmp_path / "copy.md").read_bytes() == BEFORE
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
