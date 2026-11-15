@@ -8,7 +8,8 @@ reason that names the file and carries none of its bytes. Recovery is to
 inspect and remove the file, as for `schedule.json`.
 
 The file holds key digests, days, revisions, verdict codes, proposal ids,
-read counts and the request id ledger. It never holds card ids, card text, titles or evidence. Its pause
+read counts, decision counts per verdict and the request id ledger. Pending
+and rejected corrections retain only revision, evidence digest and verdict codes. It never holds card ids, card text, titles or evidence. Its pause
 counter is separate from the reflect job's.
 """
 
@@ -24,6 +25,7 @@ from typing import Any
 
 from . import memory_hub_client as hubc
 from . import memory_proposal_io as io
+from . import memory_verify_feedback as feedback
 from .inbox_lock import InboxLockTimeout, held_file_lock
 from .memory_reflect_hub import valid_submission
 
@@ -43,7 +45,9 @@ LOCK_ERROR = "verify state is locked by another run"
 KEY = re.compile(r"[0-9a-f]{32}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
-TOP_KEYS = frozenset({"schema", "consecutive_failures", "paused", "last_status", "binding", "scopes", "submissions"})
+TOP_KEYS = frozenset(
+    {"schema", "consecutive_failures", "paused", "last_status", "binding", "scopes", "submissions", "decisions"}
+)
 # The S19d request id ledger, shared with reflect: one entry per correction, keyed by its ops digest.
 MAX_SUBMISSIONS = 4096
 # Verify keeps the digest of the full submitted ops, marks an id a duplicate reply named, and
@@ -53,7 +57,9 @@ MAX_SUBMISSIONS = 4096
 # `duplicate` are saved with a proposal id and say whether this request opened it.
 LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate", "expired", "card", "unsettled", "created"})
 SCOPE_KEYS = frozenset({"since_day", "never_read", "counts_ms", "cards"})
-CARD_KEYS = frozenset({"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads"})
+CARD_KEYS = frozenset(
+    {"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads", "review", "rejected"}
+)
 
 assert io.MAX_STATE_BYTES == MAX_BYTES  # The bounded reader and writer enforce this limit.
 
@@ -86,6 +92,8 @@ def _card(entry: object) -> bool:
         return False
     if "pending" in entry and not (isinstance(entry["pending"], str) and hubc.event_id_ms(entry["pending"])):
         return False
+    if any(name in entry and not feedback.valid_record(entry[name]) for name in ("review", "rejected")):
+        return False
     # A present key must hold a value: an explicit null is as invalid as a wrong type.
     if "reads" not in entry:
         return True
@@ -116,6 +124,8 @@ def _validate(state: object) -> dict[str, Any]:
     if "last_status" in state and state["last_status"] not in ("completed", "failed"):
         raise VerifyStateError()
     if "binding" in state and not (isinstance(state["binding"], str) and DIGEST.fullmatch(state["binding"])):
+        raise VerifyStateError()
+    if "decisions" in state and not feedback.valid_counts(state["decisions"]):
         raise VerifyStateError()
     submissions = state.get("submissions", {})
     if (
@@ -213,4 +223,6 @@ def summary(target: Path) -> dict[str, Any]:
         report["last_status"] = state["last_status"]
     report["never_read"] = {name: table.get("never_read") for name, table in sorted(state["scopes"].items())}
     report["tracked_cards"] = sum(len(table.get("cards", {})) for table in state["scopes"].values())
+    if "decisions" in state:
+        report["decisions"] = state["decisions"]
     return report

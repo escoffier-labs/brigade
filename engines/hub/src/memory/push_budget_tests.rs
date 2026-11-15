@@ -83,7 +83,7 @@ async fn push_card_negative_copy_budget_and_body_parity() {
     let mut baseline = None;
     let mut joined = Vec::new();
     let mut instructions = Vec::new();
-    for id in ["absent", "one", "five", "sixty_four", "many"] {
+    for id in ["absent", "one", "five", "sixty_four", "many", "zzabsent"] {
         let tx = CountRows {
             conn: Conn(&conn),
             joined: Cell::new(0),
@@ -129,9 +129,7 @@ async fn push_card_negative_copy_budget_and_body_parity() {
             tx.plan
                 .borrow()
                 .iter()
-                .any(|s| s.contains("memory_cards_id")
-                    && s.contains("card_id=?")
-                    && s.contains("scope>?")),
+                .any(|s| s.contains("memory_cards_id") && s.contains("(card_id,scope)>(?,?)")),
             "{:?}",
             tx.plan.borrow()
         );
@@ -158,13 +156,13 @@ async fn push_card_negative_copy_budget_and_body_parity() {
     }
     assert_eq!(
         joined,
-        vec![65; 5],
-        "absent, one, five, sixty_four, many joined-head budgets"
+        vec![65; 6],
+        "absent, one, five, sixty_four, many, absent-after-index joined-head budgets"
     );
-    println!("VM instructions absent/1/5/64/70: {instructions:?}");
+    println!("VM instructions absent/1/5/64/70/absent-after-index: {instructions:?}");
     let spread = instructions.iter().max().unwrap() - instructions.iter().min().unwrap();
-    assert!(
-        spread <= 160,
+    assert_eq!(
+        spread, 0,
         "discovery VM instruction spread {spread}: {instructions:?}"
     );
 }
@@ -232,4 +230,39 @@ async fn push_card_discovery_survives_missing_index() {
         )
         .await;
     assert_eq!(r.status, 404, "{:?}", r.body);
+}
+
+#[tokio::test]
+async fn push_card_scope_successor_preserves_prefix_scopes() {
+    let h = Hub::with(scan::bundled(), None);
+    let scopes = ["repo:example/prefix", "repo:example/prefix/child"];
+    for scope in scopes {
+        let r = h.call(ADMIN_TOKEN, json!({"action":"import", "scope":scope, "card_id":"shared", "text":"release checklist", "client_event_id":h.id()})).await;
+        assert_eq!(r.status, 201, "{:?}", r.body);
+    }
+    let conn = Connection::open(h.memory()).unwrap();
+    for indexed in [true, false] {
+        if !indexed {
+            conn.execute("DROP INDEX memory_cards_id", []).unwrap();
+        }
+        let r = h
+            .call(
+                NODE_TOKEN,
+                json!({"action":"card", "card_id":"shared", "push":true}),
+            )
+            .await;
+        assert_eq!(r.status, 409, "{:?}", r.body);
+        assert_eq!(r.body["scopes"], json!(scopes));
+        for scope in scopes {
+            let r = h
+                .call(
+                    NODE_TOKEN,
+                    json!({"action":"card", "scope":scope, "card_id":"shared", "push":true}),
+                )
+                .await;
+            assert_eq!(r.status, 200, "{:?}", r.body);
+            assert_eq!(r.body["card"]["scope"], scope);
+            assert_eq!(r.body["card"]["text"], "release checklist\n");
+        }
+    }
 }

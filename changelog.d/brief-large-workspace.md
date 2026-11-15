@@ -1,0 +1,1 @@
+- Bound brief harness wiring discovery to known roots, label its scope in brief output, share care receipt reads, and resolve watched inboxes once per call, and reuse handoff inspection within each fleet repository summary to reduce session brief work on large workspaces.

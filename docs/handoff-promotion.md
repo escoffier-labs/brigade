@@ -221,3 +221,42 @@ forge an origin. Deployments that need protection from that agent must run
 the signer and key under a separate account or broker and restrict the
 agent's access. The local host label
 is local metadata and does not prove a remote host identity.
+### Replace a preference through review
+
+A `preference` handoff with action `no-card` and target `USER.md` can include
+an optional `## Superseded preference` section. It holds the exact existing
+line. `## Suggested document content` holds the new line. Both must be single,
+nonempty lines without headings. Handoffs without this section still append
+as before.
+
+Use the atomic draft writer to propose a replacement:
+
+```bash
+brigade handoff draft --type preference --title "Reply length" --summary "The preference changed." --target-document USER.md --superseded-preference '- Prefer short replies.' --content '- Prefer detailed replies.'
+```
+
+Ingest always holds a replacement in the review inbox, including during the
+automatic inbox drain. Lint or handoff closeout does not approve it. Use the
+existing proposal commands with the handoff path, either in its writer inbox
+or after ingest moved it to `memory/handoff-inbox/`:
+
+```bash
+brigade memory proposal create --relation replace-preference --handoff memory/handoff-inbox/example.md --reason "The user changed the preference."
+brigade memory proposal show <proposal-id>
+brigade memory proposal review <proposal-id> --digest <digest> --reason "Reviewed both lines."
+brigade memory proposal apply <proposal-id> --digest <digest>
+```
+
+The preview includes an old and new `preference_diff` pair and exact file
+mutations. Review accepts only that digest. Apply replaces the unique matching
+line in place and writes the old line with a UTC date to
+`.brigade/memory/proposals/<proposal-id>/history.md` in the same transaction.
+History stays outside bootstrap context. The proposal also retains the full
+original document for recovery.
+
+Use `brigade memory proposal reject <proposal-id> --digest <digest> --reason
+"Keep the old preference."` to reject it. Rejection leaves `USER.md` unchanged
+and prevents apply. A missing or duplicate target line refuses. Changes to the
+source document or owner configuration after preview also refuse, so review
+cannot apply to a different revision. Create a fresh proposal after inspecting
+the current document. Apply remains a separate explicit step after approval.

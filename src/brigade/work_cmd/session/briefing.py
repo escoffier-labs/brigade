@@ -28,6 +28,8 @@ def _security_health_for_brief(security_cmd: Any, target: Path) -> dict[str, Any
     supports_cache_only = "suppression_cache_only" in signature.parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
     )
+    if "known_wiring_roots_only" in signature.parameters:
+        return security_cmd.health(target, suppression_cache_only=True, known_wiring_roots_only=True)
     if supports_cache_only:
         return security_cmd.health(target, suppression_cache_only=True)
     return security_cmd.health(target)
@@ -424,6 +426,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "top_issue": security_health["top_issue"],
             "top_finding": security_health["top_finding"],
             "suppression_cache": security_health.get("suppression_cache"),
+            "wiring_scan_mode": security_health.get("harness_wiring", {}).get("scan_mode"),
         },
         "backup_health": {
             "config_path": backup_health["config_path"],
@@ -1034,6 +1037,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     security_health: dict[str, Any] = raw_security_health if isinstance(raw_security_health, dict) else {}
     if security_health:
         print(f"security_config: {security_health.get('config_path')}")
+        if security_health.get("wiring_scan_mode"):
+            print("security_wiring_scan: known-roots (full search: brigade security health)")
         issue_count = security_health.get("issue_count")
         print(f"security_health: {helpers._count_status(issue_count)}")
         suppression_cache = (

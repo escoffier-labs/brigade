@@ -1,0 +1,2 @@
+- Recover interrupted instruction moves under the document lock, and abandon moves safely when a source or guard path becomes a symlink.
+- Allow phased journal commits to use a validated preallocated decision id.

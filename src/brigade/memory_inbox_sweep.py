@@ -22,6 +22,11 @@ def sweep(target: Path, *, dry_run: bool = False) -> dict[str, Any]:
         if not before.exists():
             continue
         try:
+            record = journal.safe_path(target, f"{journal.JOURNAL_REL}/{directory.name}/decision.json")
+            if not record.exists() and list(directory.glob("decision.quarantined-*.json")):
+                result["retained"] += 1
+                result["retentions"].append({"decision_id": directory.name, "reason": "quarantined decision record"})
+                continue
             payload = journal._payload(target, directory.name)
             if payload.get("phase") != "abandoned":
                 continue

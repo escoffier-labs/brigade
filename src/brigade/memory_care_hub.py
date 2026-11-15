@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from . import memory_care_journal as journal
+from . import memory_care_hub_reconcile as reconcile
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
 from . import memory_hub_sync as sync
@@ -378,6 +379,14 @@ def _send(
             # A holder edited since the request was stored gets a new write with its current text.
             if stored and handover and stored.get("text") != body_text:
                 stored = None
+            if request and stored is None:
+                accepted = reconcile.accepted_revision(client, request)
+                if accepted is not None:
+                    revision, epoch = accepted
+                    if base.get("log_epoch") != epoch or revision > base.get("revision", 0):
+                        base = {**base, "revision": revision, "log_epoch": epoch}
+                        state[client.identity][settings.scope][card_id] = base
+                        store.save_published(target, state)
             fields = (
                 dict(stored)
                 if stored
