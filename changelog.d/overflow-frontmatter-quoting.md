@@ -1,0 +1,1 @@
+- Keep overflow-card keys and source paths as literal strings in YAML frontmatter, including keys such as `yes`, `null` and `on`.
