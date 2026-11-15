@@ -1,0 +1,1 @@
+- Validate explicit task batches with `brigade run batch <file> --dry-run`, including dependency layers, stable request fingerprints, and optional JSON output. Batch execution remains unavailable.
