@@ -1070,11 +1070,17 @@ def _run(
                 tally.skip("pending_proposal")  # Reconcile opened its proposal this run.
                 continue
             known_entry = entry if entry is not None else picked.entries.get(key, {})
+            if dry_run:
+                # Preview the same feedback guard without persisting the decision or its counters.
+                known_entry = dict(known_entry)
+                feedback.decide({}, known_entry)
             found_evidence = assembly.evidence()
             if feedback.unchanged(
                 known_entry, head.get("revision", 0), found_evidence.digest if found_evidence else None
             ):
                 tally.skip("verify_rejected_unchanged")
+                if entry is not None:
+                    entry["verified"] = today  # The unchanged check completed without a seat call.
                 continue
             calls = Calls(area)
             try:

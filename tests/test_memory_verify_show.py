@@ -71,6 +71,29 @@ def test_without_review_the_command_refuses_before_reading_local_evidence(verify
     assert "Zanzibar" not in output.out + output.err
 
 
+@pytest.mark.parametrize("manifest_state", ["pending_review", "active", "rejected", "expired", None])
+def test_show_requires_an_applicable_manifest_state(verify_hub, capsys, resolver, monkeypatch, manifest_state):
+    target, hub, _, _ = verify_hub
+    ident = proposal(verify_hub, capsys)
+    original = hub.do_proposal_show
+
+    def shown(body):
+        status, reply = original(body)
+        reply["verifier_manifests"][0]["state"] = manifest_state
+        return status, reply
+
+    monkeypatch.setattr(hub, "do_proposal_show", shown)
+    code, output = show(target, ident, capsys)
+    if manifest_state in ("pending_review", "active"):
+        assert code == 0 and json.loads(output.out)["evidence"]
+    else:
+        assert code == 1
+        report = json.loads(output.out)
+        assert report["code"] == "verify_review_mismatch"
+        assert set(report) == {"status", "code", "reason"}
+        assert "Zanzibar" not in output.out + output.err
+
+
 def test_headers_precede_quotes_and_json_has_the_same_review_fields(verify_hub, capsys, resolver):
     target, hub, fake, _ = verify_hub
     ident = proposal(verify_hub, capsys)
@@ -130,6 +153,42 @@ def test_rejected_revision_and_evidence_are_not_proposed_again(verify_hub, capsy
     code, report = verify(target, capsys)
     assert code == 0 and report["skipped"]["verify_rejected_unchanged"] == 1
     assert writes(hub) == [] and fake.calls == []
+
+
+def test_unchanged_rejection_does_not_starve_another_stale_card(verify_hub, capsys, resolver):
+    from brigade import memory_fairness as fairness
+
+    target, hub, fake, _ = verify_hub
+    ident = proposal(verify_hub, capsys)
+    hub.shown[ident] = "rejected"
+    assert verify(target, capsys)[0] == 0
+    today = entry_for(target, CARD_ID)["verified"]
+    state = state_of(target)
+    cards = state["scopes"][SCOPE]["cards"]
+    rejected = cards[fairness.key_digest(SCOPE, [CARD_ID])]
+    rejected["verified"] = today - 60
+    cards[fairness.key_digest(SCOPE, ["a"])]["verified"] = today - 30
+    vstate.save(target, state)
+    config_path = target / ".brigade/memory-care.toml"
+    config_path.write_text(config_path.read_text().replace("[verify]\n", "[verify]\ncards_per_run = 1\n"))
+    # The other stale card has checkable evidence and requires the model seats.
+    hub._commit("card.put", SCOPE, "a", hub.cards[(SCOPE, CARD_ID)]["text"], "live", run_mod.hubc.event_id())
+    hub.calls.clear()
+    fake.calls.clear()
+
+    code, first = verify(target, capsys)
+    assert code == 0 and first["skipped"]["verify_rejected_unchanged"] == 1
+    assert first["cards"] == [] and first["proposals"] == []
+    assert writes(hub) == [] and fake.calls == []
+    code, second = verify(target, capsys)
+    assert code == 0
+    assert [card["card_id"] for card in second["cards"]] == ["a"]
+    assert second["calls"]["made"] > 0
+    assert entry_for(target, "a")["verified"] == today
+    saved = entry_for(target, CARD_ID)
+    assert saved["verified"] == today
+    assert saved["rejected"] == rejected["rejected"]
+    assert saved["verdict"] == "rejected_contradicted"
 
 
 @pytest.mark.parametrize("change", ["none", "changed", "appended", "missing", "symlink"])
@@ -230,6 +289,35 @@ def test_dry_run_never_persists_decisions(verify_hub, capsys, resolver):
     assert (target / vstate.STATE).read_bytes() == before
 
 
+def test_dry_run_skips_a_new_rejection_like_a_real_run(verify_hub, capsys, resolver):
+    from brigade import memory_fairness as fairness
+
+    target, hub, fake, _ = verify_hub
+    ident = proposal(verify_hub, capsys)
+    hub.shown[ident] = "rejected"
+    state = state_of(target)
+    state["scopes"][SCOPE]["cards"][fairness.key_digest(SCOPE, [CARD_ID])].pop("verified")
+    vstate.save(target, state)
+    before = {path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    hub.calls.clear()
+    fake.calls.clear()
+
+    code, dry = verify(target, capsys, "--dry-run")
+    assert code == 0
+    after = {path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    assert before == after
+    assert writes(hub) == []
+    assert fake.calls == []
+    code, real = verify(target, capsys)
+    assert code == 0
+    assert dry["skipped"]["verify_rejected_unchanged"] == real["skipped"]["verify_rejected_unchanged"] == 1
+    assert dry["calls"] == real["calls"] == {"made": 0, "ok": 0}
+    assert dry["cards"] == real["cards"] == []
+    assert dry["proposals"] == real["proposals"] == []
+    assert writes(hub) == [] and fake.calls == []
+    assert state_of(target)["decisions"]["contradicted"]["rejected"] == 1
+
+
 @pytest.mark.parametrize("field", ["review", "rejected", "decisions"])
 @pytest.mark.parametrize(
     "value", [None, "PrivateWords", {"text": "PrivateWords"}, {"contradicted": {"accepted": True, "rejected": 0}}]
@@ -286,6 +374,29 @@ def test_manifest_finalization_recovers_after_an_interrupted_write(verify_hub, c
     code, output = show(target, ident, capsys)
     assert code == 0 and json.loads(output.out)["evidence"]
     assert not list((target / pk.PACKETS).glob("staged-*.json"))
+
+
+def test_manifest_mismatch_discards_the_stage_without_overwriting_artifacts(verify_hub, capsys, resolver, monkeypatch):
+    target, hub, _, _ = verify_hub
+    conflicting = b'{"other": "manifest"}\n'
+
+    def conflict(target, staged, proposal_id):
+        with pk.directory(target) as fd:
+            pk.atomic_write(fd, f"{proposal_id}.manifest.json", conflicting)
+        return pk.finalize(target, staged, proposal_id)
+
+    monkeypatch.setattr(run_mod, "FINALIZE", conflict)
+    code, report = verify(target, capsys)
+    assert code == 0 and report["skipped"][pk.MISMATCH] == 1
+    ident = entry_for(target, CARD_ID)["pending"]
+    root = target / pk.PACKETS
+    assert (root / f"{ident}.manifest.json").read_bytes() == conflicting
+    assert not (root / f"{ident}.json").exists()
+    assert not list(root.glob("staged-*.json"))
+    sent = len(writes(hub))
+    code, again = verify(target, capsys)
+    assert code == 0 and pk.MISMATCH not in again["skipped"]
+    assert len(writes(hub)) == sent
 
 
 def test_show_writes_no_text_to_any_local_file(verify_hub, capsys, resolver):

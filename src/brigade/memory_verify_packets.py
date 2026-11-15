@@ -326,6 +326,8 @@ def finalize(target: Path, record: Stage, proposal_id: str) -> str | None:
         manifest_name = f"{proposal_id}.manifest.json"
         manifest = read(fd, manifest_name)
         if manifest is not None and io.sha256(manifest) != io.sha256(record.manifest):
+            _unlink(fd, record.name)
+            os.fsync(fd)
             return MISMATCH
         existing = read(fd, final)
         if existing is None:

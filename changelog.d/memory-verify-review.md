@@ -1,2 +1,4 @@
 - Add `memory verify show` to check the proposal's manifest and packet hashes before showing evidence quotes and current file status.
 - Record review decisions by verdict and suppress rejected corrections until the card revision or evidence changes.
+- Advance scheduling after checking an unchanged rejection so other stale cards can be verified, and skip the same rejections in dry runs without model calls.
+- Refuse review manifests outside their applicable hub states and discard staged packets when a stored manifest conflicts.

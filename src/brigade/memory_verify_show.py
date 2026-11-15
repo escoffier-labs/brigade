@@ -11,6 +11,7 @@ from . import memory_proposal_io as io
 from . import memory_verify_cmd as cmd
 from . import memory_verify_evidence as ev
 from . import memory_verify_packets as packets
+from .memory_verify_run import APPLICABLE_MANIFESTS
 
 MISMATCH = "verify_review_mismatch"
 
@@ -74,6 +75,7 @@ def show_payload(target: Path, proposal_id: str) -> dict[str, Any]:
         for m in listed
         if isinstance(m, dict)
         and m.get("artifact_kind") == "memory-verify-manifest"
+        and m.get("state") in APPLICABLE_MANIFESTS
         and m.get("artifact_sha256") == digest
     ]
     if len(matches) != 1:
