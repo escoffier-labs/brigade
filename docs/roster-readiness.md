@@ -113,18 +113,40 @@ admission uses `route_receipts.admissible_seats` and the retired-model policy,
 and capacity uses `runguard.inspect_run_lock_reconcile` combined with
 `limits.max_workers`. When a Fleet Hub is configured, admission queries
 `GET /models` via `fetch_versioned_roster(..., allow_lkg=True, cache_write=False)`
-and, when enrolled, queries `GET /policy` via `fleet_client_policy.show_policy()`
-and evaluates `fleet_policy.admissible_seat`. Capacity inspects the local run lock
-plus a read-only `POST /claims` (`action = "inspect"`) check when a live Hub
-roster is reachable and uses an absolute `BRIGADE_HOME`. Because no Hub endpoint
-exposes live per-seat lease usage without acquiring a lease, Hub-enforced
-positive concurrency limits and enrolled fleet policy lease usage report
-`capacity` as `unknown` (`unverified`) rather than guessing. LKG fallback also
-leaves live Hub capacity `unknown` (`unverified`), and `limit = 0` or a held
-lock/claim reports `admitted_capacity = 0` (`blocked`). Network calls use the
-existing 2.5-second client timeouts. Reading the roster high-water mark and LKG
-cache takes the existing spool lock, which can create an empty `.lock` file
-under `<BRIGADE_HOME>/fleet-spool/`. No cache content is written.
+and resolves the effective roster via `resolve_fleet_model_policy`. Seat health
+probing, `operation_scope`, and readiness evaluation all bind to that
+Hub-resolved effective roster instead of the un-updated local declaration.
+When enrolled, admission also queries `GET /policy` via
+`fleet_client_policy.show_policy()` and evaluates `fleet_policy.admissible_seat`.
+Because `authorize_launch` requires live Hub admission (`allow_lkg=False`), an
+enrolled node falling back to LKG reports `admission` as `unknown` (`unverified`)
+instead of `passed`.
+
+Capacity inspects the local run lock plus a read-only `POST /claims`
+(`action = "inspect"`) check when a live Hub roster is reachable and uses an
+absolute `BRIGADE_HOME`. If the claim check fails with `auth-failed`, capacity
+reports `failed` (`blocked`) and tells the operator to enroll the node, matching
+`claim_workspace` fail-closed behavior. Claim `no-identity`, `missing`, and
+`hub-unavailable` outcomes are reported conservatively as `unknown`
+(`unverified`), even though `brigade run` proceeds on the local run lock. When
+unenrolled, Hub seat-limit checks scan every selected worker seat before
+deciding capacity: any `limit = 0` reports `admitted_capacity = 0` (`blocked`),
+otherwise any malformed limit reports `unknown` (`unverified`), and otherwise
+any positive limit reports `unknown` (`unverified`), independent of `--worker`
+order. Because no Hub endpoint exposes live per-seat lease usage without
+acquiring a lease, Hub-enforced positive concurrency limits and enrolled fleet
+policy lease usage report `capacity` as `unknown` (`unverified`) instead of
+guessing. LKG fallback also leaves live Hub capacity `unknown` (`unverified`),
+and `limit = 0` or a held lock or claim reports `admitted_capacity = 0`
+(`blocked`).
+
+Network calls use the existing 2.5-second client timeouts. Reading the roster
+high-water mark and LKG cache takes `_spool_lock`, which also runs on the
+no-Hub path through `enrollment_activation_observed`. `_spool_lock` can create
+`<BRIGADE_HOME>/fleet-spool/`, `chmod` that directory to `0700`, and create
+empty `.lock` files. No cache content is written. The spool-lock wait is
+currently unbounded (`timeout=None`), so `brigade roster ready` can block behind
+a concurrent writer. Bounding that wait is deferred to a follow-up PR.
 
 T3 capability and governance observation production remains unimplemented, so
 T3 requests still skip local provider probes and remain unverified (or blocked
