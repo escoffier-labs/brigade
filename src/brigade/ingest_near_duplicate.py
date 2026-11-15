@@ -74,6 +74,11 @@ def merge_pending(
     """
     import re
 
+    from .memory_inbox_drain import classify
+
+    incoming_review = classify(code, snapshot.decode("utf-8"))
+    if incoming_review == "human":
+        return None
     threshold, _ = near.settings(target)
     for item in pending:
         if (
@@ -84,9 +89,13 @@ def merge_pending(
         ):
             continue
         text = read_text_nofollow(item.path)
+        # Never hide a stricter review disposition behind a source pointer.
+        if incoming_review != classify(item.code, text):
+            continue
         digest = hashlib.sha256(snapshot).hexdigest()
         name = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_name)[:160]
         pointer = f"\n<!-- merged handoff: {name} sha256={digest} -->\n"
-        write_text_nofollow_atomic(item.path, text + pointer)
+        if pointer not in text:
+            write_text_nofollow_atomic(item.path, text + pointer)
         return item.path
     return None

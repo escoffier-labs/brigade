@@ -1087,19 +1087,25 @@ def _execute(
                     outcome.match.path,
                     outcome.code,
                 )
+            new_receipt = dest is None
             if dest is None:
                 stem = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_path.stem)[:120]
                 dest = _write_review_draft(inbox_dir, stem, receipt + original)
-                if pending is not None:
-                    pending.append(
-                        ingest_near_duplicate.Pending(
-                            sections.get("suggested card content", ""), dest, outcome.match.path, outcome.code
-                        )
-                    )
             # Publish the receipt before mutating the card so a failed inbox write
             # leaves the source retryable without incrementing reinforcements twice.
             assert outcome.dest is not None
-            reinforce_existing_card(outcome.dest, today=date.today(), evidence_pointer=evidence_pointer)
+            try:
+                reinforce_existing_card(outcome.dest, today=date.today(), evidence_pointer=evidence_pointer)
+            except OSError:
+                if new_receipt:
+                    dest.unlink()
+                raise
+            if new_receipt and pending is not None:
+                pending.append(
+                    ingest_near_duplicate.Pending(
+                        sections.get("suggested card content", ""), dest, outcome.match.path, outcome.code
+                    )
+                )
             log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
         return Action("reinforced", summary)
 
