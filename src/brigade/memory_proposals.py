@@ -8,7 +8,7 @@ import os
 import posixpath
 import re
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 from urllib.parse import unquote, urlsplit
@@ -100,7 +100,9 @@ def _outside_roots(path: Path, target: Path, care: memory_cmd.MemoryCareConfig) 
         raise ProposalError("proposal state or notification overlaps a canonical card root")
 
 
-def _configuration(target: Path) -> tuple[memory_cmd.MemoryCareConfig, dict[str, Any]]:
+def _configuration(
+    target: Path, *, require_card_roots: bool = True
+) -> tuple[memory_cmd.MemoryCareConfig, dict[str, Any]]:
     digests: dict[str, str] = {}
     for name in (
         brigade_config.CONFIG_REL_PATH,
@@ -120,9 +122,10 @@ def _configuration(target: Path) -> tuple[memory_cmd.MemoryCareConfig, dict[str,
     if len(care.index_paths) > io.MAX_INDEXES or not care.card_roots:
         raise ProposalError("card roots or index count unsupported")
     # Existing readers are reused only after their paths and bytes are checked.
-    for root in care.card_roots:
-        with io.directory(target / root):
-            pass
+    if require_card_roots:
+        for root in care.card_roots:
+            with io.directory(target / root):
+                pass
     workspace = target.stat()
     binding = {
         "owner": cfg.selection.owner if cfg else "this-repo",
@@ -754,7 +757,14 @@ def create_payload(
     source_paths: list[str] | None = None,
     ops: list[dict[str, Any]] | None = None,
     anchor_blocks: bool = False,
+    handoff_path: str | None = None,
 ) -> dict[str, Any]:
+    if relation == "replace-preference":
+        from . import preference_replace
+
+        return preference_replace.create_payload(target=target, handoff_path=handoff_path, reason=reason)
+    if handoff_path is not None:
+        raise ProposalError("handoff requires relation replace-preference")
     if relation == "consolidate":
         from . import memory_proposal_v2
 
@@ -828,7 +838,7 @@ def _load(target: Path, proposal_id: str, digest: str | None = None) -> dict[str
     path = _root(target) / proposal_id / "revision-1.json"
     proposal = io.read_object(path, private=True)
     if (
-        proposal.get("schema") not in (SCHEMA, "brigade.memory-proposal.v2")
+        proposal.get("schema") not in (SCHEMA, "brigade.memory-proposal.v2", "brigade.memory-preference-proposal.v1")
         or proposal.get("revision") != 1
         or proposal.get("id") != proposal_id
     ):
@@ -873,6 +883,11 @@ def _validate_binding(target: Path, proposal: dict[str, Any]) -> memory_cmd.Memo
 
 
 def _validate_live(target: Path, proposal: dict[str, Any]) -> None:
+    if proposal["schema"] == "brigade.memory-preference-proposal.v1":
+        from .preference_replace import validate_live
+
+        validate_live(target, proposal)
+        return
     if proposal["schema"] == "brigade.memory-proposal.v2":
         from .memory_proposal_v2 import validate_live
 
@@ -1141,8 +1156,12 @@ def _mutation(target: Path, change: dict[str, Any], *, private: bool = False) ->
 @_boundary(1)
 def apply_payload(*, target: Path, proposal_id: str, digest: str) -> dict[str, Any]:
     target = _target(target)
-    with _locked(target):
+    with _locked(target), ExitStack() as stack:
         proposal = _load(target, proposal_id, digest)
+        if proposal["schema"] == "brigade.memory-preference-proposal.v1":
+            from .ingest import _document_lock
+
+            stack.enter_context(_document_lock(target))
         _validate_owner(target, proposal)
         _require_accepted(target, proposal)
         receipt_path = _receipt_path(target, proposal)

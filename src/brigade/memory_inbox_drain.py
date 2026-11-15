@@ -17,6 +17,7 @@ RESOLVED_REL = INBOX_REL + "/resolved"
 LEDGER_REL = ".brigade/memory-care/inbox-ledger.jsonl"
 HUMAN_CODES = frozenset(
     {
+        "preference-replacement-review",
         "card-injection-signal",
         "document-injection-signal",
         "contradiction-candidate",
@@ -107,6 +108,7 @@ NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "near-match-proposal": True,
     "overflow-block-too-large": False,
     "overflow-card-untrusted": False,
+    "preference-replacement-review": False,
     "proposal-notification": False,
     "unknown-sections": False,
     "unsafe-card-name": False,
