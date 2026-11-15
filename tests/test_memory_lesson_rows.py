@@ -1,12 +1,21 @@
 """Failure signals retain identifiers and reserve verification capacity."""
 
-import pytest
 import json
+import os
+
+import pytest
 
 from brigade import memory_lesson_rows as lessons
 from brigade import memory_evidence_log as log
 from tests.test_memory_verify_select import NOW, TODAY, entry, head, key
 from brigade import memory_verify_select as pick
+
+# Callers catch append failures and warn, so platforms without safe directory
+# descriptors run without failure signals. Match the other memory test modules.
+pytestmark = pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 
 REF = {"scope": "repo:verify", "card_id": "card-example", "hash": "a" * 12}
 
