@@ -1,0 +1,1 @@
+- Prioritize cited cards across scopes when failures are recorded in a configured verification workspace, while preserving scope isolation for legacy file evidence and the receipt shape for runs without memory citations.

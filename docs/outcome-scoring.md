@@ -54,7 +54,7 @@ warning: scoreable: no (reason=unattributed); this receipt cannot score the capt
 
 `--json` carries the same verdict as `outcome_scoreability` on the printed payload. `brigade work brief` lists the ids this target has as `outcome_verify_manifests`, and the `outcome_loop_half_fed` warning names them inline.
 
-A repo with no tracked manifest cannot produce an eligible receipt at all. That is the expected state until someone declares one; `ineligibility_rate=1.0` there means "nothing has been declared scoreable yet", not "the checks were untrustworthy".
+A repo with no tracked manifest cannot produce an eligible receipt at all. That is the expected state until someone declares one. `ineligibility_rate=1.0` there means "nothing has been declared scoreable yet", not "the checks were untrustworthy".
 
 ## Tracked manifests in this checkout
 
@@ -192,3 +192,50 @@ deterministic candidates. Proposal admission refuses translation of the negative
 review candidate.
 A failed check does not establish that a claim is false. This workflow adds no
 semantic adjudication or card mutation operation.
+
+### Failure signals for automatic memory verification
+
+Failed `brigade run` receipts retain the recalled cards as bounded
+`evidence_brief.memory_refs` entries with `scope`, `card_id`, and `hash`.
+The receipt omits `memory_refs` when there are no citations.
+File-backed cards cited through `outcome capture --kind card --run-receipt`
+also produce a negative row on failure. Review findings may supply the same
+`memory_refs` list. Completed reviews log
+new findings automatically, and `work review import-findings` retries logging
+without adding duplicate rows. Dry imports and dry runs write no failure rows.
+
+Each producer writes at most one `negative-outcome` row per receipt and scoped
+card through `.brigade/memory/reflect/lesson-signals.jsonl`. Rows contain identifiers and digests,
+with a synthetic card path keyed by the scope and card identity. They contain
+no card body or finding prose. The `.brigade/memory/lesson-cards/` directory
+is reserved for these synthetic identifiers. Do not store file-backed cards
+there. A shared append lock serializes deduplication.
+The lock waits up to 30 seconds. Deduplication scans the complete signal log
+with bounded memory, so its runtime grows with retained history.
+An unreadable or truncated scan refuses the optional append with a fixed
+warning rather than admitting duplicates.
+
+The verify pass reads its own log and the logs under its revalidated workspace
+roots. A workspace that is neither the controller nor a configured verify
+workspace records signals that no verify pass reads. Citations in a configured
+workspace log can prioritize cards from any bound scope. Legacy file rows
+inherit only the configured workspace scope. The log schema has no optional
+`scope` field, which keeps it compatible with older readers.
+Pending negative cards get the first half of a batch, rounded up.
+Remaining slots follow the existing staleness and score order. A one-slot
+batch gives previously verified negatives priority only when no eligible card
+has an older verification day. Existing
+eligibility rules and minimum intervals still apply, so repeated failures
+cannot force a card into every run. Review or consolidation timestamps clear
+older priority signals. These rows supply scheduling priority, never positive
+proof or a drafted lesson card. Reflection reads only `evidence-log.jsonl`,
+which retains eligible verification outcomes. File-backed run citations also
+write to the scheduling log because their hashes are not verification receipts.
+
+Verification consumes signals through its recorded UTC day, including failures
+later that day. Selection reads the newest 4 MiB of each log, so an unconsumed
+signal can expire by signal-log volume. Unrelated reflection evidence cannot
+push signals out of this window. Digest-addressed retractions belong in the
+same log as the original row. No supported command writes signal-log
+retractions today. Retries retain original rows as deduplication
+tombstones and cannot restore a withdrawn signal.
