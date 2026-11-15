@@ -8,6 +8,7 @@ from datetime import date
 
 import pytest
 
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from brigade import ingest, memory_cmd
 from brigade import memory_care_journal as journal
 from brigade.handoff_cmd import linting
@@ -52,6 +53,7 @@ def _cap_cards(ws, max_card_bytes=600):
     (ws / ".brigade" / "memory-care.toml").write_text(f"max_card_bytes = {max_card_bytes}\n")
 
 
+@requires_automatic_filing
 def test_finding_9_preference_past_act_at_lands_in_the_preference_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -65,6 +67,7 @@ def test_finding_9_preference_past_act_at_lands_in_the_preference_card(tmp_path,
     assert journal._payload(ws, decision.decision_id)["appends"][0]["writer"] == "card-append"
 
 
+@requires_automatic_filing
 def test_overflow_card_frontmatter_is_private_and_pinned_byte_for_byte(tmp_path, monkeypatch):
     # A card the hub could publish would leak handoff content: pin the exact frontmatter fields.
     ws, home, env = field_workspace(tmp_path)
@@ -88,6 +91,7 @@ def test_overflow_card_frontmatter_is_private_and_pinned_byte_for_byte(tmp_path,
     assert raw.count(b"visibility: private\n") == 1 and raw.count(b"archive: never\n") == 1
 
 
+@requires_automatic_filing
 def test_append_within_act_at_still_goes_to_the_file(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -114,6 +118,7 @@ def test_handoff_type_maps_to_the_template_values(raw, expected):
     assert handoff_type({} if raw is None else {"type": raw}) == expected
 
 
+@requires_automatic_filing
 def test_injection_signal_still_goes_to_a_person(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)  # USER.md 8241, past act-at
@@ -142,6 +147,7 @@ def test_overflow_card_rolls_at_max_card_bytes(tmp_path, monkeypatch):
     assert outcome.overflow.cards == (f"{CARDS_REL}/user-md--overflow-preference.md",)
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("archive_fails", [False, True])
 def test_replay_across_the_rollover_never_writes_the_block_twice(
     tmp_path, monkeypatch, archive_fails
@@ -171,6 +177,7 @@ def test_replay_across_the_rollover_never_writes_the_block_twice(
     assert card.read_text().count(NOTE) == 1
 
 
+@requires_automatic_filing
 def test_replay_finds_the_block_in_an_earlier_card_after_a_rollover(tmp_path, monkeypatch):
     # The block went to card 1 when it had room; card 1 then grew. A replay must not open card 2.
     ws, home, env = field_workspace(tmp_path)
@@ -186,6 +193,7 @@ def test_replay_finds_the_block_in_an_earlier_card_after_a_rollover(tmp_path, mo
     assert card.read_text().count(NOTE) == 1
 
 
+@requires_automatic_filing
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
 def test_symlinked_user_md_routes_to_card_without_writing_through(tmp_path, monkeypatch):  # Review Focus 3
     ws, home, env = field_workspace(tmp_path)
@@ -202,6 +210,7 @@ def test_symlinked_user_md_routes_to_card_without_writing_through(tmp_path, monk
     assert card.is_file() and "source_file: 'USER.md'\n" in card.read_text()  # the card names the workspace path
 
 
+@requires_automatic_filing
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
 def test_symlinked_user_md_with_an_invalid_config_still_routes_to_the_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
@@ -217,6 +226,7 @@ def test_symlinked_user_md_with_an_invalid_config_still_routes_to_the_card(tmp_p
     assert shared.stat().st_size == 100
 
 
+@requires_automatic_filing
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
 def test_dangling_link_and_linked_card_folder_stay_unsafe(tmp_path, monkeypatch):  # Review Focus 3
     ws, home, env = field_workspace(tmp_path)
@@ -235,6 +245,7 @@ def test_dangling_link_and_linked_card_folder_stay_unsafe(tmp_path, monkeypatch)
     assert not any(elsewhere.iterdir())
 
 
+@requires_automatic_filing
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
 def test_symlinked_card_file_is_never_written_through(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
@@ -255,6 +266,7 @@ def test_invalid_instructions_table_routes_every_known_file(tmp_path):
     assert route(ws, "USER.md", "note", "setup", home=home, environ=env).reason == "config-invalid"
 
 
+@requires_automatic_filing
 def test_invalid_instructions_table_never_loses_a_handoff(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -268,6 +280,7 @@ def test_invalid_instructions_table_never_loses_a_handoff(tmp_path, monkeypatch)
     assert (ws / "USER.md").stat().st_size == 100
 
 
+@requires_automatic_filing
 def test_unparseable_care_configuration_keeps_the_handoff_for_a_person(tmp_path, monkeypatch):
     # Protected paths cannot be read from it, so nothing is written: the handoff is inboxed, not lost.
     ws, home, env = field_workspace(tmp_path)
@@ -329,6 +342,7 @@ def test_lint_and_draft_accept_an_append_past_act_at(tmp_path, monkeypatch):
     assert not linting.lint_text(handoff_text("USER.md", "y" * 200), workspace=ws).errors
 
 
+@requires_automatic_filing
 def test_overflow_cards_skip_orphan_and_undersourced_checks(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -352,6 +366,7 @@ def test_routing_starts_no_subprocess(tmp_path, monkeypatch):
     assert _decide(ws, _sections("USER.md", NOTE)).kind == "routed-card"
 
 
+@requires_automatic_filing
 def test_discovery_runs_once_per_ingest_run_not_once_per_handoff(tmp_path, monkeypatch):
     from brigade import instruction_overflow
 
@@ -397,6 +412,7 @@ def test_ingest_decide_on_a_missing_user_md_with_a_big_note_routes_to_a_card(tmp
     assert (outcome.kind, outcome.code) == ("routed-card", "document-routed-to-card")
 
 
+@requires_automatic_filing
 def test_journal_decision_undoes_the_card_append_and_keeps_later_ones(tmp_path, monkeypatch):
     from brigade import memory_care_tend
 
@@ -421,6 +437,7 @@ def test_journal_decision_undoes_the_card_append_and_keeps_later_ones(tmp_path, 
     assert card.read_text().startswith("---\n") and "note." not in card.read_text()
 
 
+@requires_automatic_filing
 def test_read_only_card_path_keeps_the_handoff_for_a_person(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -431,6 +448,7 @@ def test_read_only_card_path_keeps_the_handoff_for_a_person(tmp_path, monkeypatc
     assert list((ws / "memory" / "handoff-inbox").glob("*.md"))
 
 
+@requires_automatic_filing
 def test_document_lock_is_taken_before_the_journal(tmp_path, monkeypatch):
     # Retry and revert take the document lock and then the journal; the direct path must match.
     ws, home, env = field_workspace(tmp_path)
@@ -459,6 +477,7 @@ def test_document_lock_is_taken_before_the_journal(tmp_path, monkeypatch):
     assert order.index("document-lock") < order.index("journal")
 
 
+@requires_automatic_filing
 def test_cached_inventory_still_sees_the_size_after_an_earlier_append(tmp_path, monkeypatch):
     # One ingest run reads the inventory once, so the second handoff must measure the file as the first left it.
     ws, home, env = field_workspace(tmp_path)
@@ -472,6 +491,7 @@ def test_cached_inventory_still_sees_the_size_after_an_earlier_append(tmp_path, 
     assert (ws / CARDS_REL / "user-md--overflow-preference.md").read_text().endswith(second + "\n")
 
 
+@requires_automatic_filing
 def test_a_card_created_between_decide_and_write_gets_a_plain_block(tmp_path, monkeypatch):
     # decide() runs without the lock. If another writer made the card since, appending a second
     # frontmatter into the middle of it would corrupt the card.
@@ -497,6 +517,7 @@ def test_a_card_created_between_decide_and_write_gets_a_plain_block(tmp_path, mo
     assert text.count("---\n") == 2 and text.endswith("\n" + NOTE + "\n")
 
 
+@requires_automatic_filing
 def test_content_published_by_a_concurrent_run_is_not_written_twice(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
