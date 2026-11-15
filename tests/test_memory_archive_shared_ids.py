@@ -8,6 +8,7 @@ import pytest
 
 from brigade import memory_archive as archive, memory_care_hub as hub, memory_care_journal as journal
 from brigade import memory_care_tend as tend, memory_hub_client as hubc, memory_hub_store as store
+from brigade import memory_care_hub_reconcile as reconcile
 from tests.test_memory_archive import setup_card
 from tests.test_memory_archive_review import configure_hub, move
 
@@ -152,6 +153,120 @@ def test_handover_holder_gone_private_before_retry_retires_instead(tmp_path, mon
     assert journal.load(tmp_path, d.decision_id).hub["status"] == "done"
     assert journal.load(tmp_path, d.decision_id).hub["action"] == "retire"
     assert "holder" not in journal.load(tmp_path, d.decision_id).hub
+
+
+class RevisionHub:
+    """Enforce conditional writes and retain the log and idempotent results."""
+
+    identity = "fake-hub"
+
+    def __init__(self):
+        self.calls = []
+        self.revision = 1
+        self.seq = 1
+        self.epoch = "epoch"
+        self.state = "live"
+        self.text = "A text"
+        self.accepted = {}
+        self.events = []
+        self.lose_reply = True
+        self.hidden_page = False
+
+    def call(self, action, **fields):
+        self.calls.append((action, fields))
+        if action == "status":
+            return {"credential": "node", "principal": "node:example", "log_epoch": self.epoch, "seq": self.seq}
+        if action == "log":
+            after = fields["after_seq"]
+            # A log page can advance over unreadable events without returning any.
+            if self.hidden_page and after < self.revision - 1:
+                return {"events": [], "next_seq": self.revision - 1, "log_epoch": self.epoch}
+            events = [event for event in self.events if event["seq"] > after][: fields["limit"]]
+            return {"events": events, "next_seq": events[-1]["seq"] if events else after, "log_epoch": self.epoch}
+        assert action in ("put", "retire")
+        event_id = fields["client_event_id"]
+        if event_id in self.accepted:
+            stored_action, stored_fields, reply = self.accepted[event_id]
+            assert (action, fields) == (stored_action, stored_fields)
+            return reply
+        if (fields["base_revision"], fields["base_epoch"]) != (self.revision, self.epoch):
+            raise hubc.HubRefusal(409, {"code": "memory_base_mismatch"})
+        self.seq += 1
+        self.revision = self.seq
+        self.state = "live" if action == "put" else "retired"
+        self.text = fields["text"] if action == "put" else None
+        event = {
+            "seq": self.revision,
+            "revision": self.revision,
+            "client_event_id": event_id,
+            "principal": "node:example",
+            "kind": f"card.{action}",
+            "scope": fields["scope"],
+            "card_id": fields["card_id"],
+        }
+        self.events.append(event)
+        reply = {"event": event, "log_epoch": self.epoch}
+        self.accepted[event_id] = (action, fields, reply)
+        if self.lose_reply:
+            self.lose_reply = False
+            raise hubc.HubUnavailable("lost-reply")
+        return reply
+
+
+@pytest.mark.parametrize("visibility", ["private", "secret", "edited"])
+@pytest.mark.parametrize("hidden_page", [False, True])
+def test_accepted_handover_is_reconciled_before_replacement(tmp_path, monkeypatch, visibility, hidden_page):
+    two_cards(tmp_path, monkeypatch)
+    fake = RevisionHub()
+    if hidden_page:
+        fake.seq = 5001  # Other scopes' writes consumed the preceding sequence numbers.
+        fake.hidden_page = True
+    monkeypatch.setattr(hubc, "client_for", lambda _: fake)
+    d = move(tmp_path, A)
+    assert d.hub["status"] == "pending"
+    stored = d.hub["request"]
+    assert stored["client_event_id"] in fake.accepted
+    accepted_revision = fake.revision
+    card(
+        tmp_path,
+        B,
+        "replacement body" if visibility == "edited" else "B text",
+        visibility=None if visibility == "edited" else visibility,
+    )
+    calls_before_tend = len(fake.calls)
+    result = tend.run(tmp_path, stages=["hub"])
+    assert result["stages"]["hub"]["done"] == 1
+    replacement = "put" if visibility == "edited" else "retire"
+    assert [action for action, _ in fake.calls[calls_before_tend:] if action in ("put", "retire")] == [replacement]
+    [fields] = [fields for action, fields in fake.calls[calls_before_tend:] if action == replacement]
+    assert fields["base_revision"] == accepted_revision
+    assert fields["client_event_id"] != stored["client_event_id"]
+    assert "B text" not in repr(fake.calls[calls_before_tend:])
+    assert fake.state == ("live" if visibility == "edited" else "retired")
+    assert fake.text == (text_of(tmp_path, B) if visibility == "edited" else None)
+    assert not list((tmp_path / ".brigade/memory-hub/proposals").glob("*.json"))
+    assert final(tmp_path, d)["status"] == "done"
+    assert final(tmp_path, d)["action"] == ("handover" if visibility == "edited" else "retire")
+    assert record(tmp_path, fake)["revision"] == fake.revision
+
+
+@pytest.mark.parametrize("changed", ["epoch", "principal"])
+def test_reconcile_does_not_adopt_another_history_or_principal(changed):
+    fake = RevisionHub()
+    request = {
+        "scope": "fleet",
+        "card_id": "old",
+        "base_revision": 1,
+        "base_epoch": "epoch",
+        "client_event_id": "stored",
+        "text": "withdrawn text",
+    }
+    fake.events = [{**request, "seq": 2, "revision": 2, "principal": "node:example", "kind": "card.put"}]
+    if changed == "epoch":
+        fake.epoch = "restored-epoch"
+    else:
+        fake.events[0]["principal"] = "node:other"
+    assert reconcile.accepted_revision(fake, request) is None
 
 
 def test_handover_put_refused_as_a_conflict_becomes_a_proposal(tmp_path, monkeypatch):
