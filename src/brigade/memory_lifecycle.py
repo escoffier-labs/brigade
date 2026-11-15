@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 import re
 import tomllib
@@ -12,6 +12,7 @@ from typing import Any
 
 from . import memory_archive, memory_card_reads, memory_cmd, memory_review
 from . import memory_care_journal as journal
+from .card_identity import card_identity
 from .memory_log_retractions import retraction
 
 
@@ -32,10 +33,10 @@ def policy(target: Path) -> dict[str, Any]:
     return values
 
 
-def _mentioned(text: str, rel: str, card_id: str) -> bool:
-    # Covers Markdown links, wikilinks, command arguments and JSON lists.
-    names = (rel, Path(rel).name, Path(rel).stem, card_id)
-    return any(re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", text) for name in names if name)
+def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = ()) -> bool:
+    # Match complete identities and paths, never a filename's incidental stem.
+    names = (rel, card_id, *aliases)
+    return any(re.search(r"(?<![\w./-])" + re.escape(name) + r"(?![\w./-])", text) for name in names if name)
 
 
 def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
@@ -46,6 +47,12 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
         ".brigade/memory-care/runbooks",
         ".brigade/schedules",
         ".brigade/jobs",
+        ".brigade/work",
+        ".brigade/workflows",
+        ".brigade/hooks",
+        ".claude",
+        ".codex",
+        ".github/workflows",
         "runbooks",
         "docs/runbooks",
         "memory/runbooks",
@@ -53,48 +60,170 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
     paths = [p for root in roots for p in (target / root).rglob("*") if p.is_file()]
     paths.extend(
         p
-        for p in (target / "memory").rglob("*")
-        if p.is_file() and any("pin" in part.lower() for part in p.relative_to(target / "memory").parts)
+        for name in ("AGENTS.md", "CLAUDE.md")
+        for p in target.rglob(name)
+        if ".git" not in p.parts and "memory" not in p.relative_to(target).parts
     )
+    paths.extend(
+        target / name
+        for name in ("AGENTS.md", "CLAUDE.md", ".brigade/work.json", ".brigade/hooks.json")
+        if (target / name).is_file()
+    )
+    paths.extend(
+        p
+        for p in (target / "memory").rglob("*")
+        if p.is_file()
+        and any(Path(part).stem.lower() in {"pin", "pins", "pinned"} for part in p.relative_to(target / "memory").parts)
+    )
+    outputs = {"runs", "verify-runs", "receipts", "logs", "sessions", "claude-hooks", "memory-handoffs"}
     for path in paths:
         rel = path.relative_to(target).as_posix()
-        if memory_archive.is_archived_path(rel):
+        if (
+            memory_archive.is_archived_path(rel)
+            or outputs.intersection(Path(rel).parts)
+            or path.suffix in {".log", ".jsonl"}
+        ):
             continue
-        safe = journal.safe_path(target, rel)
-        refs[rel] = safe.read_text(encoding="utf-8")
+        try:
+            refs[rel] = journal.safe_path(target, rel).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+    # Installed schedules live outside the target. These are reads only.
+    from . import care_cmd
+    import shutil
+    import sys
+
+    if sys.platform != "win32" and shutil.which("crontab"):
+        text, error = care_cmd._read_crontab()
+        if error:
+            raise ValueError("installed care schedules are unreadable")
+        refs["scheduler:crontab"] = text
+    if sys.platform == "win32":
+        import subprocess
+
+        raw = subprocess.run(
+            ["schtasks", "/Query", "/FO", "CSV", "/V"], capture_output=True, text=True, check=True, timeout=15
+        )
+        refs["scheduler:schtasks"] = raw.stdout
+    directories = [care_cmd._systemd_user_dir(None), care_cmd._launchd_dir(None)]
+    for directory in directories:
+        if not directory.exists():
+            continue
+        for path in directory.iterdir():
+            if path.suffix not in {".service", ".timer", ".plist"} or not path.is_file() or path.is_symlink():
+                continue
+            try:
+                refs[f"scheduler:{path.name}"] = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
     return refs
 
 
-def _signals(target: Path) -> dict[str, date]:
-    """Use rows only protect cards, even if a row's evidence is not scoreable."""
+def _signals(target: Path, cards: dict[str, str], *, today: date) -> dict[str, date]:
+    """Admit only receipt-backed card citations under the promotion contract."""
+    from . import memory_evidence_log as evidence
+
     result: dict[str, date] = {}
-    for rel in (
-        "memory/outcome/records.jsonl",
-        ".brigade/memory/reflect/evidence-log.jsonl",
-        ".brigade/memory/search-log.jsonl",
-    ):
+    for rel in ("memory/outcome/records.jsonl", evidence.LOG_PATH):
         path = journal.safe_path(target, rel)
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
+        from .memory_log_retractions import active
+
+        rows = [
+            (json.loads(line), line.encode())
+            for line in path.read_text(encoding="utf-8").splitlines(keepends=True)
+            if line.strip()
+        ]
+        for row in active(rows):
+            if not isinstance(row, dict) or retraction(row):
                 continue
-            row = json.loads(line)
-            if retraction(row):
+            if rel == evidence.LOG_PATH:
+                if not evidence._valid(row) or row["kind"] not in {"outcome", "negative-outcome"}:
+                    continue
+                ref, stamp = row["evidence_id"], row["ts"]
+            else:
+                if row.get("source") != "verify" or row.get("artifact_kind") != "card":
+                    continue
+                ref, stamp = row.get("evidence_ref"), row.get("ts")
+                if not isinstance(ref, str):
+                    continue
+                if Path(ref).is_absolute():
+                    try:
+                        ref = Path(ref).relative_to(target).as_posix()
+                    except ValueError:
+                        continue
+            observed = evidence._timestamp(stamp)
+            if observed is None or observed.date() > today:
                 continue
-            if not isinstance(row, dict):
-                raise ValueError(f"invalid use row in {rel}")
-            stamp = row.get("ts") or row.get("timestamp") or row.get("recorded_at")
-            day = memory_cmd._parse_date(str(stamp)[:10]) if stamp else None
-            if not day:
-                raise ValueError(f"undated use row in {rel}")
-            keys = [row.get("artifact_id"), row.get("card_id"), row.get("card_path")]
-            keys.extend(row.get("card_ids", []))
-            keys.extend(row.get("card_aliases", []))
-            for key in keys:
-                if isinstance(key, str) and key:
-                    result[key] = max(day, result.get(key, day))
+            if not evidence.verify_outcome_ref(ref):
+                continue
+            try:
+                receipt = json.loads(evidence.io.read_bytes(target / ref) or b"")
+            except (OSError, ValueError):
+                continue
+            if not isinstance(receipt, dict):
+                continue
+            receipt_stamp = receipt.get("completed_at") or receipt.get("started_at")
+            receipt_time = evidence._timestamp(receipt_stamp)
+            if receipt_time is None or receipt_time.date() > today:
+                continue
+            if rel == evidence.LOG_PATH and stamp != receipt_stamp:
+                continue
+            # Outcome capture time is not the time of the cited verification.
+            stamp, observed = receipt_stamp, receipt_time
+            for card_rel, text in cards.items():
+                meta, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
+                identity = card_identity(meta, card_rel)
+                keys = (identity.card_id, *identity.aliases)
+                if row.get("card_id", row.get("artifact_id")) not in keys or (
+                    "card_path" in row and row["card_path"] != card_rel
+                ):
+                    continue
+                if evidence._validate_outcome(
+                    target,
+                    card_path=card_rel,
+                    card_text=text,
+                    ref=ref,
+                    timestamp=stamp,
+                    negative=row.get("kind") == "negative-outcome" or row.get("signal_value") == -1,
+                    observed=receipt,
+                ):
+                    result[card_rel] = max(observed.date(), result.get(card_rel, observed.date()))
     return result
+
+
+def _keys(text: str, rel: str) -> tuple[str, ...]:
+    from .memory_hub_sync import publication_identity
+
+    normalized = text.lstrip("\ufeff").replace("\r\n", "\n")
+    fm, _ = memory_cmd._parse_frontmatter(normalized)
+    identity = card_identity(fm, rel)
+    return (identity.card_id, rel, *identity.aliases, publication_identity(normalized, rel)[0])
+
+
+def _last_use(
+    target: Path,
+    rel: str,
+    text: str,
+    ledger: memory_card_reads.ReadLedger,
+    signals: dict[str, date],
+    opens: dict,
+    hub_reads: dict,
+    *,
+    today: date,
+) -> date:
+    fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
+    days = [ledger.tracking_since, datetime.fromtimestamp((target / rel).stat().st_mtime, timezone.utc).date()]
+    if ledger.healthy_since:
+        days.append(ledger.healthy_since)
+    for key in ("created", "created_at", "updated", "updated_at", "last_reviewed"):
+        if day := memory_cmd._parse_date(fm.get(key)):
+            days.append(day)
+    for key in _keys(text, rel):
+        days.extend(mapping[key] for mapping in (signals, hub_reads, ledger.last_read) if key in mapping)
+        days.extend(opens.get(key, (set(), set()))[1])
+    return max((day for day in days if day <= today), default=today)
 
 
 @journal.serialized
@@ -104,28 +233,43 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
     if not rules["enabled"]:
         return payload
     config = memory_cmd._config_or_default(target)
-    cards = {
-        p.relative_to(target).as_posix(): journal.safe_path(target, p.relative_to(target).as_posix())
-        .read_bytes()
-        .decode("utf-8")
-        for p in memory_cmd._iter_cards(target, config)
-    }
-    refs = _references(target, cards)
-    signals = _signals(target)
+    cards = {}
+    for path in memory_cmd._iter_cards(target, config):
+        rel = path.relative_to(target).as_posix()
+        try:
+            cards[rel] = journal.safe_path(target, rel).read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    signals = _signals(target, cards, today=today)
     if cards and not dry_run:
         # Start an observation window even when no reader has ever opened a card.
-        memory_card_reads.record(target, [], today=today)
+        if not memory_card_reads.record(target, [], today=today):
+            return {**payload, "blocked": "local read recorder error"}
     ledger = memory_card_reads.load(target)
     opens = memory_review._opens(target)
     hub_reads = memory_card_reads.hub_last_reads(target, unused_after_days=rules["archive_after_days"])
     if hub_reads is None:
         return {**payload, "blocked": "hub read coverage unavailable"}
+    if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
+        return {**payload, "blocked": "local read coverage incomplete"}
+    last_use = {
+        rel: _last_use(target, rel, text, ledger, signals, opens, hub_reads, today=today) for rel, text in cards.items()
+    }
+    # An unused card cannot confer use on another unused card through a cycle.
+    active_cards = {
+        rel: text for rel, text in cards.items() if (today - last_use[rel]).days < rules["stale_after_days"]
+    }
+    refs = _references(target, active_cards)
     digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
     for rel, text in sorted(cards.items()):
-        fm, _ = memory_cmd._parse_frontmatter(text.replace("\r\n", "\n"))
-        identity = memory_cmd.card_identity_from_text(text, rel)
+        fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
+        identity = card_identity(fm, rel).card_id
         reason = None
-        if fm.get("trust") != "agent-unreviewed" or fm.get("author_type") == "human" or fm.get("author") == "human":
+        if (
+            fm.get("trust") != "agent-unreviewed"
+            or str(fm.get("author_type", "")).lower() == "human"
+            or str(fm.get("author", "")).lower() == "human"
+        ):
             reason = "human or unknown authorship"
         elif (
             fm.get("pinned")
@@ -134,25 +278,29 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
             or rel in config.index_paths
         ):
             reason = "pinned or protected"
-        elif any(other != rel and _mentioned(body, rel, identity) for other, body in refs.items()):
+        elif any(
+            other != rel
+            and _mentioned(
+                body,
+                rel,
+                identity if fm.get("id") or fm.get("card_id") else "",
+                tuple(k for k in _keys(text, rel) if k != Path(rel).stem),
+            )
+            for other, body in refs.items()
+        ):
             reason = "referenced"
         if reason:
             payload["skipped"].append({"path": rel, "reason": reason})
             continue
-        from .memory_hub_sync import publication_identity
-
-        keys = (identity, rel, Path(rel).stem, publication_identity(text, rel)[0])
-        days = [ledger.tracking_since, date.fromtimestamp((target / rel).stat().st_mtime)]
-        for key in ("created", "created_at", "updated", "updated_at", "last_reviewed"):
-            if day := memory_cmd._parse_date(fm.get(key)):
-                days.append(day)
-        for key in keys:
-            days.extend(signals[k] for k in (key,) if k in signals)
-            days.extend(hub_reads[k] for k in (key,) if k in hub_reads)
-            days.extend(opens.get(key, (set(), set()))[1])
-        if read := memory_card_reads.last_read(ledger, keys):
-            days.append(read)
-        age = (today - max(days)).days
+        days = [last_use[rel]]
+        age = (today - last_use[rel]).days
+        if not memory_card_reads.covered(
+            ledger,
+            today=today,
+            days=rules["archive_after_days"] if age >= rules["archive_after_days"] else rules["stale_after_days"],
+        ):
+            payload["skipped"].append({"path": rel, "reason": "local read coverage incomplete"})
+            continue
         state_rel = f".brigade/memory/lifecycle/{hashlib.sha256(rel.encode()).hexdigest()}.json"
         before = journal.current(target, state_rel)
         previous = json.loads(before)["state"] if before else "active"

@@ -102,12 +102,9 @@ def _store_cards(store: MemoryStore) -> list[Path]:
 
 def _record_reads(store: MemoryStore, keys: list[str]) -> None:
     """Count a successful retrieval as use, so memory care never retires a card an agent just read."""
-    try:
-        from .memory_card_reads import record
+    from .memory_card_reads import record
 
-        record(store.root.expanduser().resolve(), [key for key in keys if key])
-    except Exception:  # noqa: BLE001 - a read ledger problem must never fail a memory tool
-        return
+    record(store.root.expanduser().resolve(), [key for key in keys if key])
 
 
 def _read_in_store(store: MemoryStore, rel: str) -> str | None:
@@ -363,14 +360,6 @@ class MemoryTools:
             ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
         ranked.sort(key=lambda item: (-item[1]["score"], item[0], item[1]["path"]))
         shown = [match for _, match in ranked[:SEARCH_LIMIT]]
-        stores = {store.origin: store for store in self.resolution().stores}
-        for origin, store in stores.items():
-            keys: list[str] = []
-            for match in shown:
-                if match["origin"] == origin:
-                    keys += [match["path"], str(match.get("card_id") or ""), *map(str, match.get("card_aliases") or [])]
-            if keys:
-                _record_reads(store, keys)
         return shown, False
 
     def _memory_status(self, arguments: dict[str, Any]) -> ToolResult:

@@ -465,12 +465,9 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
     card_id = opened_card_id(*found)
     if card_id is None:
         return False
-    try:
-        from ..memory_card_reads import record
+    from ..memory_card_reads import record
 
-        record(found[1], [card_id, found[0].relative_to(found[1]).as_posix()])
-    except Exception:  # noqa: BLE001 - accounting must never fail a file read
-        pass
+    record(found[1], [card_id, found[0].relative_to(found[1]).as_posix()])
     from ..memory_review import note_open
 
     def observed(ledger: dict[str, Any]) -> None:

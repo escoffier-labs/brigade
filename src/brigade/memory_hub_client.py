@@ -722,7 +722,8 @@ def read_stats(
         or not (since is None or type(since) is int)
         or not all(
             isinstance(row, dict)
-            and row.keys() == READ_STATS_FIELDS
+            and row.keys() in (READ_STATS_FIELDS, READ_STATS_FIELDS | {"last_card_read_day"})
+            and ("last_card_read_day" not in row or count(row["last_card_read_day"]))
             and valid_card_id(row["card_id"])
             and all(count(row[key]) for key in READ_STATS_FIELDS - {"card_id"})
             for row in rows

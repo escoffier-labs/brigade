@@ -2,6 +2,8 @@
 
 from datetime import date, timedelta
 
+from tests.test_memory_lifecycle_security import cover
+
 from brigade import memory_archive as archive
 from brigade import memory_card_reads as reads
 from brigade import memory_care_retire as retire
@@ -11,7 +13,14 @@ from brigade import memory_hub_client as hubc
 
 
 def _row(card_id, day):
-    return {"card_id": card_id, "reads_7d": 1, "reads_30d": 1, "total_reads": 1, "last_read_day": day}
+    return {
+        "card_id": card_id,
+        "reads_7d": 1,
+        "reads_30d": 1,
+        "total_reads": 1,
+        "last_read_day": day,
+        "last_card_read_day": day,
+    }
 
 
 def _hub(monkeypatch, pages, *, refusals=0, since=1, repeated_cursor=False):
@@ -68,6 +77,7 @@ def test_unreadable_hub_stats_retire_nothing(tmp_path, monkeypatch, capsys):
     path.parent.mkdir(parents=True)
     path.write_text("---\ncard_id: old\nexpires_at: 2026-01-01\n---\nEnded\n")
     reads.record(tmp_path, [], today=date(2026, 1, 1))
+    cover(tmp_path, end=date(2026, 11, 12))
     monkeypatch.setattr(reads, "hub_last_reads", lambda _, **_kw: None)
     plan = retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=date(2026, 11, 12))
     assert plan["candidates"] == []
@@ -80,6 +90,7 @@ def test_hub_not_configured_still_retires(tmp_path, monkeypatch):
     path.parent.mkdir(parents=True)
     path.write_text("---\ncard_id: old\nexpires_at: 2026-01-01\n---\nEnded\n")
     reads.record(tmp_path, [], today=date(2026, 1, 1))
+    cover(tmp_path, end=date(2026, 11, 12))
     assert reads.hub_last_reads(tmp_path) == {}
     plan = retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=date(2026, 11, 12))
     assert len(plan["candidates"]) == 1
@@ -111,10 +122,12 @@ def test_replica_read_of_a_card_without_an_id_blocks_retirement(tmp_path):
     published = memory_hub_sync.publication_identity(text, rel)[0]
     assert published not in (rel, memory_cmd.card_identity_from_text(text, rel))
     reads.record(tmp_path, [], today=date(2026, 1, 1))
+    cover(tmp_path, end=date(2026, 11, 12))
     today = date(2026, 11, 12)
     assert len(retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=today)["candidates"]) == 1
     # A replica read is recorded under the publication id only.
     reads.record(tmp_path, [published], today=date(2026, 11, 10))
+    cover(tmp_path, end=today)
     plan = retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=today)
     assert plan["candidates"] == []
     assert plan["skipped"]["read_recently"] == 1

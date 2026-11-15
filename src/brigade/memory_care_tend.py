@@ -113,9 +113,17 @@ def undo(target: Path, decision_id: str) -> journal.Decision:
         raise journal.JournalConflict("cannot undo an undo decision")
     if d.undone_by and journal._payload(target, d.undone_by).get("phase") != "abandoned":
         return journal.load(target, d.undone_by)
-    return (
-        memory_archive.restore(target, d) if d.kind == "archive" else journal.revert(target, decision_id, reason="undo")
-    )
+    if d.kind == "archive":
+        return memory_archive.restore(target, d)
+    reverted = journal.revert(target, decision_id, reason="undo")
+    if d.kind == "lifecycle":
+        from .memory_card_reads import record_content
+
+        rel = journal._payload(target, decision_id).get("card_path")
+        if isinstance(rel, str):
+            path = journal.safe_path(target, rel)
+            record_content(target, path.read_text(encoding="utf-8"), rel)
+    return reverted
 
 
 def inbox_summary(payload: dict[str, Any]) -> None:

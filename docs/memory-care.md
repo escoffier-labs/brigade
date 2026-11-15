@@ -620,17 +620,31 @@ upgrading.
 
 Only cards marked `trust: agent-unreviewed` qualify. Unknown and human authorship,
 `author_type: human`, `pinned`, `archive: never`, configured indexes and read-only
-paths are protected. References from other active cards, care schedules,
-runbooks under `.brigade/runbooks`, `.brigade/memory-care/runbooks`, `runbooks`
-and `docs/runbooks`, and files named with `pin` under `memory` protect a card.
-Archive contents do not protect active cards.
+paths are protected. References from recently used cards, instruction files,
+hook configurations, task and workflow definitions, installed care schedules,
+and runbook definitions protect a card. Files or directories named exactly
+`pin`, `pins` or `pinned` under `memory` also protect their references.
+Matches use card identities, paths and declared compatibility aliases.
+Archive contents, unused card cycles and saved run output do not protect cards.
+Undecodable reference files are skipped.
 
-Read tracking, dated interactive opens, search hits, citation evidence rows,
-outcome rows and hub read dates all count as use. The window starts no earlier
-than read tracking or the card's modification date. Missing history starts a
-new observation window. An unavailable configured hub blocks the pass. Invalid
-use rows stop the pass before transitions. Uninstrumented external reads remain
-outside this observation model.
+Explicit card opens, dated interactive hook opens and card citations backed by
+eligible verification receipts count as use. Search hits and automatic recall
+do not. Future dates are ignored in every source. Receipt citations must pass
+the same current-card binding and scoreability checks used for reflection.
+The window starts no earlier than read tracking or the card's modification date.
+
+Local coverage requires a daily heartbeat throughout the observation window.
+A missed day or recorder error starts a new window. Recording publishes a
+private intent before updating the ledger. A failed write leaves an error
+marker, and an interrupted write leaves a pending intent. Pending intents
+block transitions until the interrupted operation has been investigated.
+Missing or legacy coverage also starts a new observation window.
+An unavailable configured hub blocks the pass. Hub statistics that expose only
+combined search and read dates also block it, because those totals cannot prove
+explicit opens. A compatible hub must supply `last_card_read_day` separately.
+Malformed evidence logs stop the pass before transitions. Uninstrumented
+external reads remain outside this observation model.
 
 Default search excludes archives. Use `brigade memory search TERMS
 --include-archived` for a local search that includes them. This flag uses the
@@ -642,6 +656,6 @@ journal. Restore an archive or roll back a stale transition with one command:
 brigade memory care undo DECISION_ID --target .
 ```
 
-Restoration verifies saved hashes, preserves the original card bytes and records
-a fresh read so the next pass gives the restored card a new use window.
+Restoration verifies saved hashes and preserves the original card bytes. Both
+restoration and undoing a stale transition record a fresh read for a new use window.
 This unused-card policy revises the earlier expiry-only retirement rule above.

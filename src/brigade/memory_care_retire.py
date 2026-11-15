@@ -27,33 +27,55 @@ class Candidate:
 
 
 def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *, today: date) -> dict[str, Any]:
-    from .memory_lifecycle import _references, _mentioned
+    from .memory_lifecycle import _references, _mentioned, _keys, _last_use, _signals, policy
+    from . import memory_review
 
-    cards = {
-        p.relative_to(target).as_posix(): p.read_text(encoding="utf-8") for p in memory_cmd._iter_cards(target, config)
-    }
-    references = _references(target, cards)
+    cards = {}
+    for path in memory_cmd._iter_cards(target, config):
+        try:
+            cards[path.relative_to(target).as_posix()] = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
     ledger = memory_card_reads.load(target)
     hub_reads = memory_card_reads.hub_last_reads(target, unused_after_days=tend.unused_after_days)
+    signals, opens = _signals(target, cards, today=today), memory_review._opens(target)
+    stale_after_days = policy(target)["stale_after_days"]
+    references = _references(
+        target,
+        {
+            rel: text
+            for rel, text in cards.items()
+            if (today - _last_use(target, rel, text, ledger, signals, opens, hub_reads or {}, today=today)).days
+            < stale_after_days
+        },
+    )
     candidates = []
     skipped = {"ledger_too_young": 0, "exempt": 0, "read_recently": 0}
-    for path in memory_cmd._iter_cards(target, config):
-        rel = path.relative_to(target).as_posix()
-        text = path.read_text(encoding="utf-8")
+    for rel, text in cards.items():
+        path = target / rel
         fm, _ = memory_cmd._parse_frontmatter(text)
         identity = memory_cmd.card_identity_from_text(text, rel)
         if (
             memory_cmd._is_read_only(config, rel)
             or memory_archive.frontmatter_refusal(text)
             or fm.get("pinned")
-            or fm.get("author_type") == "human"
-            or fm.get("author") == "human"
-            or str(fm.get("trust", "")).startswith("human")
-            or any(other != rel and _mentioned(body, rel, identity) for other, body in references.items())
+            or str(fm.get("author_type", "")).lower() == "human"
+            or str(fm.get("author", "")).lower() == "human"
+            or str(fm.get("trust", "")).lower().startswith("human")
+            or any(
+                other != rel
+                and _mentioned(
+                    body,
+                    rel,
+                    identity if fm.get("id") or fm.get("card_id") else "",
+                    tuple(k for k in _keys(text, rel) if k != path.stem),
+                )
+                for other, body in references.items()
+            )
         ):
             skipped["exempt"] += 1
             continue
-        if (today - ledger.tracking_since).days < tend.unused_after_days:
+        if not memory_card_reads.covered(ledger, today=today, days=tend.unused_after_days):
             skipped["ledger_too_young"] += 1
             continue
         if hub_reads is None:
@@ -67,8 +89,8 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
             filter(
                 None,
                 [
-                    memory_card_reads.last_read(ledger, (card_id, rel, published)),
-                    hub_reads.get(published),
+                    memory_card_reads.last_read(ledger, _keys(text, rel), today=today),
+                    hub_reads.get(published) if hub_reads.get(published, today) <= today else None,
                 ],
             ),
             default=None,

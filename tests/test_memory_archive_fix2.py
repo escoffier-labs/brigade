@@ -132,6 +132,9 @@ def test_cap_counts_success_and_plan_shares_pin_check(tmp_path):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"---\nexpires: 2000-01-01\n{extra}---\nended")
     reads.record(tmp_path, [], today=date(2000, 1, 1))
+    from tests.test_memory_lifecycle_security import cover
+
+    cover(tmp_path, end=date.today())
     cfg = memory_cmd.MemoryCareConfig()
     tc = tend.TendConfig(max_archives_per_run=1)
     assert retire.plan(tmp_path, cfg, tc, today=date.today())["candidate_count"] == 2
@@ -166,6 +169,9 @@ def test_hub_days_use_validated_client_response(tmp_path, monkeypatch, capsys):
     assert "hub read stats unavailable, retiring nothing on use grounds" in capsys.readouterr().err
     setup_card(tmp_path, b"---\ncard_id: old\nexpires_at: 2000-01-01\n---\nEnded\n")
     reads.record(tmp_path, [], today=date(2000, 1, 1))
+    from tests.test_memory_lifecycle_security import cover
+
+    cover(tmp_path, end=date.today())
     planned = retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=date.today())
     assert planned["candidates"] == []
     assert planned["skipped"]["hub_reads_unavailable"] == 1

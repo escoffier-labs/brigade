@@ -1743,11 +1743,6 @@ def _record_search_log(
     ts: str | None = None,
 ) -> None:
     """Append one search event; fail-open so logging never breaks search."""
-    from .memory_card_reads import record
-
-    # The read ledger counts every returned card, whatever the search log caps or skips.
-    shown = [m for m in matches if isinstance(m, dict)] if isinstance(matches, list) else []
-    record(target, _search_log_card_ids(shown, top_k=len(shown)) + _search_log_aliases(shown, top_k=len(shown)))
     if not _should_log_search(query):
         return
     entry = {
@@ -1833,6 +1828,18 @@ def search_card_fields(
                 for p in sorted(root.rglob("*.md"))
                 if not p.is_symlink()
                 and (keep is None or keep(p))
+                and (
+                    not config.include_paths
+                    or _path_matches("memory/" + p.relative_to(root).as_posix(), config.include_paths)
+                    or _path_matches(p.relative_to(target).as_posix(), config.include_paths)
+                )
+                and (
+                    not config.exclude_paths
+                    or not (
+                        _path_matches("memory/" + p.relative_to(root).as_posix(), config.exclude_paths)
+                        or _path_matches(p.relative_to(target).as_posix(), config.exclude_paths)
+                    )
+                )
                 and safe_path(target, p.relative_to(target).as_posix()).is_file()
             )
     return [fields for path in paths if (fields := _card_search_fields(path, target))]
@@ -1870,6 +1877,9 @@ def search(
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
+    if include_archived:
+        payload["search_scope"] = "local-only"
+        print("memory search: --include-archived uses local-only search", file=sys.stderr)
     # Side-effect only on the CLI path so search_cards_payload (and the
     # retrieval eval harness that calls it) stay pure.
     _record_search_log(target, query=query, matches=payload.get("matches") or [])
