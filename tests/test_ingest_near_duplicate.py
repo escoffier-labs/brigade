@@ -290,6 +290,36 @@ def test_archive_failure_after_merge_takes_back_the_pointer(tmp_target: Path, mo
     assert not (inbox / "copy-b.md").exists()
 
 
+def test_archive_failure_for_the_first_proposal_offers_no_draft_to_merge_into(tmp_target: Path, monkeypatch):
+    inbox = seed(tmp_target)
+    existing = tmp_target / "memory/cards/original.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(card(BODY))
+    handoff(inbox, "copy-a", BODY + " extra")
+    handoff(inbox, "copy-b", BODY + " extra")
+    archive = ingest._archive
+
+    def unavailable(src, processed_dir, expected_sha=None):
+        if src.name == "copy-a.md":
+            raise OSError("fixture archive failed")
+        return archive(src, processed_dir, expected_sha)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest, "_archive", unavailable)
+        assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    assert (inbox / "copy-a.md").exists() and not (inbox / "copy-b.md").exists()
+    drafts = [draft.read_text() for draft in (tmp_target / drain.INBOX_REL).glob("*.md")]
+    assert len(drafts) == 1
+    assert "copy-b.md" in drafts[0] and "merged handoff:" not in drafts[0]
+
+    assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    drafts = [draft.read_text() for draft in (tmp_target / drain.INBOX_REL).glob("*.md")]
+    assert len(drafts) == 2
+    assert sum("copy-a.md" in text for text in drafts) == 1
+    assert sum("copy-b.md" in text for text in drafts) == 1
+    assert not (inbox / "copy-a.md").exists()
+
+
 @pytest.mark.parametrize("threshold", [-0.1, 1.1])
 def test_invalid_reflect_threshold_routes_create_card_for_review(tmp_target: Path, threshold: float):
     inbox = seed(tmp_target)

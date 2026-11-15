@@ -1208,19 +1208,23 @@ def _execute(
                 )
                 if merged is not None:
                     dest, merged_before = merged
+            new_draft = dest is None
             if dest is None:
                 dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
-                if can_merge and pending is not None:
-                    assert outcome.match is not None
-                    pending.append(ingest_near_duplicate.Pending(content, dest, outcome.match.path, outcome.code))
             try:
                 log_match(target, outcome.match, dest)
                 _archive(handoff_path, processed_dir, snapshot_sha)
             except OSError:
-                # The handoff stays pending, so take back its pointer. The next run gives it a draft of its own.
+                # The handoff stays pending, so take back what this attempt wrote. The next run writes it again.
                 if merged_before is not None:
                     write_text_nofollow_atomic(dest, merged_before.decode("utf-8"))
+                elif new_draft:
+                    dest.unlink(missing_ok=True)
                 raise
+            # Offer the draft to later handoffs only once its own handoff is archived.
+            if new_draft and can_merge and pending is not None:
+                assert outcome.match is not None
+                pending.append(ingest_near_duplicate.Pending(content, dest, outcome.match.path, outcome.code))
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)
 
