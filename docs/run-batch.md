@@ -25,6 +25,9 @@ non-empty `text` and a `seat`. It is fingerprinted and displayed as requested,
 but never executed. No synthesis budget, receipt, or launch is created yet.
 Only the documented fields are accepted. Each task requires `task_id`, `text`,
 and `seat`. `depends_on` defaults to an empty list of unique task IDs.
+Selecting a task by admitted capability instead of a named seat, which #2047
+also allows, is not part of v1. It needs the admission wiring that execution
+will add.
 
 The batch admits 1 through 8 tasks, matching the existing durable assignment
 batch bound. Each task or synthesis text is limited to 16,384 UTF-8 bytes.
