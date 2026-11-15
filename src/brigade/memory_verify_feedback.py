@@ -131,6 +131,7 @@ def retain_case(target: Path, proposal_id: str, decision: str, shown: dict[str, 
     excludes hub-recorded automatic decisions, preventing automatic corrections
     from grading themselves.
     """
+    from . import memory_verify_contract as contract
     from . import memory_verify_eval as evaluation, memory_verify_gate as gate
     from . import memory_verify_packets as packets, memory_verify_show as show
 
@@ -166,5 +167,7 @@ def retain_case(target: Path, proposal_id: str, decision: str, shown: dict[str, 
             return  # One case alone exceeds what every feedback reader accepts.
         with io.directory((target / gate.FEEDBACK).parent, create=True, private=True) as fd:
             packets.atomic_write(fd, gate.FEEDBACK.name, payload)
-    except (OSError, ValueError, KeyError, TypeError):
-        return  # Packet retention or legacy data can make a label unavailable.
+    except (OSError, ValueError, KeyError, TypeError, contract.Abstain):
+        # Packet retention, legacy data or a case that cannot be replayed on its
+        # own makes a label unavailable. Never let it stop the verification run.
+        return

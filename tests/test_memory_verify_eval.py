@@ -524,3 +524,16 @@ def test_feedback_is_bounded_by_serialized_size():
     assert json.loads(payload)["counts"]["correct"]["accepted"] == len(kept)
     assert feedback.bounded_feedback([case(0, 5000)], 4500) is None
     assert feedback.MAX_FEEDBACK_BYTES <= feedback.io.MAX_INPUT_BYTES
+
+
+def test_unreplayable_feedback_case_does_not_stop_runs(tmp_path, monkeypatch):
+    from brigade import memory_verify_contract as contract
+    from brigade import memory_verify_feedback as feedback
+    from brigade import memory_verify_show as show
+
+    def abstain(*_args, **_kwargs):
+        raise contract.Abstain("verify_card_invalid")
+
+    monkeypatch.setattr(show, "_local", abstain)
+    feedback.retain_case(tmp_path, "proposal-1", "applied", {"verifier_manifests": []})
+    assert not (tmp_path / gate.FEEDBACK).exists()
