@@ -703,7 +703,16 @@ fn run(
     match &p.action {
         Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
         Action::AutoApplySwitch(enabled, release) => {
-            tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
+            if release.is_none() {
+                tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
+            }
+            let enabled = tx
+                .query(
+                    "SELECT value FROM memory_meta WHERE key='auto_apply_enabled'",
+                    &[],
+                )?
+                .first()
+                .is_none_or(|r| s(&r[0]) == "true");
             if let Some((scope, op)) = release {
                 tx.execute(
                     "DELETE FROM memory_meta WHERE key=?1",

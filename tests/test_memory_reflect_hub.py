@@ -923,7 +923,7 @@ def test_compensation_watch_preserves_explicit_policy_window():
 
 
 @pytest.mark.parametrize("json_output", [False, True])
-@pytest.mark.parametrize("state", ["held", "stale"])
+@pytest.mark.parametrize("state", ["held", "stale", "pending"])
 def test_rollback_failure_reports_failed_without_missing_proposal(setup, capsys, monkeypatch, json_output, state):
     target, hub, _ = setup
     monkeypatch.setattr(
@@ -934,7 +934,8 @@ def test_rollback_failure_reports_failed_without_missing_proposal(setup, capsys,
             {
                 "state": state,
                 "reason": "scan_failed",
-                **({"proposal_id": hubc.event_id()} if state == "stale" else {"result": "failed"}),
+                "compensation_result": "failed",
+                **({"proposal_id": hubc.event_id()} if state in {"stale", "pending"} else {"result": "failed"}),
             },
         ),
     )

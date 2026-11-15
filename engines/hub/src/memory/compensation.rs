@@ -485,7 +485,7 @@ pub fn watch(
     };
     tx.execute("DELETE FROM memory_meta WHERE (key LIKE 'compensation_watch:%' OR key LIKE 'compensation_retrieval:%') AND substr(key,instr(key,':')+1) IN (SELECT proposal_id FROM memory_proposals WHERE terminal_ms<?1 OR compacted=1)", &[Value::Integer(p.now_ms.saturating_sub(604_800_000))])?;
     let after = string(request, "after");
-    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result')='applied') ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(after),t(scope)])?;
+    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result') IN ('applied','stale')) ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(after),t(scope)])?;
     let mut results = Vec::new();
     for row in rows.iter().take(32) {
         let id = s(&row[0]);
@@ -530,6 +530,14 @@ pub fn watch(
         }) {
             continue;
         }
+        // A changed signal must not multiply referrals awaiting human review.
+        // A second independent verifier may still upgrade the trip to automatic.
+        if trip["review_required"] == true && !tx.query(
+            "SELECT proposal_id FROM memory_proposals WHERE state='pending' AND json_extract(body,'$.rollback_of')=?1 LIMIT 1",
+            &[t(&id)],
+        )?.is_empty() {
+            continue;
+        }
         body["watch_trip"] = trip.clone();
         let mut result = proposals::compensate(tx, p, &body, a, scanner)?;
         result.body["rollback_of"] = json!(id);
@@ -541,8 +549,18 @@ pub fn watch(
         } else {
             "failed"
         };
-        if outcome != "failed" {
-            tx.execute("INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &[t(&journal_key),t(&json!({"trip":trip,"result":outcome}).to_string())])?;
+        let permanent = matches!(
+            string(&result.body, "reason"),
+            "memory_epoch_changed"
+                | "card_missing"
+                | "memory_base_mismatch"
+                | "pinned_content_changed"
+                | "pinned_block_changed"
+                | "compensation_not_exact"
+        );
+        if outcome != "failed" || permanent {
+            let journal_result = if permanent { "stale" } else { outcome };
+            tx.execute("INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &[t(&journal_key),t(&json!({"trip":trip,"result":journal_result}).to_string())])?;
         } else {
             // A refusal must leave both verifier and retrieval signals retryable.
             tx.execute("DELETE FROM memory_meta WHERE key=?1", &[t(&cursor_key)])?;
@@ -553,7 +571,7 @@ pub fn watch(
                 )?;
             }
         }
-        results.push(json!({"rollback_of":id,"proposal_id":result.body["proposal_id"],"trigger":trip["trigger"],"result":if result.body["state"]=="applied" {"applied"} else if trip["review_required"]==true && result.body["state"]=="pending" {"review_required"} else {"failed"},"reason":result.body["reason"]}));
+        results.push(json!({"rollback_of":id,"proposal_id":result.body["proposal_id"],"trigger":trip["trigger"],"result":outcome,"reason":result.body["reason"]}));
     }
     Ok(Reply::new(
         200,

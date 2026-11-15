@@ -365,6 +365,7 @@ async fn compensation_failed_scan_keeps_all_cards_identical_and_records_failed()
     h.open(Arc::new(Fixed(Scan::Failed)), None);
     let result = compensate(&h, &id, ADMIN_TOKEN).await;
     assert_ne!(result.body["state"], "applied", "{result:?}");
+    assert_eq!(result.body["compensation_result"], "failed");
     assert_eq!(attestation_tests::bytes_snapshot(&h), before);
     let db = Connection::open(h.memory()).unwrap();
     let count:i64=db.query_row("SELECT count(*) FROM memory_events WHERE json_extract(payload,'$.compensation_result')='failed'",[],|r|r.get(0)).unwrap();
@@ -579,6 +580,11 @@ async fn compensation_release_can_keep_kill_switch_off() {
         compensate(&h, &id, ADMIN_TOKEN).await.body["state"],
         "applied"
     );
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
+    )
+    .await;
     let result = h.call(ADMIN_TOKEN, json!({"action":"auto_apply_switch","enabled":false,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()})).await;
     assert_eq!(result.status, 200, "{result:?}");
     let db = rusqlite::Connection::open(h.memory()).unwrap();
@@ -668,7 +674,16 @@ async fn compensation_evidence_appends_do_not_hide_human_edit_and_revert() {
     assert_eq!(watch(&h).await.body["results"][0]["result"], "failed");
     assert_eq!(attestation_tests::bytes_snapshot(&h), before);
     let db = rusqlite::Connection::open(h.memory()).unwrap();
-    assert_eq!(db.query_row("SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_watch:%' OR key LIKE 'compensation_hold:%'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(db.query_row("SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_watch:%' AND json_extract(value,'$.result')='stale'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_hold:%'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -718,4 +733,119 @@ async fn compensation_watch_discovers_attested_failure_without_client_ids() {
     verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
     verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
     assert_eq!(watch(&h).await.body["results"][0]["result"], "applied");
+}
+
+#[tokio::test]
+async fn compensation_stale_watch_is_final_after_one_attempt() {
+    let (h, id, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
+    let c = card(&h, "fleet", "a").await;
+    h.put(
+        ADMIN_TOKEN,
+        "fleet",
+        "a",
+        c["revision"].as_i64(),
+        "Human correction. ^c-abcdef",
+    )
+    .await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "failed");
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let proposals: i64 = db
+        .query_row(
+            "SELECT count(*) FROM memory_proposals WHERE json_extract(body,'$.rollback_of')=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let events: i64 = db.query_row("SELECT count(*) FROM memory_events WHERE kind='proposal.decide' AND json_extract(payload,'$.rollback_of')=?1", [id.as_str().unwrap()], |r| r.get(0)).unwrap();
+    assert_eq!(proposals, 1);
+    assert_eq!(events, 1);
+}
+
+#[tokio::test]
+async fn compensation_watch_scan_refusal_retries_after_scanner_recovers() {
+    let (mut h, _, before) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
+    h.store.take();
+    struct RefuseInverse(String);
+    impl Scanner for RefuseInverse {
+        fn scan(&self, text: &str) -> Scan {
+            if text == self.0 {
+                Scan::Failed
+            } else {
+                Scan::Clean {
+                    ruleset: "test-v1".into(),
+                }
+            }
+        }
+        fn describe(&self) -> (bool, Option<String>) {
+            (true, Some("test-v1".into()))
+        }
+    }
+    h.open(Arc::new(RefuseInverse(before.clone())), None);
+    let refused = watch(&h).await;
+    assert_eq!(
+        refused.body["results"][0]["result"], "failed",
+        "{refused:?}"
+    );
+    assert_eq!(refused.body["results"][0]["reason"], "scan_not_clean");
+    h.store.take();
+    h.open(
+        Arc::new(Fixed(Scan::Clean {
+            ruleset: "test-v1".into(),
+        })),
+        None,
+    );
+    let retried = watch(&h).await;
+    assert_eq!(
+        retried.body["results"][0]["result"], "applied",
+        "{retried:?}"
+    );
+    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+}
+
+#[tokio::test]
+async fn compensation_watch_deduplicates_changed_review_trips() {
+    let (h, id, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
+    assert_eq!(
+        watch(&h).await.body["results"][0]["result"],
+        "review_required"
+    );
+    verifier_signal(&h, AGENT_TOKEN, "another", "active", false, "").await;
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let pending: i64 = db.query_row("SELECT count(*) FROM memory_proposals WHERE state='pending' AND json_extract(body,'$.rollback_of')=?1", [id.as_str().unwrap()], |r| r.get(0)).unwrap();
+    assert_eq!(pending, 1);
+    drop(db);
+    verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "applied");
+}
+
+#[tokio::test]
+async fn compensation_release_leaves_enabled_switch_unchanged() {
+    let (h, id, _) = applied().await;
+    assert_eq!(
+        compensate(&h, &id, ADMIN_TOKEN).await.body["state"],
+        "applied"
+    );
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
+    )
+    .await;
+    let result = h.call(ADMIN_TOKEN, json!({"action":"auto_apply_switch","enabled":false,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()})).await;
+    assert_eq!(result.body["auto_apply_enabled"], true);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let enabled: String = db
+        .query_row(
+            "SELECT value FROM memory_meta WHERE key='auto_apply_enabled'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(enabled, "true");
 }
