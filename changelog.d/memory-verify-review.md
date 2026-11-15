@@ -1,0 +1,2 @@
+- Add `memory verify show` to check the proposal's manifest and packet hashes before showing evidence quotes and current file status.
+- Record review decisions by verdict and suppress rejected corrections until the card revision or evidence changes.
