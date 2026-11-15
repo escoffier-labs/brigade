@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from brigade import memory_compensation_watch as watch
 from brigade.memory_proposal_io import sha256
 from tests.test_memory_negative_outcomes import failed_card as failed_card
 from tests.test_memory_outcome_evidence import capture
+
+pytestmark = pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 
 
 @pytest.mark.parametrize("drift", [None, "card", "scope", "receipt"])

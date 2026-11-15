@@ -1057,10 +1057,11 @@ pub fn run(
                 "a verifier proposal is Tier 2 and requires a reviewed decision",
             ));
         }
-        if !body["rollback_of"].is_null()
-            && !(super::compensation::actor(&body, &p.credential, authority)
-                && super::compensation::exact(tx, &body)?)
-        {
+        let is_compensation = !body["rollback_of"].is_null();
+        let automatic_compensation = is_compensation
+            && super::compensation::actor(&body, &p.credential, authority)
+            && super::compensation::exact(tx, &body)?;
+        if is_compensation && !automatic_compensation {
             if body["ops"].as_array().is_none_or(|ops| !ops.is_empty()) {
                 return Ok(error(
                     409,
