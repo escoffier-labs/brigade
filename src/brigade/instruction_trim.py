@@ -23,7 +23,7 @@ from .instruction_sections import (
     POINTER_LINE,
     SectionDocument,
     Unit,
-    _link_definition_referenced,
+    link_definition_referenced,
     heading_lines,
     html_balanced,
     managed_blocks,
@@ -514,7 +514,7 @@ def check(
         # No run may carry one tag of an HTML pair away from the other, whatever the parse says.
         structure_ok = structure_ok and all(
             html_balanced(before[run.start : run.end])
-            and not _link_definition_referenced(before[run.start : run.end], after)
+            and not link_definition_referenced(before[run.start : run.end], after)
             for run in plan.runs
         )
     if not structure_ok:

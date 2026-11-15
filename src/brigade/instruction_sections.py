@@ -363,7 +363,9 @@ def parse(data: bytes) -> SectionDocument:
             blocked = "pointer"
         elif not html_balanced(data[start:end]):
             blocked = "html-block"  # it holds one tag of an HTML pair: moving it would split the pair
-        elif _link_definition_referenced(data[start:end], data[:start] + data[end:]):
+        elif (labels := definition_labels(data[start:end])) and link_definition_referenced(
+            data[start:end], data[:start] + data[end:], labels
+        ):
             blocked = "link-definition"
         body = [line for line in span[1:] if line.text.strip() and _pin_of(line) is None]
         links = bool(body) and 2 * sum(1 for line in body if _LINK_LINE.search(line.text)) > len(body)
@@ -458,17 +460,27 @@ def managed_blocks(data: bytes) -> tuple[bytes, ...]:
     return tuple(blocks)
 
 
-_LINK_DEFINITION = re.compile(rb"^ {0,3}\[([^]\r\n]+)\]:[^\r\n]+", re.MULTILINE)
-_LINK_LABEL = re.compile(rb"\[([^]\r\n]+)\]")
+# The destination may sit on the next line (`[label]:` then an indented URL), so nothing is required after `:`.
+_LINK_DEFINITION = re.compile(rb"^ {0,3}\[([^][\r\n]+)\]:[^\r\n]*", re.MULTILINE)
+# The innermost label, so `[see [deploy]]` yields `deploy`. A label may wrap across lines.
+_LINK_LABEL = re.compile(rb"\[([^][]{1,999})\]")
 
 
-def _link_definition_referenced(moved: bytes, kept: bytes) -> bool:
+def _label_key(raw: bytes) -> str:
+    """A link label as CommonMark compares it: case-folded, with runs of whitespace collapsed to one space."""
+    return " ".join(raw.decode("utf-8", errors="replace").split()).casefold()
+
+
+def definition_labels(moved: bytes) -> frozenset[str]:
+    """The labels that `moved` defines as reference-link definitions."""
+    return frozenset(_label_key(m.group(1)) for m in _LINK_DEFINITION.finditer(moved))
+
+
+def link_definition_referenced(moved: bytes, kept: bytes, labels: frozenset[str] | None = None) -> bool:
     """Refuse to separate a definition from any matching bracketed label in raw kept bytes.
 
     Full, collapsed and shortcut references all contain `[label]`. Code, escapes and
     duplicate definitions may cause extra refusals. They cannot authorize a move.
     """
-    labels = {m.group(1).decode("utf-8", errors="replace").casefold() for m in _LINK_DEFINITION.finditer(moved)}
-    return bool(labels) and any(
-        m.group(1).decode("utf-8", errors="replace").casefold() in labels for m in _LINK_LABEL.finditer(kept)
-    )
+    labels = definition_labels(moved) if labels is None else labels
+    return bool(labels) and any(_label_key(m.group(1)) in labels for m in _LINK_LABEL.finditer(kept))

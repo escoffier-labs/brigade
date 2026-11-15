@@ -765,3 +765,18 @@ def test_html_special_opener_line_keeps_comment_text_inert(opener, closer):
     plan = _plan(data)
     assert not plan.runs
     assert check(plan, _cards(plan), config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+@pytest.mark.parametrize(
+    ("definition", "reference"),
+    [
+        (b"[Deploy  Guide]: guide.md\n", b"see [deploy guide]"),  # whitespace collapses before comparing
+        (b"[deploy]:\n  guide.md\n", b"see [deploy]"),  # destination on the next line
+        (b"[deploy]: guide.md\n", b"see [see [deploy]]"),  # the innermost of nested brackets
+        (b"[deploy guide]: guide.md\n", b"see [deploy\nguide]"),  # a label that wraps across lines
+    ],
+)
+def test_reference_labels_match_as_commonmark_compares_them(definition, reference):  # review of #2572
+    data = b"# T\n" + reference + b"\n## Notes\n" + definition + b"word " * 900 + b"\n"
+    assert parse(data).units[0].blocked == "link-definition"
+    assert not _plan(data).runs
