@@ -62,7 +62,7 @@ class VerifyRunError(ValueError):
 
 
 def register(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("verify", help="Check hub cards against local evidence and open reviewed corrections.")
+    parser = sub.add_parser("verify", help="Check hub cards against evidence and apply policy-admitted corrections.")
     commands = parser.add_subparsers(dest="memory_verify_command", required=True)
     status = commands.add_parser("status", help="Show the verify job's pause state and last never-read counts.")
     run = commands.add_parser("run", help="Select cards, check them with both seats and open pinned proposals.")
@@ -72,7 +72,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     show = commands.add_parser("show", help="Authenticate a local review packet and print evidence quotes.")
     show.add_argument("proposal_id")
-    for command in (status, run, doctor, show):
+    evaluate = commands.add_parser("eval", help="Score labeled cards offline with the configured seats.")
+    evaluate.add_argument("--corpus", type=Path, required=True)
+    gate = commands.add_parser("gate", help="Run evaluation and record per-class go/no-go automatically.")
+    for command in (status, run, doctor, show, evaluate, gate):
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     run.add_argument("--dry-run", action="store_true", help="Submit, attach and write nothing, and leave the pause.")
@@ -487,6 +490,27 @@ def dispatch(args: argparse.Namespace) -> int:
             from . import memory_verify_show
 
             payload = memory_verify_show.show_payload(target, args.proposal_id)
+        elif args.memory_verify_command in ("eval", "gate"):
+            from . import memory_verify_gate, memory_verify_eval, memory_verify_run
+
+            settings = configured(target)
+            if not settings.enabled:
+                raise VerifyRunError("verify_disabled", DISABLED_REASON)
+            pair = memory_verify_run.READY(target, settings.propose_seat, settings.confirm_seat)
+            if args.memory_verify_command == "gate":
+                with vstate.locked(target):
+                    hub_settings, client = _hub(target)
+                    status = memory_verify_run._preflight(client, hub_settings)
+                    binding = _binding(client.identity, status["principal"], status["log_epoch"])
+                    payload = memory_verify_gate.run(target, pair=pair, binding=binding, now_ms=int(time.time() * 1000))
+                payload["status"] = "completed"
+            else:
+                cases = memory_verify_eval.read_corpus(args.corpus.absolute())
+                with memory_verify_run.WORK_AREA(target) as area:
+                    calls = memory_verify_run.Calls(area)
+                    payload = memory_verify_eval.evaluate(
+                        cases, propose=calls.seat(pair[0]), confirm=calls.seat(pair[1])
+                    )
         elif args.dry_run and args.no_model:
             payload = run_payload(target=target, dry_run=True, no_model=True, list_ids=args.list_ids)
         elif args.no_model:
@@ -528,6 +552,8 @@ def dispatch(args: argparse.Namespace) -> int:
         from . import memory_verify_show
 
         memory_verify_show.print_review(payload)
+    elif args.memory_verify_command in ("eval", "gate"):
+        print(json.dumps(payload, sort_keys=True, indent=2))
     elif args.memory_verify_command == "status":
         state = payload.get("state", {})
         print(f"paused: {str(state.get('paused')).lower()}  failures: {state.get('consecutive_failures', '-')}")

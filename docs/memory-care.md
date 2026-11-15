@@ -592,3 +592,88 @@ instrument. Hub read counts have budgets and can miss reads. Reads therefore
 only ever protect a card. Missing, incomplete, or too-young read history blocks
 automatic retirement. `memory care archive --from-file` applies an outside
 judgment and does not consult reads.
+
+## Model-backed verification admission
+
+Verify is enabled by default when its workspace and isolated seats are configured.
+Set `[verify] enabled = false` in `.brigade/memory-care.toml` to stop model calls.
+The scheduled `memory-verify` care entry runs evaluation and go/no-go without a
+person. An admitted operation class applies automatically through the hub's
+transactional decision path. A class without a current go record stays
+proposal-only. Failed or invalid runs do not apply corrections.
+
+`brigade memory verify eval --corpus <directory> --target <verify-folder> --json`
+scores labeled cards with the production two-seat contract, without contacting
+the hub or submitting proposals. The directory contains `cases.json` with schema
+`brigade.memory-verify-corpus.v1`. Each case includes an id, anchored card input,
+serialized evidence items with provenance and digests, an expected class and
+expected operation fields. Labels stay outside prompts. Optional `commits` maps
+abbreviations to independently established full commit ids for offline replay.
+The test corpus contains 70 synthetic cases covering incorrect, drifted, confirmed,
+adversarial, shared-source, history and supersede outcomes.
+
+`brigade memory verify gate --target <verify-folder> --json` reads
+`.brigade/memory/verify/eval/cases.json`, adds retained decision-feedback cases,
+runs the harness and writes `.brigade/memory/verify/decision.json`. The scheduled
+run does this automatically when admission is missing, stale or invalidated.
+The report contains precision, recall, true positives, false positives and false
+negatives per class and operation type, repeat agreement and unsafe proposals.
+Operation metrics count emitted operations separately from verdicts. Confirming
+a card without an operation cannot qualify automatic evidence additions.
+A replacement only counts as correct when its expected operation fields match.
+An unsupported history or supersede remains a recall miss, so those classes do
+not receive go records merely because the verifier abstained.
+
+The packaged `fixtures/memory-verify-policy.v1.json` supplies the defaults.
+A complete override belongs at `.brigade/memory/verify/policy.json`:
+
+| Setting | Default |
+| --- | ---: |
+| Precision | 0.9 |
+| Recall | 0.6 |
+| Repeat agreement | 0.9 |
+| Cases per class | 5 |
+| Repeats per evaluation | 3 |
+| Consecutive passing evaluations | 2 |
+| Minimum decided feedback cases per class | 0 |
+| Accept rate when feedback exists | 0.7 |
+| Decision lifetime in days | 7 |
+| Automatic application | true |
+
+A nonzero feedback minimum is optional. The default gate can pass from a labeled
+corpus without waiting for anyone to review live proposals. Healthy-card or
+adversarial correction proposals and invalid model outputs block all classes.
+Shared-source cases exercise the same independence checks as production.
+
+The decision digest binds its metrics and reasons. Its input binding covers the
+exact policy bytes, corpus and feedback bytes, prompt contract, seat fingerprints,
+hub identity, principal, log epoch and verifier implementation digests. A policy edit, changed input, expired record,
+changed seat or invalid digest removes admission immediately. A no-go record names
+the failed bars for every class. Set policy `auto_apply` to false to retain model
+verification and proposals while stopping automatic decisions.
+
+New private review packets retain replayable card and evidence inputs. A subsequent
+external applied or rejected decision supplies a labeled case when its manifest
+and packet hashes match. Legacy packets still supply slice 10's verdict counters
+but cannot supply replay inputs. Automatic decisions are journaled before sending
+and excluded from labels, so the verifier cannot grade its own corrections.
+Feedback retains the latest 128 cases. Text stays in private packets and evaluation
+inputs, never the text-free decision record or run summary.
+
+Automatic application requires a separate non-admin memory principal with `read`
+and `review` on every addressed scope. The hub continues to refuse self-review.
+Configure its private token file in user-level `fleet.toml` under
+`[memory_verify] review_token_file`, or set
+`BRIGADE_MEMORY_VERIFY_REVIEW_TOKEN_FILE` to its absolute path. Workspace policy
+never names credentials. The verifier needs `review` to authenticate its retained
+manifest hash chain. Both principals must address the same hub and epoch.
+Missing credentials or grants keep corrections proposal-only.
+
+Before applying, Brigade rechecks admission, authenticates the manifest and packet,
+checks local evidence freshness and acknowledges the hub policy digest. Existing
+proposal caps, revision checks and cooldowns remain. The private applications
+journal keeps stable request ids for 35 days, up to 4096 entries. A replay uses the
+same id. Application uses `decide accept`, which retains before-state and supports
+`brigade memory reflect rollback <proposal-id>`. That opens a compensating proposal
+under the existing rollback checks. No direct card write or Tier 2 floor bypass is
+introduced. The maintainer soak remains tracked separately by #762.

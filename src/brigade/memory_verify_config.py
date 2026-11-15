@@ -91,7 +91,7 @@ class Workspace:
 
 @dataclass(frozen=True)
 class VerifyConfig:
-    enabled: bool = False
+    enabled: bool = True
     propose_seat: str | None = None
     confirm_seat: str | None = None
     cards_per_run: int = DEFAULT_CARDS_PER_RUN
@@ -296,7 +296,7 @@ def parse(data: dict[str, Any]) -> VerifyConfig:
     unknown = sorted(set(table) - VERIFY_KEYS)
     if unknown:
         raise VerifyConfigError(f"[verify] has unknown keys: {', '.join(unknown)}")
-    enabled = table.get("enabled", False)
+    enabled = table.get("enabled", True)
     if type(enabled) is not bool:
         raise VerifyConfigError("[verify] enabled must be true or false")
     propose, confirm = _seat(table, "propose_seat"), _seat(table, "confirm_seat")
