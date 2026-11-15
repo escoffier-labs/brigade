@@ -60,7 +60,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 5 command path(s)
 - `brigade route`: 1 command path(s)
-- `brigade run`: 47 command path(s)
+- `brigade run`: 48 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 21 command path(s)
 - `brigade scrub`: 1 command path(s)
@@ -636,6 +636,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade route`
 - `brigade run`
 - `brigade run approve`
+- `brigade run batch`
 - `brigade run cloud adopt`
 - `brigade run cloud canary`
 - `brigade run cloud compact`
