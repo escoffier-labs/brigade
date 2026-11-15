@@ -503,3 +503,12 @@ def test_sources_refuse_the_lesson_outbox(tmp_path, inbox):
     path.write_text(_json.dumps({"sources": [{"root": ".brigade", "inboxes": ["lesson-review/outbox"]}]}))
     with pytest.raises(ValueError, match="lesson review outbox"):
         sources._load_sources(tmp_path, path)
+
+
+@pytest.mark.parametrize("session", ["", "   "])
+def test_empty_session_id_records_no_session(scope, session):
+    from brigade import lesson_activity
+
+    lesson_activity.record_event(scope, "PostToolUse", {"session_id": session, "tool_output": "observation"}, now=100)
+    events = lesson_activity.load(scope)["events"]
+    assert events and all("session_id" not in event for event in events)

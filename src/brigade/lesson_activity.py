@@ -141,7 +141,8 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
                 if run_id:
                     metadata["verify_run_id"] = run_id
         session = payload.get("session_id")
-        if isinstance(session, str):
+        # An empty id would hash to a non-empty value and pass the same-session check.
+        if isinstance(session, str) and session.strip():
             metadata["session_id"] = sha256_hex(session.encode())
             metadata["harness_session_fingerprint"] = localio.stable_hash({"claude_session_id": session})
         work_session = io.text(target / ".brigade/work/current", absent=True, limit=4096)
