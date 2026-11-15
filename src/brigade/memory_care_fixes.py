@@ -55,7 +55,8 @@ class UndoneFixIndex:
 
     def decisions(self, rel: str, kind: str) -> list[journal.Decision]:
         if self._error is not None:
-            raise self._error
+            # A fresh traceback each time, so raising once per item does not grow one shared traceback.
+            raise self._error.with_traceback(None)
         return self._entries.get((rel, kind), [])
 
 
@@ -261,6 +262,9 @@ def apply_fixes(
             result.update(skipped=1, reasons={"scan-unreadable": 1})
             return result
     context = plan_context(target, config)
+    # One journal read for the whole apply. Fixes committed in this loop carry no undone_by, so the snapshot
+    # cannot go stale for the undone check.
+    undone_index = UndoneFixIndex(target)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in plan["items"]:
         if item.get("blockers"):
@@ -279,7 +283,9 @@ def apply_fixes(
             for item in items:
                 if not isinstance(item.get("content_digest"), str):
                     raise FixRefused("unbound-plan")
-                prepared.append((item, prepare(target, config, item, today, context=context)))
+                prepared.append(
+                    (item, prepare(target, config, item, today, context=context, undone_index=undone_index))
+                )
             before = prepared[0][1]["before"]
             fields = {k: v for _, p in prepared for k, v in p["candidate_fields"].items()}
             # Insert only: preserve the BOM, every existing byte, and the physical newline style.

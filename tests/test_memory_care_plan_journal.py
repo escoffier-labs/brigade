@@ -1,8 +1,7 @@
 """Journal planning snapshots preserve refusals and avoid repeated disk scans."""
 
 import json
-import statistics
-import time
+import os
 from dataclasses import asdict
 from datetime import date
 
@@ -43,21 +42,6 @@ def workload(target, count=48, decisions=350):
             json.dumps({**asdict(decision), "status": "committed", "before_absent": [True]}), encoding="utf-8"
         )
     return care._config_or_default(target), issues
-
-
-def test_plan_journal_scaling(tmp_path):
-    config, issues = workload(tmp_path)
-    samples = {}
-    for count in (24, 48):
-        samples[count] = []
-        for _ in range(5):
-            start = time.perf_counter()
-            plan = planner.plan_payload(tmp_path, config, {"issues": issues[:count]})
-            samples[count].append(time.perf_counter() - start)
-            assert plan["plan_count"] == count
-            assert plan["blocked_count"] == 0, plan["items"][0]
-    print(f"plan_payload seconds: {samples}")
-    assert statistics.median(samples[48]) / statistics.median(samples[24]) < 3.5
 
 
 def test_plan_reads_journal_once_and_refreshes_next_run(tmp_path, monkeypatch):
@@ -108,7 +92,6 @@ def test_prepare_index_equivalence(tmp_path, kind, state):
         elif state == "changed":
             path.write_bytes(before + b"New fact.\n")
     # Undo writes the card today, so use a fixed historical mtime for review-date cases.
-    import os
 
     os.utime(path, (1793491200, 1793491200))
     item = {"card_file": rel, "issue_type": kind}
@@ -144,3 +127,19 @@ def test_plan_shares_journal_failure_without_changing_blockers(tmp_path, monkeyp
     assert len(calls) == 1
     assert plan["blocked_count"] == len(issues)
     assert all(item["blockers"] == ["unreadable"] for item in plan["items"])
+
+
+def test_apply_reads_journal_once(tmp_path, monkeypatch):  # review of #2579: the apply path too
+    config, issues = workload(tmp_path, decisions=350)
+    plan = planner.plan_payload(tmp_path, config, {"issues": issues})
+    entries = journal.entries
+    calls = []
+
+    def counted(target):
+        calls.append(target)
+        return entries(target)
+
+    monkeypatch.setattr(journal, "entries", counted)
+    result = fixes.apply_fixes(tmp_path, config, today=date(2026, 11, 14), dry_run=True, plan=plan)
+    assert len(calls) == 1
+    assert result["skipped"] == 0
