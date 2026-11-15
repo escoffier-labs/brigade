@@ -35,7 +35,15 @@ def refresh(target: Path, *, routing: instruction_overflow.RouteContext | None =
     from .memory_inbox_io import read
 
     target = target.resolve()
-    routing = routing or instruction_overflow.RouteContext(target)
+    from .instruction_overflow_batch import RouteContext
+
+    # Ingest and drain pass their live routing context. Cache only this read-only report,
+    # retaining its discovered inventory but never sharing card caches with later writes.
+    routing = (
+        RouteContext(target, home=routing.home, environ=routing.environ, _loaded=routing._loaded)
+        if routing is not None
+        else RouteContext(target)
+    )
     counts: Counter[str] = Counter()
     problems: dict[str, str] = {}
     try:
