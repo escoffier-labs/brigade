@@ -1,7 +1,9 @@
 {
   "id": "daily-care-pass",
   "description": "Daily memory-care scan and inbox import. Run from the repo or workspace root: brigade runbook run --approved .brigade/memory-care/runbooks/daily-care-pass.json",
-  "allowed_commands": ["brigade"],
+  "allowed_commands": [
+    "brigade"
+  ],
   "steps": [
     {
       "id": "scan",
@@ -10,6 +12,10 @@
     {
       "id": "import-issues",
       "run": "brigade memory care import-issues --target ."
+    },
+    {
+      "id": "unused-cards",
+      "run": "brigade memory care tend --stage lifecycle --target ."
     }
   ]
 }

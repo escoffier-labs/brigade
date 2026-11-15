@@ -592,3 +592,56 @@ instrument. Hub read counts have budgets and can miss reads. Reads therefore
 only ever protect a card. Missing, incomplete, or too-young read history blocks
 automatic retirement. `memory care archive --from-file` applies an outside
 judgment and does not consult reads.
+
+## Unused agent cards (#2603)
+
+The daily scheduled care runbook runs `memory care tend --stage lifecycle`.
+The pass marks an unused agent card stale after 30 days and moves it to
+`memory/archive/` after 90 days. It never deletes a card. A first pass beyond
+the archive window records both transitions. A recent read returns a stale
+card to active. Stale cards remain searchable.
+
+The policy lives in `[lifecycle]` in `.brigade/memory-care.toml`. Its shipped
+defaults are in `templates/memory/lifecycle-policy.json`:
+
+```toml
+[lifecycle]
+enabled = true
+stale_after_days = 30
+archive_after_days = 90
+max_transitions_per_run = 20
+```
+
+Set `enabled = false` to disable this pass. `[tend] enabled = false` disables
+all tending. Preview with `memory care tend --stage lifecycle --dry-run --json`.
+Install scheduled care with `brigade care install`. Existing runbooks retain
+local edits, so add the lifecycle command to an existing daily runbook when
+upgrading.
+
+Only cards marked `trust: agent-unreviewed` qualify. Unknown and human authorship,
+`author_type: human`, `pinned`, `archive: never`, configured indexes and read-only
+paths are protected. References from other active cards, care schedules,
+runbooks under `.brigade/runbooks`, `.brigade/memory-care/runbooks`, `runbooks`
+and `docs/runbooks`, and files named with `pin` under `memory` protect a card.
+Archive contents do not protect active cards.
+
+Read tracking, dated interactive opens, search hits, citation evidence rows,
+outcome rows and hub read dates all count as use. The window starts no earlier
+than read tracking or the card's modification date. Missing history starts a
+new observation window. An unavailable configured hub blocks the pass. Invalid
+use rows stop the pass before transitions. Uninstrumented external reads remain
+outside this observation model.
+
+Default search excludes archives. Use `brigade memory search TERMS
+--include-archived` for a local search that includes them. This flag uses the
+local corpus even when hub search is configured. Every state transition stores
+the policy actor, policy digest and last-use date in the memory-care decision
+journal. Restore an archive or roll back a stale transition with one command:
+
+```bash
+brigade memory care undo DECISION_ID --target .
+```
+
+Restoration verifies saved hashes, preserves the original card bytes and records
+a fresh read so the next pass gives the restored card a new use window.
+This unused-card policy revises the earlier expiry-only retirement rule above.

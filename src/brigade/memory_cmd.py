@@ -1813,12 +1813,28 @@ def card_fields_from_text(text: str, rel: str, *, stem: str) -> dict[str, Any]:
 
 
 def search_card_fields(
-    target: Path, config: MemoryCareConfig | None = None, *, keep: Callable[[Path], bool] | None = None
+    target: Path,
+    config: MemoryCareConfig | None = None,
+    *,
+    keep: Callable[[Path], bool] | None = None,
+    include_archived: bool = False,
 ) -> list[dict[str, Any]]:
     """Searchable fields for every card under a resolved ``target``; ``keep`` filters paths before any read."""
     if config is None:
         config = load_config(target) or MemoryCareConfig()
     paths = [path for path in _iter_cards(target, config) if keep is None or keep(path)]
+    if include_archived:
+        from .memory_care_journal import safe_path
+
+        root = safe_path(target, "memory/archive")
+        if root.is_dir():
+            paths.extend(
+                p
+                for p in sorted(root.rglob("*.md"))
+                if not p.is_symlink()
+                and (keep is None or keep(p))
+                and safe_path(target, p.relative_to(target).as_posix()).is_file()
+            )
     return [fields for path in paths if (fields := _card_search_fields(path, target))]
 
 
@@ -1829,12 +1845,12 @@ def card_search_match(fields: dict[str, Any], score: float) -> dict[str, Any]:
 
 
 def search_cards_payload(
-    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None
+    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None, include_archived: bool = False
 ) -> dict[str, Any]:
     target = target.expanduser().resolve()
     # BM25 over one field per card, rebuilt per call (no cache, no index file).
     # Scores are floats rounded to 4 decimals; ties break by path.
-    cards = search_card_fields(target, config)
+    cards = search_card_fields(target, config, include_archived=include_archived)
     ranked = memory_bm25.rank([memory_bm25.card_text(fields) for fields in cards], query)
     matches = [card_search_match(cards[index], score) for index, score in ranked]
     matches.sort(key=lambda item: (-item["score"], item["path"]))
@@ -1846,9 +1862,11 @@ def search_cards_payload(
     }
 
 
-def search(*, target: Path, query: str, limit: int = 20, json_output: bool = False) -> int:
+def search(
+    *, target: Path, query: str, limit: int = 20, json_output: bool = False, include_archived: bool = False
+) -> int:
     try:
-        payload = search_cards_payload(target, query, limit=limit)
+        payload = search_cards_payload(target, query, limit=limit, include_archived=include_archived)
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2

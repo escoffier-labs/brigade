@@ -14,7 +14,7 @@ from typing import Any, Sequence
 from . import memory_archive, memory_care_hub, memory_care_journal as journal, memory_care_retire, memory_cmd
 from . import memory_hub_store as store
 
-STAGES = ("hub", "fixes", "retire", "inbox", "instructions")
+STAGES = ("hub", "fixes", "lifecycle", "retire", "inbox", "instructions")
 STATE_REL = ".brigade/memory-care/tend/latest.json"
 
 
@@ -66,6 +66,10 @@ def run(
             payload["stages"][stage] = apply_fixes(
                 target, memory_cmd._config_or_default(target), today=today or memory_cmd._today(), dry_run=dry_run
             )
+        elif stage == "lifecycle":
+            from . import memory_lifecycle
+
+            payload["stages"][stage] = memory_lifecycle.run(target, today=today or memory_cmd._today(), dry_run=dry_run)
         elif stage == "inbox":
             from .memory_inbox_drain import drain
 

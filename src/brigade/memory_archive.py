@@ -66,7 +66,16 @@ def frontmatter_refusal(text: str) -> str | None:
 
 
 @journal.serialized
-def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd.MemoryCareConfig) -> journal.Decision:
+def archive_card(
+    target: Path,
+    card_rel: str,
+    *,
+    reason: str,
+    config: memory_cmd.MemoryCareConfig,
+    policy_metadata: dict[str, Any] | None = None,
+    state_change: journal.Change | None = None,
+    expected_before: bytes | None = None,
+) -> journal.Decision:
     try:
         if PurePosixPath(card_rel).as_posix() != card_rel or "." in card_rel.split("/") or "//" in card_rel:
             raise ArchiveRefused(f"{card_rel}: non-canonical path")
@@ -80,6 +89,8 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
         before = journal.current(target, card_rel)
         if before is None:
             raise ArchiveRefused(f"{card_rel}: missing card")
+        if expected_before is not None and before != expected_before:
+            raise ArchiveRefused(f"{card_rel}: changed since lifecycle planning")
         text = before.decode("utf-8")
         refusal = frontmatter_refusal(text)
         if refusal:
@@ -92,6 +103,8 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
             journal.Change(dest, None, before, journal.safe_path(target, card_rel).stat().st_mode & 0o777),
             journal.Change(card_rel, before, None),
         ]
+        if state_change is not None:
+            changes.append(state_change)
         index_lines: list[dict[str, Any]] = []
         index_warnings: list[dict[str, Any]] = []
         for index in config.index_paths:
@@ -130,6 +143,8 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
             hub={"status": "pending", "action": "retire", "path": card_rel},
             prepared_paths=[dest],
             metadata={
+                **(policy_metadata or {}),
+                "state_paths": [state_change.path] if state_change else [],
                 "index_paths": sorted({row["path"] for row in index_lines}),
                 "index_lines": index_lines,
                 "index_warnings": index_warnings,
@@ -181,7 +196,7 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
                 raise ArchiveRefused(f"{path}: changed after archive")
             before = journal.before_bytes(target, d, path)
             changes.append(journal.Change(path, live, before, metadata.get("modes", {}).get(path)))
-            if before is not None:
+            if before is not None and path not in metadata.get("state_paths", []):
                 card_rel, original = path, before
         config = memory_cmd._config_or_default(target)
         for index in sorted(indices):
@@ -228,6 +243,9 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
         )
         if journal._payload(target, undo.decision_id).get("phase") == "abandoned":
             return journal.update_hub(target, undo.decision_id, {"status": "skipped", "reason": "undo abandoned"})
+        from .memory_card_reads import record_content
+
+        record_content(target, original.decode("utf-8"), card_rel)
         withheld = memory_hub_sync.withheld(original.decode("utf-8"))
         if withheld:
             return journal.update_hub(target, undo.decision_id, {"status": "skipped", "reason": withheld})

@@ -27,6 +27,12 @@ class Candidate:
 
 
 def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *, today: date) -> dict[str, Any]:
+    from .memory_lifecycle import _references, _mentioned
+
+    cards = {
+        p.relative_to(target).as_posix(): p.read_text(encoding="utf-8") for p in memory_cmd._iter_cards(target, config)
+    }
+    references = _references(target, cards)
     ledger = memory_card_reads.load(target)
     hub_reads = memory_card_reads.hub_last_reads(target, unused_after_days=tend.unused_after_days)
     candidates = []
@@ -35,7 +41,16 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
         rel = path.relative_to(target).as_posix()
         text = path.read_text(encoding="utf-8")
         fm, _ = memory_cmd._parse_frontmatter(text)
-        if memory_cmd._is_read_only(config, rel) or memory_archive.frontmatter_refusal(text):
+        identity = memory_cmd.card_identity_from_text(text, rel)
+        if (
+            memory_cmd._is_read_only(config, rel)
+            or memory_archive.frontmatter_refusal(text)
+            or fm.get("pinned")
+            or fm.get("author_type") == "human"
+            or fm.get("author") == "human"
+            or str(fm.get("trust", "")).startswith("human")
+            or any(other != rel and _mentioned(body, rel, identity) for other, body in references.items())
+        ):
             skipped["exempt"] += 1
             continue
         if (today - ledger.tracking_since).days < tend.unused_after_days:
@@ -92,7 +107,13 @@ def apply(
             if len(decisions) >= tend.max_archives_per_run:
                 break
             try:
-                d = memory_archive.archive_card(target, candidate["file"], reason=candidate["signal"], config=config)
+                d = memory_archive.archive_card(
+                    target,
+                    candidate["file"],
+                    reason=candidate["signal"],
+                    config=config,
+                    policy_metadata={"actor": "policy"},
+                )
                 decisions.append(d.decision_id)
             except memory_archive.ArchiveRefused as exc:
                 refused.append(str(exc))

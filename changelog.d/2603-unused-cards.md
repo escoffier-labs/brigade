@@ -1,0 +1,1 @@
+- Scheduled memory care marks unused agent cards stale and archives them under a configurable policy. References, pins and human cards protect against archiving. Search retained archives with `memory search --include-archived` and restore them with `memory care undo`.
