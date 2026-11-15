@@ -76,6 +76,7 @@ def append_evidence(
     similarity: float,
     ts: str | None = None,
     expected_card_text: str | None = None,
+    log_path: str = LOG_PATH,
 ) -> None:
     """Append one bounded row, failing closed on unsafe paths or capabilities."""
     from .card_identity import card_identity
@@ -99,17 +100,17 @@ def append_evidence(
     data = io.json_bytes(row)
     if len(data) > MAX_LINE_BYTES:
         raise ValueError("evidence log line size limit exceeded")
-    append_log_row(target, data)
+    append_log_row(target, data, log_path=log_path)
 
 
-def append_log_row(target: Path, data: bytes) -> None:
+def append_log_row(target: Path, data: bytes, *, log_path: str = LOG_PATH) -> None:
     """Append an evidence or retraction row using the shared safe writer."""
     from .memory_log_retractions import retraction
 
     row = json.loads(data)
     if len(data) > MAX_LINE_BYTES or not data.endswith(b"\n") or not (_valid(row) or retraction(row)):
         raise ValueError("invalid evidence log row")
-    path = target / LOG_PATH
+    path = target / io.relative(log_path)
     with io.directory(path.parent, create=True, private=True) as parent:
         fd = os.open(
             path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent
@@ -475,11 +476,11 @@ def log_match(target: Path, match: CardMatch | None, handoff_path: Path) -> None
         print(f"warning: evidence log append failed: {exc}", file=sys.stderr)
 
 
-def read_evidence(target: Path) -> tuple[list[dict[str, Any]], int, bool]:
+def read_evidence(target: Path, *, log_path: str = LOG_PATH) -> tuple[list[dict[str, Any]], int, bool]:
     """Return newest bounded rows, warning count, and unsupported IO capability."""
     if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         return [], 0, True
-    path = target / LOG_PATH
+    path = target / io.relative(log_path)
     from .memory_log_retractions import active, retraction
 
     rows: list[tuple[dict[str, Any], bytes]] = []

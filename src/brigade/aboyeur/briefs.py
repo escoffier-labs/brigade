@@ -225,7 +225,7 @@ def with_memory_context(evidence: EvidenceBrief, cwd: Path | None, task: str) ->
         {key: item[key] for key in ("scope", "card_id", "hash")}
         for item in packet.context["items"]
         if "blocked" not in item
-    )
+    )[: dispatch_memory.MAX_REFS]
     text = f"{block}\n{evidence.text}" if evidence.attached and evidence.text else block
     return EvidenceBrief(attached=True, text=text, bytes=_brief_bytes(text), memory_refs=refs)
 

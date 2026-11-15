@@ -20,26 +20,26 @@ def test_failed_run_is_deduplicated_and_body_free(tmp_path):
     }
     lessons.log_run_receipt(tmp_path, receipt)
     lessons.log_run_receipt(tmp_path, receipt)
-    rows, warnings, _ = log.read_evidence(tmp_path)
+    rows, warnings, _ = log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)
     assert warnings == 0
     assert len(rows) == 1
     assert rows[0]["kind"] == "negative-outcome"
-    assert "PRIVATE CARD BODY" not in (tmp_path / log.LOG_PATH).read_text()
+    assert "PRIVATE CARD BODY" not in (tmp_path / lessons.LOG_PATH).read_text()
     assert lessons.pending_keys(tmp_path, [head(REF["card_id"])]) == {key(REF["card_id"])}
 
 
 def test_success_and_dry_run_do_not_write(tmp_path):
     for extra in ({"status": "ok"}, {"status": "failed", "dry_run": True}):
         lessons.log_run_receipt(tmp_path, {"run_id": "run-example", "evidence_brief": {"memory_refs": [REF]}, **extra})
-    assert log.read_evidence(tmp_path)[0] == []
+    assert log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0] == []
 
 
 def test_review_finding_logs_one_row_per_receipt_card(tmp_path):
     finding = {"memory_refs": [REF], "rationale": "PRIVATE CARD BODY"}
     lessons.log_review_findings(tmp_path, {"run_id": "review-example"}, [finding, finding])
     lessons.log_review_findings(tmp_path, {"run_id": "review-example"}, [finding])
-    assert len(log.read_evidence(tmp_path)[0]) == 1
-    assert "PRIVATE CARD BODY" not in (tmp_path / log.LOG_PATH).read_text()
+    assert len(log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0]) == 1
+    assert "PRIVATE CARD BODY" not in (tmp_path / lessons.LOG_PATH).read_text()
 
 
 def test_negative_priority_reserves_cadence_slots():
@@ -81,7 +81,7 @@ def test_run_writer_emits_after_durable_receipt(tmp_path):
     }
     run_io._write_json(run_dir / "run.json", payload)
     run_io._write_json(run_dir / "run.json", payload)
-    assert len(log.read_evidence(tmp_path)[0]) == 1
+    assert len(log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0]) == 1
 
 
 def test_review_import_retains_citations_and_logs(tmp_path):
@@ -103,10 +103,10 @@ def test_review_import_retains_citations_and_logs(tmp_path):
     }
     (run_dir / "receipt.json").write_text(json.dumps(receipt))
     assert reviews.review_import_findings(target=tmp_path, run_id="review-example", dry_run=True) == 0
-    assert log.read_evidence(tmp_path)[0] == []
+    assert log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0] == []
     assert reviews.review_import_findings(target=tmp_path, run_id="review-example") == 0
     assert reviews.review_import_findings(target=tmp_path, run_id="review-example") == 0
-    assert len(log.read_evidence(tmp_path)[0]) == 1
+    assert len(log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0]) == 1
 
 
 def test_negative_scopes_do_not_bleed(tmp_path):
@@ -153,7 +153,7 @@ def test_review_completion_captures_without_import(tmp_path):
         },
     )
     assert receipt["status"] == "completed"
-    assert len(log.read_evidence(tmp_path)[0]) == 1
+    assert len(log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0]) == 1
 
 
 def test_dispatch_citation_capture_has_no_card_text(tmp_path, monkeypatch):
@@ -197,10 +197,10 @@ def test_file_card_run_capture_is_deduplicated(tmp_path):
     )
     for _ in range(2):
         log.log_outcome(tmp_path, record, {"status": "failed"})
-    rows = log.read_evidence(tmp_path)[0]
+    rows = log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0]
     assert len(rows) == 1
     assert rows[0]["card_path"] == "memory/cards/example.md"
-    assert "PRIVATE CARD BODY" not in (tmp_path / log.LOG_PATH).read_text()
+    assert "PRIVATE CARD BODY" not in (tmp_path / lessons.LOG_PATH).read_text()
 
 
 @pytest.mark.parametrize("field", ["last_consolidated", "last_reviewed", "last_reviewed_at", "reviewed_at"])
@@ -271,7 +271,7 @@ def append_failure(tmp_path, request):
 
 def test_failure_append_survives_large_log(tmp_path, append_failure):
     append_failure()
-    path = tmp_path / log.LOG_PATH
+    path = tmp_path / lessons.LOG_PATH
     first = path.read_bytes()
     # Push the original signal outside the reader's tail with unrelated evidence.
     row = {**json.loads(first), "kind": "near-match", "evidence_id": "handoff-example.md"}
@@ -282,7 +282,7 @@ def test_failure_append_survives_large_log(tmp_path, append_failure):
     assert path.read_bytes().count(first) == 1
     # A distinct receipt still appends beyond the old scan limit.
     append_failure("another-run")
-    assert any(row["kind"] == "negative-outcome" for row in log.read_evidence(tmp_path)[0])
+    assert any(row["kind"] == "negative-outcome" for row in log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0])
 
 
 @pytest.mark.parametrize(
@@ -292,13 +292,13 @@ def test_failure_append_survives_large_log(tmp_path, append_failure):
 )
 def test_failure_append_survives_malformed_log(tmp_path, append_failure, malformed):
     append_failure()
-    path = tmp_path / log.LOG_PATH
+    path = tmp_path / lessons.LOG_PATH
     first = path.read_bytes()
     with path.open("ab") as handle:
         handle.write(malformed)
     append_failure()
     append_failure("another-run")
-    rows, warnings, _ = log.read_evidence(tmp_path)
+    rows, warnings, _ = log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)
     assert warnings >= 1
     assert len([row for row in rows if row["kind"] == "negative-outcome"]) == 2
     assert path.read_bytes().count(first) == 1
@@ -308,12 +308,12 @@ def test_failure_retraction_sticks_on_retry(tmp_path, append_failure):
     from brigade.memory_log_retractions import withdrawn
 
     append_failure()
-    path = tmp_path / log.LOG_PATH
-    log.append_log_row(tmp_path, withdrawn(path.read_bytes()))
-    assert log.read_evidence(tmp_path)[0] == []
+    path = tmp_path / lessons.LOG_PATH
+    log.append_log_row(tmp_path, withdrawn(path.read_bytes()), log_path=lessons.LOG_PATH)
+    assert log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0] == []
     before = path.read_bytes()
     append_failure()
-    assert log.read_evidence(tmp_path)[0] == []
+    assert log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0] == []
     assert path.read_bytes() == before
 
 
@@ -344,13 +344,13 @@ def test_legacy_file_rows_scope(tmp_path, scope_source):
 
 def test_complete_unterminated_row_is_not_duplicated(tmp_path, append_failure):
     append_failure()
-    path = tmp_path / log.LOG_PATH
+    path = tmp_path / lessons.LOG_PATH
     original = path.read_bytes()
     path.write_bytes(original.rstrip(b"\n"))
     append_failure()
     assert path.read_bytes() == original.rstrip(b"\n")
     append_failure("another-run")
-    assert len(log.read_evidence(tmp_path)[0]) == 2
+    assert len(log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0]) == 2
     assert path.read_bytes().count(original) == 1
 
 
@@ -358,7 +358,7 @@ def test_dedup_refuses_concurrent_log_truncation(tmp_path, monkeypatch, append_f
     from brigade import memory_proposal_io as io
 
     append_failure()
-    path = tmp_path / log.LOG_PATH
+    path = tmp_path / lessons.LOG_PATH
     regular = io._regular
 
     def truncate(fd, **kwargs):
@@ -415,3 +415,127 @@ def test_outcome_capture_survives_failure_logging_error(tmp_path, monkeypatch, c
     records = outcome_cmd.load_records(tmp_path)
     assert len(records) == 1 and records[0].signal_value == -1
     assert capsys.readouterr().err == "warning: evidence log append failed; retry outcome capture\n"
+
+
+@pytest.mark.parametrize("producer", ["run", "review", "capture"])
+@pytest.mark.parametrize("scope", ["repo:verify", "repo:other"])
+def test_scheduling_failure_does_not_block_local_proposal(tmp_path, producer, scope):
+    from brigade.card_identity import card_identity
+    from brigade.memory_cmd import _parse_frontmatter
+    from brigade.outcome import OutcomeRecord
+    from tests.test_memory_proposal_v2 import setup, create, op, apply
+
+    card = setup(tmp_path)
+    meta, _ = _parse_frontmatter(card.read_text())
+    card_id = card_identity(meta, card.relative_to(tmp_path).as_posix()).card_id
+    ref = {**REF, "card_id": card_id, "scope": scope}
+    proposal = create(tmp_path, [op("replace_block", text="Keep the cache cold.")])
+    if producer == "run":
+        lessons.log_run_receipt(
+            tmp_path,
+            {
+                "run_id": "run-example",
+                "status": "failed",
+                "evidence_brief": {"memory_refs": [ref]},
+            },
+        )
+    elif producer == "review":
+        lessons.log_review_findings(tmp_path, {"run_id": "review-example"}, [{"memory_refs": [ref]}])
+    else:
+        lessons.log_captured_run(
+            tmp_path,
+            OutcomeRecord(
+                "cache",
+                "card",
+                "",
+                "run",
+                -1,
+                str(tmp_path / ".brigade/runs/run-example/run.json"),
+                "2026-11-15T12:00:00Z",
+            ),
+            {"status": "failed"},
+        )
+    assert log.read_evidence(tmp_path) == ([], 0, False)
+    assert log.EvidenceLog(tmp_path).by_identity == {}
+    from brigade.memory_proposal_v2 import _refuse_live_blockers
+
+    # Exercise the live preflight used by reflection proposals, not just storage.
+    _refuse_live_blockers(
+        tmp_path,
+        [
+            {
+                "path": card.relative_to(tmp_path).as_posix(),
+                "text": card.read_text(),
+                "metadata": meta,
+                "id": card_id,
+            }
+        ],
+    )
+    assert len(log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0]) == 1
+    if producer != "capture":
+        assert lessons.pending_keys(tmp_path, [head(card_id), head(card_id, scope="repo:other")]) == {
+            key(card_id, scope=scope)
+        }
+    assert apply(tmp_path, proposal)["status"] == "committed"
+
+
+def test_scheduling_reads_real_verification_failure_rows(tmp_path):
+    log.append_log_row(
+        tmp_path,
+        json.dumps(
+            {
+                "ts": "2026-11-15T12:00:00Z",
+                "card_id": REF["card_id"],
+                "card_path": "memory/cards/example.md",
+                "kind": "negative-outcome",
+                "similarity": 1.0,
+                "evidence_id": ".brigade/work/verify-runs/example/receipt.json",
+            }
+        ).encode()
+        + b"\n",
+    )
+    assert lessons.pending_keys(tmp_path, [head(REF["card_id"])], scope=REF["scope"]) == {key(REF["card_id"])}
+
+
+def test_shared_ledger_volume_cannot_evict_scheduling_signal(tmp_path):
+    lessons.log_run_receipt(
+        tmp_path,
+        {
+            "run_id": "run-example",
+            "status": "failed",
+            "evidence_brief": {"memory_refs": [REF]},
+        },
+    )
+    path = tmp_path / log.LOG_PATH
+    path.write_bytes(b"invalid\n" * (log.MAX_SCAN_BYTES // 8 + 1))
+    assert lessons.pending_keys(tmp_path, [head(REF["card_id"])]) == {key(REF["card_id"])}
+
+
+def test_run_writer_uses_receipt_root_for_nested_cwd(tmp_path):
+    from brigade.aboyeur import run_io
+
+    run_dir = tmp_path / ".brigade/runs/run-example"
+    run_dir.mkdir(parents=True)
+    cwd = tmp_path / "src/nested"
+    cwd.mkdir(parents=True)
+    run_io._write_json(
+        run_dir / "run.json",
+        {
+            "status": "failed",
+            "cwd": str(cwd),
+            "evidence_brief": {"memory_refs": [REF]},
+        },
+    )
+    assert lessons.pending_keys(tmp_path, [head(REF["card_id"])]) == {key(REF["card_id"])}
+    assert not (cwd / ".brigade").exists()
+
+
+def test_dispatch_caps_citations_independently_of_packet_size(tmp_path, monkeypatch):
+    from brigade import dispatch_memory
+    from brigade.aboyeur import briefs
+
+    packet = dispatch_memory.Packet("connector", "Context", {"items": [REF] * (dispatch_memory.MAX_REFS + 1)})
+    monkeypatch.setattr(dispatch_memory, "build", lambda *args, **kwargs: packet)
+    brief = briefs.with_memory_context(briefs.EvidenceBrief(False), tmp_path, "task")
+    assert len(brief.memory_refs) == dispatch_memory.MAX_REFS
+    assert dispatch_memory.validate_refs(list(brief.memory_refs))

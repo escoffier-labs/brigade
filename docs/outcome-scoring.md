@@ -204,9 +204,11 @@ new findings automatically, and `work review import-findings` retries logging
 without adding duplicate rows. Dry imports and dry runs write no failure rows.
 
 Each producer writes at most one `negative-outcome` row per receipt and scoped
-card through the memory evidence log. Rows contain identifiers and digests,
+card through `.brigade/memory/reflect/lesson-signals.jsonl`. Rows contain identifiers and digests,
 with a synthetic card path keyed by the scope and card identity. They contain
 no card body or finding prose. A shared append lock serializes deduplication.
+The lock waits up to 30 seconds. Deduplication scans the complete signal log
+with bounded memory, so its runtime grows with retained history.
 An unreadable or truncated scan refuses the optional append with a fixed
 warning rather than admitting duplicates.
 
@@ -218,4 +220,13 @@ has an older verification day. Existing
 eligibility rules and minimum intervals still apply, so repeated failures
 cannot force a card into every run. Review or consolidation timestamps clear
 older priority signals. These rows supply scheduling priority, never positive
-proof or a drafted lesson card.
+proof or a drafted lesson card. Reflection reads only `evidence-log.jsonl`,
+which retains eligible verification outcomes. File-backed run citations also
+write to the scheduling log because their hashes are not verification receipts.
+
+Verification consumes signals through its recorded UTC day, including failures
+later that day. Selection reads the newest 4 MiB of each log, so an unconsumed
+signal can expire by signal-log volume. Unrelated reflection evidence cannot
+push signals out of this window. Digest-addressed retractions belong in the
+same log as the original row. Retries retain original rows as deduplication
+tombstones and cannot restore a withdrawn signal.

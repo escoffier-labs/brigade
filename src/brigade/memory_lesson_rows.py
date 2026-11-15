@@ -19,6 +19,8 @@ from .inbox_lock import held_file_lock
 if TYPE_CHECKING:
     from .outcome import OutcomeRecord
 
+LOG_PATH = ".brigade/memory/reflect/lesson-signals.jsonl"
+
 PREFIX = ".brigade/memory/lesson-cards/"
 
 
@@ -36,7 +38,7 @@ def _seen(target: Path, candidates: set[tuple[str, str]]) -> set[tuple[str, str]
     valid rows as tombstones so an import retry cannot undo a retraction. The
     caller holds lesson-rows.lock across this scan and the subsequent append.
     """
-    path = target / ledger.LOG_PATH
+    path = target / LOG_PATH
     seen: set[tuple[str, str]] = set()
     try:
         with io.directory(path.parent) as parent:
@@ -86,7 +88,7 @@ def _append(target: Path, source: str, receipt: Mapping[str, Any], refs: list[di
         timestamp = datetime.now(timezone.utc).isoformat()
     lock = target / ".brigade/memory/reflect/lesson-rows.lock"
     io.protect_file(lock)
-    with held_file_lock(lock, deadline_seconds=1.0):
+    with held_file_lock(lock, deadline_seconds=30.0):
         seen = _seen(
             target, {(f"{PREFIX}{fairness.key_digest(ref['scope'], [ref['card_id']])}.md", evidence_id) for ref in refs}
         )
@@ -107,6 +109,7 @@ def _append(target: Path, source: str, receipt: Mapping[str, Any], refs: list[di
                         "similarity": 1.0,
                     }
                 ),
+                log_path=LOG_PATH,
             )
             seen.add((path, evidence_id))
 
@@ -138,7 +141,9 @@ def pending_keys(
     A later review, consolidation or verification consumes a row. New scoped signals use a
     synthetic path containing the fairness digest, never a path to open.
     """
-    rows, _, _ = ledger.read_evidence(target)
+    rows, _, _ = ledger.read_evidence(target, log_path=LOG_PATH)
+    evidence, _, _ = ledger.read_evidence(target)
+    rows.extend(evidence)
     negative: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         if row["kind"] == "negative-outcome":
@@ -200,9 +205,15 @@ def log_captured_run(target: Path, record: OutcomeRecord, receipt: Mapping[str, 
     rel = path.relative_to(target).as_posix()
     lock = target / ".brigade/memory/reflect/lesson-rows.lock"
     io.protect_file(lock)
-    with held_file_lock(lock, deadline_seconds=1.0):
+    with held_file_lock(lock, deadline_seconds=30.0):
         if _seen(target, {(rel, ref)}):
             return
         ledger.append_evidence(
-            target, card_path=path, evidence_id=ref, kind="negative-outcome", similarity=1.0, ts=record.ts
+            target,
+            card_path=path,
+            evidence_id=ref,
+            kind="negative-outcome",
+            similarity=1.0,
+            ts=record.ts,
+            log_path=LOG_PATH,
         )

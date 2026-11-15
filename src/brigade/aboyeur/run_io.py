@@ -499,7 +499,12 @@ def _write_json(path: Path, payload: object) -> None:
         cwd = payload.get("cwd")
         if isinstance(cwd, str):
             try:
-                lessons.log_run_receipt(Path(cwd), {**payload, "run_id": path.parent.name})
+                from ..memory_hooks import resolve_memory_recall_target
+
+                # Canonical receipts identify the workspace even for nested cwd.
+                root = path.parents[3] if path.parent.parent.parent.name == ".brigade" else Path(cwd)
+                recall_root, _ = resolve_memory_recall_target(root)
+                lessons.log_run_receipt(recall_root or root, {**payload, "run_id": path.parent.name})
             except (OSError, ValueError, TimeoutError):
                 lessons.warn_append_failed()
         return
