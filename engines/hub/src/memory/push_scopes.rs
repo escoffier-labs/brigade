@@ -3,21 +3,13 @@
 //! ids with more copies. Every scope-less query joins 65 real or stand-in heads, even
 //! for an absent id, so revision and scan joins cannot grow with copy count.
 //!
-//! Threat model: this bounds work; it is not a constant-time SQLite program.
-//! On bundled SQLite the warmed discovery takes 12,507 / 12,509 / 12,517 /
-//! 12,634 / 12,637 VM instructions for 0 / 1 / 5 / 64 / 70 withheld copies:
-//! about two extra instructions per copy up to the 65-slot cap (130 total).
-//! The regression allows at most 160 instructions of spread. An aggregate-min
-//! probe increased the spread, so retain the simpler ordered seek. Do not pad
-//! SQLite opcodes or impose a response delay to simulate constant-time behavior.
-//! Two interleaved HTTP runs of 500 reads per case on a local test hub measured
-//! negative-path p99-minus-p50 jitter of 569-1,658 microseconds, versus 47-55
-//! microseconds between absent and 70-copy medians. This residual is below the
-//! noise of individual HTTP reads in that experiment, before remote network
-//! jitter. Repeated sampling can reduce noise: these measurements do not prove
-//! resistance to a statistical remote timing attack and require security review.
-//! Without memory_cards_id the planner can fall back to a scan for correctness;
-//! the indexed-work bound applies to the normal schema, not a damaged database.
+//! A composite lower-bound seek distinguishes a different card id from EOF,
+//! rather than letting an equality range check skip an opcode at the index end.
+//! Identity substr calls balance both miss paths against a successful probe on
+//! bundled SQLite. The regression requires zero VM spread, including end misses.
+//! Equal VM counts do not guarantee constant wall-clock time.
+//! Without memory_cards_id the probe can fall back to a primary-key scan whose
+//! cost depends on table size. That damaged-schema case remains correct.
 use super::{Credential, ReadTx, Value, num, search, text};
 
 const SLOTS: usize = 65;
@@ -38,11 +30,20 @@ pub(super) fn push_scopes<T: ReadTx + ?Sized>(
         Value::Text(credential.principal().into()),
         Value::Text(credential.class().into()),
     ];
+    // Valid scopes contain no NUL, so appending it expresses a strict scope
+    // successor using >= without visiting the previous head again.
+    // SQLite executes seven fewer instructions for another id and fourteen fewer
+    // at EOF. Keep the identity functions in step with the zero-spread test.
+    let pad = |functions| {
+        (0..functions).fold(String::from("cursor"), |sql, _| format!("substr({sql},1)"))
+    };
+    let miss = pad(7);
+    let eof = pad(14);
     let rows = tx.query(
         &format!(
             "WITH RECURSIVE walk(n,cursor) AS (VALUES(0,'') UNION ALL \
-             SELECT n+1,COALESCE((SELECT scope FROM memory_cards \
-             WHERE card_id=?1 AND scope>walk.cursor ORDER BY scope LIMIT 1),cursor) \
+             SELECT n+1,COALESCE((SELECT CASE WHEN card_id=?1 THEN scope ELSE {miss} END FROM memory_cards \
+             WHERE (card_id,scope)>=(?1,walk.cursor||X'00') ORDER BY card_id,scope LIMIT 1),{eof}) \
              FROM walk WHERE n<{SLOTS}), \
              heads AS MATERIALIZED (SELECT n,cursor,cursor!=lag(cursor,1,'') OVER (ORDER BY n) AS real FROM walk), \
              decoy AS MATERIALIZED (SELECT scope,card_id FROM memory_cards LIMIT 1), \

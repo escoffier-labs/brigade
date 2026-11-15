@@ -49,9 +49,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
         if name == "create":
+            command.add_argument("--handoff", help="Relative handoff path for replace-preference.")
             command.add_argument("--issue", help="Saved contradictory finding for a v1 pair proposal.")
             command.add_argument("--survivor", help="Surviving card for a v1 pair proposal.")
-            command.add_argument("--relation", choices=("merge", "supersede", "consolidate"), required=True)
+            command.add_argument(
+                "--relation", choices=("merge", "supersede", "consolidate", "replace-preference"), required=True
+            )
             command.add_argument(
                 "--source", action="append", default=[], help="Canonical v2 source card. Repeat up to eight times."
             )
@@ -489,6 +492,8 @@ def dispatch(args) -> int:
         values = {"target": args.target}
         if name == "create":
             values.update(issue_id=args.issue, survivor=args.survivor, relation=args.relation, reason=args.reason)
+            if args.handoff is not None:
+                values["handoff_path"] = args.handoff
             if args.relation == "consolidate":
                 from .. import memory_proposal_io as proposal_io
 
@@ -517,6 +522,11 @@ def dispatch(args) -> int:
             else:
                 print(f"error: {exc}", file=sys.stderr)
             return exc.exit_code
+        if not args.json and "preference_diff" in payload:
+            pair = payload["preference_diff"]
+            old = pair["old"].replace("|", r"\|")
+            new = pair["new"].replace("|", r"\|")
+            print(f"| Old preference | New preference |\n| --- | --- |\n| {old} | {new} |\n")
         # The human preview retains every exact before/after text and hash too.
         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
         return 0 if payload.get("status") not in ("restored", "recovery-required") else 1

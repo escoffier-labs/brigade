@@ -421,6 +421,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory vault-show`
 - `brigade memory verify doctor`
 - `brigade memory verify run`
+- `brigade memory verify show`
 - `brigade memory verify status`
 - `brigade model scorecard`
 - `brigade model trial drain`

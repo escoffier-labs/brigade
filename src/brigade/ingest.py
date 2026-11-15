@@ -74,6 +74,7 @@ KNOWN_SECTIONS = {
     "suggested card content",
     "target document",
     "suggested document content",
+    "superseded preference",
 }
 
 # ingest_into status codes. Fleet maps these to skip reasons; do not collapse
@@ -386,6 +387,17 @@ def ingest_into(
     return 0
 
 
+def strip_section_blank_lines(text: str) -> str:
+    """Remove section delimiters without changing whitespace on content lines."""
+    lines = text.splitlines()
+    start, end = 0, len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[start:end])
+
+
 def parse(path: Path, data: bytes | None = None) -> Dict[str, str]:
     """Split a handoff into sections keyed by lowercased ## heading."""
     body = data.decode("utf-8") if data is not None else path.read_text(encoding="utf-8")
@@ -394,11 +406,18 @@ def parse(path: Path, data: bytes | None = None) -> Dict[str, str]:
     last_pos = 0
     for m in SECTION_RE.finditer(body):
         if last_name is not None:
-            sections[last_name.lower()] = body[last_pos : m.start()].strip()
+            sections[last_name.lower()] = body[last_pos : m.start()]
         last_name = m.group("name")
         last_pos = m.end()
     if last_name is not None:
-        sections[last_name.lower()] = body[last_pos:].strip()
+        sections[last_name.lower()] = body[last_pos:]
+    for name, content in sections.items():
+        if name == "superseded preference" or (
+            name == "suggested document content" and "superseded preference" in sections
+        ):
+            sections[name] = strip_section_blank_lines(content)
+        else:
+            sections[name] = content.strip()
     if "suggested card content" in sections:
         sections["suggested card content"], _ = normalize_suggested_card_content(sections["suggested card content"])
     return sections
@@ -439,6 +458,12 @@ def decide(
             "inboxed",
             code="proposal-notification",
             reason="memory proposal notification requires explicit digest-bound review/apply",
+        )
+    if "superseded preference" in sections:
+        return Outcome(
+            "inboxed",
+            code="preference-replacement-review",
+            reason="preference replacement requires explicit memory proposal review and apply",
         )
     action = sections.get("recommended memory action", "").strip().lower()
 

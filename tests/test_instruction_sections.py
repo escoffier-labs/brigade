@@ -325,3 +325,11 @@ def test_a_unit_that_closes_one_pair_and_opens_another_is_blocked():  # review o
     bridge = next(u for u in parse(data).units if u.heading == b"## Bridge")
     assert bridge.blocked == "html-block"
     assert html_balanced(b"<div>x</div>") and not html_balanced(b"</details>\nx\n<details>")
+
+
+def test_an_indented_managed_marker_after_a_blank_line_is_still_a_marker():  # review of #2572
+    block = b"    <!-- BEGIN BRIGADE INTEGRATION v:1 profile:full hash:ab -->\n    body\n    <!-- END BRIGADE INTEGRATION -->\n"
+    data = b"# T\n## Setup\n\n- Install:\n\n" + block + b"\n## Next\nx\n"
+    doc = parse(data)
+    assert doc.problem is None
+    assert next(u for u in doc.units if u.heading == b"## Setup").blocked == "managed-block"

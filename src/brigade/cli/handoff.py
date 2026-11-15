@@ -84,6 +84,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         default="no-card",
         help="Recommended memory action.",
     )
+    p_handoff_draft.add_argument(
+        "--superseded-preference", help="Exact USER.md line proposed for replacement through review."
+    )
     p_handoff_draft.add_argument("--target-card", default=None, help="Target card filename for card handoffs.")
     p_handoff_draft.add_argument(
         "--target-document", default=".learnings/LEARNINGS.md", help="Target document for no-card handoffs."
@@ -325,6 +328,7 @@ def _dispatch_impl(args) -> int:
             json_output=args.json,
             workspace=args.workspace,
             expected_sha=args.expected_sha,
+            superseded_preference=args.superseded_preference,
         )
     if args.handoff_command == "list":
         return handoff_cmd.list_drafts(

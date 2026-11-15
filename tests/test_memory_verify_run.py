@@ -236,7 +236,7 @@ def state_of(target):
 
 def packets(target):
     root = target / pk.PACKETS
-    return sorted(path.name for path in root.iterdir()) if root.exists() else []
+    return sorted(path.name for path in root.iterdir() if ".manifest." not in path.name) if root.exists() else []
 
 
 def entry_for(target, card_id, scope=SCOPE):
@@ -799,9 +799,9 @@ def test_the_temporary_file_is_owner_only_inside_the_packet_directory(verify_hub
 
     monkeypatch.setattr(pk, "write_all", observe)
     assert verify(target, capsys)[0] == 0
-    # The stage, the stage again with its attach time, then the packet: each through its own
+    # The stage, the stage again with its attach time, then the packet and manifest: each through its own
     # temporary file in the packet directory.
-    assert len(seen) == 3 and set(seen) == {(target / pk.PACKETS, 0o600)}
+    assert len(seen) == 4 and set(seen) == {(target / pk.PACKETS, 0o600)}
     assert not list(target.rglob(".packet-*.tmp"))
 
 

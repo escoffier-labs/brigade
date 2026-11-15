@@ -82,9 +82,10 @@ class _Edit:
 
 def card_body(card: bytes) -> bytes | None:
     """The bytes after the first frontmatter block (`---` first line, closed by the next `---` line), or None."""
-    if not card.startswith(b"---\n"):
+    newline = card.find(b"\n")
+    if newline == -1 or card[:newline].removeprefix(b"\xef\xbb\xbf").rstrip(b"\r") != b"---":
         return None
-    offset = 4
+    offset = newline + 1
     while offset < len(card):
         newline = card.find(b"\n", offset)
         stop = len(card) if newline == -1 else newline + 1

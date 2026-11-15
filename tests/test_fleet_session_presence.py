@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,36 @@ def test_dirty_paths_are_bounded_relative_and_rename_safe(git_repo):
     assert all(not Path(path).is_absolute() and ".." not in Path(path).parts for path in snapshot.paths)
     assert "renamed file.txt" in snapshot.paths
     assert all(not path.startswith(".brigade/") for path in snapshot.paths)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not support control characters in filenames")
+def test_dirty_paths_skip_control_character_filenames(git_repo):
+    (git_repo / "README.md").write_text("changed\n", encoding="utf-8")
+    for name in ("tab\tfile.txt", "escape\x1bfile.txt", "newline\nfile.txt", "c1\x85file.txt"):
+        (git_repo / name).write_text("untracked\n", encoding="utf-8")
+
+    snapshot = presence.collect_dirty_paths(git_repo)
+
+    assert snapshot.paths == ("README.md",)
+    assert snapshot.truncated is True
+
+
+@pytest.mark.parametrize("control", ["\x00", "\x1f", "\x7f", "\x80", "\x9f"])
+def test_normalize_dirty_path_rejects_controls(control):
+    assert presence._normalize_dirty_path(f"file{control}.txt") is None
+
+
+def test_dirty_paths_skip_lone_surrogates(git_repo, monkeypatch):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=" M README.md\0?? invalid\udcff.txt\0"),
+    )
+
+    assert presence._normalize_dirty_path("invalid\udcff.txt") is None
+    snapshot = presence.collect_dirty_paths(git_repo)
+    assert snapshot.paths == ("README.md",)
+    assert snapshot.truncated is True
 
 
 def test_missing_remote_is_node_scoped_and_uses_local_digest(git_repo):
