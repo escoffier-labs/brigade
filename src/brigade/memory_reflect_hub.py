@@ -1,4 +1,4 @@
-"""Scheduled hub reflection opens proposals and never decides or applies them."""
+"""Scheduled hub reflection with optional authority-gated Tier 0 application."""
 
 from __future__ import annotations
 
@@ -434,6 +434,7 @@ def _reflect(
     scope: str | None,
     limit: int,
     dry_run: bool,
+    apply: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= limit <= 100:
         raise ReflectError("hub_reflect_limit_invalid", "--limit must be from 1 to 100")
@@ -536,7 +537,9 @@ def _reflect(
         for ops in submissions:
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
-            if remembered.get("proposal_id"):
+            if remembered.get("proposal_id") and apply and not dry_run:
+                fresh.append((digest, ops))
+            elif remembered.get("proposal_id"):
                 skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
             elif remembered.get("refused"):
                 skipped["refused"] = skipped.get("refused", 0) + 1
@@ -612,14 +615,19 @@ def _reflect(
                 tables[lane][name][key][1] = now
 
         for position, (digest, ops) in enumerate(selected):
-            sent = submit(
-                client,
-                previous,
-                digest,
-                ops,
-                base_epoch=report["log_epoch"],
-                save=lambda: _save(target, state),
-                fields={"pins": ledger.pins(ops)},
+            remembered_id = previous.get(digest, {}).get("proposal_id")
+            sent = (
+                Submitted(OPENED, proposal_id=remembered_id)
+                if remembered_id and apply
+                else submit(
+                    client,
+                    previous,
+                    digest,
+                    ops,
+                    base_epoch=report["log_epoch"],
+                    save=lambda: _save(target, state),
+                    fields={"pins": ledger.pins(ops)},
+                )
             )
             refused.extend({"op_digest": digest, "code": code} for code in sent.refusals)
             if sent.outcome == QUOTA:
@@ -639,7 +647,12 @@ def _reflect(
             if sent.outcome == DUPLICATE:
                 skipped["duplicate_pending"] = skipped.get("duplicate_pending", 0) + 1
             else:
-                proposals.append({"proposal_id": sent.proposal_id})
+                proposal: dict[str, Any] = {"proposal_id": sent.proposal_id}
+                if apply and sent.proposal_id is not None:
+                    from .memory_reflect_policy import attempt
+
+                    proposal["automatic"] = attempt(target, client, sent.proposal_id, ops, report["log_epoch"])
+                proposals.append(proposal)
         if served_any:
             state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
         # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.
@@ -664,7 +677,9 @@ def _reflect(
     return payload
 
 
-def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, scheduled: bool) -> dict[str, Any]:
+def run_payload(
+    *, target: Path, scope: str | None, limit: int, dry_run: bool, scheduled: bool, apply: bool = False
+) -> dict[str, Any]:
     derive.configuration(target)  # Refuse state overlapping a canonical card root.
     lock = target / ".brigade/memory/reflect/schedule.lock"
     io.protect_file(lock)
@@ -675,7 +690,9 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
         try:
             settings, client = _client(target)
             with store.limits.bounded(max_cards=MAX_SCOPE_CARDS, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
-                payload = _reflect(target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run)
+                payload = _reflect(
+                    target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run, apply=apply
+                )
         except (hubc.HubConfigError, hubc.HubUnavailable, hubc.HubRefusal, OSError, ValueError) as exc:
             # Never retain hub-supplied text, card bytes or credential-bearing errors.
             if isinstance(exc, store.limits.ReplicaLimitError):
@@ -709,6 +726,9 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
         if not dry_run:
             count = state["consecutive_failures"] + 1 if payload["status"] == "failed" else 0
             state.update(consecutive_failures=count, paused=count >= FAILURES, last_status=payload["status"])
+            _save(target, state)
+        if not dry_run:
+            state["last_automatic"] = payload.get("proposals", [])
             _save(target, state)
         payload["schedule"] = {k: state[k] for k in ("consecutive_failures", "paused")}
         return payload

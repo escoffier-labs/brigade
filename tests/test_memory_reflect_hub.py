@@ -141,8 +141,8 @@ def test_care_install_memory_reflect(setup, capsys):
     argv = shlex.split(
         next(line.removeprefix("ExecStart=") for line in body.splitlines() if line.startswith("ExecStart="))
     )
-    assert argv[-7:] == ["memory", "reflect", "run", "--hub", "--scheduled", "--target", str(target)]
-    assert "decide" not in body and "apply" not in body
+    assert argv[-7:] == ["memory", "reflect", "run", "--scheduled", "--apply", "--target", str(target)]
+    assert "decide" not in body and "--apply" in body
     environment = [line for line in body.splitlines() if line.startswith("Environment=")]
     assert len(environment) == 1 and "PATH=" in environment[0]
     assert "BRIGADE_MEMORY_HUB" not in body and "BRIGADE_HOME" not in body
@@ -291,13 +291,13 @@ def test_other_scheduler_backends_pin_the_reflect_command(setup):
     entry = care_cmd._catalog_by_id()["memory-reflect"]
     plists = care_cmd._launchd_plists(workspace=target, home=home, entries=(entry,))
     argv = plistlib.loads(next(iter(plists.values())))["ProgramArguments"]
-    assert argv[-7:] == ["memory", "reflect", "run", "--hub", "--scheduled", "--target", str(target)]
+    assert argv[-7:] == ["memory", "reflect", "run", "--scheduled", "--apply", "--target", str(target)]
     assert set(plistlib.loads(next(iter(plists.values())))["EnvironmentVariables"]) == {"PATH"}
     cron = care_cmd._cron_command(entry, workspace=target)
-    assert '"reflect" "run" "--hub" "--scheduled"' in cron
+    assert '"reflect" "run" "--scheduled" "--apply"' in cron
     windows = care_cmd._schtasks_create_command(entry, workspace=target)
     decoded = base64.b64decode(windows.split("-EncodedCommand ")[1]).decode("utf-16le")
-    assert "reflect run --hub --scheduled" in decoded
+    assert "reflect run --scheduled --apply" in decoded
 
 
 @pytest.mark.parametrize("source", ["env", "table"])

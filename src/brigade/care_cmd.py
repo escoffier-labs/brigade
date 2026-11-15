@@ -168,9 +168,11 @@ MEMORY_REFLECT_ENTRY = CareEntry(
     entry_id="memory-reflect",
     schedule="0 10 * * *",
     on_calendar="*-*-* 10:00:00",
-    description="Brigade hub memory reflection proposals",
+    description="Brigade policy-gated memory reflection",
     kind="reflect",
 )
+
+CARE_ENTRIES = (*CARE_ENTRIES, MEMORY_REFLECT_ENTRY)
 
 MEMORY_VERIFY_ENTRY = verify_entry(CareEntry)
 
@@ -1100,6 +1102,11 @@ def install(
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    if not dry_run and any(entry.kind == "reflect" for entry in entries):
+        from .memory_reflect_policy import ensure
+
+        ensure(target)
 
     if _uses_schtasks(backend):
         if not dry_run:

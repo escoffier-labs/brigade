@@ -482,6 +482,7 @@ EXPECTED_SCHTASKS_FLAGS = {
     "0 4 * * *": "/SC DAILY /ST 04:00",
     "0 7 * * *": "/SC DAILY /ST 07:00",
     "0 9 * * *": "/SC DAILY /ST 09:00",
+    "0 10 * * *": "/SC DAILY /ST 10:00",
 }
 
 

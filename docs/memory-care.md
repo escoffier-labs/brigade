@@ -17,6 +17,47 @@ brigade memory care closeout
 
 `init` writes `.brigade/memory-care.toml`. The config is host-local and should stay gitignored.
 
+## Automatic Tier 0 reflection
+
+New `brigade init` and setup installs create
+`.brigade/memory/reflect/policy.json` with `auto_apply: true` and
+`tier0_op_classes: ["append_evidence", "merge_exact_duplicates"]`.
+Reinitializing an existing workspace does not opt it in or change its policy.
+`brigade care install --target .` now includes the daily `memory-reflect`
+entry. Selecting `--entry memory-reflect` installs just that entry. Care
+installation creates a missing reflect policy and preserves an existing one.
+Installing OS timers remains an explicit care-install action.
+
+The entry runs `memory reflect run --scheduled --apply`. On a configured hub,
+it opens pinned proposals and calls the hub's `auto_apply` path. The hub checks
+Tier 0 class, cited proof, trusted scan-clean sources, ownership, retrieval
+evaluation, blast caps, cooldown and policy bindings before changing cards.
+A gate hold, including an unsupported retrieval scope, keeps the proposal
+pending and records its checks or refusal code. It does not fail the care entry.
+External memory owners and handoff-only policies cannot pass the ownership gate.
+The hub decision ledger records automatic decisions with the policy actor and
+digest. `memory reflect rollback <proposal-id>` opens the existing compensating
+proposal, which still requires a reviewed decision.
+
+Use one workspace switch to stop automatic application:
+
+```bash
+brigade memory reflect auto-apply off --target .
+```
+
+This sets `auto_apply` to `false` in the workspace policy. The scheduled run
+re-reads it before each candidate, including during an in-flight run. A request
+already sent to the hub can finish. Existing workspaces opt in with
+`brigade memory reflect auto-apply on --target .`. Existing timers using
+`--scheduled` also honor this opt-in without reinstallation. Workspace intent cannot override
+the hub's fleet memory policy or its kill switch.
+
+Local repository candidates remain proposal-only while their evidence,
+ownership, retrieval and cooldown authority contracts are unbound. Their
+`automatic.json` run artifact records the preflight holds. Hub runs retain the
+latest automatic results in `schedule.json`. Tier 1 and Tier 2 application is
+outside this Tier 0 change.
+
 ## Deterministic reflection candidates
 
 `brigade memory reflect run --dry-run` derives `stale-newer-evidence`, `duplicate`,
@@ -140,8 +181,8 @@ and back up `.brigade/memory/reflect/evidence-log.jsonl`. Manually quarantine th
 invalid line outside the log, or truncate an incomplete final line. Preserve
 valid rows, then rerun reflection before resuming writers. Rows with an unknown
 `kind` also require recovery or a Brigade version that supports that kind.
-Policy promotion and model-authored claim changes are not available through
-reflection. Reviewed proposal creation is available as described below.
+Hub Tier 0 policy application is available as described above. Model-authored
+claim changes remain outside this deterministic reflection path.
 
 ## Reviewed consolidation proposals
 

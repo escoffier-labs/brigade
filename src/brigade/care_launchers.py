@@ -98,8 +98,8 @@ def entry_argv(entry: CareEntry, workspace: Path) -> list[str]:
             "memory",
             "reflect",
             "run",
-            "--hub",
             "--scheduled",
+            "--apply",
             "--target",
             str(workspace.expanduser().resolve()),
         )
