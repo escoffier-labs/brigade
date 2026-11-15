@@ -12,6 +12,7 @@ import os
 
 import pytest
 
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from brigade import ingest, instruction_overflow
 from brigade import memory_care_journal as journal
 from brigade import memory_inbox_drain as drain
@@ -64,6 +65,7 @@ def _act_at(ws, home, env):
 # --- A1: recovery validates the exact opened destination before it writes ---------------------------
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("existing", [False, True])
 def test_recovery_never_appends_to_a_card_replaced_after_the_decision_committed(tmp_path, monkeypatch, existing):
     ws, home, env = field_workspace(tmp_path)
@@ -100,6 +102,7 @@ def test_recovery_never_appends_to_a_card_replaced_after_the_decision_committed(
     assert planted.read_bytes() == before and held.exists()
 
 
+@requires_automatic_filing
 def test_recovery_refuses_a_card_that_changed_after_the_commit_and_the_handoff_lands_once(tmp_path, monkeypatch):
     # The card is still one this feature created, but it is not the bytes the decision pinned.
     ws, home, env = field_workspace(tmp_path)
@@ -118,6 +121,7 @@ def test_recovery_refuses_a_card_that_changed_after_the_commit_and_the_handoff_l
     assert drain.drain(ws, today=TODAY, deadline_days=14)["retried"] == 0
 
 
+@requires_automatic_filing
 def test_a_refused_recovery_of_a_retried_draft_returns_the_draft_to_the_inbox(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -142,6 +146,7 @@ def test_a_refused_recovery_of_a_retried_draft_returns_the_draft_to_the_inbox(tm
     assert (ws / CARD).read_text().count(NOTE) == 1 and not draft.exists()
 
 
+@requires_automatic_filing
 def test_a_refused_recovery_of_a_cited_retry_makes_the_draft_pending_again(tmp_path, monkeypatch):
     # A cited draft stays where it is and a ledger row marks it handled. The refusal withdraws that row.
     from brigade import memory_evidence_log
@@ -209,6 +214,7 @@ def _decide_then_fill(monkeypatch, ws, filler_to):
     return state
 
 
+@requires_automatic_filing
 def test_a_file_filled_between_decide_and_the_locked_write_goes_to_the_card_in_the_same_run(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -222,6 +228,7 @@ def test_a_file_filled_between_decide_and_the_locked_write_goes_to_the_card_in_t
     assert not _drafts(ws)
 
 
+@requires_automatic_filing
 def test_the_sink_holds_the_limit_when_the_locked_measurement_also_missed_the_fill(tmp_path, monkeypatch):
     # decide() and the locked route both see room; the file fills before the open. Only the opened file knows.
     ws, home, env = field_workspace(tmp_path)
@@ -244,6 +251,7 @@ def test_the_sink_holds_the_limit_when_the_locked_measurement_also_missed_the_fi
     assert (ws / CARD).read_text().count(NOTE) == 1 and not _drafts(ws)
 
 
+@requires_automatic_filing
 def test_two_handoffs_in_one_run_never_cross_act_at(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -257,6 +265,7 @@ def test_two_handoffs_in_one_run_never_cross_act_at(tmp_path, monkeypatch):
     assert [landed.count(f"{NOTE} {index}") for index in range(2)] == [1, 1]
 
 
+@requires_automatic_filing
 def test_a_card_filled_between_choosing_and_writing_rolls_to_the_next_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -279,6 +288,7 @@ def test_a_card_filled_between_choosing_and_writing_rolls_to_the_next_card(tmp_p
     assert (ws / CARD_2).read_text().count(NOTE) == 1 and not _drafts(ws)
 
 
+@requires_automatic_filing
 def test_a_retry_never_writes_to_a_card_that_filled_after_it_was_chosen(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -302,6 +312,7 @@ def test_a_retry_never_writes_to_a_card_that_filled_after_it_was_chosen(tmp_path
     assert (ws / CARD_2).read_text().count(NOTE) == 1 and (ws / CARD).stat().st_size == 590
 
 
+@requires_automatic_filing
 def test_the_retry_of_a_direct_append_measures_the_file_under_the_lock(tmp_path, monkeypatch):
     # A draft held for another reason, with room in USER.md when it was decided and none by the write.
     ws, home, env = field_workspace(tmp_path)
@@ -339,6 +350,7 @@ def test_the_retry_of_a_direct_append_measures_the_file_under_the_lock(tmp_path,
 # --- A3: an already hard linked instruction file is supported; a swap is not ------------------------
 
 
+@requires_automatic_filing
 @POSIX_ONLY
 def test_an_unchanged_hard_linked_instruction_file_still_takes_a_direct_append(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
@@ -393,6 +405,7 @@ def test_the_provenance_check_reads_the_tags_not_a_substring(tags, ok):
 # --- A5: a blocked card is recorded, and the drain delivers once it passes -------------------------
 
 
+@requires_automatic_filing
 def test_ingest_records_each_untrusted_card_and_the_drafts_waiting_on_it(tmp_path, monkeypatch, capsys):
     from brigade import instruction_overflow_blocked
 
@@ -412,6 +425,7 @@ def test_ingest_records_each_untrusted_card_and_the_drafts_waiting_on_it(tmp_pat
     assert f"blocked overflow card {CARD}: 2 draft(s) held" in capsys.readouterr().out
 
 
+@requires_automatic_filing
 def test_the_record_holds_paths_and_counts_never_handoff_content(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -420,6 +434,7 @@ def test_the_record_holds_paths_and_counts_never_handoff_content(tmp_path, monke
     assert NOTE not in (ws / BLOCKED).read_text()
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("repair", ["remove", "repair"])
 def test_the_drain_delivers_the_held_drafts_once_the_card_passes(tmp_path, monkeypatch, repair):
     ws, home, env = field_workspace(tmp_path)
@@ -449,6 +464,7 @@ def test_the_drain_delivers_the_held_drafts_once_the_card_passes(tmp_path, monke
 # --- B: a card routing may choose is a card retry can read ----------------------------------------
 
 
+@requires_automatic_filing
 def test_retry_reads_a_card_larger_than_a_draft_may_be(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -461,6 +477,7 @@ def test_retry_reads_a_card_larger_than_a_draft_may_be(tmp_path, monkeypatch):
     assert (ws / CARD).read_text().endswith(f"\n{NOTE}\n") and not draft.exists() and not (ws / CARD_2).exists()
 
 
+@requires_automatic_filing
 def test_an_interrupted_refusal_has_already_returned_the_draft(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)

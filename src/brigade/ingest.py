@@ -313,30 +313,43 @@ def ingest_into(
             try:
                 # One read. The digest, the parse and every delivered copy
                 # come from these bytes, so the digest names what was handled.
-                snapshot = handoff_origin.read_handoff(path, max_bytes=INSPECTION_CEILING)
+                oversized = False
+                try:
+                    snapshot = handoff_origin.read_handoff(path, max_bytes=INSPECTION_CEILING)
+                except handoff_origin.HandoffTooLargeError as exc:
+                    # Preserve the whole stable publication for a person without
+                    # parsing it or granting any automatic filing authority.
+                    snapshot = handoff_origin.read_handoff(path, max_bytes=exc.size)
+                    oversized = True
                 sidecar = handoff_origin.stamp_path(source, path)
                 sha = hashlib.sha256(snapshot).hexdigest()
-                origin = handoff_origin.verify_handoff(source, path, snapshot)
+                origin = None if oversized else handoff_origin.verify_handoff(source, path, snapshot)
                 trusted_origin = origin is not None and origin.allows_automatic_filing
                 if origin is not None:
                     sidecar = origin.stamp.sidecar
+
+                def claim_origin(verified: handoff_origin.VerifiedOrigin | None = origin) -> bool:
+                    nonlocal trusted_origin
+                    assert verified is not None
+                    trusted_origin = verified.stamp.claim()
+                    return trusted_origin
+
                 # Bad bytes or malformed structure belong to this handoff
                 # only. Guard and invariant failures further on stay fatal.
                 try:
-                    sections = parse(path, snapshot)
+                    sections = {} if oversized else parse(path, snapshot)
                 except UnicodeDecodeError:
                     _record_failure(stats, path, "invalid-encoding")
                     continue
                 except ValueError:
                     _record_failure(stats, path, "invalid-content")
                     continue
-                # Claim before _execute can mutate canonical memory. A crash or
-                # failed publication spends the stamp and requires human review.
                 if trusted_origin and not dry_run:
                     if _is_tracked(path, _git_tracked_files(path.parent)):
                         raise TrackedHandoffError("handoff became tracked before origin claim")
-                    assert origin is not None
-                    trusted_origin = origin.stamp.claim()
+                    if sha in stats.seen_digests:
+                        assert origin is not None
+                        trusted_origin = claim_origin()
                 if trusted_origin and sha in stats.seen_digests:
                     if not dry_run:
                         _archive(path, processed_dir, sha)
@@ -344,7 +357,11 @@ def ingest_into(
                     stats.skipped += 1
                     stats.actions.append(_summary("skip", path.name, "duplicate-content"))
                     continue
-                if not trusted_origin:
+                if oversized:
+                    outcome = Outcome(
+                        "inboxed", code="handoff-too-large", reason="handoff exceeds automatic inspection limit"
+                    )
+                elif not trusted_origin:
                     outcome = Outcome(
                         "inboxed",
                         code="origin-review-required",
@@ -359,6 +376,13 @@ def ingest_into(
                         card_ids=card_ids,
                         routing=routing,
                     )
+                # A busy card lock has made no canonical writes. Claim its
+                # origin only after acquiring the lock, so it remains retryable.
+                if trusted_origin and outcome.kind != "promoted" and not dry_run:
+                    assert origin is not None
+                    if not claim_origin():
+                        trusted_origin = False
+                        outcome = Outcome("inboxed", code="origin-review-required")
                 action = _execute(
                     outcome,
                     handoff_path=path,
@@ -372,6 +396,7 @@ def ingest_into(
                     promote_cards=promote_cards,
                     route_documents=route_documents,
                     routing=routing,
+                    claim_origin=claim_origin if trusted_origin and outcome.kind == "promoted" else None,
                 )
                 if not dry_run and action.kind in _HANDLED_KINDS:
                     handoff_origin.remove_stamp(sidecar)
@@ -381,6 +406,12 @@ def ingest_into(
                 # Changed since it was read: what was delivered is not what
                 # sits here, so leave it pending and do not count the digest.
                 _record_failure(stats, path, "handoff-changed")
+                continue
+            except handoff_origin.LinkedHandoffError:
+                _record_failure(stats, path, "linked-handoff")
+                continue
+            except handoff_origin.HandoffTooLargeError:
+                _record_failure(stats, path, "handoff-too-large")
                 continue
             except OSError:
                 _record_failure(stats, path, "io-error")
@@ -806,6 +837,7 @@ def _publish_promoted_card(
     dry_run: bool,
     expected_sha: str = "",
     card_ids: CardIdIndex | None = None,
+    claim_origin: Callable[[], bool] | None = None,
 ) -> str:
     """Publish (or, in a dry run, simulate) one card and record its id in `card_ids`.
 
@@ -857,6 +889,8 @@ def _publish_promoted_card(
                 raise OSError("publication must be a regular file")
             build_content(check_state(dest.read_bytes() if dest.exists() else None))
         else:
+            if claim_origin is not None and not claim_origin():
+                raise handoff_origin.OriginClaimRefused("origin claim unavailable")
             _write_card_descriptor_bound(dest, target, check_state, build_content)
     if card_ids is not None:
         # `built` is the text written, or in a dry run the text the same builder would
@@ -1044,6 +1078,7 @@ def _execute(
     promote_cards: bool | None = None,
     route_documents: bool | None = None,
     routing: instruction_overflow.RouteContext | None = None,
+    claim_origin: Callable[[], bool] | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
@@ -1062,10 +1097,29 @@ def _execute(
             expected_sha = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
         try:
             _publish_promoted_card(
-                dest, target, sections, dry_run=dry_run, expected_sha=expected_sha, card_ids=card_ids
+                dest,
+                target,
+                sections,
+                dry_run=dry_run,
+                expected_sha=expected_sha,
+                card_ids=card_ids,
+                claim_origin=claim_origin,
             )
         except InboxLockTimeout:
             return Action("skipped", _summary("skip", name, "card-publication-busy"))
+        except handoff_origin.OriginClaimRefused:
+            return _execute(
+                Outcome("inboxed", code="origin-review-required"),
+                handoff_path,
+                target,
+                sections,
+                inbox_dir,
+                processed_dir,
+                dry_run,
+                snapshot,
+                promote_cards=promote_cards,
+                route_documents=route_documents,
+            )
         except (OSError, ValueError) as exc:
             # A reviewed migration may have arrived after decide(). Route the
             # original handoff for review without replacing that revision.
@@ -1176,7 +1230,7 @@ def _execute(
             inbox_dir.mkdir(parents=True, exist_ok=True)
             # Copy the original file verbatim so reviewers see what the
             # harness actually wrote, not a reconstruction.
-            original = snapshot.decode("utf-8") if snapshot is not None else handoff_path.read_text(encoding="utf-8")
+            original = snapshot if snapshot is not None else handoff_path.read_bytes()
             header = (
                 f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
                 f"     reason: {outcome.code}{_match_meta(outcome, target)}\n     routed-at: {slug} -->\n\n"
@@ -1184,13 +1238,14 @@ def _execute(
             if promote_cards is not None and route_documents is not None:
                 flags = f"promote={str(promote_cards).lower()} route={str(route_documents).lower()}"
                 header = header.replace(f"routed-at: {slug} -->", f"routed-at: {slug}\n     retry-flags: {flags} -->")
-            dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
+            review_bytes = header.encode("utf-8") + original
+            dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", review_bytes)
             if promote_cards is not None and route_documents is not None:
                 try:
                     handoff_origin.stamp_review_draft(
                         target,
                         dest,
-                        (header + original).encode("utf-8"),
+                        review_bytes,
                         handoff_origin.ReviewDraft(outcome.code, promote_cards, route_documents),
                     )
                 except OSError:
@@ -1588,7 +1643,7 @@ def _archive(src: Path, processed_dir: Path, expected_sha: str | None = None) ->
     return dest
 
 
-def _write_review_draft(inbox_dir: Path, base: str, text: str) -> Path:
+def _write_review_draft(inbox_dir: Path, base: str, text: str | bytes) -> Path:
     """Create a new review draft, never replacing an existing one.
 
     Sanitizing and truncating handoff names can map two handoffs to one
@@ -1598,7 +1653,7 @@ def _write_review_draft(inbox_dir: Path, base: str, text: str) -> Path:
         dest = inbox_dir / (f"{base}.md" if index == 0 else f"{base}-{index}.md")
         try:
             with dest.open("xb") as handle:
-                handle.write(text.encode("utf-8"))
+                handle.write(text.encode("utf-8") if isinstance(text, str) else text)
                 handle.flush()
                 os.fsync(handle.fileno())
         except FileExistsError:

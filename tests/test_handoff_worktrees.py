@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from brigade import dirfd, handoff_worktrees, ingest as ingest_mod, runguard
 from brigade.claude_hooks import runtime as hook_runtime
 from brigade.install import install_selection
@@ -259,6 +260,7 @@ def test_handoff_changed_after_read_is_never_archived_undelivered(tmp_target: Pa
     assert not any("Y-CONTENT" in text for text in archived)
 
 
+@requires_automatic_filing
 def test_guard_failure_in_decide_stays_fatal(tmp_target: Path, monkeypatch):
     inbox = _seed(tmp_target)
     trusted_handoff(_handoff(inbox, "2026-11-08-0900-a.md", "a"))
@@ -274,6 +276,7 @@ def test_guard_failure_in_decide_stays_fatal(tmp_target: Path, monkeypatch):
 # Daybreak 4: logs and review receipts carry codes, never handoff fields.
 
 
+@requires_automatic_filing
 def test_untrusted_fields_stay_out_of_logs_and_receipts(tmp_target: Path, capsys):
     inbox = _seed(tmp_target)
     # Windows rejects control characters in filenames, so it gets a
@@ -363,6 +366,7 @@ def test_ingest_discovers_linked_worktree_inbox(tmp_path: Path):
     assert (stranded.parent / "processed" / stranded.name).is_file()
 
 
+@requires_automatic_filing
 def test_same_handoff_in_two_worktrees_ingests_once(tmp_path: Path):
     main, linked = _repo_with_worktree(tmp_path)
     trusted_handoff(_handoff(main / ".claude" / "memory-handoffs", "2026-11-08-0900-same.md", "same"), main)
@@ -407,6 +411,7 @@ Retry fact.
 """
 
 
+@requires_automatic_filing
 def test_retryable_skip_does_not_mark_identical_handoffs_handled(tmp_path: Path):
     from brigade import inbox_lock
 

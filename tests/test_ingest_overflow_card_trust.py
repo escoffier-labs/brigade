@@ -8,11 +8,13 @@ content wherever it was published.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import replace
 from datetime import date
 
 import pytest
 
+from tests._handoff_origin_fixtures import requires_automatic_filing, windows_draft_review
 from brigade import ingest, instruction_overflow, memory_cmd, memory_inbox_drain as drain
 from brigade import memory_care_journal as journal
 from brigade.instruction_overflow import CARDS_REL, RouteContext, route
@@ -68,7 +70,12 @@ def _drafts(ws):
 
 def _held(ws, content=NOTE, number=0):
     """An authenticated ingest draft held for a full instruction file."""
-    source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
+    if sys.platform == "win32":
+        source = ws / ".claude/memory-handoffs" / f"2026-10-01-{number}.md"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(handoff_text("USER.md", content, type_="preference"), encoding="utf-8")
+    else:
+        source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
     ingest._execute(
         ingest.Outcome("inboxed", code="bootstrap-budget-exceeded"),
         source,
@@ -99,6 +106,7 @@ def _no_note_in_cards(ws):
 # --- A1: a planted card never receives handoff bytes ---------------------------------------------
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("plant", sorted(PLANTS))
 def test_a_planted_card_gets_no_handoff_bytes_through_ingest(tmp_path, monkeypatch, plant):
     ws, home, env = field_workspace(tmp_path)
@@ -114,6 +122,7 @@ def test_a_planted_card_gets_no_handoff_bytes_through_ingest(tmp_path, monkeypat
     assert "overflow-card-untrusted" in draft.read_text()
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("plant", sorted(PLANTS))
 def test_a_planted_card_gets_no_handoff_bytes_through_retry(tmp_path, monkeypatch, plant):
     ws, home, env = field_workspace(tmp_path)
@@ -127,6 +136,7 @@ def test_a_planted_card_gets_no_handoff_bytes_through_retry(tmp_path, monkeypatc
     assert not [d for d in journal.entries(ws) if d.reason.startswith("retry:document-routed-to-card")]
 
 
+@requires_automatic_filing
 def test_a_planted_rollover_card_gets_no_handoff_bytes(tmp_path, monkeypatch):
     # Card 1 is a real, full card. The card the append would roll into is planted and public.
     ws, home, env = field_workspace(tmp_path)
@@ -143,6 +153,7 @@ def test_a_planted_rollover_card_gets_no_handoff_bytes(tmp_path, monkeypatch):
     assert planted.read_bytes() == before and draft.exists()
 
 
+@requires_automatic_filing
 def test_a_card_planted_after_decide_is_caught_under_the_lock(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -166,6 +177,7 @@ def test_a_card_planted_after_decide_is_caught_under_the_lock(tmp_path, monkeypa
     assert planted.read_bytes() == before
 
 
+@requires_automatic_filing
 def test_every_card_this_feature_writes_is_private_to_the_hub_and_passes_its_own_check(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -187,6 +199,7 @@ def test_the_trust_check_refuses_what_the_hub_would_publish_or_cannot_vouch_for(
         assert withheld(PLANTS[plant]) is None  # the hub would publish it: the two parsers agree
 
 
+@requires_automatic_filing
 def test_content_that_would_form_a_second_frontmatter_block_is_held_before_a_card_exists(tmp_path, monkeypatch):
     # Every card written must pass the check that guards the next append, or it would hold its own feed.
     ws, home, env = field_workspace(tmp_path)
@@ -207,6 +220,7 @@ def _first_card_size(tmp_path, monkeypatch, content=NOTE):
     return (ws / CARD).stat().st_size
 
 
+@requires_automatic_filing
 def test_a_first_block_at_the_card_limit_is_written_and_one_byte_over_is_held(tmp_path, monkeypatch):
     size = _first_card_size(tmp_path, monkeypatch)
     ws, home, env = field_workspace(tmp_path / "at-limit")
@@ -226,6 +240,7 @@ def test_a_first_block_at_the_card_limit_is_written_and_one_byte_over_is_held(tm
     assert outcome.code == "overflow-block-too-large" and str(size - 1) in outcome.reason
 
 
+@requires_automatic_filing
 def test_a_block_larger_than_the_whole_limit_is_never_written_oversize(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -234,6 +249,7 @@ def test_a_block_larger_than_the_whole_limit_is_never_written_oversize(tmp_path,
     assert not (ws / CARDS_REL).exists()
 
 
+@requires_automatic_filing
 def test_an_append_to_an_existing_card_may_reach_the_limit_exactly(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -246,6 +262,7 @@ def test_an_append_to_an_existing_card_may_reach_the_limit_exactly(tmp_path, mon
     assert card2.stat().st_size == 600 and card.stat().st_size == 600
 
 
+@requires_automatic_filing
 def test_the_limit_is_clamped_to_what_the_duplicate_scan_reads_and_the_request_is_recorded(tmp_path, monkeypatch):
     size = _first_card_size(tmp_path, monkeypatch)
     ws, home, env = field_workspace(tmp_path / "clamped")
@@ -262,6 +279,7 @@ def test_the_limit_is_clamped_to_what_the_duplicate_scan_reads_and_the_request_i
     assert unclamped.cards == (CARD,)
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("archive_fails", [False, True])
 def test_a_card_the_scan_cannot_read_is_never_written_and_a_replay_never_duplicates(
     tmp_path, monkeypatch, archive_fails
@@ -288,6 +306,7 @@ def test_a_card_the_scan_cannot_read_is_never_written_and_a_replay_never_duplica
     assert sum(card.read_text().count(NOTE) for card in cards) <= 1
 
 
+@requires_automatic_filing
 def test_a_replay_with_a_card_exactly_at_the_ceiling_finds_the_block(tmp_path, monkeypatch):
     size = _first_card_size(tmp_path, monkeypatch)
     ws, home, env = field_workspace(tmp_path / "at-ceiling")
@@ -309,6 +328,7 @@ def test_a_replay_with_a_card_exactly_at_the_ceiling_finds_the_block(tmp_path, m
     assert (ws / CARD).read_text().count(NOTE) == 1 and not (ws / CARD_2).exists()
 
 
+@requires_automatic_filing
 def test_an_existing_card_over_the_ceiling_holds_the_handoff_instead_of_hiding_a_replay(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -323,6 +343,7 @@ def test_an_existing_card_over_the_ceiling_holds_the_handoff_instead_of_hiding_a
 # --- A3: a hard link swapped in before the write cannot redirect it ------------------------------
 
 
+@requires_automatic_filing
 @POSIX_ONLY
 @pytest.mark.parametrize("existing", [False, True])
 def test_a_hard_link_swapped_in_before_the_open_never_redirects_a_card_append(tmp_path, monkeypatch, existing):
@@ -352,6 +373,7 @@ def test_a_hard_link_swapped_in_before_the_open_never_redirects_a_card_append(tm
     assert ("overflow-card-untrusted" if existing else "document-destination-unwritable") in draft.read_text()
 
 
+@requires_automatic_filing
 @POSIX_ONLY
 def test_a_hard_link_swapped_in_before_the_open_never_redirects_a_direct_append(tmp_path, monkeypatch):
     from brigade import dirfd
@@ -384,6 +406,7 @@ def test_a_hard_link_swapped_in_before_the_open_never_redirects_a_direct_append(
 # --- B: Codex review threads ---------------------------------------------------------------------
 
 
+@requires_automatic_filing
 def test_a_file_missing_at_discovery_is_measured_again_after_an_earlier_handoff_creates_it(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -397,6 +420,7 @@ def test_a_file_missing_at_discovery_is_measured_again_after_an_earlier_handoff_
     assert ("b" * chunk) in (ws / CARD).read_text() and ("b" * chunk) not in (ws / "USER.md").read_text()
 
 
+@requires_automatic_filing
 def test_cards_beyond_a_gap_in_the_chain_still_protect_a_replay(tmp_path, monkeypatch):
     # An undo deleted card 1 and left card 2. The content in card 2 must not be written again into a new card 1.
     ws, home, env = field_workspace(tmp_path)
@@ -411,6 +435,7 @@ def test_cards_beyond_a_gap_in_the_chain_still_protect_a_replay(tmp_path, monkey
     assert "document-content-present" in draft.read_text()
 
 
+@requires_automatic_filing
 def test_new_content_fills_the_first_gap_in_the_chain(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -419,6 +444,7 @@ def test_new_content_fills_the_first_gap_in_the_chain(tmp_path, monkeypatch):
     assert (ws / CARD).read_text().endswith("\n" + NOTE + "\n")
 
 
+@requires_automatic_filing
 def test_a_chain_of_full_cards_that_is_too_long_holds_the_handoff(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -435,6 +461,7 @@ def test_a_chain_of_full_cards_that_is_too_long_holds_the_handoff(tmp_path, monk
 # --- C: review notes -----------------------------------------------------------------------------
 
 
+@requires_automatic_filing
 def test_the_direct_path_finds_content_already_published_to_a_card(tmp_path, monkeypatch):
     # A card took the block, archiving failed, then a person trimmed USER.md below act-at before the replay.
     ws, home, env = field_workspace(tmp_path)
@@ -457,6 +484,7 @@ def test_a_line_of_an_unrelated_card_does_not_hold_a_new_handoff(tmp_path, monke
     assert outcome.kind == "routed-card", outcome
 
 
+@requires_automatic_filing
 @POSIX_ONLY
 def test_a_card_problem_found_under_the_lock_holds_with_the_same_code_as_decide(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
@@ -481,6 +509,7 @@ def test_a_card_problem_found_under_the_lock_holds_with_the_same_code_as_decide(
     assert "document-destination-unsafe" in action.summary and outside.stat().st_size == 50
 
 
+@requires_automatic_filing
 def test_a_bug_in_building_the_block_is_not_swallowed_as_a_held_handoff(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -505,6 +534,7 @@ def test_a_bug_in_building_the_block_is_not_swallowed_as_a_held_handoff(tmp_path
         )
 
 
+@requires_automatic_filing
 def test_an_unparseable_care_configuration_is_retried_automatically_once_it_parses(tmp_path, monkeypatch):
     # Nothing is lost and no person is involved: ingest keeps the handoff under a retry code, and the drain
     # delivers it as soon as the configuration parses.
@@ -553,6 +583,7 @@ def test_config_is_read_through_the_care_configuration_the_ingest_uses(tmp_path)
     assert route(ws, "USER.md", NOTE, "preference", home=home, environ=env).card_limit == 777
 
 
+@requires_automatic_filing
 @pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="POSIX permission bits")
 def test_a_card_that_cannot_be_opened_holds_the_handoff_instead_of_opening_the_next_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
@@ -602,6 +633,10 @@ def test_unverified_draft_is_not_a_retryable_card_blocker(tmp_path, monkeypatch)
     draft = _held(ws)
     planted = _plant(ws, PUBLIC + "\nplanted\n")
     before = planted.read_bytes()
+    if windows_draft_review(ws, draft):
+        assert drain.drain(ws, today=TODAY, deadline_days=14)["blocked_cards"] == []
+        assert planted.read_bytes() == before
+        return
     assert drain.drain(ws, today=TODAY, deadline_days=14)["blocked_cards"]
     handoff_origin.stamp_path(ws, draft).unlink()
     result = drain.drain(ws, today=TODAY, deadline_days=14)

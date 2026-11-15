@@ -3,3 +3,5 @@
 - Drain revokes review stamps for drafts observed missing, so restoring the same bytes after manual removal requires review.
 - Ingest archives handoffs after review stamp storage fails, retaining one unsigned draft for a person with a fixed failure reason.
 - Recovery abandons prepared review decisions without usable origin claims and retains or restores their drafts for human review before any card or document write.
+- Windows handoffs require human review until #2588 adds Win32 ACL confinement checks. Portable file safety checks still run.
+- Origin claims publish complete markers atomically. Failed claims abandon retry authority and retain drafts for review. Oversized handoffs retain their bytes in review, and linked handoffs report a specific refusal.

@@ -146,6 +146,13 @@ rules. Worker, cron, subagent, unknown, and tool-touched origins go to
 `memory/handoff-inbox/` with reason `origin-review-required`. The inbox drain
 classifies that reason as human review and cannot retry it automatically.
 
+On Windows, automatic filing is off. Handoffs go to human review with
+`origin-review-required` until [#2588](https://github.com/escoffier-labs/brigade/issues/2588)
+adds a Win32 ACL confinement check. Regular-file, reparse-point, and single-link
+checks still apply. Files above the automatic inspection limit go to review as
+`handoff-too-large`, with their original bytes preserved. Linked handoffs stay in
+the writer inbox with `linked-handoff` and cannot file automatically.
+
 Ingest also signs each review draft's final bytes, path, routing reason, and
 promotion and document-routing flags with the memory owner's key. The drain and
 direct reprocessing require that record before retrying. Headers are display

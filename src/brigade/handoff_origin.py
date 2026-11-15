@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import stat
+import sys
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -41,17 +42,44 @@ def stamp_path(target: Path, handoff: Path) -> Path:
     return target.expanduser().resolve() / ".brigade" / "handoffs" / "origins" / f"{identity}.json"
 
 
+class OriginClaimRefused(OSError):
+    """Automatic authority could not be consumed before a canonical write."""
+
+
+class LinkedHandoffError(OSError):
+    """A handoff cannot be trusted through a linked publication."""
+
+
+class HandoffTooLargeError(OSError):
+    """A regular handoff needs review outside the automatic inspection limit."""
+
+    def __init__(self, size: int):
+        super().__init__("handoff exceeds the automatic inspection limit")
+        self.size = size
+
+
 def read_handoff(path: Path, *, max_bytes: int, private_key: bool = False) -> bytes:
     """Read one stable, single-link regular file through a no-follow descriptor."""
     parent = dirfd.open_directory_chain(path.absolute().parent)
     try:
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        info = dirfd.stat_child(parent, path.name, allow_reparse=True)
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise LinkedHandoffError("linked handoff")
         fd = dirfd.open_child_file(parent, path.name, flags, share_write=False)
         with os.fdopen(fd, "rb") as handle:
             before = os.fstat(handle.fileno())
-            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > max_bytes:
-                raise OSError("not a bounded single-link regular file")
-            if private_key and (before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) & 0o077):
+            if not stat.S_ISREG(before.st_mode):
+                raise OSError("handoff is not a regular file")
+            if before.st_nlink != 1 or getattr(before, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise LinkedHandoffError("linked handoff")
+            if before.st_size > max_bytes:
+                raise HandoffTooLargeError(before.st_size)
+            if (
+                private_key
+                and sys.platform != "win32"
+                and (not hasattr(os, "getuid") or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) & 0o077)
+            ):
                 raise OSError("origin key is not private to the current user")
             data = handle.read(max_bytes + 1)
             after = os.fstat(handle.fileno())
@@ -84,12 +112,13 @@ def read_handoff(path: Path, *, max_bytes: int, private_key: bool = False) -> by
 
 def _key(target: Path) -> bytes | None:
     # Origin authority never honors the receipt-only environment override.
-    # Windows cannot prove POSIX ownership and private mode, so fail closed.
-    if not dirfd.posix_available() or not hasattr(os, "getuid"):
-        return None
+    # Read with the portable regular-file, reparse-point and link checks first.
+    # Windows still needs the Win32 ACL confinement proof tracked in #2588.
     try:
         path = target.expanduser().resolve() / ".brigade" / receipt_signing.KEY_NAME
         data = read_handoff(path, max_bytes=256, private_key=True)
+        if sys.platform == "win32" or not dirfd.posix_available() or not hasattr(os, "getuid"):
+            return None
         key = bytes.fromhex(data.decode("ascii").strip())
     except (OSError, ValueError, UnicodeError):
         return None
@@ -118,28 +147,32 @@ def _claim(consumed: Path, *, decision_id: str = "") -> bool:
                 pass
             parent = dirfd.open_child_directory(state, consumed.parent.name)
             try:
-                created = True
+                temporary = f".claim-{secrets.token_hex(16)}.tmp"
+                fd = dirfd.open_child_file(parent, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 try:
-                    fd = dirfd.open_child_file(parent, consumed.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-                except FileExistsError:
-                    if not decision_id:
-                        return False
-                    created = False
-                    fd = dirfd.open_child_file(parent, consumed.name, os.O_RDONLY)
-                try:
-                    data = decision_id.encode("ascii")
-                    if created:
+                    try:
+                        data = decision_id.encode("ascii")
                         if os.write(fd, data) != len(data):
                             raise OSError("short origin claim write")
-                    else:
-                        info = os.fstat(fd)
-                        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or os.read(fd, 257) != data:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                    try:
+                        os.link(temporary, consumed.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                    except FileExistsError:
+                        if not decision_id:
                             return False
-                    # Re-flush an existing claim too. The earlier attempt may
-                    # have failed its durability check before canonical writes.
-                    os.fsync(fd)
+                        fd = dirfd.open_child_file(parent, consumed.name, os.O_RDONLY)
+                        try:
+                            info = os.fstat(fd)
+                            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or os.read(fd, 257) != data:
+                                return False
+                            # An earlier attempt may have failed its durability check.
+                            os.fsync(fd)
+                        finally:
+                            os.close(fd)
                 finally:
-                    os.close(fd)
+                    dirfd.unlink_child(parent, temporary)
                 os.fsync(parent)
                 os.fsync(state)
             finally:

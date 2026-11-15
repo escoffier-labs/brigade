@@ -14,6 +14,7 @@ from tests._handoff_origin_fixtures import trusted_handoff
 
 import pytest
 
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from brigade import ingest as ingest_mod
 from brigade import memory_cmd, memory_hub_sync
 from brigade.handoff_cmd import linting
@@ -276,6 +277,7 @@ def _ingest(tmp_path: Path, *, dry_run: bool = False) -> ingest_mod.IngestStats:
     return stats
 
 
+@requires_automatic_filing
 def test_ingest_rejects_an_explicit_id_collision_and_never_writes_the_card(tmp_path: Path):
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
@@ -294,6 +296,7 @@ def test_ingest_rejects_an_explicit_id_collision_and_never_writes_the_card(tmp_p
     assert "reason: card-id-collision" in drafts[0].read_text(encoding="utf-8")
 
 
+@requires_automatic_filing
 def test_ingest_rejection_is_isolated_to_the_colliding_handoff(tmp_path: Path):
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
@@ -309,6 +312,7 @@ def test_ingest_rejection_is_isolated_to_the_colliding_handoff(tmp_path: Path):
     assert stats.inboxed == 1 and stats.promoted == 1
 
 
+@requires_automatic_filing
 def test_ingest_dry_run_reports_the_rejection_and_writes_nothing(tmp_path: Path):
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
@@ -325,6 +329,7 @@ def test_ingest_dry_run_reports_the_rejection_and_writes_nothing(tmp_path: Path)
     )
 
 
+@requires_automatic_filing
 def test_two_handoffs_in_one_run_cannot_claim_the_same_id(tmp_path: Path):
     inbox = _inbox(tmp_path)
     _write(inbox, "2026-11-09-1000-first.md", "first.md", _card_text(topic="first-topic", card_id=MINTED))
@@ -344,6 +349,7 @@ def test_two_handoffs_in_one_run_cannot_claim_the_same_id(tmp_path: Path):
     assert any("card-id-collision" in action for action in stats.actions)
 
 
+@requires_automatic_filing
 def test_ingest_gives_an_id_less_topic_collision_a_minted_id(tmp_path: Path):
     inbox = _inbox(tmp_path)
     cards = tmp_path / "memory" / "cards"
@@ -360,6 +366,7 @@ def test_ingest_gives_an_id_less_topic_collision_a_minted_id(tmp_path: Path):
     assert "\nid: card-" in written
 
 
+@requires_automatic_filing
 def test_a_failed_archive_still_blocks_a_second_claim_on_the_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     inbox = _inbox(tmp_path)
     _write(inbox, "2026-11-09-1000-first.md", "first.md", _card_text(topic="first-topic", card_id=MINTED))
@@ -388,6 +395,7 @@ def test_a_failed_archive_still_blocks_a_second_claim_on_the_id(tmp_path: Path, 
     assert any("card-id-collision" in action for action in stats.actions)
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_an_update_without_an_id_keeps_the_original_id_claimed(tmp_path: Path, dry_run: bool):
     inbox = _inbox(tmp_path)

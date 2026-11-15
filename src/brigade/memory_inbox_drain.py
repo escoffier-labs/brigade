@@ -18,6 +18,7 @@ LEDGER_REL = ".brigade/memory-care/inbox-ledger.jsonl"
 HUMAN_CODES = frozenset(
     {
         "origin-review-required",
+        "handoff-too-large",
         "preference-replacement-review",
         "card-injection-signal",
         "document-injection-signal",
@@ -77,6 +78,7 @@ EXPIRE_CODES: frozenset[str] = frozenset()  # No ingest code proves that unappli
 # Per-code dependence on usable evidence-log proof, separate from destination reads.
 NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "origin-review-required": False,
+    "handoff-too-large": False,
     "action-not-auto-handled": False,
     "bootstrap-budget-exceeded": False,
     "card-destination-not-regular": False,
@@ -301,8 +303,8 @@ def drain(
         raise ValueError("deadline_days must be positive")
     try:
         if not dry_run:
-            result["pruned_review_stamps"] = handoff_origin.prune_missing_review_stamps(target)
             result["recovery"] = journal.resolve_prepared(target)
+            result["pruned_review_stamps"] = handoff_origin.prune_missing_review_stamps(target)
         paths = pending(target)
         for inbox in ingest._resolve_inbox_paths(target):
             try:

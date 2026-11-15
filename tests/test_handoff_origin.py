@@ -1,12 +1,14 @@
 """Only tooling-authenticated origins may enter automatic filing."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from brigade import handoff_origin as origin, ingest, receipt_signing
 from brigade.handoff_cmd import drafts
+from tests._handoff_origin_fixtures import windows_origin_review
 
 
 def handoff(tmp_path: Path, *, action: str = "no-card") -> Path:
@@ -39,17 +41,22 @@ def stamp(target: Path, path: Path, kind: str = "interactive", touched: bool | N
     )
 
 
+@pytest.mark.parametrize("windows", [False, True])
 @pytest.mark.parametrize("action", ["no-card", "create-card"])
 @pytest.mark.parametrize("kind", ["interactive", "worker", "cron", "subagent", "unknown"])
 @pytest.mark.parametrize("touched", [False, True, None])
-def test_filing_requires_known_clean_interactive_origin(tmp_path, action, kind, touched):
+def test_filing_requires_known_clean_interactive_origin(tmp_path, monkeypatch, action, kind, touched, windows):
+    from types import SimpleNamespace
+
+    if windows:
+        monkeypatch.setattr(origin, "sys", SimpleNamespace(platform="win32"))
     path = handoff(tmp_path, action=action)
     stamp(tmp_path, path, kind, touched)
     stats = ingest.IngestStats()
     assert (
         ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=True, route_documents=True) == 0
     )
-    allowed = kind == "interactive" and touched is False
+    allowed = not windows and sys.platform != "win32" and kind == "interactive" and touched is False
     assert stats.inboxed == (0 if allowed else 1)
     assert stats.promoted + stats.routed == (1 if allowed else 0)
     if not allowed:
@@ -71,6 +78,8 @@ def test_modified_or_unverifiable_stamp_goes_to_review(tmp_path, attack):
 
     path = handoff(tmp_path)
     stamp(tmp_path, path, "worker" if attack == "metadata" else "interactive")
+    if windows_origin_review(tmp_path, path):
+        return
     sidecar = origin.stamp_path(tmp_path, path)
     if attack == "body":
         path.write_bytes(path.read_bytes() + b"Changed.")
@@ -93,6 +102,8 @@ def test_modified_or_unverifiable_stamp_goes_to_review(tmp_path, attack):
 def test_draft_with_key_stamps_unknown_origin(tmp_path):
     receipt_signing.generate_key(tmp_path)
     path = handoff(tmp_path)
+    if windows_origin_review(tmp_path, path):
+        return
     result = origin.verify_handoff(tmp_path, path, path.read_bytes())
     assert result is not None
     assert result.session_kind == "unknown"
@@ -109,6 +120,8 @@ def test_origin_review_cannot_be_automatically_retried():
 def test_copied_stamp_cannot_authorize_another_filename(tmp_path):
     path = handoff(tmp_path)
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     renamed = path.with_name("renamed.md")
     renamed.write_bytes(path.read_bytes())
     origin.stamp_path(tmp_path, renamed).write_bytes(origin.stamp_path(tmp_path, path).read_bytes())
@@ -119,6 +132,8 @@ def test_verification_uses_source_key_when_owner_differs(tmp_path):
     source, owner = tmp_path / "source", tmp_path / "owner"
     path = handoff(source)
     stamp(source, path)
+    if windows_origin_review(source, path, owner=owner):
+        return
     receipt_signing.generate_key(owner)
     stats = ingest.IngestStats()
     assert ingest.ingest_into(source=source, owner=owner, stats=stats, route_documents=True) == 0
@@ -150,6 +165,8 @@ def test_draft_cannot_self_declare_clean_interactive_origin(tmp_path, monkeypatc
     monkeypatch.setenv("BRIGADE_HANDOFF_UNTRUSTED_TOOLS", "false")
     receipt_signing.generate_key(tmp_path)
     path = handoff(tmp_path)
+    if windows_origin_review(tmp_path, path):
+        return
     verified = origin.verify_handoff(tmp_path, path, path.read_bytes())
     assert verified is not None
     assert not verified.allows_automatic_filing
@@ -160,6 +177,8 @@ def test_origin_sidecar_is_private(tmp_path):
 
     path = handoff(tmp_path)
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     if os.name == "posix":
         assert origin.stamp_path(tmp_path, path).stat().st_mode & 0o777 == 0o600
 
@@ -170,6 +189,8 @@ def test_duplicate_content_cannot_bypass_origin_review(tmp_path, trusted_first):
     duplicate = path.with_name("000-first.md" if trusted_first else "zzz-last.md")
     duplicate.write_bytes(path.read_bytes())
     stamp(tmp_path, duplicate)
+    if windows_origin_review(tmp_path, duplicate):
+        return
     stats = ingest.IngestStats()
     assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, route_documents=True) == 0
     assert stats.routed == 1
@@ -187,6 +208,8 @@ def test_tooling_rejects_non_boolean_tool_status(tmp_path):
 def test_copied_stamp_cannot_authorize_same_name_at_another_path(tmp_path):
     path = handoff(tmp_path)
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     copied = tmp_path / "another-inbox" / path.name
     copied.parent.mkdir()
     copied.write_bytes(path.read_bytes())
@@ -199,6 +222,8 @@ def test_failed_force_stamp_cannot_reuse_previous_interactive_authorization(tmp_
     monkeypatch.setattr(drafts.time, "gmtime", lambda *args: frozen)
     path = handoff(tmp_path)
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     original = path.read_bytes()
     assert origin.verify_handoff(tmp_path, path, original).allows_automatic_filing
 
@@ -225,6 +250,8 @@ def test_ingest_removes_archived_handoff_stamp_from_source(tmp_path, trusted):
     source, owner = tmp_path / "source", tmp_path / "owner"
     path = handoff(source)
     stamp(source, path, "interactive" if trusted else "worker")
+    if windows_origin_review(source, path, owner=owner):
+        return
     sidecar = origin.stamp_path(source, path)
     assert sidecar.exists()
     stats = ingest.IngestStats()
@@ -240,6 +267,8 @@ def test_attacker_key_environment_cannot_authorize_ingest(tmp_path, monkeypatch)
 
     path = handoff(tmp_path, action="create-card")
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     sidecar = origin.stamp_path(tmp_path, path)
     attacker = tmp_path / "attacker-key"
     attacker.write_text("11" * 32 + "\n")
@@ -265,6 +294,8 @@ def test_unsafe_key_cannot_authorize_ingest(tmp_path, monkeypatch, attack):
 
     path = handoff(tmp_path, action="create-card")
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     key = tmp_path / ".brigade/receipt-signing-key"
     if attack in {"symlink", "hardlink"}:
         other = tmp_path / "key-copy"
@@ -297,6 +328,8 @@ def test_linked_handoff_is_refused(tmp_path, link):
 
     path = handoff(tmp_path, action="create-card")
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     other = path.with_suffix(".saved")
     path.rename(other)
     if link == "symlink":
@@ -308,6 +341,7 @@ def test_linked_handoff_is_refused(tmp_path, link):
     assert stats.failed == 1
     assert stats.promoted == stats.inboxed == 0
     assert path.exists()
+    assert "linked-handoff" in stats.actions[0]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX archive replay")
@@ -316,6 +350,8 @@ def test_archive_path_swap_cleans_exact_stamp_and_refuses_hardlink_replay(tmp_pa
 
     path = handoff(tmp_path, action="create-card")
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     sidecar = origin.stamp_path(tmp_path, path)
     archive = ingest._archive
 
@@ -344,6 +380,8 @@ def test_archive_path_swap_cleans_exact_stamp_and_refuses_hardlink_replay(tmp_pa
 def test_crash_after_memory_write_cannot_replay_stamp(tmp_path, monkeypatch, boundary):
     path = handoff(tmp_path, action="create-card")
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     sidecar = origin.stamp_path(tmp_path, path)
     record = sidecar.read_bytes()
 
@@ -379,6 +417,8 @@ def test_platform_without_key_confinement_proof_requires_review(tmp_path, monkey
 
     path = handoff(tmp_path)
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     assert origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
 
@@ -386,6 +426,8 @@ def test_platform_without_key_confinement_proof_requires_review(tmp_path, monkey
 def test_verified_stamp_can_be_claimed_only_once(tmp_path):
     path = handoff(tmp_path)
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     first = origin.verify_handoff(tmp_path, path, path.read_bytes())
     second = origin.verify_handoff(tmp_path, path, path.read_bytes())
     assert first is not None and second is not None
@@ -397,6 +439,8 @@ def test_verified_stamp_can_be_claimed_only_once(tmp_path):
 def test_real_workspace_key_still_verifies_with_attacker_override(tmp_path, monkeypatch):
     path = handoff(tmp_path, action="create-card")
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     monkeypatch.setenv(receipt_signing.KEY_ENV, str(tmp_path / "missing-attacker-key"))
     stats = ingest.IngestStats()
     ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=True)
@@ -406,17 +450,22 @@ def test_real_workspace_key_still_verifies_with_attacker_override(tmp_path, monk
 def test_claim_failure_cannot_write_canonical_memory(tmp_path, monkeypatch):
     path = handoff(tmp_path, action="create-card")
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     blocked = tmp_path / ".brigade/handoffs/consumed-stamps"
     blocked.write_text("not a ledger directory")
     stats = ingest.IngestStats()
     ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=True)
     assert stats.promoted == 0 and stats.inboxed == 1
+    assert not stats.seen_digests
     assert not (tmp_path / "memory/cards/origin.md").exists()
 
 
 def test_review_claim_resumes_only_the_original_journal_decision(tmp_path):
     path = handoff(tmp_path)
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     verified = origin.verify_handoff(tmp_path, path, path.read_bytes())
     assert verified is not None
     mac = verified.stamp.consumed.name
@@ -430,6 +479,8 @@ def test_review_claim_resumes_only_the_original_journal_decision(tmp_path):
 def test_hardlink_replay_reinforces_exactly_once(tmp_path, monkeypatch):
     path = handoff(tmp_path, action="create-card")
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     initial = ingest.IngestStats()
     ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=initial, promote_cards=True)
     assert initial.promoted == 1
@@ -460,6 +511,8 @@ def test_failed_review_stamp_archives_once_and_keeps_draft_for_a_person(tmp_path
 
     path = handoff(tmp_path)
     stamp(tmp_path, path)
+    if windows_origin_review(tmp_path, path):
+        return
     monkeypatch.setattr(
         ingest, "decide", lambda *args, **kwargs: ingest.Outcome("inboxed", code="document-destination-unwritable")
     )
@@ -485,3 +538,87 @@ def test_failed_review_stamp_archives_once_and_keeps_draft_for_a_person(tmp_path
     result = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 14), deadline_days=14)
     assert result["kept_for_person"] == 1 and result["retried"] == 0
     assert draft.exists() and not (tmp_path / "TOOLS.md").exists()
+
+
+@pytest.mark.parametrize("suffix", [b"", b"\xff\x00"])
+def test_oversized_handoff_goes_to_human_review_with_exact_bytes(tmp_path, suffix):
+    from datetime import date
+
+    from brigade import memory_inbox_drain
+    from brigade.instruction_inventory import INSPECTION_CEILING
+
+    path = handoff(tmp_path, action="create-card")
+    snapshot = path.read_bytes() + b"x" * INSPECTION_CEILING + suffix
+    path.write_bytes(snapshot)
+    stamp(tmp_path, path)
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=True) == 0
+    assert stats.inboxed == 1 and stats.failed == stats.promoted == 0
+    assert "handoff-too-large" in stats.actions[0]
+    (review,) = (tmp_path / "memory/handoff-inbox").glob("*.md")
+    assert review.read_bytes().split(b"-->\n\n", 1)[1] == snapshot
+    assert not path.exists()
+    assert (path.parent / "processed" / path.name).read_bytes() == snapshot
+    assert not (tmp_path / "memory/cards/origin.md").exists()
+    assert memory_inbox_drain.classify("handoff-too-large", "") == "human"
+    result = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 14), deadline_days=14)
+    assert result["retried"] == 0 and review.exists()
+    again = ingest.IngestStats()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=again, promote_cards=True) == 0
+    assert again.processed == again.failed == 0
+
+
+@pytest.mark.parametrize("defect", ["none", "directory", "reparse", "hardlink"])
+def test_windows_key_checks_portable_file_safety_before_acl_hold(tmp_path, monkeypatch, defect):
+    import stat
+    from types import SimpleNamespace
+
+    receipt_signing.generate_key(tmp_path)
+    key = tmp_path / ".brigade/receipt-signing-key"
+    monkeypatch.setattr(origin, "sys", SimpleNamespace(platform="win32"))
+    real_fstat = os.fstat
+    observed = []
+
+    def fstat(fd):
+        info = real_fstat(fd)
+        observed.append(fd)
+        if defect == "none":
+            return info
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR if defect == "directory" else info.st_mode,
+            st_nlink=2 if defect == "hardlink" else 1,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT if defect == "reparse" else 0,
+        )
+
+    monkeypatch.setattr(os, "fstat", fstat)
+    if defect != "none":
+        with pytest.raises(OSError):
+            origin.read_handoff(key, max_bytes=256, private_key=True)
+    else:
+        assert origin.read_handoff(key, max_bytes=256, private_key=True) == key.read_bytes()
+    assert origin._key(tmp_path) is None
+    assert observed
+
+
+@pytest.mark.skipif(os.name != "posix", reason="origin claims need POSIX key confinement until #2588")
+@pytest.mark.parametrize("failure", ["short", "error"])
+def test_claim_write_failure_never_publishes_partial_marker(tmp_path, monkeypatch, failure):
+    consumed = tmp_path / "handoffs/consumed-stamps/claim"
+    consumed.parent.parent.mkdir()
+    write = os.write
+
+    def fail(fd, data):
+        if failure == "error":
+            raise OSError("claim storage unavailable")
+        return write(fd, data[:1])
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", fail)
+        assert not origin._claim(consumed, decision_id="first-decision")
+    assert not consumed.exists()
+    assert not list(consumed.parent.iterdir())
+    assert origin._claim(consumed, decision_id="first-decision")
+    assert consumed.read_bytes() == b"first-decision" and consumed.stat().st_nlink == 1
+    assert origin._claim(consumed, decision_id="first-decision")
+    assert not origin._claim(consumed, decision_id="second-decision")
+    assert list(consumed.parent.iterdir()) == [consumed]

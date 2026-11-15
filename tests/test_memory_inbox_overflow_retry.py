@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 from datetime import date
 
 import pytest
 
+from tests._handoff_origin_fixtures import requires_automatic_filing, windows_draft_review
 from brigade import handoff_origin, ingest, memory_care_tend, memory_inbox_retry
 from brigade import memory_care_journal as journal
 from brigade import memory_inbox_drain as drain
@@ -20,7 +22,12 @@ CARD = "memory/cards/instructions/user-md--overflow-preference.md"
 
 def _held(ws, content=NOTE, *, flags=False, number=0):
     """An authorized review draft, optionally without legacy retry flags in its header."""
-    source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
+    if sys.platform == "win32":
+        source = ws / ".claude/memory-handoffs" / f"2026-10-01-{number}.md"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(handoff_text("USER.md", content, type_="preference"), encoding="utf-8")
+    else:
+        source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
     ingest._execute(
         ingest.Outcome("inboxed", code="bootstrap-budget-exceeded"),
         source,
@@ -34,9 +41,10 @@ def _held(ws, content=NOTE, *, flags=False, number=0):
         route_documents=True if flags else None,
     )
     draft = sorted((ws / drain.INBOX_REL).glob("*.md"))[-1]
-    assert handoff_origin.stamp_review_draft(
+    stamped = handoff_origin.stamp_review_draft(
         ws, draft, draft.read_bytes(), handoff_origin.ReviewDraft("bootstrap-budget-exceeded", flags, True)
     )
+    assert stamped == (sys.platform != "win32")
     return draft
 
 
@@ -52,6 +60,7 @@ def test_the_new_success_code_is_a_hold_and_needs_no_evidence_proof():
     assert "bootstrap-budget-exceeded" in drain.RETRY_CODES and "bootstrap-budget-exceeded" not in drain.HOLD_CODES
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("flags", [False, True])
 def test_old_budget_hold_lands_in_the_overflow_card_on_the_next_drain(tmp_path, monkeypatch, flags):
     ws, home, env = field_workspace(tmp_path)
@@ -63,6 +72,7 @@ def test_old_budget_hold_lands_in_the_overflow_card_on_the_next_drain(tmp_path, 
     assert not draft.exists() and (ws / "USER.md").stat().st_size == 8241
 
 
+@requires_automatic_filing
 def test_second_retry_appends_to_the_existing_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -74,6 +84,7 @@ def test_second_retry_appends_to_the_existing_card(tmp_path, monkeypatch):
     assert "archive: never" in card and NOTE in card and card.endswith("\n\nPrefer UTC timestamps.\n")
 
 
+@requires_automatic_filing
 def test_held_copy_of_published_content_resolves_without_a_second_card(tmp_path, monkeypatch):  # Review Focus 6
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -88,6 +99,7 @@ def test_held_copy_of_published_content_resolves_without_a_second_card(tmp_path,
     assert [p.name for p in (ws / "memory/cards/instructions").iterdir()] == ["user-md--overflow-preference.md"]
 
 
+@requires_automatic_filing
 def test_old_budget_hold_with_an_injection_marker_stays_for_a_person(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -97,6 +109,7 @@ def test_old_budget_hold_with_an_injection_marker_stays_for_a_person(tmp_path, m
     assert draft.exists() and not (ws / "memory/cards/instructions").exists()
 
 
+@requires_automatic_filing
 def test_retry_waits_when_the_document_lock_is_busy(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -119,6 +132,7 @@ def test_retry_waits_when_the_document_lock_is_busy(tmp_path, monkeypatch):
     assert not (ws / "memory/cards/instructions").exists()
 
 
+@requires_automatic_filing
 def test_retry_decision_undoes_by_exact_block(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -128,6 +142,7 @@ def test_retry_decision_undoes_by_exact_block(tmp_path, monkeypatch):
     assert not (ws / CARD).exists()
 
 
+@requires_automatic_filing
 def test_retry_claim_failure_abandons_without_writing_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -154,6 +169,7 @@ def test_retry_claim_failure_abandons_without_writing_card(tmp_path, monkeypatch
     assert journal.resolve_prepared(ws) == []
 
 
+@requires_automatic_filing
 def test_retry_journals_a_card_append_and_dry_run_writes_nothing(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -166,6 +182,7 @@ def test_retry_journals_a_card_append_and_dry_run_writes_nothing(tmp_path, monke
     assert payload["appends"][0]["created"] is True and payload["appends"][0]["header_bytes"] > 0
 
 
+@requires_automatic_filing
 def test_retry_of_a_card_append_keeps_the_card_private(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -174,6 +191,7 @@ def test_retry_of_a_card_append_keeps_the_card_private(tmp_path, monkeypatch):
     assert "visibility: private\n" in head + "\n" and "archive: never" in head
 
 
+@requires_automatic_filing
 def test_retry_with_an_invalid_instructions_table_still_routes_the_handoff(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -185,6 +203,7 @@ def test_retry_with_an_invalid_instructions_table_still_routes_the_handoff(tmp_p
     assert (ws / "USER.md").stat().st_size == 100
 
 
+@requires_automatic_filing
 def test_a_committed_retry_is_not_reported_skipped_when_the_card_id_index_cannot_read_the_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -204,6 +223,8 @@ def test_unsigned_budget_hold_stays_for_a_person(tmp_path, monkeypatch, flags):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
     draft = _held(ws, flags=flags)
+    if windows_draft_review(ws, draft):
+        return
     handoff_origin.stamp_path(ws, draft).unlink()
     result = drain.drain(ws, today=TODAY, deadline_days=14)
     assert result["kept_for_person"] == 1 and result["retried"] == 0
@@ -215,6 +236,8 @@ def test_manually_removed_review_draft_loses_retry_authority(tmp_path, monkeypat
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
     draft = _held(ws)
+    if windows_draft_review(ws, draft):
+        return
     data = draft.read_bytes()
     sidecar = handoff_origin.stamp_path(ws, draft)
     if move:
