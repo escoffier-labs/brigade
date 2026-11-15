@@ -22,9 +22,15 @@ import (
 
 // Files are committed individually before advancing the cursor. A killed run
 // replays at most its current file. Content hashes also catch same-stat edits.
+// Failed non-budget exports stay uncached and are retried on the next sweep.
 const filesCrawlMaxBytes = 8 * 1024 * 1024
 
 func cmdCrawlFiles(args []string, out, errw io.Writer) int {
+	return crawlFiles(args, out, errw, filepath.WalkDir, os.Open)
+}
+
+// Filesystem operations are passed in so error paths can be tested as root.
+func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.WalkDirFunc) error, openFile func(string) (*os.File, error)) int {
 	asJSON, dryRun, args := splitWrapperFlags(args)
 	// Keep the existing exporter dry-run contract without updating checkpoints.
 	if dryRun {
@@ -140,18 +146,21 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		cursor = path
 		return nil
 	}
+	// WalkDir orders siblings, not full paths. NUL-separated components preserve
+	// that order, including a directory named a next to a file named a.txt.
+	order := func(path string) string { return strings.ReplaceAll(path, string(filepath.Separator), "\x00") }
 	warnAndCheckpoint := func(path string, err error) error {
 		warnings = append(warnings, fmt.Sprintf("%s: %s", path, err))
 		if _, err := db.Exec(`delete from files_crawl_cache where profile=? and path=?`, profile, path); err != nil {
 			return err
 		}
-		return checkpoint(path)
+		if order(path) > order(cursor) {
+			return checkpoint(path)
+		}
+		return nil
 	}
-	// WalkDir orders siblings, not full paths. NUL-separated components preserve
-	// that order, including a directory named a next to a file named a.txt.
-	order := func(path string) string { return strings.ReplaceAll(path, string(filepath.Separator), "\x00") }
 	startCursor := cursor
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+	err = walkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if ctx.Err() != nil || entries >= 10000 {
 			pending = true
 			return fs.SkipAll
@@ -206,7 +215,7 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 			warnings = append(warnings, fmt.Sprintf("%s: exceeds file size cap", path))
 			return checkpoint(path)
 		}
-		f, err := os.Open(path)
+		f, err := openFile(path)
 		if err != nil {
 			return warnAndCheckpoint(path, err)
 		}
@@ -260,7 +269,7 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 				pending = true
 				return fs.SkipAll
 			}
-			return warnAndCheckpoint(path, err)
+			return toolpath.WrapExecErr("sourceharvest", toolpath.HintSourceHarvest, err)
 		}
 		exported++
 		result, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://files "+path, "")
@@ -284,8 +293,21 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		warnings = append(warnings, summary.Warnings...)
 		warnings = append(warnings, result.Warnings...)
 		// Bad records and exporter warnings advance traversal but stay uncached.
+		// They are retried on the next sweep, rather than the next run.
 		if len(result.Warnings) > 0 || len(summary.Warnings) > 0 {
 			return warnAndCheckpoint(path, fmt.Errorf("export incomplete, left uncached"))
+		}
+		// Keep scan inspection current as well as the profile-specific crawl cache.
+		summary.Path = path
+		if summary.Records == 0 {
+			summary.Records = result.Inserted
+		}
+		sourceKind := result.SourceKind
+		if sourceKind == "" {
+			sourceKind = *source
+		}
+		if err := recordSourceHarvestScan(db, sourceKind, result.SourceHash, summary); err != nil {
+			return err
 		}
 		parsed++
 		// Write the cache before the checkpoint. A crash between them leaves

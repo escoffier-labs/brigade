@@ -1,8 +1,12 @@
 package app
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -27,6 +31,7 @@ printf '{"schema":"@SCHEMA@","source":{"kind":"files","name":"files"},"collectio
 if [ -n "$FILES_CRAWL_EMIT_SLOW" ]; then exec sleep 5; fi
 if [ -n "$FILES_CRAWL_WARN" ]; then printf '{"warnings":["fixture warning"]}\n' >&2; fi
 if [ -n "$FILES_CRAWL_BAD" ]; then printf 'invalid record\n'; fi
+if [ -z "$FILES_CRAWL_WARN" ]; then printf '{"path":"%s","records":1}\n' "$path" >&2; fi
 `
 	body = strings.Replace(body, "@SCHEMA@", adapter.SchemaV1, 1)
 	if err := os.WriteFile(filepath.Join(dir, "sourceharvest"), []byte(body), 0700); err != nil {
@@ -205,29 +210,38 @@ func TestFilesCrawlUnreadablePaths(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "z.txt"), []byte("fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(badFile, 0); err != nil {
-		t.Fatal(err)
+	denied := true
+	walk := func(root string, visit fs.WalkDirFunc) error {
+		return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if denied && path == badDir {
+				if err := visit(path, d, nil); err != nil {
+					return err
+				}
+				return visit(path, d, fs.ErrPermission)
+			}
+			return visit(path, d, err)
+		})
 	}
-	if err := os.Chmod(badDir, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(badFile, 0600); _ = os.Chmod(badDir, 0700) })
-	if f, err := os.Open(badFile); err == nil {
-		f.Close()
-		t.Skip("permissions are not enforced for this user")
+	open := func(path string) (*os.File, error) {
+		if denied && path == badFile {
+			return nil, fs.ErrPermission
+		}
+		return os.Open(path)
 	}
 	for i := 0; i < 2; i++ {
-		got := runJSON(t, "crawl", "files", root, "--max-files", "1", "--json")
+		var out, errw bytes.Buffer
+		if code := crawlFiles([]string{root, "--max-files", "1", "--json"}, &out, &errw, walk, open); code != 0 {
+			t.Fatalf("crawl failed: %s", &errw)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
 		if got["complete"] != true || len(got["warnings"].([]any)) != 2 {
 			t.Fatalf("unreadable paths blocked traversal: %v", got)
 		}
 	}
-	if err := os.Chmod(badFile, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(badDir, 0700); err != nil {
-		t.Fatal(err)
-	}
+	denied = false
 	got := runJSON(t, "crawl", "files", root, "--json")
 	if got["files_parsed"] != float64(2) {
 		t.Fatalf("unreadable paths were cached: %v", got)
@@ -242,5 +256,132 @@ func TestFilesCrawlDryRunBudgetFlags(t *testing.T) {
 	got := runJSON(t, "crawl", "files", "budget", "--budget=1s", "--max-files", "2", "--dry-run", "--json")
 	if got["dry_run"] != true {
 		t.Fatalf("dry run: %v", got)
+	}
+}
+
+func TestFilesCrawlSourceScans(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	path := filepath.Join(t.TempDir(), "one.txt")
+	if err := os.WriteFile(path, []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "files", path, "--json")
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	assertScan := func(changed bool) {
+		t.Helper()
+		diff, err := scanDiff(db, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diff["known"] != true || diff["changed"] != changed || diff["records_generated"] != 1 {
+			t.Fatalf("scan: %v", diff)
+		}
+		scans, err := changedScans(db, "files")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if changed {
+			want = 1
+		}
+		if len(scans) != want {
+			t.Fatalf("changed scans: %v", scans)
+		}
+	}
+	assertScan(false)
+	if err := os.WriteFile(path, []byte("later"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	assertScan(true)
+	runJSON(t, "crawl", "files", path, "--json")
+	assertScan(false)
+}
+
+func TestFilesCrawlExporterStartFailure(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	binary, err := exec.LookPath("sourceharvest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// LookPath accepts this executable, but Start cannot load its interpreter.
+	if err := os.WriteFile(binary, []byte("#!/missing-fixture-interpreter\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out, errw bytes.Buffer
+	if code := cmdCrawlFiles([]string{root, "--json"}, &out, &errw); code != 1 {
+		t.Fatalf("start failure returned %d: %s %s", code, &out, &errw)
+	}
+	if !strings.Contains(errw.String(), "crawl files:") {
+		t.Fatalf("missing diagnostic: %s", &errw)
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow("select count(*) from files_crawl_cursor").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("start failure checkpointed %d cursors", count)
+	}
+}
+
+func TestFilesCrawlAncestorErrorKeepsCursor(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	root := t.TempDir()
+	dir := filepath.Join(root, "a")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a/one.txt", "a/two.txt", "z.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := runJSON(t, "crawl", "files", root, "--max-files", "1", "--json")
+	walk := func(root string, visit fs.WalkDirFunc) error {
+		return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if path == dir {
+				if err := visit(path, d, nil); err != nil {
+					return err
+				}
+				return visit(path, d, fs.ErrPermission)
+			}
+			if path == filepath.Join(root, "z.txt") {
+				return fmt.Errorf("fixture stop after ancestor")
+			}
+			return visit(path, d, err)
+		})
+	}
+	var out, errw bytes.Buffer
+	if code := crawlFiles([]string{root, "--json"}, &out, &errw, walk, os.Open); code != 1 {
+		t.Fatalf("expected fixture stop: %s", &errw)
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var cursor string
+	if err := db.QueryRow("select path from files_crawl_cursor").Scan(&cursor); err != nil {
+		t.Fatal(err)
+	}
+	if cursor != first["resume_cursor"] {
+		t.Fatalf("cursor regressed: %q, was %v", cursor, first["resume_cursor"])
 	}
 }
