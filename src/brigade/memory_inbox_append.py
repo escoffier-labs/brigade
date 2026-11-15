@@ -140,23 +140,22 @@ def _refuse(target: Path, decision_id: str, payload: dict[str, Any], exc: Any) -
     from .memory_inbox_io import append
 
     decision = journal.load(target, decision_id)
-    if draft in decision.paths and journal.current(target, draft) is None:
-        original = journal.before_bytes(target, decision, draft)
-        if original is not None:
-            journal.commit_phased(
-                target,
-                kind="inbox",
-                reason=f"append-refused:{exc.code}",
-                card_id=None,
-                changes=[journal.Change(draft, None, original)],
-                prepared_paths=[draft],
-                hub={},
-            )
+    refusal_reason = None
+    if draft in decision.paths:
+        from .memory_inbox_refusal import restore
+
+        refusal_reason = restore(target, decision_id, draft, reason=f"append-refused:{exc.code}")
     for row in retractions(payload):
         data = base64.b64decode(row["data"])
         if not _contains(target, row["path"], data):  # a repeated refusal never withdraws twice
             append(target, row["path"], data)
-    journal.annotate(target, decision_id, append_refused=f"{exc.code}: {exc.reason}")
+    # Keep the refusal that started this, so a digest mismatch does not hide the real cause.
+    detail = f"{refusal_reason} (cause: {exc.reason})" if refusal_reason else exc.reason
+    journal.annotate(target, decision_id, append_refused=f"{exc.code}: {detail}")
+    if refusal_reason:
+        exc.code = refusal_reason
+        exc.reason = refusal_reason
+        exc.args = (refusal_reason,)
 
 
 def undo_changes(target: Path, payload: dict[str, Any]) -> list[journal.Change]:

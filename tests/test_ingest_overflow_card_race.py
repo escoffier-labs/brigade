@@ -30,6 +30,7 @@ from tests.test_ingest_overflow_card_trust import (
     _held,
     _ingest,
     _plant,
+    _sections,
 )
 
 POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX hard links")
@@ -406,6 +407,106 @@ def test_ingest_records_each_untrusted_card_and_the_drafts_waiting_on_it(tmp_pat
     assert instruction_overflow_blocked.load(ws) == stats.blocked_cards
     ingest._report(stats, dry_run=False)
     assert f"blocked overflow card {CARD}: 2 draft(s) held" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("state", ["public", "private", "rollover", "gap", "direct", "oversized"])
+def test_blocked_batch_matches_per_draft_routing_for_mixed_drafts(tmp_path, monkeypatch, state):
+    from brigade.instruction_overflow_batch import RouteContext as BatchRouteContext
+
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    workflow_card = CARD.replace("preference", "workflow")
+    _plant(ws, PUBLIC + "\npreference plant\n")
+    workflow_head = PUBLIC.replace("overflow: preference", "overflow: workflow")
+    _plant(ws, workflow_head + "\nworkflow plant\n", workflow_card)
+    if state in {"private", "rollover", "gap"}:
+        _plant(ws, CARD_HEAD + "\n" + NOTE + "\n")
+    if state == "rollover":
+        _cap_cards(ws)
+        sized(ws / CARD, 590, head=CARD_HEAD)
+        _plant(ws, CARD_HEAD + "\nsecond card\n", CARD_2)
+    elif state == "gap":
+        (ws / CARD).rename(ws / CARD_2)
+    elif state == "direct":
+        sized(ws / "USER.md", 100)
+    elif state == "oversized":
+        sized(ws / CARD, instruction_overflow.INSPECTION_CEILING + 1, head=CARD_HEAD)
+    drafts = [
+        {**_sections(content), "type": kind, "target document": document}
+        for document, kind, content in (
+            ("USER.md", "preference", NOTE),
+            ("USER.md", "workflow", "Prefer UTC timestamps."),
+            ("AGENTS.md", "preference", "Prefer focused checks."),
+            ("USER.md", "preference", "x" * 500),
+            ("USER.md", "workflow", NOTE),
+        )
+    ]
+    expected = [
+        ingest.decide(sections, ws, promote_cards=True, route_documents=True, routing=RouteContext(ws))
+        for sections in drafts
+    ]
+    routing = BatchRouteContext(ws)
+    actual = [
+        ingest.decide(sections, ws, promote_cards=True, route_documents=True, routing=routing) for sections in drafts
+    ]
+    assert actual == expected
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+def test_blocked_refresh_lists_cards_once_per_file_and_type_group(tmp_path, monkeypatch, supplied):
+    from brigade import instruction_overflow_blocked
+
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    sized(ws / "TOOLS.md", 50000)
+    groups = [(file_key, kind) for file_key in ("user-md", "tools-md") for kind in ("preference", "workflow")]
+    for number, (file_key, kind) in enumerate(groups):
+        document = "USER.md" if file_key == "user-md" else "TOOLS.md"
+        card = f"{CARDS_REL}/{instruction_overflow.card_name(file_key, kind, 1)}"
+        _plant(ws, PUBLIC.replace("USER.md", document) + "\nplanted\n", card)
+        for index in range(3):
+            draft_number = number * 3 + index
+            _held(ws, content=f"{NOTE} {number}-{index}", number=draft_number)
+            (held,) = (ws / drain.INBOX_REL).glob(f"*-2026-10-01-{draft_number}.md")
+            text = held.read_text().replace("USER.md", document).replace("\npreference\n", f"\n{kind}\n")
+            held.write_text(text)
+    calls, trusts = [], []
+    real_numbers, real_trust = instruction_overflow._card_numbers, instruction_overflow._untrusted_card
+
+    def counting(target, file_key, kind):
+        calls.append((file_key, kind))
+        return real_numbers(target, file_key, kind)
+
+    def trust_counting(target, rel):
+        trusts.append(rel)
+        return real_trust(target, rel)
+
+    monkeypatch.setattr(instruction_overflow, "_card_numbers", counting)
+    monkeypatch.setattr(instruction_overflow, "_untrusted_card", trust_counting)
+    baseline = []
+    for draft in drain.pending(ws):
+        outcome = ingest.decide(
+            ingest.parse(draft), ws, promote_cards=False, route_documents=True, routing=RouteContext(ws)
+        )
+        assert outcome.code == "overflow-card-untrusted"
+        baseline.append(outcome.overflow.untrusted_card_rel)
+    assert len(calls) == len(trusts) == 12
+    calls.clear()
+    trusts.clear()
+    routing = RouteContext(ws) if supplied else None
+    cards = instruction_overflow_blocked.refresh(ws, routing=routing)
+    assert len(cards) == 4 and all(card["held_drafts"] == 3 for card in cards)
+    assert sorted(baseline) == sorted(card["path"] for card in cards for _ in range(card["held_drafts"]))
+    assert sorted(calls) == sorted(groups)
+    assert sorted(trusts) == sorted(card["path"] for card in cards)
+    # The next report must see repairs even when the caller passes the same context.
+    _plant(ws, CARD_HEAD + "\nrepaired\n")
+    calls.clear()
+    trusts.clear()
+    refreshed = instruction_overflow_blocked.refresh(ws, routing=routing)
+    assert CARD not in {card["path"] for card in refreshed}
+    assert sorted(calls) == sorted(groups)
+    assert len(trusts) == 4
 
 
 def test_the_record_holds_paths_and_counts_never_handoff_content(tmp_path, monkeypatch):

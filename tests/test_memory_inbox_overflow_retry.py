@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from datetime import date
 
@@ -167,3 +168,231 @@ def test_a_committed_retry_is_not_reported_skipped_when_the_card_id_index_cannot
     result = drain.drain(ws, today=TODAY, deadline_days=14)
     assert result["retried"] == 1 and not result.get("skipped"), result
     assert (ws / CARD).read_text().endswith("\n" + NOTE + "\n") and not draft.exists()
+
+
+def _refuse_retry_at_write(ws, monkeypatch, before_write=None):
+    original = ingest._append_document_nofollow
+
+    def refuse(owner, path, text, **kwargs):
+        if before_write is not None:
+            before_write()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("untrusted card\n")
+        return original(owner, path, text, **kwargs)
+
+    monkeypatch.setattr(ingest, "_append_document_nofollow", refuse)
+
+
+def test_refused_retry_removes_resolved_copy_and_restores_inbox(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    original = draft.read_bytes()
+    _refuse_retry_at_write(ws, monkeypatch)
+
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+
+    assert result["held"] == 1
+    assert draft.read_bytes() == original
+    assert not list((ws / drain.RESOLVED_REL).glob("*.md"))
+
+
+def test_refused_retry_keeps_changed_resolved_copy_and_reports_reason(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+
+    def change_resolved():
+        resolved = next((ws / drain.RESOLVED_REL).glob("*.md"))
+        resolved.write_bytes(resolved.read_bytes() + b"\nchanged\n")
+
+    _refuse_retry_at_write(ws, monkeypatch, change_resolved)
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+
+    assert draft.exists() and list((ws / drain.RESOLVED_REL).glob("*.md"))
+    assert result["decisions"][0]["reason"] == "hold:resolved-copy-digest-mismatch"
+    retry = next(item for item in journal.entries(ws) if item.reason.startswith("retry:"))
+    refused = journal._payload(ws, retry.decision_id)["append_refused"]
+    assert "resolved-copy-digest-mismatch" in refused
+    assert re.search(r"\(cause: \S.*\)$", refused), refused
+
+
+def test_refused_retry_does_not_overwrite_occupied_inbox_and_cleanup_undoes(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    original = draft.read_bytes()
+    occupant = b"occupying file\n"
+
+    def occupy_inbox():
+        draft.write_bytes(occupant)
+
+    _refuse_retry_at_write(ws, monkeypatch, occupy_inbox)
+    drain.drain(ws, today=TODAY, deadline_days=14)
+
+    recovered = list(draft.parent.glob(f"{draft.stem}-append-refused-*.md"))
+    assert draft.read_bytes() == occupant
+    assert len(recovered) == 1 and recovered[0].read_bytes() == original
+    cleanup = next(item for item in journal.entries(ws) if item.reason.startswith("append-refused:"))
+    memory_care_tend.undo(ws, cleanup.decision_id)
+    assert draft.read_bytes() == occupant and not recovered[0].exists()
+    assert len(list((ws / drain.RESOLVED_REL).glob("*.md"))) == 1
+
+
+def test_refused_cited_retry_keeps_one_pending_draft(tmp_path, monkeypatch):
+    from brigade import memory_evidence_log
+
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    original = draft.read_bytes()
+    monkeypatch.setattr(
+        memory_evidence_log,
+        "read_evidence",
+        lambda _: ([{"evidence_id": draft.relative_to(ws).as_posix()}], 0, False),
+    )
+    _refuse_retry_at_write(ws, monkeypatch)
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+
+    assert result["held"] == 1 and not result["skipped"], result
+    assert drain.pending(ws) == [draft]
+    assert draft.read_bytes() == original
+    assert not list(draft.parent.glob(f"{draft.stem}-append-refused-*.md"))
+    assert not list((ws / drain.RESOLVED_REL).glob("*.md"))
+
+
+@pytest.mark.parametrize("step", ["finish", "annotation"])
+def test_refused_retry_cleanup_recovers_once_after_interruption(tmp_path, monkeypatch, step):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    original = draft.read_bytes()
+    _refuse_retry_at_write(ws, monkeypatch)
+    execute = journal._execute_phase
+    annotate = journal.annotate
+
+    class Interrupted(BaseException):
+        pass
+
+    def interrupt_finish(target, decision_id, phase, changes):
+        if phase == "finish" and journal._payload(target, decision_id).get("refusal_of"):
+            raise Interrupted
+        return execute(target, decision_id, phase, changes)
+
+    def interrupt_annotation(target, decision_id, **fields):
+        if "append_refused" in fields:
+            raise Interrupted
+        return annotate(target, decision_id, **fields)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "_execute_phase", interrupt_finish if step == "finish" else execute)
+        patch.setattr(journal, "annotate", interrupt_annotation if step == "annotation" else annotate)
+        with pytest.raises(Interrupted):
+            memory_inbox_retry.reprocess(ws, draft)
+
+    for _ in range(2):
+        journal.resolve_prepared(ws)
+    assert draft.read_bytes() == original
+    assert drain.pending(ws) == [draft]
+    assert not list((ws / drain.RESOLVED_REL).glob("*.md"))
+    cleanups = [item for item in journal.entries(ws) if item.reason.startswith("append-refused:")]
+    assert len(cleanups) == 1
+    memory_care_tend.undo(ws, cleanups[0].decision_id)
+    assert not draft.exists()
+    assert [path.read_bytes() for path in (ws / drain.RESOLVED_REL).glob("*.md")] == [original]
+
+
+def test_recovery_reports_resolved_copy_digest_mismatch(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    original = draft.read_bytes()
+
+    def interrupt(*_args, **_kwargs):
+        raise OSError("interrupted publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest, "_append_document_nofollow", interrupt)
+        with pytest.raises(OSError, match="interrupted publication"):
+            memory_inbox_retry.reprocess(ws, draft)
+    (resolved,) = (ws / drain.RESOLVED_REL).glob("*.md")
+    changed = resolved.read_bytes() + b"\nchanged\n"
+    resolved.write_bytes(changed)
+    _refuse_retry_at_write(ws, monkeypatch)
+
+    recovery = journal.resolve_prepared(ws)
+
+    assert len(recovery) == 1
+    assert recovery[0]["phase"] == "append-refused"
+    assert recovery[0]["reason"] == "resolved-copy-digest-mismatch"
+    assert resolved.read_bytes() == changed and draft.read_bytes() == original
+
+
+@pytest.mark.parametrize("record_id", ["20000101T000000Z-inbox-00000000", "not-a-decision"])
+def test_refused_retry_recovers_with_unrelated_unreadable_record(tmp_path, monkeypatch, record_id):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    original = draft.read_bytes()
+
+    def interrupt(*_args, **_kwargs):
+        raise OSError("interrupted publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest, "_append_document_nofollow", interrupt)
+        with pytest.raises(OSError, match="interrupted publication"):
+            memory_inbox_retry.reprocess(ws, draft)
+    assert not draft.exists()
+    record = ws / journal.JOURNAL_REL / record_id / "decision.json"
+    record.parent.mkdir()
+    record.write_text("{malformed JSON\n")
+    _refuse_retry_at_write(ws, monkeypatch)
+
+    recovery = journal.resolve_prepared(ws)
+
+    assert any(item["phase"] == "append-refused" for item in recovery)
+    assert draft.read_bytes() == original
+    assert record.read_text() == "{malformed JSON\n"
+    assert not list((ws / drain.RESOLVED_REL).glob("*.md"))
+    journal.resolve_prepared(ws)
+    assert drain.pending(ws) == [draft]
+
+
+def test_refused_retry_recovers_with_read_only_resolved_copy_and_undo(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    original = draft.read_bytes()
+
+    def interrupt(*_args, **_kwargs):
+        raise OSError("interrupted publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest, "_append_document_nofollow", interrupt)
+        with pytest.raises(OSError, match="interrupted publication"):
+            memory_inbox_retry.reprocess(ws, draft)
+    assert not draft.exists()
+    (resolved,) = (ws / drain.RESOLVED_REL).glob("*.md")
+    before = resolved.stat()
+    (ws / ".brigade/memory-care.toml").write_text('read_only_paths = ["memory/handoff-inbox/resolved/**"]\n')
+    _refuse_retry_at_write(ws, monkeypatch)
+
+    recovery = journal.resolve_prepared(ws)
+
+    assert recovery == [
+        {"decision_id": recovery[0]["decision_id"], "phase": "append-refused", "reason": "resolved-copy-read-only"}
+    ]
+    assert draft.read_bytes() == original and resolved.read_bytes() == original
+    assert (resolved.stat().st_ino, resolved.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    retry = journal._payload(ws, recovery[0]["decision_id"])
+    assert "resolved-copy-read-only" in retry["append_refused"]
+    cleanup = next(item for item in journal.entries(ws) if item.reason.startswith("append-refused:"))
+    assert cleanup.paths == (draft.relative_to(ws).as_posix(),)
+    assert journal._payload(ws, cleanup.decision_id)["refusal_reason"] == "resolved-copy-read-only"
+    assert journal.resolve_prepared(ws) == []
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+    assert not result.get("error") and not result["skipped"], result
+    assert draft.read_bytes() == original
+    memory_care_tend.undo(ws, cleanup.decision_id)
+    assert not draft.exists() and resolved.read_bytes() == original
+    assert (resolved.stat().st_ino, resolved.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)

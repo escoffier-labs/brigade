@@ -547,6 +547,10 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
 
     p = _validated_payload(target, decision_id)
     d = Decision(**{**{k: p[k] for k in Decision.__dataclass_fields__}, "paths": tuple(p["paths"])})
+    # Recovering an append may finish its refusal cleanup from the same pending-index snapshot.
+    # A later visit to that row must not replay the finished mutations or mark it abandoned.
+    if p.get("phase") != "prepared":
+        return d
     config = _config_or_default(target)
     changes = [
         Change(
