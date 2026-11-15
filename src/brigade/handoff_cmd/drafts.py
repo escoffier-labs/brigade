@@ -778,6 +778,7 @@ def _render_handoff_draft(
     target_document: str | None,
     suggested_content: str,
     expected_sha: str = "",
+    superseded_preference: str | None = None,
 ) -> str:
     parts = [
         "# Memory Handoff",
@@ -807,6 +808,8 @@ def _render_handoff_draft(
     else:
         parts.extend(["", "## Target document", "", str(target_document or "").strip()])
         parts.extend(["", "## Suggested document content", "", suggested_content.strip()])
+    if superseded_preference is not None:
+        parts.extend(["", "## Superseded preference", "", superseded_preference])
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -830,6 +833,7 @@ def build_draft(
     guard_policy: str = "personal",
     workspace: Path | None = None,
     expected_sha: str | None = None,
+    superseded_preference: str | None = None,
 ) -> dict[str, Any]:
     """Write one handoff draft and return its payload. Raises ValueError on bad input.
 
@@ -874,6 +878,7 @@ def build_draft(
         target_document=target_document,
         suggested_content=suggested_content,
         expected_sha=sha,
+        superseded_preference=superseded_preference,
     )
     preflight = _linting_mod.lint_text(text, path=path, workspace=workspace_root)
     if not preflight.valid:
@@ -926,6 +931,7 @@ def draft(
     json_output: bool = False,
     workspace: Path | None = None,
     expected_sha: str | None = None,
+    superseded_preference: str | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -951,6 +957,7 @@ def draft(
             guard_policy=guard_policy,
             workspace=workspace,
             expected_sha=expected_sha,
+            superseded_preference=superseded_preference,
         )
     except HandoffDraftRefused as exc:
         if json_output:

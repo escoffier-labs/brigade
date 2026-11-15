@@ -1,0 +1,1 @@
+- Preference handoffs can propose replacing one exact USER.md line through digest-bound review. Applying an approved proposal keeps the old line in dated history outside bootstrap context and refuses a missing or changed target.

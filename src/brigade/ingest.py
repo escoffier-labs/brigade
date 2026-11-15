@@ -74,6 +74,7 @@ KNOWN_SECTIONS = {
     "suggested card content",
     "target document",
     "suggested document content",
+    "superseded preference",
 }
 
 # ingest_into status codes. Fleet maps these to skip reasons; do not collapse
@@ -439,6 +440,12 @@ def decide(
             "inboxed",
             code="proposal-notification",
             reason="memory proposal notification requires explicit digest-bound review/apply",
+        )
+    if "superseded preference" in sections:
+        return Outcome(
+            "inboxed",
+            code="preference-replacement-review",
+            reason="preference replacement requires explicit memory proposal review and apply",
         )
     action = sections.get("recommended memory action", "").strip().lower()
 
