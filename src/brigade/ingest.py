@@ -1200,20 +1200,27 @@ def _execute(
                 and sections.get("recommended memory action", "").strip().lower() == "create-card"
             )
             dest = None
+            previous: bytes | None = None
             if can_merge and pending is not None:
                 assert outcome.match is not None
                 merged = ingest_near_duplicate.merge_pending(
                     content, pending, target, name, original.encode("utf-8"), outcome.match.path, outcome.code
                 )
                 if merged is not None:
-                    dest, _ = merged
+                    dest, previous = merged
             if dest is None:
                 dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
                 if can_merge and pending is not None:
                     assert outcome.match is not None
                     pending.append(ingest_near_duplicate.Pending(content, dest, outcome.match.path, outcome.code))
-            log_match(target, outcome.match, dest)
-            _archive(handoff_path, processed_dir, snapshot_sha)
+            try:
+                log_match(target, outcome.match, dest)
+                _archive(handoff_path, processed_dir, snapshot_sha)
+            except OSError:
+                # The handoff stays pending, so take back its pointer. The next run gives it a draft of its own.
+                if previous is not None:
+                    write_text_nofollow_atomic(dest, previous.decode("utf-8"))
+                raise
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)
 

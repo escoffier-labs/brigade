@@ -245,6 +245,36 @@ def test_reinforcement_failure_retry_keeps_one_receipt_and_pointer(tmp_target: P
     assert not (inbox / "copy-b.md").exists()
 
 
+def test_archive_failure_after_merge_takes_back_the_pointer(tmp_target: Path, monkeypatch):
+    inbox = seed(tmp_target)
+    existing = tmp_target / "memory/cards/original.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(card(BODY))
+    handoff(inbox, "copy-a", BODY + " extra")
+    handoff(inbox, "copy-b", BODY + " extra")
+    archive = ingest._archive
+
+    def unavailable(src, processed_dir, expected_sha=None):
+        if src.name == "copy-b.md":
+            raise OSError("fixture archive failed")
+        return archive(src, processed_dir, expected_sha)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest, "_archive", unavailable)
+        assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    assert (inbox / "copy-b.md").exists()
+    drafts = list((tmp_target / drain.INBOX_REL).glob("*.md"))
+    assert len(drafts) == 1
+    assert "copy-b.md" not in drafts[0].read_text()
+
+    # A new run creates a fresh pending list, so copy-b gets a draft of its own and no stale pointer remains.
+    assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    drafts = list((tmp_target / drain.INBOX_REL).glob("*.md"))
+    assert len(drafts) == 2
+    assert sum("copy-b.md" in draft.read_text() for draft in drafts) == 1
+    assert not (inbox / "copy-b.md").exists()
+
+
 @pytest.mark.parametrize("threshold", [-0.1, 1.1])
 def test_invalid_reflect_threshold_routes_create_card_for_review(tmp_target: Path, threshold: float):
     inbox = seed(tmp_target)
