@@ -189,6 +189,50 @@ def test_single_slot_does_not_starve_older_cards_after_cooldown():
     assert [card.card_id for card, _ in selected] == ["card-other"]
 
 
+@pytest.mark.parametrize("field", ["last_reviewed", "last_reviewed_at", "reviewed_at"])
+def test_reinforcement_does_not_consume_failures(tmp_path, field):
+    lessons.log_run_receipt(
+        tmp_path,
+        {
+            "run_id": "run-example",
+            "status": "failed",
+            "finished_at": "2026-01-01T00:00:00Z",
+            "evidence_brief": {"memory_refs": [REF]},
+        },
+    )
+    row = {
+        "ts": "2026-01-02T12:00:00Z",
+        "card_id": REF["card_id"],
+        "card_path": "memory/cards/example.md",
+        "evidence_id": "handoff:duplicate",
+        "kind": "reinforced",
+        "similarity": 1.0,
+    }
+    log.append_log_row(tmp_path, json.dumps(row).encode() + b"\n")
+    reinforced = head(REF["card_id"], body=f"---\n{field}: 2026-01-02\n---\nReinforced. ^c-abcdef\n")
+    assert lessons.pending_keys(tmp_path, [reinforced]) == {key(REF["card_id"])}
+
+
+def test_file_card_run_capture_uses_completion_time(tmp_path):
+    from brigade.outcome import OutcomeRecord
+
+    card = tmp_path / "memory/cards/example.md"
+    card.parent.mkdir(parents=True)
+    card.write_text("---\ntopic: example\n---\nBody\n")
+    record = OutcomeRecord(
+        artifact_id="example",
+        artifact_kind="card",
+        task_id="",
+        source="run",
+        signal_value=-1,
+        evidence_ref=str(tmp_path / ".brigade/runs/run-late/run.json"),
+        ts="2026-01-01T00:00:00Z",
+    )
+    log.log_outcome(tmp_path, record, {"status": "failed", "finished_at": "2026-01-03T00:00:00Z"})
+    rows = log.read_evidence(tmp_path, log_path=lessons.LOG_PATH)[0]
+    assert [row["ts"] for row in rows] == ["2026-01-03T00:00:00Z"]
+
+
 def test_file_card_run_capture_is_deduplicated(tmp_path):
     from brigade.outcome import OutcomeRecord
 

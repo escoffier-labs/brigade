@@ -145,9 +145,12 @@ def pending_keys(
     evidence, _, _ = ledger.read_evidence(target)
     rows.extend(evidence)
     negative: dict[str, list[dict[str, Any]]] = {}
+    reinforced: dict[str, list[datetime]] = {}
     for row in rows:
         if row["kind"] == "negative-outcome":
             negative.setdefault(row["card_id"], []).append(row)
+        elif row["kind"] == "reinforced" and (stamp := ledger._timestamp(row["ts"])) is not None:
+            reinforced.setdefault(row["card_id"], []).append(stamp)
     result = set()
     from .memory_cmd import _parse_frontmatter
 
@@ -162,9 +165,17 @@ def pending_keys(
                 continue
             try:
                 date.fromisoformat(value)
+                date_only = True
             except (ValueError, TypeError):
-                pass
-            else:
+                date_only = False
+            # Reinforcement bumps last_reviewed without reviewing pending rows, as in
+            # EvidenceLog.findings. Its date comes from the local date, not UTC.
+            if field != "last_consolidated" and any(
+                (stamp.astimezone().date() >= cutoff.date() if date_only else stamp >= cutoff)
+                for stamp in reinforced.get(str(head["card_id"]), [])
+            ):
+                continue
+            if date_only:
                 # A date-only review consumes all evidence on that UTC day.
                 cutoff = datetime.combine(cutoff.date(), time.max, timezone.utc)
             cutoffs.append(cutoff)
@@ -192,6 +203,15 @@ def warn_append_failed() -> None:
     print("warning: memory failure evidence append failed", file=sys.stderr)
 
 
+def _completed_at(receipt: Mapping[str, Any]) -> str | None:
+    """Prefer the run's completion time so a failure after a review stays pending."""
+    for field in ("finished_at", "completed_at"):
+        value = receipt.get(field)
+        if isinstance(value, str) and ledger._timestamp(value) is not None:
+            return value
+    return None
+
+
 def log_captured_run(target: Path, record: OutcomeRecord, receipt: Mapping[str, Any]) -> None:
     """Use the existing outcome capture citation for file-backed cards."""
     from .outcome_cmd import _artifact_content_path
@@ -214,6 +234,6 @@ def log_captured_run(target: Path, record: OutcomeRecord, receipt: Mapping[str, 
             evidence_id=ref,
             kind="negative-outcome",
             similarity=1.0,
-            ts=record.ts,
+            ts=_completed_at(receipt) or record.ts,
             log_path=LOG_PATH,
         )
