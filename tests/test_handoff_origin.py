@@ -450,3 +450,38 @@ def test_hardlink_replay_reinforces_exactly_once(tmp_path, monkeypatch):
     ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=second, promote_cards=True)
     assert second.reinforced == 0
     assert "reinforcements: 1" in (tmp_path / "memory/cards/origin.md").read_text()
+
+
+@pytest.mark.parametrize("published_stamp", [False, True])
+def test_failed_review_stamp_archives_once_and_keeps_draft_for_a_person(tmp_path, monkeypatch, published_stamp):
+    from datetime import date
+
+    from brigade import memory_inbox_drain
+
+    path = handoff(tmp_path)
+    stamp(tmp_path, path)
+    monkeypatch.setattr(
+        ingest, "decide", lambda *args, **kwargs: ingest.Outcome("inboxed", code="document-destination-unwritable")
+    )
+    real_stamp = origin.stamp_review_draft
+
+    def fail(*args, **kwargs):
+        if published_stamp:
+            assert real_stamp(*args, **kwargs)
+        raise OSError("review stamp storage unavailable")
+
+    monkeypatch.setattr(origin, "stamp_review_draft", fail)
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, route_documents=True) == 0
+    assert stats.inboxed == 1
+    assert "review-stamp-write-failed" in stats.actions[0]
+    assert not path.exists()
+    assert (path.parent / "processed" / path.name).exists()
+    inbox = tmp_path / "memory/handoff-inbox"
+    (draft,) = inbox.glob("*.md")
+    assert not origin.stamp_path(tmp_path, draft).exists()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=ingest.IngestStats(), route_documents=True) == 0
+    assert list(inbox.glob("*.md")) == [draft]
+    result = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 14), deadline_days=14)
+    assert result["kept_for_person"] == 1 and result["retried"] == 0
+    assert draft.exists() and not (tmp_path / "TOOLS.md").exists()

@@ -1161,12 +1161,18 @@ def _execute(
                 header = header.replace(f"routed-at: {slug} -->", f"routed-at: {slug}\n     retry-flags: {flags} -->")
             dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
             if promote_cards is not None and route_documents is not None:
-                handoff_origin.stamp_review_draft(
-                    target,
-                    dest,
-                    (header + original).encode("utf-8"),
-                    handoff_origin.ReviewDraft(outcome.code, promote_cards, route_documents),
-                )
+                try:
+                    handoff_origin.stamp_review_draft(
+                        target,
+                        dest,
+                        (header + original).encode("utf-8"),
+                        handoff_origin.ReviewDraft(outcome.code, promote_cards, route_documents),
+                    )
+                except OSError:
+                    # Publication already succeeded. Keep one unsigned draft for
+                    # a person and archive the source rather than duplicating it.
+                    handoff_origin.remove_stamp(handoff_origin.stamp_path(target, dest))
+                    summary = _summary(verb, name, "review-stamp-write-failed")
             log_match(target, outcome.match, dest)
             _archive(handoff_path, processed_dir, snapshot_sha)
         # Both inboxed and skipped are now archived; classify them uniformly.

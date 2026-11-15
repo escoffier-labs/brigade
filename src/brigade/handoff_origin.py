@@ -315,6 +315,32 @@ def verify_review_draft(target: Path, draft: Path, snapshot: bytes) -> VerifiedR
         return None
 
 
+def prune_missing_review_stamps(target: Path) -> int:
+    """Revoke review authority when a drain observes a manually removed draft."""
+    target = target.resolve()
+    root = target / ".brigade/handoffs/origins"
+    removed = 0
+    for sidecar in root.glob("*.json"):
+        try:
+            payload = json.loads(read_handoff(sidecar, max_bytes=16384))
+            if not isinstance(payload, dict) or not isinstance(payload.get("review"), dict):
+                continue
+            name = payload.get("handoff_name")
+            if not isinstance(name, str) or Path(name).name != name:
+                continue
+            draft = target / "memory/handoff-inbox" / name
+            if stamp_path(target, draft) != sidecar:
+                continue
+            try:
+                draft.lstat()
+            except FileNotFoundError:
+                remove_stamp(sidecar)
+                removed += 1
+        except (OSError, ValueError, TypeError, RecursionError):
+            continue
+    return removed
+
+
 def remove_stamp(sidecar: Path) -> None:
     """Remove the exact path captured before archive, never resolve the handoff again."""
     sidecar.unlink(missing_ok=True)

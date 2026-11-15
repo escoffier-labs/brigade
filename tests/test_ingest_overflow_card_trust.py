@@ -337,11 +337,11 @@ def test_a_hard_link_swapped_in_before_the_open_never_redirects_a_card_append(tm
         sized(card, 200, head=CARD_HEAD)
     real_open = dirfd.open_child_file
 
-    def swapped(parent, name, flags, mode=0o777):
+    def swapped(parent, name, flags, mode=0o777, **kwargs):
         if name == card.name:
             card.unlink(missing_ok=True)
             os.link(outside, card)
-        return real_open(parent, name, flags, mode)
+        return real_open(parent, name, flags, mode, **kwargs)
 
     monkeypatch.setattr(dirfd, "open_child_file", swapped)
     assert _ingest(ws) == 0
@@ -363,11 +363,11 @@ def test_a_hard_link_swapped_in_before_the_open_never_redirects_a_direct_append(
     outside.write_bytes(b"outside file\n")
     real_open = dirfd.open_child_file
 
-    def swapped(parent, name, flags, mode=0o777):
+    def swapped(parent, name, flags, mode=0o777, **kwargs):
         if name == "USER.md":
             (ws / "USER.md").unlink()
             os.link(outside, ws / "USER.md")
-        return real_open(parent, name, flags, mode)
+        return real_open(parent, name, flags, mode, **kwargs)
 
     monkeypatch.setattr(dirfd, "open_child_file", swapped)
     with pytest.raises(OSError):

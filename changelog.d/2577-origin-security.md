@@ -1,2 +1,4 @@
 - Origin filing ignores receipt key environment overrides and requires a private, current-user-owned, single-link key at the fixed workspace location. Platforms without ownership proof require review.
 - Ingest refuses linked handoffs, cleans the exact verified sidecar, and consumes origin and review retry stamps before canonical writes to prevent replay after archive or a crash.
+- Drain revokes review stamps for drafts observed missing, so restoring the same bytes after manual removal requires review.
+- Ingest archives handoffs after review stamp storage fails, retaining one unsigned draft for a person with a fixed failure reason.

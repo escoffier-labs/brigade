@@ -300,6 +300,8 @@ def drain(
     if not dry_run:
         result["recovery"] = journal.resolve_prepared(target)
     try:
+        if not dry_run:
+            result["pruned_review_stamps"] = handoff_origin.prune_missing_review_stamps(target)
         paths = pending(target)
         for inbox in ingest._resolve_inbox_paths(target):
             try:

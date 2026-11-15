@@ -7,7 +7,7 @@ from datetime import date
 
 import pytest
 
-from brigade import ingest, memory_care_tend, memory_inbox_retry
+from brigade import handoff_origin, ingest, memory_care_tend, memory_inbox_retry
 from brigade import memory_care_journal as journal
 from brigade import memory_inbox_drain as drain
 from tests._home import set_home
@@ -19,7 +19,7 @@ CARD = "memory/cards/instructions/user-md--overflow-preference.md"
 
 
 def _held(ws, content=NOTE, *, flags=False, number=0):
-    """A draft held by an earlier release, built the way tests/test_memory_inbox_drain.py builds one."""
+    """An authorized review draft, optionally without legacy retry flags in its header."""
     source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
     ingest._execute(
         ingest.Outcome("inboxed", code="bootstrap-budget-exceeded"),
@@ -33,7 +33,11 @@ def _held(ws, content=NOTE, *, flags=False, number=0):
         promote_cards=True if flags else None,
         route_documents=True if flags else None,
     )
-    return sorted((ws / drain.INBOX_REL).glob("*.md"))[-1]
+    draft = sorted((ws / drain.INBOX_REL).glob("*.md"))[-1]
+    assert handoff_origin.stamp_review_draft(
+        ws, draft, draft.read_bytes(), handoff_origin.ReviewDraft("bootstrap-budget-exceeded", flags, True)
+    )
+    return draft
 
 
 def test_retry_flags_route_old_budget_holds():
@@ -167,3 +171,35 @@ def test_a_committed_retry_is_not_reported_skipped_when_the_card_id_index_cannot
     result = drain.drain(ws, today=TODAY, deadline_days=14)
     assert result["retried"] == 1 and not result.get("skipped"), result
     assert (ws / CARD).read_text().endswith("\n" + NOTE + "\n") and not draft.exists()
+
+
+@pytest.mark.parametrize("flags", [False, True])
+def test_unsigned_budget_hold_stays_for_a_person(tmp_path, monkeypatch, flags):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws, flags=flags)
+    handoff_origin.stamp_path(ws, draft).unlink()
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+    assert result["kept_for_person"] == 1 and result["retried"] == 0
+    assert draft.exists() and not (ws / CARD).exists()
+
+
+@pytest.mark.parametrize("move", [False, True])
+def test_manually_removed_review_draft_loses_retry_authority(tmp_path, monkeypatch, move):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    data = draft.read_bytes()
+    sidecar = handoff_origin.stamp_path(ws, draft)
+    if move:
+        draft.rename(draft.with_suffix(".removed"))
+    else:
+        draft.unlink()
+    preview = drain.drain(ws, today=TODAY, deadline_days=14, dry_run=True)
+    assert preview["retried"] == 0 and sidecar.exists()
+    drain.drain(ws, today=TODAY, deadline_days=14)
+    assert not sidecar.exists()
+    draft.write_bytes(data)
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+    assert result["kept_for_person"] == 1 and result["retried"] == 0
+    assert draft.exists() and not (ws / CARD).exists()

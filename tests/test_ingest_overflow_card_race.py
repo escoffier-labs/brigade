@@ -17,6 +17,7 @@ from brigade import memory_care_journal as journal
 from brigade import memory_inbox_drain as drain
 from brigade.instruction_overflow import CARDS_REL, RouteContext, card_trust_problem
 from brigade.memory_hub_sync import VISIBILITY_PRIVATE, withheld
+from tests._handoff_origin_fixtures import trusted_review_draft
 from tests._home import set_home
 from tests._instruction_fixtures import CARD_HEAD, field_workspace, handoff_text, sized, write_handoff
 from tests.test_ingest_overflow_card_trust import (
@@ -131,6 +132,9 @@ def test_a_refused_recovery_of_a_retried_draft_returns_the_draft_to_the_inbox(tm
     journal.resolve_prepared(ws)
     assert planted.read_bytes() == before
     assert draft.read_bytes() == original  # held again, byte for byte
+    # A refused decision has spent its stamp. Only a fresh review authorizes another attempt.
+    assert drain.drain(ws, today=TODAY, deadline_days=14)["kept_for_person"] == 1
+    trusted_review_draft(ws, draft, "bootstrap-budget-exceeded")
     held = drain.drain(ws, today=TODAY, deadline_days=14)
     assert (held["retried"], held["held"]) == (0, 1) and planted.read_bytes() == before
     planted.unlink()
@@ -485,6 +489,8 @@ def test_an_interrupted_refusal_has_already_returned_the_draft(tmp_path, monkeyp
     assert draft.read_bytes() == original and planted.read_bytes() == before
     monkeypatch.setattr(journal, "annotate", annotate)
     journal.resolve_prepared(ws)
+    assert drain.drain(ws, today=TODAY, deadline_days=14)["kept_for_person"] == 1
+    trusted_review_draft(ws, draft, "bootstrap-budget-exceeded")
     planted.unlink()
     assert drain.drain(ws, today=TODAY, deadline_days=14)["retried"] == 1
     assert (ws / CARD).read_text().count(NOTE) == 1 and not draft.exists()
