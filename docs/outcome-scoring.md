@@ -3,7 +3,12 @@
 Outcome capture classifies runs when it reads stored receipts and persists the resulting `signal_value` in the outcome ledger. Upgrading Brigade can change a new capture of the same historical `run.json` and `worker-results.json` files. Ranking reads the stored ledger signals and also builds current verification scorecards
 ([capture and ranking](../src/brigade/outcome_cmd.py), [scorecard projection](../src/brigade/scorecard.py)).
 
-This is outcome-based skill scoring, promotion, and rollback from verification evidence. It is not autonomous reflective memory learning.
+This is outcome-based skill scoring, promotion, and rollback from verification evidence.
+Scheduled memory reflection separately attempts automatic Tier 0 hub changes
+for opted-in workspaces, including new installs. Every automatic change must
+pass the hub authority gates. Unsupported retrieval scopes and local repository
+authority gaps remain proposal-only. See [Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
+for the `auto_apply` policy field and `memory reflect auto-apply off` switch.
 
 ## Workflow
 
