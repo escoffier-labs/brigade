@@ -69,7 +69,7 @@ def load_workspace_key(target: Path) -> tuple[bytes, str] | None:
         path = target.expanduser().resolve() / ".brigade" / KEY_NAME
         parent = dirfd.open_directory_chain(path.parent)
         try:
-            fd = dirfd.open_child_file(parent, path.name, os.O_RDONLY | os.O_NONBLOCK)
+            fd = dirfd.open_child_file(parent, path.name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
             with os.fdopen(fd, "rb") as handle:
                 before = os.fstat(handle.fileno())
                 if (

@@ -37,7 +37,7 @@ def directory(path: Path, *, create: bool = False, private: bool = False) -> Ite
 def read_bytes(path: Path, *, limit: int = 1024 * 1024, absent: bool = False, private: bool = False) -> bytes | None:
     try:
         with directory(path.parent) as parent:
-            fd = dirfd.open_child_file(parent, path.name, os.O_RDONLY | os.O_NONBLOCK)
+            fd = dirfd.open_child_file(parent, path.name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
             try:
                 before = regular(fd)
                 if private and os.name == "posix" and (before.st_uid != os.getuid() or before.st_mode & 0o077):
