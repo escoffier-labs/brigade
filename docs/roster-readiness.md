@@ -119,9 +119,12 @@ plus a read-only `POST /claims` (`action = "inspect"`) check when a live Hub
 roster is reachable and uses an absolute `BRIGADE_HOME`. Because no Hub endpoint
 exposes live per-seat lease usage without acquiring a lease, Hub-enforced
 positive concurrency limits and enrolled fleet policy lease usage report
-`capacity` as `unknown` (`unverified`) rather than guessing; LKG fallback also
+`capacity` as `unknown` (`unverified`) rather than guessing. LKG fallback also
 leaves live Hub capacity `unknown` (`unverified`), and `limit = 0` or a held
-lock/claim reports `admitted_capacity = 0` (`blocked`).
+lock/claim reports `admitted_capacity = 0` (`blocked`). Network calls use the
+existing 2.5-second client timeouts. Reading the roster high-water mark and LKG
+cache takes the existing spool lock, which can create an empty `.lock` file
+under `<BRIGADE_HOME>/fleet-spool/`. No cache content is written.
 
 T3 capability and governance observation production remains unimplemented, so
 T3 requests still skip local provider probes and remain unverified (or blocked
