@@ -27,8 +27,8 @@ Only the documented fields are accepted. Each task requires `task_id`, `text`,
 and `seat`. `depends_on` defaults to an empty list of unique task IDs.
 `depends_on` must be a list when present. `null` is refused, unlike
 `synthesis`. Rows are checked in input order, so when several rows are
-invalid, the reported code belongs to the first invalid row, and row errors
-name it as `tasks[N]`.
+invalid, the reported code belongs to the first invalid row. A row error names
+the row as `tasks[N]` until its `task_id` is valid, and by `task_id` after that.
 Selecting a task by admitted capability instead of a named seat, which #2047
 also allows, is not part of v1. It needs the admission wiring that execution
 will add.
