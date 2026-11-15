@@ -7,6 +7,7 @@ text-only forgery, not an isolation boundary against an agent with shell access.
 from __future__ import annotations
 
 import hashlib
+from itertools import islice
 import hmac
 import json
 import os
@@ -135,12 +136,12 @@ class VerifiedStamp:
         return _claim(self.consumed)
 
 
-def _claim_temporaries(parent: int) -> Iterator[str]:
-    # Stream names even after years of consumed markers have accumulated.
+def _claim_temporaries(parent: int, *, limit: int | None = None) -> Iterator[str]:
+    # Bound orphan maintenance by names visited, including consumed markers.
     scan = os.open(".", dirfd.directory_flags(), dir_fd=parent)
     try:
         with os.scandir(scan) as entries:
-            for entry in entries:
+            for entry in islice(entries, limit):
                 if entry.name.startswith(".claim-") and entry.name.endswith(".tmp"):
                     yield entry.name
     finally:
@@ -148,7 +149,7 @@ def _claim_temporaries(parent: int) -> Iterator[str]:
 
 
 def _sweep_claim_temporaries(parent: int) -> None:
-    for name in _claim_temporaries(parent):
+    for name in _claim_temporaries(parent, limit=64):
         try:
             info = dirfd.stat_child(parent, name)
             # A one-link temp never published a marker. Linked temps are handled
@@ -220,8 +221,8 @@ def _claim(consumed: Path, *, decision_id: str = "") -> bool:
                 pass
             parent = dirfd.open_child_directory(state, consumed.parent.name)
             try:
-                # Serialize publication and sweeping so a concurrent live temp
-                # cannot be mistaken for debris from a crashed claimant.
+                # Keep the orphan batch bounded while serializing it with publication,
+                # so a live temporary cannot be mistaken for crash debris.
                 fcntl.flock(parent, fcntl.LOCK_EX)
                 _sweep_claim_temporaries(parent)
                 temporary = f".claim-{secrets.token_hex(16)}.tmp"

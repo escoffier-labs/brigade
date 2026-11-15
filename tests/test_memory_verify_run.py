@@ -436,14 +436,69 @@ def test_principal_and_scope_quota_replies_stop_proposing_without_a_failure(veri
     assert "verified" not in entry_for(target, CARD_ID)
 
 
-@pytest.mark.parametrize("code", sorted(hubc.EVIDENCE_QUOTA_REFUSALS))
-def test_a_retained_evidence_quota_stops_before_proposing_without_a_failure(verify_hub, capsys, resolver, code):
+@pytest.mark.parametrize(
+    "code",
+    [
+        "memory_evidence_retained_principal_quota",
+        "memory_evidence_retained_scope_quota",
+    ],
+)
+def test_an_evidence_quota_stops_before_proposing_without_a_failure(verify_hub, capsys, resolver, code):
     target, hub, _, _ = verify_hub
     hub.attach_reply = (429, {"code": code, "error": "quota"})
     status, report = verify(target, capsys)
     assert status == 0 and report["skipped"]["evidence_quota"] == 1
     assert [call["action"] for call in writes(hub)] == ["evidence.attach"]
     assert report["schedule"]["consecutive_failures"] == 0
+    assert report["stop"] == "evidence_quota"
+    (staged,) = packets(target)
+    assert pk.STAGED.fullmatch(staged)
+    assert "refused" not in next(iter(state_of(target)["submissions"].values()))
+    before = len(writes(hub))
+    status, report = verify(target, capsys)
+    assert status == 0 and report["stop"] == "evidence_quota"
+    assert [call["action"] for call in writes(hub)[before:]] == ["evidence.attach"]
+    assert packets(target) == [staged]
+
+
+@pytest.mark.parametrize("crash_before_drop", [False, True])
+def test_lifetime_quota_settles_the_stage_and_does_not_replay(
+    verify_hub, capsys, resolver, monkeypatch, crash_before_drop
+):
+    target, hub, _, _ = verify_hub
+    hub.attach_reply = (429, {"code": "memory_evidence_lifetime_principal_quota", "error": "quota"})
+    drop = pk.drop
+    if crash_before_drop:
+        # Leave the stage behind after the refusal has been saved to the ledger.
+        monkeypatch.setattr(pk, "drop", lambda *_: None)
+    status, report = verify(target, capsys)
+    assert status == 0 and report["stop"] == "evidence_lifetime_quota"
+    assert report["skipped"]["evidence_lifetime_quota"] == 1
+    assert report["schedule"]["consecutive_failures"] == 0
+    assert [call["action"] for call in writes(hub)] == ["evidence.attach"]
+    assert len(packets(target)) == int(crash_before_drop)
+    assert next(iter(state_of(target)["submissions"].values()))["refused"] == "evidence_lifetime_quota"
+    monkeypatch.setattr(pk, "drop", drop)
+    state = state_of(target)
+    for card in state["scopes"][SCOPE]["cards"].values():
+        card.pop("verified", None)
+    vstate.save(target, state)
+    before = len(writes(hub))
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"]["refused"] == 1
+    assert writes(hub)[before:] == []
+    assert packets(target) == []
+
+
+def test_lifetime_evidence_quota_is_a_hub_refusal():
+    client = hubc.MemoryHubClient(
+        "https://hub.example.com",
+        "test-token",
+        transport=lambda *_: (429, {"code": "memory_evidence_lifetime_principal_quota"}),
+    )
+    with pytest.raises(hubc.HubRefusal) as refused:
+        client.call("evidence.attach")
+    assert refused.value.code == "memory_evidence_lifetime_principal_quota"
 
 
 def test_an_unclean_manifest_is_never_attached(verify_hub, capsys, resolver, monkeypatch):

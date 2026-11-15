@@ -456,7 +456,7 @@ Python and the hub both check it. Regenerate it with
 lockfile through `url`, so this adds no new package.
 
 - `off`: `memory search` behaves exactly as before and never contacts the hub. A config that cannot be read or is not UTF-8 gives the same error and exit status as before.
-- `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. The same bytes under one card id in one scope appear once, and a local card joins the hub entry with its bytes. Each match says where it came from (`source`: `hub`, `local` or `replica`). The hub returns at most 20 matches, so a larger `--limit` is capped there with a warning, and `hub_match_count` reports how many the hub found.
+- `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. The same bytes under one card id in one scope appear once, and a local card joins the hub entry with its bytes. Each match says where it came from (`source`: `hub`, `local` or `replica`). In JSON, a match contributed by the hub also keeps the hub's `lineage` and `source_demoted` fields when present, plus its retrieval ranks under `hub_ranks`. Matches without those hub fields omit them. The hub returns at most 20 matches, so a larger `--limit` is capped there with a warning, and `hub_match_count` reports how many the hub found.
 - If the hub is unreachable, times out, or answers a redirect, 404, 408, 429 or 503, the answer comes from local cards and the replica and carries a warning with the reason. If the hub refuses (401, 403 or another coded answer), the answer comes from local cards only and the warning names the refusal. The replica never stands in for a hub that said no.
 - `sync`: as `read`, and `memory hub push` publishes changed local cards into `scope`. The first push into a scope prints how many cards it would publish and needs `--yes`. Cards marked `visibility: private` are never published or imported. The check fails closed: a leading byte-order mark is ignored, every `visibility:` line in the frontmatter counts whatever its case, and the first word of its value decides, so `visibility: private  # keep local` is private. Only an absent `visibility` or `public` publishes. Any other value, an empty one included, is skipped as `visibility-unrecognized`, and so is a file with a `visibility:` line in a leading block that does not parse as frontmatter, such as one with no closing `---`. A card the replica holds with the same bytes but no published base is adopted only when the replica was pulled under the `log_epoch` the push preflight reports. Otherwise it is skipped as `replica-stale` until a pull. A card published under an older `log_epoch` counts as unpublished after a restore, because the restored hub may not hold it: push adopts a current replica head with the same bytes, or sends the card again. A credential that can write but not read still pushes, and the hub checks each write's base epoch itself.
 - Push keeps valid legacy card ids, including ids already published. For an invalid id, it uses import's valid frontmatter `id` or `card_id`, else import's `<slug>-<10 hex>` derivation from the workspace-relative path, such as `memory/cards/My Card.md`. This is the same id import produces with the workspace as `--root`. The first-publish preview and push summary count derived ids only among the changed cards planned for publication. Unchanged, adopted and skipped cards do not contribute to that count. Local files and their old-name lookup aliases stay unchanged. Moving a card changes a path-derived id. Use a valid frontmatter id to keep it across moves. Two public local cards claiming one id are refused as `card-id-collision`. A private card sharing an id with a public card also makes both fail closed: the private card stays withheld and the public card is refused as a collision. A derived id cannot replace an existing hub card without this workspace's published base for that path. A collision leaves the existing hub card untouched. A collision proposal refuses `--keep-local` while a local card still claims its id. Use `--keep-hub` or give the local card a distinct frontmatter id and push again. `--keep-hub` adopts the hub card for this path, while a distinct frontmatter id keeps both cards separate. After changing the id, close the old proposal with `--keep-local`. When a live or retired hub head exists, a proposal from a new derived-id create also refuses `--keep-local` unless an acknowledged publish proves this workspace wrote the current revision. With no hub head, `--keep-local` closes the proposal so the next push can retry its conditional create. For a retired hub card, give the local card a distinct frontmatter id. There is no live hub text for `--keep-hub` to adopt.
@@ -2164,13 +2164,20 @@ about 140 records, at most 8.75 MiB at the 64 KiB artifact limit. Active
 records are not counted, since a reviewer accepted them and the per-card slot
 caps bound them.
 
+A principal may create at most 32,768 verifier evidence records over the
+database lifetime. Purged bindings count toward this limit because their audit
+metadata stays in the database. Further attaches are refused with
+`429 memory_evidence_lifetime_principal_quota`. This lifetime limit is far
+above the retained budgets, but it puts a fixed bound on metadata growth.
+
 The idle sweep purges a record 35 days after it went inert, at most 8 records
 per sweep transaction. The purge is the tombstone the admin `evidence.purge`
 action writes: the artifact bytes are cleared, the id, hash and other fields
 stay, and an `evidence.purge` event with `"reason": "verifier_retention"`
 records it. The binding row keeps its metadata and gains `purged_ms`. A purged
-record frees its budget, never holds automatic apply and never counts as
-proof. An admin purge also stops a record counting at once.
+record frees its retained budget, never holds automatic apply and never counts as
+proof. An admin purge also frees retained budget at once. Neither purge resets the
+lifetime count.
 
 `propose` checks every verifier record an `append_evidence` op cites. The
 record binds only when the proposal comes from the principal that attached
@@ -2621,6 +2628,10 @@ card, evidence or model text, and it is scanned before attachment
 (`verify_manifest_unclean`). Its evidence id is
 `<principal>/memory-verify/<sha256 of the manifest>`.
 
+The JSON report includes a top-level `stop` field when a quota stops new
+proposals. Its value is the run reason, such as `evidence_quota` or
+`evidence_lifetime_quota`. Retained quota stages stay available for replay.
+
 | Run reason | Meaning |
 |---|---|
 | `dry_run_proposal` | A dry run would have attached and proposed for this card |
@@ -2628,6 +2639,7 @@ card, evidence or model text, and it is scanned before attachment
 | `pending_ceiling` | The job already has 8 pending proposals |
 | `proposal_quota` | The hub answered a proposal quota. The run stops proposing and still verifies the rest |
 | `evidence_quota` | The hub answered a retained evidence quota. Handled like `proposal_quota` |
+| `evidence_lifetime_quota` | The hub answered `429 memory_evidence_lifetime_principal_quota`. The run stops proposing without a failure, drops the stage and records the correction as refused. This quota is permanent for that principal, so the correction is never replayed under it |
 | `evidence_cap` | The card already holds the most manifests this principal may attach to it |
 | `duplicate_pending` | The hub already holds this proposal. Its id is remembered |
 | `already_proposed`, `refused` | The ledger already holds a proposal id or a final refusal for this correction |

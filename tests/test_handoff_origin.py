@@ -558,7 +558,9 @@ def test_oversized_handoff_keeps_exact_bytes_outside_review_draft(tmp_path, suff
     (review,) = (tmp_path / "memory/handoff-inbox").glob("*.md")
     import hashlib
 
-    assert hashlib.sha256(snapshot).hexdigest() in review.read_text()
+    sample = b"brigade-handoff-sample-v1\0" + str(len(snapshot)).encode("ascii") + b"\0"
+    sample += snapshot[:65536] + snapshot[-65536:]
+    assert hashlib.sha256(sample).hexdigest() in review.read_text()
     assert review.stat().st_size < 4096
     assert not path.exists()
     (held,) = (tmp_path / ".brigade/handoffs/held").rglob("*.md")
@@ -710,13 +712,159 @@ def test_oversized_sparse_handoff_never_uses_an_unbounded_snapshot(tmp_path, mon
     held = list((tmp_path / ".brigade/handoffs/held").rglob("*.md"))
     assert len(held) == 1 and held[0].stat().st_ino == identity
     assert held[0].stat().st_size == size and not path.exists()
-    digest = hashlib.sha256()
+    sample = b"brigade-handoff-sample-v1\0" + str(size).encode("ascii") + b"\0"
     with held[0].open("rb") as handle:
-        while chunk := handle.read(65536):
-            digest.update(chunk)
-    assert digest.hexdigest() in text
+        sample += handle.read(65536)
+        handle.seek(-65536, os.SEEK_END)
+        sample += handle.read(65536)
+    assert hashlib.sha256(sample).hexdigest() in text
     if os.name == "posix":
         assert held[0].parent.stat().st_mode & 0o777 == 0o700
     result = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 15), deadline_days=14)
     assert result["kept_for_person"] == 1 and result["retried"] == 0
     assert not (tmp_path / "TOOLS.md").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sparse files and read accounting")
+def test_sparse_hold_has_a_total_read_bound(tmp_path, monkeypatch):
+    import json
+    from brigade import handoff_quarantine
+
+    path = handoff(tmp_path)
+    os.truncate(path, 1 << 40)
+    identity = path.stat().st_ino
+    real_read = os.read
+    total = 0
+
+    def bounded_read(fd, length):
+        nonlocal total
+        if os.fstat(fd).st_ino == identity:
+            total += length
+            assert total <= 131072, "quarantine exceeded its total sample read budget"
+        return real_read(fd, length)
+
+    monkeypatch.setattr(os, "read", bounded_read)
+    handoff_quarantine.hold(tmp_path, path)
+    (draft,) = (tmp_path / "memory/handoff-inbox").glob("*.md")
+    metadata = json.loads(draft.read_text().split("```json\n")[1].split("\n```")[0])
+    assert metadata["size"] == 1 << 40
+    assert metadata["digest"]["algorithm"] == "sha256-size-first-last-v1"
+    assert metadata["digest"]["max_read_bytes"] == 131072
+    assert "sha256" not in metadata
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX intermediate symlink confinement")
+def test_hold_metadata_refuses_linked_memory_parent(tmp_path):
+    from brigade import handoff_quarantine
+
+    owner, outside = tmp_path / "owner", tmp_path / "outside"
+    owner.mkdir()
+    outside.mkdir()
+    (owner / "memory").symlink_to(outside, target_is_directory=True)
+    path = handoff(tmp_path / "source")
+    os.truncate(path, 2 * 1024 * 1024)
+    with pytest.raises(OSError):
+        handoff_quarantine.hold(owner, path)
+    assert path.exists()
+    assert not list(outside.iterdir())
+
+
+@pytest.mark.parametrize("failure", ["publish", "rename", "private", "metadata"])
+def test_failed_hold_removes_empty_token_directory(tmp_path, monkeypatch, failure):
+    import errno
+    from brigade import handoff_quarantine
+
+    path = handoff(tmp_path)
+    os.truncate(path, 2 * 1024 * 1024)
+
+    def refuse(*args, **kwargs):
+        if failure == "publish":
+            os.close(args[0])
+        raise OSError(errno.EACCES, "injected hold failure")
+
+    if failure == "publish":
+        monkeypatch.setattr(handoff_quarantine.handoff_publish, "_write_and_sync", refuse)
+    elif failure == "rename":
+        if os.name != "posix":
+            pytest.skip("POSIX rename fault injection")
+        monkeypatch.setattr(os, "rename", refuse)
+        # Keep backend detection independent of the injected syscall failure.
+        monkeypatch.setattr(handoff_quarantine.dirfd, "posix_available", lambda: os.name == "posix")
+    elif failure == "private":
+        if os.name != "posix":
+            pytest.skip("POSIX mode privacy check")
+        real_hold = handoff_quarantine._private_hold
+
+        def public_hold(target, token):
+            result = real_hold(target, token)
+            (target / ".brigade/handoffs/held" / token).chmod(0o755)
+            return result
+
+        monkeypatch.setattr(handoff_quarantine, "_private_hold", public_hold)
+    else:
+        monkeypatch.setattr(handoff_quarantine, "MAX_DRAFT_BYTES", 1)
+    with pytest.raises(OSError):
+        handoff_quarantine.hold(tmp_path, path)
+    assert path.exists()
+    assert not list((tmp_path / ".brigade/handoffs/held").iterdir())
+    assert not list((tmp_path / "memory/handoff-inbox").glob("*"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative rename fault injection")
+@pytest.mark.parametrize("cause", ["EXDEV", "EACCES", "EIO"])
+def test_ingest_hold_failure_reports_specific_cause(tmp_path, monkeypatch, cause):
+    import errno
+    from brigade import handoff_quarantine
+
+    path = handoff(tmp_path)
+    os.truncate(path, 2 * 1024 * 1024)
+
+    def refuse(*args, **kwargs):
+        raise OSError(getattr(errno, cause), "injected hold rename failure")
+
+    monkeypatch.setattr(os, "rename", refuse)
+    monkeypatch.setattr(handoff_quarantine.dirfd, "posix_available", lambda: True)
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats) == 0
+    assert stats.failed == 1 and stats.processed == stats.inboxed == 0
+    assert "[handoff-hold-failed]" in stats.actions[0]
+    assert f"cause={cause}" in stats.actions[0]
+    assert path.exists()
+    assert not list((tmp_path / ".brigade/handoffs/held").iterdir())
+    assert not list((tmp_path / "memory/handoff-inbox").glob("*"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX claim flock and directory enumeration")
+@pytest.mark.parametrize("resume", [False, True])
+def test_claim_orphan_sweep_has_a_bounded_batch(tmp_path, monkeypatch, resume):
+    consumed = tmp_path / ".brigade/handoffs/consumed-stamps" / ("a" * 64)
+    consumed.parent.mkdir(parents=True)
+    for number in range(200):
+        (consumed.parent / f"marker-{number}").touch()
+    if resume:
+        assert origin._claim(consumed, decision_id="same-decision")
+    real_scan = os.scandir
+    visited = 0
+
+    class CountedScan:
+        def __init__(self, path):
+            self.scan = real_scan(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.scan.close()
+
+        def __iter__(self):
+            nonlocal visited
+            for entry in self.scan:
+                visited += 1
+                assert visited <= 64, "claim lock performed an unbounded orphan sweep"
+                yield entry
+
+    monkeypatch.setattr(os, "scandir", CountedScan)
+    if resume:
+        assert origin.owns_review_claim(tmp_path, consumed.name, "same-decision")
+    else:
+        assert origin._claim(consumed, decision_id="same-decision")

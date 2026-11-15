@@ -23,6 +23,7 @@ HUMAN_CODES = frozenset(
         "card-injection-signal",
         "document-injection-signal",
         "contradiction-candidate",
+        "near-duplicate-config-invalid",
         "governed-card-migration",
         "identity-migration-fields",
         "card-id-collision",
@@ -71,6 +72,7 @@ HOLD_CODES = frozenset(
         "card-reinforced",
         "document-appended",
         "document-routed-to-card",
+        "resolved-copy-digest-mismatch",
     }
 )
 EXPIRE_CODES: frozenset[str] = frozenset()  # No ingest code proves that unapplied knowledge is disposable.
@@ -110,10 +112,12 @@ NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "missing-action": False,
     "missing-target-document": False,
     "near-match-proposal": True,
+    "near-duplicate-config-invalid": False,
     "overflow-block-too-large": False,
     "overflow-card-untrusted": False,
     "preference-replacement-review": False,
     "proposal-notification": False,
+    "resolved-copy-digest-mismatch": False,
     "unknown-sections": False,
     "unsafe-card-name": False,
     "unsafe-target-document": False,

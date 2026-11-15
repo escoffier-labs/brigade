@@ -547,6 +547,10 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
 
     p = _validated_payload(target, decision_id)
     d = Decision(**{**{k: p[k] for k in Decision.__dataclass_fields__}, "paths": tuple(p["paths"])})
+    # Recovering an append may finish its refusal cleanup from the same pending-index snapshot.
+    # A later visit to that row must not replay the finished mutations or mark it abandoned.
+    if p.get("phase") != "prepared":
+        return d
     config = _config_or_default(target)
     changes = [
         Change(
@@ -600,7 +604,8 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
     protected = any(read_only_pattern(path, config.read_only_paths) for path in destinations)
     # Older review decisions have no stamp field. Recognize their source drafts
     # independently of that field, while allowing undo and draft-only restoration.
-    drafts = {c.path for c in changes if c.before is not None and c.path.startswith("memory/handoff-inbox/")}
+    # Resolved safety copies are cleanup artifacts, never sources of filing authority.
+    drafts = {c.path for c in changes if c.before is not None and Path(c.path).parent == Path("memory/handoff-inbox")}
     drafts.update(a["draft"] for a in p.get("appends", []) if a.get("draft"))
     origin_refused = False
     if (drafts and d.kind != "undo") or "origin_stamp_mac" in p:

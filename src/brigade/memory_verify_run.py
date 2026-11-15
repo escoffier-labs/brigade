@@ -659,6 +659,8 @@ def _attach(client: hubc.MemoryHubClient, staged: packets.Stage, observed: int) 
             raise
         if exc.status == 409 and exc.code == EVIDENCE_CONFLICT:
             return ALREADY_ATTACHED  # The id is the manifest's digest, so this manifest is on the hub.
+        if exc.status == 429 and exc.code == "memory_evidence_lifetime_principal_quota":
+            return "evidence_lifetime_quota"
         if exc.status == 429 and exc.code in hubc.EVIDENCE_QUOTA_REFUSALS:
             return "evidence_quota"
         if exc.code in EVIDENCE_CAPS:
@@ -886,11 +888,17 @@ class Sender:
             blocked = None
         if blocked is not None:
             tally.skip(blocked)
-            if blocked == "evidence_quota":
+            if blocked in ("evidence_quota", "evidence_lifetime_quota"):
                 tally.stop = blocked  # Back pressure: stop proposing without a failure.
             if blocked in ("manifest_refused", MANIFEST_TRANSIENT):
                 tally.attempted += 1
                 tally.failed += 1
+            if blocked == "evidence_lifetime_quota":
+                # Permanent refusal. Save before dropping so a crash cannot replay the attach.
+                remembered["refused"] = blocked
+                self.save()
+                packets.drop(self.target, staged)
+                return REFUSED
             if blocked != "manifest_refused":
                 return UNRESOLVED  # The stage and its request id stay, and the next run replays them.
             remembered["refused"] = MANIFEST_REFUSED
@@ -1152,6 +1160,8 @@ def _run(
         "calls": {"made": tally.made, "ok": tally.ok},
         "idle": not tally.worked,
     }
+    if tally.stop is not None:
+        payload["stop"] = tally.stop
     if tally.attempted and tally.failed == tally.attempted:
         payload.update(status="failed", code="all_proposals_refused", reason="the hub refused every verify proposal")
     return payload

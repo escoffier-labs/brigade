@@ -40,3 +40,10 @@ def test_hub_ranks_update_for_each_contributing_hub_match():
     )
     assert match["ranks"] == {"hub": 2}
     assert match["hub_ranks"] == {"dense": 3}
+
+
+def test_later_hub_match_without_ranks_clears_older_hub_ranks():
+    shared = {"card_id": "shared", "content_hash": "same", "scope": "fleet"}
+    [match] = fuse({"hub": [{**shared, "ranks": {"lexical": 9}}, dict(shared)]}, 20)
+    assert match["ranks"] == {"hub": 2}
+    assert "hub_ranks" not in match

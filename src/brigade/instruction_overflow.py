@@ -134,6 +134,14 @@ class RouteContext:
             self._loaded = _discover(self.target, self.home, self.environ)
         return self._loaded
 
+    def card_numbers(self, file_key: str, kind: str) -> dict[int, str]:
+        """List the cards for one file and handoff type."""
+        return _card_numbers(self.target, file_key, kind)
+
+    def card_trust(self, rel: str) -> str | None:
+        """Return the trust problem for one existing card, if any."""
+        return _untrusted_card(self.target, rel)
+
 
 def _discover(target: Path, home: Path | None, environ: Mapping[str, str] | None) -> tuple[Inventory, bool]:
     invalid = False
@@ -219,7 +227,7 @@ def route(
         reason = "over-act-at"
     else:
         return None
-    return _with_card(target, file, reason, handoff_type, content)
+    return _with_card(target, file, reason, handoff_type, content, context=context)
 
 
 def _card_numbers(target: Path, file_key: str, kind: str) -> dict[int, str]:
@@ -245,10 +253,18 @@ def _card_numbers(target: Path, file_key: str, kind: str) -> dict[int, str]:
     return found
 
 
-def _with_card(target: Path, file: InstructionFile, reason: str, kind: str, content: str) -> OverflowRoute:
+def _with_card(
+    target: Path,
+    file: InstructionFile,
+    reason: str,
+    kind: str,
+    content: str,
+    *,
+    context: RouteContext | None = None,
+) -> OverflowRoute:
     limit, requested = _card_limit(target)
     extra = len(append_block(content))
-    numbers = _card_numbers(target, file.key, kind)
+    numbers = context.card_numbers(file.key, kind) if context is not None else _card_numbers(target, file.key, kind)
     cards: list[str] = []
     unreadable: str | None = None
     unreadable_rel: str | None = None
@@ -287,7 +303,7 @@ def _with_card(target: Path, file: InstructionFile, reason: str, kind: str, cont
     untrusted_rel = unreadable_rel
     block_problem: str | None = None
     if problem is None and chosen_exists and untrusted is None:
-        untrusted = _untrusted_card(target, chosen)
+        untrusted = context.card_trust(chosen) if context is not None else _untrusted_card(target, chosen)
         untrusted_rel = chosen if untrusted else None
     elif problem is None:
         first, _ = _first_block(target, file, content, kind, today=date.today())
@@ -520,11 +536,12 @@ def direct_card_text(
     file = find(inventory, document)
     if file is None:
         return []
-    rels = [
-        rel
-        for _, rel in sorted(_card_numbers(target, file.key, handoff_type).items())
-        if document_destination_problem(rel, target) is None
-    ]
+    numbers = (
+        context.card_numbers(file.key, handoff_type)
+        if context is not None
+        else _card_numbers(target, file.key, handoff_type)
+    )
+    rels = [rel for _, rel in sorted(numbers.items()) if document_destination_problem(rel, target) is None]
     return _read_cards(target, rels)
 
 

@@ -48,6 +48,7 @@ pub const DDL: &str = "CREATE TABLE IF NOT EXISTS memory_evidence_bindings(
   CHECK(state != 'active' OR proposal_id IS NOT NULL),
   CHECK(purged_ms IS NULL OR state = 'inert')
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_evidence_bindings_principal ON memory_evidence_bindings(principal);
 CREATE INDEX IF NOT EXISTS memory_evidence_bindings_proposal ON memory_evidence_bindings(proposal_id);
 CREATE INDEX IF NOT EXISTS memory_evidence_bindings_unbound ON memory_evidence_bindings(state,created_ms) WHERE proposal_id IS NULL;
 CREATE INDEX IF NOT EXISTS memory_evidence_bindings_retained_principal ON memory_evidence_bindings(principal) WHERE purged_ms IS NULL AND state!='active';
@@ -98,6 +99,9 @@ pub const BUDGET: Budget = Budget {
     scope_bytes: 64 * 1024 * 1024,
     scope_records: 4096,
 };
+/// Verifier records one principal may create over the database lifetime.
+/// Purged bindings count because their audit metadata is retained.
+pub const LIFETIME_PRINCIPAL_RECORDS: i64 = 32_768;
 
 /// Appended to a `memory_evidence` query: the record holds and counts only if
 /// it has no binding row or its row is `active`.
@@ -144,7 +148,7 @@ pub fn manifest_card(request: &Json, bytes: &[u8]) -> Result<i64, Reply> {
     Ok(revision)
 }
 
-/// The retained-storage check for a new verifier record of `bytes` bytes.
+/// The lifetime and retained-storage checks for a new verifier record of `bytes` bytes.
 /// Counts pending and inert records that are neither purged by retention nor
 /// tombstoned by an admin.
 pub fn retained_refusal<T: ReadTx + ?Sized>(
@@ -154,6 +158,22 @@ pub fn retained_refusal<T: ReadTx + ?Sized>(
     bytes: i64,
     budget: &Budget,
 ) -> rusqlite::Result<Option<Reply>> {
+    // Include every binding, regardless of state, scope or purge status.
+    let rows = tx.query(
+        "SELECT count(*) FROM memory_evidence_bindings WHERE principal=?1",
+        &[t(principal)],
+    )?;
+    let records = match rows.first().and_then(|row| row.first()) {
+        Some(Value::Integer(value)) => *value,
+        _ => i64::MAX,
+    };
+    if records >= LIFETIME_PRINCIPAL_RECORDS {
+        return Ok(Some(error(
+            429,
+            "memory_evidence_lifetime_principal_quota",
+            "lifetime verifier evidence record budget reached",
+        )));
+    }
     for (column, key, max_bytes, max_records, code) in [
         (
             "principal",

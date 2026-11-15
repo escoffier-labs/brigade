@@ -709,7 +709,7 @@ async fn non_verifier_attestations_behave_exactly_as_before() {
 }
 
 #[test]
-fn version_eleven_migrates_to_twelve_with_no_binding_rows() {
+fn version_eleven_migrates_with_no_binding_rows() {
     let dir = temp_dir();
     let path = dir.join("memory.db");
     let db = Connection::open(&path).unwrap();
@@ -722,7 +722,7 @@ fn version_eleven_migrates_to_twelve_with_no_binding_rows() {
         db.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap()
     };
-    assert_eq!(version(&db), 12);
+    assert_eq!(version(&db), schema::USER_VERSION);
     assert_eq!(schema::log_epoch(&db).unwrap(), epoch);
     let rows: i64 = db
         .query_row("SELECT count(*) FROM memory_evidence_bindings", [], |r| {
@@ -731,7 +731,7 @@ fn version_eleven_migrates_to_twelve_with_no_binding_rows() {
         .unwrap();
     assert_eq!(rows, 0);
     schema::migrate(&db, 1_800_000_000_000).unwrap();
-    assert_eq!(version(&db), 12);
+    assert_eq!(version(&db), schema::USER_VERSION);
     drop(db);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -813,7 +813,10 @@ async fn churn_hits_the_retained_budget_and_the_35_day_purge_frees_it() {
     // Not yet: records keep their bytes for 35 days after going inert.
     h.set_clock(h.now() + manifest_binding::RETENTION_MS - 60_000);
     let db = Connection::open(h.memory()).unwrap();
-    writer::sweep(&db, h.now()).unwrap();
+    // This tests retention and row bounds, independently of the production
+    // 20 ms deadline. A descheduled runner can interrupt and roll back a sweep.
+    let sweep = || writer::sweep_with_budget(&db, h.now(), std::time::Duration::from_secs(30));
+    sweep().expect("pre-expiry sweep commits");
     assert_eq!(purged(&h), (0, 0, 0));
     assert_eq!(
         code(&attach_large(&h, "early", a).await),
@@ -825,7 +828,7 @@ async fn churn_hits_the_retained_budget_and_the_35_day_purge_frees_it() {
         if purged(&h).0 == inert {
             break;
         }
-        let _ = writer::sweep(&db, h.now());
+        assert!(sweep().expect("retention sweep commits") > 0);
     }
     assert_eq!(purged(&h), (inert, inert, inert));
     let again = attach_large(&h, "after-purge", a).await;
@@ -882,6 +885,91 @@ async fn the_scope_and_record_budgets_count_retained_records_only() {
 }
 
 #[tokio::test]
+async fn purged_bindings_count_toward_the_lifetime_principal_budget() {
+    let (h, a) = ready().await;
+    assert_eq!(attest(&h, "old", "fleet", "a", a).await.status, 201);
+    let purge = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"evidence.purge","evidence_id":eid("old"),"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(purge.status, 200, "{purge:?}");
+
+    let db = Connection::open(h.memory()).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
+         INSERT INTO memory_evidence(evidence_id,scope,card_id,workspace_id,principal,credential_id,credential_class,artifact_kind,artifact_sha256,artifact_bytes,observed_ms,stance,scan_state,created_ms,tombstoned)
+         SELECT 'purged-'||value,scope,card_id,workspace_id,principal,credential_id,credential_class,artifact_kind,artifact_sha256,x'',observed_ms,stance,scan_state,created_ms,1
+         FROM memory_evidence, n WHERE evidence_id=?2",
+        rusqlite::params![
+            manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 2,
+            eid("old")
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
+         INSERT INTO memory_evidence_bindings(evidence_id,principal,scope,base_revision,retained_bytes,state,proposal_id,created_ms,updated_ms,purged_ms)
+         SELECT 'purged-'||value,'agent:dot','fleet',1,0,'inert',NULL,1,1,1 FROM n",
+        [manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 2],
+    )
+    .unwrap();
+    drop(db);
+
+    let last = attest(&h, "last", "fleet", "a", a).await;
+    assert_eq!(last.status, 201, "{last:?}");
+    // Even purging the last retained record cannot free lifetime capacity.
+    let purge = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"evidence.purge","evidence_id":eid("last"),"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(purge.status, 200, "{purge:?}");
+    let db = Connection::open(h.memory()).unwrap();
+    let events: i64 = db
+        .query_row("SELECT count(*) FROM memory_events", [], |r| r.get(0))
+        .unwrap();
+    // The same principal cannot escape the budget through a different scope.
+    for scope in ["fleet", "repo:other"] {
+        let refused = attest(&h, "over", scope, "a", a).await;
+        assert_eq!(
+            (refused.status, code(&refused)),
+            (429, "memory_evidence_lifetime_principal_quota"),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM memory_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        events
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM memory_evidence_bindings", [], |r| r
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        manifest_binding::LIFETIME_PRINCIPAL_RECORDS
+    );
+    // A different principal still has its entire budget.
+    let tx = crate::writer::worker::Tx(&db);
+    assert!(
+        manifest_binding::retained_refusal(
+            &tx,
+            "agent:other",
+            "fleet",
+            1,
+            &manifest_binding::BUDGET
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test]
 async fn retention_purges_only_records_inert_for_35_days() {
     let (h, a) = ready().await;
     for name in ["kept", "dropped"] {
@@ -928,5 +1016,86 @@ async fn retention_purges_only_records_inert_for_35_days() {
             [eid("dropped")],
         )
         .is_err()
+    );
+}
+
+#[test]
+fn version_twelve_gains_the_lifetime_principal_index_on_open() {
+    let dir = temp_dir();
+    let path = dir.join("memory.db");
+    let db = Connection::open(&path).unwrap();
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    db.execute_batch("DROP INDEX memory_evidence_bindings_principal; PRAGMA user_version=12;")
+        .unwrap();
+    let epoch = schema::log_epoch(&db).unwrap();
+    drop(db);
+    let db = Connection::open(&path).unwrap();
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        schema::USER_VERSION
+    );
+    assert_eq!(schema::log_epoch(&db).unwrap(), epoch);
+    let plan: String = db
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT count(*) FROM memory_evidence_bindings WHERE principal=?1",
+            ["agent:dot"],
+            |r| r.get(3),
+        )
+        .unwrap();
+    assert!(
+        plan.contains("USING COVERING INDEX memory_evidence_bindings_principal"),
+        "{plan}"
+    );
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    drop(db);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn fill_lifetime_bindings(state: &str) -> (Hub, i64) {
+    let (h, a) = ready().await;
+    assert_eq!(attest(&h, "seed", "fleet", "a", a).await.status, 201);
+    let db = Connection::open(h.memory()).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
+         INSERT INTO memory_evidence(evidence_id,scope,card_id,workspace_id,principal,credential_id,credential_class,artifact_kind,artifact_sha256,artifact_bytes,observed_ms,stance,scan_state,created_ms,tombstoned)
+         SELECT 'lifetime-'||value,scope,card_id,workspace_id,principal,credential_id,credential_class,artifact_kind,artifact_sha256,x'',observed_ms,stance,scan_state,created_ms,1
+         FROM memory_evidence, n WHERE evidence_id=?2",
+        rusqlite::params![manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 1, eid("seed")],
+    ).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
+         INSERT INTO memory_evidence_bindings(evidence_id,principal,scope,base_revision,retained_bytes,state,proposal_id,created_ms,updated_ms)
+         SELECT 'lifetime-'||value,'agent:dot','fleet',1,1,?2,'proposal-bound',1,1 FROM n",
+        rusqlite::params![manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 1, state],
+    ).unwrap();
+    (h, a)
+}
+
+#[tokio::test]
+async fn lifetime_quota_takes_precedence_over_retained_quotas() {
+    let (h, a) = fill_lifetime_bindings("pending_review").await;
+    let db = Connection::open(h.memory()).unwrap();
+    let retained: i64 = db.query_row("SELECT count(*) FROM memory_evidence_bindings WHERE purged_ms IS NULL AND state!='active'", [], |r| r.get(0)).unwrap();
+    assert!(retained >= manifest_binding::BUDGET.principal_records);
+    assert!(retained >= manifest_binding::BUDGET.scope_records);
+    let refused = attest(&h, "over", "fleet", "a", a).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_evidence_lifetime_principal_quota")
+    );
+}
+
+#[tokio::test]
+async fn active_bindings_count_toward_the_lifetime_principal_budget() {
+    let (h, a) = fill_lifetime_bindings("active").await;
+    let db = Connection::open(h.memory()).unwrap();
+    let retained: i64 = db.query_row("SELECT count(*) FROM memory_evidence_bindings WHERE purged_ms IS NULL AND state!='active'", [], |r| r.get(0)).unwrap();
+    assert_eq!(retained, 1);
+    let refused = attest(&h, "over", "fleet", "a", a).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_evidence_lifetime_principal_quota")
     );
 }

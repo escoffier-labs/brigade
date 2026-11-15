@@ -74,7 +74,10 @@ def test_hundreds_resolve_and_undo(tmp_path):
 
 
 @requires_automatic_filing
-@pytest.mark.parametrize("code", ["contradiction-candidate", "identity-migration-fields", "card-id-collision"])
+@pytest.mark.parametrize(
+    "code",
+    ["contradiction-candidate", "identity-migration-fields", "card-id-collision", "near-duplicate-config-invalid"],
+)
 def test_security_decision_recorded_without_moving(tmp_path, code):
     path = draft(tmp_path, code)
     result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
