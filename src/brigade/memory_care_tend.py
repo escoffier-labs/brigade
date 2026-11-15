@@ -69,7 +69,14 @@ def run(
         elif stage == "lifecycle":
             from . import memory_lifecycle
 
-            payload["stages"][stage] = memory_lifecycle.run(target, today=today or memory_cmd._today(), dry_run=dry_run)
+            try:
+                payload["stages"][stage] = memory_lifecycle.run(
+                    target, today=today or memory_cmd._today(), dry_run=dry_run
+                )
+            except OSError:
+                payload["stages"][stage] = {"blocked": "reference scan incomplete", "error": True}
+                payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
+                payload["failed"] = len(payload["failed_stages"])
         elif stage == "inbox":
             from .memory_inbox_drain import drain
 
@@ -94,9 +101,18 @@ def run(
                 payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
                 payload["failed"] = len(payload["failed_stages"])
         else:
-            payload["stages"][stage] = memory_care_retire.apply(
-                target, memory_cmd._config_or_default(target), tend, today=today or memory_cmd._today(), dry_run=dry_run
-            )
+            try:
+                payload["stages"][stage] = memory_care_retire.apply(
+                    target,
+                    memory_cmd._config_or_default(target),
+                    tend,
+                    today=today or memory_cmd._today(),
+                    dry_run=dry_run,
+                )
+            except OSError:
+                payload["stages"][stage] = {"blocked": "reference scan incomplete", "error": True}
+                payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
+                payload["failed"] = len(payload["failed_stages"])
     if not dry_run:
         store.write_json(target / STATE_REL, payload)
     return payload

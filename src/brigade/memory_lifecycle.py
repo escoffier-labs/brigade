@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import string
+import html
 import hashlib
 import json
 from datetime import date, datetime, timezone
@@ -50,7 +52,7 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
     # Resolve link destinations in the source file's directory. A basename in
     # unrelated prose or another directory must not protect this card.
     if referring and not referring.startswith("scheduler:"):
-        destinations = re.findall(r"\]\(\s*(?:<([^>]+)>|([^\s)]+))", text)
+        destinations = re.findall(r"\]\(\s*(?:<([^>]+)>|((?:\\.|[^\s)])+))", text)
         destinations.extend(
             re.findall(r"^ {0,3}\[[^\]\n]+\]:[ \t]*(?:\r?\n[ \t]*)?(?:<([^>\n]+)>|([^\s]+))", text, flags=re.MULTILINE)
         )
@@ -60,7 +62,8 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
         )
         for angle, bare in destinations:
             try:
-                link = urlsplit(angle or bare)
+                destination = re.sub(r"\\([" + re.escape(string.punctuation) + r"])", r"\1", angle or bare)
+                link = urlsplit(html.unescape(destination))
             except ValueError:
                 continue
             if link.scheme or link.netloc or not link.path:
@@ -77,7 +80,8 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
 
 
 def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
-    refs = dict(cards)
+    config = memory_cmd._config_or_default(target)
+    refs = {rel: text for rel, text in cards.items() if rel not in config.index_paths}
     roots = (
         ".brigade/care",
         ".brigade/runbooks",
@@ -177,7 +181,8 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
     for path in paths:
         rel = path.relative_to(target).as_posix()
         if (
-            memory_archive.is_archived_path(rel)
+            rel in config.index_paths
+            or memory_archive.is_archived_path(rel)
             or outputs.intersection(Path(rel).parts)
             or path.suffix in {".log", ".jsonl"}
         ):
@@ -360,97 +365,125 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
         rel: text for rel, text in cards.items() if (today - last_use[rel]).days < rules["stale_after_days"]
     }
     refs = _references(target, active_cards)
-    digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
-    for rel, text in sorted(cards.items()):
-        fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
-        identity = card_identity(fm, rel).card_id
-        reason = None
-        if (
-            fm.get("trust") != "agent-unreviewed"
-            or str(fm.get("author_type", "")).lower() == "human"
-            or str(fm.get("author", "")).lower() == "human"
-        ):
-            reason = "human or unknown authorship"
-        elif (
-            fm.get("pinned")
-            or memory_archive.frontmatter_refusal(text)
-            or memory_cmd._is_read_only(config, rel)
-            or rel in config.index_paths
-        ):
-            reason = "pinned or protected"
-        elif any(
-            other != rel
-            and _mentioned(
-                body,
-                rel,
-                identity if fm.get("id") or fm.get("card_id") else "",
-                tuple(k for k in _keys(text, rel) if k != Path(rel).stem),
-                referring=other,
-            )
-            for other, body in refs.items()
-        ):
-            reason = "referenced"
-        if reason:
-            payload["skipped"].append({"path": rel, "reason": reason})
-            continue
-        days = [last_use[rel]]
-        age = (today - last_use[rel]).days
-        if not memory_card_reads.covered(
-            ledger,
-            today=today,
-            days=rules["archive_after_days"] if age >= rules["archive_after_days"] else rules["stale_after_days"],
-        ):
-            payload["skipped"].append({"path": rel, "reason": "local read coverage incomplete"})
-            continue
-        state_rel = f".brigade/memory/lifecycle/{hashlib.sha256(rel.encode()).hexdigest()}.json"
-        before = journal.current(target, state_rel)
-        previous = json.loads(before)["state"] if before else "active"
-        desired = (
-            "archived"
-            if age >= rules["archive_after_days"]
-            else "stale"
-            if age >= rules["stale_after_days"]
-            else "active"
-        )
-        # Record both lifecycle edges for a first run after the archive window.
-        states = ["stale", "archived"] if previous == "active" and desired == "archived" else [desired]
-        for state in states:
-            if state == previous or len(payload["transitions"]) >= rules["max_transitions_per_run"]:
-                continue
-            metadata = {
-                "actor": "policy",
-                "policy_digest": digest,
-                "from_state": previous,
-                "to_state": state,
-                "last_use": max(days).isoformat(),
-                "card_path": rel,
+    from .inbox_lock import held_file_lock
+
+    with held_file_lock(
+        journal.safe_path(target, memory_card_reads.READS_REL).with_suffix(".lock"), deadline_seconds=5
+    ):
+        ledger = memory_card_reads.load(target)
+        if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
+            return {**payload, "blocked": "local read coverage incomplete"}
+        last_use = {
+            rel: _last_use(target, rel, text, ledger, signals, opens, hub_reads, today=today)
+            for rel, text in cards.items()
+        }
+        refs.update(
+            {
+                rel: text
+                for rel, text in cards.items()
+                if rel not in config.index_paths and (today - last_use[rel]).days < rules["stale_after_days"]
             }
-            after = (json.dumps({"state": state, "path": rel}, sort_keys=True) + "\n").encode()
-            change = journal.Change(state_rel, before, after)
-            entry = {**metadata, "decision_id": None}
-            if not dry_run:
-                if state == "archived":
-                    decision = memory_archive.archive_card(
-                        target,
-                        rel,
-                        reason="unused-card",
-                        config=config,
-                        policy_metadata=metadata,
-                        state_change=change,
-                        expected_before=text.encode("utf-8"),
-                    )
-                else:
-                    decision = journal.commit_phased(
-                        target,
-                        kind="lifecycle",
-                        reason="unused-card",
-                        card_id=identity,
-                        changes=[change],
-                        prepared_paths=[state_rel],
-                        hub={"status": "skipped"},
-                        metadata=metadata,
-                    )
-                entry["decision_id"] = decision.decision_id
-            payload["transitions"].append(entry)
-            previous, before = state, after
-    return payload
+        )
+        digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
+        for rel, text in sorted(cards.items()):
+            fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
+            identity = card_identity(fm, rel).card_id
+            reason = None
+            if (
+                fm.get("trust") != "agent-unreviewed"
+                or str(fm.get("author_type", "")).lower() == "human"
+                or str(fm.get("author", "")).lower() == "human"
+            ):
+                reason = "human or unknown authorship"
+            elif (
+                fm.get("pinned")
+                or memory_archive.frontmatter_refusal(text)
+                or memory_cmd._is_read_only(config, rel)
+                or rel in config.index_paths
+            ):
+                reason = "pinned or protected"
+            elif any(
+                other != rel
+                and _mentioned(
+                    body,
+                    rel,
+                    identity if fm.get("id") or fm.get("card_id") else "",
+                    tuple(k for k in _keys(text, rel) if k != Path(rel).stem),
+                    referring=other,
+                )
+                for other, body in refs.items()
+            ):
+                reason = "referenced"
+            if reason:
+                payload["skipped"].append({"path": rel, "reason": reason})
+                continue
+            days = [last_use[rel]]
+            age = (today - last_use[rel]).days
+            if not memory_card_reads.covered(
+                ledger,
+                today=today,
+                days=rules["archive_after_days"] if age >= rules["archive_after_days"] else rules["stale_after_days"],
+            ):
+                payload["skipped"].append({"path": rel, "reason": "local read coverage incomplete"})
+                continue
+            state_rel = f".brigade/memory/lifecycle/{hashlib.sha256(rel.encode()).hexdigest()}.json"
+            before = journal.current(target, state_rel)
+            previous = json.loads(before)["state"] if before else "active"
+            desired = (
+                "archived"
+                if age >= rules["archive_after_days"]
+                else "stale"
+                if age >= rules["stale_after_days"]
+                else "active"
+            )
+            # Record both lifecycle edges for a first run after the archive window.
+            states = ["stale", "archived"] if previous == "active" and desired == "archived" else [desired]
+            for state in states:
+                if state == previous or len(payload["transitions"]) >= rules["max_transitions_per_run"]:
+                    continue
+                # A reader waiting on this lock has already persisted its intent.
+                # Recheck before each edge so it blocks the rest of this pass.
+                if not memory_card_reads.covered(
+                    memory_card_reads.load(target),
+                    today=today,
+                    days=rules["archive_after_days"] if state == "archived" else rules["stale_after_days"],
+                ):
+                    payload["skipped"].append({"path": rel, "reason": "local read coverage incomplete"})
+                    break
+                metadata = {
+                    "actor": "policy",
+                    "policy_digest": digest,
+                    "from_state": previous,
+                    "to_state": state,
+                    "last_use": max(days).isoformat(),
+                    "card_path": rel,
+                }
+                after = (json.dumps({"state": state, "path": rel}, sort_keys=True) + "\n").encode()
+                change = journal.Change(state_rel, before, after)
+                entry = {**metadata, "decision_id": None}
+                if not dry_run:
+                    if state == "archived":
+                        decision = memory_archive.archive_card(
+                            target,
+                            rel,
+                            reason="unused-card",
+                            config=config,
+                            policy_metadata=metadata,
+                            state_change=change,
+                            expected_before=text.encode("utf-8"),
+                        )
+                    else:
+                        decision = journal.commit_phased(
+                            target,
+                            kind="lifecycle",
+                            reason="unused-card",
+                            card_id=identity,
+                            changes=[change],
+                            prepared_paths=[state_rel],
+                            hub={"status": "skipped"},
+                            metadata=metadata,
+                        )
+                    entry["decision_id"] = decision.decision_id
+                payload["transitions"].append(entry)
+                previous, before = state, after
+        return payload

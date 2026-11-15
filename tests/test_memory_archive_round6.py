@@ -107,7 +107,6 @@ def test_malformed_intent_recovers_without_preserving_body(tmp_path, body):
         "SAFETY_RULES.md",
         "INSTALL_FOR_AGENTS.md",
         "AGENTS.override.md",
-        "MEMORY.md",
     ],
 )
 def test_supported_bootstrap_reference_protects_card(tmp_path, bootstrap):

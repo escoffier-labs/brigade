@@ -1830,6 +1830,17 @@ def search_card_fields(
     paths = [path for path in _iter_cards(target, config) if keep is None or keep(path)]
     if include_archived:
         from .memory_care_journal import safe_path
+        from .memory_archive import archive_rel
+
+        def original_paths(path: Path) -> tuple[str, ...]:
+            suffix = path.relative_to(target / "memory/archive").as_posix()
+            candidates = (suffix, "memory/" + suffix)
+            return tuple(
+                rel
+                for rel in candidates
+                if any(_path_matches(rel, (root,)) for root in config.card_roots)
+                and archive_rel(rel) == path.relative_to(target).as_posix()
+            )
 
         root = safe_path(target, "memory/archive")
         if root.is_dir():
@@ -1840,13 +1851,13 @@ def search_card_fields(
                 and (keep is None or keep(p))
                 and (
                     not config.include_paths
-                    or _path_matches("memory/" + p.relative_to(root).as_posix(), config.include_paths)
+                    or any(_path_matches(rel, config.include_paths) for rel in original_paths(p))
                     or _path_matches(p.relative_to(target).as_posix(), config.include_paths)
                 )
                 and (
                     not config.exclude_paths
                     or not (
-                        _path_matches("memory/" + p.relative_to(root).as_posix(), config.exclude_paths)
+                        any(_path_matches(rel, config.exclude_paths) for rel in original_paths(p))
                         or _path_matches(p.relative_to(target).as_posix(), config.exclude_paths)
                     )
                 )

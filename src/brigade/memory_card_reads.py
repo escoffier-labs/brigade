@@ -214,7 +214,17 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
     try:
         # No authority means transitions are already disabled. Do not accumulate
         # an intent for every content open in an unconfigured workspace.
-        if receipt_signing.workspace_key(target) is None or _disabled(target):
+        if receipt_signing.workspace_key(target) is None:
+            # Only a confined lookup proving absence permits a silent return.
+            # Unsafe parents, dangling links and inaccessible keys are failures.
+            with bound_run_dir(target) as bound:
+                try:
+                    bound.stat((".brigade",), receipt_signing.KEY_NAME)
+                except FileNotFoundError:
+                    return False
+            _record_failure(target)
+            return False
+        if _disabled(target):
             return False
         _write_json(target, intent, {"state": "pending", "day": today.isoformat()})
         path = safe_path(target, READS_REL)
