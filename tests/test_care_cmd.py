@@ -572,6 +572,14 @@ def test_care_windows_install_json_returns_structured_plan(tmp_path, monkeypatch
     assert payload["mutates_scheduler"] is False
     assert payload["status"] == "printed-plan"
     assert {task["id"] for task in payload["tasks"]} == {entry.entry_id for entry in care_cmd.CARE_ENTRIES}
+    assert {task["task_name"] for task in payload["tasks"]} == {
+        "BrigadeCare-daily-care",
+        "BrigadeCare-ingest-sweep",
+        "BrigadeCare-weekly-outcome-ratchet",
+        "BrigadeCare-daily-observability",
+        "BrigadeCare-nightly-ops",
+        "BrigadeCare-memory-reflect",
+    }
     for task, entry in zip(payload["tasks"], care_cmd.CARE_ENTRIES, strict=True):
         assert task["schedule"] == entry.schedule
         assert task["schedule_flags"] == EXPECTED_SCHTASKS_FLAGS[entry.schedule]

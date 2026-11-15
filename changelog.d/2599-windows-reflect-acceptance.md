@@ -1,0 +1,1 @@
+Fixed Windows native acceptance to validate all six default care tasks, including the exact isolated memory-reflect command scheduled daily at 10:00. Reflection behavior is unchanged.
