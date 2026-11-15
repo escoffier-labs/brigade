@@ -312,17 +312,13 @@ def ingest_into(
             try:
                 # One read. The digest, the parse and every delivered copy
                 # come from these bytes, so the digest names what was handled.
-                snapshot = path.read_bytes()
+                snapshot = handoff_origin.read_handoff(path, max_bytes=INSPECTION_CEILING)
+                sidecar = handoff_origin.stamp_path(source, path)
                 sha = hashlib.sha256(snapshot).hexdigest()
                 origin = handoff_origin.verify_handoff(source, path, snapshot)
                 trusted_origin = origin is not None and origin.allows_automatic_filing
-                if trusted_origin and sha in stats.seen_digests:
-                    if not dry_run:
-                        _archive(path, processed_dir, sha)
-                        handoff_origin.remove_stamp(source, path)
-                    stats.skipped += 1
-                    stats.actions.append(_summary("skip", path.name, "duplicate-content"))
-                    continue
+                if origin is not None:
+                    sidecar = origin.stamp.sidecar
                 # Bad bytes or malformed structure belong to this handoff
                 # only. Guard and invariant failures further on stay fatal.
                 try:
@@ -332,6 +328,20 @@ def ingest_into(
                     continue
                 except ValueError:
                     _record_failure(stats, path, "invalid-content")
+                    continue
+                # Claim before _execute can mutate canonical memory. A crash or
+                # failed publication spends the stamp and requires human review.
+                if trusted_origin and not dry_run:
+                    if _is_tracked(path, _git_tracked_files(path.parent)):
+                        raise TrackedHandoffError("handoff became tracked before origin claim")
+                    assert origin is not None
+                    trusted_origin = origin.stamp.claim()
+                if trusted_origin and sha in stats.seen_digests:
+                    if not dry_run:
+                        _archive(path, processed_dir, sha)
+                        handoff_origin.remove_stamp(sidecar)
+                    stats.skipped += 1
+                    stats.actions.append(_summary("skip", path.name, "duplicate-content"))
                     continue
                 if not trusted_origin:
                     outcome = Outcome(
@@ -363,7 +373,7 @@ def ingest_into(
                     routing=routing,
                 )
                 if not dry_run and action.kind in _HANDLED_KINDS:
-                    handoff_origin.remove_stamp(source, path)
+                    handoff_origin.remove_stamp(sidecar)
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
             except ChangedHandoffError:

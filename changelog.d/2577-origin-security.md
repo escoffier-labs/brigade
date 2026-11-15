@@ -1,0 +1,2 @@
+- Origin filing ignores receipt key environment overrides and requires a private, current-user-owned, single-link key at the fixed workspace location. Platforms without ownership proof require review.
+- Ingest refuses linked handoffs, cleans the exact verified sidecar, and consumes origin and review retry stamps before canonical writes to prevent replay after archive or a crash.

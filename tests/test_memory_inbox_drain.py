@@ -1304,3 +1304,28 @@ def test_ingest_written_retry_draft_preserves_source_authority(tmp_path):
     assert result["retried"] == 1, result
     assert "Revised fact." in card.read_text()
     assert not handoff_origin.stamp_path(owner, path).exists()
+
+
+def test_review_retry_crash_after_write_cannot_replay_record(tmp_path, monkeypatch):
+    path = draft(tmp_path, "document-destination-unwritable")
+    data = path.read_bytes()
+    sidecar = handoff_origin.stamp_path(tmp_path, path)
+    record = sidecar.read_bytes()
+    commit = journal.commit_phased
+
+    def commit_then_crash(*args, **kwargs):
+        commit(*args, **kwargs)
+        raise OSError("simulated crash after retry commit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "commit_phased", commit_then_crash)
+        with pytest.raises(OSError, match="simulated crash"):
+            ingest.reprocess_review_draft(tmp_path, path)
+    assert b"A useful fact." in (tmp_path / "USER.md").read_bytes()
+    path.write_bytes(data)
+    sidecar.write_bytes(record)
+    # Remove the destination so content deduplication cannot hide a replay.
+    (tmp_path / "USER.md").unlink()
+    action = ingest.reprocess_review_draft(tmp_path, path)
+    assert action.summary == "origin-review-required"
+    assert not (tmp_path / "USER.md").exists()

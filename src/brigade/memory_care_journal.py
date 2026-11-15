@@ -533,6 +533,11 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
         if any(c.path in prepared and c.after is None for c in pending):
             final["restorable"] = False
     else:
+        if "origin_stamp_mac" in p:
+            from .handoff_origin import claim_review_stamp
+
+            if not claim_review_stamp(target, p["origin_stamp_mac"], decision_id):
+                raise JournalConflict("review origin stamp already consumed or unavailable")
         final = {**p, "phase": "undone" if d.kind == "undo" else "committed", "status": "committed"}
         pending = [c for c in changes if c.path not in prepared]
         if d.undoes:

@@ -256,6 +256,12 @@ def _record(target: Path, rel: str, data: bytes, reason: str, *, cited: bool, ex
     path = target / rel
     if ingest._is_tracked(path, ingest._git_tracked_files(path.parent)):
         raise ingest.TrackedHandoffError("tracked review draft")
+    review = handoff_origin.verify_review_draft(target, path, data)
+    if review is None:
+        raise ValueError("review origin unavailable before disposition")
+    sidecar = review.stamp.sidecar
+    metadata = disposition_metadata(rel, reason, cited=cited)
+    metadata["origin_stamp_mac"] = review.stamp.consumed.name
     changes = disposition_changes(target, rel, data, reason, cited=cited, expired=expired)
     decision = journal.commit_phased(
         target,
@@ -265,12 +271,12 @@ def _record(target: Path, rel: str, data: bytes, reason: str, *, cited: bool, ex
         changes=changes,
         prepared_paths=[] if cited else [changes[0].path],
         hub={},
-        metadata=disposition_metadata(rel, reason, cited=cited),
+        metadata=metadata,
     )
 
     if journal._payload(target, decision.decision_id).get("phase") != "committed":
         raise journal.JournalConflict("inbox disposition abandoned")
-    handoff_origin.remove_stamp(target, path)
+    handoff_origin.remove_stamp(sidecar)
     return decision
 
 

@@ -167,9 +167,29 @@ invalidates the stamp. Replacing, touching, or renaming a handoff also requires
 a new stamp. A failed attempt to stamp a replacement cannot reuse its previous
 publication's authorization.
 
-This reuses the local receipt key configured by `brigade receipts keygen`, at
-`.brigade/receipt-signing-key` or `BRIGADE_RECEIPT_SIGNING_KEY_FILE`. Ingest uses
-the source workspace's key, even when it writes memory into a different owner.
+Ingest reads handoffs through a no-follow descriptor and refuses symlinks,
+hardlinks, and non-regular files. Verification retains the exact sidecar path
+for cleanup, so replacing the inbox pathname after archive cannot redirect
+stamp removal. Before any canonical write, ingest atomically claims the
+record's MAC in `.brigade/handoffs/consumed-stamps/` and flushes the claim to
+disk. Review dispositions and retries use the same one-time claim after journal
+preparation and before canonical writes. Recovery can resume a claim only
+under the journal decision that owns it.
+Restoring an archived inode or a consumed sidecar cannot revive its authority.
+A crash or failed write after the claim requires human review unless an
+already-prepared journal transaction can complete recovery. New tooling stamps
+include a random nonce. Only trusted tooling can authorize a fresh attempt.
+
+Origin stamps use only the fixed workspace-owned key at
+`.brigade/receipt-signing-key`. The receipt-only
+`BRIGADE_RECEIPT_SIGNING_KEY_FILE` override cannot select an origin key. Run
+`brigade receipts keygen` without that override to provision the fixed key.
+Ingest uses the source workspace's key, even when it writes memory into a
+different owner. The key must be a single-link regular file owned by the
+current OS user, with no group or world permission bits. No-follow opens
+reject links in the key path. On Windows, or any platform that cannot prove
+these ownership and permission checks, automatic filing fails closed and
+handoffs require review.
 A missing key, missing sidecar, bad MAC, changed content, malformed stamp, or
 unknown tool status requires review. Neither drafting nor ingest creates a key.
 Stamps are local to the source workspace and path. Worktree rescue and archive
@@ -192,11 +212,12 @@ stamp preserves the existing opt-in filing behavior and all content checks.
 
 ### Threat model
 
-The signer, its observations, and the receipt key are trusted. The gate protects
-against forged claims in agent-authored handoff text and against sidecar edits
-made without the key. It does not isolate a process from other processes running
-as the same operating-system user. An agent with shell access to the key or to
-trusted signer code can compute a valid MAC and forge an origin. Deployments
-that need protection from that agent must run the signer and key under a
-separate account or broker and restrict the agent's access. The local host label
+The signer, its observations, the fixed key file, and Brigade's consumed-stamp
+state are trusted. The gate defends against text-only and file-drop agents
+that cannot read the key or modify trusted state. It rejects forged claims in
+handoff text and sidecar edits made without the key. An agent able to read the
+key file or run code as the same OS user can still compute a valid MAC and
+forge an origin. Deployments that need protection from that agent must run
+the signer and key under a separate account or broker and restrict the
+agent's access. The local host label
 is local metadata and does not prove a remote host identity.

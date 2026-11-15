@@ -213,6 +213,9 @@ def reprocess(
             return ingest.Action(kind, outcome.code, dest_rel)
         if ingest._is_tracked(draft, ingest._git_tracked_files(draft.parent)):
             raise ingest.TrackedHandoffError("tracked review draft")
+        # The journal claims after durable preparation, before finish can write
+        # canonical memory. Recovery may resume only this same decision.
+        metadata["origin_stamp_mac"] = review.stamp.consumed.name
         try:
             decision = journal.commit_phased(
                 owner,
@@ -230,7 +233,7 @@ def reprocess(
             return ingest.Action("inboxed", exc.code)
         if journal._payload(owner, decision.decision_id).get("phase") != "committed":
             raise journal.JournalConflict("retry abandoned")
-        handoff_origin.remove_stamp(owner, draft)
+        handoff_origin.remove_stamp(review.stamp.sidecar)
         if outcome.kind in ("promoted", "reinforced") and card_ids is not None:
             card_ids.register(dest_rel, after.decode("utf-8"))
         elif outcome.kind == "routed-card" and card_ids is not None:
