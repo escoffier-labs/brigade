@@ -2704,6 +2704,10 @@ def test_search_fuses_derived_publication_id_and_retains_old_name(hub, tmp_path,
         # The node wrote it unreviewed, so the connector opens it only once it is reviewed.
         assert _dot_cli(target).memory_card(match["card_id"])["error"] == "card_not_found"
         hub.cards[("repo:test/app", match["card_id"])]["trust"] = "reviewed"
+        # A local-source fused entry with a scope reaches callers of `brigade memory search --json`.
+        # Dot connectors never see it: with the hub on they take the principal path, which never fuses,
+        # and principal profiles drop local-source matches. Turning the hub off for the search and back
+        # on for the read stages that CLI payload, then checks the hinted name and scope open the card.
         monkeypatch.setattr(hubc, "hub_mode", lambda target: "off")
         tools = _dot_memory(target, payload)
         found = tools.memory_search("koala")
