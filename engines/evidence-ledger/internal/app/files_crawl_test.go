@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/ingest"
 )
 
 func filesExporter(t *testing.T) {
@@ -32,6 +34,10 @@ if [ -n "$FILES_CRAWL_ATTEMPTS" ]; then printf "attempt\n" >> "$FILES_CRAWL_ATTE
 if [ -n "$FILES_CRAWL_SLOW" ] && [ "${path##*/}" = "001.txt" ]; then exec sleep 5; fi
 printf '{"schema":"@SCHEMA@","source":{"kind":"files","name":"files"},"collection":{"external_id":"fixture","kind":"files","name":"fixture"},"item":{"external_id":"%s","kind":"file","created_at":"2026-01-01T00:00:00Z","text":"fixture"},"raw":{"format":"text","path":"%s"}}\n' "$path" "$path"
 if [ -n "$FILES_CRAWL_EMIT_SLOW" ]; then exec sleep 5; fi
+if [ -n "$FILES_CRAWL_GATE" ]; then
+exec 1>&-
+while [ ! -f "$FILES_CRAWL_GATE" ]; do sleep 0.01; done
+fi
 if [ -n "$FILES_CRAWL_WARN" ]; then printf '{"warnings":["fixture warning"]}\n' >&2; fi
 if [ -n "$FILES_CRAWL_BAD" ]; then printf 'invalid record\n'; fi
 if [ -z "$FILES_CRAWL_WARN" ]; then printf '{"path":"%s","records":1}\n' "$path" >&2; fi
@@ -473,6 +479,10 @@ func TestFilesCrawlBusyRetry(t *testing.T) {
 				if got["complete"] != false || got["resume_cursor"] != first["resume_cursor"] {
 					t.Fatalf("busy stop skipped file: %v", got)
 				}
+				warning := fmt.Sprint(got["warnings"])
+				if !strings.Contains(warning, "stopped on a busy archive") || !strings.Contains(warning, "holder-diagnosis:") || !strings.Contains(warning, "db=") || strings.Contains(warning, fmt.Sprint(math.MaxInt)) {
+					t.Fatalf("missing lock diagnosis: %v", got)
+				}
 				var cursor string
 				if err := holder.QueryRow("select path from files_crawl_cursor").Scan(&cursor); err != nil {
 					t.Fatal(err)
@@ -526,5 +536,142 @@ func TestFilesCrawlScanUsesCrawlDigest(t *testing.T) {
 	}
 	if diff["changed"] != true {
 		t.Fatalf("scan used post-export content: %v", diff)
+	}
+}
+
+func TestFilesCrawlFirstTablesBusy(t *testing.T) {
+	withTempHome(t)
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	holder, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	holder.SetMaxOpenConns(1)
+	if _, err := holder.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_, err := holder.Exec("ROLLBACK")
+		released <- err
+	}()
+	err = prepareFilesCrawlDB(db)
+	releaseErr := <-released
+	if releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	if err != nil {
+		t.Fatalf("first crawl tables failed under writer contention: %v", err)
+	}
+	var tables int
+	if err := db.QueryRow("select count(*) from sqlite_master where name in ('files_crawl_cache', 'files_crawl_cursor')").Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 2 {
+		t.Fatalf("created %d crawl tables", tables)
+	}
+	var timeout int
+	if err := db.QueryRow("pragma busy_timeout").Scan(&timeout); err != nil {
+		t.Fatal(err)
+	}
+	if timeout != 0 {
+		t.Fatalf("crawl busy timeout = %d", timeout)
+	}
+}
+
+type filesCrawlBusyError struct{}
+
+func (filesCrawlBusyError) Error() string { return "fixture busy" }
+func (filesCrawlBusyError) Code() int     { return 5 }
+
+func TestFilesCrawlBusyErrorActualAttempts(t *testing.T) {
+	now := time.Now()
+	calls := 0
+	err := ingest.RetryOnBusy(func() error { calls++; now = now.Add(time.Second); return filesCrawlBusyError{} }, ingest.BusyRetryOptions{
+		Attempts: math.MaxInt, MaxTotalWait: time.Millisecond, Now: func() time.Time { return now },
+	})
+	if calls != 1 || !strings.Contains(err.Error(), "after 1 attempts") || strings.Contains(err.Error(), fmt.Sprint(math.MaxInt)) {
+		t.Fatalf("incorrect bounded retry count: calls=%d error=%v", calls, err)
+	}
+}
+
+func TestFilesCrawlBusyCacheDeleteDoesNotRepeatWarnings(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	holder, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	holder.SetMaxOpenConns(1)
+	gate := filepath.Join(t.TempDir(), "exporter-exit")
+	attempts := filepath.Join(t.TempDir(), "attempts")
+	t.Setenv("FILES_CRAWL_GATE", gate)
+	t.Setenv("FILES_CRAWL_ATTEMPTS", attempts)
+	t.Setenv("FILES_CRAWL_WARN", "1")
+	released := make(chan error, 1)
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			var items int
+			err := holder.QueryRow("select count(*) from items").Scan(&items)
+			if err != nil {
+				released <- err
+				return
+			}
+			if items == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				released <- fmt.Errorf("import did not commit before exporter exit")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		// The importer committed, but Wait is blocked on the exporter gate.
+		if _, err := holder.Exec("BEGIN IMMEDIATE"); err != nil {
+			released <- err
+			return
+		}
+		if err := os.WriteFile(gate, nil, 0600); err != nil {
+			holder.Exec("ROLLBACK")
+			released <- err
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+		_, err := holder.Exec("ROLLBACK")
+		released <- err
+	}()
+	got := runJSON(t, "crawl", "files", root, "--budget", "3s", "--json")
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	warnings := got["warnings"].([]any)
+	if len(warnings) != 2 || warnings[0] != "fixture warning" || !strings.Contains(fmt.Sprint(warnings[1]), "export incomplete") || got["complete"] != true {
+		t.Fatalf("cache delete repeated warnings or stopped early: %v", got)
+	}
+	data, err := os.ReadFile(attempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(data, []byte("attempt\n")) != 1 {
+		t.Fatalf("cache delete restarted export: %s", data)
+	}
+	var cached int
+	if err := holder.QueryRow("select count(*) from files_crawl_cache").Scan(&cached); err != nil {
+		t.Fatal(err)
+	}
+	if cached != 0 {
+		t.Fatalf("warned file cached: %d", cached)
 	}
 }

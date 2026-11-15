@@ -116,22 +116,12 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 	if err := toolpath.Require("sourceharvest", toolpath.HintSourceHarvest); err != nil {
 		return fatalf(errw, "crawl files: %s", err)
 	}
-	db, _, err := openMigrated()
+	db, paths, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "crawl files: %s", err)
 	}
 	defer db.Close()
-	// This crawl owns one connection. Let the context-bounded retry loop handle
-	// locks instead of composing the connection's busy timeout with each retry.
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("pragma busy_timeout=0"); err != nil {
-		return fatalf(errw, "crawl files: %s", err)
-	}
-	// Separate from source_scans: option changes and collections must not share
-	// cache identities. Existing archive migrations need no rewrite.
-	_, err = db.Exec(`create table if not exists files_crawl_cache (profile text not null, path text not null, hash text not null, primary key(profile,path));
- create table if not exists files_crawl_cursor (profile text primary key, path text not null)`)
-	if err != nil {
+	if err := prepareFilesCrawlDB(db); err != nil {
 		return fatalf(errw, "crawl files: %s", err)
 	}
 	identity := sha256.Sum256([]byte(strings.Join([]string{root, filepath.Clean(inputPath), *source, *collection, *kind, *glob}, "\x00")))
@@ -143,9 +133,19 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *budget)
 	defer cancel()
+	warnings := []string{}
+	busyWarning := false
+	warnBusy := func() {
+		if !busyWarning {
+			warnings = append(warnings, "bounded stop: stopped on a busy archive, "+ingest.DiagnoseLockHolder(paths.DBPath))
+			busyWarning = true
+		}
+	}
 	retryBusy := func(fn func() error) error {
 		deadline, _ := ctx.Deadline()
-		return ingest.RetryOnBusy(fn, ingest.BusyRetryOptions{
+		retriedBusy := false
+		err := ingest.RetryOnBusy(fn, ingest.BusyRetryOptions{
+			OnRetry:      func(int, int, time.Duration, error) { retriedBusy = true },
 			Attempts:     math.MaxInt,
 			MaxTotalWait: max(time.Nanosecond, time.Until(deadline)),
 			Sleep: func(wait time.Duration) {
@@ -157,11 +157,15 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 				}
 			},
 		})
+		// A retry can hit the budget or exporter cap before another write.
+		if ingest.IsBusy(err) || (retriedBusy && err == fs.SkipAll) {
+			warnBusy()
+		}
+		return err
 	}
 	exported, parsed, skipped, inserted := 0, 0, 0, 0
 	pending := false
 	entries := 0
-	warnings := []string{}
 	checkpoint := func(path string) error {
 		if err := retryBusy(func() error {
 			_, err := db.Exec(`insert into files_crawl_cursor values(?,?) on conflict(profile) do update set path=excluded.path`, profile, path)
@@ -177,7 +181,10 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 	order := func(path string) string { return strings.ReplaceAll(path, string(filepath.Separator), "\x00") }
 	warnAndCheckpoint := func(path string, err error) error {
 		warnings = append(warnings, fmt.Sprintf("%s: %s", path, err))
-		if _, err := db.Exec(`delete from files_crawl_cache where profile=? and path=?`, profile, path); err != nil {
+		if err := retryBusy(func() error {
+			_, err := db.Exec(`delete from files_crawl_cache where profile=? and path=?`, profile, path)
+			return err
+		}); err != nil {
 			return err
 		}
 		if order(path) > order(cursor) {
@@ -384,4 +391,22 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 		fmt.Fprintf(out, "imported=%d files_parsed=%d files_skipped=%d complete=%v resume_cursor=%q warnings=%d\n", inserted, parsed, skipped, !pending, cursor, len(warnings))
 	}
 	return 0
+}
+
+func prepareFilesCrawlDB(db *sql.DB) error {
+	// This crawl owns one connection. Let the context-bounded retry loop handle
+	// locks instead of composing the connection's busy timeout with each retry.
+	db.SetMaxOpenConns(1)
+	// Separate from source_scans: option changes and collections must not share
+	// cache identities. Existing archive migrations need no rewrite.
+	_, err := db.Exec(`create table if not exists files_crawl_cache (profile text not null, path text not null, hash text not null, primary key(profile,path));
+ create table if not exists files_crawl_cursor (profile text primary key, path text not null)`)
+	if err != nil {
+		return err
+	}
+	// First-run DDL keeps the archive's startup busy timeout.
+	if _, err := db.Exec("pragma busy_timeout=0"); err != nil {
+		return err
+	}
+	return nil
 }
