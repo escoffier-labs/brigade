@@ -161,8 +161,12 @@ def fuse(lists: dict[str, list[dict[str, Any]]], limit: int, *, home_scope: str 
                     if isinstance(alias, str)
                 )
             )
-            if source == "hub" and isinstance(match.get("ranks"), dict):
-                entry["hub_ranks"] = dict(match["ranks"])
+            if source == "hub":
+                # The latest contributing hub match decides, so a later match without ranks clears older ones.
+                if isinstance(match.get("ranks"), dict):
+                    entry["hub_ranks"] = dict(match["ranks"])
+                else:
+                    entry.pop("hub_ranks", None)
             entry["ranks"][source] = rank
             entry["rrf"] += 1.0 / (RRF_K + rank)
             scope = entry.get("scope") or match.get("scope")

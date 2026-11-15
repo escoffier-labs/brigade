@@ -52,6 +52,16 @@ def test_init_refuses_bare_hub_image_id_without_writes(project, tmp_path, capsys
     )
 
 
+@pytest.mark.parametrize("image", ["hub:x\nBRIGADE_BACKUP_DIR=/elsewhere", "hub:x\r", "hub :latest", "hub:\tx", ""])
+def test_init_refuses_hub_image_with_whitespace_or_controls_without_writes(project, tmp_path, capsys, image):
+    before = _tree(project, tmp_path / "backups")
+
+    assert _init(project, tmp_path, "--hub-image", image) == 1
+
+    assert _tree(project, tmp_path / "backups") == before
+    assert capsys.readouterr().err.strip() == "error: --hub-image must not contain whitespace or control characters"
+
+
 @pytest.mark.parametrize(
     "image",
     [
