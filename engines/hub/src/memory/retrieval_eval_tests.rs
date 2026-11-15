@@ -1426,6 +1426,7 @@ async fn live_scope_eval_binds_candidate_and_rejects_metric_mutations() {
     for target in &mut safe_targets {
         target.as_object_mut().unwrap().remove("after_text");
     }
+    let judged = seed_live_history(&h).await;
     let fixture = gate_report(&h).await;
     let metrics =
         json!({"query_count":20,"hit_rate":1.0,"mrr":1.0,"precision_at_k":0.2,"recall_at_k":1.0});
@@ -1433,6 +1434,11 @@ async fn live_scope_eval_binds_candidate_and_rejects_metric_mutations() {
         "gate":{"name":"Live-R0","passed":true,"failures":[]},
         "live":{"proposal_id":id,"targets":safe_targets,"replay_matches":true,"binding":fixture["adapters"]["hub-lexical"]["binding"]},
         "adapters":{"before":{"available":true,"overall":metrics},"candidate":{"available":true,"overall":metrics}}});
+    live["query_set_digest"] = judged["query_set_digest"].clone();
+    live["live"]["history_seq"] = judged["history_seq"].clone();
+    let mut forged = live.clone();
+    forged["query_set_digest"] = json!(ids::sha256_hex(b"forged history"));
+    assert_eq!(record(&h, &forged).await.status, 409);
     assert_eq!(record(&h, &live).await.status, 201);
     let preflight = report(&h, &id).await;
     assert!(preflight::all_satisfied(&preflight.body), "{preflight:?}");
@@ -1467,7 +1473,12 @@ async fn live_scope_eval_binds_candidate_and_rejects_metric_mutations() {
             "proposal" => changed["live"]["proposal_id"] = json!(h.id()),
             _ => changed["live"]["replay_matches"] = json!(false),
         }
-        assert_eq!(record(&h, &changed).await.status, 201);
+        let recorded = record(&h, &changed).await;
+        if mutation == "count" {
+            assert_eq!(recorded.status, 409, "{recorded:?}");
+            continue;
+        }
+        assert_eq!(recorded.status, 201);
         let preflight = report(&h, &id).await;
         assert!(!preflight::all_satisfied(&preflight.body), "{preflight:?}");
     }
@@ -1476,4 +1487,286 @@ async fn live_scope_eval_binds_candidate_and_rejects_metric_mutations() {
     assert_eq!(record(&h, &live).await.status, 201);
     let applied = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
     assert_eq!(applied.body["state"], "applied", "{applied:?}");
+}
+
+#[tokio::test]
+async fn retrieval_history_twenty_self_made_pairs_cannot_qualify() {
+    let h = Hub::with(clean(), None);
+    h.put(ADMIN_TOKEN, "fleet", "wrong", None, "needle").await;
+    for i in 0..20 {
+        let search = h.call(NODE_TOKEN, json!({"action":"search","query":format!("needle {i}"),"scopes":["fleet"],"session_id":"one-session","session_kind":"interactive","query_source":"explicit","min_seq":h.events()})).await;
+        assert_eq!(search.status, 200);
+        assert!(search.body["search_id"].is_i64(), "{search:?}");
+        let used = h.call(NODE_TOKEN, json!({"action":"retrieval_use","session_id":"one-session","session_kind":"interactive","card_id":"wrong","content_hash":ids::sha256_hex(b"needle\n"),"client_event_id":h.id()})).await;
+        assert_eq!(used.status, 201, "{used:?}");
+    }
+    let judged = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"retrieval_judgments","scope":"fleet"}),
+        )
+        .await;
+    assert_eq!(judged.status, 409, "{judged:?}");
+    assert_eq!(code(&judged), "memory_retrieval_history_insufficient");
+}
+
+async fn seed_live_history(h: &Hub) -> Json {
+    let now = h.now();
+    for i in 0..20 {
+        h.set_clock(now - (2 - i / 7) * 86_400_000 + i);
+        let id = format!("label-{i}");
+        let text = format!("term{i}");
+        h.put(ADMIN_TOKEN, "fleet", &id, None, &text).await;
+        history_pair(
+            h,
+            &format!("session-{}", i / 7),
+            &format!("term{i}"),
+            &id,
+            &text,
+        )
+        .await;
+    }
+    h.set_clock(now + 100);
+    let judged = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"retrieval_judgments","scope":"fleet"}),
+        )
+        .await;
+    assert_eq!(judged.status, 200, "{judged:?}");
+    judged.body
+}
+
+async fn history_pair(h: &Hub, session: &str, query: &str, card: &str, text: &str) {
+    let search=h.call(NODE_TOKEN,json!({"action":"search","query":query,"scopes":["fleet"],"query_source":"explicit","session_id":session,"session_kind":"interactive","min_seq":h.events()})).await;
+    assert_eq!(search.status, 200, "{search:?}");
+    assert!(search.body["search_id"].is_i64(), "{search:?}");
+    let used=h.call(NODE_TOKEN,json!({"action":"retrieval_use","session_id":session,"session_kind":"interactive","card_id":card,"content_hash":ids::sha256_hex(ids::normalize(text).as_bytes()),"client_event_id":h.id()})).await;
+    assert_eq!(used.status, 201, "{used:?}");
+}
+
+#[tokio::test]
+async fn retrieval_history_diverse_history_is_authoritative_and_immutable() {
+    let h = Hub::with(clean(), None);
+    let judged = seed_live_history(&h).await;
+    assert_eq!(judged["query_count"], 20);
+    let refused = h
+        .call(
+            NODE_TOKEN,
+            json!({"action":"retrieval_judgments","scope":"fleet"}),
+        )
+        .await;
+    assert_eq!(refused.status, 403);
+    let db = Connection::open(h.memory()).unwrap();
+    assert!(
+        db.execute("UPDATE memory_retrieval_history SET session='forged'", [])
+            .is_err()
+    );
+    assert!(
+        db.execute("DELETE FROM memory_retrieval_history", [])
+            .is_err()
+    );
+    assert_eq!(judged["queries"].as_array().unwrap().len(), 20);
+}
+
+#[tokio::test]
+async fn retrieval_history_filters_jobs_and_binds_session_and_credential() {
+    let h = Hub::with(clean(), None);
+    h.put(ADMIN_TOKEN, "fleet", "one", None, "needle").await;
+    for kind in [Json::Null, json!("scheduled"), json!("worker")] {
+        let r=h.call(NODE_TOKEN,json!({"action":"search","query":"needle","scopes":["fleet"],"session_id":"one","session_kind":kind,"query_source":"explicit","min_seq":h.events()})).await;
+        assert_eq!(r.status, 200, "{r:?}");
+        assert!(r.body.get("search_id").is_none());
+    }
+    let before=h.call(NODE_TOKEN,json!({"action":"search","query":"person","scopes":["fleet"],"session_id":"person","session_kind":"interactive","query_source":"explicit","min_seq":h.events()})).await;
+    assert!(before.body["search_id"].is_i64());
+    let search=h.call(NODE_TOKEN,json!({"action":"search","query":"needle","scopes":["fleet"],"session_id":"person","session_kind":"interactive","query_source":"explicit","min_seq":h.events()})).await;
+    let cron=h.call(NODE_TOKEN,json!({"action":"search","query":"needle cron","scopes":["fleet"],"session_id":"cron","session_kind":"scheduled","query_source":"explicit","min_seq":h.events()})).await;
+    assert!(cron.body.get("search_id").is_none());
+    let use_request = json!({"action":"retrieval_use","session_id":"other","session_kind":"interactive","card_id":"one","content_hash":ids::sha256_hex(b"needle\n"),"client_event_id":h.id()});
+    assert_eq!(h.call(NODE_TOKEN, use_request.clone()).await.status, 409);
+    let mut request = use_request;
+    request["session_id"] = json!("person");
+    let mut wrong_hash = request.clone();
+    wrong_hash["content_hash"] = json!(ids::sha256_hex(b"different content"));
+    assert_eq!(h.call(NODE_TOKEN, wrong_hash).await.status, 409);
+    let now = h.now();
+    h.set_clock(now + 600_001);
+    let mut expired = request.clone();
+    expired["client_event_id"] = json!(h.id());
+    assert_eq!(h.call(NODE_TOKEN, expired).await.status, 409);
+    h.set_clock(now);
+    assert_eq!(h.call(AGENT_TOKEN, request.clone()).await.status, 403);
+    assert_eq!(h.call(ADMIN_TOKEN, request.clone()).await.status, 409);
+    assert_eq!(h.call(NODE_TOKEN, request.clone()).await.status, 201);
+    assert_eq!(h.call(NODE_TOKEN, request).await.status, 201);
+    let db = Connection::open(h.memory()).unwrap();
+    let (count,seq):(i64,i64)=db.query_row("SELECT COUNT(*),json_extract(payload,'$.search_seq') FROM memory_retrieval_history WHERE kind='use'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(json!(seq), search.body["search_id"]);
+}
+
+#[tokio::test]
+async fn retrieval_history_invalidates_age_revision_retirement_and_negative() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    for change in ["expiry", "revision", "retire", "negative", "supersede"] {
+        let h = Hub::with(clean(), None);
+        let judged = seed_live_history(&h).await;
+        let current = card(&h, "fleet", "label-0").await;
+        match change {
+            "expiry" => h.set_clock(h.now() + retrieval_history::AGE_MS + 1),
+            "revision" => {
+                h.put(
+                    ADMIN_TOKEN,
+                    "fleet",
+                    "label-0",
+                    current["revision"].as_i64(),
+                    "corrected",
+                )
+                .await;
+            }
+            "retire" => {
+                let r=h.call(ADMIN_TOKEN,json!({"action":"retire","scope":"fleet","card_id":"label-0","base_epoch":h.epoch().await,"base_revision":current["revision"],"client_event_id":h.id()})).await;
+                assert_eq!(r.status, 200, "{r:?}");
+            }
+            "negative" => {
+                let r=h.call(ADMIN_TOKEN,json!({"action":"evidence.attach","scope":"fleet","card_id":"label-0","workspace_id":"workspace-a","evidence_id":"hub:admin/workspace-a/negative","artifact_kind":"verification","artifact_sha256":ids::sha256_hex(b"contradicted"),"observed_at":h.now(),"artifact_base64":STANDARD.encode(b"contradicted"),"stance":"negative","client_event_id":h.id()})).await;
+                assert_eq!(r.status, 201, "{r:?}");
+            }
+            _ => {
+                let r = h.call(ADMIN_TOKEN,json!({"action":"import","scope":"fleet","card_id":"new","text":"---\nsupersedes: label-0\n---\nreplacement","client_event_id":h.id()})).await;
+                assert_eq!(r.status, 201, "{r:?}");
+            }
+        }
+        let got=h.call(ADMIN_TOKEN,json!({"action":"retrieval_judgments","scope":"fleet","history_seq":judged["history_seq"]})).await;
+        assert_eq!(got.status, 409, "{change}: {got:?}");
+    }
+}
+
+#[tokio::test]
+async fn retrieval_history_each_diversity_floor_is_independently_required() {
+    for kind in ["one-card", "one-day", "one-session"] {
+        let h = Hub::with(clean(), None);
+        let now = h.now();
+        for i in 0..20 {
+            let day = if kind == "one-day" { 0 } else { i / 7 };
+            h.set_clock(now + day * 86_400_000 + i);
+            let session = if kind == "one-session" {
+                "only".into()
+            } else {
+                format!("s-{}", i / 7)
+            };
+            let id = if kind == "one-card" {
+                "only".into()
+            } else {
+                format!("card-{i}")
+            };
+            if i == 0 || kind != "one-card" {
+                h.put(ADMIN_TOKEN, "fleet", &id, None, "needle").await;
+            }
+            history_pair(&h, &session, &format!("needle {i}"), &id, "needle").await;
+        }
+        let judged = h
+            .call(
+                ADMIN_TOKEN,
+                json!({"action":"retrieval_judgments","scope":"fleet"}),
+            )
+            .await;
+        assert_eq!(judged.status, 409, "{kind}: {judged:?}");
+    }
+}
+
+#[tokio::test]
+async fn retrieval_history_query_normalization_and_watermark_are_enforced() {
+    let h = Hub::with(clean(), None);
+    let judged = seed_live_history(&h).await;
+    history_pair(&h, "later", "  TERM0  ", "label-0", "term0").await;
+    let fresh = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"retrieval_judgments","scope":"fleet"}),
+        )
+        .await;
+    assert_eq!(fresh.status, 200, "{fresh:?}");
+    assert_eq!(fresh.body["query_count"], 20);
+    assert_eq!(fresh.body["query_set_digest"], judged["query_set_digest"]);
+    let frozen=h.call(ADMIN_TOKEN,json!({"action":"retrieval_judgments","scope":"fleet","history_seq":judged["history_seq"]})).await;
+    assert_eq!(frozen.body, judged);
+    let forged = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"retrieval_judgments","scope":"fleet","history_seq":999999}),
+        )
+        .await;
+    assert_eq!(forged.status, 409);
+}
+
+#[tokio::test]
+async fn retrieval_history_storage_and_derivation_budgets_fail_closed() {
+    let h = Hub::with(clean(), None);
+    let judged = seed_live_history(&h).await;
+    let db = Connection::open(h.memory()).unwrap();
+    // Simulate a busy authenticated history without spending wall clock on I/O.
+    db.execute("INSERT INTO memory_retrieval_history(principal,credential,session,kind,created_ms,payload) SELECT principal,credential,session,kind,created_ms,payload FROM memory_retrieval_history WHERE kind='use'",[]).unwrap();
+    for _ in 0..4 {
+        db.execute("INSERT INTO memory_retrieval_history(principal,credential,session,kind,created_ms,payload) SELECT principal,credential,session,kind,created_ms,payload FROM memory_retrieval_history WHERE kind='use'",[]).unwrap();
+    }
+    let too_many = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"retrieval_judgments","scope":"fleet"}),
+        )
+        .await;
+    assert_eq!(code(&too_many), "memory_retrieval_history_budget");
+    // A bounded frozen set stays usable when only later history grows.
+    let frozen=h.call(ADMIN_TOKEN,json!({"action":"retrieval_judgments","scope":"fleet","history_seq":judged["history_seq"]})).await;
+    assert_eq!(frozen.status, 200);
+    db.execute("INSERT INTO memory_retrieval_history(principal,credential,session,kind,created_ms,payload) VALUES('node-1','fake','s','search',?1,?2)",rusqlite::params![h.now()," ".repeat(16*1024*1024)]).unwrap();
+    let used=h.call(NODE_TOKEN,json!({"action":"retrieval_use","session_id":"session-0","session_kind":"interactive","card_id":"label-0","content_hash":ids::sha256_hex(b"term0\n"),"client_event_id":h.id()})).await;
+    assert_eq!(code(&used), "memory_retrieval_history_budget");
+}
+
+#[tokio::test]
+async fn retrieval_history_rejects_client_supplied_search_results() {
+    let h = Hub::with(clean(), None);
+    let forged=h.call(NODE_TOKEN,json!({"action":"retrieval_search","session_id":"forged","session_kind":"interactive","query":"fake","results":[{"scope":"fleet","card_id":"fake"}],"client_event_id":h.id()})).await;
+    assert_eq!(forged.status, 400);
+    let db = Connection::open(h.memory()).unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM memory_retrieval_history", [], |r| r
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn retrieval_history_ambiguous_scopes_do_not_label_an_open() {
+    let h = Hub::with(clean(), None);
+    for scope in ["fleet", "repo:example/app"] {
+        h.put(ADMIN_TOKEN, scope, "one", None, "needle").await;
+    }
+    let search=h.call(NODE_TOKEN,json!({"action":"search","query":"needle","scopes":["fleet","repo:example/app"],"session_id":"s","session_kind":"interactive","query_source":"explicit","min_seq":h.events()})).await;
+    assert_eq!(search.body["matches"].as_array().unwrap().len(), 2);
+    let used=h.call(NODE_TOKEN,json!({"action":"retrieval_use","session_id":"s","session_kind":"interactive","card_id":"one","content_hash":ids::sha256_hex(b"needle\n"),"client_event_id":h.id()})).await;
+    assert_eq!(used.status, 409);
+}
+
+#[tokio::test]
+async fn retrieval_history_unreviewed_successor_cannot_erase_other_gold() {
+    let h = Hub::with(clean(), None);
+    let judged = seed_live_history(&h).await;
+    h.put(
+        NODE_TOKEN,
+        "fleet",
+        "unreviewed",
+        None,
+        "---\nsupersedes: label-0\n---\nunsupported successor",
+    )
+    .await;
+    let current=h.call(ADMIN_TOKEN,json!({"action":"retrieval_judgments","scope":"fleet","history_seq":judged["history_seq"]})).await;
+    assert_eq!(current.status, 200, "{current:?}");
+    assert_eq!(current.body["query_set_digest"], judged["query_set_digest"]);
 }

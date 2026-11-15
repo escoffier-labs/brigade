@@ -297,6 +297,15 @@ pub fn record(
             "evaluation time is more than 24 hours old",
         ));
     }
+    if r.body["gate"]["name"] == "Live-R0"
+        && !super::retrieval_history::valid(tx, &r.body, p.now_ms)?
+    {
+        return Ok(ops::error(
+            409,
+            "memory_retrieval_history_insufficient",
+            "judged history does not match the report",
+        ));
+    }
     let snapshot = members(tx, string(binding(r), "scope"))?;
     if binding(r)["corpus_identity"] != identity(&snapshot) {
         return Ok(ops::error(
@@ -388,6 +397,9 @@ pub fn hold<T: ReadTx + ?Sized>(
             || r.body["live"]["targets"] != live_targets(proposal, false))
     {
         return Ok(Some("retrieval_eval_candidate_mismatch"));
+    }
+    if r.body["gate"]["name"] == "Live-R0" && !super::retrieval_history::valid(tx, &r.body, now)? {
+        return Ok(Some("retrieval_eval_judgments_changed"));
     }
     let reason = if r.mode != mode {
         Some("retrieval_eval_mode_mismatch")

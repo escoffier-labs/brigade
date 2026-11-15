@@ -47,3 +47,36 @@ def test_later_hub_match_without_ranks_clears_older_hub_ranks():
     [match] = fuse({"hub": [{**shared, "ranks": {"lexical": 9}}, dict(shared)]}, 20)
     assert match["ranks"] == {"hub": 2}
     assert "hub_ranks" not in match
+
+
+def test_hub_records_local_winner_before_fusion(tmp_path, monkeypatch):
+    from brigade import memory_hub_search as search
+    from brigade.memory_hub_client import HubSettings
+
+    monkeypatch.setenv("BRIGADE_SESSION_ID", "session-one")
+    monkeypatch.setenv("BRIGADE_SESSION_KIND", "interactive")
+    shared = {"card_id": "shared", "content_hash": "same", "path": "memory/cards/shared.md"}
+    monkeypatch.setattr(search, "_local_matches", lambda *a: ([shared], None))
+    requests = []
+
+    def transport(url, token, body, timeout):
+        requests.append(body)
+        return 200, {
+            "search_id": 1,
+            "matches": [{"scope": "fleet", "card_id": "other"}, {**shared, "scope": "fleet"}],
+            "retrieval": {"mode": "lexical", "stale": False},
+        }
+
+    settings = HubSettings(
+        mode="read", scope="fleet", read_scopes=("fleet",), hub_url="https://hub.example.test", token="fake-token"
+    )
+    result = search.search_payload(tmp_path, "query", settings=settings, transport=transport)
+    match = next(m for m in result["matches"] if m["card_id"] == "shared")
+    assert match["source"] == "local"
+    assert match["ranks"]["hub"] == 2
+    assert requests[0]["session_id"] == "session-one"
+    assert requests[0]["session_kind"] == "interactive"
+    monkeypatch.setenv("BRIGADE_RUN_ID", "job")
+    search.search_payload(tmp_path, "query", settings=settings, transport=transport)
+    assert "session_id" not in requests[-1]
+    assert "session_kind" not in requests[-1]

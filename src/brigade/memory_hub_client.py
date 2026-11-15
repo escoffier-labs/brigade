@@ -69,6 +69,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -591,7 +592,15 @@ class Transport(Protocol):
         ...
 
 
-def urllib_transport(url: str, token: str, body: dict[str, Any], timeout: float) -> tuple[int, Any]:
+def urllib_transport(
+    url: str,
+    token: str,
+    body: dict[str, Any],
+    timeout: float,
+    *,
+    max_response_bytes: int | None = None,
+    response_bytes: Callable[[int], None] | None = None,
+) -> tuple[int, Any]:
     from . import fleet_client
 
     request = urllib.request.Request(
@@ -601,12 +610,20 @@ def urllib_transport(url: str, token: str, body: dict[str, Any], timeout: float)
         method="POST",
     )
 
+    def bounded_read(response: Any) -> bytes:
+        raw: bytes = response.read() if max_response_bytes is None else response.read(max_response_bytes + 1)
+        if response_bytes is not None:
+            response_bytes(len(raw))
+        if max_response_bytes is not None and len(raw) > max_response_bytes:
+            raise HubUnavailable("response-budget")
+        return raw
+
     def send() -> tuple[int, bytes]:
         try:
             with fleet_client._hub_open(request, timeout=timeout) as response:
-                return response.status, response.read()
+                return response.status, bounded_read(response)
         except urllib.error.HTTPError as exc:
-            return exc.code, exc.read()
+            return exc.code, bounded_read(exc)
 
     status, raw = fleet_client._run_with_deadline(send, timeout=timeout)
     try:

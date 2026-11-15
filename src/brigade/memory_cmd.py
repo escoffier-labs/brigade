@@ -1744,7 +1744,7 @@ def _record_search_log(
     private_query: bool = False,
 ) -> None:
     """Append one search event; fail-open so logging never breaks search."""
-    # Hub query text belongs only in private use-derived evaluation state.
+    # Hub query text belongs only in private hub evaluation history.
     if private_query:
         from .memory_recall_log import record_recall
 

@@ -1,34 +1,34 @@
 """Use-derived private judgments and proposal-bound lexical replay (#2376).
 
-Only explicit searches enter this store. A later interactive open with identical
-content judges the latest matching search. Neither result delivery nor eval
-replay is a use signal. All outward errors and reports omit query text.
+The hub owns search/use history and derives judgments. Neither result delivery
+nor eval replay is a use signal. Outward errors and reports omit query text.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from brigade import memory_proposal_io as io
-from brigade.inbox_lock import held_file_lock
-from brigade.memory_hub_client import MemoryHubClient, event_id
-from brigade.memory_hub_store import write_private
+from brigade.memory_hub_client import MemoryHubClient, event_id, urllib_transport
 
 from .adapters import bm25_adapter
-from .corpus import CardDoc, QuerySpec, repo_root
+from .corpus import CardDoc, QuerySpec
 from .hub import HubAdapter, HubOptions, stable_digest
 from .metrics import aggregate_scores, score_query
 
 MIN_QUERIES = 20
-MAX_HISTORY = 500
-USE_WINDOW_SECONDS = 600
-MAX_AGE_SECONDS = 30 * 86400
+MAX_EVENTS = 10_000
+MAX_CARDS = 2_000
+MAX_BYTES = 16 * 1024 * 1024
+MAX_REQUESTS = 2_500
+MAX_SECONDS = 60
 METRICS = ("hit_rate", "mrr", "precision_at_k", "recall_at_k")
 
 
@@ -40,118 +40,98 @@ def text_hash(text: str) -> str:
     return hashlib.sha256((text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n").encode()).hexdigest()
 
 
-def state_path(target: Path) -> Path:
-    root = Path.home() / ".brigade" / "private-retrieval-eval"
-    resolved = root.resolve()
-    if any(resolved.is_relative_to(p.resolve()) for p in (target, repo_root())) or any(
-        (p / ".git").exists() for p in (resolved, *resolved.parents)
+def interactive_session(payload: dict[str, Any] | None = None) -> dict[str, str]:
+    """Require affirmative session context. Never infer interactive from absence."""
+    payload = payload or {}
+    if (
+        os.environ.get("BRIGADE_RUN_ID")
+        or os.environ.get("BRIGADE_SCANNER_RUN_ID")
+        or payload.get("agent_id")
+        or payload.get("agent_type", "main") not in ("main", "claude")
     ):
-        raise LiveEvalError("private retrieval state must stay outside repositories")
-    return root / stable_digest(str(target.resolve())) / "history.json"
+        return {}
+    kind = payload.get("session_kind") or os.environ.get("BRIGADE_SESSION_KIND")
+    sid = payload.get("session_id") or os.environ.get("BRIGADE_SESSION_ID")
+    if kind != "interactive" or not isinstance(sid, str) or not 1 <= len(sid) <= 128:
+        return {}
+    if not all(c.isascii() and (c.isalnum() or c in "-_.:") for c in sid):
+        return {}
+    return {"session_id": sid, "session_kind": "interactive"}
 
 
-def derived_path(target: Path, hub: str, epoch: str, scope: str) -> Path:
-    return state_path(target).parent / (stable_digest([hub, epoch, scope]) + ".json")
-
-
-def _read(path: Path) -> list[dict[str, Any]]:
-    raw = io.text(path, limit=io.MAX_STATE_BYTES, absent=True, private=True)
-    rows = json.loads(raw) if raw is not None else []
-    if not isinstance(rows, list) or len(rows) > MAX_HISTORY or any(not isinstance(r, dict) for r in rows):
-        raise LiveEvalError("invalid private history")
-    return rows
-
-
-def _change(target: Path, update: Callable[[list[dict[str, Any]]], None]) -> None:
-    # Logging must never break retrieval or echo sensitive state on failure.
+def record_use(target: Path, card_id: str, text: str, *, payload: dict[str, Any] | None = None) -> None:
+    """Best effort. The hub joins only its own search in this credential/session."""
+    context = interactive_session(payload)
+    if not context:
+        return
     try:
-        path = state_path(target)
-        with io.directory(path.parent, create=True, private=True):
-            pass
-        lock = path.with_suffix(".lock")
-        io.protect_file(lock)
-        with held_file_lock(lock, deadline_seconds=1):
-            rows = _read(path)
-            update(rows)
-            write_private(path, json.dumps(rows[-MAX_HISTORY:], separators=(",", ":")))
-    except (OSError, ValueError, TypeError, KeyError):
-        return
+        from brigade.memory_hub_client import HubConfigError, HubRefusal, HubUnavailable, load_settings
 
-
-def record_search(
-    target: Path, query: str, matches: list[dict[str, Any]], *, hub: str, epoch: str, now: float | None = None
-) -> None:
-    if not query.strip() or len(query.encode()) > 4096 or not epoch:
-        return
-    results = [
-        {k: m[k] for k in ("scope", "card_id", "content_hash")}
-        for m in matches
-        if all(isinstance(m.get(k), str) and m[k] for k in ("scope", "card_id", "content_hash"))
-    ]
-    if results:
-        _change(
-            target,
-            lambda rows: rows.append(
-                {
-                    "ts": time.time() if now is None else now,
-                    "hub": hub,
-                    "epoch": epoch,
-                    "query": query,
-                    "results": results,
-                    "gold": [],
-                }
-            ),
-        )
-
-
-def record_use(target: Path, card_id: str, text: str, *, now: float | None = None) -> None:
-    stamp = time.time() if now is None else now
-    digest = text_hash(text)
-
-    def update(rows: list[dict[str, Any]]) -> None:
-        eligible = [
-            (r, m)
-            for r in rows
-            if 0 <= stamp - r["ts"] <= USE_WINDOW_SECONDS
-            for m in r["results"]
-            if m["card_id"] == card_id and m["content_hash"] == digest
-        ]
-        # File opens have no hub scope. Ambiguous identities earn no label.
-        if len({(r["hub"], r["epoch"], m["scope"]) for r, m in eligible}) != 1:
+        settings = load_settings(target)
+        if not settings.enabled:
             return
-        row, match = max(eligible, key=lambda pair: pair[0]["ts"])
-        if match not in row["gold"]:
-            row["gold"].append(match)
-
-    _change(target, update)
-
-
-def derive_queries(target: Path, *, hub: str, epoch: str, scope: str, now: float | None = None) -> list[QuerySpec]:
-    stamp = time.time() if now is None else now
-    try:
-        rows = _read(state_path(target))
-        grouped: dict[str, set[str]] = {}
-        for row in rows:
-            if row["hub"] != hub or row["epoch"] != epoch or not 0 <= stamp - row["ts"] <= MAX_AGE_SECONDS:
-                continue
-            query = " ".join(row["query"].lower().split())
-            gold = {m["card_id"] for m in row["gold"] if m["scope"] == scope}
-            if gold:
-                grouped.setdefault(query, set()).update(gold)
-        queries = [
-            QuerySpec(str(i), q, tuple(sorted(gold)), "observed") for i, (q, gold) in enumerate(sorted(grouped.items()))
-        ]
-        if len(queries) < MIN_QUERIES:
-            raise LiveEvalError(f"insufficient judged queries: {len(queries)} available, {MIN_QUERIES} required")
-        write_private(
-            derived_path(target, hub, epoch, scope),
-            json.dumps({"queries": [{"query": q.query, "gold": q.gold} for q in queries]}, separators=(",", ":")),
+        client = MemoryHubClient(settings.hub_url, settings.token)
+        client.call(
+            "retrieval_use",
+            timeout=0.8,
+            card_id=card_id,
+            content_hash=text_hash(text),
+            client_event_id=event_id(),
+            **context,
         )
-        return queries
-    except (OSError, TypeError, KeyError, ValueError) as exc:
-        if isinstance(exc, ValueError) and str(exc).startswith("insufficient judged queries:"):
-            raise
-        raise LiveEvalError("private retrieval history unavailable") from None
+    except (OSError, ValueError, HubConfigError, HubRefusal, HubUnavailable):
+        return
+
+
+class BudgetClient(MemoryHubClient):
+    """One shared aggregate budget for snapshot, replay and report recording."""
+
+    def __init__(self, client: MemoryHubClient) -> None:
+        self.client = client
+        self.identity = client.identity
+        self.deadline = time.monotonic() + MAX_SECONDS
+        self.requests = 0
+        self.bytes = 0
+
+    def check(self) -> None:
+        if time.monotonic() >= self.deadline or self.requests >= MAX_REQUESTS or self.bytes >= MAX_BYTES:
+            raise LiveEvalError("live evaluation budget exceeded")
+
+    def consume_bytes(self, size: int) -> None:
+        self.bytes += size
+        if self.bytes > MAX_BYTES:
+            raise LiveEvalError("live evaluation budget exceeded")
+
+    def call(self, action: str, *, timeout: float | None = None, **fields: Any) -> dict[str, Any]:
+        self.check()
+        self.requests += 1
+        transport = self.client._transport
+        counted = isinstance(transport, partial) and transport.func is urllib_transport
+        if counted:
+            self.client._transport = partial(
+                urllib_transport, max_response_bytes=MAX_BYTES - self.bytes, response_bytes=self.consume_bytes
+            )
+        reply = self.client.call(
+            action, timeout=min(timeout or 10, max(0.001, self.deadline - time.monotonic())), **fields
+        )
+        if not counted:
+            self.consume_bytes(len(json.dumps(reply, ensure_ascii=False).encode()))
+        if self.bytes > MAX_BYTES or time.monotonic() >= self.deadline:
+            raise LiveEvalError("live evaluation budget exceeded")
+        return reply
+
+
+def derive_queries(client: MemoryHubClient, scope: str) -> tuple[list[QuerySpec], dict[str, Any]]:
+    from brigade.memory_hub_client import HubRefusal
+
+    try:
+        judged = client.call("retrieval_judgments", scope=scope)
+    except HubRefusal:
+        raise LiveEvalError("hub judged history unavailable or insufficient") from None
+    queries = [QuerySpec(str(i), q, tuple(gold), "observed") for i, (q, gold) in enumerate(judged["queries"])]
+    if len(queries) < MIN_QUERIES:
+        raise LiveEvalError(f"insufficient judged queries: {len(queries)} available, {MIN_QUERIES} required")
+    return queries, judged
 
 
 def _card(card_id: str, text: str) -> CardDoc:
@@ -166,14 +146,20 @@ def snapshot(client: MemoryHubClient, scope: str) -> tuple[list[CardDoc], str]:
     status = client.call("status")
     epoch, high = status["log_epoch"], status["seq"]
     after = 0
+    events = 0
     heads: dict[str, dict[str, Any]] = {}
     while after < high:
         page = client.call("log", after_seq=after, limit=500)
         if page.get("log_epoch") != epoch or page["next_seq"] <= after:
             raise LiveEvalError("live scope snapshot changed or incomplete")
+        events += len(page["events"])
+        if events > MAX_EVENTS:
+            raise LiveEvalError("live evaluation budget exceeded")
         for event in page["events"]:
             if event["seq"] <= high and event.get("scope") == scope and event.get("revision") is not None:
                 heads[event["card_id"]] = event
+                if len(heads) > MAX_CARDS:
+                    raise LiveEvalError("live evaluation budget exceeded")
         after = page["next_seq"]
     from brigade.memory_hub_sync import _card_text, _EpochMoved
 
@@ -218,13 +204,18 @@ def measure_candidate(
             after[card_id] = _card(card_id, target["after_text"])
         else:
             raise LiveEvalError("live candidate state unavailable")
-    if any(g not in before for q in queries for g in q.gold):
-        raise LiveEvalError("judged card no longer live")
+    queries = [replace(q, gold=tuple(g for g in q.gold if g in before)) for q in queries]
+    queries = [q for q in queries if q.gold]
+    if len(queries) < MIN_QUERIES:
+        raise LiveEvalError(f"insufficient judged queries: {len(queries)} available, {MIN_QUERIES} required")
     local = bm25_adapter(cards)
     candidate = bm25_adapter(sorted(after.values(), key=lambda c: c.path))
     scores: dict[str, list[dict[str, Any]]] = {"before": [], "candidate": []}
     parity = True
     for query in queries:
+        budget = getattr(baseline, "client", None)
+        if isinstance(budget, BudgetClient):
+            budget.check()
         ranked = baseline(query.query, 20)
         parity &= [i for i, _ in ranked] == [i for i, _ in local(query.query, 20)]
         scores["before"].append(score_query([i for i, _ in ranked], query.gold, 5))
@@ -260,9 +251,15 @@ def measure_candidate(
 def run_live_eval(target: Path, options: HubOptions, proposal_id: str, *, record: bool = False) -> dict[str, Any]:
     if not options.url or not options.token_file or options.binary or options.memory_config:
         raise LiveEvalError("live evaluation requires an explicit external hub and credential")
-    client = MemoryHubClient(options.url, options.token_file.read_text().strip())
+    client = BudgetClient(
+        MemoryHubClient(
+            options.url,
+            options.token_file.read_text().strip(),
+            transport=partial(urllib_transport, max_response_bytes=MAX_BYTES),
+        )
+    )
     cards, epoch = snapshot(client, options.scope)
-    queries = derive_queries(target, hub=client.identity, epoch=epoch, scope=options.scope)
+    queries, judged = derive_queries(client, options.scope)
     proposal = client.call("proposal_show", proposal_id=proposal_id)
     targets = proposal.get("retrieval_eval_targets")
     if not targets or any(t["scope"] != options.scope for t in targets):
@@ -275,6 +272,9 @@ def run_live_eval(target: Path, options: HubOptions, proposal_id: str, *, record
         raise LiveEvalError("live hybrid candidate replay unavailable")
     report = measure_candidate(cards, queries, {"proposal_id": proposal_id, "targets": targets}, search, binding)
     search(queries[0].query, 20)  # Fence the complete run, including the last query.
+    report["query_set_digest"] = judged["query_set_digest"]
+    report["live"]["history_seq"] = judged["history_seq"]
+    client.check()
     report["digest"] = stable_digest(report)
     if record:
         from .hub import record_report

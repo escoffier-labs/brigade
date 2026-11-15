@@ -67,6 +67,8 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
         "limit",
         "mode",
         "query_source",
+        "session_id",
+        "session_kind",
         "scopes",
         "sources",
         "min_seq",
@@ -526,8 +528,8 @@ pub fn run<T: ReadTx + ?Sized>(
             "ranking": if request.raw { "raw" } else { "default" },
         }),
     );
+    reply.body["log_epoch"] = json!(super::ops::epoch(tx)?);
     if request.eval {
-        reply.body["log_epoch"] = json!(super::ops::epoch(tx)?);
         let mut corpus: std::collections::BTreeMap<String, Vec<(String, String)>> =
             std::collections::BTreeMap::new();
         for (scope, ok) in scopes.iter().zip(&allowed) {

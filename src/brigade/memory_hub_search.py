@@ -208,6 +208,8 @@ def search_payload(
     try:
         client = hubc.client_for(settings, transport=transport)
         hub = client.identity
+        from .memory_retrieval_eval.live import interactive_session
+
         body = client.call(
             "search",
             timeout=hubc.SEARCH_BUDGET_SECONDS,
@@ -215,6 +217,7 @@ def search_payload(
             limit=hub_limit,
             query_source=query_source,
             scopes=list(settings.read_scopes),
+            **interactive_session(),
         )
         lists["hub"] = [
             {**m, "path": m.get("path") or f"cards/{m.get('card_id')}.md"}
@@ -252,16 +255,6 @@ def search_payload(
         retrieval.update(hub="unavailable", degraded=True, reason="hub-config-invalid")
         retrieval["fallback"] = sorted(lists)
     matches = fuse(lists, limit, home_scope=settings.scope)
-    if query_source == "explicit" and not retrieval.get("degraded") and not retrieval.get("stale"):
-        from .memory_retrieval_eval.live import record_search
-
-        record_search(
-            target,
-            query,
-            [m for m in matches if m.get("source") == "hub"],
-            hub=hub,
-            epoch=str(body.get("log_epoch") or ""),
-        )
     payload: dict[str, Any] = {
         "target": str(target),
         "query": query,

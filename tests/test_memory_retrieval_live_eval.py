@@ -22,83 +22,47 @@ def workspace(tmp_path, monkeypatch):
     return target
 
 
-def history(target, count=20):
-    for i in range(count):
-        text = f"---\ntitle: Topic {i}\n---\nterm{i} guidance\n"
-        live.record_search(
-            target,
-            f"term{i}",
-            [{"scope": "fleet", "card_id": f"card-{i}", "content_hash": live.text_hash(text)}],
-            hub="test-hub",
-            epoch="test-epoch",
-            now=100 + i,
-        )
-        live.record_use(target, f"card-{i}", text, now=101 + i)
+def test_local_forged_history_is_never_an_authority(workspace):
+    from brigade.memory_hub_client import MemoryHubClient
+
+    history = Path.home() / ".brigade/private-retrieval-eval/history.json"
+    history.parent.mkdir(parents=True)
+    history.write_text(json.dumps([{"query": f"attack {i}", "gold": ["wrong"]} for i in range(20)]))
+    calls = []
+
+    def transport(url, token, body, timeout):
+        calls.append(body)
+        return 409, {"code": "memory_retrieval_history_insufficient"}
+
+    client = MemoryHubClient("https://hub.example.test", "fake-token", transport=transport)
+    with pytest.raises(live.LiveEvalError, match="hub judged history"):
+        live.derive_queries(client, "fleet")
+    assert calls == [{"action": "retrieval_judgments", "scope": "fleet"}]
+    assert history.exists()
 
 
-def test_derivation_uses_followup_not_returned_results_and_keeps_text_private(workspace, capsys):
-    history(workspace)
-    live.record_search(
-        workspace,
-        "unused private words",
-        [{"scope": "fleet", "card_id": "ignored", "content_hash": "a" * 64}],
-        hub="test-hub",
-        epoch="test-epoch",
-        now=130,
-    )
-    queries = live.derive_queries(workspace, hub="test-hub", epoch="test-epoch", scope="fleet", now=140)
-    assert len(queries) == 20
-    assert queries[0].gold
-    assert all(q.query != "unused private words" for q in queries)
-    state = live.state_path(workspace)
-    assert not state.is_relative_to(workspace)
-    assert state.stat().st_mode & 0o777 == 0o600
-    assert state.parent.stat().st_mode & 0o777 == 0o700
-    assert "term0" in state.read_text()
-    assert not list(workspace.rglob("*"))
-    assert "term0" not in str(capsys.readouterr())
-    assert live.derived_path(workspace, "test-hub", "test-epoch", "fleet").is_file()
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"session_id": "one"},
+        {"session_id": "one", "session_kind": "scheduled"},
+        {"session_id": "one", "session_kind": "interactive", "agent_id": "worker"},
+    ],
+)
+def test_missing_or_worker_context_is_not_interactive(monkeypatch, overrides):
+    monkeypatch.delenv("BRIGADE_SESSION_ID", raising=False)
+    monkeypatch.delenv("BRIGADE_SESSION_KIND", raising=False)
+    assert not live.interactive_session(overrides)
 
 
-def test_insufficient_duplicate_expired_wrong_epoch_or_scope_queries_fail_closed(workspace):
-    history(workspace, 19)
-    with pytest.raises(ValueError, match="insufficient judged queries: 19 available, 20 required"):
-        live.derive_queries(workspace, hub="test-hub", epoch="test-epoch", scope="fleet", now=140)
-    history(workspace, 19)
-    for epoch, scope in [("test-epoch", "fleet"), ("other", "fleet"), ("test-epoch", "repo:other")]:
-        with pytest.raises(ValueError, match="insufficient judged queries"):
-            live.derive_queries(workspace, hub="test-hub", epoch=epoch, scope=scope, now=140)
-    history(workspace, 20)
-    with pytest.raises(ValueError, match="insufficient judged queries"):
-        live.derive_queries(workspace, hub="test-hub", epoch="test-epoch", scope="fleet", now=4_000_000)
-
-
-def test_open_must_follow_search_with_matching_content_and_unambiguous_scope(workspace):
-    text = "useful text\n"
-    match = {"scope": "fleet", "card_id": "one", "content_hash": live.text_hash(text)}
-    live.record_search(workspace, "private", [match], hub="h", epoch="e", now=100)
-    live.record_use(workspace, "one", "different", now=101)
-    live.record_use(workspace, "one", text, now=99)
-    live.record_use(workspace, "one", text, now=701)
-    assert not any(row.get("gold") for row in json.loads(live.state_path(workspace).read_text()))
-    live.record_search(workspace, "private", [{**match, "scope": "repo:other"}], hub="h", epoch="e", now=102)
-    live.record_use(workspace, "one", text, now=103)
-    assert not any(row.get("gold") for row in json.loads(live.state_path(workspace).read_text()))
-
-
-def test_private_state_refuses_symlinks_and_repository_locations(workspace):
-    path = live.state_path(workspace)
-    path.parent.mkdir(parents=True)
-    victim = workspace / "victim"
-    victim.write_text("unchanged")
-    path.symlink_to(victim)
-    history(workspace)
-    assert victim.read_text() == "unchanged"
-    with pytest.raises(ValueError, match="private retrieval history unavailable"):
-        live.derive_queries(workspace, hub="h", epoch="e", scope="fleet")
-    (Path.home() / ".git").mkdir()
-    with pytest.raises(ValueError, match="outside repositories"):
-        live.state_path(workspace)
+@pytest.mark.parametrize("name", ["BRIGADE_RUN_ID", "BRIGADE_SCANNER_RUN_ID"])
+def test_job_search_and_use_share_interactive_filter(monkeypatch, name):
+    monkeypatch.setenv("BRIGADE_SESSION_ID", "one")
+    monkeypatch.setenv("BRIGADE_SESSION_KIND", "interactive")
+    monkeypatch.setenv(name, "job")
+    assert not live.interactive_session()
+    assert not live.interactive_session({"session_id": "one", "session_kind": "interactive"})
 
 
 def test_live_extra_cards_and_mutation_refuses_regression():
@@ -150,7 +114,6 @@ def test_live_pipeline_reads_scope_and_records_only_aggregates(workspace, monkey
     from brigade.memory_retrieval_eval.adapters import bm25_adapter
     from tests.test_memory_retrieval_hub_eval import response
 
-    history(workspace)
     cards = [live._card(f"card-{i}", f"---\ntitle: Topic {i}\n---\nterm{i} guidance\n") for i in range(25)]
     search = bm25_adapter(cards)
     candidate = {
@@ -166,6 +129,12 @@ def test_live_pipeline_reads_scope_and_records_only_aggregates(workspace, monkey
 
     def transport(url, token, body, timeout):
         actions.append(body["action"])
+        if body["action"] == "retrieval_judgments":
+            return 200, {
+                "queries": [[f"term{i}", [f"card-{i}"]] for i in range(20)],
+                "history_seq": 40,
+                "query_set_digest": "a" * 64,
+            }
         if body["action"] == "status":
             return 200, {"log_epoch": "test-epoch", "seq": 25, "default_mode": "lexical"}
         if body["action"] == "log":
@@ -200,10 +169,7 @@ def test_live_pipeline_reads_scope_and_records_only_aggregates(workspace, monkey
         return 200, reply
 
     client = MemoryHubClient("https://hub.example.test", "fake-token", transport=transport)
-    # Bind the synthetic recorded uses to the actual client's opaque hub id.
-    path = live.state_path(workspace)
-    path.write_text(path.read_text().replace("test-hub", client.identity))
-    monkeypatch.setattr(live, "MemoryHubClient", lambda *a: client)
+    monkeypatch.setattr(live, "MemoryHubClient", lambda *a, **kw: client)
     monkeypatch.setattr(live.time, "time", lambda: 140)
     token_file = workspace.parent / "token"
     token_file.write_text("fake-token")
@@ -276,3 +242,143 @@ def test_native_live_scope_snapshot_and_measured_regression(workspace):
         target["after_hash"] = live.text_hash(target["after_text"])
         assert not live.measure_candidate(loaded, queries, proposal, adapter, adapter.binding)["gate"]["passed"]
         assert corpus_identity(live.snapshot(client, "fleet")[0]) == corpus_identity(cards)
+
+
+@pytest.mark.parametrize("budget", ["requests", "bytes", "clock"])
+def test_evaluation_aggregate_budgets_fail_closed(monkeypatch, budget):
+    from brigade.memory_hub_client import MemoryHubClient
+
+    calls = []
+    client = live.BudgetClient(
+        MemoryHubClient(
+            "https://hub.example.test",
+            "fake-token",
+            transport=lambda *a: calls.append(a) or (200, {"value": "1234567890"}),
+        )
+    )
+    if budget == "requests":
+        monkeypatch.setattr(live, "MAX_REQUESTS", 1)
+        client.call("status")
+    elif budget == "bytes":
+        monkeypatch.setattr(live, "MAX_BYTES", 2)
+    else:
+        client.deadline = 0
+    with pytest.raises(live.LiveEvalError, match="live evaluation budget exceeded"):
+        client.call("status")
+    assert len(calls) <= 1
+
+
+@pytest.mark.parametrize("ceiling", ["MAX_EVENTS", "MAX_CARDS"])
+def test_snapshot_aggregate_budget(monkeypatch, ceiling):
+    from brigade.memory_hub_client import MemoryHubClient
+
+    monkeypatch.setattr(live, ceiling, 1)
+
+    def transport(url, token, body, timeout):
+        if body["action"] == "status":
+            return 200, {"log_epoch": "e", "seq": 2}
+        assert body["action"] == "log"
+        return 200, {
+            "log_epoch": "e",
+            "next_seq": 2,
+            "events": [{"seq": i + 1, "scope": "fleet", "card_id": str(i), "revision": 1} for i in range(2)],
+        }
+
+    client = MemoryHubClient("https://hub.example.test", "fake-token", transport=transport)
+    with pytest.raises(live.LiveEvalError, match="live evaluation budget exceeded"):
+        live.snapshot(client, "fleet")
+
+
+def test_missing_gold_ids_are_dropped_before_query_floor():
+    from brigade.memory_retrieval_eval.adapters import bm25_adapter
+
+    cards = [live._card(f"c-{i}", f"term{i}") for i in range(20)]
+    queries = [QuerySpec(str(i), f"term{i}", (f"c-{i}", "retired"), "observed") for i in range(20)]
+    queries.append(QuerySpec("old", "old query", ("retired",), "observed"))
+    proposal = {
+        "proposal_id": "p",
+        "targets": [
+            {
+                "scope": "fleet",
+                "card_id": "c-0",
+                "before_hash": live.text_hash(cards[0].body),
+                "after_hash": live.text_hash(cards[0].body),
+                "after_text": cards[0].body,
+                "after_state": "live",
+            }
+        ],
+    }
+    report = live.measure_candidate(cards, queries, proposal, bm25_adapter(cards), {})
+    assert report["corpus"]["query_count"] == 20
+    assert report["gate"]["passed"]
+    with pytest.raises(live.LiveEvalError, match="19 available"):
+        live.measure_candidate(cards, queries[1:], proposal, bm25_adapter(cards), {})
+
+
+def test_private_search_read_ledger_counts_all_twenty(workspace):
+    from brigade.memory_cmd import _record_search_log
+    from brigade.memory_card_reads import load
+
+    matches = [{"card_id": f"c-{i}", "path": f"cards/c-{i}.md"} for i in range(20)]
+    _record_search_log(workspace, query="private", matches=matches, private_query=True)
+    counts = load(workspace).last_read
+    assert all(f"c-{i}" in counts for i in range(20))
+
+
+def test_wire_budget_counts_raw_bytes_before_json_decode(monkeypatch):
+    from brigade import fleet_client
+    from brigade.memory_hub_client import MemoryHubClient, urllib_transport
+    from functools import partial
+
+    requested = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self, size):
+            requested.append(size)
+            return b" " * size
+
+    monkeypatch.setattr(fleet_client, "_hub_open", lambda *a, **kw: Response())
+    monkeypatch.setattr(live, "MAX_BYTES", 10)
+    client = live.BudgetClient(
+        MemoryHubClient(
+            "https://hub.example.test", "fake-token", transport=partial(urllib_transport, max_response_bytes=10)
+        )
+    )
+    with pytest.raises(live.LiveEvalError, match="live evaluation budget exceeded"):
+        client.call("status")
+    assert requested == [11]
+
+
+def test_record_use_sends_only_identity_and_session_to_hub(workspace, monkeypatch):
+    from brigade import memory_hub_client as hubc
+
+    requests = []
+    client = hubc.MemoryHubClient(
+        "https://hub.example.test",
+        "fake-token",
+        transport=lambda url, token, body, timeout: requests.append(body) or (201, {}),
+    )
+    monkeypatch.setattr(live, "MemoryHubClient", lambda *a, **kw: client)
+    monkeypatch.setattr(
+        hubc,
+        "load_settings",
+        lambda *a: hubc.HubSettings(mode="read", hub_url="https://hub.example.test", token="fake-token"),
+    )
+    context = {"session_id": "one", "session_kind": "interactive"}
+    live.record_use(workspace, "published", "private card text", payload=context)
+    assert len(requests) == 1
+    assert requests[0]["session_id"] == "one"
+    assert requests[0]["action"] == "retrieval_use"
+    assert requests[0]["content_hash"] == live.text_hash("private card text")
+    assert "private card text" not in json.dumps(requests)
+    monkeypatch.setenv("BRIGADE_RUN_ID", "job")
+    live.record_use(workspace, "published", "private card text", payload=context)
+    assert len(requests) == 1
