@@ -18,9 +18,15 @@ func filesExporter(t *testing.T) {
 	}
 	dir := t.TempDir()
 	body := `#!/bin/sh
+for arg in "$@"; do
+case "$arg" in --budget*|--max-files*) exit 2;; esac
+done
 path="$2"
 if [ -n "$FILES_CRAWL_SLOW" ] && [ "${path##*/}" = "001.txt" ]; then exec sleep 5; fi
 printf '{"schema":"@SCHEMA@","source":{"kind":"files","name":"files"},"collection":{"external_id":"fixture","kind":"files","name":"fixture"},"item":{"external_id":"%s","kind":"file","created_at":"2026-01-01T00:00:00Z","text":"fixture"},"raw":{"format":"text","path":"%s"}}\n' "$path" "$path"
+if [ -n "$FILES_CRAWL_EMIT_SLOW" ]; then exec sleep 5; fi
+if [ -n "$FILES_CRAWL_WARN" ]; then printf '{"warnings":["fixture warning"]}\n' >&2; fi
+if [ -n "$FILES_CRAWL_BAD" ]; then printf 'invalid record\n'; fi
 `
 	body = strings.Replace(body, "@SCHEMA@", adapter.SchemaV1, 1)
 	if err := os.WriteFile(filepath.Join(dir, "sourceharvest"), []byte(body), 0700); err != nil {
@@ -61,7 +67,7 @@ func TestFilesCrawlResumesAndSkipsUnchanged(t *testing.T) {
 	if total != 33 {
 		t.Fatalf("parsed %d, want 33", total)
 	}
-	got := runJSON(t, "crawl", "files", root, "--json")
+	got := runJSON(t, "crawl", "files", root, "--max-files", "1", "--out", "-", "--json")
 	if got["files_parsed"] != float64(0) || got["files_skipped"] != float64(33) || got["complete"] != true {
 		t.Fatalf("unchanged: %v", got)
 	}
@@ -142,5 +148,98 @@ func TestFilesCrawlSafety(t *testing.T) {
 	got := runJSON(t, "crawl", "files", root, "--json")
 	if got["files_parsed"] != float64(1) || len(got["warnings"].([]any)) != 1 {
 		t.Fatalf("safety filters: %v", got)
+	}
+}
+
+func TestFilesCrawlCommittedCounts(t *testing.T) {
+	for _, mode := range []string{"EMIT_SLOW", "WARN", "BAD"} {
+		t.Run(mode, func(t *testing.T) {
+			withTempHome(t)
+			filesExporter(t)
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("fixture"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("FILES_CRAWL_"+mode, "1")
+			got := runJSON(t, "crawl", "files", root, "--budget", "500ms", "--json")
+			if got["inserted_items"] != float64(1) {
+				t.Fatalf("durable insert lost: %v", got)
+			}
+			db, _, err := openMigrated()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var items, cached int
+			if err := db.QueryRow("select count(*) from items").Scan(&items); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow("select count(*) from files_crawl_cache").Scan(&cached); err != nil {
+				t.Fatal(err)
+			}
+			if items != 1 || cached != 0 {
+				t.Fatalf("items=%d cached=%d", items, cached)
+			}
+			if mode == "EMIT_SLOW" && got["complete"] != false {
+				t.Fatalf("expected bounded result: %v", got)
+			}
+		})
+	}
+}
+
+func TestFilesCrawlUnreadablePaths(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	root := t.TempDir()
+	badFile := filepath.Join(root, "a.txt")
+	badDir := filepath.Join(root, "b")
+	if err := os.WriteFile(badFile, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(badDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "hidden.txt"), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "z.txt"), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(badFile, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(badDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(badFile, 0600); _ = os.Chmod(badDir, 0700) })
+	if f, err := os.Open(badFile); err == nil {
+		f.Close()
+		t.Skip("permissions are not enforced for this user")
+	}
+	for i := 0; i < 2; i++ {
+		got := runJSON(t, "crawl", "files", root, "--max-files", "1", "--json")
+		if got["complete"] != true || len(got["warnings"].([]any)) != 2 {
+			t.Fatalf("unreadable paths blocked traversal: %v", got)
+		}
+	}
+	if err := os.Chmod(badFile, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(badDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	got := runJSON(t, "crawl", "files", root, "--json")
+	if got["files_parsed"] != float64(2) {
+		t.Fatalf("unreadable paths were cached: %v", got)
+	}
+}
+
+func TestFilesCrawlDryRunBudgetFlags(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	root := t.TempDir()
+	got := runJSON(t, "crawl", "files", root, "--budget=1s", "--max-files", "2", "--dry-run", "--json")
+	if got["dry_run"] != true {
+		t.Fatalf("dry run: %v", got)
 	}
 }

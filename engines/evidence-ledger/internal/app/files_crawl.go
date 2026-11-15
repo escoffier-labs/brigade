@@ -28,6 +28,19 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 	asJSON, dryRun, args := splitWrapperFlags(args)
 	// Keep the existing exporter dry-run contract without updating checkpoints.
 	if dryRun {
+		// Budget controls belong to the wrapper, including on a dry run.
+		filtered := []string{}
+		for i := 0; i < len(args); i++ {
+			name := strings.TrimLeft(strings.SplitN(args[i], "=", 2)[0], "-")
+			if name == "budget" || name == "max-files" {
+				if !strings.Contains(args[i], "=") && i+1 < len(args) {
+					i++
+				}
+				continue
+			}
+			filtered = append(filtered, args[i])
+		}
+		args = filtered
 		if asJSON {
 			args = append(args, "--json")
 		}
@@ -44,8 +57,9 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 	kind := flags.String("collection-kind", "files", "collection kind")
 	glob := flags.String("glob", "*.txt,*.md,*.markdown", "comma-separated filename globs")
 	budget := flags.Duration("budget", 600*time.Second, "time budget, returns success with a resume cursor")
-	maxFiles := flags.Int("max-files", 1000, "maximum eligible files visited per run")
-	limit := flags.Int("limit", 0, "maximum eligible files visited per run (alias)")
+	maxFiles := flags.Int("max-files", 1000, "maximum exporter invocations per run")
+	output := flags.String("out", "-", "export stream destination (must be stdout)")
+	limit := flags.Int("limit", 0, "maximum exporter invocations per run (alias)")
 	// Exporter flags historically accept a leading path.
 	path := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -61,6 +75,9 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		path = flags.Arg(0)
 	} else if flags.NArg() != 0 {
 		return fatalf(errw, "crawl files: expected one path")
+	}
+	if *output != "-" {
+		return fatalf(errw, "crawl files: --out must be - for archive ingestion")
 	}
 	if path == "" || *budget <= 0 || *budget > 600*time.Second || *maxFiles <= 0 {
 		return fatalf(errw, "crawl files: path, positive max-files and budget up to 10m are required")
@@ -112,7 +129,7 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *budget)
 	defer cancel()
-	visited, parsed, skipped, inserted := 0, 0, 0, 0
+	exported, parsed, skipped, inserted := 0, 0, 0, 0
 	pending := false
 	entries := 0
 	warnings := []string{}
@@ -123,17 +140,30 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		cursor = path
 		return nil
 	}
+	warnAndCheckpoint := func(path string, err error) error {
+		warnings = append(warnings, fmt.Sprintf("%s: %s", path, err))
+		if _, err := db.Exec(`delete from files_crawl_cache where profile=? and path=?`, profile, path); err != nil {
+			return err
+		}
+		return checkpoint(path)
+	}
 	// WalkDir orders siblings, not full paths. NUL-separated components preserve
 	// that order, including a directory named a next to a file named a.txt.
 	order := func(path string) string { return strings.ReplaceAll(path, string(filepath.Separator), "\x00") }
 	startCursor := cursor
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if ctx.Err() != nil || visited >= *maxFiles || entries >= 10000 {
+		if ctx.Err() != nil || entries >= 10000 {
 			pending = true
 			return fs.SkipAll
 		}
 		if walkErr != nil {
-			return walkErr
+			if err := warnAndCheckpoint(path, walkErr); err != nil {
+				return err
+			}
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		if path != root && startCursor != "" && order(path) <= order(startCursor) {
 			if d.IsDir() && path != startCursor && !strings.HasPrefix(startCursor, path+string(filepath.Separator)) {
@@ -146,7 +176,9 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		entries++
 		name := strings.ToLower(d.Name())
 		if d.IsDir() {
-			cursor = path
+			if order(path) > order(cursor) {
+				cursor = path
+			}
 			if path != root && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "backup" || name == "backups" || name == "deleted") {
 				return fs.SkipDir
 			}
@@ -166,10 +198,9 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 			return nil
 		}
 		cursor = cursorBeforeFile
-		visited++
 		stat, err := d.Info()
 		if err != nil {
-			return err
+			return warnAndCheckpoint(path, err)
 		}
 		if stat.Size() > filesCrawlMaxBytes {
 			warnings = append(warnings, fmt.Sprintf("%s: exceeds file size cap", path))
@@ -177,12 +208,12 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		}
 		f, err := os.Open(path)
 		if err != nil {
-			return err
+			return warnAndCheckpoint(path, err)
 		}
 		data, err := io.ReadAll(io.LimitReader(f, filesCrawlMaxBytes+1))
 		_ = f.Close()
 		if err != nil {
-			return err
+			return warnAndCheckpoint(path, err)
 		}
 		if len(data) > filesCrawlMaxBytes {
 			warnings = append(warnings, fmt.Sprintf("%s: exceeds file size cap", path))
@@ -198,6 +229,10 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		if known == digest {
 			skipped++
 			return checkpoint(path)
+		}
+		if ctx.Err() != nil || exported >= *maxFiles {
+			pending = true
+			return fs.SkipAll
 		}
 		exportPath := path
 		if !filepath.IsAbs(inputPath) {
@@ -221,37 +256,40 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Start(); err != nil {
-			return err
+			if ctx.Err() != nil {
+				pending = true
+				return fs.SkipAll
+			}
+			return warnAndCheckpoint(path, err)
 		}
+		exported++
 		result, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://files "+path, "")
 		if importErr != nil {
 			_ = stdout.Close()
 			cancel()
 		}
 		waitErr := cmd.Wait()
+		inserted += result.Inserted
+		if importErr != nil {
+			return importErr
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			pending = true
 			return fs.SkipAll
 		}
-		if importErr != nil {
-			return importErr
-		}
 		if waitErr != nil {
-			return fmt.Errorf("sourceharvest: %s: %w", strings.TrimSpace(stderr.String()), waitErr)
+			return warnAndCheckpoint(path, fmt.Errorf("sourceharvest: %s: %w", strings.TrimSpace(stderr.String()), waitErr))
 		}
 		summary := parseSourceHarvestSummary(stderr.Bytes())
 		warnings = append(warnings, summary.Warnings...)
 		warnings = append(warnings, result.Warnings...)
-		// Rejected records fail the run. Exporter warnings (for example empty
-		// files) advance the traversal but remain uncached for a later retry.
-		if len(result.Warnings) > 0 {
-			return fmt.Errorf("sourceharvest file import incomplete: %s", path)
-		}
-		if len(summary.Warnings) > 0 {
-			return checkpoint(path)
+		// Bad records and exporter warnings advance traversal but stay uncached.
+		if len(result.Warnings) > 0 || len(summary.Warnings) > 0 {
+			return warnAndCheckpoint(path, fmt.Errorf("export incomplete, left uncached"))
 		}
 		parsed++
-		inserted += result.Inserted
+		// Write the cache before the checkpoint. A crash between them leaves
+		// the cursor behind a committed cache hit, avoiding another export.
 		if _, err := db.Exec(`insert into files_crawl_cache values(?,?,?) on conflict(profile,path) do update set hash=excluded.hash`, profile, path, digest); err != nil {
 			return err
 		}
