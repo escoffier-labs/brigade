@@ -2164,13 +2164,20 @@ about 140 records, at most 8.75 MiB at the 64 KiB artifact limit. Active
 records are not counted, since a reviewer accepted them and the per-card slot
 caps bound them.
 
+A principal may create at most 32,768 verifier evidence records over the
+database lifetime. Purged bindings count toward this limit because their audit
+metadata stays in the database. Further attaches are refused with
+`429 memory_evidence_lifetime_principal_quota`. This lifetime limit is far
+above the retained budgets, but it puts a fixed bound on metadata growth.
+
 The idle sweep purges a record 35 days after it went inert, at most 8 records
 per sweep transaction. The purge is the tombstone the admin `evidence.purge`
 action writes: the artifact bytes are cleared, the id, hash and other fields
 stay, and an `evidence.purge` event with `"reason": "verifier_retention"`
 records it. The binding row keeps its metadata and gains `purged_ms`. A purged
-record frees its budget, never holds automatic apply and never counts as
-proof. An admin purge also stops a record counting at once.
+record frees its retained budget, never holds automatic apply and never counts as
+proof. An admin purge also frees retained budget at once. Neither purge resets the
+lifetime count.
 
 `propose` checks every verifier record an `append_evidence` op cites. The
 record binds only when the proposal comes from the principal that attached
@@ -2621,6 +2628,10 @@ card, evidence or model text, and it is scanned before attachment
 (`verify_manifest_unclean`). Its evidence id is
 `<principal>/memory-verify/<sha256 of the manifest>`.
 
+The JSON report includes a top-level `stop` field when a quota stops new
+proposals. Its value is the run reason, such as `evidence_quota` or
+`evidence_lifetime_quota`. Retained quota stages stay available for replay.
+
 | Run reason | Meaning |
 |---|---|
 | `dry_run_proposal` | A dry run would have attached and proposed for this card |
@@ -2628,6 +2639,7 @@ card, evidence or model text, and it is scanned before attachment
 | `pending_ceiling` | The job already has 8 pending proposals |
 | `proposal_quota` | The hub answered a proposal quota. The run stops proposing and still verifies the rest |
 | `evidence_quota` | The hub answered a retained evidence quota. Handled like `proposal_quota` |
+| `evidence_lifetime_quota` | The hub answered `429 memory_evidence_lifetime_principal_quota`. The run stops proposing without a failure, drops the stage and records the correction as refused. This quota is permanent for that principal, so the correction is never replayed under it |
 | `evidence_cap` | The card already holds the most manifests this principal may attach to it |
 | `duplicate_pending` | The hub already holds this proposal. Its id is remembered |
 | `already_proposed`, `refused` | The ledger already holds a proposal id or a final refusal for this correction |

@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 12;
+pub const USER_VERSION: i64 = 13;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -271,6 +271,10 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     // current behavior.
     if version < 12 {
         step(c, super::manifest_binding::DDL, 12).map_err(err)?;
+    }
+    // Version 13: index the lifetime count, including active and purged bindings.
+    if version < 13 {
+        step(c, super::manifest_binding::DDL, 13).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c
