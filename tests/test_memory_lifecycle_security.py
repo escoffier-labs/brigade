@@ -158,7 +158,9 @@ def test_recorder_failure_resets_coverage_before_transitions(tmp_path, monkeypat
 def test_interrupted_read_blocks_even_a_successful_heartbeat(tmp_path):
     old_card(tmp_path)
     cover(tmp_path)
-    reads._write_json(tmp_path, f"{reads.COVERAGE_REL}/interrupted.json", {"state": "pending"})
+    reads._write_json(
+        tmp_path, f"{reads.COVERAGE_REL}/interrupted.json", {"state": "pending", "day": TODAY.isoformat()}
+    )
     assert life.run(tmp_path, today=TODAY)["blocked"]
     assert reads.load(tmp_path).recorder_error
 

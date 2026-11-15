@@ -229,10 +229,14 @@ def test_legacy_publication_identity_retire_revive_and_reads(tmp_path, monkeypat
     path.write_text(text)
     identity = sync.publication_identity(text, "memory/cards/Old Note.md")[0]
     fake = configure_hub(tmp_path, monkeypatch, identity, "memory/cards/Old Note.md")
-    monkeypatch.setattr(reads, "load", lambda _: reads.ReadLedger(date(2000, 1, 1), {}))
+    monkeypatch.setattr(reads, "load", lambda _: reads.ReadLedger(date(2000, 1, 1), {}, date(2000, 1, 1), date.today()))
     monkeypatch.setattr(reads, "hub_last_reads", lambda _, **_kw: {identity: date.today()})
     assert (
         retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), TendConfig(), today=date.today())["candidate_count"] == 0
+    )
+    monkeypatch.setattr(reads, "hub_last_reads", lambda _, **_kw: {})
+    assert (
+        retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), TendConfig(), today=date.today())["candidate_count"] == 1
     )
     d = move(tmp_path, "memory/cards/Old Note.md")
     assert d.hub["status"] == "done"

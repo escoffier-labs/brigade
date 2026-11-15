@@ -1162,6 +1162,16 @@ def health(target: Path) -> dict[str, Any]:
                     "detail": (f"{explicit_ids} cards have explicit IDs" if explicit_ids else "no cards"),
                 }
             )
+    from . import receipt_signing
+
+    if receipt_signing.workspace_key(target) is None:
+        checks.append(
+            {
+                "status": "warn",
+                "name": "memory_lifecycle_authority",
+                "detail": "workspace key unavailable, lifecycle and expiry disabled",
+            }
+        )
     issues = [check for check in checks if check["status"] != "ok"]
     metadata = (
         scan_payload.get("metadata")

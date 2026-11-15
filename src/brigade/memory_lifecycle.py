@@ -13,7 +13,7 @@ import tomllib
 from urllib.parse import unquote, urlsplit
 from typing import Any
 
-from . import memory_archive, memory_card_reads, memory_cmd, memory_review
+from . import memory_archive, memory_card_reads, memory_cmd, memory_review, receipt_signing
 from . import memory_care_journal as journal
 from .card_identity import card_identity
 from .memory_log_retractions import retraction
@@ -51,7 +51,9 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
     # unrelated prose or another directory must not protect this card.
     if referring and not referring.startswith("scheduler:"):
         destinations = re.findall(r"\]\(\s*(?:<([^>]+)>|([^\s)]+))", text)
-        destinations.extend(re.findall(r"^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<([^>]+)>|([^\s]+))", text, flags=re.MULTILINE))
+        destinations.extend(
+            re.findall(r"^ {0,3}\[[^\]\n]+\]:[ \t]*(?:\r?\n[ \t]*)?(?:<([^>\n]+)>|([^\s]+))", text, flags=re.MULTILINE)
+        )
         destinations.extend(
             ("", name + ("" if name.endswith(".md") else ".md"))
             for name in re.findall(r"\[\[([^\]|#]+)(?:[^\]]*)\]\]", text)
@@ -63,7 +65,12 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
                 continue
             if link.scheme or link.netloc or not link.path:
                 continue
-            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(referring), unquote(link.path)))
+            destination = unquote(link.path)
+            resolved = posixpath.normpath(
+                destination.lstrip("/")
+                if destination.startswith("/")
+                else posixpath.join(posixpath.dirname(referring), destination)
+            )
             if resolved in names:
                 return True
     return False
@@ -104,9 +111,27 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
         "coverage",
     }
 
-    from .localio import check_git_ignored
+    from .instruction_inventory import ROOT_NAMES
+    import subprocess
 
-    def walk(root: Path):
+    target = target.resolve()
+    ignored = set()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target), "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            ignored = {os.fsdecode(name).rstrip("/") for name in result.stdout.split(b"\0") if name}
+    except (OSError, subprocess.TimeoutExpired):
+        # Unknown ignore rules only expand the scan. They never hide references.
+        pass
+
+    def walk(root: Path, *, explicit: bool = True):
+        if not root.exists():
+            return
         if root != target:
             try:
                 journal.safe_path(target, root.relative_to(target).as_posix())
@@ -114,25 +139,32 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
                 return
         if root.is_symlink():
             return
-        for directory, dirs, files in os.walk(root, followlinks=False):
+        excluded = skip - {"build", "dist", "target", "coverage", ".next", ".cache"} if explicit else skip
+
+        def unreadable(error):
+            raise error
+
+        for directory, dirs, files in os.walk(root, followlinks=False, onerror=unreadable):
             base = Path(directory)
             dirs[:] = [
                 name
                 for name in dirs
-                if name not in skip
+                if name not in excluded
                 and not (base / name).is_symlink()
-                and check_git_ignored(target, base / name) != "yes"
+                and (explicit or (base / name).relative_to(target).as_posix() not in ignored)
             ]
             for name in files:
                 yield base / name
 
     paths = [p for root in roots for p in walk(target / root)]
     paths.extend(
-        p for p in walk(target) if p.name in {"AGENTS.md", "CLAUDE.md"} and "memory" not in p.relative_to(target).parts
+        p
+        for p in walk(target, explicit=False)
+        if p.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"} and "memory" not in p.relative_to(target).parts
     )
     paths.extend(
         target / name
-        for name in ("AGENTS.md", "CLAUDE.md", ".brigade/work.json", ".brigade/hooks.json")
+        for name in (*ROOT_NAMES, ".brigade/work.json", ".brigade/hooks.json")
         if (target / name).is_file()
     )
     paths.extend(
@@ -152,7 +184,7 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
             continue
         try:
             refs[rel] = journal.safe_path(target, rel).read_text(encoding="utf-8")
-        except (UnicodeDecodeError, journal.JournalConflict, OSError):
+        except (UnicodeDecodeError, journal.JournalConflict):
             continue
     # Installed schedules live outside the target. These are reads only.
     from . import care_cmd
@@ -298,6 +330,8 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
     payload: dict[str, Any] = {"enabled": rules["enabled"], "transitions": [], "skipped": []}
     if not rules["enabled"]:
         return payload
+    if receipt_signing.workspace_key(target) is None:
+        return {**payload, "blocked": "workspace key unavailable, lifecycle and expiry disabled"}
     config = memory_cmd._config_or_default(target)
     cards = {}
     for path in memory_cmd._iter_cards(target, config):

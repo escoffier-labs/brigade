@@ -53,6 +53,10 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
     skipped = {"ledger_too_young": 0, "exempt": 0, "read_recently": 0}
     for rel, text in cards.items():
         path = target / rel
+        if hub_reads is None:
+            # A configured hub that cannot report reads proves nothing about use.
+            skipped["hub_reads_unavailable"] = skipped.get("hub_reads_unavailable", 0) + 1
+            continue
         fm, _ = memory_cmd._parse_frontmatter(text)
         identity = memory_cmd.card_identity_from_text(text, rel)
         if (
@@ -78,10 +82,6 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
             continue
         if not memory_card_reads.covered(ledger, today=today, days=tend.unused_after_days):
             skipped["ledger_too_young"] += 1
-            continue
-        if hub_reads is None:
-            # A configured hub that cannot report reads proves nothing about use.
-            skipped["hub_reads_unavailable"] = skipped.get("hub_reads_unavailable", 0) + 1
             continue
         card_id = memory_cmd.card_identity_from_text(text, rel)
         # Replica reads are recorded under the publication id, which is derived for a card without one.

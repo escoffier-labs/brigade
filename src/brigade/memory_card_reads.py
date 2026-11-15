@@ -32,7 +32,9 @@ class ReadLedger:
 
 
 COVERAGE_REL = ".brigade/memory/read-coverage"
-# Preserve failures within this process when storage cannot accept even an intent.
+FAILURES_REL = ".brigade/read-recorder-failures"
+DISABLED_REL = ".brigade-read-recorder-disabled"
+# Last resort when storage cannot accept a marker or invalidate the ledger.
 _FAILED_ROOTS: set[Path] = set()
 
 
@@ -111,6 +113,52 @@ def _pending(target: Path) -> list[str]:
         return [f"{COVERAGE_REL}/{name}" for name in names if name.endswith(".json")]
 
 
+def _failures(target: Path) -> list[str]:
+    with bound_run_dir(target) as bound:
+        try:
+            parent = bound.dir_fd(*Path(FAILURES_REL).parts)
+        except FileNotFoundError:
+            return []
+        names = dirfd.child_names(parent, 10001)
+        if len(names) > 10000:
+            raise ValueError("read recorder failure limit exceeded")
+        return [f"{FAILURES_REL}/{name}" for name in names]
+
+
+def _disabled(target: Path) -> bool:
+    # An unreadable or malformed sentinel is still a stop signal.
+    with bound_run_dir(target) as bound:
+        try:
+            bound.stat((), DISABLED_REL)
+        except FileNotFoundError:
+            return False
+        return True
+
+
+def _record_failure(target: Path) -> None:
+    """Use storage independent of both the ledger and its intent writer."""
+    _FAILED_ROOTS.add(target.resolve())
+    try:
+        with bound_run_dir(target) as bound:
+            bound.write_text_atomic(tuple(Path(FAILURES_REL).parts), secrets.token_hex(16), "recorder-error\n")
+        return
+    except (OSError, ValueError):
+        pass
+    try:
+        # If Brigade's state directory is unavailable, permanently disable
+        # transitions at the workspace root until an operator reviews the gap.
+        with bound_run_dir(target) as bound:
+            bound.write_text_atomic((), DISABLED_REL, "recorder-error\n")
+        return
+    except (OSError, ValueError):
+        pass
+    try:
+        # Removing stale authority is safer than reusing it after recovery.
+        _unlink(target, READS_REL)
+    except (OSError, ValueError):
+        pass
+
+
 def load(target: Path) -> ReadLedger:
     try:
         p = _read_json(target, READS_REL)
@@ -135,7 +183,7 @@ def load(target: Path) -> ReadLedger:
             {k: date.fromisoformat(v) for k, v in p["last_read"].items()},
             since,
             heartbeat,
-            bool(_pending(target)) or target.resolve() in _FAILED_ROOTS,
+            bool(_pending(target)) or bool(_failures(target)) or _disabled(target) or target.resolve() in _FAILED_ROOTS,
         )
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return ReadLedger(_day(), {}, recorder_error=True)
@@ -164,26 +212,46 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
     keys = tuple(keys)
     intent = f"{COVERAGE_REL}/{secrets.token_hex(16)}.json"
     try:
+        # No authority means transitions are already disabled. Do not accumulate
+        # an intent for every content open in an unconfigured workspace.
+        if receipt_signing.workspace_key(target) is None or _disabled(target):
+            return False
         _write_json(target, intent, {"state": "pending", "day": today.isoformat()})
         path = safe_path(target, READS_REL)
         with held_file_lock(path.with_suffix(".lock"), deadline_seconds=5):
             ledger = load(target)
             limits = _coverage_policy(target)
+            failures = _failures(target)
             errors = []
             for pending in _pending(target):
                 if pending == intent:
                     continue
-                payload = _read_json(target, pending)
-                if payload.get("state") == "error":
+                malformed = False
+                try:
+                    payload = _read_json(target, pending)
+                    if not isinstance(payload, dict) or payload.get("state") not in {"error", "pending"}:
+                        raise ValueError("invalid intent state")
+                    day = date.fromisoformat(payload["day"])
+                    if day > today:
+                        raise ValueError("future intent day")
+                except (ValueError, TypeError, KeyError):
+                    malformed = True
+                if malformed:
+                    # Keep only a body-free reason. Do not copy attacker-controlled
+                    # payloads or filenames into the quarantine receipt.
+                    quarantine = hashlib.sha256(pending.encode()).hexdigest()
+                    _write_json(
+                        target,
+                        f".brigade/memory/read-coverage-quarantine/{quarantine}.json",
+                        {"reason": "malformed-intent", "day": today.isoformat()},
+                    )
                     errors.append(pending)
-                elif payload.get("state") == "pending":
-                    # Missing or invalid dates remain unhealthy and cannot expire.
-                    day = date.fromisoformat(payload["day"]) if "day" in payload else today
-                    if (today - day).days >= limits["pending_intent_max_age_days"]:
-                        errors.append(pending)
+                elif payload["state"] == "error" or (today - day).days >= limits["pending_intent_max_age_days"]:
+                    errors.append(pending)
             since = ledger.healthy_since
             if (
                 errors
+                or failures
                 or target.resolve() in _FAILED_ROOTS
                 or since is None
                 or ledger.heartbeat is None
@@ -210,14 +278,14 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
                 READS_REL,
                 {**value, "mac": mac},
             )
-            for error in errors:
+            for error in [*errors, *failures]:
                 _unlink(target, error)
             _unlink(target, intent)
         _FAILED_ROOTS.discard(target.resolve())
         return True
     except (OSError, ValueError, TypeError, AttributeError):
         # This is independent of the ledger lock and remains visible to lifecycle.
-        _FAILED_ROOTS.add(target.resolve())
+        _record_failure(target)
         try:
             _write_json(target, intent, {"state": "error", "day": today.isoformat()})
         except (OSError, ValueError):
@@ -232,7 +300,7 @@ def record_content(target: Path, text: str, rel: str) -> None:
     try:
         record(target, [rel, card_identity_from_text(text.lstrip("\ufeff").replace("\r\n", "\n"), rel)])
     except (OSError, ValueError):
-        _FAILED_ROOTS.add(target.resolve())
+        _record_failure(target)
 
 
 def last_read(ledger: ReadLedger, keys: Iterable[str], *, today: date | None = None) -> date | None:
