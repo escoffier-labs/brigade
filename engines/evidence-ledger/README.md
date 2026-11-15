@@ -363,6 +363,8 @@ brigade-evidence crawl jsonl export.jsonl --source notes --collection notes:loca
 brigade-evidence crawl adapter export.adapter.jsonl --source export --json
 ```
 
+A files export that fails outside a budget stop checkpoints past the file and leaves it uncached. The file is retried on the next sweep, rather than the next run. An exporter start error fails the run without advancing past that file.
+
 External crawler binaries can be called through domain wrappers when installed on `PATH`, or through adapter JSONL files they produced earlier:
 
 ```bash

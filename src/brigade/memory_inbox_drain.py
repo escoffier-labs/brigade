@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import ingest, instruction_overflow, memory_content_scan, memory_evidence_log, untrusted
+from . import handoff_origin, ingest, instruction_overflow, memory_content_scan, memory_evidence_log, untrusted
 from . import memory_care_journal as journal
 from .memory_inbox_io import MAX_DRAFT_BYTES as MAX_DRAFT_BYTES, read
 
@@ -17,6 +17,8 @@ RESOLVED_REL = INBOX_REL + "/resolved"
 LEDGER_REL = ".brigade/memory-care/inbox-ledger.jsonl"
 HUMAN_CODES = frozenset(
     {
+        "origin-review-required",
+        "handoff-too-large",
         "preference-replacement-review",
         "card-injection-signal",
         "document-injection-signal",
@@ -77,6 +79,8 @@ EXPIRE_CODES: frozenset[str] = frozenset()  # No ingest code proves that unappli
 
 # Per-code dependence on usable evidence-log proof, separate from destination reads.
 NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
+    "origin-review-required": False,
+    "handoff-too-large": False,
     "action-not-auto-handled": False,
     "bootstrap-budget-exceeded": False,
     "card-destination-not-regular": False,
@@ -121,6 +125,7 @@ NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
 
 
 def retry_flags(code: str, text: str) -> tuple[bool, bool] | None:
+    """Read a legacy display header. Never use this as retry authority."""
     header = text.replace("\r\n", "\n").split("-->", 1)[0].rstrip() + " -->"
     match = re.search(r"^     retry-flags: promote=(true|false) route=(true|false) -->$", header, re.M)
     if match:
@@ -200,9 +205,10 @@ def destination_proven(
     card_ids: ingest.CardIdIndex,
     routing: instruction_overflow.RouteContext | None = None,
 ) -> bool:
-    flags = retry_flags(code, text)
-    if flags is None:
+    review = handoff_origin.verify_review_draft(target, path, data)
+    if review is None:
         return False
+    flags = review.promote_cards, review.route_documents
     try:
         outcome = ingest.decide(
             ingest.parse(path, data),
@@ -258,6 +264,12 @@ def _record(target: Path, rel: str, data: bytes, reason: str, *, cited: bool, ex
     path = target / rel
     if ingest._is_tracked(path, ingest._git_tracked_files(path.parent)):
         raise ingest.TrackedHandoffError("tracked review draft")
+    review = handoff_origin.verify_review_draft(target, path, data)
+    if review is None:
+        raise ValueError("review origin unavailable before disposition")
+    sidecar = review.stamp.sidecar
+    metadata = disposition_metadata(rel, reason, cited=cited)
+    metadata["origin_stamp_mac"] = review.stamp.consumed.name
     changes = disposition_changes(target, rel, data, reason, cited=cited, expired=expired)
     decision = journal.commit_phased(
         target,
@@ -267,11 +279,12 @@ def _record(target: Path, rel: str, data: bytes, reason: str, *, cited: bool, ex
         changes=changes,
         prepared_paths=[] if cited else [changes[0].path],
         hub={},
-        metadata=disposition_metadata(rel, reason, cited=cited),
+        metadata=metadata,
     )
 
     if journal._payload(target, decision.decision_id).get("phase") != "committed":
         raise journal.JournalConflict("inbox disposition abandoned")
+    handoff_origin.remove_stamp(sidecar)
     return decision
 
 
@@ -295,6 +308,7 @@ def drain(
     try:
         if not dry_run:
             result["recovery"] = journal.resolve_prepared(target)
+            result["pruned_review_stamps"] = handoff_origin.prune_missing_review_stamps(target)
         paths = pending(target)
         for inbox in ingest._resolve_inbox_paths(target):
             try:
@@ -326,6 +340,11 @@ def drain(
             code, routed = parse_header(text)
             if not code or routed is None:
                 raise ValueError("missing or malformed routing header")
+            review = handoff_origin.verify_review_draft(target, path, data)
+            if review is None:
+                code = "origin-review-required"
+            else:
+                code = review.code
             disposition = classify(code, text, classifications)
             needs_proof = (classifications or {}).get(code, (disposition, NEEDS_EVIDENCE_PROOF.get(code, True)))[1]
             expired = (today - routed.date()).days >= deadline_days

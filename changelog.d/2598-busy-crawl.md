@@ -1,0 +1,1 @@
+- Files crawls warn when archive contention stops a run, report actual lock retry attempts, retry cache deletion without repeating exports or warnings, and retain the startup lock timeout while creating crawl tables.

@@ -1,4 +1,4 @@
-"""Scheduled hub reflection proposes edits and watches policy-actor applies."""
+"""Scheduled hub reflection with optional Tier 0 application and a watch over policy-actor applies."""
 
 from __future__ import annotations
 
@@ -75,6 +75,7 @@ def _code(value: object) -> bool:
 # Optional ledger fields kept beside the request id by reflection and other jobs.
 LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
+    "attempted_ms": lambda value: type(value) is int and value >= 0,
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -117,7 +118,10 @@ def schedule_status(target: Path) -> dict[str, Any]:
         submissions = state.get("submissions", {})
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
-        if not all(valid_submission(digest, pending, frozenset({"pins"})) for digest, pending in submissions.items()):
+        if not all(
+            valid_submission(digest, pending, frozenset({"pins", "attempted_ms"}))
+            for digest, pending in submissions.items()
+        ):
             raise ValueError(STATE_ERROR)
         for lane in LANES:
             schedule = state.get(lane, {})
@@ -435,6 +439,7 @@ def _reflect(
     limit: int,
     dry_run: bool,
     watch: bool = False,
+    apply: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= limit <= 100:
         raise ReflectError("hub_reflect_limit_invalid", "--limit must be from 1 to 100")
@@ -544,12 +549,21 @@ def _reflect(
     live = {(head["scope"], head["card_id"]): head["revision"] for head in heads}
     previous = {d: p for d, p in previous.items() if ledger.current(p, live, _now_ms(), settings.read_scopes)}
 
+    retries: list[tuple[str, list[dict[str, Any]]]] = []
+
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []
         for ops in submissions:
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
-            if remembered.get("proposal_id"):
+            if remembered.get("proposal_id") and apply and not dry_run:
+                from .memory_reflect_policy import allowed
+
+                if allowed(target, ops) is None:
+                    retries.append((digest, ops))
+                else:
+                    skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
+            elif remembered.get("proposal_id"):
                 skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
             elif remembered.get("refused"):
                 skipped["refused"] = skipped.get("refused", 0) + 1
@@ -605,7 +619,11 @@ def _reflect(
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
     remaining = unremembered(exact) + alternating
-    selected = remaining[:limit]
+    # Retry budget is separate so held proposals cannot consume new-work slots.
+    # Retries reuse an opened proposal and never submit, so they run first and a
+    # full new-proposal quota cannot block them.
+    retries.sort(key=lambda item: (previous[item[0]].get("attempted_ms", 0), item[0]))
+    selected = retries[:limit] + remaining[:limit]
     proposals = []
     refused: list[dict[str, str]] = []
     error = None
@@ -615,6 +633,9 @@ def _reflect(
         # Preserve unprocessed submissions under this binding across scope and limit changes.
         state.update(binding=binding, submissions=previous, **tables)
 
+        from .memory_reflect_policy import AutoApplyPacer
+
+        pacer = AutoApplyPacer()
         served_any = False
 
         def served(digest: str) -> None:
@@ -625,14 +646,19 @@ def _reflect(
                 tables[lane][name][key][1] = now
 
         for position, (digest, ops) in enumerate(selected):
-            sent = submit(
-                client,
-                previous,
-                digest,
-                ops,
-                base_epoch=report["log_epoch"],
-                save=lambda: _save(target, state),
-                fields={"pins": ledger.pins(ops)},
+            remembered_id = previous.get(digest, {}).get("proposal_id")
+            sent = (
+                Submitted(OPENED, proposal_id=remembered_id)
+                if remembered_id and apply
+                else submit(
+                    client,
+                    previous,
+                    digest,
+                    ops,
+                    base_epoch=report["log_epoch"],
+                    save=lambda: _save(target, state),
+                    fields={"pins": ledger.pins(ops)},
+                )
             )
             refused.extend({"op_digest": digest, "code": code} for code in sent.refusals)
             if sent.outcome == QUOTA:
@@ -652,7 +678,20 @@ def _reflect(
             if sent.outcome == DUPLICATE:
                 skipped["duplicate_pending"] = skipped.get("duplicate_pending", 0) + 1
             else:
-                proposals.append({"proposal_id": sent.proposal_id})
+                proposal: dict[str, Any] = {"proposal_id": sent.proposal_id}
+                if apply and sent.proposal_id is not None:
+                    from .memory_reflect_policy import attempt
+
+                    # Persist before attempting so a lost response also rotates the retry lane.
+                    # Advance beyond the previous maximum even if the wall clock stalls or regresses.
+                    previous[digest]["attempted_ms"] = max(
+                        _now_ms(), max((p.get("attempted_ms", 0) for p in previous.values()), default=0) + 1
+                    )
+                    _save(target, state)
+                    proposal["automatic"] = attempt(
+                        target, client, sent.proposal_id, ops, report["log_epoch"], pacer=pacer
+                    )
+                proposals.append(proposal)
         if served_any:
             state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
         # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.
@@ -678,7 +717,9 @@ def _reflect(
     return payload
 
 
-def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, scheduled: bool) -> dict[str, Any]:
+def run_payload(
+    *, target: Path, scope: str | None, limit: int, dry_run: bool, scheduled: bool, apply: bool = False
+) -> dict[str, Any]:
     derive.configuration(target)  # Refuse state overlapping a canonical card root.
     lock = target / ".brigade/memory/reflect/schedule.lock"
     io.protect_file(lock)
@@ -690,7 +731,15 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
             settings, client = _client(target)
             with store.limits.bounded(max_cards=MAX_SCOPE_CARDS, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
                 payload = _reflect(
-                    target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run, watch=scheduled
+                    target,
+                    settings,
+                    client,
+                    state,
+                    scope=scope,
+                    limit=limit,
+                    dry_run=dry_run,
+                    watch=scheduled,
+                    apply=apply,
                 )
         except (hubc.HubConfigError, hubc.HubUnavailable, hubc.HubRefusal, OSError, ValueError) as exc:
             # Never retain hub-supplied text, card bytes or credential-bearing errors.
@@ -725,6 +774,9 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
         if not dry_run:
             count = state["consecutive_failures"] + 1 if payload["status"] == "failed" else 0
             state.update(consecutive_failures=count, paused=count >= FAILURES, last_status=payload["status"])
+            _save(target, state)
+        if not dry_run:
+            state["last_automatic"] = payload.get("proposals", [])
             _save(target, state)
         payload["schedule"] = {k: state[k] for k in ("consecutive_failures", "paused")}
         return payload

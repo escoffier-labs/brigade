@@ -139,8 +139,10 @@ def evaluate_readiness(
 ) -> dict[str, Any]:
     """Evaluate facts supplied by selected-seat health and route integrations.
 
-    Injected observations are useful to embedding callers; the CLI currently
-    has no producer for admission, capacity, or T3 governance support.
+    ``inspect_readiness`` produces live read-only ``admission`` and
+    ``capacity`` observations for ``route == "brigade"``. Embedding callers may
+    still inject explicit observations; T3 governance support remains
+    unproduced here.
     """
     now = time.time() if now is None else now
     evidence: list[dict[str, Any]] = []
@@ -436,6 +438,24 @@ def evaluate_readiness(
     }
 
 
+def brigade_route_observations(
+    roster: roster_mod.Roster,
+    request: ReadinessRequest,
+    *,
+    workspace: Path,
+    scope: str | None = None,
+    now: float | None = None,
+) -> dict[str, Observation]:
+    """Produce authoritative, strictly read-only ``admission`` and ``capacity``
+    observations for ``route == "brigade"``.
+
+    Delegates to :func:`brigade.roster_readiness_brigade.brigade_route_observations`.
+    """
+    from .roster_readiness_brigade import brigade_route_observations as _impl
+
+    return _impl(roster, request, workspace=workspace, scope=scope, now=now)
+
+
 def inspect_readiness(
     roster: roster_mod.Roster,
     request: ReadinessRequest,
@@ -453,9 +473,6 @@ def inspect_readiness(
     ):
         return initial
     request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
-    selected_roster = replace(
-        roster, agents={name: replace(roster.agents[name], fallback=()) for name in request.workers}
-    )
     # A separate checkout is not a read-only sandbox. Confirm only Git
     # eligibility here, without creating a worktree or asserting disk capacity.
     if request.isolation == "worktree" and not runguard.is_git_worktree(workspace):
@@ -469,12 +486,22 @@ def inspect_readiness(
                 "isolation": Observation("failed", time.time(), scope, "Worktree isolation requires a Git checkout.")
             },
         )
+    from .roster_readiness_brigade import brigade_route_readiness
+
+    effective_roster, observations = brigade_route_readiness(roster, request, workspace=workspace)
+    selected_roster = replace(
+        effective_roster,
+        agents={name: replace(effective_roster.agents[name], fallback=()) for name in request.workers},
+    )
     probe = health_probe or seat_health.SeatHealthProbe(collect_executable_version=False)
     results = probe.probe_roster(selected_roster, workspace=workspace, allow_model_smoke=False)
+    observed_now = max([time.time(), *(obs.observed_at for obs in observations.values())])
     return evaluate_readiness(
-        roster,
+        effective_roster,
         request,
         workspace=workspace,
         health={result.seat: result for result in results},
+        observations=observations,
+        now=observed_now,
         hub_discovery_possible=hub_discovery_possible,
     )
