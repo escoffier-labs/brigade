@@ -433,6 +433,36 @@ pub struct Card {
     pub text: String,
     pub automated: bool,
 }
+/// Full retrieval-visible projection. Shared by indexing and automatic gates.
+/// Keep raw text too: literal queries read the blob rather than token postings.
+#[derive(Clone, Debug)]
+pub struct Projection {
+    pub fields: Fields,
+    pub tokens: Vec<String>,
+    pub links: super::ranking::Links,
+    pub digest: String,
+}
+pub fn projection(card: &Card, live: bool) -> Projection {
+    let fields = text::fields(&card.text, &card.card_id);
+    let indexed = text::card_text(&fields, &card.text);
+    let tokens = text::tokenize(&indexed);
+    let links = super::ranking::Links::parse(&card.text, &card.scope);
+    let body = serde_json::json!({
+        "scope":card.scope,"card_id":card.card_id,"live":live,
+        "indexed_text":indexed,"text":card.text,"tokens":tokens,
+        "title":fields.title,"summary":fields.summary,"tags":fields.tags,
+        "trust":card.trust,"revision":card.revision,"head_seq":card.revision,
+        "content_hash":card.content_hash,"automated":card.automated,
+        "successor":links.successor,"predecessors":links.predecessors
+    });
+    Projection {
+        fields,
+        tokens,
+        links,
+        digest: super::ids::sha256_hex(super::ids::canonical(&body).as_bytes()),
+    }
+}
+
 /// What the tail replay found for one changed card.
 #[derive(Debug)]
 pub enum Change {
@@ -495,8 +525,12 @@ impl Builder {
         for card in cards {
             let scope = self.scope_id(&card.scope);
             self.remove(scope, &card.card_id);
-            let fields = text::fields(&card.text, &card.card_id);
-            let tokens = text::tokenize(&text::card_text(&fields, &card.text));
+            let Projection {
+                fields,
+                tokens,
+                links,
+                ..
+            } = projection(&card, true);
             let card_id: Arc<str> = card.card_id.into();
             let doc = self.snap.docs.push(Doc {
                 live: true,
@@ -506,7 +540,7 @@ impl Builder {
                 head_seq: card.revision,
                 content_hash: card.content_hash.into(),
                 trust: card.trust.into(),
-                links: Arc::new(super::ranking::Links::parse(&card.text, &card.scope)),
+                links: Arc::new(links),
                 automated: card.automated,
                 fields: Arc::new(fields),
                 length: tokens.len() as u32,
@@ -628,7 +662,7 @@ impl Builder {
     }
 }
 
-const AUTOMATED_SQL: &str = "(c.writer_class='principal' OR COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0))";
+pub(super) const AUTOMATED_SQL: &str = "(c.writer_class='principal' OR COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0))";
 
 fn card_row(r: &rusqlite::Row) -> rusqlite::Result<Card> {
     let bytes: Vec<u8> = r.get(5)?;
@@ -1092,5 +1126,97 @@ impl Publisher {
                 self.rebuild_after(backoff(self.failed_installs));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    fn card() -> Card {
+        Card {
+            scope: "fleet".into(),
+            card_id: "one".into(),
+            revision: 1,
+            content_hash: super::super::ids::sha256_hex(b"needle\n"),
+            trust: "reviewed".into(),
+            text: "needle\n".into(),
+            automated: false,
+        }
+    }
+    #[test]
+    fn every_retrieval_visible_field_breaks_projection_invariance() {
+        let before = card();
+        let digest = projection(&before, true).digest;
+        for field in [
+            "scope",
+            "card_id",
+            "revision",
+            "content_hash",
+            "trust",
+            "text",
+            "automated",
+            "title",
+            "summary",
+            "description",
+            "tags",
+            "superseded_by",
+            "supersedes",
+            "merged_from",
+            "aliases",
+            "status",
+        ] {
+            let mut changed = before.clone();
+            match field {
+                "scope" => changed.scope = "repo:example/app".into(),
+                "card_id" => changed.card_id = "two".into(),
+                "revision" => changed.revision += 1,
+                "content_hash" => changed.content_hash = "different".into(),
+                "trust" => changed.trust = "flagged".into(),
+                "text" => changed.text = "another token\n".into(),
+                "automated" => changed.automated = true,
+                _ => changed.text = format!("---\n{field}: two\n---\nneedle\n"),
+            }
+            assert_ne!(projection(&changed, true).digest, digest, "{field}");
+        }
+        assert_ne!(projection(&before, false).digest, digest, "live status");
+    }
+    #[test]
+    fn projection_invariant_index_replay_is_byte_equal() {
+        let one = card();
+        let mut two = one.clone();
+        two.card_id = "two".into();
+        let mut b = Builder::from_cards([one.clone(), two], 1);
+        let replay = |s: &Snapshot| {
+            let rows: Vec<_> = ["needle", "one", "two", "absent"]
+                .iter()
+                .map(|q| {
+                    let hits = s.top(s.score(&[true], &text::tokenize(q)), TOP);
+                    serde_json::json!(
+                        hits.into_iter()
+                            .map(|(n, score)| {
+                                let d = s.doc(n);
+                                serde_json::json!([
+                                    &*d.card_id,
+                                    score,
+                                    d.revision,
+                                    &*d.trust,
+                                    d.fields.title,
+                                    d.fields.summary,
+                                    d.fields.tags
+                                ])
+                            })
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .collect();
+            serde_json::to_vec(&rows).unwrap()
+        };
+        let before = replay(&b.snapshot());
+        assert_eq!(
+            projection(&one, true).digest,
+            projection(&one.clone(), true).digest
+        );
+        b.apply(vec![Change::Live(one)], 2);
+        assert_eq!(replay(&b.snapshot()), before);
     }
 }

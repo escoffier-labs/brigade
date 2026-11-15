@@ -307,8 +307,8 @@ impl ReadTx for Budget<'_> {
 /// Conservative global high water marks make a post-snapshot write hold the gate.
 /// sqlite_sequence survives vector-log retention, so deletion cannot restore a token.
 pub fn token<T: ReadTx + ?Sized>(tx: &T) -> rusqlite::Result<Json> {
-    let mut token = json!({"epoch":ops::epoch(tx)?,"memory_events":0,"memory_vector_log":0});
-    for row in tx.query("SELECT name,seq FROM sqlite_sequence WHERE name IN ('memory_events','memory_vector_log') ORDER BY name",&[])? {
+    let mut token = json!({"epoch":ops::epoch(tx)?,"memory_events":0,"memory_vector_log":0,"memory_retrieval_history":0});
+    for row in tx.query("SELECT name,seq FROM sqlite_sequence WHERE name IN ('memory_events','memory_vector_log','memory_retrieval_history') ORDER BY name",&[])? {
         token[ops::s(&row[0])]=json!(number(&row[1]));
     }
     Ok(token)

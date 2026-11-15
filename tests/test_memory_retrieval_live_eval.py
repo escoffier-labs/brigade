@@ -311,8 +311,10 @@ def test_missing_gold_ids_are_dropped_before_query_floor():
     report = live.measure_candidate(cards, queries, proposal, bm25_adapter(cards), {})
     assert report["corpus"]["query_count"] == 20
     assert report["gate"]["passed"]
-    with pytest.raises(live.LiveEvalError, match="19 available"):
-        live.measure_candidate(cards, queries[1:], proposal, bm25_adapter(cards), {})
+    # Every surviving label may veto, including a single query in one session.
+    assert live.measure_candidate(cards, queries[1:2], proposal, bm25_adapter(cards), {})["gate"]["passed"]
+    with pytest.raises(live.LiveEvalError, match="0 available"):
+        live.measure_candidate(cards, [], proposal, bm25_adapter(cards), {})
 
 
 def test_private_search_read_ledger_counts_all_twenty(workspace):
@@ -382,3 +384,31 @@ def test_record_use_sends_only_identity_and_session_to_hub(workspace, monkeypatc
     monkeypatch.setenv("BRIGADE_RUN_ID", "job")
     live.record_use(workspace, "published", "private card text", payload=context)
     assert len(requests) == 1
+
+
+def test_single_query_vetoes_a_gold_drop_despite_equal_aggregate_metrics():
+    from brigade.memory_retrieval_eval.adapters import bm25_adapter
+
+    cards = [live._card("a", "needle\n"), live._card("b", "needle needle needle\n")]
+    baseline = bm25_adapter(cards)
+    assert [i for i, _ in baseline("needle", 20)] == ["b", "a"]
+    after_text = "needle\n"
+    proposal = {
+        "proposal_id": "candidate",
+        "targets": [
+            {
+                "scope": "fleet",
+                "card_id": "b",
+                "before_hash": live.text_hash(cards[1].body),
+                "after_hash": live.text_hash(after_text),
+                "after_text": after_text,
+                "after_state": "live",
+            }
+        ],
+    }
+    query = QuerySpec("one", "needle", ("a", "b"), "observed")
+    report = live.measure_candidate(cards, [query], proposal, baseline, {})
+    assert report["adapters"]["before"]["overall"] == report["adapters"]["candidate"]["overall"]
+    assert not report["gate"]["passed"]
+    assert report["gate"]["authorizes"] is False
+    assert report["live"]["veto_count"] == 1

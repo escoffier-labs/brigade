@@ -17,6 +17,7 @@ pub enum Action {
     RetrievalEval(super::retrieval_eval::Report),
     RetrievalSearch(Json),
     RetrievalUse(Json),
+    RetrievalHistoryRotate(usize),
     AutoApplySwitch(bool),
     EvidencePurge(String),
     Evidence(super::attestation::Attachment),
@@ -90,6 +91,7 @@ impl Action {
             Action::RetrievalEval(_) => "retrieval_eval.record",
             Action::RetrievalSearch(_) => "retrieval_search",
             Action::RetrievalUse(_) => "retrieval_use",
+            Action::RetrievalHistoryRotate(_) => "retrieval_history_rotate",
             Action::AutoApplySwitch(_) => "auto_apply_switch",
             Action::EvidencePurge(_) => "evidence.purge",
             Action::Evidence(_) => "evidence.attach",
@@ -119,7 +121,9 @@ impl Action {
         match self {
             Action::RetrievalEval(_) => (None, "admin"),
             Action::RetrievalSearch(_) | Action::RetrievalUse(_) => (None, "read"),
-            Action::AutoApplySwitch(_) | Action::EvidencePurge(_) => (None, "admin"),
+            Action::RetrievalHistoryRotate(_)
+            | Action::AutoApplySwitch(_)
+            | Action::EvidencePurge(_) => (None, "admin"),
             Action::Evidence(a) => (
                 Some(super::proposals::string(&a.request, "scope")),
                 "reflect",
@@ -172,7 +176,9 @@ impl Action {
         match self {
             Action::RetrievalEval(r) => r.raw.len(),
             Action::RetrievalSearch(r) | Action::RetrievalUse(r) => r.to_string().len(),
-            Action::AutoApplySwitch(_) | Action::EvidencePurge(_) => 0,
+            Action::RetrievalHistoryRotate(_)
+            | Action::AutoApplySwitch(_)
+            | Action::EvidencePurge(_) => 0,
             Action::Evidence(a) => a.bytes.len(),
             Action::Proposal(c) => c.new_bytes(),
             Action::Put { text, .. } | Action::Handoff { text, .. } => text.len(),
@@ -693,6 +699,7 @@ fn run(
         Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
         Action::RetrievalSearch(r) => super::retrieval_history::write(tx, p, r, true),
         Action::RetrievalUse(r) => super::retrieval_history::write(tx, p, r, false),
+        Action::RetrievalHistoryRotate(limit) => super::retrieval_history::rotate(tx, p, *limit),
         Action::AutoApplySwitch(enabled) => {
             tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
             let payload = json!({"auto_apply_enabled":enabled});

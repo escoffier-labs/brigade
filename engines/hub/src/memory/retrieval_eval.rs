@@ -11,6 +11,9 @@ use rusqlite::types::Value;
 use serde_json::{Value as Json, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Reserved synthetic scope. Fixture reports carry no authority elsewhere.
+pub const FIXTURE_SCOPE: &str = "repo:brigade/retrieval-eval-fixture";
+
 /// The harness evaluation id expires after 24 hours even with no corpus drift.
 pub const MAX_AGE_MS: i64 = 86_400_000;
 /// Match event-id admission: tolerate five minutes of client clock skew.
@@ -367,6 +370,14 @@ pub fn hold<T: ReadTx + ?Sized>(
     } else {
         "lexical"
     };
+    // Fixture reports have authority only in this reserved test/CI scope.
+    // On real scopes history can veto, but can never supply permission.
+    if super::proposals::cards(proposal)
+        .iter()
+        .any(|c| c["scope"] != FIXTURE_SCOPE)
+    {
+        return real_scope_hold(tx, proposal, mode, now);
+    }
     let rows=tx.query("SELECT report_json,report_sha256,corpus_members,dense_identity FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
     let Some(row) = rows.first() else {
         return Ok(Some("retrieval_eval_unbound"));
@@ -496,6 +507,76 @@ pub fn hold<T: ReadTx + ?Sized>(
         (changed.len() > drift_budget(snapshot.len().min(live_members.len())))
             .then_some("retrieval_eval_drift_exceeded"),
     )
+}
+
+/// Recomputed at preflight and apply from current hub heads, never report metrics.
+fn real_scope_hold<T: ReadTx + ?Sized>(
+    tx: &T,
+    proposal: &Json,
+    mode: &str,
+    now: i64,
+) -> rusqlite::Result<Option<&'static str>> {
+    if mode != "lexical" {
+        return Ok(Some("retrieval_eval_projection_changed"));
+    }
+    if let Some(reason) = super::retrieval_history::veto(tx, proposal, now)? {
+        return Ok(Some(reason));
+    }
+    if proposal["tier"] != 0 {
+        return Ok(Some("retrieval_eval_projection_changed"));
+    }
+    if proposal["ops"].as_array().is_none_or(|ops| {
+        ops.is_empty() || ops.iter().any(|op| string(op, "type") != "append_evidence")
+    }) {
+        return Ok(Some("retrieval_eval_projection_changed"));
+    }
+    let cards = super::proposals::cards(proposal);
+    if cards.is_empty() {
+        return Ok(Some("retrieval_eval_projection_changed"));
+    }
+    for target in cards {
+        let scope = string(target, "scope");
+        let id = string(target, "card_id");
+        let rows = tx.query(&format!("SELECT c.revision,c.content_hash,c.trust,b.bytes,{},c.state FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", super::index::AUTOMATED_SQL), &[ops::t(scope),ops::t(id)])?;
+        let Some(row) = rows.first() else {
+            return Ok(Some("retrieval_eval_target_drifted"));
+        };
+        let (Value::Integer(revision), Value::Blob(bytes)) = (&row[0], &row[3]) else {
+            return Ok(Some("retrieval_eval_projection_changed"));
+        };
+        if target["base_revision"] != *revision || target["before_hash"] != ops::s(&row[1]) {
+            return Ok(Some("retrieval_eval_target_drifted"));
+        }
+        let before = super::index::Card {
+            scope: scope.into(),
+            card_id: id.into(),
+            revision: *revision,
+            content_hash: ops::s(&row[1]),
+            trust: ops::s(&row[2]),
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            automated: matches!(row[4],Value::Integer(n) if n != 0),
+        };
+        // Every applied target receives a new global revision. Include this
+        // recency input instead of pretending a rewrite preserves ranking.
+        let changed = target["after_text"] != target["before_text"]
+            || target["after_state"] != target["before_state"];
+        let after = super::index::Card {
+            revision: if changed {
+                revision.saturating_add(1)
+            } else {
+                *revision
+            },
+            content_hash: string(target, "after_hash").into(),
+            text: string(target, "after_text").into(),
+            ..before.clone()
+        };
+        if super::index::projection(&before, ops::s(&row[5]) == "live").digest
+            != super::index::projection(&after, target["after_state"] == "live").digest
+        {
+            return Ok(Some("retrieval_eval_projection_changed"));
+        }
+    }
+    Ok(None)
 }
 
 /// Only review-capable diagnostics expose the selected trust-bearing record.

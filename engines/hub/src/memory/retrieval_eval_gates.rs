@@ -64,18 +64,8 @@ fn ranking(adapter: &Json) -> Option<&str> {
 }
 pub(super) fn passed(body: &Json, mode: &str) -> bool {
     if body["gate"]["name"] == "Live-R0" {
-        let before = &body["adapters"]["before"];
-        let after = &body["adapters"]["candidate"];
-        return mode == "lexical"
-            && body["k"] == 5
-            && body["live"]["binding"]["ranking"] == "raw"
-            && body["live"]["replay_matches"] == true
-            && before["available"] == true
-            && after["available"] == true
-            && before["overall"]["query_count"]
-                .as_u64()
-                .is_some_and(|n| n >= 20)
-            && compare(&before["overall"], &after["overall"], false);
+        // A diagnostic live report can never supply authorization.
+        return false;
     }
     let lexical = mode == "lexical";
     let before = &body["adapters"]["bm25"];

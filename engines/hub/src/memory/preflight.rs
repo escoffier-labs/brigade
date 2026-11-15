@@ -281,12 +281,19 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.principals.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
     });
     report["retrieval_eval_record"] = super::retrieval_eval::summary(tx, authority)?;
-    let eval_expiry = super::retrieval_eval::expires(tx, authority)?;
+    let eval_expiry = if proposals::cards(body)
+        .iter()
+        .all(|c| c["scope"] == super::retrieval_eval::FIXTURE_SCOPE)
+    {
+        super::retrieval_eval::expires(tx, authority)?
+    } else {
+        None // Real-scope invariance needs no measurement or report lifetime.
+    };
     report["valid_until_ms"] = json!(
         proof
             .expires_ms
             .unwrap_or(now)
-            .min(eval_expiry.unwrap_or(now))
+            .min(eval_expiry.unwrap_or(i64::MAX))
     );
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
     bind_evaluation(&mut report);

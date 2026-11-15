@@ -1031,6 +1031,7 @@ impl Store {
             | "evidence.attach"
             | "evidence.purge"
             | "auto_apply_switch"
+            | "retrieval_history_rotate"
             | "retrieval_use"
             | "retrieval_eval.record" => match self.prepare(credential, action, map, &raw) {
                 Ok(prepared) => self.write(prepared).await,
@@ -1178,6 +1179,7 @@ impl Store {
             "retrieval_eval.record" => {
                 &["action", "report_json", "report_sha256", "client_event_id"]
             }
+            "retrieval_history_rotate" => &["action", "limit", "client_event_id"],
             "retrieval_use" => &[
                 "action",
                 "session_id",
@@ -1257,6 +1259,7 @@ impl Store {
                 | "auto_apply_switch"
                 | "evidence.purge"
                 | "retrieval_eval.record"
+                | "retrieval_history_rotate"
         ) && *credential != Credential::Admin
         {
             return Err(error(
@@ -1343,6 +1346,13 @@ impl Store {
         let action = match action {
             "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
             "retrieval_use" => Action::RetrievalUse(raw.clone()),
+            "retrieval_history_rotate" => Action::RetrievalHistoryRotate(
+                map.get("limit")
+                    .and_then(Json::as_u64)
+                    .filter(|n| (1..=500).contains(n))
+                    .ok_or_else(|| invalid("limit must be from 1 through 500"))?
+                    as usize,
+            ),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
             "verifier_resync" => Action::VerifierResync { generation: 0 },
             "verifier" => Action::Verifier {

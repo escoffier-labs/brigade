@@ -1,11 +1,12 @@
 //! phase-memory-verify slice 3: verifier principals and the Tier 2 floor (D4).
+use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{proposal_tests::*, tests::*, *};
 use rusqlite::Connection;
 
 const ROTATED_TOKEN: &str = "fake-agent-token-rotated";
 
 fn evidence(card: &str, revision: i64) -> Json {
-    let mut o = op("fleet", card, revision);
+    let mut o = op(FIXTURE_SCOPE, card, revision);
     o.as_object_mut().unwrap().remove("text");
     o["type"] = json!("append_evidence");
     o["evidence_ids"] = json!([
@@ -146,9 +147,9 @@ fn snapshot(h: &Hub) -> Vec<String> {
 /// `agent:dot` may propose on `fleet` and two cards exist there.
 async fn ready(h: &Hub) -> (i64, i64) {
     tier0(h);
-    grant(h, "fleet", &["read", "reflect"]).await;
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let b = h.put(ADMIN_TOKEN, "fleet", "b", None, OLD).await;
+    grant(h, FIXTURE_SCOPE, &["read", "reflect"]).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let b = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "b", None, OLD).await;
     (rev(&a), rev(&b))
 }
 
@@ -235,7 +236,7 @@ async fn auto_apply_on_a_verifier_proposal_is_refused_and_changes_nothing() {
         "{again:?}"
     );
     assert_eq!(before, snapshot(&h));
-    assert_eq!(card(&h, "fleet", "a").await["revision"], a);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["revision"], a);
 }
 
 #[tokio::test]
@@ -301,7 +302,7 @@ async fn flag_changes_publish_the_verifier_list_for_the_policy_writer() {
 #[tokio::test]
 async fn status_reports_verifier_and_reflect_principal_for_the_caller() {
     let h = Hub::with(clean(), None);
-    grant(&h, "fleet", &["read"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read"]).await;
     policy(
         &h,
         json!({"tier0_op_classes":["append_evidence"],"reflect_principals":["node-1"]}),
@@ -340,7 +341,7 @@ async fn status_reports_verifier_and_reflect_principal_for_the_caller() {
 async fn a_principal_cannot_set_its_own_flag_through_any_memory_action() {
     let h = Hub::with(clean(), None);
     let all: Vec<&str> = auth::RIGHTS.to_vec();
-    for scope in ["fleet", "*"] {
+    for scope in [FIXTURE_SCOPE, "*"] {
         let r = h.call(ADMIN_TOKEN, json!({"action":"grant","principal":"agent:dot","scope":scope,"rights":all,"client_event_id":h.id()})).await;
         assert_eq!(r.status, 200, "{r:?}");
     }
@@ -349,12 +350,12 @@ async fn a_principal_cannot_set_its_own_flag_through_any_memory_action() {
             let r = h.call(token, json!({"action":"verifier","principal":principal,"verifier":verifier,"client_event_id":h.id()})).await;
             assert_eq!((r.status, code(&r)), (403, "memory_grant_missing"), "{r:?}");
         }
-        let r = h.call(token, json!({"action":"grant","principal":principal,"scope":"fleet","rights":["read"],"client_event_id":h.id()})).await;
+        let r = h.call(token, json!({"action":"grant","principal":principal,"scope":FIXTURE_SCOPE,"rights":["read"],"client_event_id":h.id()})).await;
         assert_eq!(r.status, 403, "{r:?}");
     }
     // No other action carries the flag: an extra field is refused outright.
     for body in [
-        json!({"action":"put","scope":"fleet","card_id":"x","text":"t","verifier":true,"client_event_id":h.id()}),
+        json!({"action":"put","scope":FIXTURE_SCOPE,"card_id":"x","text":"t","verifier":true,"client_event_id":h.id()}),
         json!({"action":"propose","base_epoch":h.epoch().await,"ops":[],"verifier":false,"client_event_id":h.id()}),
         json!({"action":"status","verifier":true}),
     ] {
@@ -411,7 +412,7 @@ async fn every_credential_a_verifier_is_issued_is_flagged_and_tier_two() {
     let h = Hub::with(clean(), None);
     let (a, b) = ready(&h).await;
     assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
-    let c = rev(&h.put(ADMIN_TOKEN, "fleet", "c", None, OLD).await);
+    let c = rev(&h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "c", None, OLD).await);
     // The hub holds one live credential per principal id, so the second and
     // third credentials are successive enrollments of the same principal.
     for (token, (card, revision)) in [
@@ -444,7 +445,7 @@ async fn revoke_and_readd_and_principal_removal_both_come_back_flagged() {
     assert_eq!(flag(&h, "agent:dot", true).await.status, 200);
     // Revoke every credential, drop the grants, then re-add one.
     revoke(&h);
-    let r = h.call(ADMIN_TOKEN, json!({"action":"grant","principal":"agent:dot","scope":"fleet","rights":[],"client_event_id":h.id()})).await;
+    let r = h.call(ADMIN_TOKEN, json!({"action":"grant","principal":"agent:dot","scope":FIXTURE_SCOPE,"rights":[],"client_event_id":h.id()})).await;
     assert_eq!(r.status, 200);
     assert_eq!(principal_flag(&h, "agent:dot"), Some(1));
     assert_eq!(
@@ -453,7 +454,7 @@ async fn revoke_and_readd_and_principal_removal_both_come_back_flagged() {
     );
     issue(&h, "fake-agent-token-readd");
     assert_eq!(status(&h, "fake-agent-token-readd").await.status, 403);
-    grant(&h, "fleet", &["read", "reflect"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
     assert_eq!(
         status(&h, "fake-agent-token-readd").await.body["verifier"],
         true
@@ -491,14 +492,14 @@ async fn a_credential_whose_copy_differs_is_refused_on_every_memory_action() {
     let epoch = h.epoch().await;
     let bodies = [
         json!({"action":"status"}),
-        json!({"action":"card","scope":"fleet","card_id":"a"}),
+        json!({"action":"card","scope":FIXTURE_SCOPE,"card_id":"a"}),
         json!({"action":"log"}),
         json!({"action":"search","query":"focused gate"}),
         json!({"action":"proposal_list"}),
         json!({"action":"proposal_show","proposal_id":id}),
-        json!({"action":"read_stats","scope":"fleet"}),
+        json!({"action":"read_stats","scope":FIXTURE_SCOPE}),
         json!({"action":"preflight","proposal_id":id}),
-        json!({"action":"put","scope":"fleet","card_id":"z","text":"new card","client_event_id":h.id()}),
+        json!({"action":"put","scope":FIXTURE_SCOPE,"card_id":"z","text":"new card","client_event_id":h.id()}),
         json!({"action":"handoff","kind":"note","text":"a note","client_event_id":h.id()}),
         json!({"action":"propose","base_epoch":epoch,"ops":[evidence("b", a)],"client_event_id":h.id()}),
         json!({"action":"auto_apply","proposal_id":id,"base_epoch":epoch,"client_event_id":h.id()}),
@@ -566,7 +567,7 @@ async fn a_credential_whose_copy_differs_is_refused_on_every_memory_action() {
 #[tokio::test]
 async fn clearing_the_flag_updates_every_copy_at_once_with_no_mismatch_between() {
     let h = Hub::with(clean(), None);
-    grant(&h, "fleet", &["read"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read"]).await;
     // Stale copies from earlier credentials are rewritten too.
     for token in ["fake-agent-token-2", "fake-agent-token-3"] {
         assert_eq!(bind(&h, token, None).await.status, 200);
@@ -648,7 +649,7 @@ async fn a_publish_failure_refuses_the_flag_change_and_leaves_it_unflagged() {
     assert_eq!(principal_flag(&h, "agent:dot"), None);
     assert!(copies(&h, "agent:dot").is_empty());
     assert_eq!(h.events(), events);
-    grant(&h, "fleet", &["read"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read"]).await;
     assert_eq!(status(&h, AGENT_TOKEN).await.body["verifier"], false);
     // Once the list can be written, the same change succeeds.
     std::fs::remove_dir_all(&sidecar).unwrap();

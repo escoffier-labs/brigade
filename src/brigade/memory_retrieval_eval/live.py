@@ -23,13 +23,12 @@ from .corpus import CardDoc, QuerySpec
 from .hub import HubAdapter, HubOptions, stable_digest
 from .metrics import aggregate_scores, score_query
 
-MIN_QUERIES = 20
+MIN_QUERIES = 1
 MAX_EVENTS = 10_000
 MAX_CARDS = 2_000
 MAX_BYTES = 16 * 1024 * 1024
 MAX_REQUESTS = 2_500
 MAX_SECONDS = 60
-METRICS = ("hit_rate", "mrr", "precision_at_k", "recall_at_k")
 
 
 class LiveEvalError(ValueError):
@@ -212,6 +211,7 @@ def measure_candidate(
     candidate = bm25_adapter(sorted(after.values(), key=lambda c: c.path))
     scores: dict[str, list[dict[str, Any]]] = {"before": [], "candidate": []}
     parity = True
+    vetoes = 0
     for query in queries:
         budget = getattr(baseline, "client", None)
         if isinstance(budget, BudgetClient):
@@ -219,14 +219,21 @@ def measure_candidate(
         ranked = baseline(query.query, 20)
         parity &= [i for i, _ in ranked] == [i for i, _ in local(query.query, 20)]
         scores["before"].append(score_query([i for i, _ in ranked], query.gold, 5))
-        scores["candidate"].append(score_query([i for i, _ in candidate(query.query, 20)], query.gold, 5))
+        candidate_ids = [i for i, _ in candidate(query.query, 20)]
+        before_ids = [i for i, _ in ranked]
+        vetoes += sum(
+            (candidate_ids.index(gold) if gold in candidate_ids else float("inf"))
+            > (before_ids.index(gold) if gold in before_ids else float("inf"))
+            for gold in query.gold
+        )
+        scores["candidate"].append(score_query(candidate_ids, query.gold, 5))
     blocks: dict[str, Any] = {
         name: {"available": True, "overall": aggregate_scores(rows)} for name, rows in scores.items()
     }
     failures = []
     if not parity:
         failures.append("live lexical replay differs from snapshot")
-    if any(blocks["candidate"]["overall"][m] < blocks["before"]["overall"][m] for m in METRICS):
+    if vetoes:
         failures.append("candidate retrieval regression")
     safe_targets = [
         {k: t[k] for k in ("scope", "card_id", "before_hash", "after_hash", "after_state")} for t in targets
@@ -237,11 +244,12 @@ def measure_candidate(
         "k": 5,
         "query_set_digest": stable_digest([(q.query, q.gold) for q in queries]),
         "corpus": {"card_count": len(cards), "query_count": len(queries)},
-        "gate": {"name": "Live-R0", "passed": not failures, "failures": failures},
+        "gate": {"name": "Live-R0", "passed": not failures, "failures": failures, "authorizes": False},
         "live": {
             "proposal_id": proposal["proposal_id"],
             "targets": safe_targets,
             "replay_matches": parity,
+            "veto_count": vetoes,
             "binding": binding,
         },
         "adapters": blocks,

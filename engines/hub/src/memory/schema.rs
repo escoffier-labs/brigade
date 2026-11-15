@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 14;
+pub const USER_VERSION: i64 = 15;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -278,8 +278,17 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     if version < 13 {
         step(c, super::manifest_binding::DDL, 13).map_err(err)?;
     }
-    if version < 14 {
-        step(c, super::retrieval_history::DDL, 14).map_err(err)?;
+    // Version 14 is reserved for #2606. Rebase its migration before landing.
+    if version < 15 {
+        step(
+            c,
+            &format!(
+                "DROP TRIGGER IF EXISTS memory_retrieval_history_no_delete; {}",
+                super::retrieval_history::DDL
+            ),
+            15,
+        )
+        .map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c
