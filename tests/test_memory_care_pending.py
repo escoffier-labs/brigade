@@ -2,11 +2,13 @@
 
 import pytest
 
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from brigade import memory_care_journal as journal, memory_care_tend as tend
 from brigade import memory_inbox_drain as drain
 from tests.test_memory_inbox_drain import draft, TODAY, DOCUMENT_BODY
 
 
+@requires_automatic_filing
 def test_abandoned_document_undo_can_retry(tmp_path, monkeypatch):
     draft(tmp_path, "document-destination-unwritable", DOCUMENT_BODY)
     drain.drain(tmp_path, today=TODAY, deadline_days=14)
@@ -29,6 +31,7 @@ def test_abandoned_document_undo_can_retry(tmp_path, monkeypatch):
     assert not (tmp_path / "USER.md").exists()
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("boundary", ["prepare-before", "prepare-after", "finish-before", "finish-after", "append"])
 def test_pending_index_matches_scan_after_crash(tmp_path, monkeypatch, boundary):
     from brigade import memory_care_pending as pending, ingest
@@ -69,6 +72,7 @@ def test_pending_index_matches_scan_after_crash(tmp_path, monkeypatch, boundary)
         assert pending.load(tmp_path) == pending.scan(tmp_path)
 
 
+@requires_automatic_filing
 def test_completed_decisions_not_reread_by_recovery(tmp_path, monkeypatch):
     from brigade import memory_care_pending as pending
 

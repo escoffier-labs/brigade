@@ -12,6 +12,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import threading
 
+import errno
 import hashlib
 import os
 import re
@@ -34,7 +35,6 @@ from .card_fingerprint import (
     index_cards,
     read_text_nofollow,
     reinforce_existing_card,
-    write_text_nofollow_atomic,
 )
 from .handoff_content import normalize_suggested_card_content
 from .handoff_ingest_rules import (
@@ -51,6 +51,7 @@ from .handoff_ingest_rules import (
     sha256_hex,
     sha_matches,
 )
+from . import handoff_origin
 from .bounded_read import read_regular_file
 from .instruction_inventory import INSPECTION_CEILING
 from .selection import WRITER_INBOXES
@@ -314,14 +315,42 @@ def ingest_into(
             try:
                 # One read. The digest, the parse and every delivered copy
                 # come from these bytes, so the digest names what was handled.
-                snapshot = path.read_bytes()
-                sha = hashlib.sha256(snapshot).hexdigest()
-                if sha in stats.seen_digests:
+                try:
+                    snapshot = handoff_origin.read_handoff(path, max_bytes=INSPECTION_CEILING)
+                except handoff_origin.HandoffTooLargeError:
+                    from .handoff_quarantine import hold
+
+                    try:
+                        hold(owner, path, dry_run=dry_run)
+                    except TrackedHandoffError:
+                        stats.skipped += 1
+                        stats.actions.append(_summary("skip", path.name, _TRACKED_SKIP_CODE))
+                        continue
+                    except ChangedHandoffError:
+                        raise
+                    except OSError as exc:
+                        _record_failure(stats, path, "handoff-hold-failed")
+                        stats.actions[-1] += f" cause={errno.errorcode.get(exc.errno or 0, 'OSError')}"
+                        continue
                     if not dry_run:
-                        _archive(path, processed_dir, sha)
-                    stats.skipped += 1
-                    stats.actions.append(_summary("skip", path.name, "duplicate-content"))
+                        handoff_origin.remove_stamp(handoff_origin.stamp_path(source, path))
+                    stats.processed += 1
+                    stats.inboxed += 1
+                    stats.actions.append(_summary("inbox", path.name, "handoff-too-large"))
                     continue
+                sidecar = handoff_origin.stamp_path(source, path)
+                sha = hashlib.sha256(snapshot).hexdigest()
+                origin = handoff_origin.verify_handoff(source, path, snapshot)
+                trusted_origin = origin is not None and origin.allows_automatic_filing
+                if origin is not None:
+                    sidecar = origin.stamp.sidecar
+
+                def claim_origin(verified: handoff_origin.VerifiedOrigin | None = origin) -> bool:
+                    nonlocal trusted_origin
+                    assert verified is not None
+                    trusted_origin = verified.stamp.claim()
+                    return trusted_origin
+
                 # Bad bytes or malformed structure belong to this handoff
                 # only. Guard and invariant failures further on stay fatal.
                 try:
@@ -332,14 +361,41 @@ def ingest_into(
                 except ValueError:
                     _record_failure(stats, path, "invalid-content")
                     continue
-                outcome = decide(
-                    sections,
-                    target=owner,
-                    promote_cards=promote_cards,
-                    route_documents=route_documents,
-                    card_ids=card_ids,
-                    routing=routing,
-                )
+                if trusted_origin and not dry_run:
+                    if _is_tracked(path, _git_tracked_files(path.parent)):
+                        raise TrackedHandoffError("handoff became tracked before origin claim")
+                    if sha in stats.seen_digests:
+                        assert origin is not None
+                        trusted_origin = claim_origin()
+                if trusted_origin and sha in stats.seen_digests:
+                    if not dry_run:
+                        _archive(path, processed_dir, sha)
+                        handoff_origin.remove_stamp(sidecar)
+                    stats.skipped += 1
+                    stats.actions.append(_summary("skip", path.name, "duplicate-content"))
+                    continue
+                if not trusted_origin:
+                    outcome = Outcome(
+                        "inboxed",
+                        code="origin-review-required",
+                        reason="missing, unverifiable or untrusted origin requires review",
+                    )
+                else:
+                    outcome = decide(
+                        sections,
+                        target=owner,
+                        promote_cards=promote_cards,
+                        route_documents=route_documents,
+                        card_ids=card_ids,
+                        routing=routing,
+                    )
+                # A busy card lock has made no canonical writes. Claim its
+                # origin only after acquiring the lock, so it remains retryable.
+                if trusted_origin and outcome.kind not in {"promoted", "reinforced"} and not dry_run:
+                    assert origin is not None
+                    if not claim_origin():
+                        trusted_origin = False
+                        outcome = Outcome("inboxed", code="origin-review-required")
                 action = _execute(
                     outcome,
                     handoff_path=path,
@@ -354,7 +410,12 @@ def ingest_into(
                     promote_cards=promote_cards,
                     route_documents=route_documents,
                     routing=routing,
+                    claim_origin=claim_origin
+                    if trusted_origin and outcome.kind in {"promoted", "reinforced"}
+                    else None,
                 )
+                if not dry_run and action.kind in _HANDLED_KINDS:
+                    handoff_origin.remove_stamp(sidecar)
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
             except ChangedHandoffError:
@@ -362,13 +423,19 @@ def ingest_into(
                 # sits here, so leave it pending and do not count the digest.
                 _record_failure(stats, path, "handoff-changed")
                 continue
+            except handoff_origin.LinkedHandoffError:
+                _record_failure(stats, path, "linked-handoff")
+                continue
+            except handoff_origin.HandoffTooLargeError:
+                _record_failure(stats, path, "handoff-too-large")
+                continue
             except OSError:
                 _record_failure(stats, path, "io-error")
                 continue
             # Only content that was published, appended or archived counts as
             # handled. A retryable skip leaves the handoff pending, so a later
             # identical copy must not be archived as its duplicate.
-            if action.kind in _HANDLED_KINDS:
+            if trusted_origin and action.kind in _HANDLED_KINDS:
                 stats.seen_digests.add(sha)
             stats.processed += 1
             stats.actions.append(action.summary)
@@ -847,6 +914,7 @@ def _publish_promoted_card(
     dry_run: bool,
     expected_sha: str = "",
     card_ids: CardIdIndex | None = None,
+    claim_origin: Callable[[], bool] | None = None,
 ) -> str:
     """Publish (or, in a dry run, simulate) one card and record its id in `card_ids`.
 
@@ -898,6 +966,8 @@ def _publish_promoted_card(
                 raise OSError("publication must be a regular file")
             build_content(check_state(dest.read_bytes() if dest.exists() else None))
         else:
+            if claim_origin is not None and not claim_origin():
+                raise handoff_origin.OriginClaimRefused("origin claim unavailable")
             _write_card_descriptor_bound(dest, target, check_state, build_content)
     if card_ids is not None:
         # `built` is the text written, or in a dry run the text the same builder would
@@ -1085,6 +1155,7 @@ def _execute(
     promote_cards: bool | None = None,
     route_documents: bool | None = None,
     routing: instruction_overflow.RouteContext | None = None,
+    claim_origin: Callable[[], bool] | None = None,
     pending: list[ingest_near_duplicate.Pending] | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
@@ -1104,10 +1175,29 @@ def _execute(
             expected_sha = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
         try:
             _publish_promoted_card(
-                dest, target, sections, dry_run=dry_run, expected_sha=expected_sha, card_ids=card_ids
+                dest,
+                target,
+                sections,
+                dry_run=dry_run,
+                expected_sha=expected_sha,
+                card_ids=card_ids,
+                claim_origin=claim_origin,
             )
         except InboxLockTimeout:
             return Action("skipped", _summary("skip", name, "card-publication-busy"))
+        except handoff_origin.OriginClaimRefused:
+            return _execute(
+                Outcome("inboxed", code="origin-review-required"),
+                handoff_path,
+                target,
+                sections,
+                inbox_dir,
+                processed_dir,
+                dry_run,
+                snapshot,
+                promote_cards=promote_cards,
+                route_documents=route_documents,
+            )
         except (OSError, ValueError) as exc:
             # A reviewed migration may have arrived after decide(). Route the
             # original handoff for review without replacing that revision.
@@ -1169,17 +1259,52 @@ def _execute(
             new_receipt = dest is None
             if dest is None:
                 stem = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_path.stem)[:120]
-                dest = _write_review_draft(inbox_dir, stem, receipt + original)
+                receipt_text = receipt + original
+                dest = _write_review_draft(inbox_dir, stem, receipt_text)
+                if promote_cards is not None and route_documents is not None:
+                    try:
+                        handoff_origin.stamp_review_draft(
+                            target,
+                            dest,
+                            receipt_text.encode("utf-8"),
+                            handoff_origin.ReviewDraft(outcome.code, promote_cards, route_documents),
+                        )
+                    except OSError:
+                        handoff_origin.remove_stamp(handoff_origin.stamp_path(target, dest))
             # Publish the receipt before mutating the card so a failed inbox write
             # leaves the source retryable without incrementing reinforcements twice.
             assert outcome.dest is not None
+
+            def admit_reinforcement() -> None:
+                if claim_origin is not None and not claim_origin():
+                    raise handoff_origin.OriginClaimRefused("origin claim unavailable")
+
             try:
-                reinforce_existing_card(outcome.dest, today=date.today(), evidence_pointer=evidence_pointer)
-            except OSError:
+                reinforce_existing_card(
+                    outcome.dest,
+                    today=date.today(),
+                    evidence_pointer=evidence_pointer,
+                    before_write=admit_reinforcement,
+                )
+            except OSError as exc:
                 if new_receipt:
                     dest.unlink()
+                    handoff_origin.remove_stamp(handoff_origin.stamp_path(target, dest))
                 else:
-                    write_text_nofollow_atomic(dest, previous.decode("utf-8"))
+                    ingest_near_duplicate.write_review_text(target, dest, previous.decode("utf-8"))
+                if isinstance(exc, handoff_origin.OriginClaimRefused):
+                    return _execute(
+                        Outcome("inboxed", code="origin-review-required"),
+                        handoff_path,
+                        target,
+                        sections,
+                        inbox_dir,
+                        processed_dir,
+                        dry_run,
+                        snapshot,
+                        promote_cards=promote_cards,
+                        route_documents=route_documents,
+                    )
                 raise
             if new_receipt and pending is not None:
                 pending.append(
@@ -1259,7 +1384,7 @@ def _execute(
             inbox_dir.mkdir(parents=True, exist_ok=True)
             # Copy the original file verbatim so reviewers see what the
             # harness actually wrote, not a reconstruction.
-            original = snapshot.decode("utf-8") if snapshot is not None else handoff_path.read_text(encoding="utf-8")
+            original_bytes = snapshot if snapshot is not None else handoff_path.read_bytes()
             header = (
                 f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
                 f"     reason: {outcome.code}{_match_meta(outcome, target)}\n     routed-at: {slug} -->\n\n"
@@ -1279,22 +1404,38 @@ def _execute(
             if can_merge and pending is not None:
                 assert outcome.match is not None
                 merged = ingest_near_duplicate.merge_pending(
-                    content, pending, target, name, original.encode("utf-8"), outcome.match.path, outcome.code
+                    content, pending, target, name, original_bytes, outcome.match.path, outcome.code
                 )
                 if merged is not None:
                     dest, merged_before = merged
             new_draft = dest is None
             if dest is None:
-                dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
+                review_bytes = header.encode("utf-8") + original_bytes
+                dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", review_bytes)
+                if promote_cards is not None and route_documents is not None:
+                    try:
+                        handoff_origin.stamp_review_draft(
+                            target,
+                            dest,
+                            review_bytes,
+                            handoff_origin.ReviewDraft(outcome.code, promote_cards, route_documents),
+                        )
+                    except OSError:
+                        # Publication already succeeded. Keep one unsigned draft for
+                        # a person and archive the source rather than duplicating it.
+                        handoff_origin.remove_stamp(handoff_origin.stamp_path(target, dest))
+                        summary = _summary(verb, name, "review-stamp-write-failed")
+
             try:
                 log_match(target, outcome.match, dest)
                 _archive(handoff_path, processed_dir, snapshot_sha)
             except OSError:
                 # The handoff stays pending, so take back what this attempt wrote. The next run writes it again.
                 if merged_before is not None:
-                    write_text_nofollow_atomic(dest, merged_before.decode("utf-8"))
+                    ingest_near_duplicate.write_review_text(target, dest, merged_before.decode("utf-8"))
                 elif new_draft:
                     dest.unlink(missing_ok=True)
+                    handoff_origin.remove_stamp(handoff_origin.stamp_path(target, dest))
                 raise
             # Offer the draft to later handoffs only once its own handoff is archived.
             if new_draft and can_merge and pending is not None:
@@ -1677,7 +1818,10 @@ def _archive(src: Path, processed_dir: Path, expected_sha: str | None = None) ->
     # Re-check right before the move: a file tracked after listing must stay.
     if _is_tracked(src, _git_tracked_files(src.parent)):
         raise TrackedHandoffError(f"refusing to archive git-tracked handoff {src}")
-    if expected_sha is not None and hashlib.sha256(src.read_bytes()).hexdigest() != expected_sha:
+    if (
+        expected_sha is not None
+        and hashlib.sha256(handoff_origin.read_handoff(src, max_bytes=INSPECTION_CEILING)).hexdigest() != expected_sha
+    ):
         raise ChangedHandoffError(f"handoff changed since it was read: {src.name}")
     processed_dir.mkdir(parents=True, exist_ok=True)
     dest = processed_dir / src.name
@@ -1688,7 +1832,7 @@ def _archive(src: Path, processed_dir: Path, expected_sha: str | None = None) ->
     return dest
 
 
-def _write_review_draft(inbox_dir: Path, base: str, text: str) -> Path:
+def _write_review_draft(inbox_dir: Path, base: str, text: str | bytes) -> Path:
     """Create a new review draft, never replacing an existing one.
 
     Sanitizing and truncating handoff names can map two handoffs to one
@@ -1698,7 +1842,7 @@ def _write_review_draft(inbox_dir: Path, base: str, text: str) -> Path:
         dest = inbox_dir / (f"{base}.md" if index == 0 else f"{base}-{index}.md")
         try:
             with dest.open("xb") as handle:
-                handle.write(text.encode("utf-8"))
+                handle.write(text.encode("utf-8") if isinstance(text, str) else text)
                 handle.flush()
                 os.fsync(handle.fileno())
         except FileExistsError:

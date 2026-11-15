@@ -179,6 +179,10 @@ def test_connector_handoff_is_linted_ingested_and_searchable(profile, workspace,
     assert not card.exists()
     assert search(workspace) == []
 
+    # Trusted harness tooling must authenticate origin before automatic filing.
+    from tests._handoff_origin_fixtures import trusted_handoff
+
+    trusted_handoff(inbox / name, workspace)
     code, report = brigade("ingest", "--target", str(workspace), "--promote-cards", "--route-documents")
     assert code == 0, report
     assert "Promoted 1" in report and "Failed 0" in report

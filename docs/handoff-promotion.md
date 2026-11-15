@@ -123,7 +123,7 @@ OpenClaw receipt writers should use the normalized JSON shape shown in [OpenClaw
 
 Normalized receipts preserve warning events, malformed handoff paths, unreachable source labels, and no-reply state so operators can see when a clean-looking scheduler run still hid skipped, failed, or unreachable work.
 
-Source coverage issues for uncovered writer inboxes include stable source keys and fingerprints. If an operator dismisses an unchanged uncovered-inbox import, Brigade does not recreate it; when the pending inbox coverage state changes, the source fingerprint changes and the repair import can resurface.
+Source coverage issues for uncovered writer inboxes include stable source keys and fingerprints. If an operator dismisses an unchanged uncovered-inbox import, Brigade does not recreate it. When the pending inbox coverage state changes, the source fingerprint changes and the repair import can resurface.
 
 This receipt surface is observability only. It does not run the ingestor, edit canonical memory, promote cards, route documents, or summarize draft content.
 
@@ -137,6 +137,97 @@ with a recorded reason. Evidence-linked drafts retain their
 paths and use a resolved ledger. See [Review inbox](memory-care.md#review-inbox)
 for the disposition table, safe skips and undo behavior.
 
+## Origin gate for automatic filing
+
+Ingest now requires a verified origin before it can promote a card, reinforce an
+existing card, append to a document, or route content to an overflow card. Only
+an `interactive` origin with `untrusted_tools: false` reaches the existing filing
+rules. Worker, cron, subagent, unknown, and tool-touched origins go to
+`memory/handoff-inbox/` with reason `origin-review-required`. The inbox drain
+classifies that reason as human review and cannot retry it automatically.
+
+On Windows, automatic filing is off. Handoffs go to human review with
+`origin-review-required` until [#2588](https://github.com/escoffier-labs/brigade/issues/2588)
+adds a Win32 ACL confinement check. Regular-file, reparse-point, and single-link
+checks still apply. Files above the automatic inspection limit go to review as
+`handoff-too-large`, with their original bytes preserved. Linked handoffs stay in
+the writer inbox with `linked-handoff` and cannot file automatically.
+
+Ingest also signs each review draft's final bytes, path, routing reason, and
+promotion and document-routing flags with the memory owner's key. The drain and
+direct reprocessing require that record before retrying. Headers are display
+text, never retry authority. Missing, legacy, altered, or unverifiable records
+stay in human review with `origin-review-required`. Files in a writer inbox's
+`malformed/` folder always require human review. Ingest removes source stamps
+after archiving, and the drain removes review stamps after resolution or retry.
+
+The tooling API `brigade.handoff_origin.stamp_handoff` writes a private,
+atomically published sidecar under `.brigade/handoffs/origins/`, outside the
+writer inbox. A hash of the full handoff path selects the sidecar.
+It records the session kind, untrusted-tool status, harness, and host label.
+An HMAC-SHA256 covers the canonical JSON payload, including the exact handoff
+SHA-256 digest, path digest, filename, file identity and modification time,
+schema, and receipt key id. The MAC uses a separate
+message domain from receipt signatures. Markdown sections and comments never
+supply origin metadata. Changing either the content or the signed fields
+invalidates the stamp. Replacing, touching, or renaming a handoff also requires
+a new stamp. A failed attempt to stamp a replacement cannot reuse its previous
+publication's authorization.
+
+Ingest reads handoffs through a no-follow descriptor and refuses symlinks,
+hardlinks, and non-regular files. Verification retains the exact sidecar path
+for cleanup, so replacing the inbox pathname after archive cannot redirect
+stamp removal. Before any canonical write, ingest atomically claims the
+record's MAC in `.brigade/handoffs/consumed-stamps/` and flushes the claim to
+disk. Review dispositions and retries use the same one-time claim after journal
+preparation and before canonical writes. Recovery can resume a claim only
+under the journal decision that owns it.
+Restoring an archived inode or a consumed sidecar cannot revive its authority.
+A crash or failed write after the claim requires human review unless an
+already-prepared journal transaction can complete recovery. New tooling stamps
+include a random nonce. Only trusted tooling can authorize a fresh attempt.
+
+Origin stamps use only the fixed workspace-owned key at
+`.brigade/receipt-signing-key`. The receipt-only
+`BRIGADE_RECEIPT_SIGNING_KEY_FILE` override cannot select an origin key. Run
+`brigade receipts keygen` without that override to provision the fixed key.
+Ingest uses the source workspace's key, even when it writes memory into a
+different owner. The key must be a single-link regular file owned by the
+current OS user, with no group or world permission bits. No-follow opens
+reject links in the key path. On Windows, or any platform that cannot prove
+these ownership and permission checks, automatic filing fails closed and
+handoffs require review.
+A missing key, missing sidecar, bad MAC, changed content, malformed stamp, or
+unknown tool status requires review. Neither drafting nor ingest creates a key.
+Stamps are local to the source workspace and path. Worktree rescue and archive
+do not yet carry them, so rescued or renamed handoffs conservatively require
+review.
+
+### Current integration limit
+
+This is the filing gate and stamp format slice of issue #2451. `handoff draft`
+writes a stamp when a usable receipt key exists. It records the detected harness
+and host, but records session kind and tool status as unknown. A Brigade run id
+can mark a draft as worker, which also requires review. There is no draft flag
+that can declare an interactive or clean session.
+
+Claude and Codex hooks do not yet supply complete session-kind and tool-use
+observations to this API. Until that observer integration lands, normal drafts
+require review, including drafts from interactive sessions. Trusted harness
+integration can use the API with observed values. A verified clean interactive
+stamp preserves the existing opt-in filing behavior and all content checks.
+
+### Threat model
+
+The signer, its observations, the fixed key file, and Brigade's consumed-stamp
+state are trusted. The gate defends against text-only and file-drop agents
+that cannot read the key or modify trusted state. It rejects forged claims in
+handoff text and sidecar edits made without the key. An agent able to read the
+key file or run code as the same OS user can still compute a valid MAC and
+forge an origin. Deployments that need protection from that agent must run
+the signer and key under a separate account or broker and restrict the
+agent's access. The local host label
+is local metadata and does not prove a remote host identity.
 ### Replace a preference through review
 
 A `preference` handoff with action `no-card` and target `USER.md` can include

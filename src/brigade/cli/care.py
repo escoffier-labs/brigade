@@ -49,6 +49,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Override one selected entry's schedule. Repeatable.",
     )
 
+    p_install.add_argument(
+        "--reflect-auto-apply",
+        action="store_true",
+        help="Opt this workspace into gated Tier 0 automatic reflection.",
+    )
     p_install.add_argument("--scope", help="One configured hub read scope for memory-reflect only.")
 
     p_status = care_sub.add_parser(
@@ -110,6 +115,7 @@ def dispatch(args) -> int:
             entry_ids=args.entry_ids,
             schedule_specs=args.schedule_specs,
             scope=args.scope,
+            reflect_auto_apply=args.reflect_auto_apply,
         )
     if args.care_command == "status":
         return care_cmd.status(

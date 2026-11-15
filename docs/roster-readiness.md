@@ -105,13 +105,54 @@ writable adapter unverified or blocked despite adequate write isolation.
 Adapter-aware operation health requirements need an explicit source contract
 before this gate can be relaxed. Unknown evidence remains unverified.
 
-**The CLI currently has no authoritative live admission, capacity, or T3
-capability/governance observation producer.** It therefore cannot return ready
-for a live operation. A structurally eligible request normally returns
-unverified, or blocked if selected-seat health supplies a fresh failure.
-T3 requests skip local provider probes because those do not establish T3
-execution health. No claim of T3 integration with Brigade budgets follows
-from this command. Active inference probing is not offered by this subcommand.
+For `route = "brigade"`, `inspect_readiness` and `brigade roster ready` produce
+authoritative, read-only `admission` and `capacity` observations without
+acquiring a lease or claim, writing LKG or audit caches, or launching a task.
+Without a configured Hub (and when no prior enrollment activation was observed),
+admission uses `route_receipts.admissible_seats` and the retired-model policy,
+and capacity uses `runguard.inspect_run_lock_reconcile` combined with
+`limits.max_workers`. When a Fleet Hub is configured, admission queries
+`GET /models` via `fetch_versioned_roster(..., allow_lkg=True, cache_write=False)`
+and resolves the effective roster via `resolve_fleet_model_policy`. Seat health
+probing, `operation_scope`, and readiness evaluation all bind to that
+Hub-resolved effective roster instead of the un-updated local declaration.
+When enrolled, admission also queries `GET /policy` via
+`fleet_client_policy.show_policy()` and evaluates `fleet_policy.admissible_seat`.
+Because `authorize_launch` requires live Hub admission (`allow_lkg=False`), an
+enrolled node falling back to LKG reports `admission` as `unknown` (`unverified`)
+instead of `passed`.
+
+Capacity inspects the local run lock plus a read-only `POST /claims`
+(`action = "inspect"`) check when a live Hub roster is reachable and uses an
+absolute `BRIGADE_HOME`. If the claim check fails with `auth-failed`, capacity
+reports `failed` (`blocked`) and tells the operator to enroll the node, matching
+`claim_workspace` fail-closed behavior. Claim `no-identity`, `missing`, and
+`hub-unavailable` outcomes are reported conservatively as `unknown`
+(`unverified`), even though `brigade run` proceeds on the local run lock. When
+unenrolled, Hub seat-limit checks scan every selected worker seat before
+deciding capacity: any `limit = 0` reports `admitted_capacity = 0` (`blocked`),
+otherwise any malformed limit reports `unknown` (`unverified`), and otherwise
+any positive limit reports `unknown` (`unverified`), independent of `--worker`
+order. Because no Hub endpoint exposes live per-seat lease usage without
+acquiring a lease, Hub-enforced positive concurrency limits and enrolled fleet
+policy lease usage report `capacity` as `unknown` (`unverified`) instead of
+guessing. LKG fallback also leaves live Hub capacity `unknown` (`unverified`),
+and `limit = 0` or a held lock or claim reports `admitted_capacity = 0`
+(`blocked`).
+
+Network calls use the existing 2.5-second client timeouts. Reading the roster
+high-water mark and LKG cache takes `_spool_lock`, which also runs on the
+no-Hub path through `enrollment_activation_observed`. `_spool_lock` can create
+`<BRIGADE_HOME>/fleet-spool/`, `chmod` that directory to `0700`, and create
+empty `.lock` files. No cache content is written. The spool-lock wait is
+currently unbounded (`timeout=None`), so `brigade roster ready` can block behind
+a concurrent writer. Bounding that wait is deferred to a follow-up PR.
+
+T3 capability and governance observation production remains unimplemented, so
+T3 requests still skip local provider probes and remain unverified (or blocked
+on structural or refusal evidence). No claim of T3 integration with Brigade
+budgets follows from this command. Active inference probing is not offered by
+this subcommand.
 
 ## Integration interface
 

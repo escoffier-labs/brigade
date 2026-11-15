@@ -1290,7 +1290,9 @@ near its cap, then resume as described below.
 This pass does not invent anchors or evidence. Local reflection still derives
 its existing evidence and review candidates when hub mode is off. S19e-1 adds
 attestation and the gated automatic route. Automatic apply requires a separate call with every gate satisfied.
-Scheduled reflection only proposes.
+Scheduled reflection proposes and can attempt gated Tier 0 application when
+the workspace policy explicitly enables it. New-workspace initialization records
+that intent. Care reinstall preserves a missing policy as off.
 
 #### Near-duplicate pass
 
