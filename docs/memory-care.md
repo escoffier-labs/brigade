@@ -640,8 +640,19 @@ only ever protect a card. Missing, incomplete, or too-young read history blocks
 automatic retirement. `memory care archive --from-file` applies an outside
 judgment and does not consult reads.
 
-Cached automatic attempts have a separate per-run budget bounded by `--limit`.
-They cannot consume slots for new proposals. A lost hub response records an
+`--limit` applies per lane: up to that many cached retries and, independently,
+up to that many new proposals per run. Cached retries run least recently
+attempted first, so held proposals rotate through the retry budget. They cannot
+consume slots for new proposals.
+
+Automatic `auto_apply` requests are paced at least one second after the previous
+request completes, matching the hub default per-principal interval. The hub does
+not currently expose its configured interval to clients. A rate-limited refusal
+gets one retry after pacing, with a fresh request id and a fresh policy check.
+A second refusal stays pending for a later run. With `--limit N`, requested sleep
+is bounded by `4 * N - 1` seconds, at most 399 seconds at the maximum limit of
+100. Hub request time is additional. Longer configured hub intervals or
+per-proposal cooldowns can still leave proposals pending. A lost hub response records an
 unknown result. The hub refuses repeated application of a decided proposal.
 Client tests verify request behavior and fallback. Hub transactional tests
 provide the card-write atomicity coverage.

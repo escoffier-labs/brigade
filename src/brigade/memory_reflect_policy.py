@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -108,26 +109,69 @@ def _checks(value: Any) -> list[dict[str, str]]:
     ]
 
 
+# Hub replies and HubSettings expose no interval. Match hardening::Limits::default.
+AUTO_APPLY_INTERVAL_SECONDS = 1.0
+RATE_LIMITED = "memory_auto_apply_rate_limited"
+
+
+class AutoApplyPacer:
+    """One run's automatic calls, spaced from the end of the preceding request."""
+
+    def __init__(self) -> None:
+        self.last_attempt: float | None = None
+
+    def wait(self) -> None:
+        if self.last_attempt is not None:
+            delay = max(0.0, AUTO_APPLY_INTERVAL_SECONDS - (time.monotonic() - self.last_attempt))
+            if delay:
+                time.sleep(delay)
+
+
 def attempt(
-    target: Path, client: hubc.MemoryHubClient, proposal_id: str, ops: list[dict[str, Any]], epoch: str
+    target: Path,
+    client: hubc.MemoryHubClient,
+    proposal_id: str,
+    ops: list[dict[str, Any]],
+    epoch: str,
+    *,
+    pacer: AutoApplyPacer | None = None,
 ) -> dict[str, Any]:
-    reason = allowed(target, ops)
-    if reason:
-        return {"state": "pending", "reason": reason}
-    try:
-        # Authority, host ownership, trust, proof, retrieval, blast caps and cooldown
-        # are rechecked transactionally by the hub. Never turn a hold into decide.
-        result = client.call("auto_apply", proposal_id=proposal_id, base_epoch=epoch, client_event_id=hubc.event_id())
-        return {
-            "state": result.get("state") if result.get("state") in ("pending", "applied", "rejected") else "pending",
-            "checks": _checks(result.get("auto_apply_gates")),
-            "reason": _code(result.get("reason")),
-        }
-    except hubc.HubRefusal as exc:
-        code = exc.code if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", exc.code) else "hub_refused"
-        return {"state": "pending", "reason": code}
-    except (hubc.HubUnavailable, OSError, ValueError):
-        return {"state": "unknown", "reason": "auto_apply_unavailable"}
+    pacer = pacer if pacer is not None else AutoApplyPacer()
+    # At most two calls per candidate and one second per gap. With both lanes
+    # capped at 100 candidates, a run adds at most 399 seconds of requested sleep.
+    for retry in range(2):
+        reason = allowed(target, ops)
+        if reason:
+            return {"state": "pending", "reason": reason}
+        pacer.wait()
+        # An operator may turn application off while this run is sleeping.
+        reason = allowed(target, ops)
+        if reason:
+            return {"state": "pending", "reason": reason}
+        try:
+            # Authority, host ownership, trust, proof, retrieval, blast caps and cooldown
+            # are rechecked transactionally by the hub. Never turn a hold into decide.
+            try:
+                result = client.call(
+                    "auto_apply", proposal_id=proposal_id, base_epoch=epoch, client_event_id=hubc.event_id()
+                )
+            finally:
+                pacer.last_attempt = time.monotonic()
+            return {
+                "state": result.get("state")
+                if result.get("state") in ("pending", "applied", "rejected")
+                else "pending",
+                "checks": _checks(result.get("auto_apply_gates")),
+                "reason": _code(result.get("reason")),
+            }
+        except hubc.HubRefusal as exc:
+            code = exc.code if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", exc.code) else "hub_refused"
+            if exc.status == 429 and code == RATE_LIMITED and retry == 0:
+                continue  # A refused call has no committed result. Retry once with a fresh request id.
+            return {"state": "pending", "reason": code}
+        except (hubc.HubUnavailable, OSError, ValueError):
+            return {"state": "unknown", "reason": "auto_apply_unavailable"}
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def local_fallback(target: Path, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

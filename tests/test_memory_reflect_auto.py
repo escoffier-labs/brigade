@@ -302,3 +302,111 @@ def test_lost_hub_reply_is_unknown(tmp_path):
         "state": "unknown",
         "reason": "auto_apply_unavailable",
     }
+
+
+def test_cached_retry_rotation_reaches_every_held_proposal(setup, capsys):
+    target, hub, _ = setup
+    for ident in ("c", "d"):
+        hub._commit(
+            "card.put", "fleet", ident, "---\nevidence: []\n---\nSame claim. ^c-abcdef\n", "live", "event-" + ident
+        )
+    # Open all three before enabling application, so only the retry lane runs.
+    assert run(target, capsys, "run")[0] == 0
+    ids = {c["client_event_id"] for c in writes(hub) if c["action"] == "propose"}
+    assert len(ids) == 3
+    policy.set_enabled(target, True)
+    hub.do_auto_apply = lambda body: (200, {"state": "pending"})
+    for _ in range(3):
+        assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    attempts = [c for c in writes(hub) if c["action"] == "auto_apply"]
+    assert len(attempts) == 3
+    assert len({c["proposal_id"] for c in attempts}) == 3
+
+
+def test_automatic_attempts_are_paced_after_hold(setup, capsys, monkeypatch):
+    from types import SimpleNamespace
+
+    target, hub, _ = setup
+    policy.set_enabled(target, True)
+    hub._commit("card.put", "fleet", "c", "---\nevidence: []\n---\nSame claim. ^c-abcdef\n", "live", "event-c")
+    clock = [0.0]
+    attempted = []
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(policy, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep), raising=False)
+
+    def auto_apply(body):
+        if attempted and clock[0] - attempted[-1] < 1:
+            return 429, {"code": "memory_auto_apply_rate_limited", "error": "rate limited"}
+        attempted.append(clock[0])
+        return 200, {"state": "pending" if len(attempted) == 1 else "applied"}
+
+    hub.do_auto_apply = auto_apply
+    code, report = run(target, capsys, "run", "--apply")
+    assert code == 0
+    assert [p["automatic"]["state"] for p in report["proposals"]] == ["pending", "applied"]
+    assert attempted == [0.0, 1.0]
+
+
+@pytest.mark.parametrize("always_limited", [False, True])
+def test_rate_limited_retry_is_bounded(setup, capsys, monkeypatch, always_limited):
+    from types import SimpleNamespace
+
+    target, hub, _ = setup
+    policy.set_enabled(target, True)
+    clock = [0.0]
+    attempts = []
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(policy, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep), raising=False)
+
+    def auto_apply(body):
+        attempts.append((clock[0], body["client_event_id"]))
+        if len(attempts) == 1 or always_limited:
+            return 429, {"code": "memory_auto_apply_rate_limited", "error": "rate limited"}
+        return 200, {"state": "applied"}
+
+    hub.do_auto_apply = auto_apply
+    code, report = run(target, capsys, "run", "--apply")
+    assert code == 0
+    assert len(attempts) == 2
+    assert attempts[1][0] - attempts[0][0] == 1.0
+    assert attempts[0][1] != attempts[1][1]
+    result = report["proposals"][0]["automatic"]
+    assert result["state"] == ("pending" if always_limited else "applied")
+    if always_limited:
+        assert result["reason"] == "memory_auto_apply_rate_limited"
+
+
+def test_off_switch_during_rate_limit_wait_prevents_retry(setup, capsys, monkeypatch):
+    from types import SimpleNamespace
+
+    target, hub, _ = setup
+    policy.set_enabled(target, True)
+    monkeypatch.setattr(
+        policy,
+        "time",
+        SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda seconds: policy.set_enabled(target, False)),
+    )
+    hub.do_auto_apply = lambda body: (429, {"code": "memory_auto_apply_rate_limited", "error": "rate limited"})
+    code, report = run(target, capsys, "run", "--apply")
+    assert code == 0
+    assert report["proposals"][0]["automatic"] == {"state": "pending", "reason": "auto_apply_disabled"}
+    assert len([c for c in writes(hub) if c["action"] == "auto_apply"]) == 1
+
+
+@pytest.mark.parametrize("timestamp", [-1, True, 1.5, "1"])
+def test_invalid_retry_timestamp_fails_closed(setup, capsys, timestamp):
+    from brigade import memory_reflect_hub as reflect
+
+    target, _, _ = setup
+    assert run(target, capsys, "run")[0] == 0
+    state = reflect.schedule_status(target)
+    next(iter(state["submissions"].values()))["attempted_ms"] = timestamp
+    reflect._save(target, state)
+    with pytest.raises(ValueError, match=reflect.STATE_ERROR):
+        reflect.schedule_status(target)

@@ -75,6 +75,7 @@ def _code(value: object) -> bool:
 # Optional ledger fields kept beside the request id by reflection and other jobs.
 LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
+    "attempted_ms": lambda value: type(value) is int and value >= 0,
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -117,7 +118,10 @@ def schedule_status(target: Path) -> dict[str, Any]:
         submissions = state.get("submissions", {})
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
-        if not all(valid_submission(digest, pending, frozenset({"pins"})) for digest, pending in submissions.items()):
+        if not all(
+            valid_submission(digest, pending, frozenset({"pins", "attempted_ms"}))
+            for digest, pending in submissions.items()
+        ):
             raise ValueError(STATE_ERROR)
         for lane in LANES:
             schedule = state.get(lane, {})
@@ -605,6 +609,7 @@ def _reflect(
     # Retry budget is separate so held proposals cannot consume new-work slots.
     # Retries reuse an opened proposal and never submit, so they run first and a
     # full new-proposal quota cannot block them.
+    retries.sort(key=lambda item: (previous[item[0]].get("attempted_ms", 0), item[0]))
     selected = retries[:limit] + remaining[:limit]
     proposals = []
     refused: list[dict[str, str]] = []
@@ -615,6 +620,9 @@ def _reflect(
         # Preserve unprocessed submissions under this binding across scope and limit changes.
         state.update(binding=binding, submissions=previous, **tables)
 
+        from .memory_reflect_policy import AutoApplyPacer
+
+        pacer = AutoApplyPacer()
         served_any = False
 
         def served(digest: str) -> None:
@@ -661,7 +669,15 @@ def _reflect(
                 if apply and sent.proposal_id is not None:
                     from .memory_reflect_policy import attempt
 
-                    proposal["automatic"] = attempt(target, client, sent.proposal_id, ops, report["log_epoch"])
+                    # Persist before attempting so a lost response also rotates the retry lane.
+                    # Advance beyond the previous maximum even if the wall clock stalls or regresses.
+                    previous[digest]["attempted_ms"] = max(
+                        _now_ms(), max((p.get("attempted_ms", 0) for p in previous.values()), default=0) + 1
+                    )
+                    _save(target, state)
+                    proposal["automatic"] = attempt(
+                        target, client, sent.proposal_id, ops, report["log_epoch"], pacer=pacer
+                    )
                 proposals.append(proposal)
         if served_any:
             state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
