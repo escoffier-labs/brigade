@@ -1014,7 +1014,9 @@ def _base_env(args: argparse.Namespace) -> dict[str, str]:
     if re.fullmatch(r"(?:sha256:)?[0-9a-fA-F]+", args.hub_image):
         raise SetupError("--hub-image takes a name:tag or a name@sha256 digest reference, not a bare image id")
     # The value is written into .env as one line, so whitespace or a control character could add another setting.
-    if not args.hub_image or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in args.hub_image):
+    if not args.hub_image:
+        raise SetupError("--hub-image must not be empty")
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in args.hub_image):
         raise SetupError("--hub-image must not contain whitespace or control characters")
     backup_dir = Path(args.backup_dir).expanduser().resolve()
     # The recipe targets Linux hosts; on other platforms name the owner explicitly.
