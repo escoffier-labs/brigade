@@ -224,6 +224,9 @@ def harness_wiring_payload(target: Path, *, known_roots_only: bool = False) -> d
     # Search directory entries by name without statting every unrelated file.
     brigade_root = target / ".brigade"
     if known_roots_only:
+        # Brigade loads only the root sources file (ingest, reflect, doctor, handoff
+        # commands) or an explicit --sources path. A nested copy is never read, so the
+        # brief skips walking the whole .brigade tree for it. Full health still does.
         path = brigade_root / "handoff-sources.json"
         if not brigade_root.is_symlink() and _scan_engine_mod._should_scan_file(path):
             paths.append(path)
