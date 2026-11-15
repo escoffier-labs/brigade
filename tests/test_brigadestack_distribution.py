@@ -32,9 +32,7 @@ MAIN_DISPATCH = (
         ("brigadestack-npm-publish.yml", "npm", {"contents": "read", "id-token": "write"}),
     ],
 )
-def test_bridge_publication_keeps_oidc_in_the_main_only_publish_job(
-    workflow_file, environment, publish_permissions
-):
+def test_bridge_publication_keeps_oidc_in_the_main_only_publish_job(workflow_file, environment, publish_permissions):
     # The registry trust entries name these files and environments.
     workflow = _load_workflow_yaml(ROOT / ".github/workflows" / workflow_file)
     assert set(workflow.get("on", workflow.get(True))) == {"workflow_dispatch"}
