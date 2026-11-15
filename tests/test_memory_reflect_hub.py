@@ -874,3 +874,49 @@ def test_changed_or_retired_card_prunes_submission(setup, capsys, state):
     hub._commit("card.put", "fleet", "a", text, state, hubc.event_id())
     assert run(target, capsys, "run")[0] == 0
     assert original not in json.loads(path.read_text())["submissions"]
+
+
+def test_scheduled_compensation_watch_runs_before_proposing(setup, capsys):
+    target, hub, _ = setup
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    hub.do_status = status
+    calls = []
+
+    def watch(body):
+        calls.append(body)
+        return 200, {"results": [{"result": "applied", "trigger": "retrieval-regression"}], "next_after": None}
+
+    hub.do_compensation_watch = watch
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code == 0
+    assert calls[0]["scope"] == "fleet"
+    assert payload["compensation_watch"][0]["result"] == "applied"
+    assert next(i for i, c in enumerate(hub.calls) if c["action"] == "compensation_watch") < next(
+        i for i, c in enumerate(hub.calls) if c["action"] == "propose"
+    )
+
+
+def test_compensation_watch_dry_run_does_not_write(setup, capsys):
+    target, hub, _ = setup
+    run(target, capsys, "run", "--hub", "--scheduled", "--dry-run")
+    assert not any(c["action"] == "compensation_watch" for c in hub.calls)
+
+
+@pytest.mark.parametrize("window", [0, -1, True, 604801, "86400"])
+def test_compensation_watch_rejects_invalid_policy_windows(window):
+    from brigade.fleet_policy import FleetPolicyError, parse_memory
+
+    with pytest.raises(FleetPolicyError, match="rollback_watch_seconds"):
+        parse_memory({"rollback_watch_seconds": window})
+
+
+def test_compensation_watch_preserves_explicit_policy_window():
+    from brigade.fleet_policy import parse_memory
+
+    assert parse_memory({"rollback_watch_seconds": 3600})["rollback_watch_seconds"] == 3600

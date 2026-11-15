@@ -628,18 +628,35 @@ pub fn apply(
                 }
             }
             Action::Proposal(c)
-                if matches!(c.name(), "decide" | "auto_apply")
-                    && reply.body["state"] == "applied" =>
+                if matches!(
+                    c.name(),
+                    "decide" | "auto_apply" | "rollback" | "compensation_watch"
+                ) =>
             {
-                for row in tx.query(
-                    "SELECT scope,card_id FROM memory_card_revisions WHERE proposal_id=?1",
-                    &[t(reply.body["proposal_id"].as_str().unwrap())],
-                )? {
-                    let scope = s(&row[0]);
-                    let card_id = s(&row[1]);
-                    super::embedding::cleanup_card(tx, &scope, &card_id)?;
-                    if let Some((id, private)) = embedder {
-                        super::embedding::queue_card(tx, &scope, &card_id, id, private)?;
+                let applied: Vec<&Json> = if c.name() == "compensation_watch" {
+                    reply.body["results"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|r| r["result"] == "applied")
+                        .map(|r| &r["proposal_id"])
+                        .collect()
+                } else if reply.body["state"] == "applied" {
+                    vec![&reply.body["proposal_id"]]
+                } else {
+                    Vec::new()
+                };
+                for id in applied {
+                    for row in tx.query(
+                        "SELECT scope,card_id FROM memory_card_revisions WHERE proposal_id=?1",
+                        &[t(id.as_str().unwrap())],
+                    )? {
+                        let scope = s(&row[0]);
+                        let card_id = s(&row[1]);
+                        super::embedding::cleanup_card(tx, &scope, &card_id)?;
+                        if let Some((id, private)) = embedder {
+                            super::embedding::queue_card(tx, &scope, &card_id, id, private)?;
+                        }
                     }
                 }
             }
@@ -687,7 +704,13 @@ fn run(
         Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
         Action::AutoApplySwitch(enabled) => {
             tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
-            let payload = json!({"auto_apply_enabled":enabled});
+            if *enabled {
+                tx.execute(
+                    "DELETE FROM memory_meta WHERE key LIKE 'compensation_hold:%'",
+                    &[],
+                )?;
+            }
+            let payload = json!({"auto_apply_enabled":enabled,"compensation_go":enabled});
             append(
                 tx,
                 p,

@@ -1636,8 +1636,9 @@ requirement and refuses to run where those operations are unavailable.
 `--schedule memory-reflect=<value>` uses the selected backend's existing
 schedule syntax. The isolated launcher pins the installed Brigade package,
 passes an absolute workspace target, and invokes `memory reflect run --hub
---scheduled`. It never invokes a decision or apply command. `--hub` refuses
-disabled hub settings rather than switching to local cards.
+--scheduled`. The scheduled run also polls the automatic compensation watch,
+which can reverse the policy actor's own unchanged applies. `--hub` refuses
+disabled hub settings.
 
 A failure means a non-dry reflect run exits non-zero. For runs that can safely write
 workspace state, `.brigade/memory/reflect/schedule.json` records consecutive
@@ -1746,11 +1747,12 @@ Without `--scope`, partial `reflect` grants across configured `read_scopes` will
 after repeated authorization failures.
 
 `brigade memory reflect rollback <proposal-id> --target <workspace>` requests
-the hub's compensating proposal. This separate operator action requires `read`
-plus `review` on every original target scope. It sends the observed log epoch
-and never restores card text directly. The compensation waits for another
-explicit decision, with the same hub scope, self-review, revision and pin
-checks as S19a.
+the hub's compensating proposal and sends the observed log epoch. An exact
+policy-actor reversal requires `read` plus `reflect` on every original target
+scope and applies automatically at the hub. Other compensations require `read`
+plus `review` and wait for another explicit decision, with the existing scope,
+self-review, revision and pin checks. The client does not restore card text
+locally.
 
 
 ## Hub proposal resource limits
@@ -2803,3 +2805,44 @@ recover`. No byte of the file is printed. `status` shows such a file as
 paused with the same reason. A card field that is present must hold a value of
 its type, so an explicit `null` is malformed. Only a scope's `since_day` and
 `never_read` may be `null`, meaning not counted yet and unknown.
+
+### Automatic compensation watch
+
+A policy actor listed in `memory.reflect_principals`, under hub curation
+ownership, can automatically compensate its own automatic apply. The hub
+constructs the inverse from its retained snapshots. The actor, applied revision,
+content hash, restored bytes, trust and state must all match. An intervening
+edit, including an edit followed by a content revert, prevents automatic
+compensation. Other compensations retain Tier 2. Ordinary verifier proposals
+retain their existing review floor.
+
+Scheduled `memory reflect run --hub --scheduled` polls the hub's
+`automatic_compensation` capability before proposing new work. Set
+`memory.rollback_watch_seconds` in fleet policy to change the watch window
+from 86400 seconds. Supported values are 1 through 604800. A manual reflect
+run and a dry run do not poll the watch.
+
+The watch compares post-apply admin-attested retrieval records against the
+pre-apply record for the same fixture, scope, epoch and ranking configuration.
+Any lower `hit_rate`, `mrr`, `precision_at_k` or `recall_at_k`, overall or by
+category, trips it. It also accepts intact, current-card `negative-outcome`
+receipt bindings from the reflect workspace and later verifier manifests with
+`contradicted` on the operation's target block. Pending verifier manifests can
+trip the watch without becoming positive proof. A canary-miss resolver is left
+as a hook until canaries have an attested evidence contract.
+
+Trips and compensation results are retained in proposal decision events.
+Failures retain every card's bytes and record `compensation_result: failed`.
+A hub watch journal retains the original proposal ID so repeated scheduled
+runs cannot file the same compensation again. Decision events include
+`watch_trip` with the signal that caused compensation. Each trip holds its original operation
+classes in hub metadata, across policy revisions. A later admin
+`auto_apply_switch` with `enabled: true` is the explicit go record that clears
+these holds. Recovery compensations remain available while a class is held.
+
+Watch requests require read and reflect on their scope. Negative outcome
+signals are assertions from this authorized policy actor, validated against
+local receipts before transport. The hub supplies retrieval and verifier
+signals itself. Watch replies contain decision metadata rather than card text.
+A request inspects at most 32 applied proposals with a continuation. Reflection
+bounds a run to 32 pages per scope and refuses incomplete evidence logs.

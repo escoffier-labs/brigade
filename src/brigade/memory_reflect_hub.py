@@ -1,4 +1,4 @@
-"""Scheduled hub reflection opens proposals and never decides or applies them."""
+"""Scheduled hub reflection proposes edits and watches policy-actor applies."""
 
 from __future__ import annotations
 
@@ -434,6 +434,7 @@ def _reflect(
     scope: str | None,
     limit: int,
     dry_run: bool,
+    watch: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= limit <= 100:
         raise ReflectError("hub_reflect_limit_invalid", "--limit must be from 1 to 100")
@@ -502,6 +503,18 @@ def _reflect(
         sync.refresh_scan_metadata(target, client, settings)
         heads = read_heads()
         check_bounds()
+    watched = []
+    if watch and not dry_run:
+        from . import memory_compensation_watch
+
+        watched = memory_compensation_watch.run(target, client, settings.read_scopes, heads, report["log_epoch"])
+        if watched:
+            # Rollbacks invalidate the inputs for proposing. Pull their committed heads first.
+            report = sync.pull(target, client, settings)
+            if report.get("warnings") or report.get("seq") is None:
+                raise ReflectError("hub_reflect_replica_incomplete", "compensation watch requires a fresh replica")
+            heads = read_heads()
+            check_bounds()
     # Each submission is one propose request. Exact merges stay one op each and
     # always come before every near-duplicate and link-repair submission, so they get the quota first.
     exact: list[list[dict[str, Any]]] = []
@@ -656,6 +669,7 @@ def _reflect(
         "proposals": proposals,
         "refused_ops": refused,
         "seq": report["seq"],
+        "compensation_watch": watched,
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
         "link_repair": {"max_proposals": link_cap, **link_stats},
     }
@@ -675,7 +689,9 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
         try:
             settings, client = _client(target)
             with store.limits.bounded(max_cards=MAX_SCOPE_CARDS, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
-                payload = _reflect(target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run)
+                payload = _reflect(
+                    target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run, watch=scheduled
+                )
         except (hubc.HubConfigError, hubc.HubUnavailable, hubc.HubRefusal, OSError, ValueError) as exc:
             # Never retain hub-supplied text, card bytes or credential-bearing errors.
             if isinstance(exc, store.limits.ReplicaLimitError):
@@ -720,4 +736,4 @@ def rollback_payload(*, target: Path, proposal_id: str) -> dict[str, Any]:
     result = client.call(
         "rollback", proposal_id=proposal_id, base_epoch=status["log_epoch"], client_event_id=hubc.event_id()
     )
-    return {"status": "proposed", "proposal": result}
+    return {"status": "applied" if result.get("state") == "applied" else "proposed", "proposal": result}

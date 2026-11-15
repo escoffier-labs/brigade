@@ -148,7 +148,10 @@ def register(sub: argparse._SubParsersAction) -> None:
             command.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Candidate limit from 1 to 100.")
             command.add_argument("--dry-run", action="store_true", help="Print metadata diffs and duplicate summaries.")
         elif name == "rollback":
-            command.add_argument("proposal_id", help="Applied hub proposal to compensate. Requires separate review.")
+            command.add_argument(
+                "proposal_id",
+                help="Applied hub proposal to compensate. Exact policy-actor reversals can apply automatically.",
+            )
         elif name in ("show", "propose", "preflight", "rollback"):
             command.add_argument("candidate_id")
             if name == "preflight":
@@ -380,7 +383,8 @@ def dispatch(args: argparse.Namespace) -> int:
         if args.memory_reflect_command == "rollback" and "proposal" in payload:
             print(
                 _terminal_text(
-                    f"compensating proposal: {payload['proposal'].get('proposal_id')} (separate decision required)"
+                    f"compensating proposal: {payload['proposal'].get('proposal_id')} "
+                    f"({payload['proposal'].get('state', 'pending')})"
                 )
             )
         if "latest_run" in payload:

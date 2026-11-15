@@ -275,6 +275,9 @@ pub fn cheap<T: ReadTx + ?Sized>(
     {
         return Ok(Some("auto_apply_killed"));
     }
+    if super::compensation::class_held(tx, body)? {
+        return Ok(Some("compensation_class_held"));
+    }
     Ok((body["opened_tier"] != 0 || !body["rollback_of"].is_null())
         .then_some("tier_requires_review"))
 }

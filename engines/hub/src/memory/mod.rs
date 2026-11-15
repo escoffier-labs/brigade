@@ -14,6 +14,7 @@ mod attestation_review_tests;
 #[cfg(test)]
 mod attestation_tests;
 pub mod auth;
+mod compensation;
 pub mod dense;
 pub mod embedder;
 pub mod embedding;
@@ -62,6 +63,8 @@ pub mod writer;
 
 #[cfg(test)]
 mod collection_tests;
+#[cfg(test)]
+mod compensation_tests;
 #[cfg(test)]
 mod embedder_tests;
 #[cfg(test)]
@@ -1013,7 +1016,7 @@ impl Store {
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
-            "propose" | "decide" | "rollback" | "auto_apply" => {
+            "propose" | "decide" | "rollback" | "auto_apply" | "compensation_watch" => {
                 self.proposal_request(credential, action, map, &raw).await
             }
             "put"
@@ -1192,6 +1195,14 @@ impl Store {
                 "decision",
                 "client_event_id",
                 "expected_policy_digest",
+            ],
+            "compensation_watch" => &[
+                "action",
+                "scope",
+                "base_epoch",
+                "client_event_id",
+                "negative_outcomes",
+                "after",
             ],
             "rollback" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "put" | "import" => &[
@@ -1379,13 +1390,36 @@ impl Store {
                     after,
                 }
             }
-            "propose" | "decide" | "rollback" | "auto_apply" => {
-                if action != "propose"
+            "propose" | "decide" | "rollback" | "auto_apply" | "compensation_watch" => {
+                if !matches!(action, "propose" | "compensation_watch")
                     && str_field("proposal_id")
                         .and_then(ids::parse_event_id)
                         .is_none()
                 {
                     return Err(invalid("proposal_id must be a time-ordered id"));
+                }
+                if action == "compensation_watch"
+                    && (str_field("scope").is_none_or(|s| !ids::valid_scope(s))
+                        || map
+                            .get("after")
+                            .is_some_and(|v| v.as_str().and_then(ids::parse_event_id).is_none())
+                        || map.get("negative_outcomes").is_some_and(|v| {
+                            v.as_array().is_none_or(|rows| {
+                                rows.len() > 64
+                                    || rows.iter().any(|r| {
+                                        r.as_object().is_none_or(|o| o.len() != 3)
+                                            || r["card_id"]
+                                                .as_str()
+                                                .is_none_or(|s| !ids::valid_card_id(s))
+                                            || r["observed_ms"].as_i64().is_none()
+                                            || r["evidence_id"]
+                                                .as_str()
+                                                .is_none_or(|s| s.is_empty() || s.len() > 1024)
+                                    })
+                            })
+                        }))
+                {
+                    return Err(invalid("invalid compensation watch scope or signals"));
                 }
                 if action == "decide" && !matches!(str_field("decision"), Some("accept" | "reject"))
                 {
@@ -1975,7 +2009,7 @@ fn reads<T: ReadTx + ?Sized>(
                     "credential": credential.class(),
                     "verifier": verifier::flagged(tx, credential.principal())?,
                     "verifier_generation": {"memory": verifier::db_generation(tx)?},
-                    "capabilities": [verifier::CAPABILITY, manifest_binding::CAPABILITY],
+                    "capabilities": [verifier::CAPABILITY, manifest_binding::CAPABILITY, compensation::CAPABILITY],
                 }),
             );
             if let Some(names) = readable_scopes {
