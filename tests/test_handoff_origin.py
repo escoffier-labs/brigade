@@ -981,6 +981,33 @@ def test_hold_rejects_rewrite_with_restored_mtime(tmp_path, monkeypatch):
     assert "identity-mismatch" in (tmp_path / "memory/handoff-inbox" / note).read_text()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor writes during resampling")
+def test_hold_rejects_write_during_held_resample(tmp_path, monkeypatch):
+    from brigade import handoff_quarantine
+
+    source = handoff(tmp_path)
+    os.truncate(source, 3 * handoff_quarantine.CHUNK_BYTES)
+    writer = os.open(source, os.O_WRONLY)
+    real_sample = handoff_quarantine._sample
+    calls = 0
+
+    def sample_then_write(fd, size):
+        nonlocal calls
+        calls += 1
+        result = real_sample(fd, size)
+        if calls == 2:
+            os.pwrite(writer, b"middle", handoff_quarantine.CHUNK_BYTES + 10)
+        return result
+
+    monkeypatch.setattr(handoff_quarantine, "_sample", sample_then_write)
+    try:
+        with pytest.raises(ingest.ChangedHandoffError, match="during quarantine"):
+            handoff_quarantine.hold(tmp_path, source)
+    finally:
+        os.close(writer)
+    assert calls == 2
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow target components")
 def test_hold_refuses_symlinked_target(tmp_path):
     from brigade import handoff_quarantine

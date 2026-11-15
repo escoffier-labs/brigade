@@ -56,6 +56,11 @@ def _verify_held(destination: int, name: str, before: os.stat_result, sample: st
             raise ingest.ChangedHandoffError("oversized handoff changed during quarantine")
         if _sample(fd, held.st_size) != sample:
             raise ingest.ChangedHandoffError("oversized handoff changed during quarantine")
+        # A descriptor kept open across the move can still write while we resample.
+        # Both stats are taken after the rename, so comparing every stable field,
+        # ctime included, is safe here.
+        if _identity(os.fstat(fd)) != _identity(held):
+            raise ingest.ChangedHandoffError("oversized handoff changed during quarantine")
     finally:
         os.close(fd)
 
