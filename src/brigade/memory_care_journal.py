@@ -462,6 +462,10 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
 
     d = load(target, decision_id)
     p = _payload(target, decision_id)
+    # Recovering an append may finish its refusal cleanup from the same pending-index snapshot.
+    # A later visit to that row must not replay the finished mutations or mark it abandoned.
+    if p.get("phase") != "prepared":
+        return d
     config = _config_or_default(target)
     changes = [
         Change(
