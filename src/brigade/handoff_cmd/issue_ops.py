@@ -358,7 +358,16 @@ def _parse_markdown_sections(text: str) -> dict[str, str]:
             continue
         if current is not None:
             sections[current].append(line)
-    return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+    exact = {"superseded preference", "suggested document content"}
+    if not any(name.casefold() == "superseded preference" for name in sections):
+        return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+    # A preference replacement matches its line exactly, so keep content-line whitespace the way ingest.parse does.
+    from ..ingest import strip_section_blank_lines
+
+    return {
+        name: strip_section_blank_lines("\n".join(lines)) if name.casefold() in exact else "\n".join(lines).strip()
+        for name, lines in sections.items()
+    }
 
 
 def _normalize_section_heading(name: str) -> str:

@@ -103,6 +103,33 @@ def test_replace_preserves_exact_preference_whitespace(tmp_path, old, new, dupli
     assert (tmp_path / proposal["history_path"]).read_text().endswith(old + "\n")
 
 
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("  - Prefer short replies.", "- Prefer short replies."),
+        ("- Prefer short replies.  ", "- Prefer short replies."),
+    ],
+    ids=["unindent", "trailing-spaces-removed"],
+)
+def test_whitespace_only_replacement_passes_draft_lint(tmp_path, old, new):
+    before = f"# Preferences\n\n{old}\n- Use plain words.\n"
+    (tmp_path / "USER.md").write_text(before)
+    result = build_draft(
+        target=tmp_path,
+        title="Reply length",
+        summary="The preference changed.",
+        handoff_type="preference",
+        target_document="USER.md",
+        superseded_preference=old,
+        content=new,
+    )
+    proposal = create(tmp_path, Path(result["path"]))
+    assert proposal["preference_diff"] == {"old": old, "new": new}
+    accept(tmp_path, proposal)
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert (tmp_path / "USER.md").read_text() == f"# Preferences\n\n{new}\n- Use plain words.\n"
+
+
 @pytest.mark.parametrize("heading_line", [OLD, NEW], ids=["superseded", "suggested"])
 def test_padded_heading_refuses_proposal(tmp_path, heading_line):
     path = draft(tmp_path)
