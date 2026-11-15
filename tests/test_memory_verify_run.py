@@ -436,14 +436,32 @@ def test_principal_and_scope_quota_replies_stop_proposing_without_a_failure(veri
     assert "verified" not in entry_for(target, CARD_ID)
 
 
-@pytest.mark.parametrize("code", sorted(hubc.EVIDENCE_QUOTA_REFUSALS))
-def test_a_retained_evidence_quota_stops_before_proposing_without_a_failure(verify_hub, capsys, resolver, code):
+@pytest.mark.parametrize(
+    "code",
+    [
+        "memory_evidence_retained_principal_quota",
+        "memory_evidence_retained_scope_quota",
+        "memory_evidence_lifetime_principal_quota",
+    ],
+)
+def test_an_evidence_quota_stops_before_proposing_without_a_failure(verify_hub, capsys, resolver, code):
     target, hub, _, _ = verify_hub
     hub.attach_reply = (429, {"code": code, "error": "quota"})
     status, report = verify(target, capsys)
     assert status == 0 and report["skipped"]["evidence_quota"] == 1
     assert [call["action"] for call in writes(hub)] == ["evidence.attach"]
     assert report["schedule"]["consecutive_failures"] == 0
+
+
+def test_lifetime_evidence_quota_is_a_hub_refusal():
+    client = hubc.MemoryHubClient(
+        "https://hub.example.com",
+        "test-token",
+        transport=lambda *_: (429, {"code": "memory_evidence_lifetime_principal_quota"}),
+    )
+    with pytest.raises(hubc.HubRefusal) as refused:
+        client.call("evidence.attach")
+    assert refused.value.code == "memory_evidence_lifetime_principal_quota"
 
 
 def test_an_unclean_manifest_is_never_attached(verify_hub, capsys, resolver, monkeypatch):

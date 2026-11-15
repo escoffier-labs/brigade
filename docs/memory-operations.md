@@ -2162,13 +2162,20 @@ about 140 records, at most 8.75 MiB at the 64 KiB artifact limit. Active
 records are not counted, since a reviewer accepted them and the per-card slot
 caps bound them.
 
+A principal may create at most 32,768 verifier evidence records over the
+database lifetime. Purged bindings count toward this limit because their audit
+metadata stays in the database. Further attaches are refused with
+`429 memory_evidence_lifetime_principal_quota`. This lifetime limit is far
+above the retained budgets, but it puts a fixed bound on metadata growth.
+
 The idle sweep purges a record 35 days after it went inert, at most 8 records
 per sweep transaction. The purge is the tombstone the admin `evidence.purge`
 action writes: the artifact bytes are cleared, the id, hash and other fields
 stay, and an `evidence.purge` event with `"reason": "verifier_retention"`
 records it. The binding row keeps its metadata and gains `purged_ms`. A purged
-record frees its budget, never holds automatic apply and never counts as
-proof. An admin purge also stops a record counting at once.
+record frees its retained budget, never holds automatic apply and never counts as
+proof. An admin purge also frees retained budget at once. Neither purge resets the
+lifetime count.
 
 `propose` checks every verifier record an `append_evidence` op cites. The
 record binds only when the proposal comes from the principal that attached

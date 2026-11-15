@@ -882,6 +882,91 @@ async fn the_scope_and_record_budgets_count_retained_records_only() {
 }
 
 #[tokio::test]
+async fn purged_bindings_count_toward_the_lifetime_principal_budget() {
+    let (h, a) = ready().await;
+    assert_eq!(attest(&h, "old", "fleet", "a", a).await.status, 201);
+    let purge = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"evidence.purge","evidence_id":eid("old"),"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(purge.status, 200, "{purge:?}");
+
+    let db = Connection::open(h.memory()).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
+         INSERT INTO memory_evidence(evidence_id,scope,card_id,workspace_id,principal,credential_id,credential_class,artifact_kind,artifact_sha256,artifact_bytes,observed_ms,stance,scan_state,created_ms,tombstoned)
+         SELECT 'purged-'||value,scope,card_id,workspace_id,principal,credential_id,credential_class,artifact_kind,artifact_sha256,x'',observed_ms,stance,scan_state,created_ms,1
+         FROM memory_evidence, n WHERE evidence_id=?2",
+        rusqlite::params![
+            manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 2,
+            eid("old")
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
+         INSERT INTO memory_evidence_bindings(evidence_id,principal,scope,base_revision,retained_bytes,state,proposal_id,created_ms,updated_ms,purged_ms)
+         SELECT 'purged-'||value,'agent:dot','fleet',1,0,'inert',NULL,1,1,1 FROM n",
+        [manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 2],
+    )
+    .unwrap();
+    drop(db);
+
+    let last = attest(&h, "last", "fleet", "a", a).await;
+    assert_eq!(last.status, 201, "{last:?}");
+    // Even purging the last retained record cannot free lifetime capacity.
+    let purge = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"evidence.purge","evidence_id":eid("last"),"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(purge.status, 200, "{purge:?}");
+    let db = Connection::open(h.memory()).unwrap();
+    let events: i64 = db
+        .query_row("SELECT count(*) FROM memory_events", [], |r| r.get(0))
+        .unwrap();
+    // The same principal cannot escape the budget through a different scope.
+    for scope in ["fleet", "repo:other"] {
+        let refused = attest(&h, "over", scope, "a", a).await;
+        assert_eq!(
+            (refused.status, code(&refused)),
+            (429, "memory_evidence_lifetime_principal_quota"),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM memory_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        events
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM memory_evidence_bindings", [], |r| r
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        manifest_binding::LIFETIME_PRINCIPAL_RECORDS
+    );
+    // A different principal still has its entire budget.
+    let tx = crate::writer::worker::Tx(&db);
+    assert!(
+        manifest_binding::retained_refusal(
+            &tx,
+            "agent:other",
+            "fleet",
+            1,
+            &manifest_binding::BUDGET
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test]
 async fn retention_purges_only_records_inert_for_35_days() {
     let (h, a) = ready().await;
     for name in ["kept", "dropped"] {

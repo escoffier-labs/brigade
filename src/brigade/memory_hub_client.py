@@ -90,8 +90,12 @@ READ_SCOPES_MAX = 64
 _UNAVAILABLE_STATUSES = {408, 429}
 # Coded proposal quota answers are hub decisions, so callers can stop proposing.
 QUOTA_REFUSALS = {"memory_proposal_principal_quota", "memory_proposal_scope_quota"}
-# Retained-storage budgets for verifier manifests (phase-memory-verify D5). Back pressure, like the proposal quotas.
-EVIDENCE_QUOTA_REFUSALS = {"memory_evidence_retained_principal_quota", "memory_evidence_retained_scope_quota"}
+# Lifetime and retained-storage budgets for verifier manifests (phase-memory-verify D5). Back pressure, like the proposal quotas.
+EVIDENCE_QUOTA_REFUSALS = {
+    "memory_evidence_retained_principal_quota",
+    "memory_evidence_retained_scope_quota",
+    "memory_evidence_lifetime_principal_quota",
+}
 # `read_stats` allows one request per second and 600 a day per principal. The hub
 # says so with this code, so a caller can stop instead of retrying at once.
 READ_STATS_RATE_LIMITED = "memory_read_stats_rate_limited"
