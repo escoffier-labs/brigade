@@ -41,8 +41,13 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def _valid(row: object) -> bool:
-    if not isinstance(row, dict) or set(row) != _FIELDS:
+    if not isinstance(row, dict) or not _FIELDS <= set(row) or set(row) - _FIELDS - {"scope"}:
         return False
+    if "scope" in row:
+        from .memory_hub_client import valid_scope
+
+        if not valid_scope(row["scope"]):
+            return False
     if any(
         not isinstance(row[key], str) or not row[key] or any(ord(c) < 32 for c in row[key])
         for key in _FIELDS - {"similarity"}
@@ -107,10 +112,15 @@ def append_log_row(target: Path, data: bytes) -> None:
     path = target / LOG_PATH
     with io.directory(path.parent, create=True, private=True) as parent:
         fd = os.open(
-            path.name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent
+            path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent
         )
         try:
-            io._regular(fd, private=True)
+            size = io._regular(fd, private=True).st_size
+            if size:
+                os.lseek(fd, -1, os.SEEK_END)
+                if os.read(fd, 1) != b"\n":
+                    # Preserve a torn tail and put the next row on its own line.
+                    data = b"\n" + data
             # One append syscall keeps concurrent rows together. Never truncate
             # or replace this inode, including when a previous row is malformed.
             if os.write(fd, data) != len(data):

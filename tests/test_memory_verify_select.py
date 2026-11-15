@@ -7,6 +7,7 @@ import math
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -452,6 +453,36 @@ def test_dry_run_prints_ids_scores_and_skip_counts_only(verify_setup, capsys):
     assert report["never_read"] == {"count": 0, "by_scope": {"fleet": 0}, "card_ids": []}
     assert {call["action"] for call in hub.calls} <= {"status", "log", "card", "read_stats"}
     assert not (target / vstate.STATE).exists()
+
+
+@pytest.mark.parametrize("ledger_in_workspace", [False, True])
+def test_verified_negative_loses_priority_after_cooldown(verify_setup, monkeypatch, ledger_in_workspace):
+    from brigade import memory_lesson_rows as lessons
+
+    target, _ = verify_setup
+    settings = config.load(target)
+    # Both readings use the verify state's day, including the workspace ledger.
+    stamp = datetime.fromtimestamp((TODAY - 9) * 86400 + 43200, timezone.utc).isoformat()
+    ledger_target = Path(settings.workspaces[0].resolved) if ledger_in_workspace else target
+    lessons.log_run_receipt(
+        ledger_target,
+        {
+            "run_id": "run-example",
+            "status": "failed",
+            "finished_at": stamp,
+            "evidence_brief": {"memory_refs": [{"scope": "fleet", "card_id": "a", "hash": "a" * 12}]},
+        },
+    )
+    monkeypatch.setattr(verify_cmd, "_counts", lambda *_: ({}, TODAY - 100))
+    hub_settings, client = verify_cmd._hub(target)
+    state = vstate.fresh()
+    picked = verify_cmd.select_cards(target, state, settings, hub_settings, client, NOW)
+    assert ("a", "negative_outcome") in [(card.card_id, lane) for card, lane in picked.selection.selected]
+    state["binding"] = picked.binding
+    state["scopes"] = {"fleet": {"cards": {key("a", "fleet"): entry(verified=TODAY - 8)}}}
+    picked = verify_cmd.select_cards(target, state, settings, hub_settings, client, NOW)
+    assert any(card.card_id == "a" for card, _ in picked.selection.selected)
+    assert all(lane != "negative_outcome" for _, lane in picked.selection.selected)
 
 
 def test_text_output_has_no_card_text(verify_setup, capsys):

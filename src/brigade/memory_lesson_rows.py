@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -27,6 +29,51 @@ def _refs(value: object) -> list[dict[str, str]]:
         return []
 
 
+def _seen(target: Path, candidates: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Scan the complete snapshot with bounded memory, including withdrawn rows.
+
+    Malformed rows cannot identify a receipt and are skipped. Keep the original
+    valid rows as tombstones so an import retry cannot undo a retraction. The
+    caller holds lesson-rows.lock across this scan and the subsequent append.
+    """
+    path = target / ledger.LOG_PATH
+    seen: set[tuple[str, str]] = set()
+    try:
+        with io.directory(path.parent) as parent:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as handle:
+                size = remaining = io._regular(handle.fileno()).st_size
+                while remaining:
+                    line = handle.readline(min(ledger.MAX_LINE_BYTES + 1, remaining))
+                    if not line:
+                        raise ValueError("evidence ledger truncated during deduplication")
+                    remaining -= len(line)
+                    oversized = len(line) > ledger.MAX_LINE_BYTES
+                    terminated = line.endswith(b"\n")
+                    while not terminated and remaining:
+                        chunk = handle.readline(min(ledger.MAX_LINE_BYTES + 1, remaining))
+                        if not chunk:
+                            raise ValueError("evidence ledger truncated during deduplication")
+                        remaining -= len(chunk)
+                        terminated = chunk.endswith(b"\n")
+                        oversized = True
+                    if oversized:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeError, RecursionError):
+                        continue
+                    if ledger._valid(row):
+                        pair = (row["card_path"], row["evidence_id"])
+                        if pair in candidates:
+                            seen.add(pair)
+                if io._regular(handle.fileno()).st_size < size:
+                    raise ValueError("evidence ledger truncated during deduplication")
+    except FileNotFoundError:
+        pass
+    return seen
+
+
 def _append(target: Path, source: str, receipt: Mapping[str, Any], refs: list[dict[str, str]]) -> None:
     run_id = receipt.get("run_id")
     if not isinstance(run_id, str) or not run_id or len(run_id) > 256 or not refs:
@@ -40,10 +87,9 @@ def _append(target: Path, source: str, receipt: Mapping[str, Any], refs: list[di
     lock = target / ".brigade/memory/reflect/lesson-rows.lock"
     io.protect_file(lock)
     with held_file_lock(lock, deadline_seconds=1.0):
-        rows, warnings, unsupported = ledger.read_evidence(target)
-        if warnings or unsupported:
-            raise ValueError("evidence ledger cannot establish deduplication")
-        seen = {(row["card_path"], row["evidence_id"]) for row in rows}
+        seen = _seen(
+            target, {(f"{PREFIX}{fairness.key_digest(ref['scope'], [ref['card_id']])}.md", evidence_id) for ref in refs}
+        )
         for ref in refs:
             key = fairness.key_digest(ref["scope"], [ref["card_id"]])
             path = f"{PREFIX}{key}.md"
@@ -80,10 +126,16 @@ def log_review_findings(target: Path, receipt: Mapping[str, Any], findings: Iter
     _append(target, "review", receipt, refs)
 
 
-def pending_keys(target: Path, heads: Iterable[Mapping[str, Any]]) -> set[str]:
+def pending_keys(
+    target: Path,
+    heads: Iterable[Mapping[str, Any]],
+    entries: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    scope: str | None = None,
+) -> set[str]:
     """Match pending rows to exact scoped ids, and legacy file rows to card ids.
 
-    A later review or consolidation consumes a row. New scoped signals use a
+    A later review, consolidation or verification consumes a row. New scoped signals use a
     synthetic path containing the fairness digest, never a path to open.
     """
     rows, _, _ = ledger.read_evidence(target)
@@ -92,19 +144,39 @@ def pending_keys(target: Path, heads: Iterable[Mapping[str, Any]]) -> set[str]:
         if row["kind"] == "negative-outcome":
             negative.setdefault(row["card_id"], []).append(row)
     result = set()
-    from .memory_cmd import _frontmatter_value, _parse_frontmatter
+    from .memory_cmd import _parse_frontmatter
 
     for head in heads:
         key = fairness.key_digest(str(head["scope"]), [str(head["card_id"])])
         meta, _ = _parse_frontmatter(str(head.get("text", "")))
-        cutoff = ledger._timestamp(meta.get("last_consolidated")) or ledger._timestamp(
-            _frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
-        )
+        cutoffs = []
+        for field in ("last_consolidated", "last_reviewed", "last_reviewed_at", "reviewed_at"):
+            value = meta.get(field)
+            cutoff = ledger._timestamp(value)
+            if cutoff is None or not isinstance(value, str):
+                continue
+            try:
+                date.fromisoformat(value)
+            except (ValueError, TypeError):
+                pass
+            else:
+                # A date-only review consumes all evidence on that UTC day.
+                cutoff = datetime.combine(cutoff.date(), time.max, timezone.utc)
+            cutoffs.append(cutoff)
+        cutoff = max(cutoffs, default=None)
+        verified = (entries or {}).get(key, {}).get("verified")
         for row in negative.get(str(head["card_id"]), []):
             if row["card_path"].startswith(PREFIX) and row["card_path"] != f"{PREFIX}{key}.md":
                 continue
+            row_scope = row.get("scope") or (scope if not row["card_path"].startswith(PREFIX) else None)
+            if row_scope is not None and row_scope != head["scope"]:
+                continue
             stamp = ledger._timestamp(row["ts"])
-            if stamp is not None and (cutoff is None or stamp > cutoff):
+            if (
+                stamp is not None
+                and (cutoff is None or stamp > cutoff)
+                and (verified is None or int(stamp.timestamp() // 86400) > verified)
+            ):
                 result.add(key)
                 break
     return result
@@ -129,10 +201,7 @@ def log_captured_run(target: Path, record: OutcomeRecord, receipt: Mapping[str, 
     lock = target / ".brigade/memory/reflect/lesson-rows.lock"
     io.protect_file(lock)
     with held_file_lock(lock, deadline_seconds=1.0):
-        rows, warnings, unsupported = ledger.read_evidence(target)
-        if warnings or unsupported:
-            raise ValueError("evidence ledger cannot establish deduplication")
-        if any(row["card_path"] == rel and row["evidence_id"] == ref for row in rows):
+        if _seen(target, {(rel, ref)}):
             return
         ledger.append_evidence(
             target, card_path=path, evidence_id=ref, kind="negative-outcome", similarity=1.0, ts=record.ts

@@ -1,6 +1,7 @@
 """Failure signals retain identifiers and reserve verification capacity."""
 
 import pytest
+import json
 
 from brigade import memory_lesson_rows as lessons
 from brigade import memory_evidence_log as log
@@ -200,3 +201,217 @@ def test_file_card_run_capture_is_deduplicated(tmp_path):
     assert len(rows) == 1
     assert rows[0]["card_path"] == "memory/cards/example.md"
     assert "PRIVATE CARD BODY" not in (tmp_path / log.LOG_PATH).read_text()
+
+
+@pytest.mark.parametrize("field", ["last_consolidated", "last_reviewed", "last_reviewed_at", "reviewed_at"])
+@pytest.mark.parametrize(
+    "review,pending",
+    [("2026-01-02", False), ("2026-01-02T15:00:00Z", False), ("2026-01-02T09:00:00Z", True), ("2026-01-01", True)],
+)
+def test_negative_cutoff_same_day(tmp_path, field, review, pending):
+    lessons.log_run_receipt(
+        tmp_path,
+        {
+            "run_id": "run-example",
+            "status": "failed",
+            "finished_at": "2026-01-02T12:00:00Z",
+            "evidence_brief": {"memory_refs": [REF]},
+        },
+    )
+    reviewed = head(REF["card_id"], body=f"---\n{field}: {review}\n---\nReviewed. ^c-abcdef\n")
+    assert lessons.pending_keys(tmp_path, [reviewed]) == ({key(REF["card_id"])} if pending else set())
+
+
+@pytest.mark.parametrize("field", ["last_reviewed", "last_reviewed_at", "reviewed_at"])
+def test_negative_cutoff_uses_latest_review_and_consolidation(tmp_path, field):
+    lessons.log_run_receipt(
+        tmp_path,
+        {
+            "run_id": "run-example",
+            "status": "failed",
+            "finished_at": "2026-01-02T12:00:00Z",
+            "evidence_brief": {"memory_refs": [REF]},
+        },
+    )
+    reviewed = head(
+        REF["card_id"], body=f"---\nlast_consolidated: 2026-01-01\n{field}: 2026-01-03\n---\nReviewed. ^c-abcdef\n"
+    )
+    assert lessons.pending_keys(tmp_path, [reviewed]) == set()
+
+
+@pytest.fixture(params=["run", "review", "capture"])
+def append_failure(tmp_path, request):
+    """Exercise all three producers with stable receipt identifiers."""
+    if request.param == "run":
+        return lambda run_id="run-example": lessons.log_run_receipt(
+            tmp_path,
+            {
+                "run_id": run_id,
+                "status": "failed",
+                "evidence_brief": {"memory_refs": [REF]},
+            },
+        )
+    if request.param == "review":
+        return lambda run_id="run-example": lessons.log_review_findings(
+            tmp_path, {"run_id": run_id}, [{"memory_refs": [REF]}]
+        )
+    from brigade.outcome import OutcomeRecord
+
+    card = tmp_path / "memory/cards/example.md"
+    card.parent.mkdir(parents=True)
+    card.write_text("---\ntopic: example\n---\nExample card.\n")
+    return lambda run_id="run-example": log.log_outcome(
+        tmp_path,
+        OutcomeRecord(
+            "example", "card", "", "run", -1, str(tmp_path / f".brigade/runs/{run_id}/run.json"), "2026-01-01T00:00:00Z"
+        ),
+        {"status": "failed"},
+    )
+
+
+def test_failure_append_survives_large_log(tmp_path, append_failure):
+    append_failure()
+    path = tmp_path / log.LOG_PATH
+    first = path.read_bytes()
+    # Push the original signal outside the reader's tail with unrelated evidence.
+    row = {**json.loads(first), "kind": "near-match", "evidence_id": "handoff-example.md"}
+    padding = (json.dumps(row) + "\n").encode()
+    with path.open("ab") as handle:
+        handle.write(padding * (log.MAX_SCAN_BYTES // len(padding) + 1))
+    append_failure()
+    assert path.read_bytes().count(first) == 1
+    # A distinct receipt still appends beyond the old scan limit.
+    append_failure("another-run")
+    assert any(row["kind"] == "negative-outcome" for row in log.read_evidence(tmp_path)[0])
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [b"invalid\n", b'{"torn":', b"x" * (log.MAX_LINE_BYTES + 1) + b"\n"],
+    ids=["invalid", "torn", "oversized"],
+)
+def test_failure_append_survives_malformed_log(tmp_path, append_failure, malformed):
+    append_failure()
+    path = tmp_path / log.LOG_PATH
+    first = path.read_bytes()
+    with path.open("ab") as handle:
+        handle.write(malformed)
+    append_failure()
+    append_failure("another-run")
+    rows, warnings, _ = log.read_evidence(tmp_path)
+    assert warnings >= 1
+    assert len([row for row in rows if row["kind"] == "negative-outcome"]) == 2
+    assert path.read_bytes().count(first) == 1
+
+
+def test_failure_retraction_sticks_on_retry(tmp_path, append_failure):
+    from brigade.memory_log_retractions import withdrawn
+
+    append_failure()
+    path = tmp_path / log.LOG_PATH
+    log.append_log_row(tmp_path, withdrawn(path.read_bytes()))
+    assert log.read_evidence(tmp_path)[0] == []
+    before = path.read_bytes()
+    append_failure()
+    assert log.read_evidence(tmp_path)[0] == []
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("scope_source", ["row", "workspace"])
+def test_legacy_file_rows_scope(tmp_path, scope_source):
+    from brigade import memory_proposal_io as io
+
+    log.append_log_row(
+        tmp_path,
+        io.json_bytes(
+            {
+                "ts": "2026-01-01T12:00:00Z",
+                "card_id": REF["card_id"],
+                "card_path": "memory/cards/example.md",
+                "evidence_id": "run-example",
+                "kind": "negative-outcome",
+                "similarity": 1.0,
+                **({"scope": REF["scope"]} if scope_source == "row" else {}),
+            }
+        ),
+    )
+    assert lessons.pending_keys(
+        tmp_path,
+        [head(REF["card_id"]), head(REF["card_id"], scope="repo:other")],
+        scope=REF["scope"] if scope_source == "workspace" else None,
+    ) == {key(REF["card_id"])}
+
+
+def test_complete_unterminated_row_is_not_duplicated(tmp_path, append_failure):
+    append_failure()
+    path = tmp_path / log.LOG_PATH
+    original = path.read_bytes()
+    path.write_bytes(original.rstrip(b"\n"))
+    append_failure()
+    assert path.read_bytes() == original.rstrip(b"\n")
+    append_failure("another-run")
+    assert len(log.read_evidence(tmp_path)[0]) == 2
+    assert path.read_bytes().count(original) == 1
+
+
+def test_dedup_refuses_concurrent_log_truncation(tmp_path, monkeypatch, append_failure):
+    from brigade import memory_proposal_io as io
+
+    append_failure()
+    path = tmp_path / log.LOG_PATH
+    regular = io._regular
+
+    def truncate(fd, **kwargs):
+        metadata = regular(fd, **kwargs)
+        # The lock and captured-card reads also validate regular files. Only
+        # truncate once the dedup scanner has sized the ledger itself.
+        if metadata.st_ino == path.stat().st_ino:
+            path.write_bytes(b"")
+        return metadata
+
+    monkeypatch.setattr(io, "_regular", truncate)
+    with pytest.raises(ValueError, match="evidence ledger truncated during deduplication"):
+        append_failure("another-run")
+    assert path.read_bytes() == b""
+
+
+@pytest.mark.parametrize("failure_day,pending", [(TODAY - 9, False), (TODAY - 8, False), (TODAY - 7, True)])
+def test_verified_cutoff_keeps_only_new_failures(tmp_path, failure_day, pending):
+    from datetime import datetime, timezone
+
+    lessons.log_run_receipt(
+        tmp_path,
+        {
+            "run_id": "run-example",
+            "status": "failed",
+            "finished_at": datetime.fromtimestamp(failure_day * 86400 + 43200, timezone.utc).isoformat(),
+            "evidence_brief": {"memory_refs": [REF]},
+        },
+    )
+    assert lessons.pending_keys(tmp_path, [head(REF["card_id"])], {key(REF["card_id"]): entry(verified=TODAY - 8)}) == (
+        {key(REF["card_id"])} if pending else set()
+    )
+
+
+def test_outcome_capture_survives_failure_logging_error(tmp_path, monkeypatch, capsys):
+    from brigade import outcome_cmd
+    from tests.test_outcome_cmd import _write_run_receipt
+
+    card = tmp_path / "memory/cards/example.md"
+    card.parent.mkdir(parents=True)
+    card.write_text("---\ntopic: example\n---\nExample card.\n")
+    _write_run_receipt(tmp_path, status="failed")
+
+    def fail(*args, **kwargs):
+        raise ValueError("private failure details")
+
+    monkeypatch.setattr(lessons, "log_captured_run", fail)
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path, artifact_id="example", artifact_kind="card", task_id="", run_receipt="brigade-run"
+        )
+        == 0
+    )
+    records = outcome_cmd.load_records(tmp_path)
+    assert len(records) == 1 and records[0].signal_value == -1
+    assert capsys.readouterr().err == "warning: evidence log append failed; retry outcome capture\n"
