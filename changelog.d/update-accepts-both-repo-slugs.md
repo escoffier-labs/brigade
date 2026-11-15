@@ -1,0 +1,1 @@
+- `brigade update` keeps working if the GitHub repository is renamed to `escoffier-labs/brigadestack`. It accepts either slug in release URLs, release manifests and stored update state, requests `escoffier-labs/brigade` first and falls back to the other name. A redirect to any other repository is still refused.

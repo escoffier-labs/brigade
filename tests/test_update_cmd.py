@@ -1101,3 +1101,179 @@ def test_distribution_identity_is_process_local_and_ignores_environment(monkeypa
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+CURRENT_SLUG = "escoffier-labs/brigade"
+RENAMED_SLUG = "escoffier-labs/brigadestack"
+
+
+class _GithubServing:
+    """GitHub serving the repository under one name: the other name only redirects."""
+
+    def __init__(self, serving: str, manifest_slug: str):
+        self.serving = serving
+        self.manifest = _manifest().replace(CURRENT_SLUG.encode(), manifest_slug.encode())
+        self.base = f"https://github.com/{serving}/releases/download/{TAG}/"
+        self.urls: list[str] = []
+
+    def release(self) -> dict:
+        release = _release(self.manifest)
+        release["assets"][0]["browser_download_url"] = self.base + "component-manifest-v1.json"
+        return release
+
+    def json(self, url):
+        self.urls.append(url)
+        if f"/repos/{self.serving}/" not in url:
+            raise update_cmd.UpdateError(f"GitHub API request redirected outside its exact expected URL: {url}")
+        if url.endswith("/releases/latest"):
+            return self.release()
+        if url == f"https://api.github.com/repos/{self.serving}/git/ref/tags/{TAG}":
+            return {"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": "a" * 40}}
+        raise AssertionError(url)
+
+    def bytes(self, url):
+        self.urls.append(url)
+        assert url == self.base + "component-manifest-v1.json"
+        return self.manifest
+
+
+def _write_previous_state(paths, slug):
+    update_cmd.write_update_state(
+        paths.data_root / "brigade" / "update-state.json",
+        update_cmd.UpdateState(
+            1,
+            "stable",
+            "brigade update",
+            "1.2.2",
+            41,
+            "v1.2.2",
+            "b" * 40,
+            f"https://github.com/{slug}/releases/download/v1.2.2/component-manifest-v1.json",
+            "c" * 64,
+            "2026-07-01T00:00:00+00:00",
+        ),
+    )
+
+
+@pytest.mark.parametrize("stored", [None, CURRENT_SLUG, RENAMED_SLUG])
+@pytest.mark.parametrize(
+    "serving,manifest_slug",
+    [
+        (CURRENT_SLUG, CURRENT_SLUG),  # today: repository named brigade
+        (RENAMED_SLUG, CURRENT_SLUG),  # renamed repository, release published before the rename
+        (RENAMED_SLUG, RENAMED_SLUG),  # renamed repository, release published after the rename
+    ],
+)
+def test_update_works_under_either_repository_name_and_either_stored_state(tmp_path, serving, manifest_slug, stored):
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    if stored is not None:
+        _write_previous_state(paths, stored)
+    http = _GithubServing(serving, manifest_slug)
+    commands = []
+
+    result = update_cmd.run_update(
+        channel="stable",
+        paths=paths,
+        http=http,
+        runner=lambda argv: commands.append(argv) or 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+
+    assert result == 0
+    assert commands[0] == ["pipx", "install", "--force", "brigade-cli==1.2.3"]
+    state = update_cmd.load_update_state(paths.data_root / "brigade" / "update-state.json")
+    assert state is not None
+    assert state.component_tag == TAG
+    assert state.component_manifest_url == http.base + "component-manifest-v1.json"
+    # The current name is requested first. Under the renamed repository that first request is refused
+    # as a redirect and the next slug answers.
+    assert http.urls[0] == f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
+
+
+def test_release_lookup_reports_the_first_error_when_no_slug_answers():
+    class _Down:
+        def json(self, url):
+            raise update_cmd.UpdateError(f"GitHub request failed: {url} HTTP 500")
+
+    with pytest.raises(update_cmd.UpdateError, match=f"repos/{CURRENT_SLUG}/"):
+        update_cmd.resolve_release(_Down(), latest=True)
+
+
+@pytest.mark.parametrize(
+    "final_url",
+    [
+        "https://api.github.com/repos/escoffier-labs/brigade-site/releases/latest",
+        "https://api.github.com/repositories/1238165856/releases/latest",
+        "https://api.github.com/repos/someone-else/brigade/releases/latest",
+    ],
+)
+def test_redirect_to_an_unrelated_repository_is_still_refused(final_url):
+    url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
+    with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
+        with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
+            update_cmd._DefaultHttp().json(url)
+
+
+def test_redirect_between_the_two_slugs_is_refused_by_the_exact_url_rule():
+    url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
+    final_url = f"https://api.github.com/repos/{RENAMED_SLUG}/releases/latest"
+    with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
+        with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
+            update_cmd._DefaultHttp().json(url)
+
+
+def test_api_and_release_url_checks_accept_both_slugs_and_no_others():
+    for slug in (CURRENT_SLUG, RENAMED_SLUG):
+        assert update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/releases/latest")
+        assert update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/git/ref/tags/{TAG}")
+        assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/commits/main")
+        assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/releases/latest?x=1")
+        assert update_cmd._is_release_url(
+            f"https://github.com/{slug}/releases/download/{TAG}/component-manifest-v1.json",
+            TAG,
+            "component-manifest-v1.json",
+        )
+    for slug in ("escoffier-labs/brigade-site", "someone-else/brigade"):
+        assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/releases/latest")
+        assert not update_cmd._is_release_url(
+            f"https://github.com/{slug}/releases/download/{TAG}/component-manifest-v1.json",
+            TAG,
+            "component-manifest-v1.json",
+        )
+
+
+def test_stored_state_naming_an_unrelated_repository_is_rejected(tmp_path):
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    _write_previous_state(paths, "escoffier-labs/brigade-site")
+
+    assert update_cmd.load_update_state(paths.data_root / "brigade" / "update-state.json") is None
+
+
+def test_release_manifest_naming_an_unrelated_repository_is_rejected():
+    manifest = json.loads(_manifest())
+    manifest["components"]["sessionfind"]["source"]["repository"] = "escoffier-labs/brigade-site"
+    raw = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    release = update_cmd.ResolvedRelease(
+        42, TAG, VERSION, "a" * 40, BASE + "component-manifest-v1.json", len(raw), hashlib.sha256(raw).hexdigest(), raw
+    )
+
+    with pytest.raises(update_cmd.UpdateError, match="outside the resolved Brigade release"):
+        update_cmd.validate_release_manifest_bytes(release)
+
+
+def test_stored_state_under_either_slug_for_the_same_release_compares_equal():
+    def state(slug):
+        return update_cmd.UpdateState(
+            1,
+            "stable",
+            "brigade update",
+            VERSION,
+            42,
+            TAG,
+            "a" * 40,
+            f"https://github.com/{slug}/releases/download/{TAG}/component-manifest-v1.json",
+            "a" * 64,
+            "2026-07-20T12:00:00+00:00",
+        )
+
+    assert update_cmd._same_coordinates(state(CURRENT_SLUG), state(RENAMED_SLUG))

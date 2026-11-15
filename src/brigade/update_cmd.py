@@ -20,6 +20,13 @@ from urllib.parse import urlparse
 from brigade import component_manifest, component_paths, distribution, localio
 
 REPOSITORY = "escoffier-labs/brigade"
+RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
+# The GitHub repository may be renamed to RENAMED_REPOSITORY. Requests try REPOSITORY
+# first and fall back to the other slug: the name GitHub currently serves answers
+# directly and the other one redirects, which the exact-URL rule rejects. Release
+# URLs, component sources and stored update state are accepted under either slug so
+# an install keeps updating across the rename.
+_RELEASE_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
 PYPI_PROJECT = "brigade-cli"
@@ -259,7 +266,7 @@ def _is_release_url(url: Any, tag: str, name: str) -> bool:
         and parsed.netloc == "github.com"
         and not parsed.query
         and not parsed.fragment
-        and parsed.path == f"/{REPOSITORY}/releases/download/{tag}/{name}"
+        and parsed.path in {f"/{repository}/releases/download/{tag}/{name}" for repository in _RELEASE_REPOSITORIES}
     )
 
 
@@ -283,19 +290,23 @@ def _is_github_api_url(url: Any) -> bool:
         or parsed.password is not None
     ):
         return False
-    prefix = f"/repos/{REPOSITORY}/"
+    return any(_is_repository_api_path(parsed, repository) for repository in _RELEASE_REPOSITORIES)
+
+
+def _is_repository_api_path(parsed: Any, repository: str) -> bool:
+    if parsed.query:
+        return False
+    prefix = f"/repos/{repository}/"
     if parsed.path == f"{prefix}releases/latest":
-        return not parsed.query
+        return True
     tag = parsed.path.removeprefix(f"{prefix}releases/tags/")
     if parsed.path == f"{prefix}releases/tags/{tag}" and _parse_tag(tag) is not None:
-        return not parsed.query
+        return True
     tag_ref = parsed.path.removeprefix(f"{prefix}git/ref/tags/")
     if parsed.path == f"{prefix}git/ref/tags/{tag_ref}" and _parse_tag(tag_ref) is not None:
-        return not parsed.query
+        return True
     tag_object = parsed.path.removeprefix(f"{prefix}git/tags/")
-    if parsed.path == f"{prefix}git/tags/{tag_object}" and _SHA.fullmatch(tag_object) is not None:
-        return not parsed.query
-    return False
+    return parsed.path == f"{prefix}git/tags/{tag_object}" and _SHA.fullmatch(tag_object) is not None
 
 
 def _is_pypi_project_json_url(url: Any) -> bool:
@@ -337,12 +348,12 @@ def _asset(release: dict[str, Any]) -> dict[str, Any]:
     return found[0]
 
 
-def _tag_ref_url(tag: str) -> str:
-    return f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{tag}"
+def _tag_ref_url(tag: str, repository: str = REPOSITORY) -> str:
+    return f"https://api.github.com/repos/{repository}/git/ref/tags/{tag}"
 
 
-def _tag_object_url(sha: str) -> str:
-    return f"https://api.github.com/repos/{REPOSITORY}/git/tags/{sha}"
+def _tag_object_url(sha: str, repository: str = REPOSITORY) -> str:
+    return f"https://api.github.com/repos/{repository}/git/tags/{sha}"
 
 
 def _tag_target(value: Any, *, source: str) -> tuple[str, str]:
@@ -358,11 +369,11 @@ def _tag_target(value: Any, *, source: str) -> tuple[str, str]:
     return object_type, sha
 
 
-def resolve_tag_commit(http: UpdateHttp, tag: str) -> str:
+def resolve_tag_commit(http: UpdateHttp, tag: str, repository: str = REPOSITORY) -> str:
     """Resolve an exact release tag to its immutable commit through Git refs."""
     if _parse_tag(tag) is None:
         raise UpdateError("GitHub release tag must be vX.Y.Z")
-    ref = http.json(_tag_ref_url(tag))
+    ref = http.json(_tag_ref_url(tag, repository))
     if not isinstance(ref, dict) or ref.get("ref") != f"refs/tags/{tag}":
         raise UpdateError(f"GitHub tag ref did not report exact tag refs/tags/{tag}")
     object_type, sha = _tag_target(ref, source="tag ref")
@@ -374,7 +385,7 @@ def resolve_tag_commit(http: UpdateHttp, tag: str) -> str:
         if depth >= MAX_TAG_DEREFERENCE_DEPTH:
             raise UpdateError("GitHub tag dereference exceeded the maximum depth")
         seen.add(sha)
-        annotated = http.json(_tag_object_url(sha))
+        annotated = http.json(_tag_object_url(sha, repository))
         if not isinstance(annotated, dict) or annotated.get("tag") != tag:
             raise UpdateError(f"GitHub tag object did not report exact tag {tag}")
         object_type, sha = _tag_target(annotated, source="tag object")
@@ -382,11 +393,28 @@ def resolve_tag_commit(http: UpdateHttp, tag: str) -> str:
     return sha
 
 
+def _lookup_release(http: UpdateHttp, suffix: str) -> tuple[Any, str]:
+    """Fetch a release under the repository's current GitHub name.
+
+    A request under a name GitHub no longer serves redirects and is refused by the
+    exact-URL rule, so a failure moves on to the next slug. When every slug fails the
+    first error is raised.
+    """
+    first_error: UpdateError | None = None
+    for repository in _RELEASE_REPOSITORIES:
+        try:
+            return http.json(f"https://api.github.com/repos/{repository}/releases/{suffix}"), repository
+        except UpdateError as exc:
+            first_error = first_error or exc
+    assert first_error is not None
+    raise first_error
+
+
 def resolve_release(http: UpdateHttp, *, latest: bool, tag: str | None = None) -> ResolvedRelease:
     if latest == (tag is not None):
         raise ValueError("choose exactly one release lookup mode")
     suffix = "latest" if latest else f"tags/{tag}"
-    raw = http.json(f"https://api.github.com/repos/{REPOSITORY}/releases/{suffix}")
+    raw, repository = _lookup_release(http, suffix)
     if not isinstance(raw, dict) or raw.get("draft") is not False or raw.get("prerelease") is not False:
         raise UpdateError("GitHub release must be a published non-prerelease")
     version = _parse_tag(raw.get("tag_name"))
@@ -398,7 +426,7 @@ def resolve_release(http: UpdateHttp, *, latest: bool, tag: str | None = None) -
     release_id = raw.get("id")
     if not isinstance(release_id, int) or isinstance(release_id, bool):
         raise UpdateError("GitHub release is missing an immutable release ID")
-    target_commit = resolve_tag_commit(http, release_tag)
+    target_commit = resolve_tag_commit(http, release_tag, repository)
     asset = _asset(raw)
     url = asset.get("browser_download_url")
     size = asset.get("size")
@@ -422,7 +450,7 @@ def _validate_manifest_coordinates(
     for component in manifest.components.values():
         if component.component_revision != release.target_commit:
             raise UpdateError("component manifest component_revision does not match the resolved release target commit")
-        if component.source.repository != REPOSITORY or component.source.release_tag != release.tag:
+        if component.source.repository not in _RELEASE_REPOSITORIES or component.source.release_tag != release.tag:
             raise UpdateError("component manifest contains components outside the resolved Brigade release")
         for asset in component.assets.values():
             if not _is_release_url(asset.download_url, release.tag, asset.asset_name):
@@ -569,6 +597,11 @@ def _returncode(result: Any) -> int:
     return result if isinstance(result, int) else int(getattr(result, "returncode", 1))
 
 
+def _canonical_release_url(url: str) -> str:
+    """Name a release URL under REPOSITORY so state written under the other slug compares equal."""
+    return url.replace(f"/{RENAMED_REPOSITORY}/releases/", f"/{REPOSITORY}/releases/", 1)
+
+
 def _same_coordinates(left: UpdateState, right: UpdateState) -> bool:
     """Compare durable coordinates only; timestamps intentionally do not update no-ops."""
     return (
@@ -578,7 +611,7 @@ def _same_coordinates(left: UpdateState, right: UpdateState) -> bool:
         left.component_release_id,
         left.component_tag,
         left.component_target_commit,
-        left.component_manifest_url,
+        _canonical_release_url(left.component_manifest_url),
         left.component_manifest_sha256,
     ) == (
         right.channel,
@@ -587,7 +620,7 @@ def _same_coordinates(left: UpdateState, right: UpdateState) -> bool:
         right.component_release_id,
         right.component_tag,
         right.component_target_commit,
-        right.component_manifest_url,
+        _canonical_release_url(right.component_manifest_url),
         right.component_manifest_sha256,
     )
 
