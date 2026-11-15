@@ -141,6 +141,7 @@ func init() {
 	for _, mode := range []string{"docs", "files", "repo", "markdown", "html", "gitlog", "json", "jsonl"} {
 		helpUsage["crawl "+mode] = []string{"crawl " + mode + " " + harvestOptions}
 	}
+	helpUsage["crawl files"] = []string{"crawl files <path> [--source KIND] [--collection ID] [--glob PATTERNS] [--budget 10m] [--max-files 1000] [--json] [--dry-run]"}
 	for _, harness := range strings.Split(nativeHarness, "|") {
 		helpUsage["adapter "+harness] = []string{"adapter " + harness + " <path-or-dir> --out <file|-> [--limit N] [--since DATE] [--redact LIST] [--json]"}
 		helpUsage["import "+harness] = []string{"import " + harness + " <path-or-dir> [--json] [--dry-run] [--full] [--limit N] [--since DATE] [--redact LIST]"}
