@@ -65,6 +65,66 @@ def test_replace_requires_review_and_preserves_history(tmp_path):
     assert apply(tmp_path, proposal)["status"] == "already-applied"
 
 
+@pytest.mark.parametrize(
+    ("old", "new", "duplicate"),
+    [
+        ("  - Prefer short replies.", "  - Prefer detailed replies.", ""),
+        ("- Prefer short replies.  ", "- Prefer detailed replies.  ", ""),
+        ("  - Prefer short replies.", "  - Prefer detailed replies.", "- Prefer short replies.\n"),
+    ],
+    ids=["indented", "trailing-spaces", "unindented-duplicate"],
+)
+@pytest.mark.parametrize("from_file", [False, True], ids=["content", "content-file"])
+def test_replace_preserves_exact_preference_whitespace(tmp_path, old, new, duplicate, from_file):
+    before = f"# Preferences\n\n{old}\n{duplicate}- Use plain words.\n"
+    (tmp_path / "USER.md").write_text(before)
+    content_args = {"content": new}
+    if from_file:
+        content_file = tmp_path / "replacement.txt"
+        content_file.write_text("\n \n" + new + "\n\t\n")
+        content_args = {"content_file": content_file}
+    result = build_draft(
+        target=tmp_path,
+        title="Reply length",
+        summary="The preference changed.",
+        handoff_type="preference",
+        target_document="USER.md",
+        superseded_preference=old,
+        **content_args,
+    )
+    path = Path(result["path"])
+    assert ingest.parse(path)["superseded preference"] == old
+    assert ingest.parse(path)["suggested document content"] == new
+    proposal = create(tmp_path, path)
+    assert proposal["preference_diff"] == {"old": old, "new": new}
+    accept(tmp_path, proposal)
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert (tmp_path / "USER.md").read_text() == f"# Preferences\n\n{new}\n{duplicate}- Use plain words.\n"
+    assert (tmp_path / proposal["history_path"]).read_text().endswith(old + "\n")
+
+
+@pytest.mark.parametrize("heading_line", [OLD, NEW], ids=["superseded", "suggested"])
+def test_padded_heading_refuses_proposal(tmp_path, heading_line):
+    path = draft(tmp_path)
+    path.write_text(path.read_text().replace(heading_line, "  # Heading  "))
+    with pytest.raises(proposals.ProposalError, match="non-heading"):
+        create(tmp_path, path)
+
+
+def test_parse_removes_only_preference_section_blank_lines():
+    sections = ingest.parse(
+        Path("handoff.md"),
+        (
+            "## Suggested document content\n\n \n  - New.  \n\t\n"
+            "## Superseded preference\n\n\t\n  - Old.  \n \n"
+            "## Summary\n\n  Changed.  \n"
+        ).encode(),
+    )
+    assert sections["suggested document content"] == "  - New.  "
+    assert sections["superseded preference"] == "  - Old.  "
+    assert sections["summary"] == "Changed."
+
+
 def test_reject_changes_no_preference(tmp_path):
     path = draft(tmp_path)
     proposal = create(tmp_path, path)

@@ -23,7 +23,7 @@ def replacement_lines(sections: dict[str, str]) -> tuple[str, str]:
     old = sections.get("superseded preference", "")
     new = sections.get("suggested document content", "")
     for line in (old, new):
-        if not line.strip() or len(line.splitlines()) != 1 or line.startswith("#"):
+        if not line.strip() or len(line.splitlines()) != 1 or line.lstrip().startswith("#"):
             raise proposals.ProposalError("old and new preferences must each be one nonempty non-heading line")
         proposals._clean(line)
     if old == new:

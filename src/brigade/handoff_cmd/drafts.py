@@ -706,15 +706,20 @@ def _slugify(value: str) -> str:
     return slug[:48].strip("-") or "handoff"
 
 
-def _read_suggested_content(content: str | None, content_file: Path | None) -> str:
+def _read_suggested_content(
+    content: str | None, content_file: Path | None, *, preserve_whitespace: bool = False
+) -> str:
+    from ..ingest import strip_section_blank_lines
+
+    clean = strip_section_blank_lines if preserve_whitespace else str.strip
     if content and content_file:
         raise ValueError("pass --content or --content-file, not both")
     if content is not None:
-        return content.strip()
+        return clean(content)
     if content_file is None:
         raise ValueError("--content or --content-file is required")
     try:
-        return content_file.expanduser().read_text(encoding="utf-8", errors="replace").strip()
+        return clean(content_file.expanduser().read_text(encoding="utf-8", errors="replace"))
     except OSError as exc:
         raise ValueError(f"cannot read --content-file: {exc}") from exc
 
@@ -807,10 +812,17 @@ def _render_handoff_draft(
         parts.extend(["", "## Suggested card content", "", suggested_content.strip()])
     else:
         parts.extend(["", "## Target document", "", str(target_document or "").strip()])
-        parts.extend(["", "## Suggested document content", "", suggested_content.strip()])
+        parts.extend(
+            [
+                "",
+                "## Suggested document content",
+                "",
+                suggested_content if superseded_preference is not None else suggested_content.strip(),
+            ]
+        )
     if superseded_preference is not None:
         parts.extend(["", "## Superseded preference", "", superseded_preference])
-    return "\n".join(parts).rstrip() + "\n"
+    return "\n".join(parts).rstrip("\r\n") + "\n"
 
 
 def build_draft(
@@ -857,7 +869,9 @@ def build_draft(
         if not target_document:
             raise ValueError("--target-document is required for no-card handoffs")
         target_card = None
-    suggested_content = _read_suggested_content(content, content_file)
+    suggested_content = _read_suggested_content(
+        content, content_file, preserve_whitespace=superseded_preference is not None
+    )
     if not suggested_content:
         raise ValueError("suggested content is empty")
     workspace_root = (workspace or target).expanduser().resolve()
