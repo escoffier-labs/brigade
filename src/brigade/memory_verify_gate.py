@@ -186,7 +186,8 @@ def run(
         report["feedback"] = labeled["counts"]
         if start != binding_digest(target, pair, binding):
             raise ValueError("verify_eval_inputs_changed")
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, runner.SeatStop):
+    # vc.Abstain covers a corpus card that cannot be parsed, which must record a no-go, not crash.
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, runner.SeatStop, vc.Abstain):
         report = {"status": "failed", "code": "verify_eval_unavailable"}
     return record(target, report, pair=pair, binding=binding, now_ms=now_ms, previous=previous)
 

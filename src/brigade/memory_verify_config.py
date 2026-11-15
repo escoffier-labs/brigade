@@ -332,6 +332,10 @@ def load(target: Any) -> VerifyConfig:
     return parse(data)
 
 
+# A table header may carry a trailing comment, for example "[verify] # settings".
+_VERIFY_HEADER = re.compile(r"^\s*\[\s*verify\s*\]\s*(#.*)?$")
+
+
 def enable(target: Path) -> None:
     """Explicitly opt an existing configuration into verification, preserving its other tables."""
     from .memory_verify_packets import atomic_write
@@ -342,7 +346,7 @@ def enable(target: Path) -> None:
     data = raw.decode("utf-8-sig")
     parse(tomllib.loads(data))
     lines = data.splitlines(keepends=True)
-    start = next((i for i, line in enumerate(lines) if line.strip() == "[verify]"), None)
+    start = next((i for i, line in enumerate(lines) if _VERIFY_HEADER.match(line)), None)
     if start is None:
         lines.extend(["\n[verify]\nenabled = true\n"])
     else:

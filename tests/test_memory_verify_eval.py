@@ -537,3 +537,33 @@ def test_unreplayable_feedback_case_does_not_stop_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(show, "_local", abstain)
     feedback.retain_case(tmp_path, "proposal-1", "applied", {"verifier_manifests": []})
     assert not (tmp_path / gate.FEEDBACK).exists()
+
+
+def test_unparseable_corpus_card_writes_no_go(verify_hub, monkeypatch):
+    from brigade import memory_verify_contract as vc
+
+    target, _, fake, _ = verify_hub
+    pair = fake.ready(target, None, None)
+    corpus(target)
+
+    def unanchored(*_args, **_kwargs):
+        raise vc.Abstain("verify_card_invalid")
+
+    monkeypatch.setattr(gate.evaluation, "read_corpus", unanchored)
+    record = gate.run(target, pair=pair, binding="a" * 64, now_ms=1000)
+    assert all(row["decision"] == "no-go" for row in record["classes"].values())
+    assert record["report"]["code"] == "verify_eval_unavailable"
+
+
+def test_enable_recognizes_a_commented_verify_header(tmp_path):
+    import tomllib
+
+    from brigade import memory_verify_config as config
+
+    path = tmp_path / config.CONFIG
+    path.parent.mkdir(parents=True)
+    path.write_text("[verify] # Verification settings\nenabled = false\n")
+    config.enable(tmp_path)
+    text = path.read_text()
+    assert text.count("[verify]") == 1
+    assert tomllib.loads(text)["verify"]["enabled"] is True
