@@ -442,7 +442,7 @@ jobs:
           python scripts/verify_component_manifest_provenance.py --manifest release-assets/component-manifest-v1.json
           while read -r _digest asset; do
             gh attestation verify "release-assets/$asset" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml \
+              --signer-workflow escoffier-labs/brigadestack/.github/workflows/publish.yml \
               --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF"
           done < release-assets/checksums.txt
 

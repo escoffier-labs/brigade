@@ -19,9 +19,9 @@ classifiers = [
 [project.urls]
 Homepage = "https://brigadestack.com"
 Documentation = "https://brigade.tools/docs"
-Repository = "https://github.com/escoffier-labs/brigade"
-Source = "https://github.com/escoffier-labs/brigade/tree/main/distribution/brigadestack/pypi"
-Issues = "https://github.com/escoffier-labs/brigade/issues"
+Repository = "https://github.com/escoffier-labs/brigadestack"
+Source = "https://github.com/escoffier-labs/brigadestack/tree/main/distribution/brigadestack/pypi"
+Issues = "https://github.com/escoffier-labs/brigadestack/issues"
 
 [project.scripts]
 brigadestack = "brigade.cli:process_main"

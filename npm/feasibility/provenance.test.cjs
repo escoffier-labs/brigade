@@ -26,7 +26,7 @@ test('real public npm bundle verifies with exact foreign source policy',async()=
 for(const [name,change] of [
   ['SAN suffix beyond expected prefix',e=>{e.san=e.san.slice(0,-4);}],
   ['SAN regex wildcard',e=>{e.san=e.san.replace('sigstore-js','sigstore.js');}],
-  ['Brigade workflow identity',e=>{e.san='https://github.com/escoffier-labs/brigade/.github/workflows/npm-publish.yml@refs/heads/main';}],
+  ['Brigade workflow identity',e=>{e.san='https://github.com/escoffier-labs/brigadestack/.github/workflows/npm-publish.yml@refs/heads/main';}],
   ['issuer',e=>{e.issuer='https://invalid.example';}],
   ['certificate source commit',e=>{e.sourceCommit='0'.repeat(40);}],
   ['workflow predicate',e=>{e.workflow='.github/workflows/other.yml';}],

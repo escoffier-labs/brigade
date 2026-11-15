@@ -94,7 +94,7 @@ The release body names `brigade-cli==<version>`. Rust builds run on the exact na
 for each platform. Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
 
 The generated manifest and all component URLs must point to
-`escoffier-labs/brigade` at the exact tag. The workflow fails before PyPI publication if inventory,
+`escoffier-labs/brigadestack` at the exact tag. The workflow fails before PyPI publication if inventory,
 checksum, release-page manifest, or `gh attestation verify` checks fail. PyPI wheel and sdist builds
 copy the final generated manifest into package data after that gate.
 
@@ -165,7 +165,7 @@ For a new name, this creates a public `0.0.0-stage` placeholder. The staged vers
 Once all six placeholders exist, verify each package's organization ownership. Set `package_name` to each exact approved name in turn, configure its trusted publisher, complete the 2FA prompt and read back the configuration:
 
 ```sh
-npm trust github "$package_name" --repo escoffier-labs/brigade --file npm-publish.yml --env npm --allow-publish
+npm trust github "$package_name" --repo escoffier-labs/brigadestack --file npm-publish.yml --env npm --allow-publish
 npm trust list "$package_name"
 ```
 

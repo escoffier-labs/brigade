@@ -12,7 +12,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REPOSITORY = "escoffier-labs/brigade"
+REPOSITORY = "escoffier-labs/brigadestack"
 TAG = "v1.2.3"
 BASE = f"https://github.com/{REPOSITORY}/releases/download/{TAG}/"
 API = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{TAG}"
@@ -160,7 +160,7 @@ def test_verifier_rejects_component_release_coordinate_drift(tmp_path):
 
     errors = module.verify_manifest(path, fetch=_fetcher(release, checksums, manifest_body))
 
-    assert any("escoffier-labs/brigade" in error for error in errors)
+    assert any("escoffier-labs/brigadestack" in error for error in errors)
 
 
 def test_verifier_rejects_incomplete_matrix_extra_release_asset_and_checksum_gap(tmp_path):

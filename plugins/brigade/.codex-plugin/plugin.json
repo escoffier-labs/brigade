@@ -7,7 +7,7 @@
     "url": "https://brigade.tools"
   },
   "homepage": "https://brigade.tools",
-  "repository": "https://github.com/escoffier-labs/brigade",
+  "repository": "https://github.com/escoffier-labs/brigadestack",
   "license": "MIT",
   "keywords": ["memory", "agent-memory", "handoffs", "mcp", "brigade"],
   "skills": "./skills/",

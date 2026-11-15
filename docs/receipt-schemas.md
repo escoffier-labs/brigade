@@ -13,8 +13,8 @@ and closeout writers live in
 `run.record` defaults to `metadata-only`, which creates no private cassette body.
 Private bodies require an explicit `auto` opt-in. `off` disables cassette
 recording. Default-on private capture remains tracked by
-[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
-Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
+[#1894](https://github.com/escoffier-labs/brigadestack/issues/1894).
+Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigadestack/issues/1855)
 require explicit `auto` recording to retain private result bodies.
 
 `brigade.run-cassette.v1` uses `schema_version: 1` and content-addressed JSON
@@ -38,7 +38,7 @@ Redaction deletes sidecars and replaces affected references with the closed
 redaction tombstone. All cassette references are tombstoned even when the
 requested redaction range is narrower, while the redaction record still reports
 only that range. Range accounting remains tracked by
-[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+[#1894](https://github.com/escoffier-labs/brigadestack/issues/1894).
 Purge rejects live owners and uses the workspace lock and publication fences.
 Offline purge and retention may leave references without bodies.
 These sidecars do not participate in lifecycle projection or audit authority.

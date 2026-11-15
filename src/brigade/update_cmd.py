@@ -19,7 +19,10 @@ from urllib.parse import urlparse
 
 from brigade import component_manifest, component_paths, distribution, localio
 
-REPOSITORY = "escoffier-labs/brigade"
+REPOSITORY = "escoffier-labs/brigadestack"
+# Release manifests published up to v0.31.0 are immutable and name the slug the
+# repository had before its GitHub rename. Accept it for their component sources.
+_RELEASE_REPOSITORIES = (REPOSITORY, "escoffier-labs/brigade")
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
 PYPI_PROJECT = "brigade-cli"
@@ -259,7 +262,7 @@ def _is_release_url(url: Any, tag: str, name: str) -> bool:
         and parsed.netloc == "github.com"
         and not parsed.query
         and not parsed.fragment
-        and parsed.path == f"/{REPOSITORY}/releases/download/{tag}/{name}"
+        and parsed.path in {f"/{repository}/releases/download/{tag}/{name}" for repository in _RELEASE_REPOSITORIES}
     )
 
 
@@ -422,7 +425,7 @@ def _validate_manifest_coordinates(
     for component in manifest.components.values():
         if component.component_revision != release.target_commit:
             raise UpdateError("component manifest component_revision does not match the resolved release target commit")
-        if component.source.repository != REPOSITORY or component.source.release_tag != release.tag:
+        if component.source.repository not in _RELEASE_REPOSITORIES or component.source.release_tag != release.tag:
             raise UpdateError("component manifest contains components outside the resolved Brigade release")
         for asset in component.assets.values():
             if not _is_release_url(asset.download_url, release.tag, asset.asset_name):

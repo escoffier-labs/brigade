@@ -12,7 +12,7 @@ from brigade import component_manifest
 GRAPHTRAIL_SHA = "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb"
 GRAPHTRAIL_BASE = "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/"
 FIXTURE_REPOSITORY = "example/components"
-RELEASE_REPOSITORY = "escoffier-labs/brigade"
+RELEASE_REPOSITORY = "escoffier-labs/brigadestack"
 MANIFEST_ASSET_NAME = "component-manifest-v1.json"
 
 

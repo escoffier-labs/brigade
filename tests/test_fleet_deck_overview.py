@@ -1236,8 +1236,8 @@ def test_sidebar_resources_link_out_safely(view):
     html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
     for href in (
         "https://brigade.tools/docs",
-        "https://github.com/escoffier-labs/brigade/issues/new?template=bug.yml",
-        "https://github.com/escoffier-labs/brigade",
+        "https://github.com/escoffier-labs/brigadestack/issues/new?template=bug.yml",
+        "https://github.com/escoffier-labs/brigadestack",
     ):
         assert html.count(f'href="{href}"') == 1
         assert f'href="{href}" target="_blank" rel="noopener noreferrer"' in html

@@ -109,7 +109,7 @@ Reviewed planning docs are public and tracked: the phase plans (`docs/phase-*.md
 From a repo clone with Python 3.11+:
 
 ```bash
-git clone https://github.com/escoffier-labs/brigade.git
+git clone https://github.com/escoffier-labs/brigadestack.git
 cd brigade
 python -m venv .venv
 ```

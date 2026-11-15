@@ -1313,7 +1313,7 @@ def _sarif_report(report: dict[str, Any]) -> dict[str, Any]:
                 "tool": {
                     "driver": {
                         "name": "Brigade Security",
-                        "informationUri": "https://github.com/escoffier-labs/brigade",
+                        "informationUri": "https://github.com/escoffier-labs/brigadestack",
                         "rules": list(rules.values()),
                     }
                 },

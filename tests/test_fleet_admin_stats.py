@@ -249,7 +249,7 @@ def test_page_unknown_partial_privacy_and_docs():
     html = page.render({"latest": value, "weeks": value["weeks"]}, nonce="example", now=NOW)
     for text in ("unknown", "partial", "active sources, not people or installs", "Solomon Neas", "erasure", "below 5"):
         assert text in html
-    assert 'href="https://github.com/escoffier-labs/brigade/blob/main/SECURITY.md"' in html
+    assert 'href="https://github.com/escoffier-labs/brigadestack/blob/main/SECURITY.md"' in html
     assert set(re.findall(r'data-field="([^"]+)"', html)) == {
         field for field in stats.FIELD_PATHS if not field.startswith("cloudflare")
     }

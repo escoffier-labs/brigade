@@ -342,7 +342,7 @@ async function main() {
     const manifest=JSON.parse(files.get('package/package.json'));
     assert.equal(manifest.private,undefined);assert.equal(manifest.version,metadata.runtime.version);
     assert.equal(manifest.publishConfig.access,'public');
-    assert.deepEqual(manifest.repository,{type:'git',url:'git+https://github.com/escoffier-labs/brigade.git',directory:'npm/feasibility'});
+    assert.deepEqual(manifest.repository,{type:'git',url:'git+https://github.com/escoffier-labs/brigadestack.git',directory:'npm/feasibility'});
     if(!artifact.platform) assert.deepEqual(manifest.optionalDependencies,Object.fromEntries(Object.values(metadata.runtime.platforms).map(p=>[p.package,metadata.runtime.version])));
     if(!artifact.platform) {
       const packed=JSON.parse(files.get('package/runtime.json'));
@@ -375,8 +375,8 @@ async function main() {
         try {
           if(await verifier.verifyRegistry(url,digest,{
             purl:verifier.purl(artifact.name,runtime.version),sourceCommit:metadata.sourceCommit,
-            repository:'https://github.com/escoffier-labs/brigade',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
-            san:'https://github.com/escoffier-labs/brigade/.github/workflows/npm-publish.yml@refs/heads/main',
+            repository:'https://github.com/escoffier-labs/brigadestack',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
+            san:'https://github.com/escoffier-labs/brigadestack/.github/workflows/npm-publish.yml@refs/heads/main',
             issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
           })) {verified=true;break;}
         } catch(error) {throw new Error(`Invalid registry provenance: ${artifact.name}: ${error.message}`,{cause:error});}

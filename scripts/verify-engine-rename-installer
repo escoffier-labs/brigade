@@ -11,5 +11,5 @@ cp engines/code-graph/target/debug/brigade-code-graph "$BRIGADE_R5_NATIVE_BIN/"
 cp engines/code-graph/target/debug/brigade-code-graph-mcp "$BRIGADE_R5_NATIVE_BIN/"
 go -C engines/evidence-ledger build -o "$BRIGADE_R5_NATIVE_BIN/brigade-evidence" ./cmd/brigade-evidence
 git fetch origin tag v0.30.0 --depth=1
-gh release download v0.30.0 --repo escoffier-labs/brigade --dir "$BRIGADE_R5_V030_ASSETS" -p '*linux-amd64' -p checksums.txt -p component-manifest-v1.json
+gh release download v0.30.0 --repo escoffier-labs/brigadestack --dir "$BRIGADE_R5_V030_ASSETS" -p '*linux-amd64' -p checksums.txt -p component-manifest-v1.json
 python -m pytest -q tests/test_engine_rename_installer.py

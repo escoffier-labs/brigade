@@ -72,7 +72,7 @@ def _prepare_unified_release_setup(tmp_path: Path, monkeypatch) -> tuple[dict[st
         f"v{brigade.__version__}",
         brigade.__version__,
         "a" * 40,
-        "https://github.com/escoffier-labs/brigade/releases/download/"
+        "https://github.com/escoffier-labs/brigadestack/releases/download/"
         f"v{brigade.__version__}/component-manifest-v1.json",
         len(manifest_bytes),
         hashlib.sha256(manifest_bytes).hexdigest(),
@@ -267,7 +267,7 @@ def test_component_report_mismatched_update_tag_falls_back_to_bundled(tmp_path, 
         component_release_id=state.component_release_id,
         component_tag="v99.99.99",
         component_target_commit=state.component_target_commit,
-        component_manifest_url="https://github.com/escoffier-labs/brigade/releases/download/v99.99.99/component-manifest-v1.json",
+        component_manifest_url="https://github.com/escoffier-labs/brigadestack/releases/download/v99.99.99/component-manifest-v1.json",
         component_manifest_sha256=state.component_manifest_sha256,
         updated_at=state.updated_at,
     )

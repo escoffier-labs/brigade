@@ -7,7 +7,7 @@ Root `AGENTS.md` is for **developing Brigade**. For install and adapt, agents fo
 ## Paste-ready install prompt
 
 ```text
-Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
+Read https://github.com/escoffier-labs/brigadestack and follow docs/agents-guide.md.
 Install brigade-cli with pipx if missing (or uv tool install brigade-cli).
 Run operator quickstart with --dry-run first and show the plan. Then apply,
 run brigade operator doctor, and report ready: yes. Keep existing memory
@@ -175,7 +175,7 @@ brigade skills doctor --target . --json
 Open a setup issue at:
 
 ```text
-https://github.com/escoffier-labs/brigade/issues/new/choose
+https://github.com/escoffier-labs/brigadestack/issues/new/choose
 ```
 
 Use the "Quickstart setup problem" form and include the redacted `issue_report`.

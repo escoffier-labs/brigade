@@ -51,9 +51,9 @@
     "releaseTag": "v0.31.0",
     "sourceCommit": "4edc8911775f3f693bf9421812806a859b837d6e",
     "componentManifest": {
-      "url": "https://github.com/escoffier-labs/brigade/releases/download/v0.31.0/component-manifest-v1.json",
+      "url": "https://github.com/escoffier-labs/brigadestack/releases/download/v0.31.0/component-manifest-v1.json",
       "sha256": "e85b5287a444b0c5fcf8e8e3801a297645a891b93ea9c767060f6f354af05b41",
-      "checksumsUrl": "https://github.com/escoffier-labs/brigade/releases/download/v0.31.0/checksums.txt",
+      "checksumsUrl": "https://github.com/escoffier-labs/brigadestack/releases/download/v0.31.0/checksums.txt",
       "checksumsSha256": "5914273ae3681395f370b18546ff62df21238386ca71a6521dcc0e4ed5d11dbf"
     }
   }

@@ -93,7 +93,7 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
     body += "Unknown includes suppressed cells and unavailable data. Retention means activity on 2+ or 3+ distinct days within one week. "
     body += "Possible upgrades link versions observed in time order within the same week. Weekly source identities rotate.</p>"
     body += "<p>Controller and erasure contact: Solomon Neas. Contact the maintainer at the address in "
-    body += '<a href="https://github.com/escoffier-labs/brigade/blob/main/SECURITY.md">SECURITY.md</a>. '
+    body += '<a href="https://github.com/escoffier-labs/brigadestack/blob/main/SECURITY.md">SECURITY.md</a>. '
     body += "The Hub retains aggregate snapshots for 400 days. Opt-in usage aggregates are not available yet. "
     body += "Future opt-in counts will undercount usage.</p>"
     body += '</section><section class="panel"><h2>Latest snapshot</h2>'

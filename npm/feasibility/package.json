@@ -29,7 +29,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/escoffier-labs/brigade.git",
+    "url": "git+https://github.com/escoffier-labs/brigadestack.git",
     "directory": "npm/feasibility"
   }
 }

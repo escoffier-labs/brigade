@@ -23,9 +23,10 @@ five-platform matrix with matching digests and provenance.
 | `agent-notify` | `agent-notify` | bundled empty/unpublished on main. first stable manifest contract after `agent-notify` publication |
 
 Every component records the immutable 40-character tagged Brigade commit in `component_revision`.
-Every `source.repository` is `escoffier-labs/brigade`, and every `source.release_tag` is the same
+Every `source.repository` is `escoffier-labs/brigadestack`, and every `source.release_tag` is the same
 immutable Brigade tag. The package template is replaced with the generated manifest before its wheel
-and sdist are built. Schema version remains v1.
+and sdist are built. Manifests for releases up to v0.31.0 name the former slug `escoffier-labs/brigade`.
+Schema version remains v1.
 
 ## Platform matrix
 
@@ -70,7 +71,7 @@ assets and no stable release is claimed. The script also writes
 `component-manifest-v1.json`.
 
 The release gate runs `scripts/verify_component_manifest_provenance.py` after creating the release.
-It requires exactly one `escoffier-labs/brigade` tag for all five components, the complete five-platform
+It requires exactly one `escoffier-labs/brigadestack` tag for all five components, the complete five-platform
 matrix, exactly 40 native assets plus the manifest and checksum file, matching release API digests,
 the complete checksum map, matching fetched `checksums.txt` bytes, and a release-page manifest
 byte-for-byte equal to the packaged manifest. This is the future first stable manifest contract.

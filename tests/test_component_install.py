@@ -106,7 +106,7 @@ def _prepare_auto_release_setup(tmp_path, monkeypatch):
         f"v{brigade.__version__}",
         brigade.__version__,
         "a" * 40,
-        "https://github.com/escoffier-labs/brigade/releases/download/"
+        "https://github.com/escoffier-labs/brigadestack/releases/download/"
         f"v{brigade.__version__}/component-manifest-v1.json",
         len(manifest_bytes),
         hashlib.sha256(manifest_bytes).hexdigest(),
@@ -1312,7 +1312,7 @@ def _persist_beta_state(
             41,
             f"v{stable_version}",
             target_commit,
-            f"https://github.com/escoffier-labs/brigade/releases/download/v{stable_version}/component-manifest-v1.json",
+            f"https://github.com/escoffier-labs/brigadestack/releases/download/v{stable_version}/component-manifest-v1.json",
             digest,
             "2026-07-20T12:00:00+00:00",
         ),
@@ -1477,13 +1477,13 @@ def test_setup_rejects_persisted_beta_state_with_mismatched_stable_version(tmp_p
     for _component_id, component in payload["components"].items():
         component["component_revision"] = target_commit
         component["source"] = {
-            "repository": "escoffier-labs/brigade",
+            "repository": "escoffier-labs/brigadestack",
             "release_tag": f"v{stable_version}",
         }
         for _platform, asset in component["assets"].items():
             asset_name = asset["asset_name"]
             asset["download_url"] = (
-                f"https://github.com/escoffier-labs/brigade/releases/download/v{stable_version}/{asset_name}"
+                f"https://github.com/escoffier-labs/brigadestack/releases/download/v{stable_version}/{asset_name}"
             )
     bundled.write_text(json.dumps(payload))
     manifest_bytes = bundled.read_bytes()
@@ -1508,7 +1508,7 @@ def test_setup_rejects_persisted_beta_state_with_mismatched_stable_version(tmp_p
             41,
             f"v{stable_version}",
             target_commit,
-            f"https://github.com/escoffier-labs/brigade/releases/download/v{stable_version}/component-manifest-v1.json",
+            f"https://github.com/escoffier-labs/brigadestack/releases/download/v{stable_version}/component-manifest-v1.json",
             digest,
             "2026-07-20T12:00:00+00:00",
         ),

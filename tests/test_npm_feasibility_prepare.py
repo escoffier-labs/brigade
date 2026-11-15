@@ -499,7 +499,7 @@ def test_registry_acceptance_retries_only_missing_metadata(tmp_path, state, fiel
             "publishConfig": {"access": "public"},
             "repository": {
                 "type": "git",
-                "url": "git+https://github.com/escoffier-labs/brigade.git",
+                "url": "git+https://github.com/escoffier-labs/brigadestack.git",
                 "directory": "npm/feasibility",
             },
         }
@@ -1067,7 +1067,7 @@ def candidate_artifacts(tmp_path, candidate_source):
             "publishConfig": {"access": "public"},
             "repository": {
                 "type": "git",
-                "url": "git+https://github.com/escoffier-labs/brigade.git",
+                "url": "git+https://github.com/escoffier-labs/brigadestack.git",
                 "directory": "npm/feasibility",
             },
             "homepage": "https://brigadestack.com",

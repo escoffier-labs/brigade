@@ -27,7 +27,7 @@ from .localio import canonical_json_digest, write_json, write_text_atomic
 from .inbox_lock import held_file_lock
 
 BUG_EMAIL = "me@solomonneas.dev"  # content-guard: allow pii/email
-REPOSITORY = "escoffier-labs/brigade"
+REPOSITORY = "escoffier-labs/brigadestack"
 ISSUES_URL = f"https://github.com/{REPOSITORY}/issues"
 URL_BUDGET = 6000
 EMAIL_BUDGET = 1800

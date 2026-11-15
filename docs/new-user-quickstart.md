@@ -215,7 +215,7 @@ template stays an advisory warning and does not block readiness.
 Open a quickstart issue here:
 
 ```text
-https://github.com/escoffier-labs/brigade/issues/new/choose
+https://github.com/escoffier-labs/brigadestack/issues/new/choose
 ```
 
 Use the "Quickstart setup problem" form. The more exact the command and redacted output are, the faster the fix can land.

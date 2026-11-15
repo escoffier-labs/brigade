@@ -17,7 +17,7 @@ FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc07
 ARG BRIGADE_REF=a7746b6da2eec257890674de30635ca5036a2115
 ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f
 
-RUN python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
+RUN python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigadestack/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
     && mkdir /src \
     && tar -xzf /tmp/brigade.tar.gz -C /src --strip-components=1 \
     && rm /tmp/brigade.tar.gz
@@ -38,13 +38,13 @@ ARG BRIGADE_REF=a7746b6da2eec257890674de30635ca5036a2115
 ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f
 # The CLI version at BRIGADE_REF.
 ARG BRIGADE_VERSION=0.31.0
-LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigade" \
+LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigadestack" \
       org.opencontainers.image.version="${BRIGADE_VERSION}" \
       org.opencontainers.image.revision="${BRIGADE_REF}" \
       org.opencontainers.image.description="Brigade Fleet Hub"
 
 RUN python -m pip install --no-cache-dir setuptools==75.8.0 wheel==0.45.1 \
-    && python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
+    && python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigadestack/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
     && python -m pip install --no-cache-dir --no-build-isolation /tmp/brigade.tar.gz \
     && rm /tmp/brigade.tar.gz \
     && groupadd --gid 10001 brigade \

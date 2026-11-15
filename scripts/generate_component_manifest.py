@@ -23,7 +23,7 @@ LEGACY_ALIASES = ("graphtrail", "graphtrail-mcp", "miseledger")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 # Mirrors component_manifest.COMPONENT_PLATFORMS: brigade-hub ships for Linux only.
 COMPONENT_PLATFORMS = {"brigade-hub": ("linux-amd64", "linux-arm64")}
-REPOSITORY = "escoffier-labs/brigade"
+REPOSITORY = "escoffier-labs/brigadestack"
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 

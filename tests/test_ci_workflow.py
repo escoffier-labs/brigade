@@ -2860,12 +2860,12 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case):
         "foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, 'fixture-only', 'Process') }\n"
         + function
         + "\nfunction Invoke-CanonicalAttestationVerifier { param($GhExe, $Subject, $Revision, $Version)\n"
-        "$args = @('attestation','verify',$Subject,'--repo','escoffier-labs/brigade','--signer-workflow',"
-        "'escoffier-labs/brigade/.github/workflows/publish.yml','--source-digest',$Revision,'--source-ref',\"refs/tags/v$Version\")\n"
+        "$args = @('attestation','verify',$Subject,'--repo','escoffier-labs/brigadestack','--signer-workflow',"
+        "'escoffier-labs/brigadestack/.github/workflows/publish.yml','--source-digest',$Revision,'--source-ref',\"refs/tags/v$Version\")\n"
         "if ($args[0] -ne 'attestation' -or $args[1] -ne 'verify') { throw 'wrong command' }\n"
         "if (-not [IO.Path]::IsPathRooted($args[2])) { throw 'relative subject' }\n"
         "foreach ($pair in @(@('--source-digest', ('a' * 40)), @('--source-ref', 'refs/tags/v1.2.3'), "
-        "@('--repo','escoffier-labs/brigade'), @('--signer-workflow','escoffier-labs/brigade/.github/workflows/publish.yml'))) {\n"
+        "@('--repo','escoffier-labs/brigadestack'), @('--signer-workflow','escoffier-labs/brigadestack/.github/workflows/publish.yml'))) {\n"
         "$i = [Array]::IndexOf($args, $pair[0]); if ($i -lt 0 -or $args[$i+1] -cne $pair[1]) { throw 'wrong binding' } }\n"
         "foreach ($key in $keys) { if ([Environment]::GetEnvironmentVariable($key, 'Process') -ne 'fixture-only') { throw 'verification lost auth' } }\n"
         "$script:verified++; $global:LASTEXITCODE = 0\n"
@@ -3039,9 +3039,9 @@ class Stub {
                 "verify",
                 str(release / name),
                 "--repo",
-                "escoffier-labs/brigade",
+                "escoffier-labs/brigadestack",
                 "--signer-workflow",
-                "escoffier-labs/brigade/.github/workflows/publish.yml",
+                "escoffier-labs/brigadestack/.github/workflows/publish.yml",
                 "--source-digest",
                 "a" * 40,
                 "--source-ref",

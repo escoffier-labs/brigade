@@ -10,7 +10,7 @@ state-root content authenticity. State-root operations require a held no-follow
 descriptor on POSIX or a native Windows handle; unavailable backends refuse
 access instead of falling back to pathname reads.
 
-Further residuals from the final #1211 review are tracked in escoffier-labs/brigade#1214:
+Further residuals from the final #1211 review are tracked in escoffier-labs/brigadestack#1214:
 small staging-path, hash-oracle, name-disclosure, and control-character items.
 All need write access to the state root without read access to the trusted
 skill directories.

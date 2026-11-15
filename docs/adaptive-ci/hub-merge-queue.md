@@ -166,7 +166,7 @@ seconds (14.0 to 15.5 minutes), of which
 `cargo test` was 4.9 to 5.7 and the Python integration steps 8.2 to 8.8.
 
 Measured after, merged 2026-11-14 00:15Z
-([#2541](https://github.com/escoffier-labs/brigade/pull/2541)): `hub (Rust
+([#2541](https://github.com/escoffier-labs/brigadestack/pull/2541)): `hub (Rust
 1.85.0 compile)` took 70 and 107 seconds on the pull request's two runs
 (43529599524, 43528927970) and 144 and 134 seconds on the first two merge
 groups that ran the hub (43531431336, 43532725642). Run 43528927970 shows as

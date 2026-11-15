@@ -99,7 +99,7 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
     assert "attestations: write" in text
     assert "artifact-metadata: write" in text
     assert "gh attestation verify" in text
-    assert "--signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml" in text
+    assert "--signer-workflow escoffier-labs/brigadestack/.github/workflows/publish.yml" in text
     assert "component-manifest-v1.json" in text
     assert "checksums.txt" in text
     assert "brigade-cli==${VERSION}" in text
@@ -693,8 +693,8 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
         "head_sha": env["PACKAGING_SHA"],
         "event": "workflow_dispatch",
         "path": ".github/workflows/npm-publish.yml",
-        "repository": {"id": 123, "full_name": "escoffier-labs/brigade"},
-        "head_repository": {"id": 123, "full_name": "escoffier-labs/brigade"},
+        "repository": {"id": 123, "full_name": "escoffier-labs/brigadestack"},
+        "head_repository": {"id": 123, "full_name": "escoffier-labs/brigadestack"},
     }
     if mutation == "artifact-id":
         metadata["id"] += 1
@@ -767,9 +767,9 @@ def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutati
         "GITHUB_WORKSPACE": str(tmp_path),
         "PACKAGING_SHA": heads["payload-source"],
         "GITHUB_SHA": heads["validation-harness"],
-        "GITHUB_REPOSITORY": "escoffier-labs/brigade",
+        "GITHUB_REPOSITORY": "escoffier-labs/brigadestack",
         "GITHUB_REF": "refs/heads/main",
-        "GITHUB_WORKFLOW_REF": "escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/main",
+        "GITHUB_WORKFLOW_REF": "escoffier-labs/brigadestack/.github/workflows/npm-registry-revalidate.yml@refs/heads/main",
     }
     if mutation == "harness-head":
         env["GITHUB_SHA"] = "a" * 40
@@ -778,7 +778,7 @@ def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutati
     elif mutation == "non-main":
         env["GITHUB_REF"] = "refs/heads/other"
         env["GITHUB_WORKFLOW_REF"] = (
-            "escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/other"
+            "escoffier-labs/brigadestack/.github/workflows/npm-registry-revalidate.yml@refs/heads/other"
         )
     elif mutation == "malformed-sha":
         env["GITHUB_SHA"] = "invalid"

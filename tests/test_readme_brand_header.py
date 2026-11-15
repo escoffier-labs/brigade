@@ -45,9 +45,9 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     shield_urls = (
-        "https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?workflow=ci.yml&branch=main&label=ci&size=xs",
+        "https://shieldcn.dev/github/ci/escoffier-labs/brigadestack.svg?workflow=ci.yml&branch=main&label=ci&size=xs",
         "https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs",
-        "https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json.svg?size=xs",
+        "https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigadestack/download-metrics/downloads.json.svg?size=xs",
         "https://shieldcn.dev/badge/python-3.11+-blue.svg?logo=python&logoColor=white&size=xs",
         "https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs",
         "https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs",

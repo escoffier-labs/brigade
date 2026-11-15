@@ -15,9 +15,9 @@ from brigade import component_manifest, update_cmd
 
 TAG = "v1.2.3"
 VERSION = "1.2.3"
-BASE = f"https://github.com/escoffier-labs/brigade/releases/download/{TAG}/"
-REF_URL = f"https://api.github.com/repos/escoffier-labs/brigade/git/ref/tags/{TAG}"
-TAG_OBJECT_URL = "https://api.github.com/repos/escoffier-labs/brigade/git/tags/"
+BASE = f"https://github.com/escoffier-labs/brigadestack/releases/download/{TAG}/"
+REF_URL = f"https://api.github.com/repos/escoffier-labs/brigadestack/git/ref/tags/{TAG}"
+TAG_OBJECT_URL = "https://api.github.com/repos/escoffier-labs/brigadestack/git/tags/"
 
 
 def _manifest() -> bytes:
@@ -35,7 +35,7 @@ def _manifest() -> bytes:
             }
         components[component] = {
             "component_revision": "a" * 40,
-            "source": {"repository": "escoffier-labs/brigade", "release_tag": TAG},
+            "source": {"repository": "escoffier-labs/brigadestack", "release_tag": TAG},
             "executable": component,
             "assets": assets,
         }
@@ -80,7 +80,7 @@ def _pre_agent_notify_manifest() -> bytes:
             }
         components[component] = {
             "component_revision": "a" * 40,
-            "source": {"repository": "escoffier-labs/brigade", "release_tag": TAG},
+            "source": {"repository": "escoffier-labs/brigadestack", "release_tag": TAG},
             "executable": component,
             "assets": assets,
         }
@@ -243,17 +243,17 @@ def test_default_http_rejects_untrusted_or_non_https_asset_redirect(final_url):
 
 
 def test_default_http_rejects_api_redirect_outside_exact_api_path():
-    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    url = "https://api.github.com/repos/escoffier-labs/brigadestack/releases/latest"
     with patch(
         "urllib.request.urlopen",
-        return_value=_Response(b"{}", "https://api.github.com/repos/escoffier-labs/brigade/releases/tags/v1.2.3"),
+        return_value=_Response(b"{}", "https://api.github.com/repos/escoffier-labs/brigadestack/releases/tags/v1.2.3"),
     ):
         with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
             update_cmd._DefaultHttp().json(url)
 
 
 def test_default_http_uses_github_token_for_github_api_requests(monkeypatch):
-    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    url = "https://api.github.com/repos/escoffier-labs/brigadestack/releases/latest"
     monkeypatch.setenv("GITHUB_TOKEN", "github-token-example")
     monkeypatch.setenv("GH_TOKEN", "gh-token-example")
     requests = []
@@ -270,7 +270,7 @@ def test_default_http_uses_github_token_for_github_api_requests(monkeypatch):
 
 
 def test_default_http_uses_gh_token_when_github_token_is_absent(monkeypatch):
-    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    url = "https://api.github.com/repos/escoffier-labs/brigadestack/releases/latest"
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setenv("GH_TOKEN", "gh-token-example")
 
@@ -283,7 +283,7 @@ def test_default_http_uses_gh_token_when_github_token_is_absent(monkeypatch):
 
 @pytest.mark.parametrize("status", (401, 403))
 def test_default_http_retries_github_api_without_rejected_token(monkeypatch, status):
-    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    url = "https://api.github.com/repos/escoffier-labs/brigadestack/releases/latest"
     secret = "rejected-token-example"
     monkeypatch.setenv("GITHUB_TOKEN", secret)
     requests = []
@@ -303,7 +303,7 @@ def test_default_http_retries_github_api_without_rejected_token(monkeypatch, sta
 
 
 def test_default_http_rejected_token_is_absent_from_final_error(monkeypatch):
-    url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
+    url = "https://api.github.com/repos/escoffier-labs/brigadestack/releases/latest"
     secret = "rejected-token-example"
     monkeypatch.setenv("GITHUB_TOKEN", secret)
 
@@ -590,16 +590,18 @@ def test_github_api_url_allowlist_only_adds_exact_tag_ref_and_tag_object_endpoin
 
     assert update_cmd._is_github_api_url(REF_URL)
     assert update_cmd._is_github_api_url(TAG_OBJECT_URL + sha)
-    assert update_cmd._is_github_api_url("https://api.github.com/repos/escoffier-labs/brigade/releases/latest")
-    assert not update_cmd._is_github_api_url("https://api.github.com/repos/escoffier-labs/brigade/commits/main")
+    assert update_cmd._is_github_api_url("https://api.github.com/repos/escoffier-labs/brigadestack/releases/latest")
+    assert not update_cmd._is_github_api_url("https://api.github.com/repos/escoffier-labs/brigadestack/commits/main")
     assert not update_cmd._is_github_api_url(
-        f"https://api.github.com/repos/escoffier-labs/brigade/commits/{sha}/check-runs?per_page=100&page=1"
+        f"https://api.github.com/repos/escoffier-labs/brigadestack/commits/{sha}/check-runs?per_page=100&page=1"
     )
     assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/other/brigade/git/ref/tags/{TAG}")
     assert not update_cmd._is_github_api_url(
-        f"https://api.github.com/repos/escoffier-labs/brigade/git/ref/tags/{TAG}?x=1"
+        f"https://api.github.com/repos/escoffier-labs/brigadestack/git/ref/tags/{TAG}?x=1"
     )
-    assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/escoffier-labs/brigade/git/tags/{sha}?x=1")
+    assert not update_cmd._is_github_api_url(
+        f"https://api.github.com/repos/escoffier-labs/brigadestack/git/tags/{sha}?x=1"
+    )
 
 
 def test_pypi_project_json_url_allowlist_is_exact():
@@ -617,6 +619,33 @@ def test_default_paths_uses_configured_pipx_bin_dir(monkeypatch, tmp_path):
 
     expected_name = "brigade.exe" if update_cmd.os.name == "nt" else "brigade"
     assert paths.brigade_executable == pipx_bin / expected_name
+
+
+def test_release_manifest_accepts_the_pre_rename_slug_published_in_old_releases():
+    old_slug = "escoffier-labs/brigade"
+    manifest = json.loads(_manifest())
+    for component in manifest["components"].values():
+        component["source"]["repository"] = old_slug
+        for asset in component["assets"].values():
+            asset["download_url"] = asset["download_url"].replace("escoffier-labs/brigadestack", old_slug)
+    raw = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    release = update_cmd.ResolvedRelease(
+        42, TAG, VERSION, "a" * 40, BASE + "component-manifest-v1.json", len(raw), hashlib.sha256(raw).hexdigest(), raw
+    )
+
+    assert update_cmd.validate_release_manifest_bytes(release).brigade_version == VERSION
+
+
+def test_release_manifest_rejects_an_unrelated_repository_slug():
+    manifest = json.loads(_manifest())
+    manifest["components"]["sessionfind"]["source"]["repository"] = "escoffier-labs/brigade-site"
+    raw = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    release = update_cmd.ResolvedRelease(
+        42, TAG, VERSION, "a" * 40, BASE + "component-manifest-v1.json", len(raw), hashlib.sha256(raw).hexdigest(), raw
+    )
+
+    with pytest.raises(update_cmd.UpdateError, match="outside the resolved Brigade release"):
+        update_cmd.validate_release_manifest_bytes(release)
 
 
 def test_release_manifest_rejects_component_revision_mismatched_to_target_commit():
@@ -805,7 +834,7 @@ def test_beta_update_migrates_git_sha_state_to_exact_wheel_version(tmp_path):
             41,
             "v1.2.2",
             "a" * 40,
-            "https://github.com/escoffier-labs/brigade/releases/download/v1.2.2/component-manifest-v1.json",
+            "https://github.com/escoffier-labs/brigadestack/releases/download/v1.2.2/component-manifest-v1.json",
             "a" * 64,
             "2026-07-20T12:00:00+00:00",
         ),
@@ -844,7 +873,7 @@ def test_beta_setup_failure_leaves_prior_update_state_unchanged(tmp_path):
             41,
             "v1.2.2",
             "a" * 40,
-            "https://github.com/escoffier-labs/brigade/releases/download/v1.2.2/component-manifest-v1.json",
+            "https://github.com/escoffier-labs/brigadestack/releases/download/v1.2.2/component-manifest-v1.json",
             "a" * 64,
             "2026-07-20T12:00:00+00:00",
         ),
@@ -877,7 +906,7 @@ def test_beta_dry_run_prints_exact_pipx_pin_and_mutates_nothing(tmp_path, capsys
             41,
             "v1.2.2",
             "a" * 40,
-            "https://github.com/escoffier-labs/brigade/releases/download/v1.2.2/component-manifest-v1.json",
+            "https://github.com/escoffier-labs/brigadestack/releases/download/v1.2.2/component-manifest-v1.json",
             "a" * 64,
             "2026-07-20T12:00:00+00:00",
         ),
@@ -916,7 +945,7 @@ def test_rollback_from_beta_to_stable_uses_stable_path_and_state(tmp_path):
             41,
             "v1.2.2",
             "a" * 40,
-            "https://github.com/escoffier-labs/brigade/releases/download/v1.2.2/component-manifest-v1.json",
+            "https://github.com/escoffier-labs/brigadestack/releases/download/v1.2.2/component-manifest-v1.json",
             "a" * 64,
             "2026-07-20T12:00:00+00:00",
         ),

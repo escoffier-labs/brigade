@@ -80,7 +80,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh attestation verify "$RUNNER_TEMP/npm-artifacts/build/component-manifest-v1.json" --repo escoffier-labs/brigade --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml
+          gh attestation verify "$RUNNER_TEMP/npm-artifacts/build/component-manifest-v1.json" --repo escoffier-labs/brigadestack --signer-workflow escoffier-labs/brigadestack/.github/workflows/publish.yml
       # Retained artifacts in this public repository are public, not confidential.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

@@ -98,7 +98,7 @@ The bounded parallel phase starts after the isolated phase has drained.
 The CI budget allows 30 minutes for two 900-second serial timeouts and
 53 minutes for the parallel phase before setup time is subtracted. This
 treats the roughly 46-minute sweep reported in
-[issue #1551](https://github.com/escoffier-labs/brigade/issues/1551) as an
+[issue #1551](https://github.com/escoffier-labs/brigadestack/issues/1551) as an
 allowance for the parallel phase, in addition to both serial timeouts.
 If the budget expires during either phase, remaining files are incomplete.
 This scheduling guarantees isolation from other file workers. It has not

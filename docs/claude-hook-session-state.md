@@ -71,7 +71,7 @@ check can therefore relocate a write without being detected by that check.
 The post-publication identity check detects a substituted temporary entry, but
 runs after publication and does not roll back bytes already published. These
 same-uid mutations and processes that ignore advisory locks remain residuals
-under [the threat model in #1093](https://github.com/escoffier-labs/brigade/issues/1093).
+under [the threat model in #1093](https://github.com/escoffier-labs/brigadestack/issues/1093).
 Windows directory sharing modes are unchanged.
 
 ## Native Windows qualification

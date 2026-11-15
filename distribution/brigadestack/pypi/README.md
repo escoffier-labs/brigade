@@ -24,5 +24,5 @@ The original `brigade` command is supplied by the dependency.
 
 [Homepage](https://brigade.tools) |
 [Documentation](https://brigade.tools/docs) |
-[Source](https://github.com/escoffier-labs/brigade/tree/main/distribution/brigadestack/pypi) |
-[Issues](https://github.com/escoffier-labs/brigade/issues)
+[Source](https://github.com/escoffier-labs/brigadestack/tree/main/distribution/brigadestack/pypi) |
+[Issues](https://github.com/escoffier-labs/brigadestack/issues)

@@ -1,6 +1,6 @@
 # Fleet MCP through Executor
 
-Slice 7 of [#1887](https://github.com/escoffier-labs/brigade/issues/1887).
+Slice 7 of [#1887](https://github.com/escoffier-labs/brigadestack/issues/1887).
 This opt-in recipe mounts the existing [Fleet MCP station](runbooks/fleet-hub-proxmox.md#fleet-mcp-station)
 in an Executor app. Direct MCP over stdio or loopback HTTP remains available.
 Executor is not the default route. No Executor installation or operator
@@ -223,7 +223,7 @@ arrives or a hub failure ends polling. The app's 10-second policy bounds this
 recipe's waits, but direct station callers can still request 120 seconds.
 There is no cancellation rollback for an accepted send or ack. End-to-end
 cancellation and immediate capacity release are deferred to
-[#2012](https://github.com/escoffier-labs/brigade/issues/2012). Check capacity
+[#2012](https://github.com/escoffier-labs/brigadestack/issues/2012). Check capacity
 release before treating the cancellation acceptance item as complete.
 
 Generate a fresh `client_id` for each intended send or reply, persist it before

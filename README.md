@@ -17,9 +17,9 @@ Brigade Stack is an open-source coordination layer for AI coding agents. It sits
 </p>
 
 <p align="center">
-  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?workflow=ci.yml&branch=main&label=ci&size=xs" alt="CI status">
+  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigadestack.svg?workflow=ci.yml&branch=main&label=ci&size=xs" alt="CI status">
   <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
-  <img src="https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json.svg?size=xs" alt="Combined PyPI and npm downloads per month">
+  <img src="https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigadestack/download-metrics/downloads.json.svg?size=xs" alt="Combined PyPI and npm downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.11+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.11+">
   <img src="https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code graph engine">
   <img src="https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: evidence log engine">
@@ -110,19 +110,19 @@ brigadestack skills serve-mcp --stdio
 - **Parallel workers.** Dispatch ready tasks into separate worktrees, supervise them, and keep results for review.
 - **Memory reflection.** Evidence-backed consolidation proposals for review. Automatic apply is off by default. A hub policy can turn it on, behind further gates, for two low-risk operations: appending evidence and merging exact duplicates.
 - **Run patrol.** Detects local lane states and offers explicit repair actions.
-- **In progress:** [fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121), [governed T3 delegation](https://github.com/escoffier-labs/brigade/issues/2046), [cross-repository campaigns](https://github.com/escoffier-labs/brigade/issues/1128).
+- **In progress:** [fleet coordination](https://github.com/escoffier-labs/brigadestack/issues/1121), [governed T3 delegation](https://github.com/escoffier-labs/brigadestack/issues/2046), [cross-repository campaigns](https://github.com/escoffier-labs/brigadestack/issues/1128).
 
 ## Reference
 
-[Commands](docs/command-inventory.md) · [Execution model](docs/execution-model.md) · [Comparisons](docs/comparison.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/escoffier-labs/brigade/issues) · [MIT license](LICENSE)
+[Commands](docs/command-inventory.md) · [Execution model](docs/execution-model.md) · [Comparisons](docs/comparison.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/escoffier-labs/brigadestack/issues) · [MIT license](LICENSE)
 
 The Python CLI may send a passive version request. [Telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
 
 <details>
 <summary>About the downloads badge</summary>
 
-The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
+The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigadestack/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
 
 </details>
 
-Brigade Stack by Escoffier Labs. Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigadestack`](https://pypi.org/project/brigadestack/), npm [`brigadestack`](https://www.npmjs.com/package/brigadestack), command `brigadestack`. The `brigade-cli` and `@escoffier-labs/brigade` packages and `brigade` command remain supported.
+Brigade Stack by Escoffier Labs. Project identity: GitHub [`escoffier-labs/brigadestack`](https://github.com/escoffier-labs/brigadestack), website [brigade.tools](https://brigade.tools), PyPI [`brigadestack`](https://pypi.org/project/brigadestack/), npm [`brigadestack`](https://www.npmjs.com/package/brigadestack), command `brigadestack`. The `brigade-cli` and `@escoffier-labs/brigade` packages and `brigade` command remain supported.

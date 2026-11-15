@@ -335,7 +335,7 @@ def register_tools(server: Any, tools: DotTools, profile: ConnectorProfile = DOT
     @tool(
         name="fleet_digest",
         annotations=annotations("fleet_digest"),
-        description="Read-only, one call: fleet_overview (runs and claims), fleet_work_next dry run (never reserves), unacked inbox count with the oldest 5 subjects, your event subscription count, and open escoffier-labs/brigade PRs (number, title, head sha8, mergeable, check rollup). Each section reports its own error. Call at task start and on every wake. "
+        description="Read-only, one call: fleet_overview (runs and claims), fleet_work_next dry run (never reserves), unacked inbox count with the oldest 5 subjects, your event subscription count, and open escoffier-labs/brigadestack PRs (number, title, head sha8, mergeable, check rollup). Each section reports its own error. Call at task start and on every wake. "
         + DIGEST_MEMORY_HITS_NOTICE,
     )
     async def fleet_digest() -> dict:

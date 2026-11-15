@@ -307,7 +307,7 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
     download(pin["url"], wheel, pin["sha256"])
     payload = validate_wheel(wheel, version)
     component = pin["componentManifest"]
-    base = f"https://github.com/escoffier-labs/brigade/releases/download/{tag}/"
+    base = f"https://github.com/escoffier-labs/brigadestack/releases/download/{tag}/"
     manifest = build / "component-manifest-v1.json"
     if component["url"] != base + manifest.name or component["checksumsUrl"] != base + "checksums.txt":
         raise ValueError("exact release manifest/checksums URLs required")
@@ -492,7 +492,7 @@ def companion_package_manifest(runtime: dict, platform: str) -> dict:
         "publishConfig": {"access": "public"},
         "repository": {
             "type": "git",
-            "url": "git+https://github.com/escoffier-labs/brigade.git",
+            "url": "git+https://github.com/escoffier-labs/brigadestack.git",
             "directory": "npm/feasibility",
         },
         "homepage": "https://brigadestack.com",

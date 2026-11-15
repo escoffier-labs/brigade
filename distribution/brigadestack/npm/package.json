@@ -22,11 +22,11 @@
   },
   "homepage": "https://brigadestack.com",
   "bugs": {
-    "url": "https://github.com/escoffier-labs/brigade/issues"
+    "url": "https://github.com/escoffier-labs/brigadestack/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/escoffier-labs/brigade.git",
+    "url": "git+https://github.com/escoffier-labs/brigadestack.git",
     "directory": "distribution/brigadestack/npm"
   },
   "publishConfig": {

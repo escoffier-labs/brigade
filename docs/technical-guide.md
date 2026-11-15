@@ -17,7 +17,7 @@ This guide preserves the detailed command walkthroughs and operational notes tha
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/brigade/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status">
+  <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/brigadestack/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status">
   <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
   <img src="https://img.shields.io/badge/harnesses-19-orange?style=for-the-badge" alt="19 harnesses">
@@ -271,7 +271,7 @@ pipx install brigade-cli
 Or, to track `main`:
 
 ```bash
-pipx install git+https://github.com/escoffier-labs/brigade
+pipx install git+https://github.com/escoffier-labs/brigadestack
 ```
 
 The workspace config directory is `.brigade` (older `.solo-mise` installs are still read).
@@ -527,10 +527,10 @@ roll forward. The append-only journal format is a one-way storage boundary.
 Worker dispatches also record classified cassettes under `events/cassettes/`.
 The default `run.record` policy is `metadata-only`, which omits private result
 bodies. Default-on private capture remains tracked by
-[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+[#1894](https://github.com/escoffier-labs/brigadestack/issues/1894).
 Set `"run": {"record": "auto"}` in `.brigade/config.json` to record private
 bodies with an explicit `auto` opt-in, or use `off` to disable recording.
-Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
+Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigadestack/issues/1855)
 require explicit `auto` recording to retain private result bodies.
 Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
 brief changes affect only the exact-prompt digest. Prompt text is never stored.
@@ -596,7 +596,7 @@ also skips live runs and serializes deletion with publication. `runs redact`
 conservatively tombstones every cassette reference, including those outside the
 selected range. The redaction record still reports only the requested range.
 This range-accounting limit remains tracked by
-[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+[#1894](https://github.com/escoffier-labs/brigadestack/issues/1894).
 It purges all cassette sidecars after rewriting the journal and recording
 its durable redaction anchor. Cleanup completes before success and retries finish
 interrupted cleanup. Rejected preflight checks preserve sidecars.

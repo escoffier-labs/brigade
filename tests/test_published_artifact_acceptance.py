@@ -156,7 +156,7 @@ def test_github_request_headers_attach_bearer_token_when_present(acceptance_modu
 def test_github_api_redirect_handler_blocks_cross_origin_targets(acceptance_module):
     handler = acceptance_module._GithubApiRedirectHandler()
     request = urllib.request.Request(
-        f"https://{acceptance_module.GITHUB_API_HOST}/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+        f"https://{acceptance_module.GITHUB_API_HOST}/repos/escoffier-labs/brigadestack/releases/tags/v1.2.3",
         headers={"Authorization": "Bearer ghs_example_token_value"},
     )
 
@@ -168,7 +168,7 @@ def test_github_api_redirect_handler_blocks_cross_origin_targets(acceptance_modu
             302,
             "Found",
             {},
-            f"http://{acceptance_module.GITHUB_API_HOST}/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+            f"http://{acceptance_module.GITHUB_API_HOST}/repos/escoffier-labs/brigadestack/releases/tags/v1.2.3",
         )
         is None
     )
@@ -231,7 +231,7 @@ def test_wait_for_github_release_tag_returns_immediately_when_release_is_visible
 
     assert payload["tag_name"] == "v1.2.3"
     assert calls == [
-        "https://api.github.com/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+        "https://api.github.com/repos/escoffier-labs/brigadestack/releases/tags/v1.2.3",
     ]
 
 
@@ -478,7 +478,7 @@ def test_poison_binary_invocation_is_a_failure(acceptance_module, tmp_path):
 def test_release_asset_verification_requires_one_tag_and_verifies_all_native_bytes(acceptance_module, tmp_path):
     version = "1.2.3"
     tag = "v1.2.3"
-    base = f"https://github.com/escoffier-labs/brigade/releases/download/{tag}/"
+    base = f"https://github.com/escoffier-labs/brigadestack/releases/download/{tag}/"
     assets = {}
     components = {}
     for component in acceptance_module.COMPONENT_IDS:
@@ -494,7 +494,7 @@ def test_release_asset_verification_requires_one_tag_and_verifies_all_native_byt
                 "download_url": base + name,
             }
         components[component] = {
-            "source": {"repository": "escoffier-labs/brigade", "release_tag": tag},
+            "source": {"repository": "escoffier-labs/brigadestack", "release_tag": tag},
             "assets": platform_assets,
         }
     manifest = {"components": components}
@@ -525,7 +525,7 @@ def test_release_asset_verification_marks_posix_assets_executable_but_not_window
 ):
     version = "1.2.3"
     tag = "v1.2.3"
-    base = f"https://github.com/escoffier-labs/brigade/releases/download/{tag}/"
+    base = f"https://github.com/escoffier-labs/brigadestack/releases/download/{tag}/"
     assets = {}
     components = {}
     for component in acceptance_module.COMPONENT_IDS:
@@ -541,7 +541,7 @@ def test_release_asset_verification_marks_posix_assets_executable_but_not_window
                 "download_url": base + name,
             }
         components[component] = {
-            "source": {"repository": "escoffier-labs/brigade", "release_tag": tag},
+            "source": {"repository": "escoffier-labs/brigadestack", "release_tag": tag},
             "assets": platform_assets,
         }
     manifest_body = json.dumps({"components": components}, sort_keys=True).encode()
@@ -1111,7 +1111,7 @@ def test_smoke_import_and_search_rejects_an_empty_new_only_export(acceptance_mod
 
 
 def _release_fixture(*, additive=True, hub=False):
-    base = "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/"
+    base = "https://github.com/escoffier-labs/brigadestack/releases/download/v1.2.3/"
     legacy = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
     aliases = ("graphtrail", "graphtrail-mcp", "miseledger")
     platforms = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
@@ -1130,7 +1130,7 @@ def _release_fixture(*, additive=True, hub=False):
             }
         if component in legacy:
             components[component] = {
-                "source": {"repository": "escoffier-labs/brigade", "release_tag": "v1.2.3"},
+                "source": {"repository": "escoffier-labs/brigadestack", "release_tag": "v1.2.3"},
                 "assets": assets,
             }
     if hub:
@@ -1146,7 +1146,7 @@ def _release_fixture(*, additive=True, hub=False):
                 "download_url": base + name,
             }
         components["brigade-hub"] = {
-            "source": {"repository": "escoffier-labs/brigade", "release_tag": "v1.2.3"},
+            "source": {"repository": "escoffier-labs/brigadestack", "release_tag": "v1.2.3"},
             "assets": assets,
         }
     bodies["component-manifest-v1.json"] = json.dumps({"components": components}).encode()
@@ -1156,7 +1156,7 @@ def _release_fixture(*, additive=True, hub=False):
 
 def _verify_fixture(module, tmp_path, bodies, checksums):
     checksum_text = "".join(f"{digest}  {name}\n" for name, digest in sorted(checksums.items())).encode()
-    base = "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/"
+    base = "https://github.com/escoffier-labs/brigadestack/releases/download/v1.2.3/"
 
     def fetch(url):
         assert url.startswith(base)
@@ -1371,10 +1371,12 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
         if argv[0] == "gh":
             assert all(kwargs["env"][key] == "fixture-only" for key in secrets)
             assert Path(argv[3]).is_absolute()
-            assert "--repo" in argv and argv[argv.index("--repo") + 1] == "escoffier-labs/brigade"
+            assert "--repo" in argv and argv[argv.index("--repo") + 1] == "escoffier-labs/brigadestack"
             assert argv[argv.index("--source-digest") + 1] == "a" * 40
             assert argv[argv.index("--source-ref") + 1] == "refs/tags/v1.2.3"
-            assert argv[argv.index("--signer-workflow") + 1] == "escoffier-labs/brigade/.github/workflows/publish.yml"
+            assert (
+                argv[argv.index("--signer-workflow") + 1] == "escoffier-labs/brigadestack/.github/workflows/publish.yml"
+            )
             failed = (case == "attestation" and "brigade-evidence-" in argv[3]) or (
                 case == "manifest-attestation" and argv[3].endswith(".json")
             )

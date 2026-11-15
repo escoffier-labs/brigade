@@ -809,7 +809,7 @@ function Assert-ReleaseManifestAndAssets {
         [string]$PythonExe = "python"
     )
     $tag = "v$Version"
-    $base = "https://github.com/escoffier-labs/brigade/releases/download/$tag"
+    $base = "https://github.com/escoffier-labs/brigadestack/releases/download/$tag"
     $manifestPath = Join-Path $Destination "component-manifest-v1.json"
     $checksumsPath = Join-Path $Destination "checksums.txt"
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
@@ -852,8 +852,8 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     $expected = @{}
     foreach ($componentId in $legacyIds) {
         $component = $manifest.components.$componentId
-        if (-not $component -or $component.source.repository -cne "escoffier-labs/brigade" -or $component.source.release_tag -cne $tag) {
-            throw "release manifest component $componentId does not point to escoffier-labs/brigade@$tag"
+        if (-not $component -or $component.source.repository -cne "escoffier-labs/brigadestack" -or $component.source.release_tag -cne $tag) {
+            throw "release manifest component $componentId does not point to escoffier-labs/brigadestack@$tag"
         }
         if (@($component.assets.PSObject.Properties).Count -ne 5) { throw "release manifest has invalid platform matrix" }
         foreach ($property in $component.assets.PSObject.Properties) {
@@ -871,8 +871,8 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     }
     $hub = $manifest.components."brigade-hub"
     if ($hub) {
-        if ($hub.source.repository -cne "escoffier-labs/brigade" -or $hub.source.release_tag -cne $tag) {
-            throw "release manifest component brigade-hub does not point to escoffier-labs/brigade@$tag"
+        if ($hub.source.repository -cne "escoffier-labs/brigadestack" -or $hub.source.release_tag -cne $tag) {
+            throw "release manifest component brigade-hub does not point to escoffier-labs/brigadestack@$tag"
         }
         if (@($hub.assets.PSObject.Properties).Count -ne 2) { throw "release manifest has invalid brigade-hub platform matrix" }
         foreach ($platform in $hubPlatforms) {
@@ -936,7 +936,7 @@ function Invoke-CanonicalAttestationVerifier {
     if (-not $GhExe -or -not [IO.Path]::IsPathRooted($GhExe) -or -not (Test-Path -LiteralPath $GhExe -PathType Leaf)) {
         throw "canonical attestation verification failed: verifier unavailable"
     }
-    $arguments = @("attestation", "verify", $Subject, "--repo", "escoffier-labs/brigade", "--signer-workflow", "escoffier-labs/brigade/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version")
+    $arguments = @("attestation", "verify", $Subject, "--repo", "escoffier-labs/brigadestack", "--signer-workflow", "escoffier-labs/brigadestack/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version")
     # Quote for Windows CreateProcess/CommandLineToArgvW, without a shell.
     $quoted = foreach ($argument in $arguments) {
         $escaped = [regex]::Replace($argument, '(\\*)"', '$1$1\"')

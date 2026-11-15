@@ -77,14 +77,14 @@ def test_generator_writes_stable_unified_release_manifest_and_checksums(generato
     for component in COMPONENTS:
         assert manifest["components"][component]["component_revision"] == "a" * 40
         assert manifest["components"][component]["source"] == {
-            "repository": "escoffier-labs/brigade",
+            "repository": "escoffier-labs/brigadestack",
             "release_tag": "v1.2.3",
         }
         assert set(manifest["components"][component]["assets"]) == set(_platforms(component))
         for platform, asset in manifest["components"][component]["assets"].items():
             assert asset["asset_name"] == _asset_name(component, platform)
             assert asset["download_url"] == (
-                "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/" + asset["asset_name"]
+                "https://github.com/escoffier-labs/brigadestack/releases/download/v1.2.3/" + asset["asset_name"]
             )
             assert asset["sha256"] == hashlib.sha256(asset["asset_name"].encode()).hexdigest()
 

@@ -826,7 +826,7 @@ incompatibility still needs a follow-up. The import ceiling remains 1 MiB.
 These request bounds leave GET payloads and fleet list clients unchanged.
 Claim fencing failures still return HTTP 503 on read paths, including `/status`.
 Result-set bounds, keyset pagination, and a current-status projection move to
-[the 0.29.0 follow-up](https://github.com/escoffier-labs/brigade/issues/1738).
+[the 0.29.0 follow-up](https://github.com/escoffier-labs/brigadestack/issues/1738).
 Retention, POST throttling, per-node fairness behind a proxy, and the fronting
 proxy runbook also remain deferred to that issue.
 

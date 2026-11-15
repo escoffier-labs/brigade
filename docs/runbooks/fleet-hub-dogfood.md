@@ -157,8 +157,8 @@ version label) to setup:
 
 ```bash
 ref=<MERGED_COMMIT_SHA>
-curl -fsSL "https://github.com/escoffier-labs/brigade/archive/${ref}.tar.gz" | sha256sum
-curl -fsSL "https://github.com/escoffier-labs/brigade/archive/${ref}.tar.gz" \
+curl -fsSL "https://github.com/escoffier-labs/brigadestack/archive/${ref}.tar.gz" | sha256sum
+curl -fsSL "https://github.com/escoffier-labs/brigadestack/archive/${ref}.tar.gz" \
   | tar -xzO "brigade-${ref}/pyproject.toml" | grep -m1 '^version'
 ```
 

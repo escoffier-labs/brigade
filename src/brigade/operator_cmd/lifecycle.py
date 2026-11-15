@@ -772,7 +772,7 @@ def _print_quickstart(payload: dict[str, Any]) -> None:
     print("next:")
     for command in payload["next_commands"]:
         print(f"- {command}")
-    print("issues: https://github.com/escoffier-labs/brigade/issues/new/choose")
+    print("issues: https://github.com/escoffier-labs/brigadestack/issues/new/choose")
 
 
 def bootstrap_portable(

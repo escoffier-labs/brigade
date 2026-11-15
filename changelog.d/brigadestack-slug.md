@@ -1,0 +1,1 @@
+- Point the repository links, install commands, release checks and `brigade bug` at the renamed GitHub repository, `escoffier-labs/brigadestack`. `brigade update` still accepts release manifests published up to v0.31.0, which name the former `escoffier-labs/brigade` slug.

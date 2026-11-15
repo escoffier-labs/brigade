@@ -695,7 +695,7 @@ def _build_status_payload(
         ],
         "docs": {
             "product": "https://brigade.tools/evidence-memory",
-            "repo": "https://github.com/escoffier-labs/brigade",
+            "repo": "https://github.com/escoffier-labs/brigadestack",
         },
         "boundaries": [
             "Explicit user-invoked `brigade evidence crawl` and `brigade evidence search` execute the evidence engine across a process boundary.",
@@ -1081,7 +1081,7 @@ def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
         ],
         "docs": {
             "product": "https://brigade.tools/evidence-memory",
-            "repo": "https://github.com/escoffier-labs/brigade",
+            "repo": "https://github.com/escoffier-labs/brigadestack",
         },
         "pipeline": [
             "evidence crawl",
@@ -1122,7 +1122,7 @@ def export_plan_payload(*, target: Path) -> dict[str, Any]:
         ],
         "docs": {
             "product": "https://brigade.tools/evidence-memory",
-            "repo": "https://github.com/escoffier-labs/brigade",
+            "repo": "https://github.com/escoffier-labs/brigadestack",
         },
     }
 

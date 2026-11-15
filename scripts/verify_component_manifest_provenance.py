@@ -18,7 +18,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "src/brigade/templates/components/manifest-v1.json"
-REPOSITORY = "escoffier-labs/brigade"
+REPOSITORY = "escoffier-labs/brigadestack"
 COMPONENT_IDS = (
     "agent-notify",
     "brigade-code-graph",

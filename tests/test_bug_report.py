@@ -366,7 +366,7 @@ def test_noninteractive_requires_yes_and_flag_receipt(report_env, monkeypatch, c
         if args[:2] == ("search", "issues"):
             return "[]"
         if args[:2] == ("issue", "create"):
-            return "https://github.com/escoffier-labs/brigade/issues/42"
+            return "https://github.com/escoffier-labs/brigadestack/issues/42"
         return ""
 
     monkeypatch.setattr(mod, "gh", fake)

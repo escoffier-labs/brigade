@@ -6,7 +6,7 @@
   "version": "0.32.0",
   "websiteUrl": "https://brigade.tools",
   "repository": {
-    "url": "https://github.com/escoffier-labs/brigade",
+    "url": "https://github.com/escoffier-labs/brigadestack",
     "source": "github"
   },
   "packages": [

@@ -16,7 +16,7 @@ files, and storage formats.
 
 See the [Python instructions](pypi/README.md) or [npm instructions](npm/README.md).
 Documentation lives at [brigade.tools](https://brigade.tools/docs).
-The source repository is [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade/tree/main/distribution/brigadestack).
+The source repository is [escoffier-labs/brigadestack](https://github.com/escoffier-labs/brigadestack/tree/main/distribution/brigadestack).
 
 ## Publishing the Python bridge
 
@@ -38,7 +38,7 @@ publishing and needs no PyPI API token or local upload configuration.
 
 After the controller reviews and merges the bridge source and workflow, select
 **Brigade Stack PyPI publication** in GitHub Actions and run it on `main`.
-The workflow accepts no inputs and runs only in `escoffier-labs/brigade` on
+The workflow accepts no inputs and runs only in `escoffier-labs/brigadestack` on
 `refs/heads/main`. Review the selected source commit before dispatch.
 
 The unprivileged job builds only `distribution/brigadestack/pypi`, checks the

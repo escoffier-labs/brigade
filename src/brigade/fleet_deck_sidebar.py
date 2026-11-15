@@ -101,8 +101,8 @@ def render_section_tabs(active: str, *, worklore_enabled: bool) -> str:
 
 RESOURCE_LINKS: tuple[tuple[str, str, str], ...] = (
     ("docs", "Docs", "https://brigade.tools/docs"),
-    ("bug", "Report a bug", "https://github.com/escoffier-labs/brigade/issues/new?template=bug.yml"),
-    ("star", "Star on GitHub", "https://github.com/escoffier-labs/brigade"),
+    ("bug", "Report a bug", "https://github.com/escoffier-labs/brigadestack/issues/new?template=bug.yml"),
+    ("star", "Star on GitHub", "https://github.com/escoffier-labs/brigadestack"),
 )
 
 

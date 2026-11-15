@@ -91,8 +91,8 @@ async function reconcile(a,field) {
         try {
           if(await verifier.verifyRegistry(r.json.url,archiveDigests.get(a.name),{
             purl:verifier.purl(a.name,version),sourceCommit:metadata.sourceCommit,
-            repository:'https://github.com/escoffier-labs/brigade',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
-            san:'https://github.com/escoffier-labs/brigade/.github/workflows/npm-publish.yml@refs/heads/main',
+            repository:'https://github.com/escoffier-labs/brigadestack',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
+            san:'https://github.com/escoffier-labs/brigadestack/.github/workflows/npm-publish.yml@refs/heads/main',
             issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
           })) return;
         } catch(error) {throw new Error(`Invalid registry provenance: ${a.name}: ${error.message}`,{cause:error});}

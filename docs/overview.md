@@ -6,7 +6,7 @@ The full tour: every component, diagram, and workflow. The [README](../README.md
 
 | Surface | Value |
 | --- | --- |
-| GitHub | [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade) |
+| GitHub | [`escoffier-labs/brigadestack`](https://github.com/escoffier-labs/brigadestack) |
 | Website | [brigade.tools](https://brigade.tools) |
 | PyPI | [`brigade-cli`](https://pypi.org/project/brigade-cli/) |
 | Command | `brigade` |
@@ -247,7 +247,7 @@ flowchart LR
 
 ### Keeping Cards Fresh
 
-Memory degrades. Cards go stale, lose their backing evidence, or get superseded. `brigade memory care scan` is a read-only sweep over the card roots that checks freshness metadata (`reviewed`, `fresh_until`, confidence, evidence) and flags stale, expired, undersourced, contradictory, orphaned, and oversized cards. Flagged cards land in a refresh queue that routes into the work inbox, so a card that needs review shows up in the daily plan instead of rotting unnoticed. The scan writes findings and queue state without editing cards. `brigade memory care tend` then applies an allowlist of derived fixes, archives eligible cards and drains the review inbox, recording each change with undo. Anything outside that allowlist stays in the queue for an assigned agent or the operator. See [memory care](memory-care.md). `brigade memory reflect` proposes consolidations from evidence. When a hub policy enables it and every Tier 0 gate passes, including a bound retrieval evaluation, an allowlisted reflect principal can have the hub apply two low-risk operation classes without human review: appending evidence and merging exact duplicates. That switch is off by default, and a failed gate leaves the proposal for a reviewer. [Memory operations](memory-operations.md) lists the gates, and the remaining work is tracked in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
+Memory degrades. Cards go stale, lose their backing evidence, or get superseded. `brigade memory care scan` is a read-only sweep over the card roots that checks freshness metadata (`reviewed`, `fresh_until`, confidence, evidence) and flags stale, expired, undersourced, contradictory, orphaned, and oversized cards. Flagged cards land in a refresh queue that routes into the work inbox, so a card that needs review shows up in the daily plan instead of rotting unnoticed. The scan writes findings and queue state without editing cards. `brigade memory care tend` then applies an allowlist of derived fixes, archives eligible cards and drains the review inbox, recording each change with undo. Anything outside that allowlist stays in the queue for an assigned agent or the operator. See [memory care](memory-care.md). `brigade memory reflect` proposes consolidations from evidence. When a hub policy enables it and every Tier 0 gate passes, including a bound retrieval evaluation, an allowlisted reflect principal can have the hub apply two low-risk operation classes without human review: appending evidence and merging exact duplicates. That switch is off by default, and a failed gate leaves the proposal for a reviewer. [Memory operations](memory-operations.md) lists the gates, and the remaining work is tracked in [#1856](https://github.com/escoffier-labs/brigadestack/issues/1856).
 
 ```mermaid
 flowchart LR
@@ -390,13 +390,13 @@ Safety and operations tools:
 
 - Content Guard is embedded in Brigade Stack and powers `brigade scrub`, publish checks, and the seeded pre-push hook. `CONTENT_GUARD_DIR` remains an explicit compatibility override for older standalone checkouts.
 - [Agent Pantry](https://github.com/escoffier-labs/agentpantry): encrypted browser session, cookie, and secret sync for agent machines.
-- [agent-notify](https://github.com/escoffier-labs/brigade/tree/main/stations/notify) (`stations/notify/` in this monorepo): optional notification hooks for long-running agent work. Released installs resolve the pinned managed `agent-notify` binary through `brigade setup` once a stable manifest publishes its assets. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing here.
+- [agent-notify](https://github.com/escoffier-labs/brigadestack/tree/main/stations/notify) (`stations/notify/` in this monorepo): optional notification hooks for long-running agent work. Released installs resolve the pinned managed `agent-notify` binary through `brigade setup` once a stable manifest publishes its assets. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing here.
 - [Token Glace](https://github.com/escoffier-labs/token-glace): output compaction for terminal-heavy agent workflows.
 - Built-in Scout skills: Brigade Stack wires `brigade-work` and `ultra-work-scout` during `brigade init`. Install upstream [Superpowers](https://github.com/obra/superpowers) separately for general workflow guidance. Retain Brigade Stack and T3 specialist skills where needed. `brigade init` does not bundle Superpowers. The optional Skillet installer remains a separate integration.
 
 Evidence log and code map (built in):
 
-- **Evidence log** (`brigade evidence …`): local-first ledger of runs, crawls, and imports. Engine lives at [`engines/evidence-ledger/`](https://github.com/escoffier-labs/brigade/tree/main/engines/evidence-ledger). Crawls sessions, files, git, and chat into SQLite with FTS5. Archived standalone [brigade-evidence](https://github.com/escoffier-labs/miseledger) is a history mirror only.
+- **Evidence log** (`brigade evidence …`): local-first ledger of runs, crawls, and imports. Engine lives at [`engines/evidence-ledger/`](https://github.com/escoffier-labs/brigadestack/tree/main/engines/evidence-ledger). Crawls sessions, files, git, and chat into SQLite with FTS5. Archived standalone [brigade-evidence](https://github.com/escoffier-labs/miseledger) is a history mirror only.
 - **Code map** (`brigade code …`): local symbol graph (callers, impact, context). Engine lives under the monorepo engines tree. Archived standalone [brigade-code-graph](https://github.com/escoffier-labs/graphtrail) is a history mirror only.
 - Brigade Stack CLI (process boundary):
   - `brigade setup` installs the code-map engine, its MCP bridge, the evidence engine, SessionFind, and `agent-notify` (when published on the release manifest) from the exact release manifest
