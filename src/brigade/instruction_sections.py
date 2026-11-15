@@ -178,9 +178,11 @@ def _scan(data: bytes) -> _Scan:
             if _closes_raw(clean, raw_tag):
                 raw_tag = None
             continue
-        # An indented code block starts after a blank line and continues across blank lines.
+        # An indented code block starts after a blank line and continues across blank lines. A managed-block
+        # marker stays live even when indented: Brigade's writer finds indented markers, so the scanner must too.
+        # This is broader than CommonMark for list-item continuation paragraphs, which only hides more text.
         if fence is None and (indented or number == 0 or not raw_lines[number - 1].strip()):
-            if clean.startswith((b"    ", b"\t")) or (indented and not clean.strip()):
+            if (clean.startswith((b"    ", b"\t")) and _marker(clean) is None) or (indented and not clean.strip()):
                 indented = True
                 kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"
                 lines.append(_Line(offset, offset + len(raw), text, kind, True, bool(stack)))
