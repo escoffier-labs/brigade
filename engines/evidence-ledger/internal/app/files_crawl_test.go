@@ -238,7 +238,8 @@ func TestFilesCrawlDryRunBudgetFlags(t *testing.T) {
 	withTempHome(t)
 	filesExporter(t)
 	root := t.TempDir()
-	got := runJSON(t, "crawl", "files", root, "--budget=1s", "--max-files", "2", "--dry-run", "--json")
+	t.Chdir(root)
+	got := runJSON(t, "crawl", "files", "budget", "--budget=1s", "--max-files", "2", "--dry-run", "--json")
 	if got["dry_run"] != true {
 		t.Fatalf("dry run: %v", got)
 	}

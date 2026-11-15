@@ -32,7 +32,7 @@ func cmdCrawlFiles(args []string, out, errw io.Writer) int {
 		filtered := []string{}
 		for i := 0; i < len(args); i++ {
 			name := strings.TrimLeft(strings.SplitN(args[i], "=", 2)[0], "-")
-			if name == "budget" || name == "max-files" {
+			if strings.HasPrefix(args[i], "-") && (name == "budget" || name == "max-files") {
 				if !strings.Contains(args[i], "=") && i+1 < len(args) {
 					i++
 				}
