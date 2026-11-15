@@ -609,3 +609,52 @@ def test_unverified_draft_is_not_a_retryable_card_blocker(tmp_path, monkeypatch)
     assert result["kept_for_person"] == 1
     assert result["retried"] == 0
     assert planted.read_bytes() == before and draft.exists()
+
+
+@pytest.mark.parametrize("key", ["yes", "null", "on"])
+def test_overflow_frontmatter_keeps_yaml_special_keys_as_strings(tmp_path, key):
+    yaml = pytest.importorskip("yaml")
+    ws, home, env = field_workspace(tmp_path)
+    file = instruction_overflow.find(RouteContext(ws, home, env).load()[0], "USER.md")
+    file = replace(file, key=key, paths=(key,))
+    raw, _ = instruction_overflow._first_block(ws, file, NOTE, "preference", today=TODAY)
+    text = raw.decode()
+    fields = yaml.safe_load(text.split("---")[1])
+    assert fields["tags"] == ["moved-instructions", key, "overflow"]
+    assert fields["source_file"] == key
+    assert fields["title"] == f"{key} overflow: preference"
+    assert instruction_overflow.card_trust_problem(text) is None
+
+
+def test_overflow_frontmatter_yaml_round_trip_preserves_encoded_source(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    from brigade.memory_care_instructions import encode_value
+
+    ws, home, env = field_workspace(tmp_path)
+    file = instruction_overflow.find(RouteContext(ws, home, env).load()[0], "USER.md")
+    source = "notes/owner's file: \\x.md"
+    file = replace(file, paths=(source,))
+    raw, _ = instruction_overflow._first_block(ws, file, NOTE, "preference", today=TODAY)
+    text = raw.decode()
+    encoded = encode_value(source)
+    assert "'" not in encoded
+    assert f"source_file: '{encoded}'\n" in text
+    fields = yaml.safe_load(text.split("---")[1])
+    assert fields["source_file"] == encoded
+    assert fields["title"] == f"{encoded} overflow: preference"
+    assert yaml.safe_load(yaml.safe_dump(fields))["source_file"] == encoded
+    assert instruction_overflow.card_trust_problem(text) is None
+
+
+def test_old_unquoted_overflow_card_is_trusted_and_loaded(tmp_path):
+    ws, home, env = field_workspace(tmp_path)
+    _plant(ws, CARD_HEAD + "\n" + NOTE + "\n")
+    assert instruction_overflow.card_trust_problem(CARD_HEAD + "\n" + NOTE + "\n") is None
+    assert instruction_overflow._tags(["[moved-instructions, user-md, overflow]"]) == {
+        "moved-instructions",
+        "user-md",
+        "overflow",
+    }
+    found = route(ws, "USER.md", NOTE, "preference", home=home, environ=env)
+    assert found.cards == (CARD,)
+    assert instruction_overflow.contains_block(ws, found, NOTE)

@@ -76,11 +76,11 @@ def test_overflow_card_frontmatter_is_private_and_pinned_byte_for_byte(tmp_path,
     assert head[0] == "---"
     assert fields.pop("id")
     assert fields == {
-        "title": "USER.md overflow: preference",
+        "title": "'USER.md overflow: preference'",
         "category": "instructions",
-        "tags": "[moved-instructions, user-md, overflow]",
+        "tags": "[moved-instructions, 'user-md', overflow]",
         "visibility": "private",
-        "source_file": "USER.md",
+        "source_file": "'USER.md'",
         "archive": "never",
         "last_reviewed": date.today().isoformat(),
         "fresh_until": fields["fresh_until"],
@@ -199,7 +199,7 @@ def test_symlinked_user_md_routes_to_card_without_writing_through(tmp_path, monk
     assert shared.stat().st_size == 100
     assert (ws / "USER.md").is_symlink()
     card = ws / CARDS_REL / "user-md--overflow-preference.md"
-    assert card.is_file() and "source_file: USER.md\n" in card.read_text()  # the card names the workspace path
+    assert card.is_file() and "source_file: 'USER.md'\n" in card.read_text()  # the card names the workspace path
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
