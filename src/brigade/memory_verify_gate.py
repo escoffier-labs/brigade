@@ -51,7 +51,11 @@ def policy(target: Path) -> tuple[dict[str, Any], str]:
 
 def binding_digest(target: Path, pair: Sequence[seats.Seat], binding: str) -> str:
     _, digest = policy(target)
-    blobs = [io.read_bytes(target / name, absent=True) for name in (CORPUS, FEEDBACK)]
+    # Match each reader's own limit: read_corpus accepts MAX_STATE_BYTES, feedback stays bounded lower.
+    blobs = [
+        io.read_bytes(target / CORPUS, absent=True, limit=io.MAX_STATE_BYTES),
+        io.read_bytes(target / FEEDBACK, absent=True),
+    ]
     return io.sha256(
         io.json_bytes(
             {

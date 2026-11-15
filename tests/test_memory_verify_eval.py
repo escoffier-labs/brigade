@@ -567,3 +567,20 @@ def test_enable_recognizes_a_commented_verify_header(tmp_path):
     text = path.read_text()
     assert text.count("[verify]") == 1
     assert tomllib.loads(text)["verify"]["enabled"] is True
+
+
+def test_binding_reads_corpus_with_the_corpus_reader_limit(tmp_path, monkeypatch):
+    seen = {}
+    real = gate.io.read_bytes
+
+    def spy(path, *args, **kwargs):
+        seen[path.name] = kwargs.get("limit", gate.io.MAX_INPUT_BYTES)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(gate.io, "read_bytes", spy)
+    monkeypatch.setattr(gate, "policy", lambda _target: ({}, "d" * 64))
+    try:
+        gate.binding_digest(tmp_path, ("a", "b"), "c" * 64)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass  # Placeholder seats fail after both reads, which is all this test needs.
+    assert seen.get(Path(gate.CORPUS).name) == gate.io.MAX_STATE_BYTES
