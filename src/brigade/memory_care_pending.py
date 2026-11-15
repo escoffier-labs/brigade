@@ -4,18 +4,34 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from . import memory_hub_store as store
 
 INDEX_REL = ".brigade/memory-care/pending.json"
+# Bump when _row classifies records differently, so cached rows are rebuilt once.
+INDEX_VERSION = 2
+# commit_phased writes these. commit() never does, so their presence marks a phased record.
+_PHASED_ONLY = frozenset({"prepared_paths", "after_bytes", "appends", "document_undo", "modes"})
 
 
 def _row(path: Path) -> dict[str, Any]:
     from . import memory_care_journal as journal
 
-    p = journal._payload(path.parents[4], path.parent.name)
+    try:
+        p = journal._payload(path.parents[4], path.parent.name)
+        if "phase" not in p and p.get("status") in ("pending", "committed") and not p.keys() & _PHASED_ONLY:
+            # commit() writes status without a phase and recovers through the kernel
+            # under its own operation id, so care recovery never acts on these records.
+            return dict.fromkeys(("prepared", "document", "repair", "append"), False)
+        journal.validate_record(p)
+    except journal.SymlinkPath:
+        raise
+    except (journal.JournalConflict, store.StoreError):
+        # An unreadable record cannot prove that no document recovery is pending.
+        return {"prepared": True, "document": True, "repair": False, "append": False}
     phase = p.get("phase")
     return {
         "prepared": phase == "prepared",
@@ -30,10 +46,18 @@ def _row(path: Path) -> dict[str, Any]:
 
 
 def _paths(target: Path) -> list[Path]:
-    from .memory_care_journal import JOURNAL_REL, safe_path
+    from .memory_care_journal import DECISION_ID, JOURNAL_REL, safe_path
 
     root = safe_path(target, JOURNAL_REL)
-    return sorted(root.glob("*/decision.json")) if root.exists() else []
+    return (
+        [
+            safe_path(target, path.relative_to(target).as_posix())
+            for path in sorted(root.glob("*/decision.json"))
+            if re.fullmatch(DECISION_ID, path.parent.name)
+        ]
+        if root.exists()
+        else []
+    )
 
 
 def scan(target: Path) -> dict[str, dict[str, Any]]:
@@ -52,6 +76,7 @@ def load(target: Path) -> dict[str, dict[str, Any]]:
         digest = hashlib.sha256(json.dumps(records, sort_keys=True).encode("utf-8")).hexdigest()
         if (
             digest == value["sha256"]
+            and value.get("version") == INDEX_VERSION
             and isinstance(records, dict)
             and all(
                 isinstance(entry, dict)
@@ -80,6 +105,7 @@ def load(target: Path) -> dict[str, dict[str, Any]]:
             store.write_json(
                 path,
                 {
+                    "version": INDEX_VERSION,
                     "records": records,
                     "sha256": hashlib.sha256(json.dumps(records, sort_keys=True).encode("utf-8")).hexdigest(),
                 },
