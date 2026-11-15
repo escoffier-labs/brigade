@@ -541,22 +541,24 @@ def _first_block(
 ) -> tuple[bytes, int]:
     from . import memory_cmd
     from .card_fingerprint import ensure_card_id_frontmatter
+    from .memory_care_instructions import encode_value
     from .memory_care_plan import derived_fresh_until
 
     try:
         stale_after = memory_cmd._config_or_default(target).stale_after_days
     except (ValueError, OSError):
         stale_after = memory_cmd.MemoryCareConfig().stale_after_days
-    name = _source_name(file)
+    name = encode_value(_source_name(file))
     # Undo of the block that created a card needs these bytes to stay exactly as written: a later
     # stage that rewrites this frontmatter (`last_reviewed`, `fresh_until`) makes that undo refuse.
     lines = [
         "---",
-        f"title: {name} overflow: {handoff_type}",
+        # Single quotes preserve encoded escapes. Source names are encoded, keys and types use safe grammars.
+        f"title: '{name} overflow: {handoff_type}'",
         "category: instructions",
-        f"tags: [moved-instructions, {file.key}, overflow]",
+        f"tags: [moved-instructions, '{file.key}', overflow]",
         "visibility: private",
-        f"source_file: {name}",
+        f"source_file: '{name}'",
         "archive: never",
         f"last_reviewed: {today.isoformat()}",
     ]
