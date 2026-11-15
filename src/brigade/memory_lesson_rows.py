@@ -92,12 +92,14 @@ def pending_keys(target: Path, heads: Iterable[Mapping[str, Any]]) -> set[str]:
         if row["kind"] == "negative-outcome":
             negative.setdefault(row["card_id"], []).append(row)
     result = set()
-    from .memory_cmd import _parse_frontmatter
+    from .memory_cmd import _frontmatter_value, _parse_frontmatter
 
     for head in heads:
         key = fairness.key_digest(str(head["scope"]), [str(head["card_id"])])
         meta, _ = _parse_frontmatter(str(head.get("text", "")))
-        cutoff = ledger._timestamp(meta.get("last_consolidated")) or ledger._timestamp(meta.get("last_reviewed"))
+        cutoff = ledger._timestamp(meta.get("last_consolidated")) or ledger._timestamp(
+            _frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
+        )
         for row in negative.get(str(head["card_id"]), []):
             if row["card_path"].startswith(PREFIX) and row["card_path"] != f"{PREFIX}{key}.md":
                 continue

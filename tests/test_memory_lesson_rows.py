@@ -1,5 +1,7 @@
 """Failure signals retain identifiers and reserve verification capacity."""
 
+import pytest
+
 from brigade import memory_lesson_rows as lessons
 from brigade import memory_evidence_log as log
 from tests.test_memory_verify_select import NOW, TODAY, entry, head, key
@@ -113,7 +115,8 @@ def test_negative_scopes_do_not_bleed(tmp_path):
     assert lessons.pending_keys(tmp_path, [head(REF["card_id"], scope="repo:other")]) == set()
 
 
-def test_negative_review_cutoff(tmp_path):
+@pytest.mark.parametrize("field", ["last_reviewed", "last_reviewed_at", "reviewed_at"])
+def test_negative_review_cutoff(tmp_path, field):
     lessons.log_run_receipt(
         tmp_path,
         {
@@ -123,7 +126,7 @@ def test_negative_review_cutoff(tmp_path):
             "evidence_brief": {"memory_refs": [REF]},
         },
     )
-    reviewed = head(REF["card_id"], body="---\nlast_reviewed: 2026-01-02\n---\nReviewed. ^c-abcdef\n")
+    reviewed = head(REF["card_id"], body=f"---\n{field}: 2026-01-02\n---\nReviewed. ^c-abcdef\n")
     assert lessons.pending_keys(tmp_path, [reviewed]) == set()
 
 
