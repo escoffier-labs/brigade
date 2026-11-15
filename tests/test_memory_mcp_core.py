@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import mcp_server, memory_mcp_core
 from tests._home import set_home
 
@@ -455,6 +457,10 @@ def test_only_explicit_mcp_opens_count_as_use(stores):
     from brigade import memory_card_reads as reads
 
     repo, user = stores
+    from tests.memory_read_fixtures import signing_key
+
+    signing_key(repo)
+    signing_key(user)
     _card(repo, "fetched.md", "Fetched", "alpha repo text")
     _card(repo, "found.md", "Found", "zebra unique word")
     _card(repo, "untouched.md", "Untouched", "nothing asks for this")

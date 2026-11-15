@@ -1,9 +1,13 @@
 from datetime import date
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import memory_card_reads as reads
+from tests.memory_read_fixtures import signing_key
 
 
 def test_record_and_corrupt_reset(tmp_path):
+    signing_key(tmp_path)
     reads.record(tmp_path, ["a"], today=date(2026, 1, 1))
     reads.record(tmp_path, ["b"], today=date(2026, 2, 1))
     ledger = reads.load(tmp_path)

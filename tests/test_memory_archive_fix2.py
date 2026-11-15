@@ -4,6 +4,9 @@ from datetime import date
 
 import pytest
 
+from tests.memory_read_fixtures import signing_key
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import memory_archive as archive, memory_card_reads as reads, memory_care_retire as retire
 from brigade import memory_care_journal as journal, memory_care_tend as tend, memory_cmd
 from tests.test_memory_archive_review import move, configure_hub
@@ -131,6 +134,7 @@ def test_cap_counts_success_and_plan_shares_pin_check(tmp_path):
         p = tmp_path / f"memory/cards/{name}.md"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"---\nexpires: 2000-01-01\n{extra}---\nended")
+    signing_key(tmp_path)
     reads.record(tmp_path, [], today=date(2000, 1, 1))
     from tests.test_memory_lifecycle_security import cover
 
@@ -168,6 +172,7 @@ def test_hub_days_use_validated_client_response(tmp_path, monkeypatch, capsys):
     assert reads.hub_last_reads(tmp_path) is None
     assert "hub read stats unavailable, retiring nothing on use grounds" in capsys.readouterr().err
     setup_card(tmp_path, b"---\ncard_id: old\nexpires_at: 2000-01-01\n---\nEnded\n")
+    signing_key(tmp_path)
     reads.record(tmp_path, [], today=date(2000, 1, 1))
     from tests.test_memory_lifecycle_security import cover
 

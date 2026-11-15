@@ -7,7 +7,9 @@ import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 import re
+import posixpath
 import tomllib
+from urllib.parse import unquote, urlsplit
 from typing import Any
 
 from . import memory_archive, memory_card_reads, memory_cmd, memory_review
@@ -33,10 +35,36 @@ def policy(target: Path) -> dict[str, Any]:
     return values
 
 
-def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = ()) -> bool:
+def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (), *, referring: str = "") -> bool:
     # Match complete identities and paths, never a filename's incidental stem.
     names = (rel, card_id, *aliases)
-    return any(re.search(r"(?<![\w./-])" + re.escape(name) + r"(?![\w./-])", text) for name in names if name)
+    for name in names:
+        if not name:
+            continue
+        path_shaped = "/" in name or name.endswith(".md")
+        endings = r"(?![\w./-])" if path_shaped else r"(?![\w/-]|\.[\w./-])"
+        candidates = (name, "./" + name) if path_shaped else (name,)
+        if any(re.search(r"(?<![\w./-])" + re.escape(value) + endings, text) for value in candidates):
+            return True
+    # Resolve link destinations in the source file's directory. A basename in
+    # unrelated prose or another directory must not protect this card.
+    if referring and not referring.startswith("scheduler:"):
+        destinations = re.findall(r"\]\(\s*(?:<([^>]+)>|([^\s)]+))", text)
+        destinations.extend(
+            ("", name + ("" if name.endswith(".md") else ".md"))
+            for name in re.findall(r"\[\[([^\]|#]+)(?:[^\]]*)\]\]", text)
+        )
+        for angle, bare in destinations:
+            try:
+                link = urlsplit(angle or bare)
+            except ValueError:
+                continue
+            if link.scheme or link.netloc or not link.path:
+                continue
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(referring), unquote(link.path)))
+            if resolved in names:
+                return True
+    return False
 
 
 def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
@@ -86,7 +114,7 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
             continue
         try:
             refs[rel] = journal.safe_path(target, rel).read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, journal.JournalConflict, OSError):
             continue
     # Installed schedules live outside the target. These are reads only.
     from . import care_cmd
@@ -285,6 +313,7 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                 rel,
                 identity if fm.get("id") or fm.get("card_id") else "",
                 tuple(k for k in _keys(text, rel) if k != Path(rel).stem),
+                referring=other,
             )
             for other, body in refs.items()
         ):

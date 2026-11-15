@@ -626,7 +626,9 @@ and runbook definitions protect a card. Files or directories named exactly
 `pin`, `pins` or `pinned` under `memory` also protect their references.
 Matches use card identities, paths and declared compatibility aliases.
 Archive contents, unused card cycles and saved run output do not protect cards.
-Undecodable reference files are skipped.
+Undecodable and symlinked reference files are skipped. Relative Markdown links
+resolve from the referring file's directory. Sentence punctuation after an ID
+does not prevent a match, while paths retain stricter boundaries.
 
 Explicit card opens, dated interactive hook opens and card citations backed by
 eligible verification receipts count as use. Search hits and automatic recall
@@ -640,6 +642,18 @@ private intent before updating the ledger. A failed write leaves an error
 marker, and an interrupted write leaves a pending intent. Pending intents
 block transitions until the interrupted operation has been investigated.
 Missing or legacy coverage also starts a new observation window.
+Coverage and explicit-use records require an HMAC from the fixed workspace
+receipt key at `.brigade/receipt-signing-key`. Interactive hook records also
+require authentication bound to the workspace and session ledger path.
+Unsigned, edited or incomplete daily histories cannot authorize transitions.
+The receipt-key environment override does not supply lifecycle authority.
+The key must be a private, current-user-owned, single-link regular file reached
+without symlinks. Recording never creates a key. A missing or unsafe key blocks
+automatic retirement. Windows also blocks it until key ACL confinement is
+supported. Provision the workspace key through `brigade receipts keygen` before
+starting the observation window, with the receipt-key override unset.
+The signing process and key are trusted. This prevents direct JSON forgery,
+but does not isolate the key from a process with the same user's shell access.
 An unavailable configured hub blocks the pass. Hub statistics that expose only
 combined search and read dates also block it, because those totals cannot prove
 explicit opens. A compatible hub must supply `last_card_read_day` separately.

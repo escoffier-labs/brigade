@@ -21,6 +21,16 @@ if TYPE_CHECKING:
     from . import memory_hub_store
 
 
+def interactive_context(payload: dict[str, Any]) -> bool:
+    return not (
+        os.environ.get("BRIGADE_RUN_ID")
+        or os.environ.get("BRIGADE_SCANNER_RUN_ID")
+        or payload.get("agent_id")
+        or payload.get("agent_type", "main") not in ("main", "claude")
+        or payload.get("session_kind", "interactive") != "interactive"
+    )
+
+
 def note_open(ledger: dict[str, Any], card_id: str, payload: dict[str, Any]) -> None:
     """Extend the existing session ledger, excluding known automated contexts.
 
@@ -28,13 +38,7 @@ def note_open(ledger: dict[str, Any], card_id: str, payload: dict[str, Any]) -> 
     Ordinary main-session hooks count unless dispatch or agent metadata marks
     them automated. Unknown explicit session kinds are excluded as well.
     """
-    if (
-        os.environ.get("BRIGADE_RUN_ID")
-        or os.environ.get("BRIGADE_SCANNER_RUN_ID")
-        or payload.get("agent_id")
-        or payload.get("agent_type", "main") not in ("main", "claude")
-        or payload.get("session_kind", "interactive") != "interactive"
-    ):
+    if not interactive_context(payload):
         return
     table = ledger.setdefault("interactive_open_days", {})
     if card_id not in table and len(table) >= 200:
@@ -44,6 +48,7 @@ def note_open(ledger: dict[str, Any], card_id: str, payload: dict[str, Any]) -> 
 
 def _opens(target: Path) -> dict[str, tuple[set[str], set[date]]]:
     from .claude_hooks import hub_recall
+    from . import memory_card_reads
 
     result: dict[str, tuple[set[str], set[date]]] = {}
     root = target / ".brigade/work/claude-hooks/recall"
@@ -51,6 +56,13 @@ def _opens(target: Path) -> dict[str, tuple[set[str], set[date]]]:
         if path.is_symlink():
             continue
         ledger = hub_recall.load(path)
+        if not memory_card_reads.authenticated(
+            target,
+            path.relative_to(target).as_posix(),
+            ledger["interactive_open_days"],
+            ledger.get("interactive_open_auth"),
+        ):
+            continue
         for key, days in ledger["interactive_open_days"].items():
             valid = {date.fromisoformat(day) for day in days if date.fromisoformat(day) <= date.today()}
             if key not in ledger["opened"] or not valid:

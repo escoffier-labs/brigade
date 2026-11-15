@@ -10,11 +10,13 @@ import time
 import secrets
 import os
 import stat
+import hashlib
+import hmac
 from pathlib import Path
 from typing import Callable, Iterable
 
 from . import memory_hub_client as hubc
-from . import dirfd
+from . import dirfd, receipt_signing
 from .run_dirfd import bound_run_dir, MAX_READ_BYTES
 
 READS_REL = ".brigade/memory/card-reads.json"
@@ -30,6 +32,28 @@ class ReadLedger:
 
 
 COVERAGE_REL = ".brigade/memory/read-coverage"
+
+
+def _mac(target: Path, context: str, value: dict, key: bytes) -> str:
+    message = json.dumps(
+        ["brigade.memory-use.v1", str(target.expanduser().resolve()), context, value],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
+def authenticate(target: Path, context: str, value: dict) -> str | None:
+    key = receipt_signing.workspace_key(target)
+    return _mac(target, context, value, key) if key is not None else None
+
+
+def authenticated(target: Path, context: str, value: dict, mac: object) -> bool:
+    if not isinstance(mac, str) or len(mac) != 64 or any(c not in "0123456789abcdef" for c in mac):
+        return False
+    expected = authenticate(target, context, value)
+    return expected is not None and hmac.compare_digest(mac, expected)
 
 
 def _day() -> date:
@@ -82,11 +106,26 @@ def _pending(target: Path) -> list[str]:
 def load(target: Path) -> ReadLedger:
     try:
         p = _read_json(target, READS_REL)
+        mac = p.pop("mac", None)
+        if not authenticated(target, READS_REL, p, mac):
+            raise ValueError("unauthenticated read coverage")
+        since = date.fromisoformat(p["healthy_since"])
+        heartbeat = date.fromisoformat(p["heartbeat"])
+        # The signed daily history must actually cover every day of the window.
+        history = [date.fromisoformat(day) for day in p["coverage_days"]]
+        if (
+            not history
+            or history[0] != since
+            or history[-1] != heartbeat
+            or any((b - a).days != 1 for a, b in zip(history, history[1:], strict=False))
+            or date.fromisoformat(p["tracking_since"]) > since
+        ):
+            raise ValueError("incomplete read coverage history")
         return ReadLedger(
             date.fromisoformat(p["tracking_since"]),
             {k: date.fromisoformat(v) for k, v in p["last_read"].items()},
-            date.fromisoformat(p["healthy_since"]) if p.get("healthy_since") else None,
-            date.fromisoformat(p["heartbeat"]) if p.get("heartbeat") else None,
+            since,
+            heartbeat,
             bool(_pending(target)),
         )
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -127,15 +166,20 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
             days = {k: v for k, v in ledger.last_read.items() if v <= today}
             for key in keys:
                 days[key] = max(today, days.get(key, today))
+            value = {
+                "tracking_since": min(ledger.tracking_since, today).isoformat(),
+                "healthy_since": since.isoformat(),
+                "heartbeat": today.isoformat(),
+                "coverage_days": [(since + timedelta(days=n)).isoformat() for n in range((today - since).days + 1)],
+                "last_read": {k: v.isoformat() for k, v in days.items()},
+            }
+            mac = authenticate(target, READS_REL, value)
+            if mac is None:
+                raise ValueError("workspace receipt signing key unavailable")
             _write_json(
                 target,
                 READS_REL,
-                {
-                    "tracking_since": min(ledger.tracking_since, today).isoformat(),
-                    "healthy_since": since.isoformat(),
-                    "heartbeat": today.isoformat(),
-                    "last_read": {k: v.isoformat() for k, v in days.items()},
-                },
+                {**value, "mac": mac},
             )
             for error in errors:
                 _unlink(target, error)

@@ -6,7 +6,10 @@ import os
 
 import pytest
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import memory_card_reads as reads, memory_cmd, memory_lifecycle as life
+from tests.memory_read_fixtures import coverage, signing_key
 from tests.test_memory_outcome_evidence import verified_card as verified_card
 
 TODAY = date(2026, 11, 15)
@@ -21,24 +24,14 @@ def old_card(root, *, meta="", name="notes", crlf=False):
     path.write_bytes(text.replace("\n", "\r\n").encode() if crlf else text.encode())
     stamp = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
     os.utime(path, (stamp, stamp))
+    signing_key(root)
     reads.record(root, [], today=OLD)
     return path
 
 
 def cover(root, end=TODAY):
-    """Model an interval with daily heartbeats. Gap behavior has separate tests."""
-    from brigade.memory_hub_store import write_json
-
-    ledger = reads.load(root)
-    write_json(
-        root / reads.READS_REL,
-        {
-            "tracking_since": OLD.isoformat(),
-            "healthy_since": OLD.isoformat(),
-            "heartbeat": end.isoformat(),
-            "last_read": {key: day.isoformat() for key, day in ledger.last_read.items()},
-        },
-    )
+    """Model an interval with daily authenticated heartbeats."""
+    coverage(root, OLD, end)
 
 
 @pytest.mark.parametrize("source", ["search", "outcome", "citation"])
@@ -171,6 +164,7 @@ def test_interrupted_read_blocks_even_a_successful_heartbeat(tmp_path):
 def test_daily_coverage_requires_continuity(tmp_path):
     from datetime import timedelta
 
+    signing_key(tmp_path)
     reads.record(tmp_path, [], today=OLD)
     reads.record(tmp_path, [], today=OLD + timedelta(days=1))
     assert reads.covered(reads.load(tmp_path), today=OLD + timedelta(days=1), days=1)

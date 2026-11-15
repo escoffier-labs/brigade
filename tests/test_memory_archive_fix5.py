@@ -4,6 +4,10 @@ from datetime import date, timedelta
 
 from tests.test_memory_lifecycle_security import cover
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
+from tests.memory_read_fixtures import signing_key
+
 from brigade import memory_archive as archive
 from brigade import memory_card_reads as reads
 from brigade import memory_care_retire as retire
@@ -76,6 +80,7 @@ def test_unreadable_hub_stats_retire_nothing(tmp_path, monkeypatch, capsys):
     path = tmp_path / "memory/cards/old.md"
     path.parent.mkdir(parents=True)
     path.write_text("---\ncard_id: old\nexpires_at: 2026-01-01\n---\nEnded\n")
+    signing_key(tmp_path)
     reads.record(tmp_path, [], today=date(2026, 1, 1))
     cover(tmp_path, end=date(2026, 11, 12))
     monkeypatch.setattr(reads, "hub_last_reads", lambda _, **_kw: None)
@@ -89,6 +94,7 @@ def test_hub_not_configured_still_retires(tmp_path, monkeypatch):
     path = tmp_path / "memory/cards/old.md"
     path.parent.mkdir(parents=True)
     path.write_text("---\ncard_id: old\nexpires_at: 2026-01-01\n---\nEnded\n")
+    signing_key(tmp_path)
     reads.record(tmp_path, [], today=date(2026, 1, 1))
     cover(tmp_path, end=date(2026, 11, 12))
     assert reads.hub_last_reads(tmp_path) == {}
@@ -121,6 +127,7 @@ def test_replica_read_of_a_card_without_an_id_blocks_retirement(tmp_path):
     path.write_text(text)
     published = memory_hub_sync.publication_identity(text, rel)[0]
     assert published not in (rel, memory_cmd.card_identity_from_text(text, rel))
+    signing_key(tmp_path)
     reads.record(tmp_path, [], today=date(2026, 1, 1))
     cover(tmp_path, end=date(2026, 11, 12))
     today = date(2026, 11, 12)

@@ -69,6 +69,7 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
                     rel,
                     identity if fm.get("id") or fm.get("card_id") else "",
                     tuple(k for k in _keys(text, rel) if k != path.stem),
+                    referring=other,
                 )
                 for other, body in references.items()
             )

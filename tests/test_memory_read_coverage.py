@@ -5,6 +5,8 @@ from datetime import date, timedelta
 
 import pytest
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import memory_card_reads as reads, memory_hooks, memory_vault, obsidian_vault, dispatch_memory
 from brigade import memory_care_retire as retire, memory_care_tend as tend, memory_cmd
 from tests.test_memory_archive import setup_card
@@ -46,6 +48,9 @@ def test_dispatch_local_context_does_not_record_opens(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="vault containment checks are unavailable on Windows")
 @pytest.mark.parametrize("operation", ["search", "show"])
 def test_vault_projection_reads_protect_canonical_card(tmp_path, operation, capsys):
+    from tests.memory_read_fixtures import signing_key
+
+    signing_key(tmp_path)
     _write_card(tmp_path, "alpha", title="Alpha", body="rotation policy", tags=["rotation"])
     vault = tmp_path / "vault"
     vault.mkdir()

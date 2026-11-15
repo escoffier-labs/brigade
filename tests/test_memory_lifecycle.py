@@ -7,8 +7,11 @@ import shutil
 
 import pytest
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import memory_card_reads as reads, memory_cmd, memory_lifecycle as life
 from brigade import memory_care_journal as journal, memory_care_tend as tend
+from tests.memory_read_fixtures import coverage, signing_key
 from brigade.memory_retrieval_eval import DEFAULT_FIXTURE_ROOT, run_eval
 
 TODAY = date(2026, 11, 15)
@@ -20,24 +23,14 @@ def card(root, name="old", meta="trust: agent-unreviewed\n", body="retrievalwidg
     path.write_bytes(f"---\ncard_id: {name}\n{meta}---\n{body}\n".encode())
     stamp = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
     os.utime(path, (stamp, stamp))
+    signing_key(root)
     reads.record(root, [], today=date(2026, 1, 1))
     return path
 
 
 def observed_run(root, *, today, **kwargs):
-    from brigade.memory_hub_store import write_json
-
     ledger = reads.load(root)
-    # Model a continuously observed workspace. Coverage gaps are tested separately.
-    write_json(
-        root / reads.READS_REL,
-        {
-            "tracking_since": ledger.tracking_since.isoformat(),
-            "healthy_since": (ledger.healthy_since or today).isoformat(),
-            "heartbeat": today.isoformat(),
-            "last_read": {key: day.isoformat() for key, day in ledger.last_read.items()},
-        },
-    )
+    coverage(root, ledger.tracking_since, today)
     return life.run(root, today=today, **kwargs)
 
 
@@ -107,7 +100,11 @@ def test_observed_use_protects(tmp_path, source):
     elif source == "interactive":
         path = tmp_path / ".brigade/work/claude-hooks/recall/session.json"
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({"v": 1, "opened": ["old"], "interactive_open_days": {"old": [TODAY.isoformat()]}}))
+        days = {"old": [TODAY.isoformat()]}
+        auth = reads.authenticate(tmp_path, path.relative_to(tmp_path).as_posix(), days)
+        path.write_text(
+            json.dumps({"v": 1, "opened": ["old"], "interactive_open_days": days, "interactive_open_auth": auth})
+        )
     assert not observed_run(tmp_path, today=TODAY)["transitions"]
 
 

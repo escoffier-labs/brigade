@@ -1,0 +1,2 @@
+- Authenticate unused-card coverage and accepted opens with the fixed workspace receipt key. Unsigned or broken history blocks automatic retirement, and automated hook contexts cannot count as use.
+- Preserve dependencies referenced by relative Markdown links or IDs followed by sentence punctuation. Skip symlinked reference files during lifecycle and expiry scans.
