@@ -53,6 +53,9 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
     target = target or resolve_wired_target(cwd, harness=harness)
     if target is None or not _allowed(target, harness, pin):
         return
+    from . import lesson_activity
+
+    lesson_activity.on_event(target, event, payload)
     observed_checks.check_capture_deadline()
     if payload.get("tool_name") == "apply_patch":
         if work_mode.is_observe(target):
