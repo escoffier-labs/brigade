@@ -1,0 +1,134 @@
+name: Brigade Stack npm publication
+
+# Publishes distribution/brigadestack/npm through npm trusted publishing (GitHub
+# OIDC). The npm trust entry for `brigadestack` names this file and the `npm`
+# environment, so renaming either breaks publication until the trust is updated.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brigadestack-npm-publication
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BRIDGE_DIR: distribution/brigadestack/npm
+  npm_config_registry: https://registry.npmjs.org/
+
+jobs:
+  build:
+    if: github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.0'
+      - name: Pin the npm toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(npm --version)" = 11.19.1
+      - name: Read bridge identity and require an exact stable dependency
+        id: identity
+        run: |
+          version=$(node - "$BRIDGE_DIR/package.json" <<'JS'
+          const assert = require('node:assert/strict');
+          const manifest = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
+          assert.equal(manifest.name, 'brigadestack');
+          assert.match(manifest.version, /^\d+\.\d+\.\d+$/, 'bridge publishes stable versions only');
+          assert.deepEqual(manifest.dependencies, {'@escoffier-labs/brigade': manifest.version});
+          assert.deepEqual(manifest.bin, {brigadestack: 'launcher.cjs'});
+          assert.deepEqual(manifest.files, ['launcher.cjs', 'README.md', 'LICENSE']);
+          process.stdout.write(manifest.version);
+          JS
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Bridge brigadestack@$version depends on @escoffier-labs/brigade@$version"
+      - name: Require the published dependency and an unused bridge version
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          test "$(npm view "@escoffier-labs/brigade@$VERSION" version)" = "$VERSION"
+          versions=$(npm view brigadestack versions --json)
+          if node -e 'process.exit(JSON.parse(process.argv[1]).includes(process.argv[2]) ? 0 : 1)' "$versions" "$VERSION"; then
+            echo "::error::brigadestack@$VERSION is already on npm; bump distribution/brigadestack/npm first"
+            exit 1
+          fi
+      - name: Run launcher contract tests
+        working-directory: ${{ env.BRIDGE_DIR }}
+        run: node --test launcher.test.cjs
+      - name: Pack and check the bridge-only payload
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          out="$RUNNER_TEMP/brigadestack-npm"
+          mkdir -p "$out"
+          (cd "$BRIDGE_DIR" && npm pack --ignore-scripts --pack-destination "$out")
+          test "$(ls "$out")" = "brigadestack-$VERSION.tgz"
+          entries=$(tar -tzf "$out/brigadestack-$VERSION.tgz" | LC_ALL=C sort | tr '\n' ' ')
+          test "$entries" = 'package/LICENSE package/README.md package/launcher.cjs package/package.json '
+      - name: Install the tarball with its real dependency and exercise the alias
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          prefix="$RUNNER_TEMP/brigadestack-smoke"
+          npm install --global --prefix "$prefix" "$RUNNER_TEMP/brigadestack-npm/brigadestack-$VERSION.tgz"
+          cd "$RUNNER_TEMP"
+          reported=$("$prefix/bin/brigadestack" --version)
+          printf '%s\n' "$reported"
+          test "$reported" = "brigade $VERSION"
+          "$prefix/bin/brigadestack" --help
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: brigadestack-npm
+          path: ${{ runner.temp }}/brigadestack-npm/brigadestack-${{ steps.identity.outputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.0'
+      - name: Pin the npm toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(npm --version)" = 11.19.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: brigadestack-npm
+          path: brigadestack-npm
+      - name: Publish the checked tarball with provenance
+        run: npm publish "brigadestack-npm/brigadestack-$VERSION.tgz" --provenance --access public --tag latest --ignore-scripts
+      - name: Confirm the registry serves the new version as latest
+        run: |
+          for attempt in $(seq 1 12); do
+            if test "$(npm view brigadestack dist-tags.latest 2>/dev/null)" = "$VERSION"; then
+              npm view "brigadestack@$VERSION" name version dependencies dist.integrity
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::brigadestack latest did not reach $VERSION"
+          exit 1
