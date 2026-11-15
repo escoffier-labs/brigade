@@ -73,7 +73,9 @@ def show_config(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, Any]:
+def health(
+    target: Path, *, suppression_cache_only: bool = False, known_wiring_roots_only: bool = False
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
     migration_map = _read_fingerprint_migration_map(target)
     checks: list[dict[str, Any]] = []
@@ -148,7 +150,11 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
                 "detail": f"{template_audit_payload['scanned_file_count']} public file(s) checked",
             }
         )
-    raw_harness_wiring = _template_audit_ops_mod.harness_wiring_payload(target)
+    raw_harness_wiring = (
+        _template_audit_ops_mod.harness_wiring_payload(target, known_roots_only=True)
+        if known_wiring_roots_only
+        else _template_audit_ops_mod.harness_wiring_payload(target)
+    )
     raw_harness_findings = [item for item in raw_harness_wiring.get("findings", []) if isinstance(item, dict)]
     include_templates = (
         bool(
@@ -191,6 +197,7 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
     ]
     harness_wiring = {
         **raw_harness_wiring,
+        **({"scan_mode": "known-roots"} if known_wiring_roots_only else {}),
         "active_findings": active_harness_findings,
         "active_finding_count": len(active_harness_findings),
         "active_top_finding": active_harness_findings[0] if active_harness_findings else None,

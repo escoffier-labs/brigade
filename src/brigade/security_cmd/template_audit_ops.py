@@ -26,6 +26,9 @@ from . import scan_detectors as _scan_detectors_mod
 from . import scan_engine as _scan_engine_mod
 from .models import (
     ENV_ASSIGNMENT_RE,
+    HARNESS_ROOTS,
+    SKIP_DIRS,
+    SKIP_PREFIXES,
     PLAINTEXT_PASSWORD_RE,
     PRIVATE_KEY_RE,
     SECRET_VALUE_RE,
@@ -201,11 +204,45 @@ def template_privacy_payload(target: Path) -> dict[str, Any]:
     }
 
 
-def harness_wiring_payload(target: Path) -> dict[str, Any]:
+def harness_wiring_payload(target: Path, *, known_roots_only: bool = False) -> dict[str, Any]:
     target = target.expanduser().resolve()
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
-    for path in _scan_engine_mod._iter_scan_files(target):
+    # These are exactly the roots accepted by _is_harness_wiring_document.
+    # Do not enumerate unrelated source trees or memory/data stores first.
+    roots = tuple(sorted((HARNESS_ROOTS - {".brigade"}) | {"templates", "src/brigade/templates"}))
+    roots += (".brigade/hermes", ".brigade/openclaw")
+    # os.walk never follows directory links. Keep that behavior when selecting
+    # roots directly, and retain the original path for a linked config file.
+    roots = tuple(
+        rel
+        for rel in roots
+        if not any(parent.is_symlink() for parent in (target / rel, *(target / rel).parents) if parent != target)
+    )
+    paths = _scan_engine_mod._iter_scan_files(target, include_paths=roots)
+    # The legacy predicate also accepts this filename anywhere under .brigade.
+    # Search directory entries by name without statting every unrelated file.
+    brigade_root = target / ".brigade"
+    if known_roots_only:
+        path = brigade_root / "handoff-sources.json"
+        if not brigade_root.is_symlink() and _scan_engine_mod._should_scan_file(path):
+            paths.append(path)
+    elif not brigade_root.is_symlink():
+        for directory, dirnames, filenames in os.walk(brigade_root):
+            current = Path(directory)
+            parts = current.relative_to(target).parts
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if name not in SKIP_DIRS
+                and not any((*parts, name)[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
+                and not (current == brigade_root and name in {"hermes", "openclaw"})
+            ]
+            if "handoff-sources.json" in filenames:
+                path = current / "handoff-sources.json"
+                if _scan_engine_mod._should_scan_file(path):
+                    paths.append(path)
+    for path in sorted(set(paths)):
         # The document check is a cheap suffix/prefix test; the skip check stats every
         # ancestor for a nested worktree marker, so run it only on candidate documents.
         if not _scan_detectors_mod._is_harness_wiring_document(path, target):

@@ -98,10 +98,15 @@ def _draft_inbox_specs(
 ) -> tuple[list[tuple[Path, str, bool]], list[str], bool]:
     target = target.expanduser().resolve()
     config, _, errors, loaded = _load_source_config_for_drafts(target, sources=sources)
+    watched_paths = {(item.root / item.inbox).resolve() for item in config.watched}
     specs: dict[tuple[str, str], tuple[Path, str, bool]] = {}
     for rel in WRITER_INBOXES:
         path = (target / rel).resolve()
-        specs[(str(path), rel)] = (path, rel, _sources_mod._is_watched(target, rel, config.watched))
+        specs[(str(path), rel)] = (
+            path,
+            rel,
+            _sources_mod._is_watched(target, rel, config.watched, watched_paths=watched_paths),
+        )
     for watched in config.watched:
         path = (watched.root / watched.inbox).resolve()
         label = watched.inbox if watched.root == target.resolve() else str(path)
