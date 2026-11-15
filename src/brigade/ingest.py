@@ -1065,15 +1065,13 @@ def _execute(
         summary = _summary("reinforce", name, outcome.code, _match_meta(outcome, target))
         if not dry_run:
             evidence_pointer = _evidence_pointer(handoff_path, sections=sections, target=target)
-            reinforce_existing_card(
-                dest,
-                today=date.today(),
-                evidence_pointer=evidence_pointer,
-            )
             # Exact matches retain automatic metadata reinforcement and a review receipt.
             inbox_dir.mkdir(parents=True, exist_ok=True)
             original = snapshot.decode("utf-8") if snapshot is not None else handoff_path.read_text(encoding="utf-8")
             receipt = (
+                f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
+                f"     reason: {outcome.code}{_match_meta(outcome, target)}\n"
+                f"     routed-at: {datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')} -->\n\n"
                 f"<!-- reinforcement receipt: {outcome.code}{_match_meta(outcome, target)} -->\n\n"
                 "## Memory proposal notification\nExact match already reinforced. Retained for review.\n\n"
             )
@@ -1087,6 +1085,7 @@ def _execute(
                     name,
                     original.encode("utf-8"),
                     outcome.match.path,
+                    outcome.code,
                 )
             if dest is None:
                 stem = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_path.stem)[:120]
@@ -1094,9 +1093,13 @@ def _execute(
                 if pending is not None:
                     pending.append(
                         ingest_near_duplicate.Pending(
-                            sections.get("suggested card content", ""), dest, outcome.match.path
+                            sections.get("suggested card content", ""), dest, outcome.match.path, outcome.code
                         )
                     )
+            # Publish the receipt before mutating the card so a failed inbox write
+            # leaves the source retryable without incrementing reinforcements twice.
+            assert outcome.dest is not None
+            reinforce_existing_card(outcome.dest, today=date.today(), evidence_pointer=evidence_pointer)
             log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
         return Action("reinforced", summary)
 
@@ -1181,19 +1184,20 @@ def _execute(
             can_merge = (
                 pending is not None
                 and outcome.match is not None
+                and not outcome.match.opposite_polarity
                 and sections.get("recommended memory action", "").strip().lower() == "create-card"
             )
             dest = None
             if can_merge and pending is not None:
                 assert outcome.match is not None
                 dest = ingest_near_duplicate.merge_pending(
-                    content, pending, target, name, original.encode("utf-8"), outcome.match.path
+                    content, pending, target, name, original.encode("utf-8"), outcome.match.path, outcome.code
                 )
             if dest is None:
                 dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
                 if can_merge and pending is not None:
                     assert outcome.match is not None
-                    pending.append(ingest_near_duplicate.Pending(content, dest, outcome.match.path))
+                    pending.append(ingest_near_duplicate.Pending(content, dest, outcome.match.path, outcome.code))
             log_match(target, outcome.match, dest)
             _archive(handoff_path, processed_dir, snapshot_sha)
         # Both inboxed and skipped are now archived; classify them uniformly.

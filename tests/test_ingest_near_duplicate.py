@@ -1,8 +1,12 @@
 """Ingest uses reflect's deterministic near-duplicate policy."""
 
+from datetime import date
 from pathlib import Path
 
+import pytest
+
 from brigade import ingest
+from brigade import memory_inbox_drain as drain
 from brigade.install import install_selection
 from brigade.selection import Selection
 
@@ -78,6 +82,33 @@ def test_distinct_handoff_creates_card(tmp_target: Path):
     assert (tmp_target / "memory/cards/distinct.md").is_file()
 
 
+@pytest.mark.parametrize("contradiction_first", [False, True])
+def test_same_session_contradiction_stays_separate_for_human_review(tmp_target: Path, contradiction_first: bool):
+    inbox = seed(tmp_target)
+    existing = tmp_target / "memory/cards/original.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    original = card(BODY + " enabled")
+    existing.write_text(original)
+    bodies = [BODY + " enabled extra", BODY + " disabled extra"]
+    if contradiction_first:
+        bodies.reverse()
+    handoff(inbox, "copy-a", bodies[0])
+    handoff(inbox, "copy-b", bodies[1])
+
+    assert ingest.run(target=tmp_target, promote_cards=True) == 0
+
+    drafts = list((tmp_target / drain.INBOX_REL).glob("*.md"))
+    assert len(drafts) == 2
+    by_code = {drain.parse_header(path.read_text())[0]: path.read_text() for path in drafts}
+    contradiction = by_code["contradiction-candidate"]
+    assert BODY + " disabled extra" in contradiction
+    assert drain.classify("contradiction-candidate", contradiction) == "human"
+    proposal = by_code["near-match-proposal"]
+    assert BODY + " enabled extra" in proposal
+    assert drain.classify("near-match-proposal", proposal) == "hold"
+    assert existing.read_text() == original
+
+
 def test_lower_reflect_threshold_catches_match_below_legacy_overlap(tmp_target: Path):
     inbox = seed(tmp_target)
     existing = tmp_target / "memory/cards/original.md"
@@ -112,3 +143,42 @@ def test_duplicate_of_card_created_earlier_in_run(tmp_target: Path):
     drafts = list((tmp_target / "memory/handoff-inbox").glob("*.md"))
     assert len(drafts) == 1
     assert "card-id=card-" in drafts[0].read_text()
+
+
+@pytest.mark.parametrize("suffix", [" extra", " disabled extra"])
+def test_exact_receipt_does_not_swallow_review_proposal(tmp_target: Path, suffix: str):
+    inbox = seed(tmp_target)
+    existing = tmp_target / "memory/cards/original.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(card(BODY + " enabled"))
+    handoff(inbox, "a-exact", BODY + " enabled")
+    handoff(inbox, "b-review", BODY + " enabled" + suffix if suffix == " extra" else BODY + suffix)
+    assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    drafts = list((tmp_target / drain.INBOX_REL).glob("*.md"))
+    assert len(drafts) == 2
+    codes = {drain.parse_header(path.read_text())[0] for path in drafts}
+    assert "card-reinforced" in codes
+    assert ("near-match-proposal" if suffix == " extra" else "contradiction-candidate") in codes
+    result = drain.drain(tmp_target, today=date.today(), deadline_days=14)
+    assert result["skipped"] == 0
+    assert result["held"] >= 1
+
+
+def test_receipt_write_failure_does_not_reinforce_before_retry(tmp_target: Path, monkeypatch):
+    inbox = seed(tmp_target)
+    existing = tmp_target / "memory/cards/original.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    original = card(BODY)
+    existing.write_text(original)
+    handoff(inbox, "copy", BODY)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("fixture receipt write failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest, "_write_review_draft", unavailable)
+        ingest.run(target=tmp_target, promote_cards=True)
+    assert existing.read_text() == original
+    assert (inbox / "copy.md").exists()
+    assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    assert "reinforcements: 1" in existing.read_text()

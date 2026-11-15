@@ -55,10 +55,17 @@ class Pending:
     content: str
     path: Path
     matched_card: Path
+    code: str
 
 
 def merge_pending(
-    content: str, pending: list[Pending], target: Path, handoff_name: str, snapshot: bytes, matched_card: Path
+    content: str,
+    pending: list[Pending],
+    target: Path,
+    handoff_name: str,
+    snapshot: bytes,
+    matched_card: Path,
+    code: str,
 ) -> Path | None:
     """Retain one review item and add a pointer to each archived source handoff.
 
@@ -70,7 +77,8 @@ def merge_pending(
     threshold, _ = near.settings(target)
     for item in pending:
         if (
-            item.matched_card != matched_card
+            item.code != code
+            or item.matched_card != matched_card
             or scope(content) != scope(item.content)
             or similarity(content, item.content) + 1e-9 < threshold
         ):
