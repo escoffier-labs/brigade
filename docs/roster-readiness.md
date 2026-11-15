@@ -105,13 +105,29 @@ writable adapter unverified or blocked despite adequate write isolation.
 Adapter-aware operation health requirements need an explicit source contract
 before this gate can be relaxed. Unknown evidence remains unverified.
 
-**The CLI currently has no authoritative live admission, capacity, or T3
-capability/governance observation producer.** It therefore cannot return ready
-for a live operation. A structurally eligible request normally returns
-unverified, or blocked if selected-seat health supplies a fresh failure.
-T3 requests skip local provider probes because those do not establish T3
-execution health. No claim of T3 integration with Brigade budgets follows
-from this command. Active inference probing is not offered by this subcommand.
+For `route = "brigade"`, `inspect_readiness` and `brigade roster ready` produce
+authoritative, read-only `admission` and `capacity` observations without
+acquiring a lease or claim, writing LKG or audit caches, or launching a task.
+Without a configured Hub (and when no prior enrollment activation was observed),
+admission uses `route_receipts.admissible_seats` and the retired-model policy,
+and capacity uses `runguard.inspect_run_lock_reconcile` combined with
+`limits.max_workers`. When a Fleet Hub is configured, admission queries
+`GET /models` via `fetch_versioned_roster(..., allow_lkg=True, cache_write=False)`
+and, when enrolled, queries `GET /policy` via `fleet_client_policy.show_policy()`
+and evaluates `fleet_policy.admissible_seat`. Capacity inspects the local run lock
+plus a read-only `POST /claims` (`action = "inspect"`) check when a live Hub
+roster is reachable and uses an absolute `BRIGADE_HOME`. Because no Hub endpoint
+exposes live per-seat lease usage without acquiring a lease, Hub-enforced
+positive concurrency limits and enrolled fleet policy lease usage report
+`capacity` as `unknown` (`unverified`) rather than guessing; LKG fallback also
+leaves live Hub capacity `unknown` (`unverified`), and `limit = 0` or a held
+lock/claim reports `admitted_capacity = 0` (`blocked`).
+
+T3 capability and governance observation production remains unimplemented, so
+T3 requests still skip local provider probes and remain unverified (or blocked
+on structural or refusal evidence). No claim of T3 integration with Brigade
+budgets follows from this command. Active inference probing is not offered by
+this subcommand.
 
 ## Integration interface
 
