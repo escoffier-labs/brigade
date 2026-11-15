@@ -13,8 +13,8 @@ from . import memory_proposal_io as io
 CAPABILITY = "automatic_compensation"
 
 
-def negative_signals(target: Path, heads: list[dict[str, Any]], scope: str) -> list[dict[str, Any]]:
-    """Forward only intact failed receipt bindings for the exact replicated bytes."""
+def negative_signals(target: Path, heads: list[dict[str, Any]], scope: str) -> list[str]:
+    """Forward immutable IDs for intact failed receipt bindings for the exact replicated bytes."""
     rows, warnings, unsupported = evidence.read_evidence(target)
     if warnings or unsupported:
         raise ValueError("compensation watch evidence log is incomplete")
@@ -38,14 +38,8 @@ def negative_signals(target: Path, heads: list[dict[str, Any]], scope: str) -> l
             is None
         ):
             continue
-        stamp = evidence._timestamp(row["ts"])
-        assert stamp is not None
-        signals.append(
-            {"card_id": row["card_id"], "observed_ms": int(stamp.timestamp() * 1000), "evidence_id": row["evidence_id"]}
-        )
-    if len(signals) > 64:
-        raise ValueError("compensation watch negative signal bound exceeded")
-    return signals
+        signals.append(row["evidence_id"])
+    return list(dict.fromkeys(signals))
 
 
 def run(
@@ -60,22 +54,24 @@ def run(
         return []
     results = []
     for scope in scopes:
-        fields: dict[str, Any] = {
-            "scope": scope,
-            "base_epoch": epoch,
-            "negative_outcomes": negative_signals(target, heads, scope),
-        }
-        seen = set()
-        for _ in range(32):
-            response = client.call("compensation_watch", client_event_id=hubc.event_id(), **fields)
-            results.extend(response["results"])
-            after = response.get("next_after")
-            if after is None:
-                break
-            if not isinstance(after, str) or hubc.event_id_ms(after) is None or after in seen:
-                raise ValueError("invalid compensation watch cursor")
-            seen.add(after)
-            fields["after"] = after
-        else:
-            raise ValueError("compensation watch page bound exceeded")
+        signals = negative_signals(target, heads, scope)
+        for offset in range(0, max(1, len(signals)), 64):
+            fields: dict[str, Any] = {
+                "scope": scope,
+                "base_epoch": epoch,
+                "negative_outcomes": signals[offset : offset + 64],
+            }
+            seen = set()
+            for _ in range(32):
+                response = client.call("compensation_watch", client_event_id=hubc.event_id(), **fields)
+                results.extend(response["results"])
+                after = response.get("next_after")
+                if after is None:
+                    break
+                if not isinstance(after, str) or hubc.event_id_ms(after) is None or after in seen:
+                    raise ValueError("invalid compensation watch cursor")
+                seen.add(after)
+                fields["after"] = after
+            else:
+                raise ValueError("compensation watch page bound exceeded")
     return results

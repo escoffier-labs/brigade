@@ -1,0 +1,1 @@
+- Resolve compensation signals from active, credential-bound hub attestations and require independent verifiers for automatic reversal. Attribute retrieval regressions to the watched proposal with a 0.01 tolerance, scope successful compensation holds, honor operator stop controls, paginate retained signals, and report failed compensation accurately.

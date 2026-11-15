@@ -664,7 +664,14 @@ fn apply_cards(
     // scans would move scan work before those checks or need a second report path.
     let compensation = automatic && !body["rollback_of"].is_null();
     if compensation {
+        if let Some(reason) = super::compensation::automatic_blocker(tx, authority)? {
+            body["state"] = json!("held");
+            body["reason"] = json!(reason);
+            return Ok(None);
+        }
+        let original = load(tx, string(body, "rollback_of"))?.unwrap_or(Json::Null);
         let eligible = super::compensation::actor(body, &p.credential, authority)
+            && super::compensation::in_window(tx, &original, authority, p.now_ms)?
             && super::compensation::exact(tx, body)?;
         body["preflight"] = json!({"checks":[{"gate":"exact_compensation","state":if eligible {"satisfied"} else {"held"}}]});
         if !eligible {
@@ -834,6 +841,9 @@ fn apply_cards(
     }
     body["state"] = json!("applied");
     body["reason"] = Json::Null;
+    if compensation {
+        super::compensation::hold(tx, &load(tx, string(body, "rollback_of"))?.unwrap())?;
+    }
     Ok(None)
 }
 pub(super) fn rollback(body: &Json) -> Json {
@@ -889,14 +899,20 @@ pub(super) fn compensate(
 ) -> rusqlite::Result<Reply> {
     let mut inverse = rollback(original);
     inverse["proposer"] = json!(p.credential.principal());
+    let in_window = super::compensation::in_window(tx, original, authority, p.now_ms)?;
     let policy_actor = original["decision_mode"] == "automatic"
-        && super::compensation::actor(original, &p.credential, authority);
+        && super::compensation::actor(original, &p.credential, authority)
+        && original["watch_trip"]["review_required"] != true
+        && in_window;
+    if !in_window {
+        inverse["watch_trip"] =
+            json!({"trigger":"compensation-window-expired","review_required":true});
+    }
     let automatic = policy_actor && super::compensation::exact(tx, &inverse)?;
     if let Some(reason) = stale_reason(tx, &inverse)? {
         inverse["state"] = json!("stale");
         inverse["reason"] = json!(reason);
     }
-    inverse["watch_trip"] = original["watch_trip"].clone();
     if !policy_actor {
         for card in cards(&inverse) {
             if let Some(r) = scan_refusal(&scanner.scan(string(card, "after_text")), false) {
@@ -958,7 +974,7 @@ pub(super) fn compensate(
             event(tx, p, "proposal.decide", &failed)?;
             Ok(Reply::new(
                 200,
-                json!({"state":"held","result":"failed","reason":r.body["code"]}),
+                json!({"state":"held","result":"failed","compensation_result":"failed","reason":r.body["code"]}),
             ))
         }
         Err(e) => {

@@ -380,7 +380,9 @@ def dispatch(args: argparse.Namespace) -> int:
                 print(_terminal_text(f"proposal: {proposal['proposal_id']} (separate decision required)"))
         if payload.get("status") == "paused":
             print("scheduled reflection is paused. Run memory reflect run --hub manually to resume after a success.")
-        if args.memory_reflect_command == "rollback" and "proposal" in payload:
+        if args.memory_reflect_command == "rollback" and "proposal" in payload and payload.get("status") == "failed":
+            print(_terminal_text(f"compensation failed: {payload['proposal'].get('reason', 'unknown')}"))
+        elif args.memory_reflect_command == "rollback" and "proposal" in payload:
             print(
                 _terminal_text(
                     f"compensating proposal: {payload['proposal'].get('proposal_id')} "

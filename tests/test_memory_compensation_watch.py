@@ -35,5 +35,31 @@ def test_negative_signals_require_current_receipt_card_and_scope(tmp_path, faile
         assert signals == []
     else:
         assert len(signals) == 1
-        assert signals[0]["card_id"] == "cache"
-        assert signals[0]["evidence_id"].endswith("/receipt.json")
+        assert signals[0].endswith("/receipt.json")
+
+
+def test_negative_history_is_batched_without_losing_any_ids(tmp_path, monkeypatch):
+    ids = [f"verifier/workspace/failed-{n}" for n in range(130)]
+    monkeypatch.setattr(watch, "negative_signals", lambda *args: ids)
+    calls = []
+
+    class Client:
+        def call(self, action, **fields):
+            if action == "status":
+                return {"capabilities": [watch.CAPABILITY]}
+            calls.append(fields)
+            return {"results": [], "next_after": None}
+
+    assert watch.run(tmp_path, Client(), ("repo",), [], "epoch") == []
+    assert [len(c["negative_outcomes"]) for c in calls] == [64, 64, 2]
+    assert [i for c in calls for i in c["negative_outcomes"]] == ids
+
+
+def test_retained_intact_negative_history_does_not_raise(tmp_path, failed_card, monkeypatch):
+    path, receipt, _ = failed_card
+    assert capture(tmp_path, receipt) == 0
+    rows, warnings, unsupported = watch.evidence.read_evidence(tmp_path)
+    assert not warnings and not unsupported
+    monkeypatch.setattr(watch.evidence, "read_evidence", lambda target: (rows * 65, [], False))
+    head = {"scope": "repo", "card_id": "cache", "content_hash": sha256(path.read_bytes())}
+    assert watch.negative_signals(tmp_path, [head], "repo") == [rows[0]["evidence_id"]]

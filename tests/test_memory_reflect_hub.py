@@ -920,3 +920,31 @@ def test_compensation_watch_preserves_explicit_policy_window():
     from brigade.fleet_policy import parse_memory
 
     assert parse_memory({"rollback_watch_seconds": 3600})["rollback_watch_seconds"] == 3600
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("state", ["held", "stale"])
+def test_rollback_failure_reports_failed_without_missing_proposal(setup, capsys, monkeypatch, json_output, state):
+    target, hub, _ = setup
+    monkeypatch.setattr(
+        hub,
+        "do_rollback",
+        lambda body: (
+            200,
+            {
+                "state": state,
+                "reason": "scan_failed",
+                **({"proposal_id": hubc.event_id()} if state == "stale" else {"result": "failed"}),
+            },
+        ),
+    )
+    args = ["memory", "reflect", "rollback", hubc.event_id(), "--target", str(target)]
+    if json_output:
+        args.append("--json")
+    assert cli.main(args) == 1
+    output = capsys.readouterr().out
+    if json_output:
+        assert json.loads(output)["status"] == "failed"
+    else:
+        assert "compensation failed: scan_failed" in output
+        assert "None" not in output

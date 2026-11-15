@@ -1168,7 +1168,7 @@ impl Store {
                 "workspace_id",
             ],
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
-            "auto_apply_switch" => &["action", "enabled", "client_event_id"],
+            "auto_apply_switch" => &["action", "enabled", "scope", "op_type", "client_event_id"],
             "verifier" => &["action", "principal", "verifier", "client_event_id"],
             "verifier_resync" => &["action", "client_event_id"],
             "evidence.purge" => &["action", "evidence_id", "client_event_id"],
@@ -1352,11 +1352,37 @@ impl Store {
                     .ok_or_else(|| invalid("verifier must be a boolean"))?,
                 generation: 0,
             },
-            "auto_apply_switch" => Action::AutoApplySwitch(
-                map.get("enabled")
+            "auto_apply_switch" => {
+                let enabled = map
+                    .get("enabled")
                     .and_then(Json::as_bool)
-                    .ok_or_else(|| invalid("enabled must be a boolean"))?,
-            ),
+                    .ok_or_else(|| invalid("enabled must be a boolean"))?;
+                let release = if map.contains_key("scope") || map.contains_key("op_type") {
+                    let scope = str_field("scope")
+                        .filter(|s| ids::valid_scope(s))
+                        .ok_or_else(|| invalid("hold release requires scope and op_type"))?;
+                    let op = str_field("op_type")
+                        .filter(|s| {
+                            matches!(
+                                *s,
+                                "append_evidence"
+                                    | "replace_block"
+                                    | "remove_block"
+                                    | "add_previously"
+                                    | "supersede_card"
+                                    | "merge_exact_duplicates"
+                            )
+                        })
+                        .ok_or_else(|| invalid("hold release requires scope and op_type"))?;
+                    if !enabled {
+                        return Err(invalid("hold release requires enabled true"));
+                    }
+                    Some((scope.to_string(), op.to_string()))
+                } else {
+                    None
+                };
+                Action::AutoApplySwitch(enabled, release)
+            }
             "evidence.attach" => Action::Evidence(attestation::prepare(raw, credential, now_ms)?),
             "rescan" => {
                 let limit = match map.get("limit") {
@@ -1407,14 +1433,7 @@ impl Store {
                             v.as_array().is_none_or(|rows| {
                                 rows.len() > 64
                                     || rows.iter().any(|r| {
-                                        r.as_object().is_none_or(|o| o.len() != 3)
-                                            || r["card_id"]
-                                                .as_str()
-                                                .is_none_or(|s| !ids::valid_card_id(s))
-                                            || r["observed_ms"].as_i64().is_none()
-                                            || r["evidence_id"]
-                                                .as_str()
-                                                .is_none_or(|s| s.is_empty() || s.len() > 1024)
+                                        r.as_str().is_none_or(|s| s.is_empty() || s.len() > 1024)
                                     })
                             })
                         }))

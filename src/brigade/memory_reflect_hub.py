@@ -736,4 +736,13 @@ def rollback_payload(*, target: Path, proposal_id: str) -> dict[str, Any]:
     result = client.call(
         "rollback", proposal_id=proposal_id, base_epoch=status["log_epoch"], client_event_id=hubc.event_id()
     )
-    return {"status": "applied" if result.get("state") == "applied" else "proposed", "proposal": result}
+    failed = (
+        result.get("compensation_result") == "failed"
+        or result.get("result") == "failed"
+        or result.get("state") in {"held", "stale", "rejected"}
+        or not result.get("proposal_id")
+    )
+    return {
+        "status": "failed" if failed else "applied" if result.get("state") == "applied" else "proposed",
+        "proposal": result,
+    }

@@ -49,11 +49,102 @@ async fn compensation_other_actor_and_human_edit_stay_review_only() {
     }
 }
 
+async fn verifier_signal(
+    h: &Hub,
+    token: &str,
+    id: &str,
+    state: &str,
+    negative: bool,
+    drift: &str,
+) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let principal = if token == AGENT_TOKEN {
+        "agent:dot"
+    } else {
+        "node-1"
+    };
+    attestation_tests::change_policy(h, "reflect_principals", json!(["hub:admin"]));
+    assert_eq!(h.call(ADMIN_TOKEN,json!({"action":"verifier","principal":principal,"verifier":true,"client_event_id":h.id()})).await.status,200);
+    let c = card(h, "fleet", "a").await;
+    let credential = attestation::credential_id(
+        if token == AGENT_TOKEN {
+            "principal"
+        } else {
+            "node"
+        },
+        principal,
+        &digest(token),
+    );
+    let mut manifest = json!({"schema":"brigade.memory-verify-manifest.v1","card":{"scope":"fleet","card_id":"a","base_revision":c["revision"],"content_hash":c["content_hash"]},"blocks":[],"effectiveness":{"status":"failed","verifier_credential":credential,"observed_ms":h.now()}});
+    if !negative {
+        manifest["blocks"] = json!([{"block_id":"c-abcdef","verdict":"contradicted"}]);
+    }
+    match drift {
+        "revision" => manifest["card"]["base_revision"] = json!(1),
+        "hash" => manifest["card"]["content_hash"] = json!("wrong"),
+        "credential" => manifest["effectiveness"]["verifier_credential"] = json!("wrong"),
+        "time" => manifest["effectiveness"]["observed_ms"] = json!(0),
+        "block" => manifest["blocks"][0]["block_id"] = json!("c-123456"),
+        _ => (),
+    }
+    let bytes = manifest.to_string();
+    let id = format!("{principal}/workspace-a/signal-{id}");
+    let r=h.call(token,json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a","evidence_id":id,"artifact_kind":"memory-verify-manifest","artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(bytes),"observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
+    assert_eq!(r.status, 201, "{r:?}");
+    if state != "pending_review" {
+        // Seed a completed review transition without changing the watched head.
+        rusqlite::Connection::open(h.memory()).unwrap().execute("UPDATE memory_evidence_bindings SET state=?1,proposal_id='review-fixture' WHERE evidence_id=?2",[state,&id]).unwrap();
+    }
+    id
+}
+
+async fn watch_negative(h: &Hub, ids: Vec<String>) -> Reply {
+    h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":ids})).await
+}
+
 #[tokio::test]
-async fn compensation_watch_negative_outcome_trips_and_records_failure_after_edit() {
+async fn compensation_watch_negative_outcome_requires_attested_exact_live_binding() {
+    for drift in [
+        "revision",
+        "hash",
+        "credential",
+        "time",
+        "revoked",
+        "pending_review",
+        "inert",
+    ] {
+        let (h, _, _) = applied().await;
+        let state = if matches!(drift, "pending_review" | "inert") {
+            drift
+        } else {
+            "active"
+        };
+        let id = verifier_signal(&h, AGENT_TOKEN, "failed", state, true, drift).await;
+        if drift == "revoked" {
+            rusqlite::Connection::open(&h.hub)
+                .unwrap()
+                .execute(
+                    "UPDATE fleet_message_principals SET revoked_at='revoked'",
+                    [],
+                )
+                .unwrap();
+        }
+        let before = attestation_tests::bytes_snapshot(&h);
+        assert_eq!(
+            watch_negative(&h, vec![id]).await.body["results"],
+            json!([]),
+            "{drift}"
+        );
+        assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+    }
+}
+
+#[tokio::test]
+async fn compensation_watch_two_independent_failures_apply_but_stale_heads_do_not_hold() {
     for edit in [false, true] {
         let (h, id, _) = applied().await;
-        grant(&h, "fleet", &["read", "reflect", "review"]).await;
+        let one = verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
+        let two = verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
         if edit {
             let c = card(&h, "fleet", "a").await;
             h.put(
@@ -65,16 +156,24 @@ async fn compensation_watch_negative_outcome_trips_and_records_failure_after_edi
             )
             .await;
         }
-        let before = card(&h, "fleet", "a").await;
-        let result = h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":[{"card_id":"a","observed_ms":h.now(),"evidence_id":"verify/failed"}]})).await;
-        assert_eq!(result.status, 200, "{result:?}");
-        assert_eq!(result.body["results"][0]["rollback_of"], id);
-        assert_eq!(result.body["results"][0]["trigger"], "negative-outcome");
+        let before = attestation_tests::bytes_snapshot(&h);
+        let result = watch_negative(&h, vec![one, two]).await;
+        assert_eq!(result.body["results"][0]["rollback_of"], id, "{result:?}");
+        assert_eq!(
+            result.body["results"][0]["result"],
+            if edit { "failed" } else { "applied" }
+        );
+        let holds: i64 = rusqlite::Connection::open(h.memory())
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_hold:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(holds, if edit { 0 } else { 1 });
         if edit {
-            assert_eq!(result.body["results"][0]["result"], "failed");
-            assert_eq!(card(&h, "fleet", "a").await, before);
-        } else {
-            assert_eq!(result.body["results"][0]["result"], "applied");
+            assert_eq!(attestation_tests::bytes_snapshot(&h), before);
         }
     }
 }
@@ -104,27 +203,39 @@ async fn compensation_watch_each_retrieval_metric_trips_but_old_or_other_workloa
 }
 
 #[tokio::test]
-async fn compensation_watch_contradicted_written_block_trips_and_other_block_does_not() {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let (h, _, _) = applied().await;
-    // A verifier cannot be in the reflector allowlist.
-    attestation_tests::change_policy(&h, "reflect_principals", json!(["hub:admin", "node-1"]));
-    let r=h.call(ADMIN_TOKEN,json!({"action":"verifier","principal":"agent:dot","verifier":true,"client_event_id":h.id()})).await;
-    assert_eq!(r.status, 200, "{r:?}");
-    let current = card(&h, "fleet", "a").await;
-    for (block, trips) in [("c-123456", false), ("c-abcdef", true)] {
-        let bytes = json!({"schema":"brigade.memory-verify-manifest.v1","card":{"scope":"fleet","card_id":"a","base_revision":current["revision"]},"blocks":[{"block_id":block,"verdict":"contradicted","confidence":"high"}]}).to_string();
-        let r=h.call(AGENT_TOKEN,json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a","evidence_id":format!("agent:dot/workspace-a/{block}"),"artifact_kind":"memory-verify-manifest","artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(bytes),"observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
-        assert_eq!(r.status, 201, "{r:?}");
-        let result = watch(&h).await;
-        if trips {
-            assert_eq!(
-                result.body["results"][0]["trigger"], "contradicted",
-                "{result:?}"
-            );
-            assert_eq!(result.body["results"][0]["result"], "applied");
+async fn compensation_watch_contradictions_require_active_independent_verifiers() {
+    for (state, count, result) in [
+        ("pending_review", 2, "none"),
+        ("inert", 2, "none"),
+        ("active", 1, "review_required"),
+        ("active", 2, "applied"),
+    ] {
+        let (h, _, _) = applied().await;
+        verifier_signal(&h, AGENT_TOKEN, "one", state, false, "").await;
+        // Two records by one principal still require review.
+        verifier_signal(&h, AGENT_TOKEN, "same-principal", state, false, "").await;
+        if count == 2 {
+            verifier_signal(&h, NODE_TOKEN, "two", state, false, "").await;
+        }
+        let before = attestation_tests::bytes_snapshot(&h);
+        let r = watch(&h).await;
+        if result == "none" {
+            assert_eq!(r.body["results"], json!([]));
         } else {
-            assert_eq!(result.body["results"], json!([]));
+            assert_eq!(r.body["results"][0]["result"], result, "{r:?}");
+        }
+        if result != "applied" {
+            assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+        }
+        if result == "review_required" {
+            let proposal = &r.body["results"][0]["proposal_id"];
+            let db = rusqlite::Connection::open(h.memory()).unwrap();
+            assert_eq!(
+                proposals::load(&crate::writer::worker::Tx(&db), proposal.as_str().unwrap())
+                    .unwrap()
+                    .unwrap()["tier"],
+                2
+            );
         }
     }
 }
@@ -160,11 +271,11 @@ async fn compensation_watch_window_and_class_hold_require_later_go() {
     let (h, id, _) = applied().await;
     attestation_tests::change_policy(&h, "rollback_watch_seconds", json!(1));
     h.set_clock(h.now() + 2000);
-    let r=h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":[{"card_id":"a","observed_ms":h.now(),"evidence_id":"verify/failed"}]})).await;
+    let r=h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":["unknown/workspace/failed"]})).await;
     assert_eq!(r.body["results"], json!([]));
     attestation_tests::change_policy(&h, "rollback_watch_seconds", json!(86400));
-    let r=h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":[{"card_id":"a","observed_ms":h.now(),"evidence_id":"verify/failed"}]})).await;
-    assert_eq!(r.body["results"][0]["rollback_of"], id);
+    let r = compensate(&h, &id, ADMIN_TOKEN).await;
+    assert_eq!(r.body["state"], "applied", "{r:?}");
     let db = Connection::open(h.memory()).unwrap();
     assert_eq!(
         db.query_row(
@@ -194,7 +305,7 @@ async fn compensation_watch_window_and_class_hold_require_later_go() {
     let r = h
         .call(
             ADMIN_TOKEN,
-            json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
+            json!({"action":"auto_apply_switch","enabled":true,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()}),
         )
         .await;
     assert_eq!(r.status, 200);
@@ -222,4 +333,179 @@ async fn compensation_failed_scan_keeps_all_cards_identical_and_records_failed()
     let db = Connection::open(h.memory()).unwrap();
     let count:i64=db.query_row("SELECT count(*) FROM memory_events WHERE json_extract(payload,'$.compensation_result')='failed'",[],|r|r.get(0)).unwrap();
     assert!(count > 0);
+}
+
+#[tokio::test]
+async fn compensation_watch_unresolved_evidence_is_ignored() {
+    let (h, _, _) = applied().await;
+    let before = attestation_tests::bytes_snapshot(&h);
+    let r = h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":["unknown/workspace/failed"]})).await;
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(r.body["results"], json!([]));
+    assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+}
+
+#[tokio::test]
+async fn compensation_respects_policy_and_kill_switch() {
+    for policy in [false, true] {
+        let (h, id, _) = applied().await;
+        if policy {
+            attestation_tests::change_policy(&h, "auto_apply", json!(false));
+        } else {
+            assert_eq!(
+                h.call(
+                    ADMIN_TOKEN,
+                    json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()})
+                )
+                .await
+                .status,
+                200
+            );
+        }
+        let before = attestation_tests::bytes_snapshot(&h);
+        assert_ne!(
+            compensate(&h, &id, ADMIN_TOKEN).await.body["state"],
+            "applied"
+        );
+        assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+    }
+}
+
+#[tokio::test]
+async fn compensation_retrieval_regression_after_first_page_is_seen() {
+    let (h, _, _) = applied().await;
+    for n in 0..129 {
+        h.set_clock(h.now() + 1);
+        let mut report = retrieval_eval_tests::gate_report(&h).await;
+        if n == 128 {
+            report["adapters"]["hub-lexical"]["overall"]["mrr"] = json!(0.25);
+        }
+        assert_eq!(retrieval_eval_tests::record(&h, &report).await.status, 201);
+    }
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    let r = watch(&h).await;
+    assert_eq!(r.body["results"][0]["result"], "applied", "{r:?}");
+}
+
+#[tokio::test]
+async fn compensation_retrieval_noise_is_ignored_and_changed_corpus_requires_review() {
+    for unrelated in [false, true] {
+        let (h, _, _) = applied().await;
+        if unrelated {
+            h.put(
+                ADMIN_TOKEN,
+                "fleet",
+                "decoy",
+                None,
+                "Unrelated corpus change.",
+            )
+            .await;
+        }
+        h.set_clock(h.now() + 1);
+        let mut report = retrieval_eval_tests::gate_report(&h).await;
+        report["adapters"]["hub-lexical"]["overall"]["mrr"] =
+            json!(if unrelated { 0.25 } else { 0.495 });
+        assert_eq!(retrieval_eval_tests::record(&h, &report).await.status, 201);
+        let before = attestation_tests::bytes_snapshot(&h);
+        let r = watch(&h).await;
+        if unrelated {
+            assert_eq!(r.body["results"][0]["result"], "review_required", "{r:?}");
+        } else {
+            assert_eq!(r.body["results"], json!([]));
+        }
+        assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+    }
+}
+
+#[tokio::test]
+async fn compensation_holds_are_scoped_and_go_releases_only_one_pair() {
+    let (h, id, _) = applied().await;
+    assert_eq!(
+        compensate(&h, &id, ADMIN_TOKEN).await.body["state"],
+        "applied"
+    );
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    db.execute(
+        "INSERT INTO memory_meta VALUES('compensation_hold:other/append_evidence','fixture')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO memory_meta VALUES('compensation_hold:fleet/replace_block','fixture')",
+        [],
+    )
+    .unwrap();
+    let tx = crate::writer::worker::Tx(&db);
+    assert!(
+        !compensation::class_held(
+            &tx,
+            &json!({"ops":[{"scope":"unheld","type":"append_evidence"}]})
+        )
+        .unwrap()
+    );
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
+    )
+    .await;
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_hold:%'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        3
+    );
+    h.call(ADMIN_TOKEN,json!({"action":"auto_apply_switch","enabled":true,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()})).await;
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_hold:%'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert!(
+        !compensation::class_held(
+            &tx,
+            &json!({"ops":[{"scope":"fleet","type":"append_evidence"}]})
+        )
+        .unwrap()
+    );
+    assert!(
+        compensation::class_held(
+            &tx,
+            &json!({"ops":[{"scope":"other","type":"append_evidence"}]})
+        )
+        .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn compensation_manual_rollback_outside_window_never_automatically_applies() {
+    let (h, id, _) = applied().await;
+    h.set_clock(h.now() + 86_400_001);
+    let before = attestation_tests::bytes_snapshot(&h);
+    let r = compensate(&h, &id, ADMIN_TOKEN).await;
+    assert_ne!(r.body["state"], "applied");
+    let r = h
+        .call(
+            ADMIN_TOKEN,
+            attestation_tests::auto_request(&h, &r.body["proposal_id"]).await,
+        )
+        .await;
+    assert_ne!(r.body["state"], "applied");
+    assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+}
+
+#[tokio::test]
+async fn compensation_watch_contradictions_on_other_blocks_are_ignored() {
+    let (h, _, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "other-block", "active", false, "block").await;
+    verifier_signal(&h, NODE_TOKEN, "other-block", "active", false, "block").await;
+    let before = attestation_tests::bytes_snapshot(&h);
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    assert_eq!(attestation_tests::bytes_snapshot(&h), before);
 }
