@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -14,6 +15,7 @@ SCHEMA = "brigade.run_batch.v1"
 MAX_TASKS = journal.MAX_BATCH_MEMBERS
 MAX_TEXT_BYTES = 16 * 1024
 MAX_INPUT_BYTES = 256 * 1024
+_FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 
 
 class BatchError(ValueError):
@@ -82,11 +84,11 @@ def validate_batch(payload: object) -> dict[str, Any]:
         raise BatchError("task-count", f"tasks must contain 1-{MAX_TASKS} members")
     tasks: list[dict[str, Any]] = []
     ids: set[str] = set()
-    for row in rows:
-        row = _fields(row, {"task_id", "text", "seat", "depends_on"}, "task")
+    for index, row in enumerate(rows):
+        row = _fields(row, {"task_id", "text", "seat", "depends_on"}, f"tasks[{index}]")
         task_id = row.get("task_id")
         if not isinstance(task_id, str) or not journal.task_id(task_id):
-            raise BatchError("invalid-task-id", "task_id must be a 1-128 character ASCII identifier")
+            raise BatchError("invalid-task-id", f"tasks[{index}].task_id must be a 1-128 character ASCII identifier")
         if task_id in ids:
             raise BatchError("duplicate-task-id", f"duplicate task_id: {task_id}")
         ids.add(task_id)
@@ -133,6 +135,8 @@ def compare_request(stored_fingerprint: str | None, payload: object) -> Literal[
     fingerprint = request_fingerprint(payload)
     if stored_fingerprint is None:
         return "new"
+    if not isinstance(stored_fingerprint, str) or not _FINGERPRINT.fullmatch(stored_fingerprint):
+        raise BatchError("invalid-fingerprint", "stored fingerprint must be 64 lowercase hex characters")
     return "same" if stored_fingerprint == fingerprint else "conflict"
 
 
@@ -164,7 +168,7 @@ def load_batch(path: Path) -> object:
         with path.open("rb") as stream:
             raw = stream.read(MAX_INPUT_BYTES + 1)
     except OSError as exc:
-        raise BatchError("input-read", "cannot read batch input") from exc
+        raise BatchError("input-read", f"cannot read batch input: {exc.strerror or type(exc).__name__}") from exc
     if len(raw) > MAX_INPUT_BYTES:
         raise BatchError("input-limit", f"batch input exceeds {MAX_INPUT_BYTES} bytes")
     try:

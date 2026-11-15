@@ -25,6 +25,10 @@ non-empty `text` and a `seat`. It is fingerprinted and displayed as requested,
 but never executed. No synthesis budget, receipt, or launch is created yet.
 Only the documented fields are accepted. Each task requires `task_id`, `text`,
 and `seat`. `depends_on` defaults to an empty list of unique task IDs.
+`depends_on` must be a list when present. `null` is refused, unlike
+`synthesis`. Rows are checked in input order, so when several rows are
+invalid, the reported code belongs to the first invalid row, and row errors
+name it as `tasks[N]`.
 Selecting a task by admitted capability instead of a named seat, which #2047
 also allows, is not part of v1. It needs the admission wiring that execution
 will add.
@@ -51,7 +55,13 @@ dependencies, and synthesis. Object key, task, and dependency ordering do not
 change the fingerprint. Text changes do. `compare_request(stored_fingerprint,
 payload)` returns `new` for no stored fingerprint, `same` for a match, and
 `conflict` otherwise. The caller must look up the stored fingerprint under the
-same request ID. This helper provides no storage or resume behavior.
+same request ID. A stored value that is not 64 lowercase hex characters is
+refused with `invalid-fingerprint` rather than reported as a conflict. This
+helper provides no storage or resume behavior. The fingerprint is defined by
+those exact bytes: Python `json.dumps` with `ensure_ascii=True`, so non-ASCII
+text is written as lowercase `\uXXXX` escapes and characters outside the Basic
+Multilingual Plane as surrogate pairs. A golden vector in
+`tests/test_run_batch.py` pins the bytes and digest for other implementations.
 
 | Code | Refusal |
 | --- | --- |
@@ -72,4 +82,5 @@ same request ID. This helper provides no storage or resume behavior.
 | `input-read` | Cannot read the input file |
 | `input-limit` | File exceeds the input byte bound |
 | `invalid-json` | Malformed UTF-8/JSON, excessive nesting, or duplicate object keys |
+| `invalid-fingerprint` | Stored fingerprint passed to `compare_request` is malformed |
 | `execution-not-implemented` | Valid batch submitted without `--dry-run` |

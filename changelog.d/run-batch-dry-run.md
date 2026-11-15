@@ -1,1 +1,1 @@
-- Validate explicit task batches with `brigade run batch <file> --dry-run`, including dependency layers, stable request fingerprints, and optional JSON output. Batch execution remains unavailable.
+- Validate explicit task batches with `brigade run batch <file> --dry-run`, including dependency layers, stable request fingerprints, and optional JSON output. Batch execution remains unavailable. `batch` is now a reserved first word after `brigade run`, like `cloud` and `approve`: quote a task that starts with the word batch.

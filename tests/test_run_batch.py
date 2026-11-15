@@ -1,6 +1,7 @@
 """Offline contract and CLI checks for explicit batch dry runs."""
 
 import copy
+import hashlib
 import json
 from unittest.mock import Mock
 
@@ -176,3 +177,37 @@ def test_validation_cli_and_synthesis(tmp_path, capsys, no_models):
     assert json.loads(capsys.readouterr().out)["synthesis"] == {"seat": "writer"}
     assert cli.main(["run", "batch", str(path), "--json"]) == 2
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "execution-not-implemented"
+
+
+def test_fingerprint_golden_vector():
+    """Pins the canonical bytes so another implementation, or a json.dumps change, can be checked."""
+    payload = {
+        "schema": run_batch.SCHEMA,
+        "request_id": "request-1",
+        "tasks": [
+            {"task_id": "b", "text": "café \U0001f600\n", "seat": "coder", "depends_on": ["a"]},
+            {"task_id": "a", "text": "Inspect", "seat": "coder"},
+        ],
+    }
+    canonical = (
+        '{"request_id":"request-1","schema":"brigade.run_batch.v1","synthesis":null,"tasks":'
+        '[{"depends_on":[],"seat":"coder","task_id":"a","text":"Inspect"},'
+        '{"depends_on":["a"],"seat":"coder","task_id":"b","text":"caf\\u00e9 \\ud83d\\ude00\\n"}]}'
+    )
+    digest = "d69a5ad741c986a250fa6e9d2089a2550a5dc334de268ec9ee94dc76d53e1d48"
+    assert hashlib.sha256(canonical.encode("ascii")).hexdigest() == digest
+    assert run_batch.request_fingerprint(payload) == digest
+
+
+@pytest.mark.parametrize("stored", ["ABC", "0" * 63, "G" * 64, "A" * 64, 7])
+def test_compare_request_refuses_malformed_stored_fingerprint(stored):
+    with pytest.raises(run_batch.BatchError) as caught:
+        run_batch.compare_request(stored, batch())
+    assert caught.value.code == "invalid-fingerprint"
+
+
+def test_row_errors_name_the_row():
+    with pytest.raises(run_batch.BatchError, match=r"tasks\[1\]"):
+        run_batch.validate_batch(batch(task("a"), "not-an-object"))
+    with pytest.raises(run_batch.BatchError, match=r"tasks\[1\]\.task_id"):
+        run_batch.validate_batch(batch(task("a"), task("bad/id")))
