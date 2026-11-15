@@ -248,6 +248,20 @@ def test_cached_proposals_do_not_starve_new_work(setup, capsys, enabled):
     assert len([c for c in writes(hub) if c["action"] == "propose"]) == 3
 
 
+def test_cached_retry_runs_when_new_proposals_hit_quota(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    policy.set_enabled(target, True)
+    hub.do_auto_apply = lambda body: (200, {"state": "pending"})
+    assert run(target, capsys, "run", "--scheduled")[0] == 0
+    hub._commit("card.put", "fleet", "c", "---\nevidence: []\n---\nSame claim. ^c-abcdef\n", "live", "event-c")
+    monkeypatch.setattr(
+        hub, "do_propose", lambda body: (429, {"code": "memory_proposal_principal_quota", "error": "quota"})
+    )
+    before = len([c for c in writes(hub) if c["action"] == "auto_apply"])
+    assert run(target, capsys, "run", "--scheduled")[0] == 0
+    assert len([c for c in writes(hub) if c["action"] == "auto_apply"]) == before + 1
+
+
 def test_off_repairs_invalid_policy(tmp_path):
     policy.ensure(tmp_path)
     (tmp_path / policy.PATH).write_text("invalid")

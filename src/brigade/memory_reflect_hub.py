@@ -603,7 +603,9 @@ def _reflect(
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
     remaining = unremembered(exact) + alternating
     # Retry budget is separate so held proposals cannot consume new-work slots.
-    selected = remaining[:limit] + retries[:limit]
+    # Retries reuse an opened proposal and never submit, so they run first and a
+    # full new-proposal quota cannot block them.
+    selected = retries[:limit] + remaining[:limit]
     proposals = []
     refused: list[dict[str, str]] = []
     error = None
