@@ -245,6 +245,21 @@ def test_reinforcement_failure_retry_keeps_one_receipt_and_pointer(tmp_target: P
     assert not (inbox / "copy-b.md").exists()
 
 
+def test_contradicting_proposals_beside_a_neutral_card_stay_separate(tmp_target: Path):
+    inbox = seed(tmp_target)
+    existing = tmp_target / "memory/cards/original.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(card(BODY))
+    handoff(inbox, "a-enabled", BODY + " enabled extra")
+    handoff(inbox, "b-disabled", BODY + " disabled extra")
+    assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    drafts = [draft.read_text() for draft in (tmp_target / drain.INBOX_REL).glob("*.md")]
+    assert len(drafts) == 2
+    assert sum(BODY + " enabled extra" in text for text in drafts) == 1
+    assert sum(BODY + " disabled extra" in text for text in drafts) == 1
+    assert all("merged handoff:" not in text for text in drafts)
+
+
 def test_archive_failure_after_merge_takes_back_the_pointer(tmp_target: Path, monkeypatch):
     inbox = seed(tmp_target)
     existing = tmp_target / "memory/cards/original.md"

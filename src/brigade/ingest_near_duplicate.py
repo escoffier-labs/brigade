@@ -87,6 +87,8 @@ def merge_pending(
             or item.matched_card != matched_card
             or scope(content) != scope(item.content)
             or similarity(content, item.content) + 1e-9 < threshold
+            # Two proposals can each look neutral beside the card yet contradict each other.
+            or opposite_polarity(content, item.content)
         ):
             continue
         text = read_text_nofollow(item.path)
