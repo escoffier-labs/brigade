@@ -4,6 +4,7 @@ import os
 import pytest
 
 from brigade import memory_care_journal as journal
+from tests._handoff_origin_fixtures import requires_automatic_filing
 
 
 def test_commit_and_revert(tmp_path):
@@ -64,7 +65,7 @@ def test_read_only(tmp_path):
 
 
 @pytest.mark.parametrize("sink", ["card", "document"])
-@pytest.mark.parametrize("claim", ["missing", "invalid", "consumed"])
+@pytest.mark.parametrize("claim", ["missing", "invalid", pytest.param("consumed", marks=requires_automatic_filing)])
 @pytest.mark.parametrize("draft_missing", [False, True])
 def test_legacy_prepared_review_without_origin_is_abandoned(tmp_path, monkeypatch, sink, claim, draft_missing):
     from brigade import handoff_origin, receipt_signing
@@ -177,3 +178,74 @@ def test_prepared_append_draft_marker_requires_origin(tmp_path, monkeypatch, rev
         assert (tmp_path / "TOOLS.md").read_bytes() == block
         assert payload["phase"] == "committed"
     assert draft.read_bytes() == b"Review this draft.\n"
+
+
+@pytest.mark.parametrize("sink", ["document", "card-append"])
+@pytest.mark.parametrize("claim", ["missing", "invalid", "unowned", "foreign", "owned"])
+@pytest.mark.parametrize("draft_missing", [False, True])
+def test_legacy_committed_review_pending_append_requires_owned_origin(
+    tmp_path, monkeypatch, sink, claim, draft_missing
+):
+    from brigade import handoff_origin
+    from brigade.memory_inbox_append import plan_append
+
+    if os.name != "posix" and claim in {"foreign", "owned"}:
+        pytest.skip(requires_automatic_filing.kwargs["reason"])
+    draft = "memory/handoff-inbox/legacy-committed.md"
+    resolved = "memory/handoff-inbox/resolved/legacy-committed.md"
+    data = b"Unsigned review draft for a person.\n"
+    path = tmp_path / draft
+    path.parent.mkdir(parents=True)
+    path.write_bytes(data)
+    destination = "TOOLS.md" if sink == "document" else "memory/cards/tools-overflow.md"
+    (tmp_path / destination).parent.mkdir(parents=True, exist_ok=True)
+    from tests._instruction_fixtures import CARD_HEAD
+
+    before = (CARD_HEAD.encode() if sink == "card-append" else b"") + b"Existing content.\n"
+    (tmp_path / destination).write_bytes(before)
+    block = b"Unapproved appended content.\n"
+
+    def legacy_finish(target, decision_id):
+        journal._execute_phase(target, decision_id, "legacyfinish", [journal.Change(draft, data, None)])
+        journal.annotate(target, decision_id, phase="committed", status="committed")
+        return journal.load(target, decision_id)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", legacy_finish)
+        decision = journal.commit_phased(
+            tmp_path,
+            kind="inbox",
+            reason="retry:document-destination-unwritable",
+            card_id=None,
+            changes=[journal.Change(resolved, None, data), journal.Change(draft, data, None)],
+            prepared_paths=[resolved],
+            hub={},
+            metadata={"appends": [plan_append(destination, block, sink, draft=draft, created=False)]},
+        )
+    if not draft_missing:
+        path.write_bytes(data)
+    mac = "a" * 64
+    if claim != "missing":
+        journal.annotate(tmp_path, decision.decision_id, origin_stamp_mac="invalid" if claim == "invalid" else mac)
+    if claim in {"foreign", "owned"}:
+        (tmp_path / ".brigade/handoffs").mkdir(parents=True, exist_ok=True)
+        assert handoff_origin.claim_review_stamp(
+            tmp_path, mac, decision.decision_id if claim == "owned" else "other-decision"
+        )
+    result = journal.resolve_prepared(tmp_path)
+    payload = journal._payload(tmp_path, decision.decision_id)
+    if claim == "owned":
+        assert (tmp_path / destination).read_bytes() == before + block
+        assert payload["appends_complete"]
+    else:
+        assert (tmp_path / destination).read_bytes() == before
+        assert path.read_bytes() == data
+        assert payload["append_refused"] == "origin-review-required: review origin stamp missing or unavailable"
+        assert result == [
+            {
+                "decision_id": decision.decision_id,
+                "phase": "append-refused",
+                "reason": "review origin stamp missing or unavailable",
+            }
+        ]
+    assert journal.resolve_prepared(tmp_path) == []

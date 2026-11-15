@@ -2,6 +2,6 @@
 - Ingest refuses linked handoffs, cleans the exact verified sidecar, and consumes origin and review retry stamps before canonical writes to prevent replay after archive or a crash.
 - Drain revokes review stamps for drafts observed missing, so restoring the same bytes after manual removal requires review.
 - Ingest archives handoffs after review stamp storage fails, retaining one unsigned draft for a person with a fixed failure reason.
-- Recovery abandons prepared review decisions without usable origin claims and retains or restores their drafts for human review before any card or document write.
+- Recovery abandons prepared review decisions without usable origin claims and refuses pending review appends from committed decisions unless they already own a claim. Drafts are kept or restored for human review.
 - Windows handoffs require human review until #2588 adds Win32 ACL confinement checks. Portable file safety checks still run.
-- Origin claims publish complete markers atomically. Failed claims abandon retry authority and retain drafts for review. Oversized handoffs retain their bytes in review, and linked handoffs report a specific refusal.
+- Origin claims publish complete markers atomically and recover their own linked temporary files after a crash. Failed claims abandon retry authority and retain drafts for review. Oversized handoffs stream into a metadata-only review draft and move their original source to a private hold. Linked handoffs report a specific refusal.

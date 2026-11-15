@@ -48,6 +48,18 @@ def publish(target: Path, decision_id: str) -> None:
         or payload.get("undone_by")
     ):
         return
+    # A committed legacy decision may have crashed before publishing. Only a
+    # claim already owned by this decision admits review-derived appends here.
+    if payload.get("kind") != "undo" and any(item.get("draft") for item in payload.get("appends", [])):
+        from .handoff_origin import owns_review_claim, remove_stamp, stamp_path
+
+        if not owns_review_claim(target, payload.get("origin_stamp_mac", ""), decision_id):
+            exc = ingest.AppendRefused("origin-review-required", "review origin stamp missing or unavailable")
+            for item in payload["appends"]:
+                if item.get("draft"):
+                    remove_stamp(stamp_path(target, journal.safe_path(target, item["draft"])))
+            _refuse(target, decision_id, payload, exc)
+            raise exc
     from .memory_cmd import _config_or_default
 
     read_only = _config_or_default(target).read_only_paths

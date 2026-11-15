@@ -15,6 +15,7 @@ import stat
 import sys
 import re
 from dataclasses import asdict, dataclass
+from collections.abc import Iterator
 from pathlib import Path
 
 from . import dirfd, handoff_publish, receipt_signing
@@ -134,8 +135,80 @@ class VerifiedStamp:
         return _claim(self.consumed)
 
 
+def _claim_temporaries(parent: int) -> Iterator[str]:
+    # Stream names even after years of consumed markers have accumulated.
+    scan = os.open(".", dirfd.directory_flags(), dir_fd=parent)
+    try:
+        with os.scandir(scan) as entries:
+            for entry in entries:
+                if entry.name.startswith(".claim-") and entry.name.endswith(".tmp"):
+                    yield entry.name
+    finally:
+        os.close(scan)
+
+
+def _sweep_claim_temporaries(parent: int) -> None:
+    for name in _claim_temporaries(parent):
+        try:
+            info = dirfd.stat_child(parent, name)
+            # A one-link temp never published a marker. Linked temps are handled
+            # only when resuming the matching marker, not another decision's.
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                dirfd.unlink_child(parent, name)
+        except FileNotFoundError:
+            pass
+
+
+def _resume_claim(parent: int, name: str, data: bytes) -> bool:
+    fd = dirfd.open_child_file(parent, name, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink not in (1, 2) or os.read(fd, 257) != data:
+            return False
+        if info.st_nlink == 2:
+            for temporary in _claim_temporaries(parent):
+                sibling = dirfd.stat_child(parent, temporary)
+                if (sibling.st_dev, sibling.st_ino) == (info.st_dev, info.st_ino):
+                    dirfd.unlink_child(parent, temporary)
+                    break
+            else:
+                return False
+        if os.fstat(fd).st_nlink != 1:
+            return False
+        os.fsync(fd)
+        return True
+    finally:
+        os.close(fd)
+
+
+def owns_review_claim(target: Path, mac: str, decision_id: str) -> bool:
+    """Recovery must already own a durable marker, never mint one from journal metadata."""
+    if not isinstance(mac, str) or re.fullmatch(r"[0-9a-f]{64}", mac) is None or not decision_id:
+        return False
+    if not dirfd.posix_available():
+        return False
+    import fcntl
+
+    try:
+        parent = dirfd.open_directory_chain(target.resolve() / ".brigade/handoffs/consumed-stamps")
+        try:
+            fcntl.flock(parent, fcntl.LOCK_EX)
+            _sweep_claim_temporaries(parent)
+            owned = _resume_claim(parent, mac, decision_id.encode("ascii"))
+            os.fsync(parent)
+            return owned
+        finally:
+            os.close(parent)
+    except (OSError, ValueError):
+        return False
+
+
 def _claim(consumed: Path, *, decision_id: str = "") -> bool:
     """Consume before canonical writes. Only the same journal decision can resume."""
+    if not dirfd.posix_available():
+        return False
+    import fcntl
+
     try:
         # origins/ already exists. Flush its sibling's creation as well as the
         # marker, so a power loss cannot lose a successful first claim.
@@ -147,6 +220,10 @@ def _claim(consumed: Path, *, decision_id: str = "") -> bool:
                 pass
             parent = dirfd.open_child_directory(state, consumed.parent.name)
             try:
+                # Serialize publication and sweeping so a concurrent live temp
+                # cannot be mistaken for debris from a crashed claimant.
+                fcntl.flock(parent, fcntl.LOCK_EX)
+                _sweep_claim_temporaries(parent)
                 temporary = f".claim-{secrets.token_hex(16)}.tmp"
                 fd = dirfd.open_child_file(parent, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 try:
@@ -162,15 +239,8 @@ def _claim(consumed: Path, *, decision_id: str = "") -> bool:
                     except FileExistsError:
                         if not decision_id:
                             return False
-                        fd = dirfd.open_child_file(parent, consumed.name, os.O_RDONLY)
-                        try:
-                            info = os.fstat(fd)
-                            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or os.read(fd, 257) != data:
-                                return False
-                            # An earlier attempt may have failed its durability check.
-                            os.fsync(fd)
-                        finally:
-                            os.close(fd)
+                        if not _resume_claim(parent, consumed.name, data):
+                            return False
                 finally:
                     dirfd.unlink_child(parent, temporary)
                 os.fsync(parent)

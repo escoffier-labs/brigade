@@ -313,17 +313,21 @@ def ingest_into(
             try:
                 # One read. The digest, the parse and every delivered copy
                 # come from these bytes, so the digest names what was handled.
-                oversized = False
                 try:
                     snapshot = handoff_origin.read_handoff(path, max_bytes=INSPECTION_CEILING)
-                except handoff_origin.HandoffTooLargeError as exc:
-                    # Preserve the whole stable publication for a person without
-                    # parsing it or granting any automatic filing authority.
-                    snapshot = handoff_origin.read_handoff(path, max_bytes=exc.size)
-                    oversized = True
+                except handoff_origin.HandoffTooLargeError:
+                    from .handoff_quarantine import hold
+
+                    hold(owner, path, dry_run=dry_run)
+                    if not dry_run:
+                        handoff_origin.remove_stamp(handoff_origin.stamp_path(source, path))
+                    stats.processed += 1
+                    stats.inboxed += 1
+                    stats.actions.append(_summary("inbox", path.name, "handoff-too-large"))
+                    continue
                 sidecar = handoff_origin.stamp_path(source, path)
                 sha = hashlib.sha256(snapshot).hexdigest()
-                origin = None if oversized else handoff_origin.verify_handoff(source, path, snapshot)
+                origin = handoff_origin.verify_handoff(source, path, snapshot)
                 trusted_origin = origin is not None and origin.allows_automatic_filing
                 if origin is not None:
                     sidecar = origin.stamp.sidecar
@@ -337,7 +341,7 @@ def ingest_into(
                 # Bad bytes or malformed structure belong to this handoff
                 # only. Guard and invariant failures further on stay fatal.
                 try:
-                    sections = {} if oversized else parse(path, snapshot)
+                    sections = parse(path, snapshot)
                 except UnicodeDecodeError:
                     _record_failure(stats, path, "invalid-encoding")
                     continue
@@ -357,11 +361,7 @@ def ingest_into(
                     stats.skipped += 1
                     stats.actions.append(_summary("skip", path.name, "duplicate-content"))
                     continue
-                if oversized:
-                    outcome = Outcome(
-                        "inboxed", code="handoff-too-large", reason="handoff exceeds automatic inspection limit"
-                    )
-                elif not trusted_origin:
+                if not trusted_origin:
                     outcome = Outcome(
                         "inboxed",
                         code="origin-review-required",
@@ -1632,7 +1632,10 @@ def _archive(src: Path, processed_dir: Path, expected_sha: str | None = None) ->
     # Re-check right before the move: a file tracked after listing must stay.
     if _is_tracked(src, _git_tracked_files(src.parent)):
         raise TrackedHandoffError(f"refusing to archive git-tracked handoff {src}")
-    if expected_sha is not None and hashlib.sha256(src.read_bytes()).hexdigest() != expected_sha:
+    if (
+        expected_sha is not None
+        and hashlib.sha256(handoff_origin.read_handoff(src, max_bytes=INSPECTION_CEILING)).hexdigest() != expected_sha
+    ):
         raise ChangedHandoffError(f"handoff changed since it was read: {src.name}")
     processed_dir.mkdir(parents=True, exist_ok=True)
     dest = processed_dir / src.name

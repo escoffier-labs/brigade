@@ -13,10 +13,10 @@ from tests._handoff_origin_fixtures import windows_origin_review
 
 def handoff(tmp_path: Path, *, action: str = "no-card") -> Path:
     content = "Prefer short status updates."
-    kwargs = {}
+    target_card = None
     if action == "create-card":
         content = "---\nid: card-origin\ntopic: origin\ncategory: test\ntags: [test]\n---\n\nA fact."
-        kwargs["target_card"] = "origin.md"
+        target_card = "origin.md"
     result = drafts.build_draft(
         target=tmp_path,
         title="Origin",
@@ -25,7 +25,7 @@ def handoff(tmp_path: Path, *, action: str = "no-card") -> Path:
         action=action,
         target_document="TOOLS.md",
         inbox=".claude/memory-handoffs",
-        **kwargs,
+        target_card=target_card,
     )
     return Path(result["path"])
 
@@ -541,7 +541,7 @@ def test_failed_review_stamp_archives_once_and_keeps_draft_for_a_person(tmp_path
 
 
 @pytest.mark.parametrize("suffix", [b"", b"\xff\x00"])
-def test_oversized_handoff_goes_to_human_review_with_exact_bytes(tmp_path, suffix):
+def test_oversized_handoff_keeps_exact_bytes_outside_review_draft(tmp_path, suffix):
     from datetime import date
 
     from brigade import memory_inbox_drain
@@ -556,13 +556,17 @@ def test_oversized_handoff_goes_to_human_review_with_exact_bytes(tmp_path, suffi
     assert stats.inboxed == 1 and stats.failed == stats.promoted == 0
     assert "handoff-too-large" in stats.actions[0]
     (review,) = (tmp_path / "memory/handoff-inbox").glob("*.md")
-    assert review.read_bytes().split(b"-->\n\n", 1)[1] == snapshot
+    import hashlib
+
+    assert hashlib.sha256(snapshot).hexdigest() in review.read_text()
+    assert review.stat().st_size < 4096
     assert not path.exists()
-    assert (path.parent / "processed" / path.name).read_bytes() == snapshot
+    (held,) = (tmp_path / ".brigade/handoffs/held").rglob("*.md")
+    assert held.read_bytes() == snapshot
     assert not (tmp_path / "memory/cards/origin.md").exists()
     assert memory_inbox_drain.classify("handoff-too-large", "") == "human"
     result = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 14), deadline_days=14)
-    assert result["retried"] == 0 and review.exists()
+    assert result["kept_for_person"] == 1 and result["retried"] == 0 and review.exists()
     again = ingest.IngestStats()
     assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=again, promote_cards=True) == 0
     assert again.processed == again.failed == 0
@@ -584,11 +588,13 @@ def test_windows_key_checks_portable_file_safety_before_acl_hold(tmp_path, monke
         observed.append(fd)
         if defect == "none":
             return info
-        return SimpleNamespace(
+        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        fields.update(
             st_mode=stat.S_IFDIR if defect == "directory" else info.st_mode,
             st_nlink=2 if defect == "hardlink" else 1,
             st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT if defect == "reparse" else 0,
         )
+        return SimpleNamespace(**fields)
 
     monkeypatch.setattr(os, "fstat", fstat)
     if defect != "none":
@@ -622,3 +628,95 @@ def test_claim_write_failure_never_publishes_partial_marker(tmp_path, monkeypatc
     assert origin._claim(consumed, decision_id="first-decision")
     assert not origin._claim(consumed, decision_id="second-decision")
     assert list(consumed.parent.iterdir()) == [consumed]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX origin claim recovery until #2588")
+def test_claim_link_crash_resumes_own_marker(tmp_path):
+    consumed = tmp_path / "handoffs/consumed-stamps/claim"
+    consumed.parent.mkdir(parents=True)
+    temporary = consumed.parent / (".claim-" + "a" * 32 + ".tmp")
+    temporary.write_bytes(b"first-decision")
+    os.link(temporary, consumed)
+    assert origin._claim(consumed, decision_id="first-decision")
+    assert consumed.read_bytes() == b"first-decision"
+    assert consumed.stat().st_nlink == 1
+    assert list(consumed.parent.iterdir()) == [consumed]
+    assert not origin._claim(consumed, decision_id="other-decision")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX origin claim recovery until #2588")
+@pytest.mark.parametrize("location", ["outside", "wrong-name"])
+def test_claim_foreign_second_link_is_refused(tmp_path, location):
+    consumed = tmp_path / "handoffs/consumed-stamps/claim"
+    consumed.parent.mkdir(parents=True)
+    consumed.write_bytes(b"first-decision")
+    extra = tmp_path / ".claim-foreign.tmp" if location == "outside" else consumed.parent / "foreign.tmp"
+    os.link(consumed, extra)
+    assert not origin._claim(consumed, decision_id="first-decision")
+    assert consumed.stat().st_nlink == 2 and extra.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX origin claim recovery until #2588")
+def test_orphan_claim_temporary_files_are_swept(tmp_path):
+    consumed = tmp_path / "handoffs/consumed-stamps/claim"
+    consumed.parent.mkdir(parents=True)
+    orphan = consumed.parent / (".claim-" + "b" * 32 + ".tmp")
+    orphan.write_bytes(b"abandoned-decision")
+    unrelated = consumed.parent / "unrelated.tmp"
+    unrelated.write_bytes(b"keep")
+    assert origin._claim(consumed, decision_id="first-decision")
+    assert not orphan.exists()
+    assert unrelated.read_bytes() == b"keep"
+
+
+def test_oversized_sparse_handoff_never_uses_an_unbounded_snapshot(tmp_path, monkeypatch):
+    from datetime import date
+    import hashlib
+
+    from brigade import memory_inbox_drain
+    from brigade.memory_inbox_io import MAX_DRAFT_BYTES
+
+    path = handoff(tmp_path)
+    size = 128 * 1024 * 1024
+    os.truncate(path, size)
+    identity = path.stat().st_ino
+    real_read = origin.read_handoff
+    real_bytes = Path.read_bytes
+    real_os_read = os.read
+
+    def chunked_read(fd, length):
+        if os.fstat(fd).st_ino == identity:
+            assert length <= 65536, "oversized hash used an unbounded read"
+        return real_os_read(fd, length)
+
+    def bounded_read(source, *, max_bytes, **kwargs):
+        assert max_bytes <= ingest.INSPECTION_CEILING, "oversized source was admitted as a snapshot"
+        return real_read(source, max_bytes=max_bytes, **kwargs)
+
+    def no_source_read(source):
+        assert source != path, "oversized source was read in full during archival"
+        return real_bytes(source)
+
+    monkeypatch.setattr(os, "read", chunked_read)
+    monkeypatch.setattr(origin, "read_handoff", bounded_read)
+    monkeypatch.setattr(Path, "read_bytes", no_source_read)
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, route_documents=True) == 0
+    assert stats.inboxed == 1 and stats.failed == 0
+    (draft,) = (tmp_path / "memory/handoff-inbox").glob("*.md")
+    assert draft.stat().st_size < MAX_DRAFT_BYTES
+    text = draft.read_text()
+    assert "reason: handoff-too-large" in text and path.name in text and str(size) in text
+    held = list((tmp_path / ".brigade/handoffs/held").rglob("*.md"))
+    assert len(held) == 1 and held[0].stat().st_ino == identity
+    assert held[0].stat().st_size == size and not path.exists()
+    digest = hashlib.sha256()
+    with held[0].open("rb") as handle:
+        while chunk := handle.read(65536):
+            digest.update(chunk)
+    assert digest.hexdigest() in text
+    if os.name == "posix":
+        assert held[0].parent.stat().st_mode & 0o777 == 0o700
+    result = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 15), deadline_days=14)
+    assert result["kept_for_person"] == 1 and result["retried"] == 0
+    assert not (tmp_path / "TOOLS.md").exists()
