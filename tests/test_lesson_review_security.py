@@ -155,7 +155,8 @@ def test_only_own_lesson_is_delivered_to_review(scope, monkeypatch):
     assert review.run(scope, now=111)["status"] == "committed"
     assert unrelated.read_bytes() == b"\xff invalid handoff"
     assert attacker.read_text() == unreviewed
-    assert len(list((inbox / "processed").glob("*.md"))) == 1
+    assert not (inbox / "processed").exists()
+    assert len(list((scope / review.OUTBOX / "processed").glob("*.md"))) == 1
     drafts = list((scope / "memory/handoff-inbox").glob("*.md"))
     assert len(drafts) == 1
     from brigade import ingest
@@ -207,22 +208,22 @@ def test_disable_works_with_invalid_config(scope, capsys):
     assert activity.config(scope)["enabled"] is False
 
 
-@pytest.mark.parametrize("component", ["runs", "state.json", "latest.json"])
+@pytest.mark.parametrize("component", ["runs", "outbox", "state.json", "latest.json"])
 def test_lesson_writes_refuse_links(scope, monkeypatch, tmp_path, component):
     event(scope)
     event(scope)
     outside = tmp_path / "untouched"
-    if component == "runs":
+    if component in {"runs", "outbox"}:
         outside.mkdir()
     else:
         outside.write_text("unchanged")
     linked = scope / activity.ROOT / component
     if linked.exists():
         linked.unlink()
-    linked.symlink_to(outside, target_is_directory=component == "runs")
-    seat(monkeypatch)
+    linked.symlink_to(outside, target_is_directory=component in {"runs", "outbox"})
+    seat(monkeypatch, proposal(scope) if component == "outbox" else None)
     assert review.run(scope, now=111)["status"] in {"retry", "rejected"}
-    if component == "runs":
+    if component in {"runs", "outbox"}:
         assert not list(outside.iterdir())
     else:
         assert outside.read_text() == "unchanged"
@@ -235,7 +236,7 @@ def test_scoped_ingest_refuses_digest_and_origin_mismatch(scope):
     event(scope)
     candidate = proposal(scope)
     admitted = admission.admit(scope, candidate, activity.load(scope)["events"], {})
-    pending = {"lesson": admitted, "run_id": "lesson-example", "digest": "a" * 64, "inbox": ".claude/memory-handoffs"}
+    pending = {"lesson": admitted, "run_id": "lesson-example", "digest": "a" * 64, "inbox": review.OUTBOX}
     text = review._draft_text(scope, pending)
     path = scope / pending["inbox"] / "example.md"
     path.parent.mkdir(parents=True)

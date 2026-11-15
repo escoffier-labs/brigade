@@ -37,14 +37,14 @@ def scope(tmp_path, monkeypatch):
 
 
 def event(target, text="Use atomic publication to prevent partial reads.", now=100, **kwargs):
+    run_id = "failed" if activity.load(target).get("calls", 0) == 0 else "example"
     activity.record_event(
         target,
         "PostToolUse",
         {
             "session_id": "example-session",
             "tool_input": {"command": "brigade work verify run --manifest lesson"},
-            "tool_response": text
-            + "\n.brigade/work/verify-runs/example/receipt.json\n.brigade/work/verify-runs/failed/receipt.json",
+            "tool_response": text + f"\nrun: {run_id}\nreceipt: .brigade/work/verify-runs/{run_id}/receipt.json",
             **kwargs,
         },
         now=now,
@@ -76,6 +76,10 @@ def proof(target, content):
     assert manifest is not None, error
     receipt = {
         "run_id": "example",
+        "harness_session": {
+            "harness": "claude",
+            "fingerprint": localio.stable_hash({"claude_session_id": "example-session"}),
+        },
         "producer_work_session_id": "example-work-session",
         "target": str(target.resolve()),
         "status": "completed",
@@ -177,7 +181,7 @@ def test_verified_fix_drafts_and_ingests_once(scope, monkeypatch):
     result = review.run(scope, now=111)
     assert result["status"] == "committed", result
     assert len(calls) == 2
-    assert len(list((scope / ".claude/memory-handoffs/processed").glob("*.md"))) == 1
+    assert len(list((scope / ".brigade/lesson-review/outbox/processed").glob("*.md"))) == 1
     assert not (scope / "memory/cards/atomic-publication.md").exists()
     assert len(list((scope / "memory/handoff-inbox").glob("lesson-*.md"))) == 1
     assert review.run(scope, now=112)["status"] == "waiting"
@@ -325,13 +329,13 @@ def test_crash_after_draft_publication_recovers_once(scope, monkeypatch):
     monkeypatch.setattr(review.ingest, "ingest_lesson", crash)
     assert review.run(scope, now=111)["status"] == "retry"
     assert activity.load(scope)["reviewed"] == 0
-    drafts = list((scope / ".claude/memory-handoffs").glob("*.md"))
+    drafts = list((scope / ".brigade/lesson-review/outbox").glob("*.md"))
     assert len(drafts) == 1
     assert activity.ORIGIN in drafts[0].read_text()
     monkeypatch.setattr(review.ingest, "ingest_lesson", ingest)
     assert review.run(scope, now=500)["status"] == "committed"
     assert len(calls) == 2
-    assert len(list((scope / ".claude/memory-handoffs/processed").glob("*.md"))) == 1
+    assert len(list((scope / ".brigade/lesson-review/outbox/processed").glob("*.md"))) == 1
     receipts = list((scope / activity.ROOT / "runs").glob("*/review.json"))
     assert json.loads(receipts[0].read_text())["draft_sha256"]
 

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import stat
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
-from . import guard, lesson_io as io
+from . import dirfd, guard, lesson_io as io, localio
 from .component_paths import cache_root
 from .handoff_ingest_rules import sha256_hex
 from .guard.types import ScanOptions
@@ -83,12 +86,16 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
     if os.environ.get("BRIGADE_RUN_ID", "").startswith("lesson-"):
         return
     if event == "UserPromptSubmit":
+        try:
+            prompt = scanned(str(payload.get("prompt", "")).encode()[:MAX_TEXT].decode(errors="ignore"))
+        except ValueError:
+            prompt = "[observation withheld by scanner]"
         spool = prompt_path(target)
         with held_file_lock(spool.with_suffix(".lock"), deadline_seconds=1):
             prompts = _read_prompts(spool)
             prompts.append(
                 {
-                    "prompt": scanned(str(payload.get("prompt", "")).encode()[:MAX_TEXT].decode(errors="ignore")),
+                    "prompt": prompt,
                     "at": time.time() if now is None else now,
                 }
             )
@@ -130,9 +137,13 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
                 argv = []
             if argv[:4] == ["brigade", "work", "verify", "run"]:
                 metadata["verify_command"] = True
+                run_id = _verify_run_id(payload)
+                if run_id:
+                    metadata["verify_run_id"] = run_id
         session = payload.get("session_id")
         if isinstance(session, str):
             metadata["session_id"] = sha256_hex(session.encode())
+            metadata["harness_session_fingerprint"] = localio.stable_hash({"claude_session_id": session})
         work_session = io.text(target / ".brigade/work/current", absent=True, limit=4096)
         if work_session and work_session.strip():
             metadata["work_session_id"] = work_session.strip()
@@ -154,12 +165,46 @@ def prompt_path(target: Path) -> Path:
     return Path(cache_root()) / "brigade/lesson-prompts" / (sha256_hex(str(target.resolve()).encode()) + ".json")
 
 
+def _verify_run_id(payload: dict[str, Any]) -> str | None:
+    """Read the coordinator's run field from output, never from command text."""
+    output = payload.get("tool_response", payload.get("tool_output", ""))
+    if isinstance(output, dict):
+        output = output.get("stdout", output.get("output", ""))
+    if not isinstance(output, str) or len(output.encode()) > 256 * 1024:
+        return None
+    try:
+        value = json.loads(output)
+    except ValueError:
+        # Multiple run headers are ambiguous, including output from nested runs.
+        runs = re.findall(r"^run: ([A-Za-z0-9_-]+)\s*$", output, re.M)
+        return runs[0] if len(runs) == 1 else None
+    run_id = value.get("run_id") if isinstance(value, dict) else None
+    return run_id if isinstance(run_id, str) and re.fullmatch(r"[A-Za-z0-9_-]+", run_id) else None
+
+
 def _read_prompts(path: Path) -> list[dict[str, Any]]:
+    try:
+        return _validated_prompts(path)
+    except (ValueError, UnicodeError):
+        # Caller holds the spool lock. Preserve the bad bytes privately without
+        # reading an oversized file again or including its body in a diagnostic.
+        name = f"{path.stem}-{uuid.uuid4().hex}.quarantine"
+        with io.directory(path.parent, private=True) as parent:
+            info = dirfd.stat_child(parent, path.name)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise OSError("lesson prompt spool must be regular and single-link") from None
+            dirfd.rename_child(parent, path.name, parent, name)
+            dirfd.fsync_directory(parent)
+        io.write(path.parent / (name + ".json"), io.json_bytes({"reason": "invalid-prompt-spool"}))
+        return []
+
+
+def _validated_prompts(path: Path) -> list[dict[str, Any]]:
     raw = io.text(path, absent=True, private=True, limit=256 * 1024)
     value = json.loads(raw) if raw is not None else None
     # Read the earlier single-prompt spool format during upgrades.
     if isinstance(value, dict):
-        return [value]
+        value = [value]
     if value is None:
         return []
     if not isinstance(value, list) or len(value) > MAX_EVENTS:
@@ -191,6 +236,10 @@ def append_event(state: dict[str, Any], kind: str, text: str, at: float, **metad
     # Keep the failure side of a fix even in long sessions. Other observations
     # are bounded to over twenty complete pre/post tool pairs plus prompts.
     while len(state["events"]) > MAX_EVENTS or len(io.json_bytes(state)) > 256 * 1024:
+        reviewed = next((i for i, e in enumerate(state["events"]) if e["id"] <= state["reviewed"]), None)
+        if reviewed is not None:
+            state["events"].pop(reviewed)
+            continue
         index = next(
             (
                 i

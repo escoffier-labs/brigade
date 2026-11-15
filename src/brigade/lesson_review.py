@@ -17,8 +17,6 @@ from .handoff_ingest_rules import safe_card_name, sha256_hex
 from .inbox_lock import InboxLockTimeout
 from .lesson_io import held_file_lock
 from .untrusted import wrap_untrusted
-from .config import load_config
-from .selection import WRITER_INBOXES
 from itertools import islice
 
 RULES = (
@@ -34,14 +32,7 @@ class StaleLesson(ValueError):
     """An unpublished lesson must be reviewed against newer card bytes."""
 
 
-def _inbox(target: Path) -> str:
-    cfg = load_config(target)
-    if cfg is None:
-        return WRITER_INBOXES["claude"]
-    for harness in sorted(cfg.selection.harnesses):
-        if harness in WRITER_INBOXES:
-            return WRITER_INBOXES[harness]
-    raise ValueError("lesson review needs a configured writer inbox")
+OUTBOX = activity.ROOT + "/outbox"
 
 
 def _invoke(target: Path, seat: str, run_id: str, prompt: str, phase: str) -> dict[str, Any]:
@@ -120,7 +111,7 @@ def _review(target: Path, cfg: dict[str, Any], snapshot: dict[str, Any], run_id:
             "title, summary, content (complete card with YAML frontmatter), action (create-card or update-card), "
             "target_card, evidence (passing verification receipt path), failure_evidence (earlier failing receipt), event (observation id), quote "
             "(at least 24 bytes and five tokens, content must derive from it). "
-            "Updates may name only cards read below. Fixes require registered independently verified card receipts, "
+            "Updates may name only cards read below. Fixes require registered signed card receipts, "
             "exact content binding, and different failing and passing tree fingerprints.\n"
         )
         + framed
@@ -175,9 +166,7 @@ def _draft_text(target: Path, pending: dict[str, Any]) -> str:
 def _publish(target: Path, pending: dict[str, Any]) -> None:
     if pending["lesson"] is None:
         return
-    if not re.fullmatch(r"lesson-[0-9a-f]{32}", str(pending.get("run_id", ""))) or pending.get("inbox") != _inbox(
-        target
-    ):
+    if not re.fullmatch(r"lesson-[0-9a-f]{32}", str(pending.get("run_id", ""))) or pending.get("inbox") != OUTBOX:
         raise ValueError("invalid pending lesson publication")
     args = _draft_args(target, pending)
     lesson = pending["lesson"]
@@ -195,7 +184,8 @@ def _publish(target: Path, pending: dict[str, Any]) -> None:
             if current is None or sha256_hex(current) != lesson["expected_sha"]:
                 raise StaleLesson("lesson card changed before publication")
         # Use the draft entry point for validation and rendering in private
-        # staging, then publish under a held no-follow inbox descriptor.
+        # staging, then publish under a held no-follow private outbox descriptor.
+        # Generic handoff sweeps must never see a draft before origin admission.
         with tempfile.TemporaryDirectory(prefix="brigade-lesson-draft-") as staging:
             staged = drafts.build_draft(**{**args, "target": Path(staging), "workspace": target})
             data = io.read_bytes(Path(staged["path"]))
@@ -246,7 +236,7 @@ def _attempt(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
             "calls": snapshot["calls"],
             "digest": sha256_hex(io.json_bytes(snapshot["events"])),
             "lesson": lesson,
-            "inbox": _inbox(target),
+            "inbox": OUTBOX,
         }
         if lesson is not None:
             text = _draft_text(target, pending)

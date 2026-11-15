@@ -36,7 +36,7 @@ def verified_receipt(
             for e in events
             if e["kind"] in ({"PostToolUse", "PostToolUseFailure"} if content is None else {"PostToolUse"})
             and e.get("verify_command") is True
-            and relative in e["text"]
+            and e.get("verify_run_id") == Path(relative).parent.name
         ),
         None,
     )
@@ -49,6 +49,14 @@ def verified_receipt(
         raise ValueError("lesson requires an authentic workspace verification receipt")
     if receipt.get("run_id") != Path(relative).parent.name or receipt.get("target") != str(target.resolve()):
         raise ValueError("lesson receipt run or workspace mismatch")
+    harness = receipt.get("harness_session")
+    if harness is not None and (
+        not isinstance(harness, dict)
+        or harness.get("harness") != "claude"
+        or not isinstance(harness.get("fingerprint"), str)
+        or harness["fingerprint"] != observed.get("harness_session_fingerprint")
+    ):
+        raise ValueError("lesson receipt harness session mismatch")
     producer_session = receipt.get("producer_work_session_id")
     if (
         not isinstance(producer_session, str)
@@ -100,7 +108,7 @@ def verified_receipt(
         or sha256_hex(identity.encode()) in sessions
         or identity == producer_session
     ):
-        raise ValueError("lesson verifier must be independent of the work session")
+        raise ValueError("lesson verifier identity must differ from the work session")
     try:
         completed = datetime.fromisoformat(receipt["completed_at"].replace("Z", "+00:00"))
         if completed.tzinfo is None or completed.timestamp() < earliest:
@@ -108,6 +116,7 @@ def verified_receipt(
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("invalid lesson receipt completion time") from exc
     receipt["_completed"] = completed.timestamp()
+    receipt["_observation_session"] = observed.get("session_id")
     return receipt
 
 
@@ -190,6 +199,7 @@ def admit(target: Path, candidate: Any, events: list[dict[str, Any]], reads: dic
             or not passed["tree_fingerprint"]
             or failed["tree_fingerprint"] == passed["tree_fingerprint"]
             or failed.get("producer_work_session_id") != passed.get("producer_work_session_id")
+            or failed.get("_observation_session") != passed.get("_observation_session")
             or failed.get("verify_manifest_id") != passed.get("verify_manifest_id")
         ):
             raise ValueError("lesson requires a verified fix with a changed tree, not a cleared transient failure")

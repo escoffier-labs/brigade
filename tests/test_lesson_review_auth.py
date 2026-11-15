@@ -89,7 +89,7 @@ def test_failed_verify_observation_survives_routine_activity(scope, monkeypatch,
         {
             "session_id": "example-session",
             "tool_input": {"command": "brigade work verify run --manifest lesson"},
-            "tool_output": candidate["failure_evidence"],
+            "tool_output": "run: failed\nreceipt: " + candidate["failure_evidence"],
         },
         now=99,
     )
@@ -136,7 +136,7 @@ def test_real_signed_failure_and_pass_are_admitted(scope, monkeypatch, capsys, b
     (scope / "check.py").write_text("raise SystemExit(1)\n")
     (scope / ".brigade/work/current").unlink()
     assert work_cmd.start(target=scope, title="lesson fix") == 0
-    monkeypatch.delenv("BRIGADE_CLAUDE_SESSION", raising=False)
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", localio.stable_hash({"claude_session_id": "example-session"}))
     monkeypatch.setenv("BRIGADE_VERIFY_SESSION_ID", "independent-verifier")
     monkeypatch.setattr(verification.code_graph_delta, "capture_before", lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -159,11 +159,14 @@ def test_real_signed_failure_and_pass_are_admitted(scope, monkeypatch, capsys, b
             {
                 "session_id": "example-session",
                 "tool_input": {"command": "brigade work verify run --manifest lesson"},
-                "tool_output": candidate["quote"] + "\n" + reference,
+                "tool_output": json.dumps(receipt),
             },
             now=100,
         )
         (scope / "check.py").write_text("print('ok')\n")
+    activity.record_event(
+        scope, "PostToolUse", {"session_id": "example-session", "tool_output": candidate["quote"]}, now=100
+    )
     candidate["event"] = activity.load(scope)["sequence"]
     reads = {card.name: sha256_hex(card.read_bytes())} if binding_mode == "patch_backed" else {}
     admission.admit(scope, candidate, activity.load(scope)["events"], reads)

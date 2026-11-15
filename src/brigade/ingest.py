@@ -400,7 +400,7 @@ def ingest_lesson(*, source: Path, path: Path, expected_digest: str, admitted_or
 
     relative = path.relative_to(source)
     if (
-        relative.parent.as_posix() not in WRITER_INBOXES.values()
+        relative.parent.as_posix() != ".brigade/lesson-review/outbox"
         or not path.name.endswith(".md")
         or not SHA256_RE.fullmatch(expected_digest)
         or admitted_origin != "brigade.lesson-review.v1"
