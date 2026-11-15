@@ -225,3 +225,11 @@ def test_evidence_retraction_does_not_block_care(tmp_path):
     log.parent.mkdir(parents=True)
     log.write_text(json.dumps({"retract_sha256": "a" * 64}) + "\n")
     assert life.run(tmp_path, today=TODAY)["transitions"][-1]["to_state"] == "archived"
+
+
+def test_unread_workspace_starts_observation_window(tmp_path):
+    card(tmp_path)
+    (tmp_path / reads.READS_REL).unlink()
+    assert not life.run(tmp_path, today=date(2026, 1, 1))["transitions"]
+    assert reads.load(tmp_path).tracking_since == date(2026, 1, 1)
+    assert life.run(tmp_path, today=date(2026, 4, 1))["transitions"][-1]["to_state"] == "archived"

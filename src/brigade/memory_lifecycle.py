@@ -111,8 +111,11 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
         for p in memory_cmd._iter_cards(target, config)
     }
     refs = _references(target, cards)
-    ledger = memory_card_reads.load(target)
     signals = _signals(target)
+    if cards and not dry_run:
+        # Start an observation window even when no reader has ever opened a card.
+        memory_card_reads.record(target, [], today=today)
+    ledger = memory_card_reads.load(target)
     opens = memory_review._opens(target)
     hub_reads = memory_card_reads.hub_last_reads(target, unused_after_days=rules["archive_after_days"])
     if hub_reads is None:
