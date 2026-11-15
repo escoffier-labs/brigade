@@ -29,6 +29,19 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_embed
 
     memory_embed.register(memory_sub)
+    review = memory_sub.add_parser(
+        "review",
+        help="List unreviewed cards ranked by observed use, without editing.",
+        description=(
+            "Offline promotion review queue. Each interactive open session earns 100 points, "
+            "each distinct open day earns 10, cached hub reads contribute at most 9, "
+            "and recency adds at most 1. Ties retain path and scope order. "
+            "Dated opens accumulate from hook reads after this update. Legacy recall/read "
+            "dates are shown without session credit. Automated contexts earn no session credit."
+        ),
+    )
+    review.add_argument("--target", "-t", type=Path, default=Path("."))
+    review.add_argument("--json", action="store_true")
     proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory edits.")
     commands = proposal.add_subparsers(dest="memory_proposal_command", required=True)
     for name in ("create", "show", "review", "reject", "apply"):
@@ -507,6 +520,10 @@ def dispatch(args) -> int:
         # The human preview retains every exact before/after text and hash too.
         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
         return 0 if payload.get("status") not in ("restored", "recovery-required") else 1
+    if args.memory_command == "review":
+        from .. import memory_review
+
+        return memory_review.review(target=args.target, json_output=args.json)
     if args.memory_command == "topology":
         return memory_operations.topology(target=args.target, json_output=args.json)
     if args.memory_command == "inventory":
