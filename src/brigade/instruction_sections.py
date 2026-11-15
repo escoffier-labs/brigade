@@ -38,6 +38,7 @@ _FENCE_OPEN = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
 _RAW_OPEN = re.compile(rb" {0,3}<(pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
 # Block elements a move must never split. Counted on raw bytes, whatever the Markdown parse says.
 HTML_BLOCK_TAGS = (b"pre", b"script", b"style", b"textarea", b"details", b"div", b"table")
+_HTML_SPECIAL_OPEN = re.compile(rb" {0,3}(?:<\?|<![A-Za-z]|<!\[CDATA\[)")
 _COMMENT = re.compile(rb"<!--((?:(?!-->).)*)-->")
 _COLON_MARKER = re.compile(rb"(\S+):(start|end)", re.IGNORECASE)
 _BRIGADE_BEGIN = re.compile(rb"BEGIN BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s.*)?")
@@ -55,7 +56,7 @@ class Unit:
     heading: bytes  # the heading line, no newline
     headings: tuple[bytes, ...]  # this heading and every subheading, in order
     pin: str | None  # "marker", "until:YYYY-MM-DD" or None, from this heading or any subheading
-    blocked: str | None  # "managed-block" | "pointer" | "html-block" | None
+    blocked: str | None  # "managed-block" | "pointer" | "html-block" | "link-definition" | None
     links: bool  # more than half of the non-blank body lines hold a link or a backticked path
     sha256: str  # of data[start:end]
 
@@ -138,6 +139,8 @@ def _scan(data: bytes) -> _Scan:
     fence: tuple[int, int] | None = None  # (character, length)
     comment = False  # inside a multi-line HTML comment
     raw_tag: bytes | None = None  # inside an HTML block such as <pre>, until its end tag
+    raw_end: bytes | None = None  # HTML types 3 to 5, until their literal end marker
+    indented = False
     offset = 0
     raw_lines = data.splitlines(keepends=True)
     # Frontmatter is fixed text: a `#` comment in it is not a heading, and nothing in it ever moves.
@@ -159,6 +162,13 @@ def _scan(data: bytes) -> _Scan:
             close = clean.find(b"-->")  # HTML ends a comment at its first `-->`
             comment = close == -1 or _opens_comment(clean[close + 3 :])  # `b --> <!-- c` closes and reopens
             continue
+        if raw_end is not None:
+            kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"
+            lines.append(_Line(offset, offset + len(raw), text, kind, True, bool(stack)))
+            offset += len(raw)
+            if raw_end in clean:
+                raw_end = None
+            continue
         if raw_tag is not None:
             # Inside a raw HTML block (`<pre>`, `<script>`, `<style>`, `<textarea>`) nothing is a heading,
             # marker or fence, so its end tag never moves without its start tag.
@@ -168,6 +178,16 @@ def _scan(data: bytes) -> _Scan:
             if _closes_raw(clean, raw_tag):
                 raw_tag = None
             continue
+        # An indented code block starts after a blank line and continues across blank lines.
+        if fence is None and (indented or number == 0 or not raw_lines[number - 1].strip()):
+            if clean.startswith((b"    ", b"\t")) or (indented and not clean.strip()):
+                indented = True
+                kind = "pointer" if POINTER_LINE.fullmatch(text) else "other"
+                lines.append(_Line(offset, offset + len(raw), text, kind, True, bool(stack)))
+                offset += len(raw)
+                continue
+        indented = False
+        special_open = _HTML_SPECIAL_OPEN.match(clean)
         in_block = fence is not None or bool(stack)
         in_managed = bool(stack)
         kind = "other"
@@ -175,6 +195,12 @@ def _scan(data: bytes) -> _Scan:
             closing = rb" {0,3}" + re.escape(bytes([fence[0]])) + (rb"{%d,}[ \t]*" % fence[1])
             if re.fullmatch(closing, clean):
                 fence = None
+        elif special_open is not None:
+            opener = clean.lstrip(b" ")
+            end = b"?>" if opener.startswith(b"<?") else b"]]>" if opener.startswith(b"<![CDATA[") else b">"
+            if end not in opener:
+                raw_end = end
+            in_block = True
         elif (raw_open := _RAW_OPEN.match(clean)) is not None:
             tag = raw_open.group(1).lower()
             if not _closes_raw(clean[raw_open.end() :], tag):
@@ -209,13 +235,24 @@ def _scan(data: bytes) -> _Scan:
                     kind = "heading"
         if kind == "other" and POINTER_LINE.fullmatch(text):
             kind = "pointer"
-        if fence is None and kind != "marker" and _opens_comment(clean):
+        if (
+            fence is None
+            and raw_tag is None
+            and raw_end is None
+            and special_open is None
+            and kind != "marker"
+            and _opens_comment(clean)
+        ):
             comment = True
             in_block = in_block or kind != "heading"
         lines.append(_Line(offset, offset + len(raw), text, kind, in_block, in_managed))
         offset += len(raw)
     # A file that ends inside an open fence or HTML comment: anything appended there would be hidden (row W30).
-    return _Scan(tuple(lines), unbalanced or bool(stack), fence is not None or comment or raw_tag is not None)
+    return _Scan(
+        tuple(lines),
+        unbalanced or bool(stack),
+        fence is not None or comment or raw_tag is not None or raw_end is not None,
+    )
 
 
 _CODE_SPAN = re.compile(rb"(`+)(?:(?!\1).)*?\1")
@@ -228,11 +265,23 @@ def _closes_raw(text: bytes, tag: bytes) -> bool:
 
 
 def _opens_comment(clean: bytes) -> bool:
-    """Whether the line opens an HTML comment it does not close (its last `<!--` has no `-->` after it).
+    """Whether the line leaves an HTML comment open, using the first `-->` after each opener.
     Inline code spans and an escaped `\\<` are not markup, so a `<!--` inside them opens nothing."""
-    text = _CODE_SPAN.sub(b"", clean).replace(b"\\<", b"")
-    start = text.rfind(b"<!--")
-    return start != -1 and b"-->" not in text[start + 4 :]
+    cursor = 0
+    while cursor < len(clean):
+        code = _CODE_SPAN.match(clean, cursor)
+        if code is not None:
+            cursor = code.end()
+        elif clean.startswith(b"\\<", cursor):
+            cursor += 2
+        elif clean.startswith(b"<!--", cursor):
+            close = clean.find(b"-->", cursor + 4)
+            if close == -1:
+                return True
+            cursor = close + 3
+        else:
+            cursor += 1
+    return False
 
 
 def _level(line: _Line) -> int:
@@ -314,6 +363,8 @@ def parse(data: bytes) -> SectionDocument:
             blocked = "pointer"
         elif not html_balanced(data[start:end]):
             blocked = "html-block"  # it holds one tag of an HTML pair: moving it would split the pair
+        elif _link_definition_referenced(data[start:end], data[:start] + data[end:]):
+            blocked = "link-definition"
         body = [line for line in span[1:] if line.text.strip() and _pin_of(line) is None]
         links = bool(body) and 2 * sum(1 for line in body if _LINK_LINE.search(line.text)) > len(body)
         units.append(
@@ -405,3 +456,19 @@ def managed_blocks(data: bytes) -> tuple[bytes, ...]:
         blocks.append(data[lines[index].start : lines[last].end])
         index = last + 1
     return tuple(blocks)
+
+
+_LINK_DEFINITION = re.compile(rb"^ {0,3}\[([^]\r\n]+)\]:[^\r\n]+", re.MULTILINE)
+_LINK_LABEL = re.compile(rb"\[([^]\r\n]+)\]")
+
+
+def _link_definition_referenced(moved: bytes, kept: bytes) -> bool:
+    """Refuse to separate a definition from any matching bracketed label in raw kept bytes.
+
+    Full, collapsed and shortcut references all contain `[label]`. Code, escapes and
+    duplicate definitions may cause extra refusals. They cannot authorize a move.
+    """
+    labels = {m.group(1).decode("utf-8", errors="replace").casefold() for m in _LINK_DEFINITION.finditer(moved)}
+    return bool(labels) and any(
+        m.group(1).decode("utf-8", errors="replace").casefold() in labels for m in _LINK_LABEL.finditer(kept)
+    )

@@ -23,6 +23,7 @@ from .instruction_sections import (
     POINTER_LINE,
     SectionDocument,
     Unit,
+    _link_definition_referenced,
     heading_lines,
     html_balanced,
     managed_blocks,
@@ -511,7 +512,11 @@ def check(
     else:
         structure_ok = new.problem is None and (old.eof_in_fence or not new.eof_in_fence)
         # No run may carry one tag of an HTML pair away from the other, whatever the parse says.
-        structure_ok = structure_ok and all(html_balanced(before[run.start : run.end]) for run in plan.runs)
+        structure_ok = structure_ok and all(
+            html_balanced(before[run.start : run.end])
+            and not _link_definition_referenced(before[run.start : run.end], after)
+            for run in plan.runs
+        )
     if not structure_ok:
         failed.append("structure")
     lines = [run.pointer[:-1] for run in plan.runs] + [pointer.data for pointer in plan.added]
