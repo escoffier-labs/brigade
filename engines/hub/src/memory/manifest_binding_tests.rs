@@ -709,7 +709,7 @@ async fn non_verifier_attestations_behave_exactly_as_before() {
 }
 
 #[test]
-fn version_eleven_migrates_to_twelve_with_no_binding_rows() {
+fn version_eleven_migrates_with_no_binding_rows() {
     let dir = temp_dir();
     let path = dir.join("memory.db");
     let db = Connection::open(&path).unwrap();
@@ -722,7 +722,7 @@ fn version_eleven_migrates_to_twelve_with_no_binding_rows() {
         db.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap()
     };
-    assert_eq!(version(&db), 12);
+    assert_eq!(version(&db), schema::USER_VERSION);
     assert_eq!(schema::log_epoch(&db).unwrap(), epoch);
     let rows: i64 = db
         .query_row("SELECT count(*) FROM memory_evidence_bindings", [], |r| {
@@ -731,7 +731,7 @@ fn version_eleven_migrates_to_twelve_with_no_binding_rows() {
         .unwrap();
     assert_eq!(rows, 0);
     schema::migrate(&db, 1_800_000_000_000).unwrap();
-    assert_eq!(version(&db), 12);
+    assert_eq!(version(&db), schema::USER_VERSION);
     drop(db);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1013,5 +1013,86 @@ async fn retention_purges_only_records_inert_for_35_days() {
             [eid("dropped")],
         )
         .is_err()
+    );
+}
+
+#[test]
+fn version_twelve_gains_the_lifetime_principal_index_on_open() {
+    let dir = temp_dir();
+    let path = dir.join("memory.db");
+    let db = Connection::open(&path).unwrap();
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    db.execute_batch("DROP INDEX memory_evidence_bindings_principal; PRAGMA user_version=12;")
+        .unwrap();
+    let epoch = schema::log_epoch(&db).unwrap();
+    drop(db);
+    let db = Connection::open(&path).unwrap();
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        schema::USER_VERSION
+    );
+    assert_eq!(schema::log_epoch(&db).unwrap(), epoch);
+    let plan: String = db
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT count(*) FROM memory_evidence_bindings WHERE principal=?1",
+            ["agent:dot"],
+            |r| r.get(3),
+        )
+        .unwrap();
+    assert!(
+        plan.contains("USING COVERING INDEX memory_evidence_bindings_principal"),
+        "{plan}"
+    );
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    drop(db);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn fill_lifetime_bindings(state: &str) -> (Hub, i64) {
+    let (h, a) = ready().await;
+    assert_eq!(attest(&h, "seed", "fleet", "a", a).await.status, 201);
+    let db = Connection::open(h.memory()).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
+         INSERT INTO memory_evidence(evidence_id,scope,card_id,workspace_id,principal,credential_id,credential_class,artifact_kind,artifact_sha256,artifact_bytes,observed_ms,stance,scan_state,created_ms,tombstoned)
+         SELECT 'lifetime-'||value,scope,card_id,workspace_id,principal,credential_id,credential_class,artifact_kind,artifact_sha256,x'',observed_ms,stance,scan_state,created_ms,1
+         FROM memory_evidence, n WHERE evidence_id=?2",
+        rusqlite::params![manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 1, eid("seed")],
+    ).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
+         INSERT INTO memory_evidence_bindings(evidence_id,principal,scope,base_revision,retained_bytes,state,proposal_id,created_ms,updated_ms)
+         SELECT 'lifetime-'||value,'agent:dot','fleet',1,1,?2,'proposal-bound',1,1 FROM n",
+        rusqlite::params![manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 1, state],
+    ).unwrap();
+    (h, a)
+}
+
+#[tokio::test]
+async fn lifetime_quota_takes_precedence_over_retained_quotas() {
+    let (h, a) = fill_lifetime_bindings("pending_review").await;
+    let db = Connection::open(h.memory()).unwrap();
+    let retained: i64 = db.query_row("SELECT count(*) FROM memory_evidence_bindings WHERE purged_ms IS NULL AND state!='active'", [], |r| r.get(0)).unwrap();
+    assert!(retained >= manifest_binding::BUDGET.principal_records);
+    assert!(retained >= manifest_binding::BUDGET.scope_records);
+    let refused = attest(&h, "over", "fleet", "a", a).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_evidence_lifetime_principal_quota")
+    );
+}
+
+#[tokio::test]
+async fn active_bindings_count_toward_the_lifetime_principal_budget() {
+    let (h, a) = fill_lifetime_bindings("active").await;
+    let db = Connection::open(h.memory()).unwrap();
+    let retained: i64 = db.query_row("SELECT count(*) FROM memory_evidence_bindings WHERE purged_ms IS NULL AND state!='active'", [], |r| r.get(0)).unwrap();
+    assert_eq!(retained, 1);
+    let refused = attest(&h, "over", "fleet", "a", a).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_evidence_lifetime_principal_quota")
     );
 }

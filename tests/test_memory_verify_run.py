@@ -441,7 +441,6 @@ def test_principal_and_scope_quota_replies_stop_proposing_without_a_failure(veri
     [
         "memory_evidence_retained_principal_quota",
         "memory_evidence_retained_scope_quota",
-        "memory_evidence_lifetime_principal_quota",
     ],
 )
 def test_an_evidence_quota_stops_before_proposing_without_a_failure(verify_hub, capsys, resolver, code):
@@ -451,6 +450,30 @@ def test_an_evidence_quota_stops_before_proposing_without_a_failure(verify_hub, 
     assert status == 0 and report["skipped"]["evidence_quota"] == 1
     assert [call["action"] for call in writes(hub)] == ["evidence.attach"]
     assert report["schedule"]["consecutive_failures"] == 0
+    assert report["stop"] == "evidence_quota"
+    (staged,) = packets(target)
+    assert pk.STAGED.fullmatch(staged)
+    assert "refused" not in next(iter(state_of(target)["submissions"].values()))
+    before = len(writes(hub))
+    status, report = verify(target, capsys)
+    assert status == 0 and report["stop"] == "evidence_quota"
+    assert [call["action"] for call in writes(hub)[before:]] == ["evidence.attach"]
+    assert packets(target) == [staged]
+
+
+def test_lifetime_quota_settles_the_stage_and_does_not_replay(verify_hub, capsys, resolver):
+    target, hub, _, _ = verify_hub
+    hub.attach_reply = (429, {"code": "memory_evidence_lifetime_principal_quota", "error": "quota"})
+    status, report = verify(target, capsys)
+    assert status == 0 and report["stop"] == "evidence_lifetime_quota"
+    assert report["skipped"]["evidence_lifetime_quota"] == 1
+    assert report["schedule"]["consecutive_failures"] == 0
+    assert [call["action"] for call in writes(hub)] == ["evidence.attach"]
+    assert packets(target) == []
+    assert next(iter(state_of(target)["submissions"].values()))["refused"] == "evidence_lifetime_quota"
+    before = len(writes(hub))
+    status, _ = verify(target, capsys)
+    assert status == 0 and writes(hub)[before:] == []
 
 
 def test_lifetime_evidence_quota_is_a_hub_refusal():

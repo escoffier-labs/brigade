@@ -48,6 +48,7 @@ pub const DDL: &str = "CREATE TABLE IF NOT EXISTS memory_evidence_bindings(
   CHECK(state != 'active' OR proposal_id IS NOT NULL),
   CHECK(purged_ms IS NULL OR state = 'inert')
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_evidence_bindings_principal ON memory_evidence_bindings(principal);
 CREATE INDEX IF NOT EXISTS memory_evidence_bindings_proposal ON memory_evidence_bindings(proposal_id);
 CREATE INDEX IF NOT EXISTS memory_evidence_bindings_unbound ON memory_evidence_bindings(state,created_ms) WHERE proposal_id IS NULL;
 CREATE INDEX IF NOT EXISTS memory_evidence_bindings_retained_principal ON memory_evidence_bindings(principal) WHERE purged_ms IS NULL AND state!='active';
