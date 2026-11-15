@@ -41,13 +41,8 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def _valid(row: object) -> bool:
-    if not isinstance(row, dict) or not _FIELDS <= set(row) or set(row) - _FIELDS - {"scope"}:
+    if not isinstance(row, dict) or set(row) != _FIELDS:
         return False
-    if "scope" in row:
-        from .memory_hub_client import valid_scope
-
-        if not valid_scope(row["scope"]):
-            return False
     if any(
         not isinstance(row[key], str) or not row[key] or any(ord(c) < 32 for c in row[key])
         for key in _FIELDS - {"similarity"}

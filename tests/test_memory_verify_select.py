@@ -485,6 +485,56 @@ def test_verified_negative_loses_priority_after_cooldown(verify_setup, monkeypat
     assert all(lane != "negative_outcome" for _, lane in picked.selection.selected)
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_workspace_failure_citation_can_prioritize_another_scope(verify_setup, monkeypatch, legacy):
+    from brigade import memory_evidence_log as log
+    from brigade import memory_lesson_rows as lessons
+
+    target, _ = verify_setup
+    settings = config.load(target)
+    root = Path(settings.workspaces[0].resolved)
+    other = "repo:other"
+    settings = parse(
+        workspace("fleet", root),
+        workspace(other, root.parent / "other"),
+    )
+    hub_settings, client = verify_cmd._hub(target)
+    from dataclasses import replace
+
+    hub_settings = replace(hub_settings, read_scopes=("fleet", other))
+    heads = [head("a", scope=scope) for scope in ("fleet", other)]
+    monkeypatch.setattr(verify_cmd, "_heads", lambda *_: (heads, "binding", "principal", "epoch"))
+    monkeypatch.setattr(verify_cmd, "_counts", lambda *_: ({}, TODAY - 100))
+    stamp = datetime.fromtimestamp((TODAY - 9) * 86400 + 43200, timezone.utc).isoformat()
+    if legacy:
+        log.append_log_row(
+            root,
+            io.json_bytes(
+                {
+                    "ts": stamp,
+                    "card_id": "a",
+                    "card_path": "memory/cards/example.md",
+                    "evidence_id": "example",
+                    "kind": "negative-outcome",
+                    "similarity": 1.0,
+                }
+            ),
+        )
+    else:
+        lessons.log_run_receipt(
+            root,
+            {
+                "run_id": "run-example",
+                "status": "failed",
+                "finished_at": stamp,
+                "evidence_brief": {"memory_refs": [{"scope": other, "card_id": "a", "hash": "a" * 12}]},
+            },
+        )
+    picked = verify_cmd.select_cards(target, vstate.fresh(), settings, hub_settings, client, NOW)
+    negatives = {card.key for card, lane in picked.selection.selected if lane == "negative_outcome"}
+    assert negatives == {key("a", "fleet" if legacy else other)}
+
+
 def test_text_output_has_no_card_text(verify_setup, capsys):
     target, _ = verify_setup
     assert cli.main(["memory", "verify", "run", "--dry-run", "--no-model", "--target", str(target)]) == 0

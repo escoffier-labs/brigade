@@ -317,8 +317,7 @@ def test_failure_retraction_sticks_on_retry(tmp_path, append_failure):
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("scope_source", ["row", "workspace"])
-def test_legacy_file_rows_scope(tmp_path, scope_source):
+def test_legacy_file_rows_scope(tmp_path):
     from brigade import memory_proposal_io as io
 
     log.append_log_row(
@@ -331,14 +330,13 @@ def test_legacy_file_rows_scope(tmp_path, scope_source):
                 "evidence_id": "run-example",
                 "kind": "negative-outcome",
                 "similarity": 1.0,
-                **({"scope": REF["scope"]} if scope_source == "row" else {}),
             }
         ),
     )
     assert lessons.pending_keys(
         tmp_path,
         [head(REF["card_id"]), head(REF["card_id"], scope="repo:other")],
-        scope=REF["scope"] if scope_source == "workspace" else None,
+        scope=REF["scope"],
     ) == {key(REF["card_id"])}
 
 
@@ -539,3 +537,16 @@ def test_dispatch_caps_citations_independently_of_packet_size(tmp_path, monkeypa
     brief = briefs.with_memory_context(briefs.EvidenceBrief(False), tmp_path, "task")
     assert len(brief.memory_refs) == dispatch_memory.MAX_REFS
     assert dispatch_memory.validate_refs(list(brief.memory_refs))
+
+
+def test_evidence_rows_reject_unused_scope_field():
+    row = {
+        "ts": "2026-01-01T12:00:00Z",
+        "card_id": REF["card_id"],
+        "card_path": "memory/cards/example.md",
+        "evidence_id": "run-example",
+        "kind": "negative-outcome",
+        "similarity": 1.0,
+    }
+    assert log._valid(row)
+    assert not log._valid({**row, "scope": REF["scope"]})

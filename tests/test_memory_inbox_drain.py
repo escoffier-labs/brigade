@@ -978,10 +978,10 @@ def test_evidence_recovery_appends_recorded_bytes_after_card_edit(tmp_path, monk
     class Crash(BaseException):
         pass
 
-    def interrupted(target, data):
+    def interrupted(target, data, *, log_path=memory_evidence_log.LOG_PATH):
         if target == tmp_path:
             raise Crash()
-        return original(target, data)
+        return original(target, data, log_path=log_path)
 
     monkeypatch.setattr(memory_evidence_log, "append_log_row", interrupted)
     with pytest.raises(Crash):

@@ -351,14 +351,14 @@ def select_cards(
     from .memory_lesson_rows import pending_keys
 
     # Legacy file rows inherit the scope of their configured workspace. The
-    # controller's ledger otherwise contributes only explicitly scoped rows.
+    # controller's ledger otherwise contributes only digest-addressed rows.
     negative_keys = pending_keys(target, valid, entries, scope="")
     for workspace in settings.workspaces:
         if config.revalidate(workspace) is None:
             negative_keys.update(
                 pending_keys(
                     Path(workspace.resolved),
-                    [head for head in valid if head["scope"] == workspace.scope],
+                    valid,
                     entries,
                     scope=workspace.scope,
                 )

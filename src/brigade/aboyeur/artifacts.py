@@ -716,7 +716,7 @@ def _run_payload(
         "evidence_brief": {
             "attached": bool(evidence.attached) if evidence is not None else False,
             "bytes": evidence.bytes if evidence is not None else 0,
-            "memory_refs": list(evidence.memory_refs) if evidence is not None else [],
+            **({"memory_refs": list(evidence.memory_refs)} if evidence is not None and evidence.memory_refs else {}),
         },
         "brief_budget": {
             "bytes": brief_set.budget_bytes if brief_set is not None else briefs.BRIEF_BUDGET_BYTES,
