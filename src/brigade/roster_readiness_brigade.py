@@ -429,6 +429,10 @@ def _hub_admission(
         for item in raw_decisions
         if isinstance(item, Mapping) and isinstance(item.get("seat"), str)
     }
+    enrollment = fleet_session_bootstrap.classify_enrollment(snapshot)
+    # An enrolled launch rejects the LKG outright, so a seat denial read from the LKG
+    # may be stale and is not the refusal the operator would actually hit.
+    stale_lkg = enrollment == "enrolled" and source != "hub"
     admission_obs: Observation | None = None
     for seat_name in workers:
         seat_decision = decisions_by_seat.get(seat_name)
@@ -438,6 +442,17 @@ def _hub_admission(
                 observed_at,
                 resolved_scope,
                 detail=f"{source_label}: missing decision for seat {seat_name!r}",
+            )
+            break
+        if seat_decision.get("outcome") != "enabled" and stale_lkg:
+            admission_obs = Observation(
+                "unknown",
+                observed_at,
+                resolved_scope,
+                detail=(
+                    f"{source_label}: seat {seat_name!r} is {seat_decision.get('outcome')} in the LKG, "
+                    "and an enrolled launch requires live hub admission"
+                ),
             )
             break
         if seat_decision.get("outcome") != "enabled":
@@ -452,7 +467,6 @@ def _hub_admission(
             )
             break
 
-    enrollment = fleet_session_bootstrap.classify_enrollment(snapshot)
     parsed_policy: Mapping[str, Any] | None = None
     if admission_obs is None:
         if enrollment == "denied":
@@ -673,7 +687,12 @@ def brigade_route_readiness(
     scope: str | None = None,
     now: float | None = None,
 ) -> tuple[roster_mod.Roster, dict[str, Observation]]:
-    """Return the effective roster and read-only ``admission`` and ``capacity`` observations."""
+    """Return the effective roster and read-only ``admission`` and ``capacity`` observations.
+
+    When ``scope`` is ``None`` it is computed from the effective (Hub-resolved)
+    roster. A caller that supplies ``scope`` must compute it from that same
+    effective roster, or the observations will not match the evaluated roster.
+    """
     from . import fleet_client
 
     if request.route != "brigade":

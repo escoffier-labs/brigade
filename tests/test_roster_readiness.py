@@ -1179,6 +1179,36 @@ def test_brigade_hub_enrolled_with_lkg_reports_admission_unknown(declared, tmp_p
     assert capacity_row["status"] == "unknown"
 
 
+def test_brigade_hub_enrolled_lkg_seat_denial_is_unknown_not_blocked(declared, tmp_path, monkeypatch):
+    """A seat disabled only in the LKG must not read as a definite refusal for an enrolled launch."""
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    seats = _hub_roster_payload()["seats"]
+    seats[0]["enabled"] = False
+    enrolled_lkg = _hub_roster_payload(
+        source="lkg",
+        seats=seats,
+        fleet_policy={"active": True, "version": 3, "digest": "sha256:" + ("b" * 64)},
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "lkg", enrolled_lkg),
+    )
+    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kw: pytest.fail("policy fetch not expected"))
+
+    result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    admission_row = next(item for item in result["evidence"] if item["category"] == "admission")
+    assert admission_row["status"] == "unknown"
+    assert "in the LKG" in admission_row["detail"]
+    assert result["status"] == "unverified"
+    assert result["exit_code"] == 3
+
+
 def test_brigade_hub_claim_auth_failed_blocks_while_other_claim_failures_stay_unknown(declared, tmp_path, monkeypatch):
     from brigade import fleet_client, fleet_model_admission
 
