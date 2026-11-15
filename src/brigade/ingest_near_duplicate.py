@@ -66,11 +66,12 @@ def merge_pending(
     snapshot: bytes,
     matched_card: Path,
     code: str,
-) -> Path | None:
+) -> tuple[Path, bytes] | None:
     """Retain one review item and add a pointer to each archived source handoff.
 
     The list belongs to one ingest call. Existing inbox files from other runs
     are never searched or changed. The original sources remain in processed/.
+    Return the path and previous UTF-8 bytes so a failed reinforcement can roll back.
     """
     import re
 
@@ -97,5 +98,5 @@ def merge_pending(
         pointer = f"\n<!-- merged handoff: {name} sha256={digest} -->\n"
         if pointer not in text:
             write_text_nofollow_atomic(item.path, text + pointer)
-        return item.path
+        return item.path, text.encode("utf-8")
     return None

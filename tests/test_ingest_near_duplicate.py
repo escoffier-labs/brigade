@@ -214,46 +214,33 @@ def test_reinforcement_failure_retry_keeps_one_receipt_and_pointer(tmp_target: P
     existing = tmp_target / "memory/cards/original.md"
     existing.parent.mkdir(parents=True, exist_ok=True)
     existing.write_text(card(BODY))
-    pending = []
-
-    def execute(name):
-        path = inbox / f"{name}.md"
-        snapshot = path.read_bytes()
-        sections = ingest.parse(path, snapshot)
-        outcome = ingest.decide(sections, target=tmp_target, promote_cards=True, route_documents=False)
-        return ingest._execute(
-            outcome,
-            path,
-            tmp_target,
-            sections,
-            tmp_target / drain.INBOX_REL,
-            inbox / "processed",
-            False,
-            snapshot,
-            pending=pending,
-        )
-
     if merge:
         handoff(inbox, "copy-a", BODY)
-        execute("copy-a")
     handoff(inbox, "copy-b", BODY)
-    before = existing.read_text()
+    reinforce = ingest.reinforce_existing_card
 
-    def unavailable(*args, **kwargs):
-        raise OSError("fixture reinforcement failed")
+    def unavailable(path, *, today, evidence_pointer):
+        if "copy-b.md" in evidence_pointer:
+            raise OSError("fixture reinforcement failed")
+        return reinforce(path, today=today, evidence_pointer=evidence_pointer)
 
     with monkeypatch.context() as patch:
         patch.setattr(ingest, "reinforce_existing_card", unavailable)
-        with pytest.raises(OSError, match="fixture reinforcement failed"):
-            execute("copy-b")
-    assert existing.read_text() == before
+        assert ingest.run(target=tmp_target, promote_cards=True) == 0
     assert (inbox / "copy-b.md").exists()
-    assert len(list((tmp_target / drain.INBOX_REL).glob("*.md"))) == int(merge)
-
-    execute("copy-b")
     drafts = list((tmp_target / drain.INBOX_REL).glob("*.md"))
-    assert len(drafts) == 1
-    assert drafts[0].read_text().count("merged handoff:") == int(merge)
+    assert len(drafts) == int(merge)
+    if merge:
+        assert "reinforcements: 1" in existing.read_text()
+    else:
+        assert existing.read_text() == card(BODY)
+
+    # A new run creates a fresh pending list, so earlier receipts cannot merge.
+    assert ingest.run(target=tmp_target, promote_cards=True) == 0
+    drafts = list((tmp_target / drain.INBOX_REL).glob("*.md"))
+    assert len(drafts) == 1 + int(merge)
+    assert sum("copy-b.md" in draft.read_text() for draft in drafts) == 1
+    assert all("merged handoff:" not in draft.read_text() for draft in drafts)
     assert f"reinforcements: {2 if merge else 1}" in existing.read_text()
     assert not (inbox / "copy-b.md").exists()
 

@@ -34,6 +34,7 @@ from .card_fingerprint import (
     index_cards,
     read_text_nofollow,
     reinforce_existing_card,
+    write_text_nofollow_atomic,
 )
 from .handoff_content import normalize_suggested_card_content
 from .handoff_ingest_rules import (
@@ -1076,9 +1077,10 @@ def _execute(
                 "## Memory proposal notification\nExact match already reinforced. Retained for review.\n\n"
             )
             dest = None
+            merged = None
             assert outcome.match is not None
             if pending is not None:
-                dest = ingest_near_duplicate.merge_pending(
+                merged = ingest_near_duplicate.merge_pending(
                     sections.get("suggested card content", ""),
                     pending,
                     target,
@@ -1087,6 +1089,8 @@ def _execute(
                     outcome.match.path,
                     outcome.code,
                 )
+            if merged is not None:
+                dest, previous = merged
             new_receipt = dest is None
             if dest is None:
                 stem = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_path.stem)[:120]
@@ -1099,6 +1103,8 @@ def _execute(
             except OSError:
                 if new_receipt:
                     dest.unlink()
+                else:
+                    write_text_nofollow_atomic(dest, previous.decode("utf-8"))
                 raise
             if new_receipt and pending is not None:
                 pending.append(
@@ -1196,9 +1202,11 @@ def _execute(
             dest = None
             if can_merge and pending is not None:
                 assert outcome.match is not None
-                dest = ingest_near_duplicate.merge_pending(
+                merged = ingest_near_duplicate.merge_pending(
                     content, pending, target, name, original.encode("utf-8"), outcome.match.path, outcome.code
                 )
+                if merged is not None:
+                    dest, _ = merged
             if dest is None:
                 dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
                 if can_merge and pending is not None:
