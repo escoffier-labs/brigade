@@ -1,5 +1,7 @@
 """Security regressions for unused-card evidence and reference protection."""
 
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 from datetime import date, datetime, timezone
 import json
 import os
@@ -168,8 +170,8 @@ def test_daily_coverage_requires_continuity(tmp_path):
     reads.record(tmp_path, [], today=OLD)
     reads.record(tmp_path, [], today=OLD + timedelta(days=1))
     assert reads.covered(reads.load(tmp_path), today=OLD + timedelta(days=1), days=1)
-    reads.record(tmp_path, [], today=OLD + timedelta(days=3))
-    assert not reads.covered(reads.load(tmp_path), today=OLD + timedelta(days=3), days=1)
+    reads.record(tmp_path, [], today=OLD + timedelta(days=7))
+    assert not reads.covered(reads.load(tmp_path), today=OLD + timedelta(days=7), days=1)
 
 
 @pytest.mark.parametrize("source", ["local", "hub", "interactive"])

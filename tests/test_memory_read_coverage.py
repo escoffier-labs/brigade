@@ -1,5 +1,7 @@
 """Retrieval protects cards, while bulk listings do not count as use."""
 
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 import os
 from datetime import date, timedelta
 
@@ -109,13 +111,13 @@ def test_local_read_lock_failure_records_coverage_error(tmp_path, monkeypatch):
     assert reads.last_read(reads.load(tmp_path), ["seen"]) is None
 
 
-def test_content_read_refuses_if_coverage_intent_cannot_be_saved(tmp_path, monkeypatch):
+def test_content_read_succeeds_if_coverage_intent_cannot_be_saved(tmp_path, monkeypatch):
     def broken(*args, **kwargs):
         raise OSError("coverage unavailable")
 
     monkeypatch.setattr(reads, "_write_json", broken)
-    with pytest.raises(OSError, match="coverage unavailable"):
-        reads.record_content(tmp_path, "body", "memory/cards/old.md")
+    reads.record_content(tmp_path, "body", "memory/cards/old.md")
+    assert reads.load(tmp_path).recorder_error
 
 
 def test_read_tool_reports_unrecordable_coverage(wired, monkeypatch):  # noqa: F811
@@ -124,6 +126,20 @@ def test_read_tool_reports_unrecordable_coverage(wired, monkeypatch):  # noqa: F
     def broken(*args, **kwargs):
         raise OSError("ledger unavailable")
 
-    monkeypatch.setattr(reads, "record", broken)
-    with pytest.raises(OSError, match="ledger unavailable"):
-        _read(target, memory / "memory/cards/comet.md")
+    monkeypatch.setattr(reads, "_write_json", broken)
+    assert _read(target, memory / "memory/cards/comet.md")
+    assert reads.load(memory).recorder_error
+
+
+def test_mcp_content_read_survives_unwritable_state(stores, monkeypatch):  # noqa: F811
+    repo, _ = stores
+    _card(repo, "old.md", "Old", "still readable")
+
+    def denied(*args, **kwargs):
+        raise PermissionError("state directory unavailable")
+
+    monkeypatch.setattr(reads, "_write_json", denied)
+    content, error = _tools(repo).call("get_card", {"path": "memory/cards/old.md"})
+    assert "still readable" in content
+    assert not error
+    assert reads.load(repo).recorder_error

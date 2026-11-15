@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 import re
 import posixpath
+import os
 import tomllib
 from urllib.parse import unquote, urlsplit
 from typing import Any
@@ -50,6 +51,7 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
     # unrelated prose or another directory must not protect this card.
     if referring and not referring.startswith("scheduler:"):
         destinations = re.findall(r"\]\(\s*(?:<([^>]+)>|([^\s)]+))", text)
+        destinations.extend(re.findall(r"^ {0,3}\[[^\]\n]+\]:[ \t]*(?:<([^>]+)>|([^\s]+))", text, flags=re.MULTILINE))
         destinations.extend(
             ("", name + ("" if name.endswith(".md") else ".md"))
             for name in re.findall(r"\[\[([^\]|#]+)(?:[^\]]*)\]\]", text)
@@ -85,12 +87,48 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
         "docs/runbooks",
         "memory/runbooks",
     )
-    paths = [p for root in roots for p in (target / root).rglob("*") if p.is_file()]
+    # Prune before descending, rather than filtering after an unbounded rglob.
+    skip = {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "vendor",
+        "build",
+        "dist",
+        "__pycache__",
+        ".tox",
+        ".nox",
+        ".next",
+        ".cache",
+        "coverage",
+    }
+
+    from .localio import check_git_ignored
+
+    def walk(root: Path):
+        if root != target:
+            try:
+                journal.safe_path(target, root.relative_to(target).as_posix())
+            except (journal.JournalConflict, OSError):
+                return
+        if root.is_symlink():
+            return
+        for directory, dirs, files in os.walk(root, followlinks=False):
+            base = Path(directory)
+            dirs[:] = [
+                name
+                for name in dirs
+                if name not in skip
+                and not (base / name).is_symlink()
+                and check_git_ignored(target, base / name) != "yes"
+            ]
+            for name in files:
+                yield base / name
+
+    paths = [p for root in roots for p in walk(target / root)]
     paths.extend(
-        p
-        for name in ("AGENTS.md", "CLAUDE.md")
-        for p in target.rglob(name)
-        if ".git" not in p.parts and "memory" not in p.relative_to(target).parts
+        p for p in walk(target) if p.name in {"AGENTS.md", "CLAUDE.md"} and "memory" not in p.relative_to(target).parts
     )
     paths.extend(
         target / name
@@ -99,7 +137,7 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
     )
     paths.extend(
         p
-        for p in (target / "memory").rglob("*")
+        for p in walk(target / "memory")
         if p.is_file()
         and any(Path(part).stem.lower() in {"pin", "pins", "pinned"} for part in p.relative_to(target / "memory").parts)
     )

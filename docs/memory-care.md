@@ -636,12 +636,21 @@ do not. Future dates are ignored in every source. Receipt citations must pass
 the same current-card binding and scoreability checks used for reflection.
 The window starts no earlier than read tracking or the card's modification date.
 
-Local coverage requires a daily heartbeat throughout the observation window.
-A missed day or recorder error starts a new window. Recording publishes a
-private intent before updating the ledger. A failed write leaves an error
-marker, and an interrupted write leaves a pending intent. Pending intents
-block transitions until the interrupted operation has been investigated.
-Missing or legacy coverage also starts a new observation window.
+Local coverage accepts up to four missing heartbeat days between signed
+observations, controlled by `lifecycle.heartbeat_gap_allowance_days`. Offline
+days count toward the observation window but never become card-use days.
+Longer gaps, broken authentication and recorded errors start a new window.
+Recording publishes a private intent before updating the ledger. A failed
+write leaves an error marker where storage permits. Reads still return their
+content when recording fails. Pending intents block transitions for up to
+`lifecycle.pending_intent_max_age_days` (one day by default). The next successful
+recorder resets the window before clearing expired intents, so the interrupted
+interval cannot authorize retirement. Missing or legacy coverage also starts
+a new observation window. If storage cannot persist any failure marker, the
+failure remains unhealthy within the reader process. No cross-process failure
+record can be guaranteed on completely unwritable storage.
+Reference scans prune vendor, environment, cache and build directories and do
+not follow directory symlinks.
 Coverage and explicit-use records require an HMAC from the fixed workspace
 receipt key at `.brigade/receipt-signing-key`. Interactive hook records also
 require authentication bound to the workspace and session ledger path.

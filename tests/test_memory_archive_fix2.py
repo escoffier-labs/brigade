@@ -1,5 +1,7 @@
 """Second review regressions, including real kernel crash recovery."""
 
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 from datetime import date
 
 import pytest

@@ -7,6 +7,7 @@ import os
 import pytest
 
 from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 
 from brigade import memory_card_reads as reads, memory_lifecycle as life, memory_review, memory_hooks
 from brigade.claude_hooks import hub_recall
@@ -158,12 +159,12 @@ def test_partial_identity_and_unrelated_paths_do_not_protect(tmp_path, reference
     assert not path.exists()
 
 
-def test_signed_history_with_a_missing_day_is_incomplete(tmp_path):
+def test_signed_history_with_an_excessive_gap_is_incomplete(tmp_path):
     old_card(tmp_path)
     cover(tmp_path)
     value = reads._read_json(tmp_path, reads.READS_REL)
     value.pop("mac")
-    del value["coverage_days"][10]
+    del value["coverage_days"][10:15]
     value["mac"] = reads.authenticate(tmp_path, reads.READS_REL, value)
     reads._write_json(tmp_path, reads.READS_REL, value)
     assert not reads.covered(reads.load(tmp_path), today=TODAY, days=90)

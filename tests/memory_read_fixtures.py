@@ -44,3 +44,19 @@ def signed_memory_authority(monkeypatch):
             return bytes.fromhex("12" * 32) if path.is_file() else None
 
         monkeypatch.setattr(receipt_signing, "workspace_key", trusted_test_key)
+
+
+@pytest.fixture(autouse=True)
+def windows_scheduler(monkeypatch):
+    """Lifecycle tests must not query the runner's real Task Scheduler."""
+    if sys.platform == "win32":
+        import subprocess
+
+        run = subprocess.run
+
+        def isolated(args, *positional, **kwargs):
+            if args == ["schtasks", "/Query", "/FO", "CSV", "/V"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return run(args, *positional, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", isolated)

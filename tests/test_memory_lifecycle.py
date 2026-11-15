@@ -1,5 +1,7 @@
 """Unused-card lifecycle, protection, search and rollback acceptance."""
 
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 from datetime import date, datetime, timezone
 import json
 import os

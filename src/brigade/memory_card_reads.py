@@ -32,6 +32,14 @@ class ReadLedger:
 
 
 COVERAGE_REL = ".brigade/memory/read-coverage"
+# Preserve failures within this process when storage cannot accept even an intent.
+_FAILED_ROOTS: set[Path] = set()
+
+
+def _coverage_policy(target: Path) -> dict:
+    from .memory_lifecycle import policy
+
+    return policy(target)
 
 
 def _mac(target: Path, context: str, value: dict, key: bytes) -> str:
@@ -111,13 +119,14 @@ def load(target: Path) -> ReadLedger:
             raise ValueError("unauthenticated read coverage")
         since = date.fromisoformat(p["healthy_since"])
         heartbeat = date.fromisoformat(p["heartbeat"])
-        # The signed daily history must actually cover every day of the window.
+        # Authenticate observed heartbeat days, including bounded offline intervals.
+        allowance = _coverage_policy(target)["heartbeat_gap_allowance_days"]
         history = [date.fromisoformat(day) for day in p["coverage_days"]]
         if (
             not history
             or history[0] != since
             or history[-1] != heartbeat
-            or any((b - a).days != 1 for a, b in zip(history, history[1:], strict=False))
+            or any(not 1 <= (b - a).days <= allowance + 1 for a, b in zip(history, history[1:], strict=False))
             or date.fromisoformat(p["tracking_since"]) > since
         ):
             raise ValueError("incomplete read coverage history")
@@ -126,7 +135,7 @@ def load(target: Path) -> ReadLedger:
             {k: date.fromisoformat(v) for k, v in p["last_read"].items()},
             since,
             heartbeat,
-            bool(_pending(target)),
+            bool(_pending(target)) or target.resolve() in _FAILED_ROOTS,
         )
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return ReadLedger(_day(), {}, recorder_error=True)
@@ -146,7 +155,7 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
     """Persist intent before recording. Failed or interrupted writes block coverage.
 
     A subsequent successful heartbeat starts a new window after recorded errors.
-    Pending intents are never cleared by another writer.
+    Expired pending intents reset the window before they are removed.
     """
     from .inbox_lock import held_file_lock
     from .memory_care_journal import safe_path
@@ -154,23 +163,43 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
     today = today or _day()
     keys = tuple(keys)
     intent = f"{COVERAGE_REL}/{secrets.token_hex(16)}.json"
-    _write_json(target, intent, {"state": "pending", "day": today.isoformat()})
     try:
+        _write_json(target, intent, {"state": "pending", "day": today.isoformat()})
         path = safe_path(target, READS_REL)
         with held_file_lock(path.with_suffix(".lock"), deadline_seconds=5):
             ledger = load(target)
-            errors = [p for p in _pending(target) if _read_json(target, p).get("state") == "error"]
+            limits = _coverage_policy(target)
+            errors = []
+            for pending in _pending(target):
+                if pending == intent:
+                    continue
+                payload = _read_json(target, pending)
+                if payload.get("state") == "error":
+                    errors.append(pending)
+                elif payload.get("state") == "pending":
+                    # Missing or invalid dates remain unhealthy and cannot expire.
+                    day = date.fromisoformat(payload["day"]) if "day" in payload else today
+                    if (today - day).days >= limits["pending_intent_max_age_days"]:
+                        errors.append(pending)
             since = ledger.healthy_since
-            if errors or since is None or ledger.heartbeat is None or not 0 <= (today - ledger.heartbeat).days <= 1:
+            if (
+                errors
+                or target.resolve() in _FAILED_ROOTS
+                or since is None
+                or ledger.heartbeat is None
+                or not 0 <= (today - ledger.heartbeat).days <= limits["heartbeat_gap_allowance_days"] + 1
+            ):
                 since = today
             days = {k: v for k, v in ledger.last_read.items() if v <= today}
             for key in keys:
                 days[key] = max(today, days.get(key, today))
+            history = [] if since == today else _read_json(target, READS_REL)["coverage_days"]
+            history = sorted(set([*history, today.isoformat()]))
             value = {
                 "tracking_since": min(ledger.tracking_since, today).isoformat(),
                 "healthy_since": since.isoformat(),
                 "heartbeat": today.isoformat(),
-                "coverage_days": [(since + timedelta(days=n)).isoformat() for n in range((today - since).days + 1)],
+                "coverage_days": history,
                 "last_read": {k: v.isoformat() for k, v in days.items()},
             }
             mac = authenticate(target, READS_REL, value)
@@ -184,10 +213,15 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
             for error in errors:
                 _unlink(target, error)
             _unlink(target, intent)
+        _FAILED_ROOTS.discard(target.resolve())
         return True
     except (OSError, ValueError, TypeError, AttributeError):
         # This is independent of the ledger lock and remains visible to lifecycle.
-        _write_json(target, intent, {"state": "error", "day": today.isoformat()})
+        _FAILED_ROOTS.add(target.resolve())
+        try:
+            _write_json(target, intent, {"state": "error", "day": today.isoformat()})
+        except (OSError, ValueError):
+            pass
         return False
 
 
@@ -195,7 +229,10 @@ def record_content(target: Path, text: str, rel: str) -> None:
     """Record an explicit content open before returning its content to the caller."""
     from .memory_cmd import card_identity_from_text
 
-    record(target, [rel, card_identity_from_text(text.lstrip("\ufeff").replace("\r\n", "\n"), rel)])
+    try:
+        record(target, [rel, card_identity_from_text(text.lstrip("\ufeff").replace("\r\n", "\n"), rel)])
+    except (OSError, ValueError):
+        _FAILED_ROOTS.add(target.resolve())
 
 
 def last_read(ledger: ReadLedger, keys: Iterable[str], *, today: date | None = None) -> date | None:
