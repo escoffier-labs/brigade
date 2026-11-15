@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import lesson_activity as activity, lesson_io as io, verify_trial
+from . import lesson_activity as activity, lesson_io as io, receipt_signing, verify_trial
 from .handoff_ingest_rules import safe_card_name, sha256_hex
 
 FORBIDDEN = re.compile(
@@ -31,7 +31,13 @@ def verified_receipt(
     if not re.fullmatch(r"\.brigade/work/verify-runs/[A-Za-z0-9_-]+/receipt\.json", relative):
         raise ValueError("lesson requires a local verification receipt")
     observed = next(
-        (e for e in events if e["kind"] == "PostToolUse" and e.get("verify_command") is True and relative in e["text"]),
+        (
+            e
+            for e in events
+            if e["kind"] in ({"PostToolUse", "PostToolUseFailure"} if content is None else {"PostToolUse"})
+            and e.get("verify_command") is True
+            and relative in e["text"]
+        ),
         None,
     )
     if observed is None:
@@ -39,6 +45,17 @@ def verified_receipt(
     receipt = json.loads(io.text(target / relative, limit=256 * 1024) or "")
     if not isinstance(receipt, dict):
         raise ValueError("invalid lesson evidence")
+    if not receipt_signing.authentic_workspace_receipt(target, receipt):
+        raise ValueError("lesson requires an authentic workspace verification receipt")
+    if receipt.get("run_id") != Path(relative).parent.name or receipt.get("target") != str(target.resolve()):
+        raise ValueError("lesson receipt run or workspace mismatch")
+    producer_session = receipt.get("producer_work_session_id")
+    if (
+        not isinstance(producer_session, str)
+        or not producer_session
+        or producer_session != observed.get("work_session_id")
+    ):
+        raise ValueError("lesson receipt producer must match the reviewed work session")
     # Inspect the patch with descriptor-bound I/O before the shared projector.
     patch = target / relative.replace("receipt.json", "changes.patch")
     binding = receipt.get("subject_binding")
@@ -53,12 +70,19 @@ def verified_receipt(
             if data is None:
                 raise ValueError("lesson receipt patch is missing")
             io.write(staged_patch, data, exclusive=True)
-        projection = verify_trial.project_trial(receipt, target=target, patch_path=staged_patch)
+        projection = verify_trial.project_trial(
+            receipt, target=target, patch_path=staged_patch, require_live_subject=content is not None
+        )
     if not projection.eligible:
         raise ValueError("lesson receipt is not eligible: " + projection.reason)
     if binding.get("artifact_kind") != "card" or binding.get("artifact_id") != Path(card).stem:
         raise ValueError("lesson receipt subject mismatch")
-    if content is not None and binding.get("content_fingerprint") != "sha256:" + sha256_hex(content.encode()):
+    content_binding = (
+        binding.get("patch_binding", {}).get("subject_hash")
+        if binding.get("binding_mode") == "patch_backed"
+        else binding.get("content_fingerprint")
+    )
+    if content is not None and content_binding != "sha256:" + sha256_hex(content.encode()):
         raise ValueError("lesson receipt content fingerprint mismatch")
     verifier = binding.get("verifier_identity", {})
     producer = binding.get("producer_binding", {})
@@ -67,12 +91,14 @@ def verified_receipt(
     if not isinstance(verifier, dict) or not isinstance(producer, dict):
         raise ValueError("invalid lesson verifier identity")
     producer_id = producer.get("work_session_id")
+    if producer_id is not None and producer_id != producer_session:
+        raise ValueError("lesson receipt producer binding mismatch")
     if (
         not isinstance(identity, str)
         or not identity
         or not sessions
         or sha256_hex(identity.encode()) in sessions
-        or identity == producer_id
+        or identity == producer_session
     ):
         raise ValueError("lesson verifier must be independent of the work session")
     try:
@@ -163,6 +189,7 @@ def admit(target: Path, candidate: Any, events: list[dict[str, Any]], reads: dic
             or not isinstance(passed.get("tree_fingerprint"), str)
             or not passed["tree_fingerprint"]
             or failed["tree_fingerprint"] == passed["tree_fingerprint"]
+            or failed.get("producer_work_session_id") != passed.get("producer_work_session_id")
             or failed.get("verify_manifest_id") != passed.get("verify_manifest_id")
         ):
             raise ValueError("lesson requires a verified fix with a changed tree, not a cleared transient failure")

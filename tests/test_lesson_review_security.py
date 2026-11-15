@@ -13,16 +13,17 @@ def scope(tmp_path, monkeypatch):
     return lesson_scope.__wrapped__(tmp_path, monkeypatch)
 
 
-def test_self_digested_receipt_is_not_authority(scope, monkeypatch):
+def test_authenticated_receipt_still_requires_subject_binding(scope, monkeypatch):
     event(scope)
     event(scope)
     candidate = proposal(scope)
     path = scope / candidate["evidence"]
     receipt = json.loads(path.read_text())
     receipt.pop("subject_binding")
-    from brigade import localio
+    from brigade import localio, receipt_signing
 
     receipt["digests"] = {"receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"})}
+    receipt_signing.stamp_workspace_signature(scope, receipt)
     path.write_text(json.dumps(receipt))
     seat(monkeypatch, candidate)
     assert review.run(scope, now=111)["status"] == "rejected"
@@ -121,9 +122,10 @@ def test_receipt_binding_and_failure_sequence(scope, monkeypatch, damage):
         for observation in state["events"]:
             observation.pop("verify_command", None)
         activity.save(scope, state)
-    from brigade import localio
+    from brigade import localio, receipt_signing
 
     receipt["digests"] = {"receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"})}
+    receipt_signing.stamp_workspace_signature(scope, receipt)
     path.write_text(json.dumps(receipt))
     seat(monkeypatch, candidate)
     assert review.run(scope, now=111)["status"] == "rejected"

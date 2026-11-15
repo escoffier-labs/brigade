@@ -666,7 +666,11 @@ def _patch_identity_complete(receipt: dict[str, Any]) -> bool:
 
 
 def project_trial(
-    receipt: dict[str, Any], *, target: Path | None = None, patch_path: Path | None = None
+    receipt: dict[str, Any],
+    *,
+    target: Path | None = None,
+    patch_path: Path | None = None,
+    require_live_subject: bool = True,
 ) -> TrialProjection:
     binding = _binding_dict(receipt)
     if binding is None:
@@ -736,7 +740,7 @@ def project_trial(
             quarantine_reason = generated_patch_quarantine.generated_patch_eligibility_reason(binding, receipt)
             if quarantine_reason is not None:
                 return TrialProjection(eligible=False, reason=quarantine_reason, attributed=True)
-        if resolved_target is not None:
+        if resolved_target is not None and require_live_subject:
             live_hash = subject_hash_for_path(resolved_target, subject_path)
             if live_hash is None or live_hash != subject_hash:
                 return TrialProjection(eligible=False, reason="subject_hash_mismatch", attributed=True)

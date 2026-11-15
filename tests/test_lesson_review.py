@@ -1,12 +1,13 @@
 """Automatic lessons use fake seats and real draft/ingest boundaries."""
 
 import json
+import sys
 
 import pytest
 
 from brigade import lesson_activity as activity
 from brigade import lesson_review as review
-from brigade import localio, run_transport, verify_manifest
+from brigade import localio, receipt_signing, run_transport, verify_manifest
 from brigade.handoff_ingest_rules import sha256_hex
 
 
@@ -20,6 +21,18 @@ def scope(tmp_path, monkeypatch):
         'orchestrator = "fake"\n[agents.fake]\ncli = "codex"\nrole = "worker"\nmodel = "test-model"\n'
     )
     monkeypatch.setenv("BRIGADE_ROSTER", str(tmp_path / ".brigade/roster.toml"))
+    (tmp_path / ".brigade/work").mkdir()
+    (tmp_path / ".brigade/work/current").write_text("example-work-session")
+    key = tmp_path / ".brigade/receipt-signing-key"
+    key.write_text("01" * 32 + "\n")
+    key.chmod(0o600)
+    if sys.platform == "win32":
+        # Exercise admission independently of the unavailable Windows ACL proof.
+        # The signing suite separately verifies that the real loader refuses it.
+        key_bytes = bytes.fromhex("01" * 32)
+        monkeypatch.setattr(
+            receipt_signing, "load_workspace_key", lambda _target: (key_bytes, receipt_signing.key_id(key_bytes))
+        )
     return tmp_path
 
 
@@ -63,6 +76,8 @@ def proof(target, content):
     assert manifest is not None, error
     receipt = {
         "run_id": "example",
+        "producer_work_session_id": "example-work-session",
+        "target": str(target.resolve()),
         "status": "completed",
         "completed_at": "2026-11-15T12:00:00Z",
         "verify_manifest_id": "lesson",
@@ -91,6 +106,7 @@ def proof(target, content):
     }
     for name in ("example", "failed"):
         item = json.loads(json.dumps(receipt))
+        item["run_id"] = name
         if name == "failed":
             item.update(
                 status="failed",
@@ -99,7 +115,14 @@ def proof(target, content):
                 tree_fingerprint="b" * 40,
             )
             item["commands"][0].update(status="failed", exit_code=1, failure_class="verification")
-        item["digests"] = {"receipt_sha256": localio.canonical_json_digest(item)}
+        digest = localio.canonical_json_digest(item)
+        key = bytes.fromhex("01" * 32)
+        item["digests"] = {
+            "receipt_sha256": digest,
+            "signature": receipt_signing.sign(digest, key),
+            "key_id": receipt_signing.key_id(key),
+        }
+        receipt_signing.stamp_workspace_signature(target, item)
         path = target / rel.replace("example", name)
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps(item))
@@ -313,7 +336,7 @@ def test_crash_after_draft_publication_recovers_once(scope, monkeypatch):
     assert json.loads(receipts[0].read_text())["draft_sha256"]
 
 
-def test_near_duplicate_goes_through_normal_ingest(scope, monkeypatch):
+def test_near_duplicate_stays_in_review(scope, monkeypatch):
     event(scope)
     event(scope)
     candidate = proposal(scope)
@@ -323,6 +346,7 @@ def test_near_duplicate_goes_through_normal_ingest(scope, monkeypatch):
     seat(monkeypatch, candidate)
     assert review.run(scope, now=111)["status"] == "committed"
     assert not (card.parent / candidate["target_card"]).exists()
+    assert len(list((scope / "memory/handoff-inbox").glob("lesson-*.md"))) == 1
 
 
 def test_correction_must_quote_user(scope, monkeypatch):

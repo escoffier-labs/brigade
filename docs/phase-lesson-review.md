@@ -21,10 +21,23 @@ scanned and supplied to the final response in this run. Admission requires that
 same-run read and an unchanged hash for updates.
 
 Admission accepts only verified fixes, worked workarounds or quoted user
-corrections. Fixes and workarounds require a current passing verification receipt
-and a resolution quote from the digest. Unresolved failures, cleared transient
-or infrastructure failures and tool-broken claims are rejected independently of
-prompt instructions. Empty results commit the review without creating memory.
+corrections. Fixes and workarounds require signed failing and passing receipts
+from a registered card manifest, bound to the producing work session in the
+reviewed observations and the proposed card bytes. Ad hoc code checks do not
+qualify. Fixture evidence can establish new card content. Patch evidence supports
+existing-card updates, checking the failure historically and the pass against
+the live card. Unchanged-tree retries do not qualify. User corrections remain
+quoted claims with content and lexical screening, subject to human review.
+Empty results commit the review without creating memory.
+
+Receipt authority uses the same fixed-path, private, operator-owned, single-link
+workspace key confinement as #2577. It never uses the audit-key environment
+override or creates a key. Windows authority stays unavailable pending #2588.
+A MAC authenticates tooling against text forgery. An agent with shell access can
+read and use the key.
+Both failed and successful verification observations take priority over routine
+events. The bounded private prompt spool retains multiple prompts and is drained
+under the state lock after the worker returns, before comparing sequences.
 
 The coordinator executes the implementation behind `brigade handoff draft` as
 the worker's only memory write path. A prepared record binds the draft bytes to

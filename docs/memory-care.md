@@ -620,11 +620,30 @@ Admission accepts a verified fix, a workaround that worked or a correction
 quoted from a user prompt with at least 24 bytes and five tokens. Lesson content
 must derive from that quote. Fixes and workarounds require registered card
 verification receipts from `brigade work verify run` observations, independent
-verifier sessions, and an exact fingerprint of the proposed card content. An
-earlier failing receipt and a later passing receipt must have different tree
-fingerprints and complete after the earliest unreviewed activity.
-Unresolved dead ends, transient
-and infrastructure failures that cleared, and tool-broken claims are excluded.
+verifier sessions, and an exact hash of the proposed card bytes. Each receipt
+must carry a workspace signature created by the verifier and name the producing
+work session recorded by its hook observation. An earlier failing receipt and a
+later passing receipt must belong to that same work session, have different tree
+fingerprints, and complete after the earliest unreviewed activity. The failing
+patch receipt is checked against its authenticated historical binding. The
+passing patch receipt must still match the current card.
+
+These receipts require a registered card manifest. Ordinary ad hoc code checks
+cannot establish a lesson about card content. New cards need fixture evidence
+with the proposed content hash. Patch evidence can support updates to existing
+cards. Unsigned receipts and receipts from another work session do not qualify.
+The workspace signature uses only the existing operator-owned, private,
+single-link `.brigade/receipt-signing-key`, read through no-follow descriptors.
+It ignores `BRIGADE_RECEIPT_SIGNING_KEY_FILE` and never creates a key. Windows
+cannot supply this authority until the ACL confinement work in #2588 lands.
+The existing configurable audit signature remains separate. This MAC boundary
+prevents text-only receipt forgery. It does not isolate the key from an agent
+with shell access.
+
+Failure and success evidence excludes unresolved fixes and unchanged-tree
+retries. Corrections remain quoted user claims screened by content and lexical
+checks, with human review as the final check. An ordinary prompt is not proof
+that its surrounding lesson is correct.
 An empty review creates no handoff or card. Updating a card requires its current
 bytes in the final worker prompt and an unchanged hash at admission.
 
@@ -639,7 +658,11 @@ stays in `memory/handoff-inbox/` for review. Other pending handoffs stay untouch
 
 The observed counter and committed watermark survive restart under
 `.brigade/lesson-review/`. New activity during review preserves the counter for
-the next idle window. A prepared draft is recovered before another review can
+the next idle window. Prompt hooks keep a bounded private spool outside the
+workspace. The coordinator drains it after the review worker returns and before accepting
+a review, so an in-flight correction interrupts publication.
+Verification observations from successful and failed tool hooks survive routine
+event eviction. A prepared draft is recovered before another review can
 publish one. Rapid and concurrent triggers share one run lock. The digest keeps
 bounded observations, so older details may require a normal handoff. Each digest
 has a persisted three-attempt budget and exponential backoff. A rejected or stuck

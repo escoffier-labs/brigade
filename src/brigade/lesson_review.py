@@ -257,6 +257,8 @@ def _attempt(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
                 raise ValueError("lesson draft refused: " + ", ".join(lint.errors))
     with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
         state = activity.load(target)
+        activity.drain_prompts(target, state)
+        activity.save(target, state)
         if state["sequence"] != pending["sequence"]:
             # An already prepared publication must be completed before reviewing
             # later activity. It has passed admission and owns its own watermark.
@@ -298,10 +300,8 @@ MAX_ATTEMPTS = 3
 def _run(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
     with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
         snapshot = activity.load(target)
-        prompt = activity.take_prompt(target)
-        if prompt is not None:
-            activity.append_event(snapshot, "UserPromptSubmit", prompt["prompt"], prompt["at"])
-            activity.save(target, snapshot)
+        activity.drain_prompts(target, snapshot)
+        activity.save(target, snapshot)
         pending = snapshot.get("pending")
         if now - snapshot["last_activity"] < cfg["idle_seconds"]:
             return {"status": "waiting"}
