@@ -235,8 +235,8 @@ class MemoryTools:
         )
         if isinstance(value.get("retrieval"), dict):
             payload["next"] = (
-                "Read a card with memory_card(name=<path basename without .md>); "
-                "for a hub or replica match, also pass scope=<its scope>."
+                "Read a scoped match with memory_card(name=<card_id>, scope=<its scope>), "
+                "and an unscoped match with memory_card(name=<path basename without .md>)."
             )
             if self.profile.prompt_load_scan:
                 # Hub JSON passes through the search CLI, so only known keys and values leave.
