@@ -25,7 +25,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from . import dirfd, handoff_worktrees, instruction_overflow
+from . import dirfd, handoff_worktrees, instruction_overflow, ingest_near_duplicate
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -34,6 +34,7 @@ from .card_fingerprint import (
     index_cards,
     read_text_nofollow,
     reinforce_existing_card,
+    write_text_nofollow_atomic,
 )
 from .handoff_content import normalize_suggested_card_content
 from .handoff_ingest_rules import (
@@ -294,6 +295,7 @@ def ingest_into(
     # Read the cards' ids once for the whole run. Each promoted card is added to it,
     # so two handoffs in one run cannot both claim an id.
     card_ids = CardIdIndex(owner)
+    pending: list[ingest_near_duplicate.Pending] = []
     # Discovery reads several files and resolves every instruction path: once per run, not per handoff.
     routing = instruction_overflow.RouteContext(owner)
     for handoffs_dir in handoff_dirs:
@@ -347,6 +349,7 @@ def ingest_into(
                     processed_dir=processed_dir,
                     dry_run=dry_run,
                     snapshot=snapshot,
+                    pending=pending,
                     card_ids=card_ids,
                     promote_cards=promote_cards,
                     route_documents=route_documents,
@@ -642,7 +645,18 @@ def decide(
 def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
     """Return reinforce / review Outcome when create-card matches an existing card."""
     indexed = index_cards(target / "memory" / "cards")
-    match = find_card_match(content, indexed)
+    # Preserve exact reinforcement and the older word-overlap review safeguard.
+    # Reflect's shingle pass supplies the shared configurable near-duplicate policy.
+    indexed = [
+        card for card in indexed if ingest_near_duplicate.scope(card.text) == ingest_near_duplicate.scope(content)
+    ]
+    try:
+        match = ingest_near_duplicate.find_match(content, indexed, target)
+    except (ValueError, OSError):
+        return Outcome("inboxed", code="near-duplicate-config-invalid", reason="cannot read reflect duplicate settings")
+    legacy_match = find_card_match(content, indexed)
+    if legacy_match is not None and (match is None or legacy_match.kind == "exact"):
+        match = legacy_match
     if match is None:
         return None
     rel = match.path.relative_to(target).as_posix()
@@ -1021,6 +1035,7 @@ def _execute(
     promote_cards: bool | None = None,
     route_documents: bool | None = None,
     routing: instruction_overflow.RouteContext | None = None,
+    pending: list[ingest_near_duplicate.Pending] | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
@@ -1076,11 +1091,52 @@ def _execute(
         summary = _summary("reinforce", name, outcome.code, _match_meta(outcome, target))
         if not dry_run:
             evidence_pointer = _evidence_pointer(handoff_path, sections=sections, target=target)
-            reinforce_existing_card(
-                dest,
-                today=date.today(),
-                evidence_pointer=evidence_pointer,
+            # Exact matches retain automatic metadata reinforcement and a review receipt.
+            inbox_dir.mkdir(parents=True, exist_ok=True)
+            original = snapshot.decode("utf-8") if snapshot is not None else handoff_path.read_text(encoding="utf-8")
+            receipt = (
+                f"<!-- routed from {handoff_worktrees.safe_text(handoff_path.name)}\n"
+                f"     reason: {outcome.code}{_match_meta(outcome, target)}\n"
+                f"     routed-at: {datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')} -->\n\n"
+                f"<!-- reinforcement receipt: {outcome.code}{_match_meta(outcome, target)} -->\n\n"
+                "## Memory proposal notification\nExact match already reinforced. Retained for review.\n\n"
             )
+            dest = None
+            merged = None
+            assert outcome.match is not None
+            if pending is not None:
+                merged = ingest_near_duplicate.merge_pending(
+                    sections.get("suggested card content", ""),
+                    pending,
+                    target,
+                    name,
+                    original.encode("utf-8"),
+                    outcome.match.path,
+                    outcome.code,
+                )
+            if merged is not None:
+                dest, previous = merged
+            new_receipt = dest is None
+            if dest is None:
+                stem = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_path.stem)[:120]
+                dest = _write_review_draft(inbox_dir, stem, receipt + original)
+            # Publish the receipt before mutating the card so a failed inbox write
+            # leaves the source retryable without incrementing reinforcements twice.
+            assert outcome.dest is not None
+            try:
+                reinforce_existing_card(outcome.dest, today=date.today(), evidence_pointer=evidence_pointer)
+            except OSError:
+                if new_receipt:
+                    dest.unlink()
+                else:
+                    write_text_nofollow_atomic(dest, previous.decode("utf-8"))
+                raise
+            if new_receipt and pending is not None:
+                pending.append(
+                    ingest_near_duplicate.Pending(
+                        sections.get("suggested card content", ""), dest, outcome.match.path, outcome.code
+                    )
+                )
             log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
         return Action("reinforced", summary)
 
@@ -1161,9 +1217,39 @@ def _execute(
             if promote_cards is not None and route_documents is not None:
                 flags = f"promote={str(promote_cards).lower()} route={str(route_documents).lower()}"
                 header = header.replace(f"routed-at: {slug} -->", f"routed-at: {slug}\n     retry-flags: {flags} -->")
-            dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
-            log_match(target, outcome.match, dest)
-            _archive(handoff_path, processed_dir, snapshot_sha)
+            content = sections.get("suggested card content", "")
+            can_merge = (
+                pending is not None
+                and outcome.match is not None
+                and not outcome.match.opposite_polarity
+                and sections.get("recommended memory action", "").strip().lower() == "create-card"
+            )
+            dest = None
+            merged_before: bytes | None = None
+            if can_merge and pending is not None:
+                assert outcome.match is not None
+                merged = ingest_near_duplicate.merge_pending(
+                    content, pending, target, name, original.encode("utf-8"), outcome.match.path, outcome.code
+                )
+                if merged is not None:
+                    dest, merged_before = merged
+            new_draft = dest is None
+            if dest is None:
+                dest = _write_review_draft(inbox_dir, f"{slug}-{stem}", header + original)
+            try:
+                log_match(target, outcome.match, dest)
+                _archive(handoff_path, processed_dir, snapshot_sha)
+            except OSError:
+                # The handoff stays pending, so take back what this attempt wrote. The next run writes it again.
+                if merged_before is not None:
+                    write_text_nofollow_atomic(dest, merged_before.decode("utf-8"))
+                elif new_draft:
+                    dest.unlink(missing_ok=True)
+                raise
+            # Offer the draft to later handoffs only once its own handoff is archived.
+            if new_draft and can_merge and pending is not None:
+                assert outcome.match is not None
+                pending.append(ingest_near_duplicate.Pending(content, dest, outcome.match.path, outcome.code))
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)
 
@@ -1589,6 +1675,11 @@ def _match_meta(outcome: Outcome, target: Path) -> str:
     except ValueError:
         rel = match.path.name
     meta = f"  match={handoff_worktrees.safe_text(rel)}"
+    try:
+        matched_id = ingest_near_duplicate.card_id(match.path, target)
+        meta += f" card-id={handoff_worktrees.safe_text(matched_id)}"
+    except (OSError, ValueError):
+        pass
     similarity = getattr(match, "similarity", None)
     if isinstance(similarity, (int, float)):
         meta += f" similarity={similarity:.2f}"
