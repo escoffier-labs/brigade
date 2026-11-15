@@ -383,9 +383,10 @@ def _send(
                 accepted = reconcile.accepted_revision(client, request)
                 if accepted is not None:
                     revision, epoch = accepted
-                    base = {**base, "revision": revision, "log_epoch": epoch}
-                    state[client.identity][settings.scope][card_id] = base
-                    store.save_published(target, state)
+                    if base.get("log_epoch") != epoch or revision > base.get("revision", 0):
+                        base = {**base, "revision": revision, "log_epoch": epoch}
+                        state[client.identity][settings.scope][card_id] = base
+                        store.save_published(target, state)
             fields = (
                 dict(stored)
                 if stored
