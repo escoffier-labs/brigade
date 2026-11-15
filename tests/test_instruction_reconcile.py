@@ -105,6 +105,33 @@ def test_card_body_is_what_follows_the_first_frontmatter_block():
     assert card_body(b"no frontmatter\n") is None and card_body(b"---\nnever closed\n") is None
 
 
+@pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"])
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_card_body_accepts_bom_and_crlf_frontmatter_without_changing_body(bom, newline):
+    body = b"## Preference\r\n\r\nKeep this exact.\r\n"
+    card = bom + newline.join([b"---", b"title: a", b"---", b""]) + body
+    assert card_body(card) == body
+
+
+@pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"])
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_restore_accepts_bom_and_crlf_frontmatter(bom, newline):
+    moved = _moved()
+    cards = {}
+    for rel, card in moved.cards.items():
+        frontmatter, body = card.split(b"---\n", 2)[1:]
+        cards[rel] = bom + b"---" + newline + frontmatter.replace(b"\n", newline) + b"---" + newline + body
+
+    result = _restore(moved.after, moved, cards)
+    assert isinstance(result, Restore)
+    assert result.after == moved.before
+    assert result.remove_cards == tuple(run.card_rel for run in moved.runs)
+
+    reconciled = _reconcile(moved.before, moved, cards)
+    assert reconciled.after == moved.before
+    assert reconciled.remove_cards == result.remove_cards
+
+
 def test_missing_card_puts_its_section_back():  # matrix W15
     moved = _moved()
     cards = {**moved.cards, moved.runs[1].card_rel: None}
