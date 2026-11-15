@@ -305,7 +305,11 @@ def test_codex_cleanup_preserves_user_entries(target, capsys, action):
         assert cli.main(["work", "hooks", "uninstall", "--target", str(target)]) == 0
     else:
         _set_mode(target, action, capsys)
-    assert json.loads(path.read_bytes())["hooks"] == {"Stop": [foreign], "PostToolUse": [foreign]}
+    assert json.loads(path.read_bytes())["hooks"] == {
+        "Stop": [foreign],
+        "PostToolUse": [foreign],
+        "UserPromptSubmit": [foreign],
+    }
 
 
 def test_codex_utf8_crlf_surgical_install_and_remove(tmp_path):

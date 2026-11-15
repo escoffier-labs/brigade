@@ -40,7 +40,7 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
     if harness != "codex":
         return
     event = payload.get("hook_event_name")
-    if event != "PostToolUse":
+    if event not in {"PostToolUse", "UserPromptSubmit"}:
         return
     if any(key in payload and not isinstance(payload[key], str) for key in ("session_id",)):
         return
@@ -54,6 +54,10 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
     if target is None or not _allowed(target, harness, pin):
         return
     from . import lesson_activity
+
+    if event == "UserPromptSubmit":
+        lesson_activity.on_event(target, event, payload)
+        return
 
     try:
         if payload.get("tool_name") == "apply_patch":

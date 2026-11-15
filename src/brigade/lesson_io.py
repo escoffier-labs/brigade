@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Iterator
 
@@ -72,29 +73,38 @@ def text(path: Path, **kwargs) -> str | None:
 
 
 def write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
-    with directory(path.parent, create=True, private=True) as parent:
-        temporary = path.name if exclusive else f".lesson-{uuid.uuid4().hex}.tmp"
-        fd = dirfd.open_child_file(parent, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        try:
-            regular(fd)
-            with os.fdopen(os.dup(fd), "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-        finally:
-            os.close(fd)
-        if not exclusive:
+    # Serialize matching exclusive writes so recovery can remove abandoned
+    # temporaries even when a retried draft gets a new timestamped filename.
+    key = hashlib.sha256(data).hexdigest()
+    lock = path.parent / f".lesson-{key}.lock"
+    with held_file_lock(lock, deadline_seconds=1) if exclusive else nullcontext():
+        with directory(path.parent, create=True, private=True) as parent:
+            temporary = f".lesson-{key if exclusive else uuid.uuid4().hex}.tmp"
+            if exclusive:
+                try:
+                    dirfd.unlink_child(parent, temporary)
+                except FileNotFoundError:
+                    pass
             try:
-                # Refuse linked destinations even though replace would not follow them.
-                existing = read_bytes(path, absent=True)
-                del existing
-                dirfd.replace_children(parent, temporary, path.name)
+                fd = dirfd.open_child_file(parent, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                try:
+                    regular(fd)
+                    with os.fdopen(os.dup(fd), "wb") as handle:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                finally:
+                    os.close(fd)
+                if not exclusive:
+                    # Refuse linked destinations even though replace would not follow them.
+                    read_bytes(path, absent=True)
+                dirfd.replace_children(parent, temporary, path.name, replace=not exclusive)
+                dirfd.fsync_directory(parent)
             finally:
                 try:
                     dirfd.unlink_child(parent, temporary)
                 except FileNotFoundError:
                     pass
-        dirfd.fsync_directory(parent)
 
 
 @contextmanager
