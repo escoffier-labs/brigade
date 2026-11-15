@@ -2,6 +2,7 @@
 
 from datetime import date, timedelta
 import json
+import os
 import time
 
 import pytest
@@ -11,6 +12,12 @@ from brigade import memory_verify_state
 from brigade.claude_hooks import hub_recall
 from brigade.cli import main
 from brigade.memory_verify_cmd import _binding
+
+# memory_verify_state.save replaces the file through directory descriptors, which Windows lacks.
+needs_dir_fd = pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 
 
 def card(target, name, *, trust="agent-unreviewed", scope=None):
@@ -105,6 +112,7 @@ def replica(target):
     return snapshot
 
 
+@needs_dir_fd
 def test_cached_hub_counts_are_scoped_bound_and_capped(tmp_path):
     snapshot = replica(tmp_path)
     key = memory_fairness.key_digest("fleet", ["hub-card"])
@@ -231,6 +239,7 @@ def test_corrupt_replica_preserves_local_queue(tmp_path):
     assert rows[0]["use"]["hub_total_reads"] is None
 
 
+@needs_dir_fd
 def test_stale_hub_counts_are_unavailable(tmp_path):
     from brigade.memory_verify_cmd import SNAPSHOT_MAX_AGE_MS
 
