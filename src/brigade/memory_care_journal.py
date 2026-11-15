@@ -145,6 +145,7 @@ def validate_record(p: dict[str, Any]) -> dict[str, Any]:
         "undoes": (str, type(None)),
         "undone_by": (str, type(None)),
         "phase": str,
+        "before_absent": list,
     }
     for field, expected in fields.items():
         if field not in p or not isinstance(p[field], expected):
@@ -156,8 +157,8 @@ def validate_record(p: dict[str, Any]) -> dict[str, Any]:
         or not set(p["paths"]) <= p["after_sha256"].keys()
     ):
         raise JournalConflict("invalid decision record: after_sha256")
-    absent = p.get("before_absent")
-    if not isinstance(absent, list) or len(absent) != len(p["paths"]) or not all(type(v) is bool for v in absent):
+    absent = p["before_absent"]
+    if len(absent) != len(p["paths"]) or not all(type(v) is bool for v in absent):
         raise JournalConflict("invalid decision record: before_absent")
     if p["phase"] == "prepared":
         for field in ("prepared_paths", "after_bytes"):
@@ -674,6 +675,7 @@ def _committed_destinations(target: Path, operation_id: str) -> list[str]:
         return [op["mutations"][n]["display_path"] for n in op.get("committed_indexes", [])]
     except (store.StoreError, OSError, ValueError, LookupError, TypeError, AttributeError):
         # recover may have failed because this journal is unreadable. Quarantine must still run.
+        # The result is only reported. Never reuse this broad catch on a path that restores bytes.
         return []
 
 

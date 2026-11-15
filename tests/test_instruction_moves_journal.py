@@ -457,3 +457,62 @@ def test_drain_reports_kernel_projection_error(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "resolve_prepared", refuse)
     result = memory_inbox_drain.drain(tmp_path, today=date(2026, 11, 14), deadline_days=30)
     assert result["error"] == "kernel journal unreadable"
+
+
+def test_rows_cached_before_a_classifier_change_are_rebuilt(tmp_path):
+    import hashlib
+    import json
+
+    from brigade import memory_care_pending
+
+    source(tmp_path)
+    move(tmp_path)
+    record = tmp_path / journal.JOURNAL_REL / ID / "decision.json"
+    p = journal._payload(tmp_path, ID)
+    del p["before_absent"]
+    journal.store.write_json(record, p)
+    stat = record.stat()
+    records = {
+        ID: {
+            "stamp": [stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino],
+            "row": dict.fromkeys(("prepared", "document", "repair", "append"), False),
+        }
+    }
+    digest = hashlib.sha256(json.dumps(records, sort_keys=True).encode("utf-8")).hexdigest()
+    journal.store.write_json(tmp_path / memory_care_pending.INDEX_REL, {"records": records, "sha256": digest})
+    assert memory_care_pending.load(tmp_path)[ID]["document"] is True
+    index = journal.store.read_json(tmp_path / memory_care_pending.INDEX_REL)
+    assert index["version"] == memory_care_pending.INDEX_VERSION
+
+
+def test_a_phased_record_that_lost_its_phase_is_not_exempt(tmp_path):
+    from brigade import memory_care_pending
+
+    source(tmp_path)
+    move(tmp_path)
+    p = journal._payload(tmp_path, ID)
+    del p["phase"]
+    p["status"] = "committed"
+    journal.store.write_json(tmp_path / journal.JOURNAL_REL / ID / "decision.json", p)
+    assert memory_care_pending.scan(tmp_path)[ID]["document"] is True
+
+
+def test_commit_interrupted_at_pending_leaves_nothing_for_care_recovery(tmp_path, monkeypatch):
+    from brigade import memory_care_pending
+
+    class Killed(BaseException):
+        pass
+
+    def killed(plan, **kw):
+        raise Killed()
+
+    monkeypatch.setattr(journal.kernel, "execute", killed)
+    with pytest.raises(Killed):
+        _fix(tmp_path)
+    monkeypatch.undo()
+    (record,) = (tmp_path / journal.JOURNAL_REL).glob("*/decision.json")
+    assert journal.store.read_json(record)["status"] == "pending"
+    entered = lock_spy(monkeypatch)
+    assert memory_care_pending.scan(tmp_path) == {}
+    assert journal.resolve_prepared(tmp_path) == []
+    assert entered == []
