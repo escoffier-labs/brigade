@@ -813,7 +813,10 @@ async fn churn_hits_the_retained_budget_and_the_35_day_purge_frees_it() {
     // Not yet: records keep their bytes for 35 days after going inert.
     h.set_clock(h.now() + manifest_binding::RETENTION_MS - 60_000);
     let db = Connection::open(h.memory()).unwrap();
-    writer::sweep(&db, h.now()).unwrap();
+    // This tests retention and row bounds, independently of the production
+    // 20 ms deadline. A descheduled runner can interrupt and roll back a sweep.
+    let sweep = || writer::sweep_with_budget(&db, h.now(), std::time::Duration::from_secs(30));
+    sweep().expect("pre-expiry sweep commits");
     assert_eq!(purged(&h), (0, 0, 0));
     assert_eq!(
         code(&attach_large(&h, "early", a).await),
@@ -825,7 +828,7 @@ async fn churn_hits_the_retained_budget_and_the_35_day_purge_frees_it() {
         if purged(&h).0 == inert {
             break;
         }
-        let _ = writer::sweep(&db, h.now());
+        assert!(sweep().expect("retention sweep commits") > 0);
     }
     assert_eq!(purged(&h), (inert, inert, inert));
     let again = attach_large(&h, "after-purge", a).await;

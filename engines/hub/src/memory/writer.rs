@@ -377,14 +377,30 @@ const SWEEP_BATCH: usize = 256;
 pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
     sweep_with(db, now_ms, &super::hardening::Limits::default())
 }
+#[cfg(test)]
+pub(super) fn sweep_with_budget(
+    db: &Connection,
+    now_ms: i64,
+    budget: Duration,
+) -> rusqlite::Result<usize> {
+    sweep_bounded(db, now_ms, &super::hardening::Limits::default(), budget)
+}
 fn sweep_with(
     db: &Connection,
     now_ms: i64,
     limits: &super::hardening::Limits,
 ) -> rusqlite::Result<usize> {
+    sweep_bounded(db, now_ms, limits, Duration::from_millis(20))
+}
+fn sweep_bounded(
+    db: &Connection,
+    now_ms: i64,
+    limits: &super::hardening::Limits,
+    budget: Duration,
+) -> rusqlite::Result<usize> {
     worker::begin(db, Instant::now() + Duration::from_millis(250))?;
-    // At most 256 rows or 20 ms per transaction, never under the hub lock.
-    let deadline = Instant::now() + Duration::from_millis(20);
+    // At most 256 rows per transaction, never under the hub lock.
+    let deadline = Instant::now() + budget;
     let _ = db.progress_handler(1000, Some(move || Instant::now() >= deadline));
     let deleted = db.execute(
         "DELETE FROM memory_idempotency WHERE (principal,client_event_id) IN (SELECT principal,client_event_id FROM memory_idempotency WHERE created_ms < ?1 ORDER BY created_ms LIMIT ?2)",

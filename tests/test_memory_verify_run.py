@@ -461,19 +461,33 @@ def test_an_evidence_quota_stops_before_proposing_without_a_failure(verify_hub, 
     assert packets(target) == [staged]
 
 
-def test_lifetime_quota_settles_the_stage_and_does_not_replay(verify_hub, capsys, resolver):
+@pytest.mark.parametrize("crash_before_drop", [False, True])
+def test_lifetime_quota_settles_the_stage_and_does_not_replay(
+    verify_hub, capsys, resolver, monkeypatch, crash_before_drop
+):
     target, hub, _, _ = verify_hub
     hub.attach_reply = (429, {"code": "memory_evidence_lifetime_principal_quota", "error": "quota"})
+    drop = pk.drop
+    if crash_before_drop:
+        # Leave the stage behind after the refusal has been saved to the ledger.
+        monkeypatch.setattr(pk, "drop", lambda *_: None)
     status, report = verify(target, capsys)
     assert status == 0 and report["stop"] == "evidence_lifetime_quota"
     assert report["skipped"]["evidence_lifetime_quota"] == 1
     assert report["schedule"]["consecutive_failures"] == 0
     assert [call["action"] for call in writes(hub)] == ["evidence.attach"]
-    assert packets(target) == []
+    assert len(packets(target)) == int(crash_before_drop)
     assert next(iter(state_of(target)["submissions"].values()))["refused"] == "evidence_lifetime_quota"
+    monkeypatch.setattr(pk, "drop", drop)
+    state = state_of(target)
+    for card in state["scopes"][SCOPE]["cards"].values():
+        card.pop("verified", None)
+    vstate.save(target, state)
     before = len(writes(hub))
-    status, _ = verify(target, capsys)
-    assert status == 0 and writes(hub)[before:] == []
+    status, report = verify(target, capsys)
+    assert status == 0 and report["skipped"]["refused"] == 1
+    assert writes(hub)[before:] == []
+    assert packets(target) == []
 
 
 def test_lifetime_evidence_quota_is_a_hub_refusal():

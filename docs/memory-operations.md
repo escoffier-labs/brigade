@@ -2626,6 +2626,10 @@ card, evidence or model text, and it is scanned before attachment
 (`verify_manifest_unclean`). Its evidence id is
 `<principal>/memory-verify/<sha256 of the manifest>`.
 
+The JSON report includes a top-level `stop` field when a quota stops new
+proposals. Its value is the run reason, such as `evidence_quota` or
+`evidence_lifetime_quota`. Retained quota stages stay available for replay.
+
 | Run reason | Meaning |
 |---|---|
 | `dry_run_proposal` | A dry run would have attached and proposed for this card |
@@ -2633,6 +2637,7 @@ card, evidence or model text, and it is scanned before attachment
 | `pending_ceiling` | The job already has 8 pending proposals |
 | `proposal_quota` | The hub answered a proposal quota. The run stops proposing and still verifies the rest |
 | `evidence_quota` | The hub answered a retained evidence quota. Handled like `proposal_quota` |
+| `evidence_lifetime_quota` | The hub answered `429 memory_evidence_lifetime_principal_quota`. The run stops proposing without a failure, drops the stage and records the correction as refused. This quota is permanent for that principal, so the correction is never replayed under it |
 | `evidence_cap` | The card already holds the most manifests this principal may attach to it |
 | `duplicate_pending` | The hub already holds this proposal. Its id is remembered |
 | `already_proposed`, `refused` | The ledger already holds a proposal id or a final refusal for this correction |
