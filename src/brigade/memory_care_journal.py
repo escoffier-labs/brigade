@@ -147,6 +147,22 @@ def current(target: Path, path: str) -> bytes | None:
     return p.read_bytes() if p.exists() else None
 
 
+class Linked:
+    """A live path that cannot be read without following a symlink."""
+
+
+LINKED = Linked()
+
+
+def _live(target: Path, path: str) -> bytes | None | Linked:
+    try:
+        return current(target, path)
+    except JournalConflict as exc:
+        if str(exc).startswith("symlink path: "):
+            return LINKED
+        raise
+
+
 def commit(
     target: Path,
     *,
@@ -332,6 +348,11 @@ def _execute_phase(target: Path, decision_id: str, phase: str, changes: Sequence
         raise JournalConflict(f"kernel {receipt.terminal_state}")
 
 
+def new_decision_id(kind: str, *, now: datetime | None = None) -> str:
+    stamp = now if now is not None else datetime.now(timezone.utc)
+    return f"{stamp:%Y%m%dT%H%M%SZ}-{kind}-{uuid.uuid4().hex[:8]}"
+
+
 def commit_phased(
     target: Path,
     *,
@@ -343,12 +364,23 @@ def commit_phased(
     hub: dict[str, Any],
     undoes: str | None = None,
     metadata: dict[str, Any] | None = None,
+    decision_id: str | None = None,
 ) -> Decision:
     """Publish the safety copy and recovery recipe before any removal."""
     import base64
 
     from .memory_cmd import _config_or_default
 
+    decision_id = decision_id if decision_id is not None else new_decision_id(kind)
+    try:
+        directory = _directory(target, decision_id)
+        if not re.fullmatch(rf"[0-9]{{8}}T[0-9]{{6}}Z-{re.escape(kind)}-[0-9a-f]{{8}}", decision_id):
+            raise ValueError("kind mismatch")
+        stamp = datetime.strptime(decision_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        if directory.exists():
+            raise ValueError("taken")
+    except ValueError as exc:
+        raise JournalConflict("decision id taken or invalid") from exc
     config = _config_or_default(target)
     for c in changes:
         safe_path(target, c.path)
@@ -356,9 +388,6 @@ def commit_phased(
             raise ReadOnlyPath(c.path)
         if current(target, c.path) != c.before:
             raise JournalConflict(f"{c.path}: changed before preparation")
-    stamp = datetime.now(timezone.utc)
-    decision_id = f"{stamp:%Y%m%dT%H%M%SZ}-{kind}-{uuid.uuid4().hex[:8]}"
-    directory = _directory(target, decision_id)
     store.private_dir(directory / "before")
     d = Decision(
         decision_id,
@@ -500,11 +529,11 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
             rebased.append(c)
         changes = rebased
     prepared = set(p["prepared_paths"])
-    drift = [c.path for c in changes if current(target, c.path) != (c.after if c.path in prepared else c.before)]
+    drift = [c.path for c in changes if _live(target, c.path) != (c.after if c.path in prepared else c.before)]
     drift.extend(
         path
         for path, digest in p.get("append_guards", {}).items()
-        if kernel.content_digest(current(target, path)) != digest
+        if isinstance(guard_live := _live(target, path), Linked) or kernel.content_digest(guard_live) != digest
     )
     # Routed documents are written after finish, so they are not among the changes.
     from .memory_inbox_append import DOCUMENT_WRITERS
@@ -522,7 +551,7 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
             "abandoned_reason": ("read-only paths changed" if protected else f"changed: {', '.join(drift)}"),
         }
         original_missing = any(
-            c.before is not None and c.after is None and current(target, c.path) is None for c in changes
+            c.before is not None and c.after is None and _live(target, c.path) is None for c in changes
         )
         final["restorable"] = _restorable(target, p)
         pending = (
@@ -559,12 +588,14 @@ def resolve_prepared(target: Path) -> list[dict[str, Any]]:
 
     needs_lock = False
     for op in kernel.unfinished_operations(target):
-        match = re.fullmatch(r"care-([0-9]{8}T[0-9]{6}Z-undo-[0-9a-f]{8})-(prepare|finish|repair)", op.operation_id)
+        match = re.fullmatch(
+            r"care-([0-9]{8}T[0-9]{6}Z-(?:undo|instructions)-[0-9a-f]{8})-(prepare|finish|repair)", op.operation_id
+        )
         if match:
             try:
                 needs_lock = needs_lock or bool(_payload(target, match[1]).get("document_undo"))
-            except JournalConflict:
-                # An unreadable unfinished undo may contain a document mutation.
+            except (JournalConflict, store.StoreError):
+                # An unreadable unfinished operation may contain a document mutation.
                 needs_lock = True
     from .memory_care_pending import load as pending_index
 
