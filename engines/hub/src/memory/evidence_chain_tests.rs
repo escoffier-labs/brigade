@@ -44,6 +44,13 @@ async fn append_in_order_and_latest_use_server_time() {
     let empty = h.call(NODE_TOKEN, latest()).await;
     assert_eq!(empty.status, 200, "{empty:?}");
     assert_eq!(empty.body["head"], Json::Null);
+    for field in [
+        "last_reset_seq",
+        "last_reset_digest",
+        "last_reset_created_at",
+    ] {
+        assert_eq!(empty.body[field], Json::Null);
+    }
     let r = h
         .call(NODE_TOKEN, append(&h, 1, None, FIRST, "append"))
         .await;
@@ -56,6 +63,7 @@ async fn append_in_order_and_latest_use_server_time() {
         "last_reset_created_at",
     ] {
         assert_eq!(r.body["head"][field], Json::Null);
+        assert_eq!(r.body[field], Json::Null);
     }
     assert_eq!(r.body["head"]["created_at"], ids::isoformat(h.now()));
     h.set_clock(h.now() + 1000);
@@ -202,6 +210,15 @@ async fn reset_is_an_ordered_record_and_survives_reopen() {
         head["last_reset_created_at"],
         reset.body["head"]["created_at"]
     );
+    let latest = h.call(NODE_TOKEN, latest()).await.body;
+    for field in [
+        "last_reset_seq",
+        "last_reset_digest",
+        "last_reset_created_at",
+    ] {
+        assert_eq!(latest[field], head[field]);
+        assert_eq!(reset.body[field], reset.body["head"][field]);
+    }
     let db = Connection::open(h.memory()).unwrap();
     let count: i64 = db
         .query_row("SELECT count(*) FROM memory_evidence_chain", [], |r| {
@@ -360,4 +377,80 @@ async fn rate_refusals_span_workspaces_and_survive_reopen_without_moving_head() 
             .status,
         201
     );
+}
+
+#[tokio::test]
+async fn workspace_quota_counts_distinct_ids_across_streams_and_preserves_head() {
+    let mut h = granted().await;
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"proposal_limits":{"evidence_workspaces_per_principal":1}}))
+        .unwrap();
+    assert_eq!(
+        h.call(NODE_TOKEN, append(&h, 1, None, FIRST, "append"))
+            .await
+            .status,
+        201
+    );
+    let before = h.call(NODE_TOKEN, latest()).await.body;
+    h.set_clock(h.now() + 1000);
+    let mut other = append(&h, 1, None, SECOND, "append");
+    other["workspace_id"] = json!(SECOND);
+    let reply = h.call(NODE_TOKEN, other).await;
+    assert_eq!(
+        (reply.status, code(&reply)),
+        (429, "memory_evidence_chain_workspace_quota")
+    );
+    assert_eq!(h.call(NODE_TOKEN, latest()).await.body, before);
+    let mut same = append(&h, 1, None, SECOND, "append");
+    same["stream"] = json!("lesson_observations");
+    assert_eq!(h.call(NODE_TOKEN, same).await.status, 201);
+    h.set_clock(h.now() + 1000);
+    assert_eq!(
+        h.call(NODE_TOKEN, append(&h, 2, Some(FIRST), SECOND, "append"))
+            .await
+            .status,
+        201
+    );
+    let db = Connection::open(h.memory()).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(DISTINCT workspace_id) FROM memory_evidence_chain",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn admin_requires_own_exact_grant_and_cannot_act_as_another_owner() {
+    let h = granted().await;
+    let mut own = latest();
+    own["scope"] = json!("principal:hub:admin");
+    let mut own_append = append(&h, 1, None, FIRST, "append");
+    own_append["scope"] = own["scope"].clone();
+    for request in [
+        own.clone(),
+        own_append.clone(),
+        latest(),
+        append(&h, 1, None, FIRST, "append"),
+    ] {
+        let reply = h.call(ADMIN_TOKEN, request).await;
+        assert_eq!((reply.status, code(&reply)), (403, "memory_grant_missing"));
+    }
+    // The grant API provisions only nodes and agents. Seed an exact admin
+    // grant to exercise owner authorization independently of that API.
+    Connection::open(h.memory()).unwrap().execute(
+        "INSERT INTO memory_grants(principal,scope,rights,updated_at,updated_by) VALUES(?1,'principal:hub:admin','evidence_chain',?2,?1)",
+        [ADMIN, &ids::isoformat(h.now())],
+    ).unwrap();
+    assert_eq!(h.call(ADMIN_TOKEN, own_append).await.status, 201);
+    assert_eq!(h.call(ADMIN_TOKEN, own).await.body["head"]["seq"], 1);
+    for request in [latest(), append(&h, 1, None, FIRST, "append")] {
+        let reply = h.call(ADMIN_TOKEN, request).await;
+        assert_eq!((reply.status, code(&reply)), (403, "memory_grant_missing"));
+    }
 }

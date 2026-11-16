@@ -45,17 +45,33 @@ replica_max_mb = 50            # cap on the replica's heads.json
 ### Workspace evidence chains
 
 `MemoryHubClient.evidence_chain(scope, workspace_id, stream)` reads the latest
-hub anchor for `card_reads` or `lesson_observations`. It returns `{"head": null}`
-for an empty chain. The hub keys each chain by the authenticated principal,
+hub anchor for `card_reads` or `lesson_observations`. An empty chain has
+`head=null` and null reset metadata. The hub keys each chain by the authenticated principal,
 workspace and stream. Grant `evidence_chain` on the caller's exact
 `principal:<id>` scope. Node defaults and wildcard grants do not grant access.
 A caller cannot read or append another principal's chain, including with the
-admin credential.
+admin credential. Admin also needs an explicit exact grant for its own chain.
 
 The caller derives `workspace_id` with HMAC on the client and sends its
 64-character lowercase hex output. Paths and card IDs stay on the client.
-The hub validates the format and treats the value as opaque. This slice does
-not derive the identifier or connect either local evidence stream.
+The hub validates the format and treats the value as opaque. Principal ownership
+is the workspace binding. No per-workspace capability is needed because a
+same-user file adds no authority. Each host keeps its own principal. This slice
+does not derive the identifier or connect either local evidence stream.
+
+The trust model guarantees that honest automation is never tricked by file
+edits or rollback. A worker that deliberately uses the host credential gains
+only delay. Every automated action is already available to that credential,
+reversible and attributed. The connected consumers must enforce the client
+contract below before the archive and lesson gates can be enabled.
+
+For the card-read stream, each local entry is
+`digest_n = H(digest_{n-1} || event_n)`. The hub stores only the opaque head
+and its continuity metadata. Consumers verify the local log up to the hub head
+before computing coverage. Dropping an anchored read requires a hash preimage.
+A credentialed worker can add reads or ordered resets, which only delay
+archiving. The local signing key authorizes no admission. This is the client
+contract for the next slice.
 
 Append with `operation="append"`, a positive `seq`, a lowercase SHA-256 `digest`
 and `prev_digest`. The first entry requires `seq=1` and `prev_digest=None`.
@@ -70,18 +86,23 @@ checks. It preserves earlier entries so later consumers can restart coverage
 at the reset. The default kind is `append`.
 Every nonempty head also includes `last_reset_seq`, `last_reset_digest` and
 `last_reset_created_at`, computed from immutable stored rows in the same read.
+All three also appear beside `head` in each response, including `latest`.
 All three are null for a stream that has never reset. Later appends preserve
 the latest reset boundary and its hub timestamp.
 
-Admission defaults to 10,000 retained rows per principal/workspace/stream,
+Admission defaults to 128 distinct workspace IDs per principal,
+10,000 retained rows per principal/workspace/stream,
 100,000 rows per principal and one successful append per principal every
 1,000 milliseconds across all workspaces and streams. Resets count toward
 both quotas and the rate limit. These conservative caps bound immutable storage
 and match the existing principal admission interval. Configure
-`evidence_rows_per_stream`, `evidence_rows_per_principal` and
+`evidence_workspaces_per_principal`, `evidence_rows_per_stream`,
+`evidence_rows_per_principal` and
 `evidence_principal_ms` under `memory.proposal_limits` using positive bounded
 integers. Admission runs in the writer transaction before insertion.
-HTTP 429 returns `memory_evidence_chain_stream_quota`,
+The workspace cap counts an ID once across both streams. Existing workspaces
+can keep appending at the cap. HTTP 429 returns
+`memory_evidence_chain_workspace_quota`, `memory_evidence_chain_stream_quota`,
 `memory_evidence_chain_principal_quota` or `memory_evidence_chain_rate_limited`.
 Refusals leave the head unchanged. Stored hub timestamps enforce the interval
 across restarts and clock rollback. Quotas retain audit history without eviction.

@@ -58,7 +58,7 @@ fn parse(map: &Map<String, Json>, append: bool) -> Result<Chain, Reply> {
         return Err(invalid("operation must be append or latest"));
     }
     let scope = string(map, "scope");
-    // TODO(#2620): bind this accepted opaque id to workspace authorization after design review.
+    // #2620: principal ownership is the workspace binding. Same-user capabilities add no authority.
     let workspace = string(map, "workspace_id");
     let stream = string(map, "stream");
     if !scope
@@ -109,10 +109,23 @@ fn authorized<T: ReadTx + ?Sized>(
     who: &auth::Credential,
     chain: &Chain,
 ) -> rusqlite::Result<bool> {
-    Ok(
-        chain.scope.strip_prefix("principal:") == Some(who.principal())
-            && auth::has_exact_rights(tx, who, &chain.scope, &["evidence_chain"])?,
-    )
+    if chain.scope.strip_prefix("principal:") != Some(who.principal()) {
+        return Ok(false);
+    }
+    // Require the owner's explicit grant even for Admin, without the general
+    // has_exact_rights admin bypass. No credential can act as another owner.
+    let grants = tx.query(
+        "SELECT rights FROM memory_grants WHERE principal=?1 AND scope=?2",
+        &[
+            Value::Text(who.principal().into()),
+            Value::Text(chain.scope.clone()),
+        ],
+    )?;
+    Ok(grants.iter().any(|r| {
+        super::ops::s(&r[0])
+            .split(',')
+            .any(|right| right == "evidence_chain")
+    }))
 }
 fn denied() -> Reply {
     super::error(
@@ -148,6 +161,14 @@ fn head<T: ReadTx + ?Sized>(
         "last_reset_created_at": if r[7] == Value::Null { Json::Null } else { json!(super::ops::s(&r[7])) }
     })))
 }
+fn response(head: Json) -> Json {
+    json!({
+        "last_reset_seq": head["last_reset_seq"],
+        "last_reset_digest": head["last_reset_digest"],
+        "last_reset_created_at": head["last_reset_created_at"],
+        "head": head
+    })
+}
 pub(super) fn latest(
     tx: &dyn ReadTx,
     who: &auth::Credential,
@@ -163,7 +184,7 @@ pub(super) fn latest(
     if !authorized(tx, who, &chain)? {
         return Ok(denied());
     }
-    Ok(Reply::new(200, json!({"head": head(tx, who, &chain)?})))
+    Ok(Reply::new(200, response(head(tx, who, &chain)?)))
 }
 pub(super) fn append(
     tx: &dyn WriteTx,
@@ -186,7 +207,8 @@ pub(super) fn append(
     // Admission shares the writer transaction with insertion. Stored timestamps
     // preserve the per-principal spacing used by Rate across hub restarts.
     let usage = tx.query(
-        "SELECT COUNT(*),COALESCE(SUM(workspace_id=?2 AND stream=?3),0),MAX(created_at)
+        "SELECT COUNT(*),COALESCE(SUM(workspace_id=?2 AND stream=?3),0),MAX(created_at),
+                COUNT(DISTINCT workspace_id),COALESCE(SUM(workspace_id=?2),0)
          FROM memory_evidence_chain WHERE principal=?1",
         &[
             Value::Text(p.credential.principal().into()),
@@ -202,6 +224,10 @@ pub(super) fn append(
         }
     };
     for (full, code) in [
+        (
+            number(4) == 0 && number(3) >= limits.evidence_workspaces_per_principal,
+            "memory_evidence_chain_workspace_quota",
+        ),
         (
             number(0) >= limits.evidence_rows_per_principal,
             "memory_evidence_chain_principal_quota",
@@ -235,6 +261,6 @@ pub(super) fn append(
     )?;
     Ok(Reply::new(
         201,
-        json!({"head": head(tx, &p.credential, &a.chain)?}),
+        response(head(tx, &p.credential, &a.chain)?),
     ))
 }

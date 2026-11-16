@@ -15,6 +15,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Limits {
+    pub evidence_workspaces_per_principal: i64,
     pub evidence_rows_per_stream: i64,
     pub evidence_rows_per_principal: i64,
     pub evidence_principal_ms: i64,
@@ -32,6 +33,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            evidence_workspaces_per_principal: 128,
             evidence_rows_per_stream: 10_000,
             evidence_rows_per_principal: 100_000,
             evidence_principal_ms: 1_000,
@@ -63,6 +65,7 @@ impl Limits {
                 .filter(|n| *n > 0 && *n <= 1_000_000_000)
                 .ok_or("proposal limits must be positive bounded integers")?;
             match key.as_str() {
+                "evidence_workspaces_per_principal" => limits.evidence_workspaces_per_principal = n,
                 "evidence_rows_per_stream" => limits.evidence_rows_per_stream = n,
                 "evidence_rows_per_principal" => limits.evidence_rows_per_principal = n,
                 "evidence_principal_ms" => limits.evidence_principal_ms = n,

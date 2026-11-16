@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Keep the latest reset boundary visible in evidence chain heads, bound immutable row growth and principal append rates, and refuse schema-16 upgrades without schema 15.
+- Keep the latest reset boundary visible in evidence chain heads, bound workspace counts, immutable row growth and principal append rates, require explicit owner grants even for admin, and refuse schema-16 upgrades without schema 15.
 
 ## [0.31.0] - 2026-11-14
 
