@@ -1939,7 +1939,7 @@ def collect_changes_patch(cwd: Path, patch_path: Path) -> PatchSummary:
     # (issue #124). Keep each piece verbatim, only guaranteeing the single
     # trailing newline git already emits.
     content = "".join(piece if piece.endswith("\n") else piece + "\n" for piece in pieces if piece)
-    patch_path.write_text(content)
+    patch_path.write_text(content, newline="")
     return PatchSummary(
         path=patch_path,
         changed=bool(content),
