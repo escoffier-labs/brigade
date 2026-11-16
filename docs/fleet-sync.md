@@ -789,7 +789,7 @@ Bodies above 8 MiB return HTTP 413. Missing, ambiguous, or invalid body framing
 returns HTTP 400 and closes the connection, except that a Worklore DELETE with
 no body still succeeds. Transfer-Encoding and duplicate
 Content-Length headers are refused. Worklore retains its smaller 256 KiB body
-limit and 1 MiB import limit. Dashboard enrollment retains its 16 KiB body limit.
+limit and 5 MiB import limit. Dashboard enrollment retains its 16 KiB body limit.
 
 Before JSON decoding, regex scans check nesting and aggregate complexity.
 A document accepts at most 32 levels of containers, 32768 objects and arrays in
@@ -819,9 +819,10 @@ fenced to the original holder token. CLI JSON includes the decision reason.
 A heartbeat quota refusal terminates the lease through the existing claim
 loss channel. The default policy cancels guarded work.
 
-The 1 MiB Worklore import ceiling predates these changes. A contract-shaped batch
-of 500 observations can serialize to about 4.27 MB and exceed it. This
-incompatibility still needs a follow-up. The import ceiling remains 1 MiB.
+The Worklore import ceiling is 5 MiB. A contract-shaped batch of 500
+observations serializes to about 4.27 MB and fits. The Rust front applies only
+its 8 MiB global limit to `/work/imports` and forwards the route, so the
+Python ceiling is the effective one.
 
 These request bounds leave GET payloads and fleet list clients unchanged.
 Claim fencing failures still return HTTP 503 on read paths, including `/status`.

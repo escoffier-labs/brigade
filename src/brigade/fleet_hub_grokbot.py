@@ -481,12 +481,19 @@ def start_expiry_sweeper(
 
 def deck_projection(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
     """Sanitized hub rows for Command Deck and cloud tracker. Terminal jobs are history."""
-    rows = conn.execute(f"SELECT {_JOB_COLUMNS} FROM grokbot_jobs ORDER BY queued_at, job_id").fetchall()
-    jobs = [_job_payload(_job_dict(row)) for row in rows]
     return {
-        "active": [job for job in jobs if job["state"] in WORK_STATES],
-        "history": [job for job in jobs if job["state"] in TERMINAL_STATES],
+        "active": _jobs_in_states(conn, WORK_STATES),
+        "history": _jobs_in_states(conn, TERMINAL_STATES),
     }
+
+
+def _jobs_in_states(conn: sqlite3.Connection, states: frozenset[str]) -> list[dict[str, Any]]:
+    marks = ",".join("?" for _ in states)
+    rows = conn.execute(
+        f"SELECT {_JOB_COLUMNS} FROM grokbot_jobs WHERE state IN ({marks}) ORDER BY queued_at, job_id",
+        sorted(states),
+    ).fetchall()
+    return [_job_payload(_job_dict(row)) for row in rows]
 
 
 def _enroll_actor(conn: sqlite3.Connection, request: dict[str, Any]) -> tuple[int, dict[str, Any]]:

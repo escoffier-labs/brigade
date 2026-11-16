@@ -137,6 +137,16 @@ def clamp_board_offset(raw: object) -> int:
     return min(value, BOARD_OFFSET_MAX)
 
 
+def next_board_offset(offset: int, limit: int) -> int | None:
+    """Offset of the next board page, or None when the endpoint cannot serve one.
+
+    The endpoint clamps offsets to ``BOARD_OFFSET_MAX``, so a link past it
+    would repeat the last page forever.
+    """
+    following = min(offset + limit, BOARD_OFFSET_MAX)
+    return following if following > offset else None
+
+
 def clamp_board_limit(raw: int, *, default: int = BOARD_LIMIT) -> int:
     if raw < 1:
         return default
