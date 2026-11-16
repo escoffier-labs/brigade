@@ -567,6 +567,8 @@ def _consume(args: argparse.Namespace) -> int:
         )
     except worklore_client.FleetClientError as exc:
         return _hub_failure(args, exc)
+    except consumer.HoldsUnreadable:
+        return _refuse(args, "campaign_holds_unreadable")
     rows = [
         {
             "outcome": p.outcome,

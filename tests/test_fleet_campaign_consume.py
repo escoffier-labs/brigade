@@ -562,3 +562,20 @@ def test_cli_refuses_without_local_repositories_before_touching_the_hub(tmp_path
     code = cli.main(["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder", "--json"])
     assert code == 2
     assert json.loads(capsys.readouterr().err) == {"error": "repository_selection_refused"}
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]"])
+def test_unreadable_holds_refuse_the_pass_instead_of_forgetting_holds(tmp_path, content):
+    path = tmp_path / "holds.json"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(consumer.HoldsUnreadable):
+        consumer.Holds(path)
+    assert "w-1" not in consumer.Holds(tmp_path / "absent.json")
+
+
+def test_a_failing_task_cleanup_never_hides_the_run(tmp_path, monkeypatch):
+    def fail(repo_path, task_id):
+        raise OSError("ledger lock timed out")
+
+    monkeypatch.setattr(consumer, "_retire_task", fail)
+    consumer._retire_quietly(tmp_path, "task-1")

@@ -14,6 +14,7 @@ import io
 import json
 import secrets
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +84,10 @@ class Pass:
     detail: str = ""
 
 
+class HoldsUnreadable(RuntimeError):
+    """The holds file exists but cannot be read. Refuse the pass; an unread hold must not relaunch."""
+
+
 class Holds:
     """Members this node must not take again until an operator clears them.
 
@@ -96,9 +101,13 @@ class Holds:
         if path is not None:
             try:
                 loaded = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+            except FileNotFoundError:
                 loaded = {}
-            self.rows = loaded if isinstance(loaded, dict) else {}
+            except (OSError, ValueError) as exc:
+                raise HoldsUnreadable(f"cannot read campaign holds at {path}") from exc
+            if not isinstance(loaded, dict):
+                raise HoldsUnreadable(f"campaign holds at {path} is not a JSON object")
+            self.rows = loaded
 
     def __contains__(self, work_id: object) -> bool:
         return work_id in self.rows
@@ -303,7 +312,7 @@ def _work(
         # be going or may have finished. Do not start a second one; an operator decides.
         runs = [x for x in payload.get("links", []) if isinstance(x, dict) and x.get("link_type") == "fleet-run"]
         if len(runs) > int(item.get("attempt_count", 0)):
-            detail = "a previous generation linked a run the hub did not count"
+            detail = "a previous generation linked a run with no failed attempt recorded; it may be running or finished"
             emit(
                 {"event": "previous-run", "repo": repo, "work_id": work_id, "generation": generation, "detail": detail}
             )
@@ -527,6 +536,12 @@ def _dispatch_detail(out: str, err: str, code: int, task_id: str) -> str:
     return f"dispatch exit {code}: {detail or (lines[-1] if lines else 'no intent was created')}"[:300]
 
 
+def _retire_quietly(repo_path: Path, task_id: str) -> None:
+    """Cancel the local task, best effort. A cleanup failure must never hide a run that happened."""
+    with contextlib.suppress(Exception):
+        _retire_task(repo_path, task_id)
+
+
 def launch_local(
     repo_path: Path,
     *,
@@ -547,6 +562,7 @@ def launch_local(
     from .work_cmd import dispatch as dispatching
     from .work_cmd import dispatch_state
 
+    started = time.monotonic()
     refusal = _prerequisites(repo_path, worker)
     if refusal:
         return Launch("refused", detail=refusal)
@@ -554,6 +570,12 @@ def launch_local(
     task_id, busy = _local_task(repo_path, text, work_id, acceptance)
     if task_id is None:
         return Launch("refused", detail=busy)
+    if deadline_seconds is not None:
+        # Setup (prerequisites, the ledger lock) spends lease too; the child gets only what is left.
+        deadline_seconds -= time.monotonic() - started
+        if deadline_seconds <= 0:
+            _retire_quietly(repo_path, task_id)
+            return Launch("refused", detail="lease used up during setup")
     try:
         seen = {row["intent_id"] for _, row in dispatch_state.intents(repo_path)}
         out, err = io.StringIO(), io.StringIO()
@@ -572,7 +594,7 @@ def launch_local(
             if row["task_id"] == task_id and row["intent_id"] not in seen
         ]
     finally:
-        _retire_task(repo_path, task_id)
+        _retire_quietly(repo_path, task_id)
     if not fresh:
         return Launch("refused", detail=_dispatch_detail(out.getvalue(), err.getvalue(), code, task_id))
     row = max(fresh, key=lambda r: r["attempt_no"])
