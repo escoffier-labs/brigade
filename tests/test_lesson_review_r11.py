@@ -1,5 +1,7 @@
 """Lesson recording needs authority and survives clock and buffer resets."""
 
+import json
+
 import pytest
 
 from brigade import lesson_activity as activity, lesson_auth, lesson_review as review, receipt_signing
@@ -183,3 +185,19 @@ def test_final_hook_save_must_retain_correction_before_ack(scope):
     saved = activity.load(scope)
     assert not any(e["kind"] == "UserPromptSubmit" for e in saved["events"])
     assert activity._read_prompts(activity.prompt_path(scope))
+
+
+def test_hooks_record_nothing_while_admission_is_off(tmp_path):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade/lesson-review.json").write_text(
+        json.dumps({"threshold": 2, "idle_seconds": 10, "seat": "fake"})
+    )
+    assert activity.record_event(tmp_path, "UserPromptSubmit", {"prompt": "Keep publication atomic."}, now=1) == (
+        "lesson_admission_awaits_hub_anchor"
+    )
+    assert (
+        activity.record_event(tmp_path, "PostToolUse", {"tool_output": "ok"}, now=2)
+        == "lesson_admission_awaits_hub_anchor"
+    )
+    assert not activity._read_prompts(activity.prompt_path(tmp_path))
+    assert not (tmp_path / activity.ROOT / "state.json").exists()

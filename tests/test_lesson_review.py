@@ -419,6 +419,9 @@ def test_review_worker_does_not_trigger_itself(scope, monkeypatch):
 
 
 def test_hook_observer_records_real_tool_activity(tmp_path, monkeypatch, capsys):
+    from brigade import lesson_admission
+
+    monkeypatch.setattr(lesson_admission, "AUTOMATIC_LESSON_ADMISSION", True)
     from brigade.claude_hooks import runtime
     from tests.test_work_mode import _wired, _payload
     from tests._home import set_home
@@ -450,6 +453,9 @@ def test_secret_and_symlink_card_fail_closed(scope, monkeypatch):
 
 
 def test_second_hook_records_tool_output(tmp_path, monkeypatch, capsys):
+    from brigade import lesson_admission
+
+    monkeypatch.setattr(lesson_admission, "AUTOMATIC_LESSON_ADMISSION", True)
     from brigade import observe_harness_hooks, observed_checks
     from tests.test_work_mode import _wired
     from tests.test_observe_harness_hooks import payload

@@ -677,8 +677,10 @@ hooks on each target whose activity should count. Repository and hub targets
 have separate local state.
 
 Automatic lesson admission is disabled in code until the hub anchor in #2620
-exists. Recording observations and manual handoff drafting remain available.
-Candidates return `lesson_admission_awaits_hub_anchor (#2620)` without publication.
+exists. Until then, hooks record no observations and keep no prompt text. They
+return `lesson_admission_awaits_hub_anchor` and clear the prompt queue. Manual
+handoff drafting remains available. Candidates return
+`lesson_admission_awaits_hub_anchor (#2620)` without publication.
 
 Lesson review requires a fixed workspace key for all lesson kinds, including
 user corrections. Generate it with

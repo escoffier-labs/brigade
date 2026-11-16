@@ -85,6 +85,13 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
     # Review workers do not feed their own activity back into the trigger.
     if os.environ.get("BRIGADE_RUN_ID", "").startswith("lesson-"):
         return None
+    from . import lesson_admission  # local import: lesson_admission imports this module
+
+    if not lesson_admission.AUTOMATIC_LESSON_ADMISSION:
+        # Nothing consumes observations until hub-anchored admission lands (#2620),
+        # so hooks record nothing and keep no prompt text.
+        discard_prompts(target)
+        return "lesson_admission_awaits_hub_anchor"
     if receipt_signing.load_workspace_key(target) is None:
         discard_prompts(target)
         return "lesson_review_needs_key"

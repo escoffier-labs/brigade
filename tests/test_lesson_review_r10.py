@@ -226,6 +226,16 @@ def test_real_hook_process_reads_confined_workspace_key(scope, harness):
             "--target",
             str(target),
         ]
+    # Recording is off in code until #2620, so the child process turns the gate on first.
+    gate_on = (
+        "import runpy, sys\n"
+        "from brigade import lesson_admission\n"
+        "lesson_admission.AUTOMATIC_LESSON_ADMISSION = True\n"
+        "module = sys.argv[1]\n"
+        "sys.argv = [module] + sys.argv[2:]\n"
+        "runpy.run_module(module, run_name='__main__', alter_sys=True)\n"
+    )
+    argv = [argv[0], "-c", gate_on, *argv[2:]]
     result = subprocess.run(argv, input=json.dumps(payload), capture_output=True, text=True, cwd=target, timeout=30)
     assert result.returncode == 0, result.stderr
     events = activity.load(target)["events"]
