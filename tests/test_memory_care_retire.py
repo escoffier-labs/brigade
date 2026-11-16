@@ -49,3 +49,45 @@ def test_blast_cap_and_deterministic_expiry(tmp_path):
         )
         == 5
     )
+
+
+def test_round14_retire_overlap_skips_only_card(tmp_path, monkeypatch):
+    from brigade import memory_lifecycle
+
+    monkeypatch.setattr(memory_lifecycle, "_references", lambda *args: {})
+    from brigade import memory_care_journal as journal
+
+    cards = tmp_path / "memory/cards"
+    cards.mkdir(parents=True)
+    for name in ("a", "b"):
+        (cards / f"{name}.md").write_text(f"---\ncard_id: {name}\nexpires: 2026-01-01\n---\nEnded\n")
+    today = date(2026, 11, 12)
+    coverage(tmp_path, date(2026, 1, 1), today)
+    operation_id = "care-20261112T000000Z-archive-12345678-prepare"
+    path = cards / "a.md"
+    plan = journal.kernel.build_plan(
+        operation_id=operation_id,
+        projector="fixture",
+        source_fingerprint="test",
+        mutations=[
+            journal.kernel.mutation(
+                destination=path,
+                mutation="replace",
+                expected_before=journal.kernel.content_digest(path.read_bytes()),
+                desired_after=journal.kernel.content_digest(b"held"),
+                staged_bytes=b"held",
+            )
+        ],
+        target=tmp_path,
+    )
+    journal.kernel.write_crash_fixture(plan, target=tmp_path, committed_count=0)
+    result = retire.apply(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=today)
+    assert result["archived"] == 1, result
+    assert "projection_blocked" in result["skipped"], result
+    assert result["skipped"]["projection_blocked"] == [
+        {
+            "path": "memory/cards/a.md",
+            "reason": (f"unfinished projection {operation_id} overlaps the planned destination set"),
+        }
+    ]
+    assert path.exists()

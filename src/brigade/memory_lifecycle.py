@@ -521,13 +521,18 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                 continue
             state_rel = f".brigade/memory/lifecycle/{hashlib.sha256(rel.encode()).hexdigest()}.json"
             before = journal.current(target, state_rel)
-            saved_state = json.loads(before) if before else {"state": "active"}
-            if (
-                not isinstance(saved_state, dict)
-                or not isinstance(saved_state.get("state"), str)
-                or saved_state["state"] not in {"active", "stale", "archived"}
-            ):
-                raise ValueError("invalid lifecycle state")
+            try:
+                saved_state = json.loads(before) if before else {"state": "active"}
+                if (
+                    not isinstance(saved_state, dict)
+                    or not isinstance(saved_state.get("state"), str)
+                    or saved_state["state"] not in {"active", "stale", "archived"}
+                ):
+                    raise ValueError("invalid lifecycle state")
+            except ValueError:
+                payload["error"] = True
+                payload["skipped"].append({"path": rel, "reason": "invalid lifecycle state"})
+                continue
             previous = saved_state["state"]
             desired = (
                 "archived"
@@ -568,38 +573,44 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                 change = journal.Change(state_rel, before, after)
                 entry = {**metadata, "decision_id": None}
                 if not dry_run:
-                    if state == "archived":
-                        try:
-                            decision = memory_archive.archive_card(
+                    try:
+                        if state == "archived":
+                            try:
+                                decision = memory_archive.archive_card(
+                                    target,
+                                    rel,
+                                    reason="unused-card",
+                                    config=config,
+                                    policy_metadata=metadata,
+                                    state_change=change,
+                                    expected_before=text.encode("utf-8"),
+                                )
+                            except memory_archive.ArchiveRecoveryUnverified as exc:
+                                payload["error"] = True
+                                payload.setdefault("recovery_unverified", []).append(exc.decision_id)
+                                payload["skipped"].append(
+                                    {"path": rel, "reason": str(exc), "decision_id": exc.decision_id}
+                                )
+                                break
+                            except memory_archive.ArchiveRefused as exc:
+                                # A refusal leaves the card and any existing archive in place.
+                                # Skip only this card so the rest of the pass still runs.
+                                payload["skipped"].append({"path": rel, "reason": str(exc)})
+                                break
+                        else:
+                            decision = journal.commit_phased(
                                 target,
-                                rel,
+                                kind="lifecycle",
                                 reason="unused-card",
-                                config=config,
-                                policy_metadata=metadata,
-                                state_change=change,
-                                expected_before=text.encode("utf-8"),
+                                card_id=identity,
+                                changes=[change],
+                                prepared_paths=[state_rel],
+                                hub={"status": "skipped"},
+                                metadata=metadata,
                             )
-                        except memory_archive.ArchiveRecoveryUnverified as exc:
-                            payload["error"] = True
-                            payload.setdefault("recovery_unverified", []).append(exc.decision_id)
-                            payload["skipped"].append({"path": rel, "reason": str(exc), "decision_id": exc.decision_id})
-                            break
-                        except memory_archive.ArchiveRefused as exc:
-                            # A refusal leaves the card and any existing archive in place.
-                            # Skip only this card so the rest of the pass still runs.
-                            payload["skipped"].append({"path": rel, "reason": str(exc)})
-                            break
-                    else:
-                        decision = journal.commit_phased(
-                            target,
-                            kind="lifecycle",
-                            reason="unused-card",
-                            card_id=identity,
-                            changes=[change],
-                            prepared_paths=[state_rel],
-                            hub={"status": "skipped"},
-                            metadata=metadata,
-                        )
+                    except journal.kernel.ProjectionError as exc:
+                        payload["skipped"].append({"path": rel, "reason": str(exc)})
+                        break
                     if state == "archived":
                         archived_cards.add(rel)
                     entry["decision_id"] = decision.decision_id

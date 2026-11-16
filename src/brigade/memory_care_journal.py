@@ -720,7 +720,11 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
             p = _validated_payload(target, decision_id)
             if decision_id not in inflight:
                 reason = "append or repair effects require operator recovery"
-                if p["phase"] == "prepared" and not any(p.get(key) for key in ("appends", "repair_indexes", "undoes")):
+                if (
+                    p["phase"] == "prepared"
+                    and not any(p.get(key) for key in ("appends", "repair_indexes", "undoes"))
+                    and not any(key in p for key in ("origin_stamp_mac", "append_guards", "document_undo"))
+                ):
                     # Capture before-images and decoded after-images once. Neither
                     # classification nor execution rereads workspace classification.
                     changes = tuple(
@@ -742,13 +746,21 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
                             or _live(target, c.path) != (c.after if c.path in p["prepared_paths"] else c.before)
                             for c in changes
                         )
-                        phase = "abandoned" if conflict else ("undone" if p["kind"] == "undo" else "committed")
-                        final = {**p, "phase": phase, "status": "abandoned" if conflict else "committed"}
-                        pending = [] if conflict else [c for c in changes if c.path not in p["prepared_paths"]]
+                        if conflict:
+                            results.append(
+                                {
+                                    "decision_id": decision_id,
+                                    "phase": "operator_required",
+                                    "reason": "changed or read-only paths require operator recovery",
+                                }
+                            )
+                            continue
+                        final = {**p, "phase": "committed", "status": "committed"}
+                        pending = [c for c in changes if c.path not in p["prepared_paths"]]
                         rel = f"{JOURNAL_REL}/{decision_id}/decision.json"
                         pending.append(Change(rel, current(target, rel), _json_bytes(final)))
                         _execute_phase(target, decision_id, "finish", pending)
-                        results.append({"decision_id": decision_id, "phase": phase, "reason": ""})
+                        results.append({"decision_id": decision_id, "phase": "committed", "reason": ""})
                         continue
         except (JournalConflict, store.StoreError, OSError, ValueError):
             reason = "unreadable recovery operations require operator recovery"

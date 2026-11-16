@@ -669,10 +669,22 @@ Local-only workspaces cannot automatically archive cards. The 90-day archive
 policy is retained for that future gate. Expiry retirement currently reports
 `refused: ["automatic archive awaits hub anchor (#2620)"]`, which is expected.
 Lifecycle reports the same reason in `skipped` after marking an old card stale.
-While the gate is off, automated care also leaves prepared archive recovery
-untouched and reports each decision id as `operator_required`. Recovery cannot
-trust workspace-supplied kind, reason or actor fields to authorize writes.
-Use `memory care undo DECISION_ID` for explicit operator recovery. A committed
+Automatic recovery uses the same allowlist regardless of the archive gate.
+It finishes only prepared decisions with no unfinished kernel operation,
+no `appends`, `repair_indexes` or `undoes` effects, and no `origin_stamp_mac`,
+`append_guards` or `document_undo` fields. Every captured after-image must be
+non-null, every path must remain writable, and live bytes must match the
+captured expected bytes. Empty plans also qualify. Classification never trusts
+workspace-supplied kind, reason or actor fields.
+
+All other decisions remain held as `operator_required`, including conflicting
+plans, removals, moves, inbox disposition, append publication, index repair and
+interrupted kernel operations. Tend reports their decision ids and named
+recovery commands. Use `brigade memory care recover DECISION_ID --target .`
+for named operator recovery. It finishes the decision or rolls back unchanged
+prepared paths when a conflict prevents completion. `brigade memory care undo
+DECISION_ID --target .` first recovers that named decision, then reverses it.
+A committed
 archive whose stored decision cannot be reloaded reports `recovery_unverified`
 with its decision id. The archive move is never retried.
 
@@ -769,7 +781,7 @@ files, then move the existing archive copy to a separate backup location before
 running care again. Brigade never overwrites the existing archive copy.
 
 Prepared removals, moves and effects outside the automatic recovery allowlist
-require `brigade memory care recover <decision-id>`. Automatic recovery only
+require `brigade memory care recover DECISION_ID --target .`. Automatic recovery only
 replays file creations and byte replacements that leave each file present.
 Quoted native Windows reference paths can contain spaces. Unquoted native
 Windows paths with spaces remain unsupported by the reference scanner.

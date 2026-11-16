@@ -188,7 +188,15 @@ def apply(
                         expected_before=before,
                     )
                     decisions.append(d.decision_id)
+            except journal.kernel.ProjectionError as exc:
+                payload["skipped"].setdefault("projection_blocked", []).append(
+                    {"path": candidate["file"], "reason": str(exc)}
+                )
             except (memory_archive.ArchiveRefused, OSError, journal.JournalConflict) as exc:
+                if isinstance(exc.__cause__, journal.kernel.ProjectionError):
+                    payload["skipped"].setdefault("projection_blocked", []).append(
+                        {"path": candidate["file"], "reason": str(exc)}
+                    )
                 refused.append(str(exc))
     return {**payload, "archived": len(decisions), "decision_ids": decisions, "refused": refused}
 

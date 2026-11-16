@@ -61,6 +61,11 @@ def run(
     if any(stage not in STAGES for stage in selected):
         raise ValueError("unknown tend stage")
     payload: dict[str, Any] = {"enabled": tend.enabled, "dry_run": dry_run, "stages": {}, "recovery": recovery}
+    payload["operator_recovery"] = [
+        f"brigade memory care recover {item['decision_id']} --target ."
+        for item in recovery
+        if item["phase"] == "operator_required"
+    ]
     if not tend.enabled:
         return payload
     for stage in STAGES:
@@ -79,11 +84,16 @@ def run(
                 payload["stages"][stage] = memory_lifecycle.run(
                     target, today=today or memory_cmd._today(), dry_run=dry_run
                 )
-                if payload["stages"][stage].get("recovery_unverified"):
+                if payload["stages"][stage].get("error") or payload["stages"][stage].get("recovery_unverified"):
                     payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
                     payload["failed"] = len(payload["failed_stages"])
-            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-                payload["stages"][stage] = {"blocked": "lifecycle signals unreadable", "error": True}
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError, journal.kernel.ProjectionError) as exc:
+                payload["stages"][stage] = {
+                    "blocked": str(exc)
+                    if isinstance(exc, journal.kernel.ProjectionError)
+                    else "lifecycle signals unreadable",
+                    "error": True,
+                }
                 payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
                 payload["failed"] = len(payload["failed_stages"])
         elif stage == "inbox":
@@ -120,8 +130,13 @@ def run(
                 )
             except memory_lifecycle.InstalledSchedulesUnreadable as exc:
                 payload["stages"][stage] = {"blocked": str(exc)}
-            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-                payload["stages"][stage] = {"blocked": "reference scan incomplete", "error": True}
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError, journal.kernel.ProjectionError) as exc:
+                payload["stages"][stage] = {
+                    "blocked": str(exc)
+                    if isinstance(exc, journal.kernel.ProjectionError)
+                    else "reference scan incomplete",
+                    "error": True,
+                }
                 payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
                 payload["failed"] = len(payload["failed_stages"])
     if not dry_run:

@@ -448,7 +448,8 @@ def test_prepared_non_archive_recovers_with_archive_gate_off(tmp_path, monkeypat
     monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
     result = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
     assert (tmp_path / rel).read_bytes() == b'{"state":"stale"}\n'
-    phase = "undone" if kind == "undo" else "committed"
+    # A claimed undo kind without an undoes link has only replacement effects.
+    phase = "committed"
     assert result["recovery"] == [{"decision_id": saved[0], "phase": phase, "reason": ""}]
     assert journal._payload(tmp_path, saved[0])["phase"] == phase
 
@@ -627,3 +628,52 @@ def test_card_lock_timeout_preserves_prior_transitions(tmp_path, monkeypatch):
 
 def test_quoted_windows_path_with_spaces():
     assert life._mentioned(r'"C:\Example Workspace\ws\memory\cards\old.md#section"', "memory/cards/old.md", "old")
+
+
+@pytest.mark.parametrize("state", ["null", "[]", "{broken"])
+def test_round14_bad_state_skips_only_card(tmp_path, monkeypatch, state):
+    monkeypatch.setattr(reads, "record", lambda *args, **kwargs: True)
+    monkeypatch.setattr(life, "_references", lambda *args: {})
+    for name in ("a", "b", "c"):
+        card(tmp_path, name=name)
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    state_path = tmp_path / (
+        ".brigade/memory/lifecycle/" + life.hashlib.sha256(b"memory/cards/b.md").hexdigest() + ".json"
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(state)
+    monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
+    result = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
+    stage = result["stages"]["lifecycle"]
+    assert [r["card_path"] for r in stage["transitions"]] == ["memory/cards/a.md", "memory/cards/c.md"]
+    assert all(r["decision_id"] for r in stage["transitions"])
+    assert {"path": "memory/cards/b.md", "reason": "invalid lifecycle state"} in stage["skipped"]
+    assert json.loads((tmp_path / tend.STATE_REL).read_text()) == result
+
+
+def test_round14_overlap_keeps_later_stages(tmp_path, monkeypatch):
+    monkeypatch.setattr(reads, "record", lambda *args, **kwargs: True)
+    monkeypatch.setattr(life, "_references", lambda *args: {})
+    card(tmp_path)
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    saved = []
+    execute = journal.kernel.execute
+
+    def crash(plan, *, target, **kwargs):
+        saved.append(plan.operation_id)
+        execute(plan, target=target, inject=journal.kernel.FailureInjector(crash_after=0))
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal.kernel, "execute", crash)
+        with pytest.raises(KeyboardInterrupt):
+            life.run(tmp_path, today=TODAY)
+    stages = ["lifecycle", "retire", "inbox", "instructions"]
+    result = tend.run(tmp_path, stages=stages, today=TODAY)
+    assert set(result["stages"]) == set(stages)
+    skipped = result["stages"]["lifecycle"]["skipped"]
+    assert any(saved[0] in r["reason"] for r in skipped), result
+    decision_id = saved[0].removeprefix("care-").removesuffix("-prepare")
+    assert any(r["decision_id"] == decision_id for r in result["recovery"])
+    assert f"brigade memory care recover {decision_id} --target ." in result["operator_recovery"]
+    assert json.loads((tmp_path / tend.STATE_REL).read_text()) == result
