@@ -11,3 +11,4 @@
 - Strip claim anchors from history text ending in a newline.
 
 - Read automatic hold diagnostics from preflight checks so stale anchoring revisions are suppressed while fresh eligible heads advance.
+- Hold a withdrawn anchoring proposal for seven days, then let reflection propose the same anchor again, so a withdrawal only delays an anchor.

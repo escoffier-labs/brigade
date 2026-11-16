@@ -77,7 +77,7 @@ def _code(value: object) -> bool:
 LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
     "attempted_ms": lambda value: type(value) is int and value >= 0,
-    "anchor_review_only": lambda value: value is True,
+    "anchor_review_only": lambda value: type(value) is int and value >= 0,
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -182,6 +182,10 @@ def _save(target: Path, state: dict[str, Any]) -> None:
                 os.unlink(temporary.name, dir_fd=parent)
             except FileNotFoundError:
                 pass
+
+
+# A withdrawn anchoring proposal waits this long before reflection proposes the same anchor again.
+ANCHOR_WITHDRAWN_RETRY_MS = 7 * 24 * 60 * 60 * 1000
 
 
 def _now_ms() -> int:
@@ -551,8 +555,15 @@ def _reflect(
         for ops in submissions:
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
-            if remembered.get("anchor_review_only") and all(op["type"] == "anchor_blocks" for op in ops):
-                skipped["anchor_review_only"] = skipped.get("anchor_review_only", 0) + 1
+            withdrawn_ms = remembered.get("anchor_review_only")
+            if type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
+                if _now_ms() - withdrawn_ms < ANCHOR_WITHDRAWN_RETRY_MS:
+                    skipped["anchor_review_only"] = skipped.get("anchor_review_only", 0) + 1
+                else:
+                    # The withdrawal only delays this anchor. Forget the rejected proposal so a
+                    # later run proposes it again, even if local state named the wrong proposal.
+                    previous.pop(digest, None)
+                    fresh.append((digest, ops))
             elif remembered.get("proposal_id") and apply and not dry_run:
                 from .memory_reflect_policy import allowed
 
@@ -727,7 +738,7 @@ def _reflect(
                     if closed.get("state") != "rejected":
                         raise ReflectError("hub_anchor_withdraw_failed", "anchoring proposal was not closed")
                     proposal["withdrawal"] = {"state": "rejected", "reason": "anchor_withdrawn"}
-                    previous[digest]["anchor_review_only"] = True
+                    previous[digest]["anchor_review_only"] = _now_ms()
                     _save(target, state)
                 proposals.append(proposal)
         if served_any:

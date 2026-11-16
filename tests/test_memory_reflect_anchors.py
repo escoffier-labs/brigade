@@ -410,3 +410,14 @@ def test_real_hold_reply_suppresses_revision_and_selects_fresh_head(setup, capsy
     assert second["skipped_reasons"]["anchor_review_only"] == 1
     closed = [call for call in writes(hub) if call["action"] == "decide"]
     assert len(closed) == 2 and all(call["decision"] == "reject" for call in closed)
+    # Withdrawal only delays an anchor. Once the retry window passes, robot-a is proposed again.
+    from brigade import memory_reflect_hub as reflect_hub
+
+    later = reflect_hub._now_ms() + reflect_hub.ANCHOR_WITHDRAWN_RETRY_MS + 1
+    monkeypatch.setattr(reflect_hub, "_now_ms", lambda: later)
+    proposed = len([call for call in writes(hub) if call["action"] == "propose"])
+    code, third = run(target, capsys, "run", "--apply", "--limit", "2")
+    assert code == 0
+    assert "anchor_review_only" not in third["skipped_reasons"]
+    again = [call for call in writes(hub) if call["action"] == "propose"][proposed:]
+    assert any(call["ops"][0]["card_id"] == "robot-a" for call in again)
