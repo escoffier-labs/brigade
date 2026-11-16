@@ -28,6 +28,8 @@ def test_real_sized_scope_can_propose(setup, capsys, card_count):
         hub._commit("card.put", "fleet", f"card-{i}", f"Unique {i}", "live", hubc.event_id())
     code, report = run(target, capsys, "run", "--scope", "fleet")
     assert code == 0 and len(report["proposals"]) == 1
+    operations = [call["ops"][0]["type"] for call in writes(hub)]
+    assert operations == ["merge_exact_duplicates"]
 
 
 @pytest.mark.parametrize("bound,value", [("MAX_SCOPE_CARDS", 1), ("MAX_SCOPE_BYTES", 1)])

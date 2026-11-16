@@ -164,6 +164,16 @@ pub fn authorize<T: ReadTx + ?Sized>(
         let Some(proposal) = load(tx, string(request, "proposal_id"))? else {
             return Ok(Some(missing()));
         };
+        // A reflector can withdraw only its own pure anchoring proposal.
+        // This never grants acceptance or access to another proposer's work.
+        let own_anchor = request["action"] == "decide"
+            && request["decision"] == "reject"
+            && string(&proposal, "proposer") == who.principal()
+            && !cards(&proposal).is_empty()
+            && proposal["ops"].as_array().is_some_and(|ops| {
+                !ops.is_empty() && ops.iter().all(|op| op["type"] == "anchor_blocks")
+            });
+        let right = if own_anchor { "reflect" } else { right };
         for card in cards(&proposal) {
             if !scoped_right(tx, who, string(card, "scope"), right)? {
                 return Ok(Some(denied(right)));
@@ -176,23 +186,27 @@ pub(super) fn op_schema(op: &Json) -> Result<(), &'static str> {
     let map = op.as_object().ok_or("op must be an object")?;
     let extras: &[&str] = match string(op, "type") {
         "replace_block" | "add_previously" => &["text"],
-        "remove_block" => &[],
+        "remove_block" | "anchor_blocks" => &[],
         "append_evidence" => &["evidence_ids"],
         "supersede_card" | "merge_exact_duplicates" => &["other_card"],
         _ => return Err("op is not a supported card-block operation"),
     };
-    let common = [
-        "type",
-        "scope",
-        "card_id",
-        "base_revision",
-        "block_id",
-        "expected_block_hash",
-    ];
+    let block_fields = ["block_id", "expected_block_hash"];
+    let common = ["type", "scope", "card_id", "base_revision"];
+    let required: Vec<_> = common
+        .iter()
+        .chain(extras)
+        .chain(
+            block_fields
+                .iter()
+                .filter(|_| op["type"] != "anchor_blocks"),
+        )
+        .copied()
+        .collect();
     if map
         .keys()
-        .any(|k| k != "tier" && !common.contains(&k.as_str()) && !extras.contains(&k.as_str()))
-        || common.iter().chain(extras).any(|k| !map.contains_key(*k))
+        .any(|k| k != "tier" && !required.contains(&k.as_str()))
+        || required.iter().any(|k| !map.contains_key(*k))
     {
         return Err("invalid typed op fields");
     }
@@ -360,15 +374,26 @@ fn submit<T: ReadTx + ?Sized>(
                 return Ok(Err("ops on a card must share a base revision".into()));
             }
             // Pins always name the original revision, even with several ops.
-            let pin = match blocks::pin(
-                string(card, "before_text"),
-                string(op, "block_id"),
-                string(op, "expected_block_hash"),
-            ) {
-                Ok(p) => p,
-                Err(r) => return Ok(Err(r.into())),
+            let pin = if op["type"] == "anchor_blocks" {
+                None
+            } else {
+                Some(
+                    match blocks::pin(
+                        string(card, "before_text"),
+                        string(op, "block_id"),
+                        string(op, "expected_block_hash"),
+                    ) {
+                        Ok(p) => p,
+                        Err(r) => return Ok(Err(r.into())),
+                    },
+                )
             };
-            let text = if matches!(
+            let text = if op["type"] == "anchor_blocks" {
+                match blocks::anchor_blocks(string(card, "after_text"), id) {
+                    Ok(text) => text,
+                    Err(r) => return Ok(Err(r.into())),
+                }
+            } else if matches!(
                 string(op, "type"),
                 "replace_block" | "remove_block" | "add_previously"
             ) {
@@ -404,7 +429,9 @@ fn submit<T: ReadTx + ?Sized>(
                 return Ok(Err("op has no delta".into()));
             }
             card["after_text"] = json!(text);
-            card["pins"].as_array_mut().unwrap().push(pin);
+            if let Some(pin) = pin {
+                card["pins"].as_array_mut().unwrap().push(pin);
+            }
             if let Some(target) = op.get("other_card") {
                 let c = by_card
                     .get_mut(&(
@@ -427,6 +454,13 @@ fn submit<T: ReadTx + ?Sized>(
     }
     if results.iter().any(|r| r["valid"] == false) {
         let mut r = invalid("proposal refused because at least one op is invalid");
+        if ops.iter().all(|op| op["type"] == "anchor_blocks")
+            && results
+                .iter()
+                .all(|r| r["valid"] == false && r["reason"] == "op has no delta")
+        {
+            r.body["code"] = json!("memory_anchor_no_delta");
+        }
         r.body["ops"] = json!(results);
         return Ok(Err(r));
     }
@@ -1350,7 +1384,14 @@ pub fn run(
     }
     if cmd.request["decision"] == "reject" {
         body["state"] = json!("rejected");
-        body["reason"] = Json::Null;
+        body["reason"] = if string(&body, "proposer") == p.credential.principal()
+            && body["ops"].as_array().is_some_and(|ops| {
+                !ops.is_empty() && ops.iter().all(|op| op["type"] == "anchor_blocks")
+            }) {
+            json!("anchor_withdrawn")
+        } else {
+            Json::Null
+        };
         body["rules"] = json!([]);
     } else if body["policy_revision"] != json!(policy.map(|a| a.0))
         || body["policy_digest"] != json!(policy.map(|a| &a.1))

@@ -78,6 +78,93 @@ fn merge_metadata<'a>(text: &'a str, excluded: &[&str]) -> Option<Vec<&'a str>> 
     )
 }
 
+/// Proof is reconstructed from the current hub blob and writer provenance.
+/// No candidate-supplied evidence, text or provenance can establish it.
+// This is a derived read fact, never a caller-provided authorization input.
+pub(super) fn auto_authored<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    id: &str,
+    revision: i64,
+) -> rusqlite::Result<bool> {
+    let rows = tx.query("SELECT e.payload FROM memory_cards c JOIN memory_events e ON e.scope=c.scope AND e.card_id=c.card_id AND e.revision=c.revision AND e.content_hash=c.content_hash AND e.principal=c.writer WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND e.kind='proposal.apply'", &[ops::t(scope), ops::t(id), rusqlite::types::Value::Integer(revision)])?;
+    Ok(rows.iter().any(|row| {
+        serde_json::from_str::<Json>(&ops::s(&row[0]))
+            .is_ok_and(|payload| payload["decision_mode"] == "automatic")
+    }))
+}
+
+pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
+    let Some(operations) = body["ops"].as_array().filter(|o| !o.is_empty()) else {
+        return Ok(false);
+    };
+    let cards = super::proposals::cards(body);
+    if cards.len() != operations.len()
+        || operations.iter().any(|op| {
+            string(op, "type") != "anchor_blocks" || super::proposals::op_schema(op).is_err()
+        })
+    {
+        return Ok(false);
+    }
+    for card in cards {
+        let scope = string(card, "scope");
+        let id = string(card, "card_id");
+        if operations
+            .iter()
+            .filter(|op| {
+                string(op, "scope") == scope
+                    && string(op, "card_id") == id
+                    && op["base_revision"] == card["base_revision"]
+            })
+            .count()
+            != 1
+        {
+            return Ok(false);
+        }
+        let Some(head) = ops::head(tx, scope, id)? else {
+            return Ok(false);
+        };
+        if card["base_revision"] != head.revision
+            || string(card, "before_hash") != head.hash
+            || card["before_state"] != "live"
+            || card["after_state"] != "live"
+            || head.state != "live"
+        {
+            return Ok(false);
+        }
+        // No existing credential class is automation-only. Only a head made
+        // by the hub's gated automatic apply path establishes authorship.
+        // Bind the exact event, never an older put/import or caller origin.
+        let rows = tx.query("SELECT e.kind, e.payload, b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash JOIN memory_events e ON e.scope=c.scope AND e.card_id=c.card_id AND e.revision=c.revision AND e.content_hash=c.content_hash AND e.principal=c.writer WHERE c.scope=?1 AND c.card_id=?2", &[ops::t(scope), ops::t(id)])?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let payload = serde_json::from_str::<Json>(&ops::s(&row[1])).unwrap_or(Json::Null);
+        if ops::s(&row[0]) != "proposal.apply"
+            || payload["decision_mode"] != "automatic"
+            || !auto_authored(tx, scope, id, head.revision)?
+        {
+            return Ok(false);
+        }
+        let rusqlite::types::Value::Blob(bytes) = &row[2] else {
+            return Ok(false);
+        };
+        let Ok(before) = std::str::from_utf8(bytes) else {
+            return Ok(false);
+        };
+        if before != string(card, "before_text") || super::ids::sha256_hex(bytes) != head.hash {
+            return Ok(false);
+        }
+        let Ok(after) = super::proposal_blocks::anchor_blocks(before, id) else {
+            return Ok(false);
+        };
+        if after == before || after != string(card, "after_text") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub fn classify<T: ReadTx + ?Sized>(
     tx: &T,
     body: &Json,
@@ -176,6 +263,11 @@ pub fn classify<T: ReadTx + ?Sized>(
             return Ok(2);
         };
         match string(op, "type") {
+            "anchor_blocks" => {
+                if !anchor_proof(tx, body)? {
+                    return Ok(2);
+                }
+            }
             "append_evidence" => (),
             "merge_exact_duplicates" => {
                 let Some(other) = cards.iter().find(|c| {
