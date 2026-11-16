@@ -1872,6 +1872,7 @@ impl Store {
         let first_chunk =
             action == "card" && map.get("offset").is_none_or(|o| o.is_null() || o == 0);
         let proposal_cursors = self.proposal_cursors.clone();
+        let pending_limit = self.proposal_limits.read().unwrap().pending_per_principal;
         match self
             .readers
             .submit(move |c| {
@@ -1908,7 +1909,7 @@ impl Store {
                         },
                     );
                 }
-                reads(
+                let mut reply = reads(
                     &Conn(c),
                     &credential,
                     &action,
@@ -1916,7 +1917,12 @@ impl Store {
                     now_ms,
                     scan,
                     indexed_seq,
-                )
+                )?;
+                if action == "status" && reply.status == 200 {
+                    let rows = Conn(c).query("SELECT count(*) FROM memory_proposals WHERE principal=?1 AND state IN ('pending','held')", &[Value::Text(credential.principal().into())])?;
+                    reply.body["proposal_quota"] = json!({"pending": num(&rows[0][0]).unwrap_or(0), "pending_per_principal": pending_limit});
+                }
+                Ok(reply)
             })
             .await
         {
@@ -2345,6 +2351,7 @@ fn reads<T: ReadTx + ?Sized>(
                     "state": text(&row[3]),
                     "scan_state": text(&row[5]),
                     "writer": text(&row[6]),
+                    "auto_authored": proposal_tiers::auto_authored(tx, &scope, card_id, revision)?,
                     "updated_at": text(&row[7]),
                     "seq": revision,
                 }, "log_epoch": epoch}),
@@ -2352,3 +2359,6 @@ fn reads<T: ReadTx + ?Sized>(
         }
     }
 }
+
+#[cfg(test)]
+mod anchor_tests;

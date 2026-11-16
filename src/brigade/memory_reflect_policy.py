@@ -13,7 +13,7 @@ from . import memory_hub_client as hubc, memory_proposal_io as io
 
 PATH = ".brigade/memory/reflect/policy.json"
 NEW_WORKSPACE_PATH = ".brigade/new-workspace.v1.json"
-CLASSES = ["append_evidence", "merge_exact_duplicates"]
+CLASSES = ["append_evidence", "merge_exact_duplicates", "anchor_blocks"]
 DEFAULT = {"schema": "brigade.memory-reflect-policy.v1", "auto_apply": True, "tier0_op_classes": CLASSES}
 
 
@@ -161,7 +161,7 @@ def attempt(
                 "state": result.get("state")
                 if result.get("state") in ("pending", "applied", "rejected")
                 else "pending",
-                "checks": _checks(result.get("auto_apply_gates")),
+                "checks": _checks(hubc.obj(result.get("preflight")).get("checks", result.get("auto_apply_gates"))),
                 "reason": _code(result.get("reason")),
             }
         except hubc.HubRefusal as exc:

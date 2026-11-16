@@ -19,6 +19,7 @@ from . import memory_hub_store as store
 from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
+from . import memory_reflect_anchors as anchors
 from . import memory_reflect_candidates as derive
 from . import memory_reflect_ledger as ledger
 from . import memory_reflect_links as links
@@ -76,6 +77,7 @@ def _code(value: object) -> bool:
 LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
     "attempted_ms": lambda value: type(value) is int and value >= 0,
+    "anchor_review_only": lambda value: type(value) is int and value >= 0,
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -119,7 +121,7 @@ def schedule_status(target: Path) -> dict[str, Any]:
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
         if not all(
-            valid_submission(digest, pending, frozenset({"pins", "attempted_ms"}))
+            valid_submission(digest, pending, frozenset({"pins", "attempted_ms", "anchor_review_only"}))
             for digest, pending in submissions.items()
         ):
             raise ValueError(STATE_ERROR)
@@ -180,6 +182,10 @@ def _save(target: Path, state: dict[str, Any]) -> None:
                 os.unlink(temporary.name, dir_fd=parent)
             except FileNotFoundError:
                 pass
+
+
+# A withdrawn anchoring proposal waits this long before reflection proposes the same anchor again.
+ANCHOR_WITHDRAWN_RETRY_MS = 7 * 24 * 60 * 60 * 1000
 
 
 def _now_ms() -> int:
@@ -332,6 +338,7 @@ class Submitted:
     code: str | None = None
     # Hub codes of the refusals this submission met, in order. Never hub text.
     refusals: tuple[str, ...] = ()
+    anchor_no_delta: bool = False
 
 
 def submit(
@@ -388,7 +395,12 @@ def submit(
             elif 400 <= exc.status < 500 and exc.status not in (408, 429) and exc.body.get("retryable") is not True:
                 pending["refused"] = code
                 save()
-            return Submitted(FAILED, code=code, refusals=tuple(refusals))
+            return Submitted(
+                FAILED,
+                code=code,
+                refusals=tuple(refusals),
+                anchor_no_delta=(code == "memory_anchor_no_delta"),
+            )
         except hubc.HubUnavailable:
             return Submitted(UNAVAILABLE, code="hub_unavailable", refusals=tuple(refusals))
         if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
@@ -556,7 +568,17 @@ def _reflect(
         for ops in submissions:
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
-            if remembered.get("proposal_id") and apply and not dry_run:
+            withdrawn_ms = remembered.get("anchor_review_only")
+            if type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
+                # A future timestamp counts as expired, so local state cannot stretch the window.
+                if 0 <= _now_ms() - withdrawn_ms < ANCHOR_WITHDRAWN_RETRY_MS:
+                    skipped["anchor_review_only"] = skipped.get("anchor_review_only", 0) + 1
+                else:
+                    # The withdrawal only delays this anchor. Forget the rejected proposal so a
+                    # later run proposes it again, even if local state named the wrong proposal.
+                    previous.pop(digest, None)
+                    fresh.append((digest, ops))
+            elif remembered.get("proposal_id") and apply and not dry_run:
                 from .memory_reflect_policy import allowed
 
                 if allowed(target, ops) is None:
@@ -618,16 +640,29 @@ def _reflect(
     if first == LINK_LANE:
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
-    remaining = unremembered(exact) + alternating
+    pending_anchors = unremembered(anchors.ops(heads))
+    remaining = unremembered(exact) + alternating + pending_anchors[: anchors.MAX_PROPOSALS]
     # Retry budget is separate so held proposals cannot consume new-work slots.
     # Retries reuse an opened proposal and never submit, so they run first and a
     # full new-proposal quota cannot block them.
     retries.sort(key=lambda item: (previous[item[0]].get("attempted_ms", 0), item[0]))
-    selected = retries[:limit] + remaining[:limit]
+    # Held anchoring proposals share the same per-run card budget as new ones.
+    selected = []
+    anchored_count = 0
+    for digest, ops in retries[:limit] + remaining[:limit]:
+        anchoring = ops[0]["type"] == "anchor_blocks"
+        if anchoring and anchored_count >= anchors.MAX_PROPOSALS:
+            continue
+        anchored_count += anchoring
+        selected.append((digest, ops))
+    anchor_candidates = sum(ops[0]["type"] == "anchor_blocks" for _, ops in retries) + len(pending_anchors)
+    if anchor_candidates > anchored_count:
+        skipped["anchor_deferred"] = anchor_candidates - anchored_count
     proposals = []
     refused: list[dict[str, str]] = []
     error = None
     failed_ops = 0
+    no_delta_ops = 0
     attempted = len(selected)
     if not dry_run:
         # Preserve unprocessed submissions under this binding across scope and limit changes.
@@ -646,7 +681,14 @@ def _reflect(
                 tables[lane][name][key][1] = now
 
         for position, (digest, ops) in enumerate(selected):
+            anchoring = all(op["type"] == "anchor_blocks" for op in ops)
             remembered_id = previous.get(digest, {}).get("proposal_id")
+            if anchoring and not remembered_id:
+                quota = client.call("status").get("proposal_quota", {})
+                pending, cap = quota.get("pending"), quota.get("pending_per_principal")
+                if type(pending) is not int or type(cap) is not int or pending >= max(0, cap - 4):
+                    skipped["anchor_quota_reserve"] = skipped.get("anchor_quota_reserve", 0) + 1
+                    continue
             sent = (
                 Submitted(OPENED, proposal_id=remembered_id)
                 if remembered_id and apply
@@ -670,7 +712,11 @@ def _reflect(
                 error = sent.code
                 break
             if sent.outcome == FAILED:
-                failed_ops += 1
+                if sent.anchor_no_delta:
+                    no_delta_ops += 1
+                    skipped["anchor_no_delta"] = skipped.get("anchor_no_delta", 0) + 1
+                else:
+                    failed_ops += 1
                 continue
             if sent.proposal_id is not None:
                 served(digest)
@@ -691,11 +737,28 @@ def _reflect(
                     proposal["automatic"] = attempt(
                         target, client, sent.proposal_id, ops, report["log_epoch"], pacer=pacer
                     )
+                if (
+                    anchoring
+                    and sent.proposal_id is not None
+                    and proposal.get("automatic", {}).get("state") != "applied"
+                ):
+                    closed = client.call(
+                        "decide",
+                        proposal_id=sent.proposal_id,
+                        decision="reject",
+                        base_epoch=report["log_epoch"],
+                        client_event_id=hubc.event_id(),
+                    )
+                    if closed.get("state") != "rejected":
+                        raise ReflectError("hub_anchor_withdraw_failed", "anchoring proposal was not closed")
+                    proposal["withdrawal"] = {"state": "rejected", "reason": "anchor_withdrawn"}
+                    previous[digest]["anchor_review_only"] = _now_ms()
+                    _save(target, state)
                 proposals.append(proposal)
         if served_any:
             state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
         # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.
-        if attempted and failed_ops == attempted and error is None:
+        if failed_ops and failed_ops == attempted - no_delta_ops and error is None:
             error = "all_ops_refused"
     payload = {
         "status": "failed" if error else "completed",
@@ -711,6 +774,7 @@ def _reflect(
         "compensation_watch": watched,
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
         "link_repair": {"max_proposals": link_cap, **link_stats},
+        "anchoring": {"max_proposals": anchors.MAX_PROPOSALS, **anchors.coverage(heads)},
     }
     if error:
         payload["error"] = error

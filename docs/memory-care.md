@@ -657,6 +657,31 @@ unknown result. The hub refuses repeated application of a decided proposal.
 Client tests verify request behavior and fallback. Hub transactional tests
 provide the card-write atomicity coverage.
 
+### Gradual block anchoring
+
+Hub reflection proposes `anchor_blocks` only for clean live cards whose current
+head came from a gated automatic hub apply and has unanchored claim blocks.
+Cards written by put, import or human-reviewed applies are not proposed.
+Anchoring adds deterministic `^c-xxxxxx` suffixes and preserves all other bytes,
+including existing anchors. Unsupported Markdown stays opaque.
+Each run handles at most 25 anchoring proposals, including retries. The normal
+run limit and hub quotas can reduce that number. Anchoring stops with four
+pending slots reserved for repair proposals. Unapplied anchoring proposals are
+withdrawn in the same run with a recorded reason. A withdrawn anchor waits seven
+days before reflection proposes it again.
+
+Anchoring uses the existing Tier 0 proposal, policy, journal and rollback path.
+The hub policy must list `anchor_blocks` in `tier0_op_classes`. Existing local
+policies must also list it to permit automatic attempts. Local policy can only
+veto application. Hub authority and evidence checks still apply.
+`memory reflect status` reports `anchoring.anchored_cards` over
+`anchoring.clean_live_cards` and their `fraction` from the last pulled replica.
+This cached fraction is diagnostic and grants no permission to apply edits.
+
+Use `memory reflect rollback <proposal-id>` to open a compensating proposal.
+After a separate review and acceptance, it restores the exact prior bytes.
+Non-clean cards remain skipped until a separate scan updates their receipts.
+
 ## Unused agent cards (#2603)
 
 The daily scheduled care runbook runs `memory care tend --stage lifecycle`.

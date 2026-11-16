@@ -175,11 +175,14 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         },
         "held",
     );
+    let structural = tier == 0 && super::proposal_tiers::anchor_proof(tx, body)?;
     let proof = super::attestation::resolve(tx, body, authority, scanner, now)?;
     check(
         &mut checks,
         "evidence_floor",
-        if !proof.complete {
+        if structural {
+            None
+        } else if !proof.complete {
             Some("proof_binding_incomplete")
         } else {
             (proof.hashes.len() < 3).then_some("evidence_floor_unmet")
@@ -189,7 +192,9 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     check(
         &mut checks,
         "source_group_floor",
-        if !proof.complete {
+        if structural {
+            None
+        } else if !proof.complete {
             Some("proof_binding_incomplete")
         } else {
             (proof.principals.len() < 2).then_some("source_group_floor_unmet")
@@ -236,7 +241,9 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     check(
         &mut checks,
         "evidence_authority",
-        if !proof.complete {
+        if structural {
+            proof.contrary.then_some("contrary_evidence")
+        } else if !proof.complete {
             Some("evidence_authority_unbound")
         } else {
             proof.contrary.then_some("contrary_evidence")
@@ -294,6 +301,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "workspace_fingerprint":null,"evidence_log_sha256":"incomplete","delta_sha256":delta,"changed_path_count":changed.len(),
         "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.principals.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
     });
+    report["structural_anchor_proof"] = json!(structural);
     report["retrieval_eval_record"] = super::retrieval_eval::summary(tx, authority)?;
     let eval_expiry = if proposals::cards(body)
         .iter()
@@ -306,7 +314,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     report["valid_until_ms"] = json!(
         proof
             .expires_ms
-            .unwrap_or(now)
+            .unwrap_or(if structural { i64::MAX } else { now })
             .min(eval_expiry.unwrap_or(i64::MAX))
     );
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
