@@ -661,3 +661,14 @@ def test_deadline_scales_with_card_runs():
 def test_duplicate_ids_across_corpus_and_feedback_are_refused():
     with pytest.raises(ValueError, match="verify_eval_duplicate_id"):
         run_eval([case(id="same"), case(id="same")])
+
+
+@pytest.mark.parametrize("bad", [None, "case", {"id": "x", "expected": "no-change", "expected_ops": []}])
+def test_eval_cli_reports_malformed_corpus_cases(verify_hub, capsys, bad):
+    from brigade import cli
+
+    target, hub, _, _ = verify_hub
+    path = corpus(target, [bad])
+    assert cli.main(["memory", "verify", "eval", "--corpus", str(path), "--target", str(target), "--json"]) != 0
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
+    assert hub.calls == []

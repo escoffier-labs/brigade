@@ -2,3 +2,4 @@
 - `memory verify eval` reports an unanchored or unreadable corpus card as a coded failure instead of a traceback.
 - The verify gate deadline scales with card runs (20 minute floor, 15 seconds per run), so a full corpus plus feedback can finish with real seats.
 - The gate refuses duplicate case ids across the corpus and feedback as a no-go.
+- `memory verify eval` reports a malformed corpus case as `verify_eval_case_invalid` instead of a traceback.

@@ -56,6 +56,16 @@ def read_corpus(path: Path) -> list[dict[str, Any]]:
 
 
 def inputs(case: dict[str, Any]) -> tuple[vc.CardInput, ev.Assembly]:
+    """Rebuild one case, reporting any malformed shape as a coded ValueError."""
+    if not isinstance(case, dict):
+        raise ValueError("verify_eval_case_invalid")
+    try:
+        return _inputs(case)
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError("verify_eval_case_invalid") from exc
+
+
+def _inputs(case: dict[str, Any]) -> tuple[vc.CardInput, ev.Assembly]:
     if case.get("expected") not in CLASSES or not isinstance(case.get("expected_ops"), list):
         raise ValueError("verify_eval_label_invalid")
     for op in case["expected_ops"]:
