@@ -16,6 +16,7 @@ pub const RIGHTS: &[&str] = &[
     "import",
     "list_proposals",
     "read_stats",
+    "evidence_chain",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

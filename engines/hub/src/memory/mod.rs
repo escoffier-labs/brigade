@@ -20,6 +20,9 @@ pub mod embedder;
 pub mod embedding;
 #[cfg(test)]
 mod embedding_tests;
+mod evidence_chain;
+#[cfg(test)]
+mod evidence_chain_tests;
 mod hardening;
 pub mod ids;
 pub mod index;
@@ -225,7 +228,7 @@ pub fn read_only(body: &[u8]) -> bool {
         matches!(
             v.get("action").and_then(Json::as_str),
             Some("card" | "log" | "search" | "status" | "proposal_list" | "proposal_show")
-        )
+        ) || (v["action"] == "evidence_chain" && v["operation"] == "latest")
     })
 }
 
@@ -1002,6 +1005,9 @@ impl Store {
         };
         let action = map.get("action").and_then(Json::as_str).unwrap_or("");
         match action {
+            "evidence_chain" if map.get("operation").and_then(Json::as_str) == Some("latest") => {
+                self.read(credential, action, map).await
+            }
             "card" | "log" | "status" | "proposal_list" | "proposal_show" | "read_stats" => {
                 self.read(credential, action, map).await
             }
@@ -1019,7 +1025,8 @@ impl Store {
             "propose" | "decide" | "rollback" | "auto_apply" | "compensation_watch" => {
                 self.proposal_request(credential, action, map, &raw).await
             }
-            "put"
+            "evidence_chain"
+            | "put"
             | "import"
             | "retire"
             | "handoff"
@@ -1159,6 +1166,19 @@ impl Store {
         raw: &Json,
     ) -> Result<Prepared, Reply> {
         let allowed: &[&str] = match action {
+            "evidence_chain" => &[
+                "base_epoch",
+                "action",
+                "operation",
+                "scope",
+                "workspace_id",
+                "stream",
+                "seq",
+                "digest",
+                "prev_digest",
+                "kind",
+                "client_event_id",
+            ],
             "propose" => &[
                 "action",
                 "base_epoch",
@@ -1338,6 +1358,7 @@ impl Store {
             }
         };
         let action = match action {
+            "evidence_chain" => Action::EvidenceChain(evidence_chain::prepare(map)?),
             "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
             "verifier_resync" => Action::VerifierResync { generation: 0 },
@@ -1814,6 +1835,9 @@ impl Store {
         match self
             .readers
             .submit(move |c| {
+                if action == "evidence_chain" {
+                    return evidence_chain::latest(&Conn(c), &credential, &map);
+                }
                 if matches!(action.as_str(), "proposal_list" | "proposal_show") {
                     return proposal_reads::read(
                         &Conn(c),

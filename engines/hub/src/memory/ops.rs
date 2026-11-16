@@ -14,6 +14,7 @@ pub struct Base {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    EvidenceChain(super::evidence_chain::Append),
     RetrievalEval(super::retrieval_eval::Report),
     AutoApplySwitch(bool, Option<(String, String)>),
     EvidencePurge(String),
@@ -85,6 +86,7 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Action::EvidenceChain(_) => "evidence_chain",
             Action::RetrievalEval(_) => "retrieval_eval.record",
             Action::AutoApplySwitch(..) => "auto_apply_switch",
             Action::EvidencePurge(_) => "evidence.purge",
@@ -113,6 +115,7 @@ impl Action {
     /// The grant an action needs, and the scope it needs it on.
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
+            Action::EvidenceChain(a) => (Some(&a.chain.scope), "evidence_chain"),
             Action::RetrievalEval(_) => (None, "admin"),
             Action::AutoApplySwitch(..) | Action::EvidencePurge(_) => (None, "admin"),
             Action::Evidence(a) => (
@@ -569,9 +572,10 @@ pub fn apply(
     // text, and a stored copy would outlive the card's retirement and answer
     // a replay without the grant, state and scan checks. Each command is
     // safe to repeat: a second submit or failure finds no leased job.
+    // Chain appends always compare the current head, including a repeated request.
     let replayable = !matches!(
         p.action,
-        Action::Embedding { .. } | Action::VerifierBind { .. }
+        Action::Embedding { .. } | Action::VerifierBind { .. } | Action::EvidenceChain(_)
     );
     let stored = if replayable {
         tx.query(
@@ -701,6 +705,9 @@ fn run(
         )
     };
     match &p.action {
+        Action::EvidenceChain(a) => {
+            super::evidence_chain::append(tx, p, a, &_authority.proposal_limits)
+        }
         Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
         Action::AutoApplySwitch(enabled, release) => {
             if release.is_none() {

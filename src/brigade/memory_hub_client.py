@@ -95,6 +95,9 @@ EVIDENCE_QUOTA_REFUSALS = {
     "memory_evidence_retained_principal_quota",
     "memory_evidence_retained_scope_quota",
     "memory_evidence_lifetime_principal_quota",
+    "memory_evidence_chain_workspace_quota",
+    "memory_evidence_chain_stream_quota",
+    "memory_evidence_chain_principal_quota",
 }
 # `read_stats` allows one request per second and 600 a day per principal. The hub
 # says so with this code, so a caller can stop instead of retrying at once.
@@ -639,6 +642,27 @@ class MemoryHubClient:
     def __repr__(self) -> str:  # never show the credential
         return f"MemoryHubClient({self.identity!r})"
 
+    def evidence_chain(
+        self,
+        scope: str,
+        workspace_id: str,
+        stream: str,
+        *,
+        operation: str = "latest",
+        seq: int | None = None,
+        digest: str | None = None,
+        prev_digest: str | None = None,
+        kind: str = "append",
+        base_epoch: str | None = None,
+    ) -> dict[str, Any]:
+        """Read or compare-and-append a head. The caller supplies an HMAC workspace id."""
+        fields: dict[str, Any] = dict(scope=scope, workspace_id=workspace_id, stream=stream, operation=operation)
+        if operation == "append":
+            fields.update(seq=seq, digest=digest, prev_digest=prev_digest, kind=kind, client_event_id=event_id())
+            if base_epoch is not None:
+                fields["base_epoch"] = base_epoch
+        return self.call("evidence_chain", **fields)
+
     def call(self, action: str, *, timeout: float | None = None, **fields: Any) -> dict[str, Any]:
         body = {"action": action, **fields}
         try:
@@ -655,7 +679,9 @@ class MemoryHubClient:
                 raise HubRefusal(status, {"code": "memory_rescan_status", "error": "rescan requires HTTP 200"})
             return payload
         code = payload.get("code")
-        coded = QUOTA_REFUSALS | EVIDENCE_QUOTA_REFUSALS | {READ_STATS_RATE_LIMITED}
+        coded = (
+            QUOTA_REFUSALS | EVIDENCE_QUOTA_REFUSALS | {READ_STATS_RATE_LIMITED, "memory_evidence_chain_rate_limited"}
+        )
         if action == "auto_apply":
             coded = coded | {"memory_auto_apply_rate_limited"}
         if status == 429 and isinstance(code, str) and code in coded:

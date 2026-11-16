@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 13;
+pub const USER_VERSION: i64 = 16;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -143,7 +143,7 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}{}{}{}{}{}{}
+{}{}{}{}{}{}{}{}
 ",
         super::embedding::DDL,
         super::proposals::DDL,
@@ -151,7 +151,8 @@ CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
         super::retrieval_eval::DDL,
         super::read_counts::DDL,
         super::verifier::DDL,
-        super::manifest_binding::DDL
+        super::manifest_binding::DDL,
+        super::evidence_chain::DDL
     )
 }
 
@@ -176,6 +177,7 @@ pub const TABLES: &[&str] = &[
     "memory_verifiers",
     "memory_verifier_credentials",
     "memory_evidence_bindings",
+    "memory_evidence_chain",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -276,6 +278,11 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     if version < 13 {
         step(c, super::manifest_binding::DDL, 13).map_err(err)?;
     }
+    // Merge only after #2606 (14) and #2605 (15), then rebase their steps above.
+    // This step requires schema 15 and must never skip either predecessor.
+    if version < 16 {
+        evidence_chain_step(c).map_err(err)?;
+    }
     for table in TABLES {
         let present: Option<i64> = c
             .query_row(
@@ -319,6 +326,18 @@ fn event_schema() -> String {
 
 fn eval_schema() -> String {
     format!("{} {}", super::retrieval_eval::legacy_ddl(), event_schema())
+}
+
+pub(super) fn evidence_chain_step(c: &Connection) -> rusqlite::Result<()> {
+    step_with(c, 16, |c| {
+        let current: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if current != 15 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "schema 16 requires schema 15 from #2606 and #2605".into(),
+            ));
+        }
+        c.execute_batch(super::evidence_chain::DDL)
+    })
 }
 
 /// Apply one migration step unless another process already recorded it.

@@ -1,0 +1,322 @@
+//! Opaque workspace evidence heads, appended under the memory writer's lock.
+use super::{Reply, auth, hardening::Limits, ids, invalid, ops::Prepared};
+use crate::writer::{ReadTx, WriteTx};
+use rusqlite::types::Value;
+use serde_json::{Map, Value as Json, json};
+
+pub(super) const DDL: &str = "
+CREATE TABLE IF NOT EXISTS memory_evidence_chain(
+  principal TEXT NOT NULL,
+  workspace_id TEXT NOT NULL CHECK(length(workspace_id)=64 AND workspace_id NOT GLOB '*[^0-9a-f]*'),
+  stream TEXT NOT NULL CHECK(stream IN ('card_reads','lesson_observations')),
+  seq INTEGER NOT NULL CHECK(seq>0),
+  digest TEXT NOT NULL CHECK(length(digest)=64 AND digest NOT GLOB '*[^0-9a-f]*'),
+  prev_digest TEXT CHECK(prev_digest IS NULL OR (length(prev_digest)=64 AND prev_digest NOT GLOB '*[^0-9a-f]*')),
+  kind TEXT NOT NULL CHECK(kind IN ('append','reset')),
+  created_at TEXT NOT NULL,
+  log_epoch TEXT NOT NULL,
+  PRIMARY KEY(principal,workspace_id,stream,seq)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_evidence_chain_principal_time ON memory_evidence_chain(principal,created_at);
+CREATE TRIGGER IF NOT EXISTS memory_evidence_chain_no_update BEFORE UPDATE ON memory_evidence_chain
+  BEGIN SELECT RAISE(ABORT, 'memory_evidence_chain is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS memory_evidence_chain_no_delete BEFORE DELETE ON memory_evidence_chain
+  BEGIN SELECT RAISE(ABORT, 'memory_evidence_chain is append-only'); END;
+";
+
+#[derive(Clone, Debug)]
+pub(super) struct Chain {
+    pub scope: String,
+    workspace: String,
+    stream: String,
+}
+#[derive(Clone, Debug)]
+pub struct Append {
+    pub(super) chain: Chain,
+    seq: i64,
+    digest: String,
+    prev: Option<String>,
+    kind: String,
+    base_epoch: Option<String>,
+}
+fn hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn string<'a>(map: &'a Map<String, Json>, key: &str) -> &'a str {
+    map.get(key).and_then(Json::as_str).unwrap_or("")
+}
+fn parse(map: &Map<String, Json>, append: bool) -> Result<Chain, Reply> {
+    let allowed = ["action", "operation", "scope", "workspace_id", "stream"];
+    let extra = [
+        "seq",
+        "digest",
+        "prev_digest",
+        "kind",
+        "client_event_id",
+        "base_epoch",
+    ];
+    if map
+        .keys()
+        .any(|k| !(allowed.contains(&k.as_str()) || append && extra.contains(&k.as_str())))
+    {
+        return Err(invalid("unknown evidence_chain field"));
+    }
+    if string(map, "operation") != if append { "append" } else { "latest" } {
+        return Err(invalid("operation must be append or latest"));
+    }
+    let scope = string(map, "scope");
+    // #2620: principal ownership is the workspace binding. Same-user capabilities add no authority.
+    let workspace = string(map, "workspace_id");
+    let stream = string(map, "stream");
+    if !scope
+        .strip_prefix("principal:")
+        .is_some_and(ids::valid_principal)
+        || !hex(workspace)
+        || !matches!(stream, "card_reads" | "lesson_observations")
+    {
+        return Err(invalid(
+            "evidence_chain requires a principal scope, a 64-character lowercase hex workspace_id and a known stream",
+        ));
+    }
+    Ok(Chain {
+        scope: scope.into(),
+        workspace: workspace.into(),
+        stream: stream.into(),
+    })
+}
+pub(super) fn prepare(map: &Map<String, Json>) -> Result<Append, Reply> {
+    let chain = parse(map, true)?;
+    let seq = map
+        .get("seq")
+        .and_then(Json::as_i64)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| invalid("seq must be a positive integer"))?;
+    let digest = string(map, "digest");
+    let kind = string(map, "kind");
+    let prev = match map.get("prev_digest") {
+        Some(Json::Null) => None,
+        Some(Json::String(s)) if hex(s) => Some(s.clone()),
+        _ => return Err(invalid("prev_digest must be lowercase hex or null")),
+    };
+    if !hex(digest) || !matches!(kind, "append" | "reset") {
+        return Err(invalid(
+            "digest must be lowercase hex and kind must be append or reset",
+        ));
+    }
+    let base_epoch = match map.get("base_epoch") {
+        None => None,
+        Some(Json::String(s)) if ids::parse_event_id(s).is_some() => Some(s.clone()),
+        _ => return Err(invalid("base_epoch must be a log_epoch identifier")),
+    };
+    Ok(Append {
+        chain,
+        seq,
+        digest: digest.into(),
+        prev,
+        kind: kind.into(),
+        base_epoch,
+    })
+}
+fn authorized<T: ReadTx + ?Sized>(
+    tx: &T,
+    who: &auth::Credential,
+    chain: &Chain,
+) -> rusqlite::Result<bool> {
+    if chain.scope.strip_prefix("principal:") != Some(who.principal()) {
+        return Ok(false);
+    }
+    // Require the owner's explicit grant even for Admin, without the general
+    // has_exact_rights admin bypass. No credential can act as another owner.
+    let grants = tx.query(
+        "SELECT rights FROM memory_grants WHERE principal=?1 AND scope=?2",
+        &[
+            Value::Text(who.principal().into()),
+            Value::Text(chain.scope.clone()),
+        ],
+    )?;
+    Ok(grants.iter().any(|r| {
+        super::ops::s(&r[0])
+            .split(',')
+            .any(|right| right == "evidence_chain")
+    }))
+}
+fn denied() -> Reply {
+    super::error(
+        403,
+        "memory_grant_missing",
+        "evidence_chain requires its owner's exact principal grant",
+    )
+}
+fn head<T: ReadTx + ?Sized>(
+    tx: &T,
+    who: &auth::Credential,
+    chain: &Chain,
+) -> rusqlite::Result<Json> {
+    let rows = tx.query(
+        "SELECT h.seq,h.digest,h.prev_digest,h.kind,h.created_at,r.seq,r.digest,r.created_at,h.log_epoch,r.log_epoch
+         FROM memory_evidence_chain h LEFT JOIN memory_evidence_chain r
+           ON r.principal=h.principal AND r.workspace_id=h.workspace_id AND r.stream=h.stream
+           AND r.seq=(SELECT MAX(seq) FROM memory_evidence_chain
+             WHERE principal=?1 AND workspace_id=?2 AND stream=?3 AND kind='reset')
+         WHERE h.principal=?1 AND h.workspace_id=?2 AND h.stream=?3 ORDER BY h.seq DESC LIMIT 1",
+        &[
+            Value::Text(who.principal().into()),
+            Value::Text(chain.workspace.clone()),
+            Value::Text(chain.stream.clone()),
+        ],
+    )?;
+    Ok(rows.first().map_or(Json::Null, |r| json!({
+        "seq": match r[0] { Value::Integer(n) => n, _ => 0 }, "digest": super::ops::s(&r[1]),
+        "prev_digest": if r[2] == Value::Null { Json::Null } else { json!(super::ops::s(&r[2])) },
+        "kind": super::ops::s(&r[3]), "created_at": super::ops::s(&r[4]),
+        "log_epoch": super::ops::s(&r[8]),
+        "last_reset_seq": if let Value::Integer(n) = r[5] { json!(n) } else { Json::Null },
+        "last_reset_digest": if r[6] == Value::Null { Json::Null } else { json!(super::ops::s(&r[6])) },
+        "last_reset_created_at": if r[7] == Value::Null { Json::Null } else { json!(super::ops::s(&r[7])) },
+        "last_reset_epoch": if r[9] == Value::Null { Json::Null } else { json!(super::ops::s(&r[9])) }
+    })))
+}
+fn response(head: Json, epoch: &str) -> Json {
+    json!({
+        "log_epoch": epoch,
+        "last_reset_seq": head["last_reset_seq"],
+        "last_reset_digest": head["last_reset_digest"],
+        "last_reset_created_at": head["last_reset_created_at"],
+        "last_reset_epoch": head["last_reset_epoch"],
+        "head": head
+    })
+}
+fn refusal(status: u16, code: &str, message: &str, head: Json, epoch: &str) -> Reply {
+    let mut reply = super::error(status, code, message);
+    reply
+        .body
+        .as_object_mut()
+        .unwrap()
+        .extend(response(head, epoch).as_object().unwrap().clone());
+    reply
+}
+pub(super) fn latest(
+    tx: &dyn ReadTx,
+    who: &auth::Credential,
+    map: &Map<String, Json>,
+) -> rusqlite::Result<Reply> {
+    if let Some(r) = super::verifier::check(tx, who)? {
+        return Ok(r);
+    }
+    let chain = match parse(map, false) {
+        Ok(c) => c,
+        Err(r) => return Ok(r),
+    };
+    if !authorized(tx, who, &chain)? {
+        return Ok(denied());
+    }
+    Ok(Reply::new(
+        200,
+        response(head(tx, who, &chain)?, &super::ops::epoch(tx)?),
+    ))
+}
+pub(super) fn append(
+    tx: &dyn WriteTx,
+    p: &Prepared,
+    a: &Append,
+    limits: &Limits,
+) -> rusqlite::Result<Reply> {
+    if !authorized(tx, &p.credential, &a.chain)? {
+        return Ok(denied());
+    }
+    let current = head(tx, &p.credential, &a.chain)?;
+    let epoch = super::ops::epoch(tx)?;
+    if a.base_epoch
+        .as_ref()
+        .is_some_and(|claimed| claimed != &epoch)
+    {
+        return Ok(refusal(
+            409,
+            "memory_epoch_changed",
+            "the memory log was restored since this head was read",
+            current,
+            &epoch,
+        ));
+    }
+    let seq = current["seq"].as_i64().unwrap_or(0);
+    if seq.checked_add(1) != Some(a.seq) || current["digest"].as_str() != a.prev.as_deref() {
+        return Ok(refusal(
+            409,
+            "memory_evidence_chain_conflict",
+            "evidence chain head does not match",
+            current,
+            &epoch,
+        ));
+    }
+    // Admission shares the writer transaction with insertion. Stored timestamps
+    // preserve the per-principal spacing used by Rate across hub restarts.
+    let usage = tx.query(
+        "SELECT COUNT(*),MAX(created_at),
+                COUNT(DISTINCT workspace_id),COALESCE(SUM(workspace_id=?2),0)
+         FROM memory_evidence_chain WHERE principal=?1",
+        &[
+            Value::Text(p.credential.principal().into()),
+            Value::Text(a.chain.workspace.clone()),
+        ],
+    )?;
+    let number = |i: usize| {
+        if let Value::Integer(n) = usage[0][i] {
+            n
+        } else {
+            0
+        }
+    };
+    // Contiguous sequence numbers count the current generation, including its reset.
+    for (full, code) in [
+        (
+            number(3) == 0 && number(2) >= limits.evidence_workspaces_per_principal,
+            "memory_evidence_chain_workspace_quota",
+        ),
+        (
+            number(0) >= limits.evidence_rows_per_principal,
+            "memory_evidence_chain_principal_quota",
+        ),
+        (
+            a.kind != "reset"
+                && seq - current["last_reset_seq"].as_i64().unwrap_or(1) + 1
+                    >= limits.evidence_rows_per_stream,
+            "memory_evidence_chain_stream_quota",
+        ),
+    ] {
+        if full {
+            return Ok(refusal(
+                429,
+                code,
+                "evidence chain row quota reached",
+                current,
+                &epoch,
+            ));
+        }
+    }
+    if usage[0][1] != Value::Null
+        && super::ops::s(&usage[0][1])
+            > ids::isoformat(p.now_ms.saturating_sub(limits.evidence_principal_ms))
+    {
+        return Ok(refusal(
+            429,
+            "memory_evidence_chain_rate_limited",
+            "evidence chain append rate exceeded",
+            current,
+            &epoch,
+        ));
+    }
+    let created_at = ids::isoformat(p.now_ms);
+    tx.execute(
+        "INSERT INTO memory_evidence_chain(principal,workspace_id,stream,seq,digest,prev_digest,kind,created_at,log_epoch)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        &[Value::Text(p.credential.principal().into()), Value::Text(a.chain.workspace.clone()),
+          Value::Text(a.chain.stream.clone()), Value::Integer(a.seq), Value::Text(a.digest.clone()),
+          a.prev.clone().map_or(Value::Null, Value::Text), Value::Text(a.kind.clone()), Value::Text(created_at), Value::Text(epoch.clone())],
+    )?;
+    Ok(Reply::new(
+        201,
+        response(head(tx, &p.credential, &a.chain)?, &epoch),
+    ))
+}

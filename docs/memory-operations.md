@@ -42,6 +42,102 @@ replica_max_mb = 50            # cap on the replica's heads.json
 
 `read` and `sync` need `scope` or `read_scopes`. Every hub search and card read names the read scopes, so a credential that can read more, such as one with a `principal:` grant, still answers only from them. Dot and Duet read through the same commands and get the same limit.
 
+### Workspace evidence chains
+
+`MemoryHubClient.evidence_chain(scope, workspace_id, stream)` reads the latest
+hub anchor for `card_reads` or `lesson_observations`. An empty chain has
+`head=null` and null reset metadata. The hub keys each chain by the authenticated principal,
+workspace and stream. Grant `evidence_chain` on the caller's exact
+`principal:<id>` scope. Node defaults and wildcard grants do not grant access.
+A caller cannot read or append another principal's chain, including with the
+admin credential. Admin also needs an explicit exact grant for its own chain.
+
+The caller derives `workspace_id` with HMAC on the client and sends its
+64-character lowercase hex output. Paths and card IDs stay on the client.
+The hub validates the format and treats the value as opaque. Principal ownership
+is the workspace binding. No per-workspace capability is needed because a
+same-user file adds no authority. Each host keeps its own principal. This slice
+does not derive the identifier or connect either local evidence stream.
+
+The trust model guarantees that honest automation is never tricked by file
+edits or rollback. A worker that deliberately uses the host credential gains
+only delay. Every automated action is already available to that credential,
+reversible and attributed. The connected consumers must enforce the client
+contract below before the archive and lesson gates can be enabled.
+
+For the card-read stream, each local entry is
+`digest_n = H(digest_{n-1} || event_n)`. The hub stores only the opaque head
+and its continuity metadata. Consumers verify the local log up to the hub head
+before computing coverage. Dropping an anchored read requires a hash preimage.
+A credentialed worker can add reads or ordered resets, which only delay
+archiving. The local signing key authorizes no admission. This is the client
+contract for the next slice.
+
+Every successful chain response and every append refusal carrying a head includes
+`log_epoch`, read in the same transaction as that head. Consumers must bind the
+local hash chain to this epoch, for example by including it in the chain root or
+comparing the epoch recorded with the local log to the hub response. A matching
+digest and sequence alone do not validate a prefix after a database restore.
+`memory-restore-epoch` rotates the epoch even though the restored rows can match
+an old local log and can predate a reset that was lost with the database.
+Coverage may count only from a reset whose `last_reset_epoch` equals the current
+`log_epoch`. Otherwise consumers must fail closed until they append their own
+ordered reset in the current epoch. A restored reset retains its stored epoch
+and cannot start a coverage window in the new epoch.
+Missing epoch binding also fails closed. Archive and lesson gates stay disabled
+until connected consumers enforce this contract.
+
+Append with `operation="append"`, a positive `seq`, a lowercase SHA-256 `digest`
+and `prev_digest`. The first entry requires `seq=1` and `prev_digest=None`.
+Every later entry requires the next sequence and the current head's digest.
+A gap, replay or previous-digest mismatch returns HTTP 409 with
+`memory_evidence_chain_conflict`. After an uncertain response, fetch `latest`
+before recovery. Appends do not replay cached success responses. Pass the observed `log_epoch`
+as `base_epoch` when appending. A mismatched claimed epoch returns HTTP 409
+`memory_epoch_changed` with the current epoch and head, before checking sequence,
+quotas or pacing. The optional field preserves compatibility, but consumers
+implementing the coverage contract must supply it to fence a concurrent restore.
+
+Each head contains `seq`, `digest`, `prev_digest`, `kind`, a hub-generated
+`created_at` timestamp and `log_epoch`, the epoch in which the hub wrote that row.
+The hub stores its current epoch on insertion and never accepts it from a client.
+`kind="reset"` records a reset with the same continuity checks. It preserves
+earlier entries so later consumers can restart coverage at the reset. The default kind is `append`.
+Every nonempty head also includes `last_reset_seq`, `last_reset_digest`,
+`last_reset_created_at` and `last_reset_epoch`, computed from immutable stored
+rows in the same read. All four also appear beside `head` in each response,
+including `latest`. All four are null for a stream that has never reset.
+Later appends preserve the latest reset boundary, its hub timestamp and its epoch.
+
+Admission defaults to 128 distinct workspace IDs per principal,
+10,000 rows per generation of each principal/workspace/stream,
+100,000 rows per principal and one successful append per principal every
+1,000 milliseconds across all workspaces and streams. Resets count toward
+the principal lifetime quota and the rate limit. A reset is allowed at the
+stream row cap and starts a new generation with the reset row counting as its
+first row. Subsequent appends count rows from that latest reset, including the
+reset itself. History is never deleted. Resets cannot bypass the principal's
+100,000-row lifetime cap or create a workspace past the 128-workspace cap, so
+repeated resets still have a fixed total storage bound per principal. A full
+principal needs an operator to raise its row cap before it can append or reset.
+Configure
+`evidence_workspaces_per_principal`, `evidence_rows_per_stream`,
+`evidence_rows_per_principal` and
+`evidence_principal_ms` under `memory.proposal_limits` using positive bounded
+integers. Admission runs in the writer transaction before insertion.
+The workspace cap counts an ID once across both streams. Existing workspaces
+can keep appending at the cap. HTTP 429 returns
+`memory_evidence_chain_workspace_quota`, `memory_evidence_chain_stream_quota`,
+`memory_evidence_chain_principal_quota` or `memory_evidence_chain_rate_limited`.
+Refusals leave the head unchanged. Stored hub timestamps enforce the interval
+across restarts and clock rollback. Quotas retain audit history without eviction.
+
+The hub stores these anchors in memory schema 16, outside workspace files.
+Upgrades to schema 16 require schema 15. PR #2606 supplies schema 14 and
+PR #2605 supplies schema 15, so both must land and be rebased before merge.
+This API alone does not authorize archive or lesson admission. Both code gates
+remain disabled until later slices bind local evidence to these heads.
+
 ### Scopes and default access
 
 A hub scope is part of a card's identity. There are four forms:
