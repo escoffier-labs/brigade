@@ -83,6 +83,13 @@ pub fn classify<T: ReadTx + ?Sized>(
     body: &Json,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<u8> {
+    if !body["rollback_of"].is_null() {
+        return Ok(if super::compensation::exact(tx, body)? {
+            0
+        } else {
+            2
+        });
+    }
     // D4: a proposal recorded from a verifier principal is Tier 2 at submit,
     // preflight and every decision, whatever its ops or the policy lists.
     if body["verifier"] == true {
