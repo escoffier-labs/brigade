@@ -278,9 +278,19 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     if version < 13 {
         step(c, super::manifest_binding::DDL, 13).map_err(err)?;
     }
-    // Versions 14 and 15 are reserved by #2606 and #2605. Rebase this step after they land.
+    // Merge only after #2606 (14) and #2605 (15), then rebase their steps above.
+    // This step requires schema 15 and must never skip either predecessor.
     if version < 16 {
-        step(c, super::evidence_chain::DDL, 16).map_err(err)?;
+        step_with(c, 16, |c| {
+            let current: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if current != 15 {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "schema 16 requires schema 15 from #2606 and #2605".into(),
+                ));
+            }
+            c.execute_batch(super::evidence_chain::DDL)
+        })
+        .map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

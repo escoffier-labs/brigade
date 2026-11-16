@@ -688,7 +688,9 @@ fn run(
         )
     };
     match &p.action {
-        Action::EvidenceChain(a) => super::evidence_chain::append(tx, p, a),
+        Action::EvidenceChain(a) => {
+            super::evidence_chain::append(tx, p, a, &_authority.proposal_limits)
+        }
         Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
         Action::AutoApplySwitch(enabled) => {
             tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;

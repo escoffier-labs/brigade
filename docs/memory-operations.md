@@ -68,8 +68,27 @@ Each head contains `seq`, `digest`, `prev_digest`, `kind` and a hub-generated
 `created_at` timestamp. `kind="reset"` records a reset with the same continuity
 checks. It preserves earlier entries so later consumers can restart coverage
 at the reset. The default kind is `append`.
+Every nonempty head also includes `last_reset_seq`, `last_reset_digest` and
+`last_reset_created_at`, computed from immutable stored rows in the same read.
+All three are null for a stream that has never reset. Later appends preserve
+the latest reset boundary and its hub timestamp.
+
+Admission defaults to 10,000 retained rows per principal/workspace/stream,
+100,000 rows per principal and one successful append per principal every
+1,000 milliseconds across all workspaces and streams. Resets count toward
+both quotas and the rate limit. These conservative caps bound immutable storage
+and match the existing principal admission interval. Configure
+`evidence_rows_per_stream`, `evidence_rows_per_principal` and
+`evidence_principal_ms` under `memory.proposal_limits` using positive bounded
+integers. Admission runs in the writer transaction before insertion.
+HTTP 429 returns `memory_evidence_chain_stream_quota`,
+`memory_evidence_chain_principal_quota` or `memory_evidence_chain_rate_limited`.
+Refusals leave the head unchanged. Stored hub timestamps enforce the interval
+across restarts and clock rollback. Quotas retain audit history without eviction.
 
 The hub stores these anchors in memory schema 16, outside workspace files.
+Upgrades to schema 16 require schema 15. PR #2606 supplies schema 14 and
+PR #2605 supplies schema 15, so both must land and be rebased before merge.
 This API alone does not authorize archive or lesson admission. Both code gates
 remain disabled until later slices bind local evidence to these heads.
 

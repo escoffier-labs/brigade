@@ -1,5 +1,5 @@
 //! Opaque workspace evidence heads, appended under the memory writer's lock.
-use super::{Reply, auth, ids, invalid, ops::Prepared};
+use super::{Reply, auth, hardening::Limits, ids, invalid, ops::Prepared};
 use crate::writer::{ReadTx, WriteTx};
 use rusqlite::types::Value;
 use serde_json::{Map, Value as Json, json};
@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS memory_evidence_chain(
   created_at TEXT NOT NULL,
   PRIMARY KEY(principal,workspace_id,stream,seq)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_evidence_chain_principal_time ON memory_evidence_chain(principal,created_at);
 CREATE TRIGGER IF NOT EXISTS memory_evidence_chain_no_update BEFORE UPDATE ON memory_evidence_chain
   BEGIN SELECT RAISE(ABORT, 'memory_evidence_chain is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS memory_evidence_chain_no_delete BEFORE DELETE ON memory_evidence_chain
@@ -57,6 +58,7 @@ fn parse(map: &Map<String, Json>, append: bool) -> Result<Chain, Reply> {
         return Err(invalid("operation must be append or latest"));
     }
     let scope = string(map, "scope");
+    // TODO(#2620): bind this accepted opaque id to workspace authorization after design review.
     let workspace = string(map, "workspace_id");
     let stream = string(map, "stream");
     if !scope
@@ -125,8 +127,12 @@ fn head<T: ReadTx + ?Sized>(
     chain: &Chain,
 ) -> rusqlite::Result<Json> {
     let rows = tx.query(
-        "SELECT seq,digest,prev_digest,kind,created_at FROM memory_evidence_chain
-         WHERE principal=?1 AND workspace_id=?2 AND stream=?3 ORDER BY seq DESC LIMIT 1",
+        "SELECT h.seq,h.digest,h.prev_digest,h.kind,h.created_at,r.seq,r.digest,r.created_at
+         FROM memory_evidence_chain h LEFT JOIN memory_evidence_chain r
+           ON r.principal=h.principal AND r.workspace_id=h.workspace_id AND r.stream=h.stream
+           AND r.seq=(SELECT MAX(seq) FROM memory_evidence_chain
+             WHERE principal=?1 AND workspace_id=?2 AND stream=?3 AND kind='reset')
+         WHERE h.principal=?1 AND h.workspace_id=?2 AND h.stream=?3 ORDER BY h.seq DESC LIMIT 1",
         &[
             Value::Text(who.principal().into()),
             Value::Text(chain.workspace.clone()),
@@ -136,7 +142,10 @@ fn head<T: ReadTx + ?Sized>(
     Ok(rows.first().map_or(Json::Null, |r| json!({
         "seq": match r[0] { Value::Integer(n) => n, _ => 0 }, "digest": super::ops::s(&r[1]),
         "prev_digest": if r[2] == Value::Null { Json::Null } else { json!(super::ops::s(&r[2])) },
-        "kind": super::ops::s(&r[3]), "created_at": super::ops::s(&r[4])
+        "kind": super::ops::s(&r[3]), "created_at": super::ops::s(&r[4]),
+        "last_reset_seq": if let Value::Integer(n) = r[5] { json!(n) } else { Json::Null },
+        "last_reset_digest": if r[6] == Value::Null { Json::Null } else { json!(super::ops::s(&r[6])) },
+        "last_reset_created_at": if r[7] == Value::Null { Json::Null } else { json!(super::ops::s(&r[7])) }
     })))
 }
 pub(super) fn latest(
@@ -156,7 +165,12 @@ pub(super) fn latest(
     }
     Ok(Reply::new(200, json!({"head": head(tx, who, &chain)?})))
 }
-pub(super) fn append(tx: &dyn WriteTx, p: &Prepared, a: &Append) -> rusqlite::Result<Reply> {
+pub(super) fn append(
+    tx: &dyn WriteTx,
+    p: &Prepared,
+    a: &Append,
+    limits: &Limits,
+) -> rusqlite::Result<Reply> {
     if !authorized(tx, &p.credential, &a.chain)? {
         return Ok(denied());
     }
@@ -167,6 +181,48 @@ pub(super) fn append(tx: &dyn WriteTx, p: &Prepared, a: &Append) -> rusqlite::Re
             409,
             "memory_evidence_chain_conflict",
             "evidence chain head does not match",
+        ));
+    }
+    // Admission shares the writer transaction with insertion. Stored timestamps
+    // preserve the per-principal spacing used by Rate across hub restarts.
+    let usage = tx.query(
+        "SELECT COUNT(*),COALESCE(SUM(workspace_id=?2 AND stream=?3),0),MAX(created_at)
+         FROM memory_evidence_chain WHERE principal=?1",
+        &[
+            Value::Text(p.credential.principal().into()),
+            Value::Text(a.chain.workspace.clone()),
+            Value::Text(a.chain.stream.clone()),
+        ],
+    )?;
+    let number = |i: usize| {
+        if let Value::Integer(n) = usage[0][i] {
+            n
+        } else {
+            0
+        }
+    };
+    for (full, code) in [
+        (
+            number(0) >= limits.evidence_rows_per_principal,
+            "memory_evidence_chain_principal_quota",
+        ),
+        (
+            number(1) >= limits.evidence_rows_per_stream,
+            "memory_evidence_chain_stream_quota",
+        ),
+    ] {
+        if full {
+            return Ok(super::error(429, code, "evidence chain row quota reached"));
+        }
+    }
+    if usage[0][2] != Value::Null
+        && super::ops::s(&usage[0][2])
+            > ids::isoformat(p.now_ms.saturating_sub(limits.evidence_principal_ms))
+    {
+        return Ok(super::error(
+            429,
+            "memory_evidence_chain_rate_limited",
+            "evidence chain append rate exceeded",
         ));
     }
     let created_at = ids::isoformat(p.now_ms);

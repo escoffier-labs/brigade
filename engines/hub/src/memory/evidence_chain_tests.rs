@@ -50,6 +50,13 @@ async fn append_in_order_and_latest_use_server_time() {
     assert_eq!(r.status, 201, "{r:?}");
     assert_eq!(r.body["head"]["seq"], 1);
     assert_eq!(r.body["head"]["prev_digest"], Json::Null);
+    for field in [
+        "last_reset_seq",
+        "last_reset_digest",
+        "last_reset_created_at",
+    ] {
+        assert_eq!(r.body["head"][field], Json::Null);
+    }
     assert_eq!(r.body["head"]["created_at"], ids::isoformat(h.now()));
     h.set_clock(h.now() + 1000);
     let r = h
@@ -147,6 +154,7 @@ async fn invalid_fields_are_refused_and_streams_and_workspaces_are_independent()
         (WORKSPACE, "lesson_observations"),
         (SECOND, "card_reads"),
     ] {
+        h.set_clock(h.now() + 1000);
         let mut request = append(&h, 1, None, FIRST, "append");
         request["workspace_id"] = json!(workspace);
         request["stream"] = json!(stream);
@@ -169,6 +177,7 @@ async fn reset_is_an_ordered_record_and_survives_reopen() {
             .status,
         409
     );
+    h.set_clock(h.now() + 1000);
     let reset = h
         .call(NODE_TOKEN, append(&h, 2, Some(FIRST), SECOND, "reset"))
         .await;
@@ -178,11 +187,20 @@ async fn reset_is_an_ordered_record_and_survives_reopen() {
     h.store.take();
     h.open(Arc::new(scan::Unavailable), None);
     assert_eq!(h.call(NODE_TOKEN, latest()).await.body, reset.body);
+    h.set_clock(h.now() + 1000);
     assert_eq!(
         h.call(NODE_TOKEN, append(&h, 3, Some(SECOND), FIRST, "append"))
             .await
             .status,
         201
+    );
+    let head = h.call(NODE_TOKEN, latest()).await.body["head"].clone();
+    assert_eq!(head["seq"], 3);
+    assert_eq!(head["last_reset_seq"], 2);
+    assert_eq!(head["last_reset_digest"], SECOND);
+    assert_eq!(
+        head["last_reset_created_at"],
+        reset.body["head"]["created_at"]
     );
     let db = Connection::open(h.memory()).unwrap();
     let count: i64 = db
@@ -211,12 +229,12 @@ async fn concurrent_appends_have_one_winner() {
 }
 
 #[test]
-fn migration_from_current_schema_preserves_rows_and_is_repeatable() {
-    // Restore the version 13 layout by removing the new table, as in other migration tests.
+fn migration_from_schema_15_preserves_rows_and_is_repeatable() {
+    // After rebasing #2606 and #2605 this retains their real schema-15 layout.
     let db = Connection::open_in_memory().unwrap();
     schema::migrate(&db, 1_800_000_000_000).unwrap();
     db.execute_batch(
-        "DROP TABLE IF EXISTS memory_evidence_chain; PRAGMA user_version=13;
+        "DROP TABLE IF EXISTS memory_evidence_chain; PRAGMA user_version=15;
         UPDATE memory_meta SET value='old-epoch' WHERE key='log_epoch';",
     )
     .unwrap();
@@ -234,4 +252,112 @@ fn migration_from_current_schema_preserves_rows_and_is_repeatable() {
         })
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn migration_from_13_refuses_to_skip_missing_predecessors() {
+    let db = Connection::open_in_memory().unwrap();
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    db.execute_batch("DROP TABLE memory_evidence_chain; PRAGMA user_version=13;")
+        .unwrap();
+    let error = schema::migrate(&db, 1_800_000_000_000).unwrap_err();
+    assert!(error.contains("schema 16 requires schema 15"), "{error}");
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        13
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name='memory_evidence_chain'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn quota_refusals_preserve_head_and_cover_all_principal_streams() {
+    for principal_quota in [false, true] {
+        let mut h = granted().await;
+        let config = if principal_quota {
+            json!({"proposal_limits":{"evidence_rows_per_principal":1}})
+        } else {
+            json!({"proposal_limits":{"evidence_rows_per_stream":1}})
+        };
+        h.store
+            .as_mut()
+            .unwrap()
+            .configure_retrieval(&config)
+            .unwrap();
+        assert_eq!(
+            h.call(NODE_TOKEN, append(&h, 1, None, FIRST, "append"))
+                .await
+                .status,
+            201
+        );
+        let before = h.call(NODE_TOKEN, latest()).await.body;
+        h.set_clock(h.now() + 1000);
+        let mut request = append(&h, 2, Some(FIRST), SECOND, "reset");
+        if principal_quota {
+            request["workspace_id"] = json!(SECOND);
+            request["stream"] = json!("lesson_observations");
+            request["seq"] = json!(1);
+            request["prev_digest"] = Json::Null;
+        }
+        let reply = h.call(NODE_TOKEN, request).await;
+        let expected = if principal_quota {
+            "memory_evidence_chain_principal_quota"
+        } else {
+            "memory_evidence_chain_stream_quota"
+        };
+        assert_eq!((reply.status, code(&reply)), (429, expected));
+        assert_eq!(h.call(NODE_TOKEN, latest()).await.body, before);
+        let db = Connection::open(h.memory()).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM memory_evidence_chain", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn rate_refusals_span_workspaces_and_survive_reopen_without_moving_head() {
+    let mut h = granted().await;
+    assert_eq!(
+        h.call(NODE_TOKEN, append(&h, 1, None, FIRST, "append"))
+            .await
+            .status,
+        201
+    );
+    let before = h.call(NODE_TOKEN, latest()).await.body;
+    h.store.take();
+    h.open(Arc::new(scan::Unavailable), None);
+    h.set_clock(h.now() + 999);
+    for other in [false, true] {
+        let mut request = append(&h, 2, Some(FIRST), SECOND, "reset");
+        if other {
+            request["workspace_id"] = json!(SECOND);
+            request["stream"] = json!("lesson_observations");
+            request["seq"] = json!(1);
+            request["prev_digest"] = Json::Null;
+        }
+        let reply = h.call(NODE_TOKEN, request).await;
+        assert_eq!(
+            (reply.status, code(&reply)),
+            (429, "memory_evidence_chain_rate_limited")
+        );
+        assert_eq!(h.call(NODE_TOKEN, latest()).await.body, before);
+    }
+    h.set_clock(h.now() + 1);
+    assert_eq!(
+        h.call(NODE_TOKEN, append(&h, 2, Some(FIRST), SECOND, "reset"))
+            .await
+            .status,
+        201
+    );
 }
