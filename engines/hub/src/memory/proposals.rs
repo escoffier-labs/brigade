@@ -718,6 +718,14 @@ fn apply_cards(
                 "a changed card was applied or rolled back in the last 24 hours",
             )));
         }
+        // An automatic compensation's scope and operation hold stops verifier applies too.
+        if super::compensation::class_held(tx, body)? {
+            return Ok(Some(error(
+                409,
+                "compensation_class_held",
+                "automatic changes of this operation type are held in this scope",
+            )));
+        }
         body["preflight"] = json!({"checks":[{"gate":"verify_evaluation","state":"satisfied"}]});
     } else if automatic {
         let snapshot = match &p.action {

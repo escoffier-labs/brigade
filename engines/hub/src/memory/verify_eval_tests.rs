@@ -529,3 +529,26 @@ async fn verifier_applies_keep_the_card_cooldown() {
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn verifier_applies_respect_compensation_class_holds() {
+    let (h, id) = ready().await;
+    assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+    // A successful automatic compensation held replace_block in this scope.
+    Connection::open(h.memory())
+        .unwrap()
+        .execute(
+            "INSERT INTO memory_meta VALUES('compensation_hold:fleet/replace_block','fixture')",
+            [],
+        )
+        .unwrap();
+    let request = json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,
+        "binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),
+        "expected_op_types":["replace_block"],"client_event_id":h.id()});
+    let refused = h.call(AGENT_TOKEN, automatic_request(request)).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (409, "compensation_class_held"),
+        "{refused:?}"
+    );
+}
