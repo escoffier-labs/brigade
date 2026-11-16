@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Keep the latest reset boundary visible in evidence chain heads, bound workspace counts, immutable row growth and principal append rates, require explicit owner grants even for admin, and refuse schema-16 upgrades without schema 15.
-
 ## [0.31.0] - 2026-11-14
 
 - Add explicit opt-in Duet dispatch with seven fleet tools, repository and prompt bounds, and atomic open-request and daily-attempt limits in private state. Approval, answer and doctor relays remain unavailable; default discovery stays at 22 tools.
