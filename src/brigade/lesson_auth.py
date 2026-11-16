@@ -60,3 +60,31 @@ def prompt_matches(target: Path, event: dict[str, Any], prompt: dict[str, Any]) 
         and event.get("at") == prompt["at"]
         and authentic(target, event)
     )
+
+
+def seal_pending(target: Path, pending: dict[str, Any]) -> None:
+    key = receipt_signing.load_workspace_key(target)
+    if key is None:
+        raise ValueError("lesson_review_needs_key")
+    pending["authentication"] = {
+        "key_id": key[1],
+        "signature": receipt_signing.sign("brigade.lesson-publication.v1\n" + _digest(target, pending), key[0]),
+    }
+
+
+def authentic_pending(target: Path, pending: dict[str, Any]) -> bool:
+    if not isinstance(pending, dict):
+        return False
+    key = receipt_signing.load_workspace_key(target)
+    auth = pending.get("authentication")
+    if key is None or not isinstance(auth, dict):
+        return False
+    signature = auth.get("signature")
+    return (
+        auth.get("key_id") == key[1]
+        and isinstance(signature, str)
+        and signature.isascii()
+        and hmac.compare_digest(
+            signature, receipt_signing.sign("brigade.lesson-publication.v1\n" + _digest(target, pending), key[0])
+        )
+    )

@@ -63,7 +63,8 @@ def test_prompt_retry_requires_matching_authenticated_saved_event(scope, monkeyp
         assert activity._read_prompts(spool)[0]["prompt_id"] == prompt_id
         prompts = [e for e in activity.load(scope)["events"] if e["kind"] == "UserPromptSubmit"]
         assert prompts
-        assert prompts[-1]["id"] == 2
+        # Each failed acknowledgement follows the hook's final tool save.
+        assert prompts[-1]["id"] == 3
         assert prompts[-1]["text"] == text
         assert prompts[-1]["at"] == 99
     event(scope)
@@ -104,13 +105,15 @@ def test_observation_envelope_binds_admission_fields(scope, field, value):
 
 
 @pytest.mark.parametrize("damage", ["missing", "symlink", "public", "malformed"])
-def test_unavailable_confined_key_never_authorizes_admission_or_ack(scope, monkeypatch, damage):
+def test_unavailable_confined_key_never_authorizes_admission(scope, monkeypatch, damage):
     import sys
     from brigade import receipt_signing
 
     if sys.platform == "win32":
         pytest.skip("confined workspace authority is POSIX-only")
     candidate = proposal(scope)
+    event(scope)
+    event(scope)
     key = scope / ".brigade/receipt-signing-key"
     audit = scope / "audit-key"
     audit.write_bytes(key.read_bytes())
@@ -124,15 +127,13 @@ def test_unavailable_confined_key_never_authorizes_admission_or_ack(scope, monke
         key.chmod(0o644)
     else:
         key.write_text("invalid key")
-    event(scope)
-    event(scope)
     with pytest.raises(ValueError, match="authenticated session observations"):
         admission.admit(scope, candidate, activity.load(scope)["events"], {})
     activity.record_event(scope, "UserPromptSubmit", {"prompt": "Keep the original evidence for review."}, now=99)
     state = activity.load(scope)
     activity.drain_prompts(scope, state)
-    assert activity._read_prompts(activity.prompt_path(scope))
-    assert any(e["kind"] == "UserPromptSubmit" for e in activity.load(scope)["events"])
+    assert not activity._read_prompts(activity.prompt_path(scope))
+    assert not any(e["kind"] == "UserPromptSubmit" for e in activity.load(scope)["events"])
 
 
 def test_unsigned_state_boundary_cannot_revive_old_failure(scope):
@@ -235,9 +236,8 @@ def test_real_hook_process_reads_confined_workspace_key(scope, harness):
     assert events[0]["harness_session_fingerprint"]
 
 
-def test_append_clock_rollback_cannot_reorder_signed_observations(scope, monkeypatch):
+def test_append_sequence_follows_authenticated_history(scope):
     event(scope)
-    sequence = activity.load(scope)["events"][0]["append_sequence"]
-    monkeypatch.setattr(activity.time, "monotonic_ns", lambda: sequence - 1)
-    with pytest.raises(ValueError, match="append clock precedes authenticated history"):
-        event(scope)
+    event(scope)
+    sequences = [e["append_sequence"] for e in activity.load(scope)["events"]]
+    assert sequences[1] == sequences[0] + 1

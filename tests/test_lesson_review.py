@@ -13,6 +13,9 @@ from brigade.handoff_ingest_rules import sha256_hex
 
 @pytest.fixture
 def scope(tmp_path, monkeypatch):
+    from brigade import lesson_admission
+
+    monkeypatch.setattr(lesson_admission, "AUTOMATIC_LESSON_ADMISSION", True)
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".brigade/lesson-review.json").write_text(
         json.dumps({"threshold": 2, "idle_seconds": 10, "seat": "fake"})
@@ -294,13 +297,14 @@ def test_read_before_update_and_hash_recheck(scope, monkeypatch):
     candidate = proposal(scope)
     card = scope / "memory/cards/atomic-publication.md"
     card.parent.mkdir(parents=True)
-    card.write_text(candidate["content"])
+    card.write_text(candidate["content"], newline="")
     candidate["action"] = "update-card"
     seat(monkeypatch, candidate)
     assert review.run(scope, now=111)["status"] == "rejected"
     calls = seat(monkeypatch, candidate, reads=[card.name])
     assert review.run(scope, now=500)["status"] == "committed"
     assert candidate["content"] in calls[1].replace("\\n", "\n")
+    assert candidate["evidence"] in calls[1]
 
 
 def test_card_changed_during_review_is_rejected(scope, monkeypatch):
@@ -309,7 +313,7 @@ def test_card_changed_during_review_is_rejected(scope, monkeypatch):
     candidate = proposal(scope)
     card = scope / "memory/cards/atomic-publication.md"
     card.parent.mkdir(parents=True)
-    card.write_text(candidate["content"])
+    card.write_text(candidate["content"], newline="")
     candidate["action"] = "update-card"
     seat(monkeypatch, candidate, reads=[card.name], interrupt=lambda: card.write_text("Changed card."))
     assert review.run(scope, now=111)["status"] == "rejected"
@@ -346,7 +350,7 @@ def test_near_duplicate_stays_in_review(scope, monkeypatch):
     candidate = proposal(scope)
     card = scope / "memory/cards/existing.md"
     card.parent.mkdir(parents=True)
-    card.write_text(candidate["content"])
+    card.write_text(candidate["content"], newline="")
     seat(monkeypatch, candidate)
     assert review.run(scope, now=111)["status"] == "committed"
     assert not (card.parent / candidate["target_card"]).exists()
@@ -421,6 +425,9 @@ def test_hook_observer_records_real_tool_activity(tmp_path, monkeypatch, capsys)
 
     set_home(monkeypatch, tmp_path / "home")
     target = _wired(tmp_path)
+    receipt_signing.generate_key(target)
+    if sys.platform == "win32":
+        monkeypatch.setattr(receipt_signing, "load_workspace_key", receipt_signing.load_key)
     runtime.handle_payload(
         "PostToolUse", _payload(target, "PostToolUse", tool_name="Read", tool_response="Read source.")
     )
@@ -451,6 +458,9 @@ def test_second_hook_records_tool_output(tmp_path, monkeypatch, capsys):
     set_home(monkeypatch, tmp_path / "home")
     monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
     target = _wired(tmp_path, harnesses=("codex",))
+    receipt_signing.generate_key(target)
+    if sys.platform == "win32":
+        monkeypatch.setattr(receipt_signing, "load_workspace_key", receipt_signing.load_key)
     data = payload(target, "codex", tool_output="Verified publication fix.")
     observe_harness_hooks.after_handling("codex", data)
     state = activity.load(target)
@@ -473,7 +483,7 @@ def test_stale_prepared_draft_retries_review(scope, monkeypatch):
     candidate = proposal(scope)
     card = scope / "memory/cards/atomic-publication.md"
     card.parent.mkdir(parents=True)
-    card.write_text(candidate["content"])
+    card.write_text(candidate["content"], newline="")
     candidate["action"] = "update-card"
     seat(monkeypatch, candidate, reads=[card.name])
     publish = review._publish

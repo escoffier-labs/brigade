@@ -676,9 +676,17 @@ values. There is no provider integration or transcript crawler. Install work
 hooks on each target whose activity should count. Repository and hub targets
 have separate local state.
 
-Before receipts can back a lesson, generate the fixed workspace key with
+Automatic lesson admission is disabled in code until the hub anchor in #2620
+exists. Recording observations and manual handoff drafting remain available.
+Candidates return `lesson_admission_awaits_hub_anchor (#2620)` without publication.
+
+Lesson review requires a fixed workspace key for all lesson kinds, including
+user corrections. Generate it with
 `brigade receipts keygen --target <scope>` and `BRIGADE_RECEIPT_SIGNING_KEY_FILE`
 unset. That variable selects an audit key only and grants no lesson authority.
+Without a usable key, recording and review return `lesson_review_needs_key`,
+discard queued prompts and run no worker. Setup and care install do not create
+this key automatically.
 Start an active work session with `brigade work start --target <scope>` before
 running either verifier. Use a registered card manifest and a plain
 `brigade work verify run --target <scope> --manifest <id>` invocation in the

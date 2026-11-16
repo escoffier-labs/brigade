@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import dirfd, guard, lesson_auth, lesson_io as io, localio
+from . import dirfd, guard, lesson_auth, lesson_io as io, localio, receipt_signing
 from .component_paths import cache_root
 from .handoff_ingest_rules import sha256_hex
 from .guard.types import ScanOptions
@@ -77,14 +77,17 @@ def scanned(text: str) -> str:
     return text
 
 
-def record_event(target: Path, event: str, payload: dict[str, Any], *, now: float | None = None) -> None:
+def record_event(target: Path, event: str, payload: dict[str, Any], *, now: float | None = None) -> str | None:
     if event not in {"PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "PreToolUse"}:
-        return
+        return None
     if not config(target)["enabled"]:
-        return
+        return None
     # Review workers do not feed their own activity back into the trigger.
     if os.environ.get("BRIGADE_RUN_ID", "").startswith("lesson-"):
-        return
+        return None
+    if receipt_signing.load_workspace_key(target) is None:
+        discard_prompts(target)
+        return "lesson_review_needs_key"
     if event == "UserPromptSubmit":
         try:
             prompt = scanned(str(payload.get("prompt", "")).encode()[:MAX_TEXT].decode(errors="ignore"))
@@ -102,7 +105,7 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
                 }
             )
             io.write(spool, io.json_bytes(prompts[-MAX_EVENTS:]))
-        return
+        return None
     fields = ("tool_input", "tool_response", "tool_output", "error")
     values = [str(payload[key]) for key in fields if key in payload]
     budget = (MAX_TEXT - len(values) * 6) // max(1, len(values))
@@ -122,7 +125,7 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
         text = "[observation withheld by scanner]"
     with held_file_lock(root(target) / "state.lock", deadline_seconds=1):
         state = load(target)
-        drain_prompts(target, state)
+        drain_prompts(target, state, acknowledge=False)
         # Pre-tool activity invalidates an in-flight review without counting twice.
         at = time.time() if now is None else now
         metadata: dict[str, Any] = {}
@@ -147,6 +150,8 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
         if event in {"PostToolUse", "PostToolUseFailure"}:
             state["calls"] = state.get("calls", 0) + 1
         save(target, state)
+        acknowledge_prompts(target)
+    return None
 
 
 def _session_metadata(target: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -226,8 +231,18 @@ def _validated_prompts(path: Path) -> list[dict[str, Any]]:
     return value
 
 
-def drain_prompts(target: Path, state: dict[str, Any]) -> None:
+def discard_prompts(target: Path) -> None:
+    """Discard queued observations when workspace authority is unavailable."""
+    path = prompt_path(target)
+    with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1):
+        io.write(path, b"null\n")
+
+
+def drain_prompts(target: Path, state: dict[str, Any], *, acknowledge: bool = True) -> None:
     """Caller holds state.lock. Prompt hooks acquire only the cache-side lock."""
+    if receipt_signing.load_workspace_key(target) is None:
+        discard_prompts(target)
+        return
     path = prompt_path(target)
     with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1):
         prompts = _read_prompts(path)
@@ -241,9 +256,10 @@ def drain_prompts(target: Path, state: dict[str, Any]) -> None:
             io.write(path, io.json_bytes(prompts))
         for prompt in prompts:
             if not any(lesson_auth.prompt_matches(target, e, prompt) for e in state["events"]):
+                candidate = {**state, "events": list(state["events"])}
                 append_event(
                     target,
-                    state,
+                    candidate,
                     "UserPromptSubmit",
                     prompt["prompt"],
                     prompt["at"],
@@ -255,10 +271,24 @@ def drain_prompts(target: Path, state: dict[str, Any]) -> None:
                         if key in prompt
                     },
                 )
+                # A full protected buffer leaves the prompt queued without
+                # changing the review digest or resetting its attempt budget.
+                if any(
+                    e["id"] == candidate["sequence"] and lesson_auth.prompt_matches(target, e, prompt)
+                    for e in candidate["events"]
+                ):
+                    state.update(candidate)
         state["drained_prompt_ids"] = [p["prompt_id"] for p in prompts]
-        # Persist before acknowledging, then check the actual saved envelopes.
-        # Missing authority or an evicted/deleted event keeps its prompt pending.
         save(target, state)
+    if acknowledge:
+        acknowledge_prompts(target)
+
+
+def acknowledge_prompts(target: Path) -> None:
+    """Caller holds state.lock and has completed every append and final save."""
+    path = prompt_path(target)
+    with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1):
+        prompts = _read_prompts(path)
         saved = load(target)
         remaining = [p for p in prompts if not any(lesson_auth.prompt_matches(target, e, p) for e in saved["events"])]
         io.write(path, io.json_bytes(remaining) if remaining else b"null\n")
@@ -270,9 +300,7 @@ def append_event(target: Path, state: dict[str, Any], kind: str, text: str, at: 
     # authenticated append backwards relative to the retained history.
     if any(e["id"] > state["sequence"] for e in authenticated):
         raise ValueError("lesson sequence precedes authenticated history")
-    append_sequence = time.monotonic_ns()
-    if any(e["append_sequence"] >= append_sequence for e in authenticated):
-        raise ValueError("lesson append clock precedes authenticated history")
+    append_sequence = max((e["append_sequence"] for e in authenticated), default=0) + 1
     state["sequence"] += 1
     boundary = min([at] + [e["earliest_unreviewed_at"] for e in authenticated if e["id"] > state["reviewed"]])
     state.setdefault("earliest_unreviewed_at", at)

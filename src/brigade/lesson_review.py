@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import ingest, lesson_activity as activity, lesson_admission as admission
-from . import lesson_io as io, proc, roster, run_seat
+from . import lesson_auth, lesson_io as io, receipt_signing, proc, roster, run_seat
 from .handoff_cmd import drafts
 from .handoff_ingest_rules import safe_card_name, sha256_hex
 from .inbox_lock import InboxLockTimeout
@@ -114,7 +114,7 @@ def _review(target: Path, cfg: dict[str, Any], snapshot: dict[str, Any], run_id:
         )
         + framed
         + wrap_untrusted(
-            json.dumps({"cards_read": cards, "receipts": [str(p.relative_to(target)) for p in refs]}),
+            json.dumps({"cards_read": cards, "receipts": [p.relative_to(target).as_posix() for p in refs]}),
             source_kind="memory",
         )
     )
@@ -122,7 +122,11 @@ def _review(target: Path, cfg: dict[str, Any], snapshot: dict[str, Any], run_id:
     lessons = response.get("lessons")
     if not isinstance(lessons, list) or len(lessons) > 1:
         raise ValueError("lesson review accepts at most one lesson")
-    return admission.admit(target, lessons[0], events, reads) if lessons else None
+    if not lessons:
+        return None
+    admitted = admission.admit(target, lessons[0], events, reads)
+    admitted["admission_inputs"] = {"candidate": lessons[0], "events": events, "reads": reads}
+    return admitted
 
 
 def _draft_args(target: Path, pending: dict[str, Any]) -> dict[str, Any]:
@@ -162,8 +166,11 @@ def _draft_text(target: Path, pending: dict[str, Any]) -> str:
 
 
 def _publish(target: Path, pending: dict[str, Any]) -> None:
+    if not lesson_auth.authentic_pending(target, pending):
+        raise ValueError("unauthenticated pending lesson")
     if pending["lesson"] is None:
         return
+    admission.require_anchor()
     if not re.fullmatch(r"lesson-[0-9a-f]{32}", str(pending.get("run_id", ""))) or pending.get("inbox") != OUTBOX:
         raise ValueError("invalid pending lesson publication")
     args = _draft_args(target, pending)
@@ -209,6 +216,14 @@ def run(target: Path, *, now: float | None = None) -> dict[str, Any]:
     if not cfg["enabled"]:
         return {"status": "disabled"}
     try:
+        if receipt_signing.load_workspace_key(target) is None:
+            activity.discard_prompts(target)
+            with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
+                state = activity.load(target)
+                if "pending" in state:
+                    state.pop("pending")
+                    activity.save(target, state)
+            return {"status": "lesson_review_needs_key"}
         with held_file_lock(activity.root(target) / "review.lock", deadline_seconds=0.05):
             return _run(target, cfg, time.time() if now is None else now)
     except InboxLockTimeout:
@@ -223,6 +238,12 @@ def _attempt(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
     with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
         snapshot = activity.load(target)
     pending = snapshot.get("pending")
+    if pending is not None and not lesson_auth.authentic_pending(target, pending):
+        with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
+            state = activity.load(target)
+            state.pop("pending", None)
+            activity.save(target, state)
+        return {"status": "rejected", "reason": "unauthenticated-pending"}
     if now - snapshot["last_activity"] < cfg["idle_seconds"]:
         return {"status": "waiting"}
     if pending is None:
@@ -245,6 +266,8 @@ def _attempt(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
             )
             if not lint.valid:
                 raise ValueError("lesson draft refused: " + ", ".join(lint.errors))
+    if pending is not None and "authentication" not in pending:
+        lesson_auth.seal_pending(target, pending)
     with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
         state = activity.load(target)
         activity.drain_prompts(target, state)
@@ -293,6 +316,12 @@ def _run(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
         activity.drain_prompts(target, snapshot)
         activity.save(target, snapshot)
         pending = snapshot.get("pending")
+        if pending is not None and not lesson_auth.authentic_pending(target, pending):
+            snapshot.pop("pending")
+            activity.save(target, snapshot)
+            return {"status": "rejected", "reason": "unauthenticated-pending"}
+        if not admission.AUTOMATIC_LESSON_ADMISSION:
+            return {"status": admission.ANCHOR_STATUS}
         if now - snapshot["last_activity"] < cfg["idle_seconds"]:
             return {"status": "waiting"}
         if pending is None and snapshot.get("calls", 0) - snapshot.get("reviewed_calls", 0) < cfg["threshold"]:
@@ -317,6 +346,12 @@ def _run(target: Path, cfg: dict[str, Any], now: float) -> dict[str, Any]:
         activity.save(target, snapshot)
     try:
         return _attempt(target, cfg, now)
+    except admission.AdmissionAwaitsHubAnchor:
+        with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
+            state = activity.load(target)
+            state.pop("attempt", None)
+            activity.save(target, state)
+        return {"status": admission.ANCHOR_STATUS}
     except (ValueError, OSError, RuntimeError, KeyError, TypeError, AttributeError) as exc:
         reason = "admission-rejected" if isinstance(exc, ValueError) else "publication-or-worker-failed"
         with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):

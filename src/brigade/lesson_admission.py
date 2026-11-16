@@ -12,6 +12,21 @@ from typing import Any
 from . import lesson_activity as activity, lesson_auth, lesson_io as io, receipt_signing, verify_trial
 from .handoff_ingest_rules import safe_card_name, sha256_hex
 
+# Same-UID keys and workspace watermarks cannot anchor automatic admission.
+# Keep disabled until the non-rollbackable hub authority in #2620 exists.
+AUTOMATIC_LESSON_ADMISSION = False
+ANCHOR_STATUS = "lesson_admission_awaits_hub_anchor (#2620)"
+
+
+class AdmissionAwaitsHubAnchor(ValueError):
+    """Automatic admission needs authority outside the worker workspace."""
+
+
+def require_anchor() -> None:
+    if not AUTOMATIC_LESSON_ADMISSION:
+        raise AdmissionAwaitsHubAnchor(ANCHOR_STATUS)
+
+
 FORBIDDEN = re.compile(
     r"\b(?:unresolved|dead[ -]end|infrastructure failure|gave up|couldn.t get)\b|"
     r"\b(?:tool|cli|command|adapter|provider)\b[^.\n]{0,60}\b(?:broken|unusable|does not work|doesn't work)\b|"
@@ -152,6 +167,7 @@ def passing_receipt(receipt: dict[str, Any]) -> bool:
 
 
 def admit(target: Path, candidate: Any, events: list[dict[str, Any]], reads: dict[str, str]) -> dict[str, Any]:
+    require_anchor()
     if not isinstance(candidate, dict):
         raise ValueError("lesson must be an object")
     kind = candidate.get("kind")

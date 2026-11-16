@@ -65,7 +65,8 @@ def test_prompt_drain_survives_write_failure_without_duplicates(scope, monkeypat
     event(scope)
     state = activity.load(scope)
     assert [e["text"] for e in state["events"] if e["kind"] == "UserPromptSubmit"] == [text]
-    assert state["sequence"] == 2
+    # An acknowledgement failure now occurs after the tool event is saved.
+    assert state["sequence"] == (3 if crash == "before-ack" else 2)
     assert not activity._read_prompts(spool)
 
 
