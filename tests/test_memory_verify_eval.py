@@ -739,6 +739,11 @@ def test_apply_pending_paces_rotates_and_reports_rate_limits(tmp_path, monkeypat
     limited = Client((429, {"code": "memory_auto_apply_rate_limited"}))
     second = automatic.apply_pending(tmp_path, state, limited, pair=(), now_ms=2000)
     assert limited.sent == ["p-good", "p-stuck"]
+    # A forged future attempt time cannot keep a proposal at the back of the line.
+    state["scopes"]["s"]["cards"]["a"]["last_auto_attempt_ms"] = 10**15
+    later = Client((409, {"code": "memory_base_mismatch"}))
+    automatic.apply_pending(tmp_path, state, later, pair=(), now_ms=3000)
+    assert later.sent[0] == "p-stuck"
     assert {r["proposal_id"]: r["state"] for r in second}["p-stuck"] == "rate-limited"
 
 

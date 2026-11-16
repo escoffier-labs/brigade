@@ -46,7 +46,14 @@ def apply_pending(
     entries = [entry for scope in state["scopes"].values() for entry in scope.get("cards", {}).values()]
     # Least recently attempted first, so a proposal the hub keeps refusing cannot hold the others back.
     # The attempt time only orders candidates. Hub admission still decides every application.
-    entries.sort(key=lambda e: e["last_auto_attempt_ms"] if isinstance(e.get("last_auto_attempt_ms"), int) else 0)
+    # A future attempt time counts as never attempted, so a forged value cannot push a proposal back forever.
+    entries.sort(
+        key=lambda e: (
+            e["last_auto_attempt_ms"]
+            if isinstance(e.get("last_auto_attempt_ms"), int) and e["last_auto_attempt_ms"] <= now_ms
+            else 0
+        )
+    )
     sent = False
     for entry in entries:
         ident = entry.get("pending")
