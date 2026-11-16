@@ -25,8 +25,8 @@ role = "plan"
 cli = "codex"
 role = "implement"
 """)
-    monkeypatch.setattr(aboyeur, "plan", Mock(side_effect=AssertionError("planner called")))
-    monkeypatch.setattr(aboyeur, "build_synth_prompt", Mock(side_effect=AssertionError("synthesis called")))
+    monkeypatch.setattr(aboyeur.planning, "plan", Mock(side_effect=AssertionError("planner called")))
+    monkeypatch.setattr(aboyeur.planning, "_run_orchestrator", Mock(side_effect=AssertionError("synthesis called")))
     calls = []
 
     def model(agent, prompt, **kwargs):
@@ -175,3 +175,117 @@ def test_timeout_retains_success_and_reports_unfinished(setup, capsys, monkeypat
     assert result["tasks"]["c"]["not_run"] is True
     assert result["tasks"]["a"]["result_ref"]
     assert invoke(setup, capsys, [task("a"), task("b"), task("c", ["b"])])[:2] == (1, result)
+
+
+def test_preflight_refusal_can_retry(setup, capsys, monkeypatch):
+    from brigade.cli import run
+
+    original = run.dispatch
+    refused = Mock(return_value=2)
+    monkeypatch.setattr(run, "dispatch", refused)
+    rc, result, _ = invoke(setup, capsys, [task("a")])
+    assert rc == 2
+    assert setup[1] == []
+    monkeypatch.setattr(run, "dispatch", original)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    assert len(setup[1]) == 1
+
+
+def test_invalid_second_seat_can_retry_after_roster_repair(setup, capsys):
+    second = {**task("b"), "seat": "reviewer"}
+    rc, _, err = invoke(setup, capsys, [task("a"), second])
+    assert rc == 2
+    assert "reviewer" in err
+    assert setup[1] == []
+    with (setup[0] / ".brigade" / "roster.toml").open("a") as stream:
+        stream.write('\n[agents.reviewer]\ncli = "codex"\nrole = "review"\n')
+    rc, result, err = invoke(setup, capsys, [task("a"), second])
+    assert rc == 0, err
+    assert all(t["status"] == "completed" for t in result["tasks"].values())
+
+
+def test_complete_receipt_and_late_drift(setup, capsys, monkeypatch):
+    from brigade import runguard
+
+    rc, result, err = invoke(setup, capsys, [task("a"), task("b")])
+    assert rc == 0, err
+    run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
+    assert (run_dir / "final.txt").is_file()
+    assert (run_dir / "synthesis.json").is_file()
+    workers = json.loads((run_dir / "worker-results.json").read_text())
+    assert len(workers["results"]) == 2
+    checks = 0
+
+    def drift(*args, **kwargs):
+        nonlocal checks
+        checks += 1
+        return "concurrent commit" if checks >= 3 else None
+
+    monkeypatch.setattr(runguard, "detect_branch_head_drift", drift)
+    rc, result, err = invoke(setup, capsys, [task("a")], request="drift")
+    assert rc != 0
+    assert result["run_status"] == "failed"
+    assert "concurrent commit" in err
+
+
+def test_batch_bypasses_preferences_and_resolves_cwd_at_execution(setup, capsys, monkeypatch):
+    from brigade import run_preference
+
+    path = setup[0] / "input.json"
+    path.write_text(json.dumps({"schema": SCHEMA, "request_id": "prefs", "tasks": [task("a")]}))
+    argv = ["run", "batch", str(path), "--json"]
+    parsed = cli._build_parser_for(argv).parse_args(argv)
+    assert parsed.cwd is None
+    monkeypatch.chdir(setup[0])
+    monkeypatch.setattr(run_preference, "refresh_cache", Mock(side_effect=AssertionError("preference called")))
+    assert parsed.func(parsed) == 0
+    assert json.loads(capsys.readouterr().out)["tasks"]["a"]["status"] == "completed"
+
+
+def test_batch_pins_all_seats_against_health_fallback(setup, capsys, monkeypatch):
+    from tests.test_aboyeur_orchestrator_health_routing import PerSeatFakeAdapter, _install_probe
+
+    roster = setup[0] / ".brigade" / "roster.toml"
+    roster.write_text(
+        roster.read_text() + '\n[agents.reviewer]\ncli = "codex"\nrole = "review"\nfallback = ["coder"]\n'
+    )
+    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"reviewer"})))
+    rc, _, err = invoke(setup, capsys, [task("a"), {**task("b"), "seat": "reviewer"}])
+    assert rc == 2
+    assert "reviewer" in err
+    assert setup[1] == []
+
+
+def test_batch_resolves_hub_only_seat_and_all_admissions(tmp_path):
+    from brigade.run_batch_execute import BatchExecution
+    from brigade.roster import Agent, Roster
+    from tests.test_fleet_model_admission import _versioned_seat, _versioned_snapshot
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan"), "coder": Agent("coder", "codex", "implement")},
+    )
+    execution = BatchExecution({"tasks": [task("a"), {**task("b"), "seat": "reviewer"}]}, tmp_path, tmp_path)
+    snapshot = _versioned_snapshot(
+        *[_versioned_seat(seat, "openai", "gpt-6.1-sol", instance_id="codex") for seat in ("coder", "reviewer")]
+    )
+    resolution = execution.resolve_model_policy(roster, worker="coder", snapshot=snapshot)
+    assert resolution.error is None
+    assert resolution.roster.agents["reviewer"].model == "gpt-6.1-sol"
+    assert {a["seat"] for a in resolution.receipt["admissions"]} == {"coder", "reviewer"}
+    snapshot["seats"][1]["enabled"] = False
+    assert "reviewer" in execution.resolve_model_policy(roster, worker="coder", snapshot=snapshot).error
+
+
+def test_request_dispatch_lock_refuses_concurrent_retry(setup, capsys):
+    from brigade.run_batch_execute import request_lock
+
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
+    with request_lock(run_dir):
+        rc, result, _ = invoke(setup, capsys, [task("a")])
+    assert rc == 2
+    assert result["error"]["code"] == "request-busy"
+    assert len(setup[1]) == 1

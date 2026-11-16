@@ -7,23 +7,13 @@ import hashlib
 import json
 import sys
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import localio, run_tasks, run_lifecycle, run_journal
+from . import agents, fleet_client, inbox_lock, localio, run_tasks, run_lifecycle, run_journal
 from .run_batch import BatchError
 from .run_transport import Assignment, WorkerResult
 from .roster import Roster
-
-
-def direct_assignments(
-    worker: str, task: str, skill_ids: tuple[str, ...], execution: BatchExecution | None, roster: Roster
-) -> list[Assignment]:
-    """Keep the normal direct-worker assignment unchanged."""
-    if execution is None:
-        return [Assignment(worker=worker, task=task, stage=1, selected_skill_ids=skill_ids)]
-    return execution.assignments(roster)
 
 
 class BatchExecution:
@@ -58,10 +48,10 @@ class BatchExecution:
         current = next(r for r in run_tasks.read_tasks(self.run_dir) if r.handle.spec.task_id == task["task_id"])
         if current.result_id is not None:
             return
-        handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task["task_id"])
         # Skipped tasks retain queued state. They were never launched.
         if result.status == "skipped":
             return
+        handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task["task_id"])
         path = self.run_dir / f"batch-result-{hashlib.sha256(task['task_id'].encode()).hexdigest()}.json"
         localio.write_json(path, asdict(result))
         run_journal._fsync_directory(self.run_dir)
@@ -108,16 +98,52 @@ class BatchExecution:
         kwargs["on_result"] = self.observe
         return planning.dispatch(waves, roster, **kwargs)
 
-    def finish(self, results: list[WorkerResult]) -> int:
-        from .aboyeur import artifacts
+    def resolve_model_policy(self, roster: Roster, **kwargs: Any) -> Any:
+        from .aboyeur import orchestrator
 
+        snapshot = kwargs.get("snapshot")
+        if snapshot is None:
+            snapshot = fleet_client.load_model_policy_snapshot()
+        # Resolve each required seat against the same snapshot and source roster.
+        # Accumulate Hub-derived seats before the final pass, which receipts all
+        # admissions together for the runtime admission coordinator.
+        for seat in sorted({t["seat"] for t in self.plan["tasks"]}):
+            resolution = orchestrator.resolve_fleet_model_policy(roster, worker=seat, snapshot=snapshot)
+            if resolution.error is not None:
+                return resolution
+            roster = replace(roster, agents={**roster.agents, **resolution.roster.agents})
+        resolution = orchestrator.resolve_fleet_model_policy(roster, worker=kwargs["worker"], snapshot=snapshot)
+        # Explicit seats have no health or invalid-final fallback. Failure must
+        # remain attributed to the seat the caller selected.
+        seats = {t["seat"] for t in self.plan["tasks"]}
+        return replace(
+            resolution,
+            roster=replace(
+                resolution.roster,
+                agents={
+                    name: replace(agent, fallback=(), invalid_final_fallback=None) if name in seats else agent
+                    for name, agent in resolution.roster.agents.items()
+                },
+            ),
+        )
+
+    def resolve_health_routing(self, roster: Roster, results: Any, **kwargs: Any) -> Any:
+        from .aboyeur import orchestrator
+
+        for seat in sorted({t["seat"] for t in self.plan["tasks"]}):
+            routing = orchestrator.resolve_orchestrator_health_routing(
+                roster, results, pinned_seats=frozenset({seat}), worker_seat=seat
+            )
+            if routing.abort_detail is not None:
+                return routing
+        return orchestrator.OrchestratorHealthRoutingDecision(roster=roster)
+
+    def finish(self, results: list[WorkerResult]) -> agents.AgentResult:
         for result in results:
             self.observe(result)
-        ok = len(results) == len(self.plan["tasks"]) and all(r.ok for r in results)
-        artifacts.update_run_receipt(
-            self.run_dir, status="ok" if ok else "incomplete", finished_at=datetime.now(timezone.utc).isoformat()
-        )
-        return 0 if ok else 1
+        # Use the planned-run finish path with no synthesis invocation. It
+        # records incomplete workers and retains every result and artifact.
+        return agents.AgentResult(text="Explicit batch completed", ok=True)
 
 
 def stored_result(plan: dict[str, Any], run_dir: Path) -> dict[str, Any]:
@@ -153,50 +179,76 @@ def stored_result(plan: dict[str, Any], run_dir: Path) -> dict[str, Any]:
     }
 
 
+def retryable_before_launch(run_dir: Path) -> bool:
+    """Fail closed on damaged journals or any evidence of a possible launch."""
+    if not run_lifecycle._journal_path(run_dir).exists():
+        return True
+    try:
+        return all(r.handle.attempt_id is None and r.status == "queued" for r in run_tasks.read_tasks(run_dir))
+    except run_tasks.TaskJournalError:
+        return False
+
+
+@contextlib.contextmanager
+def request_lock(run_dir: Path):
+    try:
+        with inbox_lock.held_file_lock(run_dir / "batch-dispatch.lock", deadline_seconds=1.0):
+            yield
+    except inbox_lock.InboxLockTimeout as exc:
+        raise BatchError("request-busy", "another caller is dispatching this batch request") from exc
+
+
 def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     from . import cli
     from .cli.run import dispatch
 
     if plan["synthesis"] is not None:
         raise BatchError("synthesis-not-implemented", "batch synthesis execution is not implemented")
-    workspace = args.cwd.expanduser().resolve()
+    workspace = (args.cwd or Path.cwd()).expanduser().resolve()
     run_dir = workspace / ".brigade" / "runs" / ("batch-" + hashlib.sha256(plan["request_id"].encode()).hexdigest())
-    # Atomic directory creation is the request-level launch fence. The marker
-    # stays inside existing run storage, including after interruption.
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
-    except FileExistsError:
-        marker = localio.read_json_dict(run_dir / "batch-request.json")
-        if marker is None:
-            raise BatchError(
-                "request-unknown", "request reservation has no readable fingerprint; refusing launch"
-            ) from None
-        if marker.get("fingerprint") != plan["fingerprint"]:
-            raise BatchError("request-conflict", "request_id already belongs to a different batch") from None
-    else:
-        localio.write_json(run_dir / "batch-request.json", plan)
-        run_journal._fsync_directory(run_dir)
         run_journal._fsync_directory(run_dir.parent)
-        argv = [
-            "run",
-            f"Explicit batch {plan['request_id']}",
-            "--worker",
-            plan["tasks"][0]["seat"],
-            "--cwd",
-            str(workspace),
-            "--output-dir",
-            str(run_dir),
-            "--no-route",
-        ]
-        if args.roster is not None:
-            argv.extend(["--roster", str(args.roster)])
-        normal = cli._build_parser_for(argv).parse_args(argv)
-        normal.batch_execution = BatchExecution(plan, run_dir, workspace)
-        try:
-            with contextlib.redirect_stdout(sys.stderr):
-                dispatch(normal)
-        except (KeyboardInterrupt, TimeoutError):
+        reserved_here = True
+    except FileExistsError:
+        reserved_here = False
+    dispatch_rc = None
+    # Serialize retry eligibility with dispatch, including preflight. The
+    # workspace run lock remains the authority for executing worker processes.
+    with request_lock(run_dir):
+        marker_path = run_dir / "batch-request.json"
+        marker = localio.read_json_dict(marker_path)
+        if marker is None:
+            # An empty reservation from an interrupted publication is ambiguous.
+            if not reserved_here:
+                raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
+        elif marker.get("fingerprint") != plan["fingerprint"]:
+            raise BatchError("request-conflict", "request_id already belongs to a different batch")
+        if marker is not None and not retryable_before_launch(run_dir):
             pass
+        else:
+            localio.write_json(marker_path, plan)
+            run_journal._fsync_directory(run_dir)
+            argv = [
+                "run",
+                f"Explicit batch {plan['request_id']}",
+                "--worker",
+                plan["tasks"][0]["seat"],
+                "--cwd",
+                str(workspace),
+                "--output-dir",
+                str(run_dir),
+                "--no-route",
+            ]
+            if args.roster is not None:
+                argv.extend(["--roster", str(args.roster)])
+            normal = cli._build_parser_for(argv).parse_args(argv)
+            normal.batch_execution = BatchExecution(plan, run_dir, workspace)
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    dispatch_rc = dispatch(normal)
+            except (KeyboardInterrupt, TimeoutError):
+                dispatch_rc = 1
     result = stored_result(plan, run_dir)
     if args.json:
         print(json.dumps(result, sort_keys=True))
@@ -204,6 +256,8 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
         print(f"run {result['run_id']}")
         for task_id, task in result["tasks"].items():
             print(f"{task_id}: {task['status']} {task['result_ref'] or ''}".rstrip())
+    if dispatch_rc:
+        return 1 if dispatch_rc in {3, 130} else dispatch_rc
     return (
         0 if result["run_status"] == "ok" and all(t["status"] == "completed" for t in result["tasks"].values()) else 1
     )

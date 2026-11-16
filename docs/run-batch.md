@@ -7,7 +7,7 @@ request fingerprint. Dry runs make zero model calls and require no roster.
 Without `--dry-run`, the command executes through the existing run orchestrator.
 Use `--cwd WORKSPACE` and optionally `--roster ROSTER.toml`. Execution makes no
 planner or synthesis call. Remove `synthesis` from this example to execute it.
-Errors exit 2, with a stable code in text or `error.code` in JSON.
+Validation errors exit 2, with a stable code in text or `error.code` in JSON.
 
 ```json
 {
@@ -86,6 +86,7 @@ Multilingual Plane as surrogate pairs. A golden vector in
 | `synthesis-not-implemented` | Execution requested with synthesis |
 | `request-conflict` | Request ID already reserved with a different fingerprint |
 | `request-unknown` | Request reservation has no readable fingerprint |
+| `request-busy` | Another caller holds this request’s dispatch lock |
 
 
 ## Execution and retries
@@ -98,14 +99,21 @@ text bytes. Layers larger than the effective roster `max_workers` split into
 consecutive waves through the existing dispatcher. Its fail-fast behavior skips
 later waves after a failure, including tasks that do not depend on that failure.
 Existing admission, provider limits, model policy, run locks, and seat health
-checks still apply.
+checks still apply. Each selected seat is resolved against the same model-policy
+snapshot and receives runtime admission. Selected seats cannot use health or
+invalid-final fallbacks. An unusable seat fails visibly. Cached run preferences
+and task classification do not select batch seats or modify batch text.
 
 A request reserves `.brigade/runs/batch-<SHA-256 of request ID>/` by atomic
 directory creation before dispatch. `batch-request.json` retains its fingerprint
 and canonical plan. This is part of existing run storage.
 The lifecycle journal records task acceptance, attempts, observations, and result
-references. A matching retry reports stored states without launching any tasks,
-including queued, unknown, or in-flight tasks. A different fingerprint exits 2.
+references. Retry eligibility and dispatch share a request lock. If no attempt
+was prepared and no task may have launched, a matching retry can execute again
+after preflight refusal. Once any task may have launched, a matching retry
+reports stored states without launching any tasks, including queued, unknown,
+or in-flight tasks. Unreadable journals refuse replay, and a different
+fingerprint exits 2.
 A crash between directory reservation and fingerprint publication refuses any
 retry with `request-unknown`. Keep the run directory to preserve the retry fence.
 
@@ -121,6 +129,10 @@ JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `ru
 as each worker finishes. Failed workers retain their result receipt too. Skipped
 tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation
 and timeout preserve completed results and report unresolved tasks as stored.
-Exit 0 requires every task to be completed successfully. Other outcomes exit 1.
+Exit 0 requires every task to be completed successfully and the run to pass
+finalization. Worker failures, cancellation, and timeout exit 1. Preflight and
+run-guard refusals retain their nonzero dispatch exit code and stderr reason.
+Batch runs retain normal drift checkpoints, worker-result artifacts, final
+receipts, artifact collection, and lineage metadata without calling synthesis.
 Synthesis execution exits 2 with `synthesis-not-implemented`. Dry run still shows
-its requested seat. No synthesis budget or receipt is created.
+its requested seat. No synthesis model call or budget is created.

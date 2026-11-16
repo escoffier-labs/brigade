@@ -365,7 +365,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_batch.add_argument("batch_file", type=Path, help="Versioned batch JSON file.")
     p_batch.add_argument("--dry-run", action="store_true", help="Print the validated batch plan.")
     p_batch.add_argument("--json", action="store_true", help="Print JSON plan or error.")
-    p_batch.add_argument("--cwd", type=Path, default=Path.cwd(), help="Workspace to execute in.")
+    p_batch.add_argument("--cwd", type=Path, default=None, help="Workspace to execute in.")
     p_batch.add_argument("--roster", type=Path, help="Roster TOML path.")
     p_batch.set_defaults(func=dry_run_cli)
 
@@ -530,7 +530,7 @@ def dispatch(args) -> int:
             "Split the writing/frontend and implementation requests or select --worker explicitly.",
             file=sys.stderr,
         )
-    if not getattr(args, "applied_preference", False):
+    if not getattr(args, "applied_preference", False) and getattr(args, "batch_execution", None) is None:
         preference = run_preference.refresh_cache()
         loaded_roster = run_preference.apply_to_roster(loaded_roster, preference)
         if args.worker is None and (classified is None or classified.status != "matched"):
@@ -809,10 +809,8 @@ def dispatch(args) -> int:
                 }
                 if run_budget_payload is not None:
                     start_kwargs["run_budget_payload"] = run_budget_payload
-                aboyeur_mod.record_run_start(
-                    output_dir,
-                    **start_kwargs,
-                )
+                if getattr(args, "batch_execution", None) is None or not (output_dir / "run.json").exists():
+                    aboyeur_mod.record_run_start(output_dir, **start_kwargs)
             if output_dir is not None and (advisory or output_warnings):
                 from .. import localio
 

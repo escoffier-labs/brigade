@@ -1,1 +1,2 @@
 - Execute explicit task batches without planner or synthesis calls, preserving task IDs, bounded dispatch waves, and durable request retry refusal.
+- Pin every explicit batch seat through model policy and health checks, retain normal drift and receipt finalization, and allow retries after refusal before any possible task launch.
