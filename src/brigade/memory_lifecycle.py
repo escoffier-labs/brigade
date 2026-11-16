@@ -468,15 +468,21 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                 entry = {**metadata, "decision_id": None}
                 if not dry_run:
                     if state == "archived":
-                        decision = memory_archive.archive_card(
-                            target,
-                            rel,
-                            reason="unused-card",
-                            config=config,
-                            policy_metadata=metadata,
-                            state_change=change,
-                            expected_before=text.encode("utf-8"),
-                        )
+                        try:
+                            decision = memory_archive.archive_card(
+                                target,
+                                rel,
+                                reason="unused-card",
+                                config=config,
+                                policy_metadata=metadata,
+                                state_change=change,
+                                expected_before=text.encode("utf-8"),
+                            )
+                        except memory_archive.ArchiveRefused as exc:
+                            # A refusal leaves the card and any existing archive in place.
+                            # Skip only this card so the rest of the pass still runs.
+                            payload["skipped"].append({"path": rel, "reason": str(exc)})
+                            break
                     else:
                         decision = journal.commit_phased(
                             target,

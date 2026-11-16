@@ -1,0 +1,1 @@
+- An occupied or refused archive destination now skips only that card. The lifecycle pass and later tending stages keep running.

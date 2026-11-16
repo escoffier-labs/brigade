@@ -209,10 +209,26 @@ def test_changed_card_refused_before_archive(tmp_path, monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(memory_archive, "archive_card", changed)
-    with pytest.raises(memory_archive.ArchiveRefused, match="changed since"):
-        observed_run(tmp_path, today=TODAY)
+    payload = observed_run(tmp_path, today=TODAY)
+    assert any("changed since" in row["reason"] for row in payload["skipped"])
+    assert [row["to_state"] for row in payload["transitions"]] == ["stale"]
     assert "New human text" in path.read_text()
     assert not (tmp_path / "memory/archive/cards/old.md").exists()
+
+
+def test_occupied_archive_skips_only_that_card(tmp_path):
+    first = card(tmp_path, name="occupiedwidget")
+    second = card(tmp_path, name="freewidget")
+    held = tmp_path / "memory/archive/cards/occupiedwidget.md"
+    held.parent.mkdir(parents=True, exist_ok=True)
+    held.write_bytes(b"earlier archive\n")
+    for _ in range(2):
+        payload = observed_run(tmp_path, today=TODAY)
+        assert any(row["path"] == "memory/cards/occupiedwidget.md" and "occupied" in row["reason"] for row in payload["skipped"])
+    assert first.exists()
+    assert held.read_bytes() == b"earlier archive\n"
+    assert not second.exists()
+    assert (tmp_path / "memory/archive/cards/freewidget.md").exists()
 
 
 def test_daily_schedule_installs_lifecycle(tmp_path):
