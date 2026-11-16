@@ -697,6 +697,11 @@ One evaluation takes the full corpus (up to 256 cases) plus retained feedback
 so 384 cases at 3 repeats allow about 4.8 hours. A run past the deadline reports
 `verify_eval_timeout` and records no-go. Duplicate ids across the corpus and
 feedback report `verify_eval_duplicate_id`, also as no-go.
+The gate and `memory verify eval` hold the verify lock for the whole evaluation.
+Scheduled `memory verify run` passes during that time report
+`verify state is locked by another run` and skip without counting toward the pause.
+Holding the lock also keeps `feedback.json` stable while the gate reads it.
+Run the gate outside the scheduled verify window.
 The report contains precision, recall, true positives, false positives and false
 negatives per class and operation type, repeat agreement and unsafe proposals.
 Operation metrics count emitted operations separately from verdicts. Confirming
