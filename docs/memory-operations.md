@@ -80,9 +80,10 @@ comparing the epoch recorded with the local log to the hub response. A matching
 digest and sequence alone do not validate a prefix after a database restore.
 `memory-restore-epoch` rotates the epoch even though the restored rows can match
 an old local log and can predate a reset that was lost with the database.
-After an epoch change, consumers must fail closed until they observe a new
-ordered reset appended in the new epoch. They must not compute a coverage window
-from restored history or treat an older stored reset as a reset in the new epoch.
+Coverage may count only from a reset whose `last_reset_epoch` equals the current
+`log_epoch`. Otherwise consumers must fail closed until they append their own
+ordered reset in the current epoch. A restored reset retains its stored epoch
+and cannot start a coverage window in the new epoch.
 Missing epoch binding also fails closed. Archive and lesson gates stay disabled
 until connected consumers enforce this contract.
 
@@ -97,15 +98,16 @@ as `base_epoch` when appending. A mismatched claimed epoch returns HTTP 409
 quotas or pacing. The optional field preserves compatibility, but consumers
 implementing the coverage contract must supply it to fence a concurrent restore.
 
-Each head contains `seq`, `digest`, `prev_digest`, `kind` and a hub-generated
-`created_at` timestamp. `kind="reset"` records a reset with the same continuity
-checks. It preserves earlier entries so later consumers can restart coverage
-at the reset. The default kind is `append`.
-Every nonempty head also includes `last_reset_seq`, `last_reset_digest` and
-`last_reset_created_at`, computed from immutable stored rows in the same read.
-All three also appear beside `head` in each response, including `latest`.
-All three are null for a stream that has never reset. Later appends preserve
-the latest reset boundary and its hub timestamp.
+Each head contains `seq`, `digest`, `prev_digest`, `kind`, a hub-generated
+`created_at` timestamp and `log_epoch`, the epoch in which the hub wrote that row.
+The hub stores its current epoch on insertion and never accepts it from a client.
+`kind="reset"` records a reset with the same continuity checks. It preserves
+earlier entries so later consumers can restart coverage at the reset. The default kind is `append`.
+Every nonempty head also includes `last_reset_seq`, `last_reset_digest`,
+`last_reset_created_at` and `last_reset_epoch`, computed from immutable stored
+rows in the same read. All four also appear beside `head` in each response,
+including `latest`. All four are null for a stream that has never reset.
+Later appends preserve the latest reset boundary, its hub timestamp and its epoch.
 
 Admission defaults to 128 distinct workspace IDs per principal,
 10,000 rows per generation of each principal/workspace/stream,

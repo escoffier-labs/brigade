@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS memory_evidence_chain(
   prev_digest TEXT CHECK(prev_digest IS NULL OR (length(prev_digest)=64 AND prev_digest NOT GLOB '*[^0-9a-f]*')),
   kind TEXT NOT NULL CHECK(kind IN ('append','reset')),
   created_at TEXT NOT NULL,
+  log_epoch TEXT NOT NULL,
   PRIMARY KEY(principal,workspace_id,stream,seq)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS memory_evidence_chain_principal_time ON memory_evidence_chain(principal,created_at);
@@ -154,7 +155,7 @@ fn head<T: ReadTx + ?Sized>(
     chain: &Chain,
 ) -> rusqlite::Result<Json> {
     let rows = tx.query(
-        "SELECT h.seq,h.digest,h.prev_digest,h.kind,h.created_at,r.seq,r.digest,r.created_at
+        "SELECT h.seq,h.digest,h.prev_digest,h.kind,h.created_at,r.seq,r.digest,r.created_at,h.log_epoch,r.log_epoch
          FROM memory_evidence_chain h LEFT JOIN memory_evidence_chain r
            ON r.principal=h.principal AND r.workspace_id=h.workspace_id AND r.stream=h.stream
            AND r.seq=(SELECT MAX(seq) FROM memory_evidence_chain
@@ -170,9 +171,11 @@ fn head<T: ReadTx + ?Sized>(
         "seq": match r[0] { Value::Integer(n) => n, _ => 0 }, "digest": super::ops::s(&r[1]),
         "prev_digest": if r[2] == Value::Null { Json::Null } else { json!(super::ops::s(&r[2])) },
         "kind": super::ops::s(&r[3]), "created_at": super::ops::s(&r[4]),
+        "log_epoch": super::ops::s(&r[8]),
         "last_reset_seq": if let Value::Integer(n) = r[5] { json!(n) } else { Json::Null },
         "last_reset_digest": if r[6] == Value::Null { Json::Null } else { json!(super::ops::s(&r[6])) },
-        "last_reset_created_at": if r[7] == Value::Null { Json::Null } else { json!(super::ops::s(&r[7])) }
+        "last_reset_created_at": if r[7] == Value::Null { Json::Null } else { json!(super::ops::s(&r[7])) },
+        "last_reset_epoch": if r[9] == Value::Null { Json::Null } else { json!(super::ops::s(&r[9])) }
     })))
 }
 fn response(head: Json, epoch: &str) -> Json {
@@ -181,6 +184,7 @@ fn response(head: Json, epoch: &str) -> Json {
         "last_reset_seq": head["last_reset_seq"],
         "last_reset_digest": head["last_reset_digest"],
         "last_reset_created_at": head["last_reset_created_at"],
+        "last_reset_epoch": head["last_reset_epoch"],
         "head": head
     })
 }
@@ -305,11 +309,11 @@ pub(super) fn append(
     }
     let created_at = ids::isoformat(p.now_ms);
     tx.execute(
-        "INSERT INTO memory_evidence_chain(principal,workspace_id,stream,seq,digest,prev_digest,kind,created_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT INTO memory_evidence_chain(principal,workspace_id,stream,seq,digest,prev_digest,kind,created_at,log_epoch)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         &[Value::Text(p.credential.principal().into()), Value::Text(a.chain.workspace.clone()),
           Value::Text(a.chain.stream.clone()), Value::Integer(a.seq), Value::Text(a.digest.clone()),
-          a.prev.clone().map_or(Value::Null, Value::Text), Value::Text(a.kind.clone()), Value::Text(created_at)],
+          a.prev.clone().map_or(Value::Null, Value::Text), Value::Text(a.kind.clone()), Value::Text(created_at), Value::Text(epoch.clone())],
     )?;
     Ok(Reply::new(
         201,

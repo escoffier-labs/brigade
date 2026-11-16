@@ -49,6 +49,7 @@ async fn append_in_order_and_latest_use_server_time() {
         "last_reset_seq",
         "last_reset_digest",
         "last_reset_created_at",
+        "last_reset_epoch",
     ] {
         assert_eq!(empty.body[field], Json::Null);
     }
@@ -58,11 +59,13 @@ async fn append_in_order_and_latest_use_server_time() {
     assert_eq!(r.status, 201, "{r:?}");
     assert_eq!(r.body["head"]["seq"], 1);
     assert_eq!(r.body["log_epoch"], empty.body["log_epoch"]);
+    assert_eq!(r.body["head"]["log_epoch"], empty.body["log_epoch"]);
     assert_eq!(r.body["head"]["prev_digest"], Json::Null);
     for field in [
         "last_reset_seq",
         "last_reset_digest",
         "last_reset_created_at",
+        "last_reset_epoch",
     ] {
         assert_eq!(r.body["head"][field], Json::Null);
         assert_eq!(r.body[field], Json::Null);
@@ -145,6 +148,7 @@ async fn invalid_fields_are_refused_and_streams_and_workspaces_are_independent()
         ("prev_digest", json!("bad")),
         ("kind", json!("delete")),
         ("created_at", json!("forged")),
+        ("log_epoch", json!("forged")),
         ("principal", json!("node-1")),
     ] {
         let mut request = append(&h, 1, None, FIRST, "append");
@@ -217,6 +221,7 @@ async fn reset_is_an_ordered_record_and_survives_reopen() {
         "last_reset_seq",
         "last_reset_digest",
         "last_reset_created_at",
+        "last_reset_epoch",
     ] {
         assert_eq!(latest[field], head[field]);
         assert_eq!(reset.body[field], reset.body["head"][field]);
@@ -557,7 +562,13 @@ async fn restored_chain_requires_a_new_epoch_boundary() {
         let reply = h
             .call(
                 NODE_TOKEN,
-                append(&h, seq, (seq > 1).then_some(FIRST), FIRST, "append"),
+                append(
+                    &h,
+                    seq,
+                    (seq > 1).then_some(FIRST),
+                    FIRST,
+                    if seq == 20 { "reset" } else { "append" },
+                ),
             )
             .await;
         assert_eq!(reply.status, 201, "{reply:?}");
@@ -589,10 +600,16 @@ async fn restored_chain_requires_a_new_epoch_boundary() {
     let restored = h.call(NODE_TOKEN, latest()).await;
     assert_eq!(restored.body["head"]["seq"], 40);
     assert_eq!(restored.body["head"]["digest"], FIRST);
-    // The matching old prefix is unusable: its epoch changed and the reset was lost.
+    // The restored reset belongs to the old epoch and cannot start coverage.
     assert_eq!(restored.body["log_epoch"], rotated.epoch);
     assert_ne!(restored.body["log_epoch"], old_epoch);
-    assert!(restored.body["last_reset_seq"].is_null());
+    assert_eq!(restored.body["last_reset_seq"], 20);
+    assert_eq!(restored.body["head"]["log_epoch"], old_epoch);
+    assert_eq!(restored.body["last_reset_epoch"], old_epoch);
+    assert_ne!(
+        restored.body["last_reset_epoch"],
+        restored.body["log_epoch"]
+    );
 
     let mut stale = append(&h, 41, Some(FIRST), SECOND, "reset");
     stale["base_epoch"] = json!(old_epoch);
@@ -609,4 +626,16 @@ async fn restored_chain_requires_a_new_epoch_boundary() {
     assert_eq!(reset.status, 201, "{reset:?}");
     assert_eq!(reset.body["log_epoch"], rotated.epoch);
     assert_eq!(reset.body["last_reset_seq"], 41);
+    assert_eq!(reset.body["head"]["log_epoch"], rotated.epoch);
+    assert_eq!(reset.body["last_reset_epoch"], reset.body["log_epoch"]);
+    h.set_clock(h.now() + 1000);
+    let appended = h
+        .call(NODE_TOKEN, append(&h, 42, Some(SECOND), FIRST, "append"))
+        .await;
+    assert_eq!(appended.status, 201, "{appended:?}");
+    assert_eq!(
+        appended.body["last_reset_epoch"],
+        appended.body["log_epoch"]
+    );
+    assert_eq!(h.call(NODE_TOKEN, latest()).await.body, appended.body);
 }
