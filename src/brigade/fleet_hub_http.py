@@ -842,7 +842,12 @@ def make_handler(
                 return
             finally:
                 conn.close()
-            more_href = _board_more_href(path, params, next_offset=board.offset + board.limit) if board.more else None
+            next_page_offset = fleet_hub_status.next_board_offset(board.offset, board.limit)
+            more_href = (
+                _board_more_href(path, params, next_offset=next_page_offset)
+                if board.more and next_page_offset is not None
+                else None
+            )
             unread_offset = fleet_hub_status.clamp_board_offset(params.get("unread_offset", ["0"])[0])
             unread_only_page = params.get("unread_only", [""])[0] == "1"
             claim_offset = fleet_hub_status.clamp_board_offset(params.get("claim_offset", ["0"])[0])
@@ -895,11 +900,11 @@ def make_handler(
                             unread_only_page=True,
                             claim_offset=next_claim_offset,
                         )
-                    elif board.more:
+                    elif board.more and next_page_offset is not None:
                         more_href = _board_more_href(
                             path,
                             params,
-                            next_offset=board.offset + board.limit,
+                            next_offset=next_page_offset,
                             unread_offset=unread_offset,
                             claim_offset=next_claim_offset,
                         )
@@ -951,11 +956,11 @@ def make_handler(
                             claim_offset=next_claim_offset,
                             claim_only_page=True,
                         )
-                    elif board.more:
+                    elif board.more and next_page_offset is not None:
                         more_href = _board_more_href(
                             path,
                             params,
-                            next_offset=board.offset + board.limit,
+                            next_offset=next_page_offset,
                             unread_offset=next_unread_offset,
                             claim_offset=next_claim_offset,
                         )

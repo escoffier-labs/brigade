@@ -51,7 +51,9 @@ MAX_JSON_CONTAINERS = 32768
 # Covers 500 Worklore observations with 50 two-field dependencies each.
 MAX_JSON_ITEMS = 131072
 WORKLORE_BODY_BYTES = 262144
-WORKLORE_IMPORT_BODY_BYTES = 1048576
+# 5 MiB fits a contract-shaped 500-observation batch (about 4.27 MB) and stays
+# under the Hub's 8 MiB global body limit, which the Rust front also enforces.
+WORKLORE_IMPORT_BODY_BYTES = 5242880
 # Consume an unterminated string too, so escaped quotes cannot trigger a
 # quadratic restart at each quote. The JSON decoder still rejects it.
 _JSON_STRINGS = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)', re.DOTALL)
