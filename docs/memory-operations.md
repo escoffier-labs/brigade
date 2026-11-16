@@ -91,11 +91,17 @@ All three are null for a stream that has never reset. Later appends preserve
 the latest reset boundary and its hub timestamp.
 
 Admission defaults to 128 distinct workspace IDs per principal,
-10,000 retained rows per principal/workspace/stream,
+10,000 rows per generation of each principal/workspace/stream,
 100,000 rows per principal and one successful append per principal every
 1,000 milliseconds across all workspaces and streams. Resets count toward
-both quotas and the rate limit. These conservative caps bound immutable storage
-and match the existing principal admission interval. Configure
+the principal lifetime quota and the rate limit. A reset is allowed at the
+stream row cap and starts a new generation with the reset row counting as its
+first row. Subsequent appends count rows from that latest reset, including the
+reset itself. History is never deleted. Resets cannot bypass the principal's
+100,000-row lifetime cap or create a workspace past the 128-workspace cap, so
+repeated resets still have a fixed total storage bound per principal. A full
+principal needs an operator to raise its row cap before it can append or reset.
+Configure
 `evidence_workspaces_per_principal`, `evidence_rows_per_stream`,
 `evidence_rows_per_principal` and
 `evidence_principal_ms` under `memory.proposal_limits` using positive bounded

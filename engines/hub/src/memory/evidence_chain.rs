@@ -207,13 +207,12 @@ pub(super) fn append(
     // Admission shares the writer transaction with insertion. Stored timestamps
     // preserve the per-principal spacing used by Rate across hub restarts.
     let usage = tx.query(
-        "SELECT COUNT(*),COALESCE(SUM(workspace_id=?2 AND stream=?3),0),MAX(created_at),
+        "SELECT COUNT(*),MAX(created_at),
                 COUNT(DISTINCT workspace_id),COALESCE(SUM(workspace_id=?2),0)
          FROM memory_evidence_chain WHERE principal=?1",
         &[
             Value::Text(p.credential.principal().into()),
             Value::Text(a.chain.workspace.clone()),
-            Value::Text(a.chain.stream.clone()),
         ],
     )?;
     let number = |i: usize| {
@@ -223,9 +222,10 @@ pub(super) fn append(
             0
         }
     };
+    // Contiguous sequence numbers count the current generation, including its reset.
     for (full, code) in [
         (
-            number(4) == 0 && number(3) >= limits.evidence_workspaces_per_principal,
+            number(3) == 0 && number(2) >= limits.evidence_workspaces_per_principal,
             "memory_evidence_chain_workspace_quota",
         ),
         (
@@ -233,7 +233,9 @@ pub(super) fn append(
             "memory_evidence_chain_principal_quota",
         ),
         (
-            number(1) >= limits.evidence_rows_per_stream,
+            a.kind != "reset"
+                && seq - current["last_reset_seq"].as_i64().unwrap_or(1) + 1
+                    >= limits.evidence_rows_per_stream,
             "memory_evidence_chain_stream_quota",
         ),
     ] {
@@ -241,8 +243,8 @@ pub(super) fn append(
             return Ok(super::error(429, code, "evidence chain row quota reached"));
         }
     }
-    if usage[0][2] != Value::Null
-        && super::ops::s(&usage[0][2])
+    if usage[0][1] != Value::Null
+        && super::ops::s(&usage[0][1])
             > ids::isoformat(p.now_ms.saturating_sub(limits.evidence_principal_ms))
     {
         return Ok(super::error(

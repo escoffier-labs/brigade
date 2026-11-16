@@ -272,27 +272,39 @@ fn migration_from_schema_15_preserves_rows_and_is_repeatable() {
 }
 
 #[test]
-fn migration_from_13_refuses_to_skip_missing_predecessors() {
-    let db = Connection::open_in_memory().unwrap();
-    schema::migrate(&db, 1_800_000_000_000).unwrap();
-    db.execute_batch("DROP TABLE memory_evidence_chain; PRAGMA user_version=13;")
-        .unwrap();
-    let error = schema::migrate(&db, 1_800_000_000_000).unwrap_err();
-    assert!(error.contains("schema 16 requires schema 15"), "{error}");
-    assert_eq!(
-        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-            .unwrap(),
-        13
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT COUNT(*) FROM sqlite_schema WHERE name='memory_evidence_chain'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
+fn schema_16_step_requires_schema_15() {
+    for version in 0..=15 {
+        let db = Connection::open_in_memory().unwrap();
+        db.pragma_update(None, "user_version", version).unwrap();
+        let result = schema::evidence_chain_step(&db);
+        if version < 15 {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("schema 16 requires schema 15"), "{error}");
+            assert_eq!(
+                db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='memory_evidence_chain'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        } else {
+            result.unwrap();
+            assert_eq!(
+                db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                16
+            );
+            db.execute("SELECT * FROM memory_evidence_chain", [])
+                .unwrap();
+        }
+    }
 }
 
 #[tokio::test]
@@ -317,7 +329,7 @@ async fn quota_refusals_preserve_head_and_cover_all_principal_streams() {
         );
         let before = h.call(NODE_TOKEN, latest()).await.body;
         h.set_clock(h.now() + 1000);
-        let mut request = append(&h, 2, Some(FIRST), SECOND, "reset");
+        let mut request = append(&h, 2, Some(FIRST), SECOND, "append");
         if principal_quota {
             request["workspace_id"] = json!(SECOND);
             request["stream"] = json!("lesson_observations");
@@ -453,4 +465,73 @@ async fn admin_requires_own_exact_grant_and_cannot_act_as_another_owner() {
         let reply = h.call(ADMIN_TOKEN, request).await;
         assert_eq!((reply.status, code(&reply)), (403, "memory_grant_missing"));
     }
+}
+
+#[tokio::test]
+async fn reset_recovers_full_generation_but_not_principal_storage() {
+    let mut h = granted().await;
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"proposal_limits": {
+            "evidence_rows_per_stream": 2, "evidence_rows_per_principal": 5
+        }}))
+        .unwrap();
+    for (seq, prev, digest, kind, status, expected) in [
+        (1, None, FIRST, "append", 201, ""),
+        (2, Some(FIRST), SECOND, "append", 201, ""),
+        (
+            3,
+            Some(SECOND),
+            FIRST,
+            "append",
+            429,
+            "memory_evidence_chain_stream_quota",
+        ),
+        (3, Some(SECOND), FIRST, "reset", 201, ""),
+        (4, Some(FIRST), SECOND, "append", 201, ""),
+        (
+            5,
+            Some(SECOND),
+            FIRST,
+            "append",
+            429,
+            "memory_evidence_chain_stream_quota",
+        ),
+        (5, Some(SECOND), FIRST, "reset", 201, ""),
+        (
+            6,
+            Some(FIRST),
+            SECOND,
+            "append",
+            429,
+            "memory_evidence_chain_principal_quota",
+        ),
+        (
+            6,
+            Some(FIRST),
+            SECOND,
+            "reset",
+            429,
+            "memory_evidence_chain_principal_quota",
+        ),
+    ] {
+        h.set_clock(h.now() + 1000);
+        let before = h.call(NODE_TOKEN, latest()).await.body;
+        let reply = h
+            .call(NODE_TOKEN, append(&h, seq, prev, digest, kind))
+            .await;
+        assert_eq!(reply.status, status, "{reply:?}");
+        if status == 429 {
+            assert_eq!(code(&reply), expected);
+            assert_eq!(h.call(NODE_TOKEN, latest()).await.body, before);
+        }
+    }
+    let db = Connection::open(h.memory()).unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM memory_evidence_chain", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
 }

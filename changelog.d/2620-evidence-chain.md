@@ -1,2 +1,4 @@
 - Add hub append chains for opaque workspace evidence in the card-read and lesson-observation streams, with owner grants, ordered resets and a Python client. Automatic archive and lesson admission remain disabled.
 - Keep the latest reset boundary visible in evidence chain heads, bound workspace counts, immutable row growth and principal append rates, require explicit owner grants even for admin, and refuse schema-16 upgrades without schema 15.
+- Allow full evidence streams to reset into a new row-quota generation while retaining history under the principal lifetime cap.
+- Preserve evidence chain quota and append-rate refusal codes in the Python client.

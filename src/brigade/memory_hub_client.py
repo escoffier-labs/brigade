@@ -95,6 +95,9 @@ EVIDENCE_QUOTA_REFUSALS = {
     "memory_evidence_retained_principal_quota",
     "memory_evidence_retained_scope_quota",
     "memory_evidence_lifetime_principal_quota",
+    "memory_evidence_chain_workspace_quota",
+    "memory_evidence_chain_stream_quota",
+    "memory_evidence_chain_principal_quota",
 }
 # `read_stats` allows one request per second and 600 a day per principal. The hub
 # says so with this code, so a caller can stop instead of retrying at once.
@@ -673,7 +676,9 @@ class MemoryHubClient:
                 raise HubRefusal(status, {"code": "memory_rescan_status", "error": "rescan requires HTTP 200"})
             return payload
         code = payload.get("code")
-        coded = QUOTA_REFUSALS | EVIDENCE_QUOTA_REFUSALS | {READ_STATS_RATE_LIMITED}
+        coded = (
+            QUOTA_REFUSALS | EVIDENCE_QUOTA_REFUSALS | {READ_STATS_RATE_LIMITED, "memory_evidence_chain_rate_limited"}
+        )
         if action == "auto_apply":
             coded = coded | {"memory_auto_apply_rate_limited"}
         if status == 429 and isinstance(code, str) and code in coded:

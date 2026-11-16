@@ -281,16 +281,7 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     // Merge only after #2606 (14) and #2605 (15), then rebase their steps above.
     // This step requires schema 15 and must never skip either predecessor.
     if version < 16 {
-        step_with(c, 16, |c| {
-            let current: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if current != 15 {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "schema 16 requires schema 15 from #2606 and #2605".into(),
-                ));
-            }
-            c.execute_batch(super::evidence_chain::DDL)
-        })
-        .map_err(err)?;
+        evidence_chain_step(c).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c
@@ -335,6 +326,18 @@ fn event_schema() -> String {
 
 fn eval_schema() -> String {
     format!("{} {}", super::retrieval_eval::legacy_ddl(), event_schema())
+}
+
+pub(super) fn evidence_chain_step(c: &Connection) -> rusqlite::Result<()> {
+    step_with(c, 16, |c| {
+        let current: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if current != 15 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "schema 16 requires schema 15 from #2606 and #2605".into(),
+            ));
+        }
+        c.execute_batch(super::evidence_chain::DDL)
+    })
 }
 
 /// Apply one migration step unless another process already recorded it.

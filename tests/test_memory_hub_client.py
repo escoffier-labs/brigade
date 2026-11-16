@@ -3111,3 +3111,22 @@ def test_an_unwritable_search_log_still_returns_the_search(hub, tmp_path, monkey
     shutil.rmtree(target / ".brigade" / "memory")
     (target / ".brigade" / "memory").write_text("not a directory", encoding="utf-8")
     assert tools.memory_search("otter") == expected
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "memory_evidence_chain_workspace_quota",
+        "memory_evidence_chain_stream_quota",
+        "memory_evidence_chain_principal_quota",
+        "memory_evidence_chain_rate_limited",
+    ],
+)
+def test_evidence_chain_coded_429_preserves_refusal(code):
+    def transport(url, token, body, timeout):
+        return 429, {"code": code, "error": "append refused"}
+
+    client = hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=transport)
+    with pytest.raises(hubc.HubRefusal) as refused:
+        client.evidence_chain("principal:example", "a" * 64, "card_reads")
+    assert (refused.value.status, refused.value.code) == (429, code)

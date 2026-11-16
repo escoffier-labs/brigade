@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -107,9 +108,15 @@ class Client(unittest.TestCase):
         admin.call("grant", principal="memory-client-it", scope=scope,
                    rights=["evidence_chain"], client_event_id=hubc.event_id())
         for stream in ("card_reads", "lesson_observations"):
+            time.sleep(1.05)  # The append interval spans streams for this principal.
             self.assertIsNone(client.evidence_chain(scope, workspace, stream)["head"])
             first = client.evidence_chain(scope, workspace, stream, operation="append",
                                           seq=1, digest="b" * 64)
+            with self.assertRaises(hubc.HubRefusal) as limited:
+                client.evidence_chain(scope, workspace, stream, operation="append",
+                                      seq=2, digest="c" * 64, prev_digest="b" * 64)
+            self.assertEqual((limited.exception.status, limited.exception.code),
+                             (429, "memory_evidence_chain_rate_limited"))
             self.assertEqual(first["head"]["seq"], 1)
             self.assertEqual(first["head"]["kind"], "append")
             self.assertIsNone(first["head"]["prev_digest"])
@@ -120,6 +127,7 @@ class Client(unittest.TestCase):
                                       seq=3, digest="c" * 64, prev_digest="b" * 64)
             self.assertEqual((caught.exception.status, caught.exception.code),
                              (409, "memory_evidence_chain_conflict"))
+            time.sleep(1.05)  # Resets share the successful-append interval.
             reset = client.evidence_chain(scope, workspace, stream, operation="append",
                                           seq=2, digest="c" * 64, prev_digest="b" * 64, kind="reset")
             self.assertEqual(reset["head"]["kind"], "reset")
