@@ -622,3 +622,26 @@ def test_eval_cli_holds_the_verify_lock(verify_hub, capsys, monkeypatch):
     assert cli.main(["memory", "verify", "eval", "--corpus", str(path), "--target", str(target), "--json"]) == 0
     capsys.readouterr()
     assert held
+
+
+def test_full_corpus_plus_full_feedback_fits_one_evaluation():
+    from brigade import memory_verify_feedback as feedback
+
+    total = evaluation.MAX_CASES + feedback.MAX_CASES
+    cases = [case(id=f"case-{index}") for index in range(total)]
+    assert run_eval(cases)["cases"] == total
+    with pytest.raises(ValueError, match="verify_eval_limit"):
+        run_eval(cases + [case(id="one-over")])
+
+
+def test_eval_cli_reports_an_unanchored_corpus_card(verify_hub, capsys):
+    from brigade import cli
+
+    target, hub, _, _ = verify_hub
+    bad = case()
+    bad["card"]["text"] = "---\nevidence: []\n---\nno anchored claim here\n"
+    path = corpus(target, [bad])
+    assert cli.main(["memory", "verify", "eval", "--corpus", str(path), "--target", str(target), "--json"]) != 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["code"] == "verify_card_invalid"
+    assert hub.calls == []

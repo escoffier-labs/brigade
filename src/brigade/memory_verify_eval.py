@@ -16,6 +16,7 @@ from typing import Any, Callable
 from . import memory_proposal_io as io
 from . import memory_verify_contract as vc
 from . import memory_verify_evidence as ev
+from . import memory_verify_feedback as feedback
 
 CORPUS_SCHEMA = "brigade.memory-verify-corpus.v1"
 CLASSES = ("confirm", "correct", "history", "supersede", "no-change")
@@ -26,6 +27,8 @@ OP_CLASS = {
     "supersede_card": "supersede",
 }
 MAX_CASES = 256
+# The gate evaluates the full corpus plus all retained feedback in one run.
+MAX_EVAL_CASES = MAX_CASES + feedback.MAX_CASES
 
 
 def read_corpus(path: Path) -> list[dict[str, Any]]:
@@ -108,7 +111,7 @@ def evaluate(
     resolve_commit: vc.Resolver | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
-    if not 1 <= len(cases) <= MAX_CASES or not 1 <= repeats <= 3:
+    if not 1 <= len(cases) <= MAX_EVAL_CASES or not 1 <= repeats <= 3:
         raise ValueError("verify_eval_limit")
     prepared = [(case, *inputs(case)) for case in cases]
     counts = {name: dict(tp=0, fp=0, fn=0, support=0) for name in CLASSES}

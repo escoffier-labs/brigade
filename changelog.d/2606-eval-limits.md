@@ -1,0 +1,2 @@
+- Verify evaluation accepts a full corpus plus all retained feedback in one run, so review feedback no longer turns a full corpus into a no-go.
+- `memory verify eval` reports an unanchored or unreadable corpus card as a coded failure instead of a traceback.

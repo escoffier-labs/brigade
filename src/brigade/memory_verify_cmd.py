@@ -28,6 +28,7 @@ from . import memory_hub_store as store
 from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_verify_config as config
+from . import memory_verify_contract as vc
 from . import memory_verify_seat as seats
 from . import memory_verify_select as pick
 from . import memory_verify_state as vstate
@@ -568,6 +569,9 @@ def dispatch(args: argparse.Namespace) -> int:
             )
     except VerifyRunError as exc:
         payload = _failure(exc.code, str(exc))
+    except vc.Abstain as exc:
+        # Abstain carries a fixed code. An unreadable corpus card reports it instead of a traceback.
+        payload = _failure(exc.code, "verify could not read an evaluation card")
     except vstate.VerifyStateError as exc:
         payload = _failure("verify_state", str(exc))
     except store.limits.ReplicaLimitError:
