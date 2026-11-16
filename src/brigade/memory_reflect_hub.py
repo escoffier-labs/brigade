@@ -333,6 +333,7 @@ class Submitted:
     code: str | None = None
     # Hub codes of the refusals this submission met, in order. Never hub text.
     refusals: tuple[str, ...] = ()
+    anchor_no_delta: bool = False
 
 
 def submit(
@@ -389,7 +390,16 @@ def submit(
             elif 400 <= exc.status < 500 and exc.status not in (408, 429) and exc.body.get("retryable") is not True:
                 pending["refused"] = code
                 save()
-            return Submitted(FAILED, code=code, refusals=tuple(refusals))
+            return Submitted(
+                FAILED,
+                code=code,
+                refusals=tuple(refusals),
+                anchor_no_delta=(
+                    code == "memory_proposal_invalid"
+                    and exc.body.get("error") == "op has no delta"
+                    and all(op.get("type") == "anchor_blocks" for op in ops)
+                ),
+            )
         except hubc.HubUnavailable:
             return Submitted(UNAVAILABLE, code="hub_unavailable", refusals=tuple(refusals))
         if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
@@ -607,8 +617,6 @@ def _reflect(
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
     pending_anchors = unremembered(anchors.ops(heads))
-    if len(pending_anchors) > anchors.MAX_PROPOSALS:
-        skipped["anchor_deferred"] = len(pending_anchors) - anchors.MAX_PROPOSALS
     remaining = unremembered(exact) + alternating + pending_anchors[: anchors.MAX_PROPOSALS]
     # Retry budget is separate so held proposals cannot consume new-work slots.
     # Retries reuse an opened proposal and never submit, so they run first and a
@@ -623,6 +631,9 @@ def _reflect(
             continue
         anchored_count += anchoring
         selected.append((digest, ops))
+    anchor_candidates = sum(ops[0]["type"] == "anchor_blocks" for _, ops in retries) + len(pending_anchors)
+    if anchor_candidates > anchored_count:
+        skipped["anchor_deferred"] = anchor_candidates - anchored_count
     proposals = []
     refused: list[dict[str, str]] = []
     error = None
@@ -669,7 +680,8 @@ def _reflect(
                 error = sent.code
                 break
             if sent.outcome == FAILED:
-                failed_ops += 1
+                if not sent.anchor_no_delta:
+                    failed_ops += 1
                 continue
             if sent.proposal_id is not None:
                 served(digest)

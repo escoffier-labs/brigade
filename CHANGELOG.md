@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Match reflection anchoring to hub-supported blocks, preserve anchor suffixes and line endings, count deferred work accurately, and read progress without the write lock. Automatic anchoring requires a hub-derived structural proof and automated writer provenance.
+
 ## [0.31.0] - 2026-11-14
 
 - Add explicit opt-in Duet dispatch with seven fleet tools, repository and prompt bounds, and atomic open-request and daily-attempt limits in private state. Approval, answer and doctor relays remain unavailable; default discovery stays at 22 tools.

@@ -78,6 +78,77 @@ fn merge_metadata<'a>(text: &'a str, excluded: &[&str]) -> Option<Vec<&'a str>> 
     )
 }
 
+/// Proof is reconstructed from the current hub blob and writer provenance.
+/// No candidate-supplied evidence, text or provenance can establish it.
+pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
+    let Some(operations) = body["ops"].as_array().filter(|o| !o.is_empty()) else {
+        return Ok(false);
+    };
+    let cards = super::proposals::cards(body);
+    if cards.len() != operations.len()
+        || operations.iter().any(|op| {
+            string(op, "type") != "anchor_blocks" || super::proposals::op_schema(op).is_err()
+        })
+    {
+        return Ok(false);
+    }
+    for card in cards {
+        let scope = string(card, "scope");
+        let id = string(card, "card_id");
+        if operations
+            .iter()
+            .filter(|op| {
+                string(op, "scope") == scope
+                    && string(op, "card_id") == id
+                    && op["base_revision"] == card["base_revision"]
+            })
+            .count()
+            != 1
+        {
+            return Ok(false);
+        }
+        let Some(head) = ops::head(tx, scope, id)? else {
+            return Ok(false);
+        };
+        if card["base_revision"] != head.revision
+            || string(card, "before_hash") != head.hash
+            || card["before_state"] != "live"
+            || card["after_state"] != "live"
+            || head.state != "live"
+        {
+            return Ok(false);
+        }
+        let rows = tx.query("SELECT c.writer_class, (SELECT e.origin FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1), b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", &[ops::t(scope), ops::t(id)])?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let class = ops::s(&row[0]);
+        let origin = ops::s(&row[1]);
+        // Explicit interactive provenance vetoes even a principal credential.
+        if !matches!(origin.as_str(), "" | "scheduled" | "worker")
+            || (class != "principal" && !matches!(origin.as_str(), "scheduled" | "worker"))
+        {
+            return Ok(false);
+        }
+        let rusqlite::types::Value::Blob(bytes) = &row[2] else {
+            return Ok(false);
+        };
+        let Ok(before) = std::str::from_utf8(bytes) else {
+            return Ok(false);
+        };
+        if before != string(card, "before_text") || super::ids::sha256_hex(bytes) != head.hash {
+            return Ok(false);
+        }
+        let Ok(after) = super::proposal_blocks::anchor_blocks(before, id) else {
+            return Ok(false);
+        };
+        if after == before || after != string(card, "after_text") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub fn classify<T: ReadTx + ?Sized>(
     tx: &T,
     body: &Json,
@@ -170,16 +241,7 @@ pub fn classify<T: ReadTx + ?Sized>(
         };
         match string(op, "type") {
             "anchor_blocks" => {
-                if card["before_state"] != "live"
-                    || card["after_state"] != "live"
-                    || super::proposal_blocks::anchor_blocks(
-                        string(card, "before_text"),
-                        string(card, "card_id"),
-                    )
-                    .ok()
-                    .as_deref()
-                        != Some(string(card, "after_text"))
-                {
+                if !anchor_proof(tx, body)? {
                     return Ok(2);
                 }
             }

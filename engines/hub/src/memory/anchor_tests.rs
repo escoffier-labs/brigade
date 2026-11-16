@@ -34,7 +34,7 @@ fn deterministic_suffixes_preserve_bytes_and_reserve_existing_ids() {
 }
 
 #[tokio::test]
-async fn anchoring_is_tier_zero_and_rollback_restores_exact_bytes() {
+async fn human_anchoring_is_review_only_and_rollback_restores_exact_bytes() {
     let h = Hub::with(clean(), None);
     let original = "---\nevidence: []\n---\nSee [[missing]].\n\n- Keep this. ^c-abcdef\n";
     let put = h.put(ADMIN_TOKEN, "fleet", "a", None, original).await;
@@ -43,7 +43,7 @@ async fn anchoring_is_tier_zero_and_rollback_restores_exact_bytes() {
         json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)});
     let opened = submit(&h, ADMIN_TOKEN, vec![operation]).await;
     assert_eq!(opened.status, 201, "{opened:?}");
-    assert_eq!(opened.body["tier"], 0, "{opened:?}");
+    assert_eq!(opened.body["tier"], 2, "{opened:?}");
     // No local policy can replace the hub's missing authority signals.
     let automatic = h.call(ADMIN_TOKEN, json!({"action":"auto_apply","proposal_id":opened.body["proposal_id"],"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
     assert_ne!(automatic.body["state"], "applied", "{automatic:?}");
@@ -60,4 +60,162 @@ async fn anchoring_is_tier_zero_and_rollback_restores_exact_bytes() {
     let restored = decide(&h, ADMIN_TOKEN, &rollback.body["proposal_id"]).await;
     assert_eq!(restored.body["state"], "applied", "{restored:?}");
     assert_eq!(card(&h, "fleet", "a").await["text"], before["text"]);
+}
+
+#[test]
+fn shared_span_table_and_whitespace_suffixes() {
+    let cases: Json =
+        serde_json::from_str(include_str!("../../../../tests/fixtures/anchor_spans.json")).unwrap();
+    for case in cases.as_array().unwrap() {
+        let text = case["text"].as_str().unwrap();
+        let expected: Vec<_> = case["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            proposal_blocks::span_texts(text),
+            expected,
+            "{}",
+            case["name"]
+        );
+        let anchored = anchor_blocks(text, "a").unwrap();
+        assert_eq!(anchor_blocks(&anchored, "a").unwrap(), anchored);
+        assert_eq!(
+            proposal_blocks::strip_anchors(&anchored),
+            proposal_blocks::strip_anchors(text)
+        );
+    }
+    for text in ["Claim. ^c-abcdef   \n", "Café. ^c-abcdef\t\r\n"] {
+        assert_eq!(anchor_blocks(text, "a").unwrap(), text);
+        assert_eq!(proposal_blocks::pins(text)[0]["block_id"], "c-abcdef");
+        let pins = proposal_blocks::pins(text);
+        assert!(proposal_blocks::pin(text, "c-abcdef", pins[0]["hash"].as_str().unwrap()).is_ok());
+        assert_eq!(
+            proposal_blocks::strip_anchors(text),
+            text.replace(" ^c-abcdef", "")
+        );
+    }
+    for (before, ending) in [("Claim.  \n", "  \n"), ("Café.\t\r\n", "\t\r\n")] {
+        let after = anchor_blocks(before, "a").unwrap();
+        assert!(after.ends_with(ending), "{after:?}");
+        assert_eq!(proposal_blocks::strip_anchors(&after), before);
+    }
+}
+
+async fn anchor_ready(token: &str) -> (Hub, Json) {
+    anchor_ready_origin(token, None).await
+}
+
+async fn anchor_ready_origin(token: &str, origin: Option<&str>) -> (Hub, Json) {
+    let h = Hub::with(clean(), None);
+    attestation_tests::policy(&h);
+    grant(&h, "fleet", &["read", "reflect", "import"]).await;
+    let db = rusqlite::Connection::open(&h.hub).unwrap();
+    let doc: String = db
+        .query_row("SELECT document FROM fleet_policy_revisions", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut doc: Json = serde_json::from_str(&doc).unwrap();
+    doc["memory"]["tier0_op_classes"] = json!(["anchor_blocks"]);
+    db.execute(
+        "UPDATE fleet_policy_revisions SET document=?1",
+        [doc.to_string()],
+    )
+    .unwrap();
+    let put = h.call(token, json!({"action":"import","scope":"fleet","card_id":"a","text":"Claim.\n","origin":origin,"client_event_id":h.id()})).await;
+    assert_eq!(put.status, 201, "{put:?}");
+    let opened = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![
+            json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)}),
+        ],
+    )
+    .await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    super::retrieval_eval_tests::record_current(&h).await;
+    (h, opened.body["proposal_id"].clone())
+}
+
+#[tokio::test]
+async fn structural_anchoring_applies_with_every_gate_satisfied() {
+    let (h, id) = anchor_ready(AGENT_TOKEN).await;
+    let report = attestation_tests::report(&h, &id).await;
+    assert!(preflight::all_satisfied(&report.body), "{report:?}");
+    let applied = h
+        .call(ADMIN_TOKEN, attestation_tests::auto_request(&h, &id).await)
+        .await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+}
+
+#[tokio::test]
+async fn human_anchoring_requires_review_and_live_origin_is_rechecked() {
+    let (h, id) = anchor_ready(ADMIN_TOKEN).await;
+    let report = attestation_tests::report(&h, &id).await;
+    assert!(
+        report.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "tier_requires_review"),
+        "{report:?}"
+    );
+    let (h, id) = anchor_ready_origin(AGENT_TOKEN, Some("interactive")).await;
+    let report = attestation_tests::report(&h, &id).await;
+    assert!(
+        report.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "tier_requires_review"),
+        "{report:?}"
+    );
+    let (h, id) = anchor_ready(AGENT_TOKEN).await;
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    db.execute("UPDATE memory_cards SET writer_class='admin'", [])
+        .unwrap();
+    let reply = h
+        .call(ADMIN_TOKEN, attestation_tests::auto_request(&h, &id).await)
+        .await;
+    assert_ne!(reply.body["state"], "applied", "{reply:?}");
+}
+
+#[tokio::test]
+async fn anchor_proof_refuses_non_suffix_changes_and_client_fields() {
+    let (h, id) = anchor_ready(AGENT_TOKEN).await;
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let raw: String = db
+        .query_row(
+            "SELECT body FROM memory_proposals WHERE proposal_id=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut body: Json = serde_json::from_str(&raw).unwrap();
+    body["cards"][0]["after_text"] = json!("Changed claim. ^c-abcdef\n");
+    db.execute(
+        "UPDATE memory_proposals SET body=?1 WHERE proposal_id=?2",
+        [body.to_string(), id.as_str().unwrap().to_string()],
+    )
+    .unwrap();
+    let report = attestation_tests::report(&h, &id).await;
+    assert!(
+        report.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "tier_requires_review"),
+        "{report:?}"
+    );
+    for field in ["text", "evidence_ids", "before_text", "after_text"] {
+        let mut operation =
+            json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":1});
+        operation[field] = json!("workspace supplied");
+        assert!(proposals::op_schema(&operation).is_err());
+        let refused = submit(&h, ADMIN_TOKEN, vec![operation]).await;
+        assert_eq!(refused.status, 422, "{refused:?}");
+    }
 }

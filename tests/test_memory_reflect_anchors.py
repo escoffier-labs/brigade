@@ -54,3 +54,85 @@ def test_anchoring_allows_later_broken_link_repair():
     [[op]], skipped, _ = unit(heads)
     assert "link_missing_pin" not in skipped
     assert op["text"] == "See [[new]] for more."
+
+
+def test_hub_classifier_shared_table():
+    import json
+    from pathlib import Path
+
+    cases = json.loads((Path(__file__).parent / "fixtures/anchor_spans.json").read_text())
+    for case in cases:
+        assert [block.text for block in anchors.blocks(case["text"])] == case["blocks"], case["name"]
+        candidate = head(case["name"], case["text"], state="live")
+        missing = any(not anchors.suffix(block) for block in case["blocks"])
+        assert bool(anchors.ops([candidate])) == missing, case["name"]
+        assert anchors.coverage([candidate])["fraction"] == int(not missing), case["name"]
+
+
+def test_limit_counts_deferred_anchors(setup, capsys):
+    target, hub, _ = setup
+    for i in range(4):
+        hub._commit("card.put", "fleet", f"unique-{i}", card_text(f"Unique {i}.", None), "live", str(i))
+    code, report = run(target, capsys, "run", "--dry-run", "--limit", "1")
+    assert code == 0
+    # The exact duplicate proposal occupies the sole new-work slot.
+    assert report["skipped_reasons"].get("anchor_deferred", 0) == 4
+
+
+def test_status_never_creates_store(setup):
+    from brigade import memory_hub_store as store
+
+    target, _, _ = setup
+    assert not store.root(target).exists()
+    assert anchors.status(target) is None
+    assert not store.root(target).exists()
+
+
+def test_status_does_not_take_write_lock(setup, capsys, monkeypatch):
+    from brigade import memory_hub_store as store
+
+    target, _, _ = setup
+    assert run(target, capsys, "run", "--dry-run")[0] == 0
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("status must not acquire the write lock")
+
+    monkeypatch.setattr(store, "locked", forbidden)
+    assert anchors.status(target)["clean_live_cards"] == 2
+
+
+@pytest.mark.parametrize("reason, expected", [("op has no delta", 0), ("invalid ops", 1)])
+def test_anchor_no_delta_is_successful_skip(setup, capsys, monkeypatch, reason, expected):
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub._commit("card.put", "fleet", "unique", card_text("Unique.", None), "live", "unique")
+    monkeypatch.setattr(hub, "do_propose", lambda body: (422, {"code": "memory_proposal_invalid", "error": reason}))
+    code, report = run(target, capsys, "run")
+    assert code == expected
+    assert report["status"] == ("completed" if expected == 0 else "failed")
+
+
+def test_partly_anchored_card_stays_covered_after_revision_change():
+    candidate = head("mixed", "Use `pytest`.\n\n1. One.\n2. Two. ^c-abcdef   \n", state="live")
+    for revision in (1, 2, 3):
+        candidate["revision"] = revision
+        assert anchors.ops([candidate]) == []
+        assert anchors.coverage([candidate])["fraction"] == 1
+
+
+@pytest.mark.parametrize("limit, budget, deferred", [(1, 25, 3), (100, 2, 2)])
+def test_held_anchors_count_deferred_for_limit_and_budget(setup, capsys, monkeypatch, limit, budget, deferred):
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    for i in range(4):
+        hub._commit("card.put", "fleet", f"unique-{i}", card_text(f"Unique {i}.", None), "live", str(i))
+    assert run(target, capsys, "run")[0] == 0
+    policy.set_enabled(target, True)
+    monkeypatch.setattr(policy, "attempt", lambda *args, **kwargs: {"state": "pending"})
+    monkeypatch.setattr(anchors, "MAX_PROPOSALS", budget)
+    code, report = run(target, capsys, "run", "--apply", "--limit", str(limit))
+    assert code == 0
+    assert report["skipped_reasons"]["anchor_deferred"] == deferred
+    assert sum(op["type"] == "anchor_blocks" for op in report["ops"]) == 4 - deferred

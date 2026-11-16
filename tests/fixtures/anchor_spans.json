@@ -1,0 +1,143 @@
+[
+  {
+    "name": "inline",
+    "text": "Use `pytest` to test.\n",
+    "blocks": []
+  },
+  {
+    "name": "arrow",
+    "text": "x -> y\n",
+    "blocks": []
+  },
+  {
+    "name": "pipe",
+    "text": "A | B\n",
+    "blocks": []
+  },
+  {
+    "name": "greater",
+    "text": "a > b\n",
+    "blocks": []
+  },
+  {
+    "name": "html",
+    "text": "Plain.\n\nx < y\n",
+    "blocks": []
+  },
+  {
+    "name": "numbered",
+    "text": "1. One.\n2. Two.\n",
+    "blocks": [
+      "1. One.\n2. Two."
+    ]
+  },
+  {
+    "name": "bullets",
+    "text": "- One.\n+ Two.\n* Three.\n",
+    "blocks": [
+      "- One.",
+      "+ Two.",
+      "* Three."
+    ]
+  },
+  {
+    "name": "paragraphs",
+    "text": "One.\ncontinued.\n\nTwo.\n",
+    "blocks": [
+      "One.\ncontinued.",
+      "Two."
+    ]
+  },
+  {
+    "name": "crlf",
+    "text": "One.\r\n\r\nTwo.\r\n",
+    "blocks": [
+      "One.",
+      "Two."
+    ]
+  },
+  {
+    "name": "continuation",
+    "text": "- a\n  continued\n",
+    "blocks": []
+  },
+  {
+    "name": "mixed",
+    "text": "Use `pytest`.\n\nPlain. ^c-abcdef\n",
+    "blocks": [
+      "Plain. ^c-abcdef"
+    ]
+  },
+  {
+    "name": "front",
+    "text": "---\ntitle: Notes\n---\n# Notes\n\nClaim.\n",
+    "blocks": [
+      "Claim."
+    ]
+  },
+  {
+    "name": "fences",
+    "text": "Before.\n\n```\nopaque\n```\n\nAfter.\n",
+    "blocks": [
+      "Before.",
+      "After."
+    ]
+  },
+  {
+    "name": "unicode",
+    "text": "Caf\u00e9.\n\nTwo.\n",
+    "blocks": [
+      "Caf\u00e9.",
+      "Two."
+    ]
+  },
+  {
+    "name": "suffix_spaces",
+    "text": "Claim. ^c-abcdef   \n",
+    "blocks": [
+      "Claim. ^c-abcdef   "
+    ]
+  },
+  {
+    "name": "suffix_tab",
+    "text": "Caf\u00e9. ^c-abcdef\t\r\n",
+    "blocks": [
+      "Caf\u00e9. ^c-abcdef\t"
+    ]
+  },
+  {
+    "name": "hard_break",
+    "text": "Claim.  \ncontinued.\t\n",
+    "blocks": [
+      "Claim.  \ncontinued.\t"
+    ]
+  },
+  {
+    "name": "crlf_front",
+    "text": "---\r\ntitle: Notes\r\n---\r\n# Notes\r\n\r\nClaim.\r\n",
+    "blocks": [
+      "Claim."
+    ]
+  },
+  {
+    "name": "crlf_fence",
+    "text": "```\r\nHidden.\r\n```\r\n\r\nVisible.\t\r\n",
+    "blocks": [
+      "Visible.\t"
+    ]
+  },
+  {
+    "name": "unicode_line",
+    "text": "Caf\u00e9.\u2028continues.\n",
+    "blocks": [
+      "Caf\u00e9.\u2028continues."
+    ]
+  },
+  {
+    "name": "non_white_control",
+    "text": "\u001cClaim.\n",
+    "blocks": [
+      "\u001cClaim."
+    ]
+  }
+]

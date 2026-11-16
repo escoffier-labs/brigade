@@ -25,13 +25,14 @@ fn spans(text: &str) -> Vec<(usize, usize)> {
 
     let mut result = Vec::new();
     let mut offset = 0;
-    let mut front = text.starts_with("---\n");
+    let mut front = text.starts_with("---\n") || text.starts_with("---\r\n");
     let mut fence: Option<(char, usize)> = None;
     let mut start = None;
     let mut end = 0;
     let mut opaque = false;
     for line in text.split_inclusive('\n') {
-        let raw = line.trim_end_matches('\n');
+        let raw = line.strip_suffix('\n').unwrap_or(line);
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
         let trimmed = raw.trim_start();
         if front {
             if offset > 0 && raw == "---" {
@@ -86,6 +87,14 @@ fn spans(text: &str) -> Vec<(usize, usize)> {
     result
 }
 
+/// One suffix parser for addressing, anchoring and removal. Horizontal
+/// whitespace belongs to the original block and is retained verbatim.
+fn suffix(block: &str) -> Option<(usize, usize, &str)> {
+    let trimmed = block.trim_end_matches([' ', '\t']);
+    let (prefix, id) = trimmed.rsplit_once(" ^")?;
+    anchor(id).then_some((prefix.len(), trimmed.len(), id))
+}
+
 /// Add only suffix bytes. Reserve every anchor spelling, even in opaque text.
 pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> {
     let mut used = BTreeSet::new();
@@ -106,7 +115,7 @@ pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> 
     let mut seen = BTreeSet::new();
     for (position, (start, end)) in spans(text).into_iter().enumerate() {
         let block = &text[start..end];
-        if let Some((_, id)) = block.rsplit_once(" ^").filter(|(_, id)| anchor(id)) {
+        if let Some((_, _, id)) = suffix(block) {
             if !seen.insert(id) {
                 return Err("duplicate block id");
             }
@@ -125,7 +134,7 @@ pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> 
         if used.len() > 4096 {
             return Err("claim anchor reservation limit exceeded");
         }
-        edits.push((end, id));
+        edits.push((start + block.trim_end_matches([' ', '\t']).len(), id));
     }
     for (end, id) in edits.into_iter().rev() {
         result.insert_str(end, &format!(" ^{id}"));
@@ -141,14 +150,12 @@ pub fn pin(text: &str, id: &str, hash: &str) -> Result<Json, &'static str> {
     let mut found = None;
     for (start, end) in spans(text) {
         let block = &text[start..end];
-        if let Some((_, name)) = block.rsplit_once(" ^") {
-            if anchor(name) {
-                if !seen.insert(name) {
-                    return Err("duplicate block id");
-                }
-                if name == id {
-                    found = Some(block);
-                }
+        if let Some((_, _, name)) = suffix(block) {
+            if !seen.insert(name) {
+                return Err("duplicate block id");
+            }
+            if name == id {
+                found = Some(block);
             }
         }
     }
@@ -163,10 +170,8 @@ pub fn pin(text: &str, id: &str, hash: &str) -> Result<Json, &'static str> {
 pub fn strip_anchors(text: &str) -> String {
     let mut result = text.to_string();
     for (start, end) in spans(text).into_iter().rev() {
-        if let Some((_, id)) = text[start..end].rsplit_once(" ^") {
-            if anchor(id) {
-                result.replace_range(end - id.len() - 2..end, "");
-            }
+        if let Some((s, e, _)) = suffix(&text[start..end]) {
+            result.replace_range(start + s..start + e, "");
         }
     }
     result
@@ -178,7 +183,7 @@ pub fn pins(text: &str) -> Vec<Json> {
         .into_iter()
         .filter_map(|(s, e)| {
             let block = &text[s..e];
-            let (_, id) = block.rsplit_once(" ^")?;
+            let (_, _, id) = suffix(block)?;
             anchor(id).then(
                 || json!({"block_id":id,"hash":ids::sha256_hex(block.as_bytes()),"bytes":block}),
             )
@@ -198,7 +203,8 @@ pub fn apply(text: &str, op: &Json) -> Result<(String, Json), &'static str> {
         .ok_or("block absent")?;
     let mut result = text.to_string();
     let old = pinned["bytes"].as_str().unwrap();
-    let old_claim = old.strip_suffix(&format!(" ^{id}")).unwrap();
+    let (s, e, _) = suffix(old).ok_or("block suffix absent")?;
+    let old_claim = format!("{}{}", &old[..s], &old[e..]);
     match op["type"].as_str() {
         Some("replace_block" | "add_previously") => {
             let wording = op["text"].as_str().ok_or("text required")?;
@@ -257,6 +263,11 @@ pub fn diff(scope: &str, card: &str, before: &str, after: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+pub(super) fn span_texts(text: &str) -> Vec<&str> {
+    spans(text).into_iter().map(|(s, e)| &text[s..e]).collect()
 }
 
 #[cfg(test)]
