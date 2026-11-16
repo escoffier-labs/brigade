@@ -191,7 +191,11 @@ def test_secondary_filter_allows_transient_retry_guidance(scope):
     quote = "Retry transient 503s with bounded exponential backoff."
     candidate = proposal(scope)
     candidate.update(kind="user-correction", quote=quote, content=candidate["content"] + "\n" + quote, evidence=quote)
-    result = admission.admit(scope, candidate, [{"id": 2, "kind": "UserPromptSubmit", "text": quote}], {})
+    activity.record_event(scope, "UserPromptSubmit", {"prompt": quote}, now=99)
+    state = activity.load(scope)
+    activity.drain_prompts(scope, state)
+    candidate["event"] = state["sequence"]
+    result = admission.admit(scope, candidate, state["events"], {})
     assert result["kind"] == "user-correction"
     assert "quote" not in result
     assert result["evidence"] is None

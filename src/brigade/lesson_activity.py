@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import dirfd, guard, lesson_io as io, localio
+from . import dirfd, guard, lesson_auth, lesson_io as io, localio
 from .component_paths import cache_root
 from .handoff_ingest_rules import sha256_hex
 from .guard.types import ScanOptions
@@ -98,6 +98,7 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
                     "prompt": prompt,
                     "prompt_id": uuid.uuid4().hex,
                     "at": time.time() if now is None else now,
+                    **_session_metadata(target, payload),
                 }
             )
             io.write(spool, io.json_bytes(prompts[-MAX_EVENTS:]))
@@ -141,18 +142,24 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
                 run_id = _verify_run_id(payload)
                 if run_id:
                     metadata["verify_run_id"] = run_id
-        session = payload.get("session_id")
-        # An empty id would hash to a non-empty value and pass the same-session check.
-        if isinstance(session, str) and session.strip():
-            metadata["session_id"] = sha256_hex(session.encode())
-            metadata["harness_session_fingerprint"] = localio.stable_hash({"claude_session_id": session})
-        work_session = io.text(target / ".brigade/work/current", absent=True, limit=4096)
-        if work_session and work_session.strip():
-            metadata["work_session_id"] = work_session.strip()
-        append_event(state, event, text, at, **metadata)
+        metadata.update(_session_metadata(target, payload))
+        append_event(target, state, event, text, at, **metadata)
         if event in {"PostToolUse", "PostToolUseFailure"}:
             state["calls"] = state.get("calls", 0) + 1
         save(target, state)
+
+
+def _session_metadata(target: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    session = payload.get("session_id")
+    # An empty id would hash to a non-empty value and pass the same-session check.
+    if isinstance(session, str) and session.strip():
+        metadata["session_id"] = sha256_hex(session.encode())
+        metadata["harness_session_fingerprint"] = localio.stable_hash({"claude_session_id": session})
+    work_session = io.text(target / ".brigade/work/current", absent=True, limit=4096)
+    if work_session and work_session.strip():
+        metadata["work_session_id"] = work_session.strip()
+    return metadata
 
 
 def on_event(target: Path, event: str, payload: dict[str, Any]) -> None:
@@ -232,22 +239,55 @@ def drain_prompts(target: Path, state: dict[str, Any]) -> None:
                 if not isinstance(prompt.get("prompt_id"), str) or not prompt["prompt_id"]:
                     prompt["prompt_id"] = uuid.uuid4().hex
             io.write(path, io.json_bytes(prompts))
-        recorded = state.get("drained_prompt_ids", [])
         for prompt in prompts:
-            if prompt["prompt_id"] not in recorded:
-                append_event(state, "UserPromptSubmit", prompt["prompt"], prompt["at"])
+            if not any(lesson_auth.prompt_matches(target, e, prompt) for e in state["events"]):
+                append_event(
+                    target,
+                    state,
+                    "UserPromptSubmit",
+                    prompt["prompt"],
+                    prompt["at"],
+                    prompt_id=prompt["prompt_id"],
+                    prompt_digest=localio.canonical_json_digest(prompt["prompt"]),
+                    **{
+                        key: prompt[key]
+                        for key in ("session_id", "harness_session_fingerprint", "work_session_id")
+                        if key in prompt
+                    },
+                )
         state["drained_prompt_ids"] = [p["prompt_id"] for p in prompts]
-        # io.write fsyncs the state and its directory before acknowledging. Keep
-        # ids in that same save to deduplicate a restart between save and ack.
+        # Persist before acknowledging, then check the actual saved envelopes.
+        # Missing authority or an evicted/deleted event keeps its prompt pending.
         save(target, state)
-        io.write(path, b"null\n")
+        saved = load(target)
+        remaining = [p for p in prompts if not any(lesson_auth.prompt_matches(target, e, p) for e in saved["events"])]
+        io.write(path, io.json_bytes(remaining) if remaining else b"null\n")
 
 
-def append_event(state: dict[str, Any], kind: str, text: str, at: float, **metadata: Any) -> None:
+def append_event(target: Path, state: dict[str, Any], kind: str, text: str, at: float, **metadata: Any) -> None:
+    authenticated = [e for e in state["events"] if lesson_auth.authentic(target, e)]
+    # A forged counter can only skip ids or veto recording, never move an
+    # authenticated append backwards relative to the retained history.
+    if any(e["id"] > state["sequence"] for e in authenticated):
+        raise ValueError("lesson sequence precedes authenticated history")
+    append_sequence = time.monotonic_ns()
+    if any(e["append_sequence"] >= append_sequence for e in authenticated):
+        raise ValueError("lesson append clock precedes authenticated history")
     state["sequence"] += 1
+    boundary = min([at] + [e["earliest_unreviewed_at"] for e in authenticated if e["id"] > state["reviewed"]])
     state.setdefault("earliest_unreviewed_at", at)
-    state["last_activity"] = at
-    state["events"].append({"id": state["sequence"], "kind": kind, "text": text, "at": at, **metadata})
+    state["last_activity"] = max(state["last_activity"], at)
+    observation = {
+        "id": state["sequence"],
+        "append_sequence": append_sequence,
+        "kind": kind,
+        "text": text,
+        "at": at,
+        **metadata,
+        "earliest_unreviewed_at": boundary,
+    }
+    lesson_auth.stamp(target, observation)
+    state["events"].append(observation)
     # Keep the failure side of a fix even in long sessions. Other observations
     # are bounded to over twenty complete pre/post tool pairs plus prompts.
     while len(state["events"]) > MAX_EVENTS or len(io.json_bytes(state)) > 256 * 1024:

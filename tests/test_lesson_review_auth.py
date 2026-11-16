@@ -100,9 +100,7 @@ def test_failed_verify_observation_survives_routine_activity(scope, monkeypatch,
     state = activity.load(scope)
     assert any(e["id"] == 1 and e.get("verify_command") for e in state["events"])
     candidate["event"] = state["sequence"]
-    # The final output cites only its own passing receipt.
-    state["events"][-1]["text"] = candidate["quote"] + "\n" + candidate["evidence"]
-    activity.save(scope, state)
+    # The final hook output already cites its own passing receipt.
     seat(monkeypatch, candidate)
     assert review.run(scope, now=111)["status"] == "committed"
 

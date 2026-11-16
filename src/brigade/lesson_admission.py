@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import lesson_activity as activity, lesson_io as io, receipt_signing, verify_trial
+from . import lesson_activity as activity, lesson_auth, lesson_io as io, receipt_signing, verify_trial
 from .handoff_ingest_rules import safe_card_name, sha256_hex
 
 FORBIDDEN = re.compile(
@@ -24,12 +24,24 @@ def read_card(target: Path, name: str) -> bytes | None:
     return io.read_bytes(target / "memory/cards" / name, limit=8192, absent=True)
 
 
+def _authenticated_events(target: Path, events: list[dict[str, Any]]) -> None:
+    if not events or any(not lesson_auth.authentic(target, e) for e in events):
+        raise ValueError("lesson requires authenticated session observations")
+    ids = [e["id"] for e in events]
+    sequences = [e["append_sequence"] for e in events]
+    if len(ids) != len(set(ids)) or len(sequences) != len(set(sequences)):
+        raise ValueError("lesson observation sequence must be unique")
+
+
 def verified_receipt(
     target: Path, relative: str, *, content: str | None, card: str, events: list[dict[str, Any]], earliest: float
 ) -> dict[str, Any]:
     io.relative(relative)
     if not re.fullmatch(r"\.brigade/work/verify-runs/[A-Za-z0-9_-]+/receipt\.json", relative):
         raise ValueError("lesson requires a local verification receipt")
+    _authenticated_events(target, events)
+    # Caller-supplied boundaries can only tighten the signed window.
+    earliest = max(earliest, min(e["earliest_unreviewed_at"] for e in events))
     observed = next(
         (
             e
@@ -118,7 +130,7 @@ def verified_receipt(
             # follows receipt completion. Only that observation's own HMAC-
             # authenticated, session-bound receipt may cross the boundary. Five
             # seconds allows hook dispatch latency without reviving old evidence.
-            first = min(events, key=lambda e: e["id"])
+            first = min(events, key=lambda e: e["append_sequence"])
             if observed is not first or observed.get("at") != earliest or earliest - completed.timestamp() > 5:
                 raise ValueError("stale lesson receipt")
     except (KeyError, TypeError, AttributeError) as exc:
@@ -168,6 +180,7 @@ def admit(target: Path, candidate: Any, events: list[dict[str, Any]], reads: dic
     content_words = set(re.findall(r"\w+", candidate["content"].casefold()))
     if len(set(words) & content_words) < max(5, len(set(words)) * 0.8):
         raise ValueError("lesson content must derive from its resolution quote")
+    _authenticated_events(target, events)
     if kind == "user-correction":
         if event["kind"] != "UserPromptSubmit":
             raise ValueError("corrections must quote a user prompt")
@@ -178,7 +191,7 @@ def admit(target: Path, candidate: Any, events: list[dict[str, Any]], reads: dic
         failure_reference = candidate.get("failure_evidence")
         if not isinstance(reference, str) or not isinstance(failure_reference, str):
             raise ValueError("lesson requires failing and passing verification evidence")
-        timestamps = [e.get("earliest_unreviewed_at", e.get("at")) for e in events]
+        timestamps = [e["earliest_unreviewed_at"] for e in events]
         if not timestamps or any(type(at) not in (int, float) for at in timestamps):
             raise ValueError("lesson evidence requires timestamped session observations")
         earliest = min(float(at) for at in timestamps if isinstance(at, (int, float)))

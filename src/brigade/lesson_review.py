@@ -73,8 +73,6 @@ def _invoke(target: Path, seat: str, run_id: str, prompt: str, phase: str) -> di
 
 def _review(target: Path, cfg: dict[str, Any], snapshot: dict[str, Any], run_id: str) -> dict[str, Any] | None:
     events = [dict(e) for e in snapshot["events"] if e["id"] > snapshot["reviewed"]]
-    for event in events:
-        event["earliest_unreviewed_at"] = snapshot.get("earliest_unreviewed_at", event.get("at"))
     digest = activity.scanned(json.dumps(events, ensure_ascii=False))
     framed = wrap_untrusted(digest, source_kind="tool-output")
     names = sorted(p.name for p in islice((target / "memory/cards").glob("*.md"), 64) if safe_card_name(p.name))
