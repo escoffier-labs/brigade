@@ -1028,7 +1028,8 @@ def _labelled(label: str, control: str, *, hint: str = "", form: fleet_form_fiel
     if form is None:
         return f"<label>{_esc(label)}{hint_html}{control}</label>"
     name = _CONTROL_NAME.search(control)
-    assert name is not None, "a marked control needs a field.<name> input name"
+    if name is None:
+        raise KeyError("a marked control needs a field.<name> input name")
     return f"<label>{fleet_form_fields.caption(label, form[name.group(1)])}{hint_html}{control}</label>"
 
 

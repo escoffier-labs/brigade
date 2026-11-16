@@ -138,12 +138,9 @@ def submit(conn: sqlite3.Connection, grant_id: str, raw: Any) -> dict[str, Any]:
     if not isinstance(request["model_id"], str) or not isinstance(request["observed_revision"], str):
         raise ActionError("invalid-submission", 400)
     prompt = request["prompt"]
-    if (
-        ff.missing(ACTION_FORM, request)
-        or not isinstance(prompt, str)
-        or len(prompt.encode("utf-8")) > 12000
-        or "\x00" in prompt
-    ):
+    if blank := ff.missing(ACTION_FORM, request):
+        raise ActionError(blank[0].error, 400)
+    if not isinstance(prompt, str) or len(prompt.encode("utf-8")) > 12000 or "\x00" in prompt:
         raise ActionError(ACTION_FORM["prompt"].error, 400)
     request_digest = digest(canonical(request))
     conn.execute("BEGIN IMMEDIATE")

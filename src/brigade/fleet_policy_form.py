@@ -234,7 +234,7 @@ def _seat_record(existing: Mapping[str, Any] | None, submission: Submission) -> 
     bindings_raw = submission.value("bindings")
     if bindings_raw is not None:
         record["bindings"] = _json_field(bindings_raw, "seat bindings")
-    if blank := ff.missing(SEAT_FORM, {name: str(record.get(name) or "") for name in ("provider", "model")}):
+    if blank := ff.missing(SEAT_FORM, {name: str(record.get(name) or "") for name in SEAT_FORM}):
         raise DocumentError(blank[0].error)
     return {
         key: value for key, value in record.items() if value is not None or key in SEAT_TEXT_FIELDS + SEAT_INT_FIELDS
