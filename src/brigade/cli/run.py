@@ -359,6 +359,14 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     add_cloud_subcommands(p_cloud)
 
+    from ..run_batch import dry_run_cli
+
+    p_batch = run_sub.add_parser("batch", help="Validate an explicit batch without execution.")
+    p_batch.add_argument("batch_file", type=Path, help="Versioned batch JSON file.")
+    p_batch.add_argument("--dry-run", action="store_true", help="Print the validated batch plan.")
+    p_batch.add_argument("--json", action="store_true", help="Print JSON plan or error.")
+    p_batch.set_defaults(func=dry_run_cli)
+
     p_approve = run_sub.add_parser("approve", help="Record a signed human approval for a run.")
     p_approve.add_argument("run_id", help="Run id under .brigade/runs.")
     p_approve.add_argument("--decision", choices=("allow", "deny", "hold"), required=True)
@@ -389,7 +397,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     def parse_known_args(args=None, namespace=None):
         tokens = list(args if args is not None else [])
-        if tokens and tokens[0] in {"cloud", "approve"}:
+        if tokens and tokens[0] in {"cloud", "approve", "batch"}:
             return orig(tokens, namespace)
         return task_parser.parse_known_args(tokens, namespace)
 

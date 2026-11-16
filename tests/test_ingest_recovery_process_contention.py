@@ -10,6 +10,7 @@ from pathlib import Path
 from brigade import ingest, instruction_overflow, memory_care_pending
 from brigade import memory_care_journal as journal
 from brigade import memory_inbox_drain as drain
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from tests._home import set_home
 from tests._instruction_fixtures import field_workspace, handoff_text, write_handoff
 from tests.test_ingest_overflow_card_trust import CARD, NOTE, TODAY, _drafts, _ingest
@@ -67,6 +68,7 @@ def _contend(workspace, role, barrier, sender):
     sender.close()
 
 
+@requires_automatic_filing
 def test_ingest_and_recovery_contend_without_deadlock_or_lost_draft(tmp_path, monkeypatch):
     started = time.monotonic()
     deadline = started + 8
