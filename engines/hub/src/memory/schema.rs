@@ -287,8 +287,9 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
         step(
             c,
             &format!(
-                "DROP TRIGGER IF EXISTS memory_retrieval_history_no_delete; {}",
-                super::retrieval_history::DDL
+                "DROP TRIGGER IF EXISTS memory_retrieval_history_no_delete; {} {}",
+                super::retrieval_history::DDL,
+                super::verify_eval::DDL
             ),
             15,
         )

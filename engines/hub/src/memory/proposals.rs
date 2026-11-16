@@ -837,6 +837,8 @@ fn apply_cards(
     // History has its own sequence and can change after the read snapshot.
     // Recompute real-scope authorization and vetoes under the writer lock.
     if automatic
+        && !verify_automatic
+        && !compensation
         && cards(body)
             .iter()
             .any(|c| c["scope"] != super::retrieval_eval::FIXTURE_SCOPE)

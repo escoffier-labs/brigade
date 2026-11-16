@@ -1877,13 +1877,14 @@ async fn retrieval_eval_fixture_report_cannot_authorize_real_scope() {
 
 #[test]
 fn retrieval_history_migration_13_and_legacy_14_to_15() {
-    for version in [13, 14] {
+    for (version, legacy) in [(13, false), (14, false), (14, true)] {
         let db = Connection::open_in_memory().unwrap();
         schema::migrate(&db, 1_800_000_000_000).unwrap();
-        if version == 13 {
+        if !legacy {
             db.execute_batch("DROP TABLE memory_retrieval_history")
                 .unwrap();
         } else {
+            db.execute_batch("DROP TABLE memory_verify_evals").unwrap();
             db.execute_batch("DROP TRIGGER memory_retrieval_history_no_delete; CREATE TRIGGER memory_retrieval_history_no_delete BEFORE DELETE ON memory_retrieval_history BEGIN SELECT RAISE(ABORT,'retrieval history is append-only'); END;").unwrap();
             db.execute("INSERT INTO memory_retrieval_history(principal,credential,session,kind,created_ms,payload) VALUES('one','one','s','search',0,'{}')",[]).unwrap();
         }
@@ -1907,7 +1908,7 @@ fn retrieval_history_migration_13_and_legacy_14_to_15() {
         assert!(
             db.execute("DELETE FROM memory_retrieval_history", [])
                 .is_ok()
-                == (version == 13)
+                != legacy
         );
         schema::migrate(&db, 1_800_000_000_000).unwrap();
     }

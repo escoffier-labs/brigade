@@ -47,6 +47,49 @@ async fn apply(h: &Hub, id: &Json, types: Json) -> Reply {
     h.call(AGENT_TOKEN, json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,"binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),"expected_op_types":types,"client_event_id":h.id()})).await
 }
 
+async fn fleet_verifier_proposal() -> (Hub, Json, Json) {
+    let h = Hub::with(clean(), None);
+    grant(&h, "fleet", &["read", "reflect"]).await;
+    set_owner(&h, "hub");
+    let r = h.call(ADMIN_TOKEN, json!({"action":"verifier","principal":"agent:dot","verifier":true,"client_event_id":h.id()})).await;
+    assert_eq!(r.status, 200, "{r:?}");
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let before = card(&h, "fleet", "a").await;
+    let opened = submit(&h, AGENT_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+    (h, opened.body["proposal_id"].clone(), before)
+}
+
+#[tokio::test]
+async fn fleet_verifier_correction_applies_with_current_admission() {
+    let (h, id, before) = fleet_verifier_proposal().await;
+    let applied = apply(&h, &id, json!(["replace_block"])).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let after = card(&h, "fleet", "a").await;
+    assert_ne!(after["text"], before["text"]);
+    assert!(
+        after["text"]
+            .as_str()
+            .unwrap()
+            .contains("Use the scoped gate.")
+    );
+}
+
+#[tokio::test]
+async fn fleet_exact_automatic_compensation_restores_bytes() {
+    let (h, id, before) = fleet_verifier_proposal().await;
+    let applied = apply(&h, &id, json!(["replace_block"])).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    assert_ne!(card(&h, "fleet", "a").await["text"], before["text"]);
+    attestation_tests::change_policy(&h, "reflect_principals", json!(["agent:dot"]));
+    h.set_clock(h.now() + 1);
+    let restored = h.call(AGENT_TOKEN, json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+    assert_eq!(restored.body["state"], "applied", "{restored:?}");
+    assert_eq!(restored.body["decision_mode"], "automatic");
+    assert_eq!(card(&h, "fleet", "a").await["text"], before["text"]);
+}
+
 fn automatic_request(mut request: Json) -> Json {
     if request["action"] == "auto_apply" {
         let object = request.as_object_mut().unwrap();
