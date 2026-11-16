@@ -20,6 +20,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_verify_cmd
 
     memory_verify_cmd.register(memory_sub)
+    from .. import lesson_cmd
+
+    lesson_cmd.register(memory_sub)
     from .. import memory_hub_cmd
 
     memory_hub_cmd.register(memory_sub)
@@ -460,6 +463,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch(args) -> int:
+    if args.memory_command == "lessons":
+        from .. import lesson_cmd
+
+        return lesson_cmd.dispatch(args)
     if args.memory_command in {"embed-worker", "reindex", "rescan"}:
         from .. import memory_embed
 

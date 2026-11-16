@@ -1,0 +1,2 @@
+- Admit the first verification observation's own authenticated receipt within five seconds of completion while retaining session and stale evidence checks.
+- Persist queued correction observations before acknowledging their spool and deduplicate retries after interrupted acknowledgement.
