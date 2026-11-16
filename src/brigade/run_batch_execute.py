@@ -7,11 +7,11 @@ import hashlib
 import json
 import re
 import sys
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import agents, fleet_client, inbox_lock, localio, run_tasks, run_lifecycle, run_journal, runguard
+from . import agents, fleet_client, inbox_lock, localio, run_receipts, run_tasks, run_lifecycle, run_journal, runguard
 from .run_batch import BatchError
 from .run_transport import Assignment, WorkerResult
 from .roster import Roster
@@ -55,7 +55,8 @@ class BatchExecution:
             return
         handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task["task_id"])
         path = self.run_dir / f"batch-result-{hashlib.sha256(task['task_id'].encode()).hexdigest()}.json"
-        localio.write_json(path, asdict(result))
+        # Persist the sanitized receipt projection, never raw captures or diagnostics.
+        localio.write_json(path, run_receipts.worker_payload_one(result))
         run_journal._fsync_directory(self.run_dir)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         run_tasks.observe_task(

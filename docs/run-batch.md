@@ -132,7 +132,8 @@ launch that was never accepted. It is never retried automatically.
 JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`, and
 `result_ref` (relative to the run directory, or null). Completed results persist
-as each worker finishes. Failed workers retain their result receipt too. Skipped
+as each worker finishes, as the same sanitized projection the run receipt uses
+(no raw stdout or stderr captures). Failed workers retain their result receipt too. Skipped
 tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation
 and timeout preserve completed results and report unresolved tasks as stored.
 Exit 0 requires every task to be completed successfully and the run to pass

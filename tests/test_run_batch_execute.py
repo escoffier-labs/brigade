@@ -244,13 +244,20 @@ def test_batch_bypasses_preferences_and_resolves_cwd_at_execution(setup, capsys,
 
 
 def test_batch_pins_all_seats_against_health_fallback(setup, capsys, monkeypatch):
-    from tests.test_aboyeur_orchestrator_health_routing import PerSeatFakeAdapter, _install_probe
+    from brigade import seat_health
+    from tests.test_aboyeur_orchestrator_health_routing import PerSeatFakeAdapter
 
     roster = setup[0] / ".brigade" / "roster.toml"
     roster.write_text(
-        roster.read_text() + '\n[agents.reviewer]\ncli = "codex"\nrole = "review"\nfallback = ["coder"]\n'
+        roster.read_text() + '\n[agents.reviewer]\ncli = "claude"\nrole = "review"\nfallback = ["coder"]\n'
     )
-    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"reviewer"})))
+    # A distinct CLI gives reviewer its own health fingerprint, so the probe
+    # cannot reuse coder's cached passing checks for it. The autouse conftest
+    # fixture replaces SeatHealthProbe with a lambda that drops ``adapter``, so
+    # recover the real class from an instance rather than from a module binding.
+    real_probe = type(seat_health.SeatHealthProbe())
+    adapter = PerSeatFakeAdapter(unhealthy=frozenset({"reviewer"}))
+    monkeypatch.setattr(seat_health, "SeatHealthProbe", lambda **kwargs: real_probe(adapter=adapter))
     rc, _, err = invoke(setup, capsys, [task("a"), {**task("b"), "seat": "reviewer"}])
     assert rc == 2
     assert "reviewer" in err
@@ -376,3 +383,19 @@ def test_batch_final_summary_reports_task_outcomes(setup, capsys, monkeypatch, o
     assert "a: completed" in summary["text"] if ok else "a: failed" in summary["text"]
     assert "b: completed" in summary["text"] if ok else "b: skipped" in summary["text"]
     assert summary["ok"] is ok
+
+
+def test_result_sidecar_omits_raw_captures(setup, capsys, monkeypatch):
+    def model(agent, prompt, **kwargs):
+        return agents.AgentResult(
+            text="done", ok=True, stdout="RAW-STDOUT-MARKER token", stderr="RAW-STDERR-MARKER token"
+        )
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    ref = result["tasks"]["a"]["result_ref"]
+    run_dir = next((setup[0] / ".brigade" / "runs").glob("batch-*"))
+    stored = (run_dir / ref).read_text()
+    assert "RAW-STDOUT-MARKER" not in stored and "RAW-STDERR-MARKER" not in stored
+    assert json.loads(stored)["ok"] is True
