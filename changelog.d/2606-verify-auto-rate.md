@@ -1,0 +1,1 @@
+- Enforce shared automatic attempt rate limits for verifier applies while preserving committed request replays.

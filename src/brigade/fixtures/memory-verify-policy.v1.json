@@ -1,0 +1,13 @@
+{
+  "schema": "brigade.memory-verify-policy.v1",
+  "precision": 0.9,
+  "recall": 0.6,
+  "agreement": 0.9,
+  "min_cases": 5,
+  "min_feedback": 0,
+  "feedback_accept_rate": 0.7,
+  "repeats": 3,
+  "consecutive_passes": 2,
+  "max_age_days": 7,
+  "auto_apply": true
+}

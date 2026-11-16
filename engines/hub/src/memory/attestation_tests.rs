@@ -176,6 +176,8 @@ async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_re
     let after = card(&h, "fleet", "a").await;
     assert_eq!(after["trust"], before["trust"]);
     assert_eq!(h.call(ADMIN_TOKEN, request).await, applied);
+    // A fresh terminal-state request is admitted only after the rate window.
+    h.set_clock(h.now() + 60_001);
     assert_eq!(
         h.call(ADMIN_TOKEN, auto_request(&h, &id).await)
             .await

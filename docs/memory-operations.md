@@ -2211,7 +2211,7 @@ mode = "read"
 read_scopes = ["repo:example"]
 
 [verify]
-enabled = false
+enabled = true
 propose_seat = "verify-propose"
 confirm_seat = "verify-confirm"
 cards_per_run = 12        # 1 to 64
@@ -2896,3 +2896,7 @@ retrieval and verifier signals and checks all negative evidence itself. Watch
 replies contain decision metadata. A request inspects at
 most 32 applied proposals with a continuation. Reflection bounds polling to
 32 pages per scope. Local evidence logs do not authorize watch signals.
+
+## Verify evaluation and automatic admission
+
+The [model-backed admission workflow](memory-care.md#model-backed-verification-admission) documents `memory verify eval`, `memory verify gate`, the unattended care path, policy thresholds, off switches and rollback. Existing verify configurations require explicit enablement. Classes apply automatically only with current hub admin-authenticated admission through the dedicated verifier automatic action. Deferred history and supersede classes remain proposal-only until the contract can meet their recall bars.

@@ -14,6 +14,7 @@ pub struct Base {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    VerifyEval(Json),
     RetrievalEval(super::retrieval_eval::Report),
     AutoApplySwitch(bool, Option<(String, String)>),
     EvidencePurge(String),
@@ -86,6 +87,7 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Action::RetrievalEval(_) => "retrieval_eval.record",
+            Action::VerifyEval(_) => "verify_eval.record",
             Action::AutoApplySwitch(..) => "auto_apply_switch",
             Action::EvidencePurge(_) => "evidence.purge",
             Action::Evidence(_) => "evidence.attach",
@@ -113,7 +115,7 @@ impl Action {
     /// The grant an action needs, and the scope it needs it on.
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
-            Action::RetrievalEval(_) => (None, "admin"),
+            Action::RetrievalEval(_) | Action::VerifyEval(_) => (None, "admin"),
             Action::AutoApplySwitch(..) | Action::EvidencePurge(_) => (None, "admin"),
             Action::Evidence(a) => (
                 Some(super::proposals::string(&a.request, "scope")),
@@ -159,6 +161,7 @@ impl Action {
             Action::Proposal(_)
                 | Action::Evidence(_)
                 | Action::RetrievalEval(_)
+                | Action::VerifyEval(_)
                 | Action::Verifier { .. }
         )
     }
@@ -587,7 +590,7 @@ pub fn apply(
         if s(&row[0]) == p.request_digest {
             let mut body: Json = serde_json::from_str(&s(&row[2])).unwrap_or(Json::Null);
             if let Action::Proposal(c) = &p.action {
-                if c.name() == "auto_apply" {
+                if matches!(c.name(), "auto_apply" | "verify_auto_apply") {
                     if let Some(proposal) = super::proposals::load(
                         tx,
                         super::proposals::string(&c.request, "proposal_id"),
@@ -630,7 +633,11 @@ pub fn apply(
             Action::Proposal(c)
                 if matches!(
                     c.name(),
-                    "decide" | "auto_apply" | "rollback" | "compensation_watch"
+                    "decide"
+                        | "auto_apply"
+                        | "verify_auto_apply"
+                        | "rollback"
+                        | "compensation_watch"
                 ) =>
             {
                 let applied: Vec<&Json> = if c.name() == "compensation_watch" {
@@ -701,6 +708,7 @@ fn run(
         )
     };
     match &p.action {
+        Action::VerifyEval(r) => super::verify_eval::record(tx, p, r, _authority),
         Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
         Action::AutoApplySwitch(enabled, release) => {
             if release.is_none() {

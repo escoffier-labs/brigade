@@ -33,12 +33,16 @@ impl Command {
             Some("propose") => "propose",
             Some("decide") => "decide",
             Some("auto_apply") => "auto_apply",
+            Some("verify_auto_apply") => "verify_auto_apply",
             Some("compensation_watch") => "compensation_watch",
             _ => "rollback",
         }
     }
     pub fn right(&self) -> &'static str {
-        if matches!(self.name(), "propose" | "auto_apply" | "compensation_watch") {
+        if matches!(
+            self.name(),
+            "propose" | "auto_apply" | "verify_auto_apply" | "compensation_watch"
+        ) {
             "reflect"
         } else if self.name() == "rollback" {
             // Exact scoped authorization below selects review or reflect.
@@ -131,7 +135,7 @@ pub fn authorize<T: ReadTx + ?Sized>(
     let right = match request["action"].as_str() {
         Some("propose") => "reflect",
         Some("preflight") => "read",
-        Some("auto_apply") => "reflect",
+        Some("auto_apply" | "verify_auto_apply") => "reflect",
         Some("rollback") => {
             let original = load(tx, string(request, "proposal_id"))?;
             if original.as_ref().is_some_and(|b| {
@@ -444,8 +448,9 @@ fn submit<T: ReadTx + ?Sized>(
         json!({"base_epoch":epoch,"workspace_id":request["workspace_id"],"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
     ))
 }
-/// Prepare CPU work and diffs on a query-only reader. A refusal is carried to
-/// the writer so a committed retry still reaches the idempotency lookup first.
+/// Prepare CPU work and diffs on a query-only reader. Ordinary commands carry a
+/// refusal to the writer. Automatic applies answer it before the writer locks,
+/// because `ops::apply` re-runs authorization before the idempotency lookup.
 pub fn prepare<T: ReadTx + ?Sized>(
     tx: &T,
     who: &auth::Credential,
@@ -530,7 +535,7 @@ fn event(tx: &dyn WriteTx, p: &Prepared, kind: &str, body: &Json) -> rusqlite::R
 pub(super) fn reply(body: &Json, status: u16) -> Reply {
     Reply::new(
         status,
-        json!({"proposal_id":body["proposal_id"],"state":body["state"],"compensation_result":body["compensation_result"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),
+        json!({"proposal_id":body["proposal_id"],"decision_mode":body["decision_mode"],"state":body["state"],"compensation_result":body["compensation_result"],"tier":body["tier"],"policy_revision":body["policy_revision"],"policy_digest":body["policy_digest"],"decision_policy_revision":body["decision_policy_revision"],"decision_policy_digest":body["decision_policy_digest"],"diff":body["diff"],"targets":metadata(body)["cards"],"reason":body["reason"],"rules":body["rules"],"preflight":body["preflight"],"log_epoch":body["base_epoch"]}),
     )
 }
 /// Automatic calls may be made by reflect-only callers, including replays.
@@ -647,7 +652,10 @@ fn apply_cards(
     authority: &Authority,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Option<Reply>> {
-    let automatic = matches!(&p.action,ops::Action::Proposal(c) if c.name()=="auto_apply");
+    let verify_automatic =
+        matches!(&p.action,ops::Action::Proposal(c) if c.name()=="verify_auto_apply");
+    let automatic =
+        verify_automatic || matches!(&p.action,ops::Action::Proposal(c) if c.name()=="auto_apply");
     for card in cards(body) {
         if !scoped_right(
             tx,
@@ -678,7 +686,7 @@ fn apply_cards(
     }
     // Keep diagnostics before blocker returns. Reusing the later apply-loop
     // scans would move scan work before those checks or need a second report path.
-    let compensation = automatic && !body["rollback_of"].is_null();
+    let compensation = automatic && !verify_automatic && !body["rollback_of"].is_null();
     if compensation {
         if let Some(reason) = super::compensation::automatic_blocker(tx, authority)? {
             body["state"] = json!("held");
@@ -695,6 +703,30 @@ fn apply_cards(
             body["reason"] = json!("compensation_not_exact");
             return Ok(None);
         }
+    } else if verify_automatic {
+        if let Some(refusal) = super::verify_eval::check(tx, p, body, authority)? {
+            return Ok(Some(refusal));
+        }
+        // Verifier applies skip Tier 0 diagnostics but keep the shared card cooldown.
+        let changed = cards(body).iter().filter(|c| {
+            c["before_text"] != c["after_text"] || c["before_state"] != c["after_state"]
+        });
+        if super::preflight::cooldown_active(tx, changed, p.now_ms)? {
+            return Ok(Some(error(
+                409,
+                "memory_card_cooldown_active",
+                "a changed card was applied or rolled back in the last 24 hours",
+            )));
+        }
+        // An automatic compensation's scope and operation hold stops verifier applies too.
+        if super::compensation::class_held(tx, body)? {
+            return Ok(Some(error(
+                409,
+                "compensation_class_held",
+                "automatic changes of this operation type are held in this scope",
+            )));
+        }
+        body["preflight"] = json!({"checks":[{"gate":"verify_evaluation","state":"satisfied"}]});
     } else if automatic {
         let snapshot = match &p.action {
             ops::Action::Proposal(c) => c.draft.as_ref().ok().map(|b| &b["_auto_snapshot"]),
@@ -732,7 +764,11 @@ fn apply_cards(
     if automatic {
         body["auto_apply_gates"] = body["preflight"]["checks"].clone();
     }
-    if automatic && !compensation && !super::preflight::all_satisfied(&body["preflight"]) {
+    if automatic
+        && !verify_automatic
+        && !compensation
+        && !super::preflight::all_satisfied(&body["preflight"])
+    {
         // A failed automatic attempt leaves human review available.
         body["state"] = json!("pending");
         body["reason"] = json!("auto_apply_held");
@@ -761,6 +797,16 @@ fn apply_cards(
     // All blockers and scans are checked before the first head changes.
     let mut scans = Vec::new();
     for card in cards(body) {
+        if verify_automatic
+            && (card["before_scan"] != "clean"
+                || !matches!(scanner.scan(string(card, "before_text")), Scan::Clean {ruleset} if !ruleset.is_empty()))
+        {
+            return Ok(Some(error(
+                409,
+                "memory_verify_auto_held",
+                "input_scan_not_clean",
+            )));
+        }
         let scan = scanner.scan(string(card, "after_text"));
         if automatic && !matches!(&scan,Scan::Clean{ruleset} if !ruleset.is_empty()) {
             body["state"] = json!("pending");
@@ -1201,8 +1247,8 @@ pub fn run(
         }
         return compensate(tx, p, &body, authority, scanner);
     }
-    if cmd.name() == "auto_apply" {
-        if body["verifier"] == true && body["rollback_of"].is_null() {
+    if matches!(cmd.name(), "auto_apply" | "verify_auto_apply") {
+        if cmd.name() == "auto_apply" && body["verifier"] == true && body["rollback_of"].is_null() {
             return Ok(error(
                 409,
                 "memory_verifier_floor",

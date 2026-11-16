@@ -28,6 +28,7 @@ from . import memory_hub_store as store
 from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_verify_config as config
+from . import memory_verify_contract as vc
 from . import memory_verify_seat as seats
 from . import memory_verify_select as pick
 from . import memory_verify_state as vstate
@@ -53,6 +54,9 @@ DOCTOR_DISABLED_REASON = "[verify] enabled is false, so doctor checked the confi
 UNRESOLVED_REQUEST = "verify_unresolved_request"
 
 
+EVAL_CODE = re.compile(r"verify_eval_[a-z_]{1,48}")
+
+
 class VerifyRunError(ValueError):
     """A fixed code and reason, safe for logs. Never formatted with hub or card text."""
 
@@ -61,8 +65,16 @@ class VerifyRunError(ValueError):
         self.code = code
 
 
+def _eval_error(exc: ValueError) -> VerifyRunError:
+    """Keep a fixed verify_eval_* code from the corpus reader or harness."""
+    code = str(exc)
+    if not EVAL_CODE.fullmatch(code):
+        code = "verify_invalid"
+    return VerifyRunError(code, "verify could not evaluate the corpus")
+
+
 def register(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("verify", help="Check hub cards against local evidence and open reviewed corrections.")
+    parser = sub.add_parser("verify", help="Check hub cards against evidence and apply policy-admitted corrections.")
     commands = parser.add_subparsers(dest="memory_verify_command", required=True)
     status = commands.add_parser("status", help="Show the verify job's pause state and last never-read counts.")
     run = commands.add_parser("run", help="Select cards, check them with both seats and open pinned proposals.")
@@ -72,7 +84,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     show = commands.add_parser("show", help="Authenticate a local review packet and print evidence quotes.")
     show.add_argument("proposal_id")
-    for command in (status, run, doctor, show):
+    evaluate = commands.add_parser("eval", help="Score labeled cards offline with the configured seats.")
+    evaluate.add_argument("--corpus", type=Path, required=True)
+    gate = commands.add_parser("gate", help="Run evaluation and record per-class go/no-go automatically.")
+    enable = commands.add_parser("enable", help="Explicitly enable verification for an existing workspace.")
+    for command in (status, run, doctor, show, evaluate, gate, enable):
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     run.add_argument("--dry-run", action="store_true", help="Submit, attach and write nothing, and leave the pause.")
@@ -503,6 +519,60 @@ def dispatch(args: argparse.Namespace) -> int:
             from . import memory_verify_show
 
             payload = memory_verify_show.show_payload(target, args.proposal_id)
+        elif args.memory_verify_command == "enable":
+            config.enable(target)
+            payload = {"status": "ok", "enabled": True}
+        elif args.memory_verify_command in ("eval", "gate"):
+            from . import memory_verify_gate, memory_verify_eval, memory_verify_run
+
+            settings = configured(target)
+            if not settings.enabled:
+                raise VerifyRunError("verify_disabled", DISABLED_REASON)
+            pair = memory_verify_run.READY(target, settings.propose_seat, settings.confirm_seat)
+            if args.memory_verify_command == "gate":
+                with vstate.locked(target):
+                    hub_settings, client = _hub(target)
+                    status = memory_verify_run._preflight(client, hub_settings)
+                    binding = _binding(client.identity, status["principal"], status["log_epoch"])
+                    evaluator = memory_verify_gate.evaluator(target, client)
+                    payload = memory_verify_gate.run(
+                        target,
+                        pair=pair,
+                        binding=binding,
+                        now_ms=int(time.time() * 1000),
+                        previous=status.get("verify_evaluation"),
+                    )
+                    if payload["binding_sha256"] != memory_verify_gate.binding_digest(target, pair, binding):
+                        raise ValueError("verify_eval_inputs_changed")
+                    policy_bytes = memory_verify_gate.policy_bytes(target)
+                    if io.sha256(policy_bytes) != payload["policy_sha256"]:
+                        raise ValueError("verify_eval_inputs_changed")
+                    evaluator.call(
+                        "verify_eval.record",
+                        principal=status["principal"],
+                        record=payload,
+                        policy=policy_bytes.decode("utf-8"),
+                        base_epoch=status["log_epoch"],
+                        client_event_id=hubc.event_id(),
+                    )
+                payload["status"] = "completed"
+            else:
+                try:
+                    cases = memory_verify_eval.read_corpus(args.corpus.absolute())
+                except ValueError as exc:
+                    raise _eval_error(exc) from None
+                # The work area sweeps stale call directories, so share the run and gate lock.
+                with vstate.locked(target), memory_verify_run.WORK_AREA(target) as area:
+                    calls = memory_verify_run.Calls(area)
+                    try:
+                        payload = memory_verify_eval.evaluate(
+                            cases, propose=calls.seat(pair[0]), confirm=calls.seat(pair[1])
+                        )
+                    except ValueError as exc:
+                        raise _eval_error(exc) from None
+                    except memory_verify_run.SeatStop as exc:
+                        # Quota and fatal seat replies end the evaluation with a report, as the gate does.
+                        raise VerifyRunError(str(exc), "verifier seat stopped the evaluation") from None
         elif args.dry_run and args.no_model:
             payload = run_payload(target=target, dry_run=True, no_model=True, list_ids=args.list_ids)
         elif args.no_model:
@@ -515,6 +585,9 @@ def dispatch(args: argparse.Namespace) -> int:
             )
     except VerifyRunError as exc:
         payload = _failure(exc.code, str(exc))
+    except vc.Abstain as exc:
+        # Abstain carries a fixed code. An unreadable card reports it instead of a traceback.
+        payload = _failure(exc.code, "verify could not read a card")
     except vstate.VerifyStateError as exc:
         payload = _failure("verify_state", str(exc))
     except store.limits.ReplicaLimitError:
@@ -544,6 +617,8 @@ def dispatch(args: argparse.Namespace) -> int:
         from . import memory_verify_show
 
         memory_verify_show.print_review(payload)
+    elif args.memory_verify_command in ("eval", "gate", "enable"):
+        print(json.dumps(payload, sort_keys=True, indent=2))
     elif args.memory_verify_command == "status":
         state = payload.get("state", {})
         print(f"paused: {str(state.get('paused')).lower()}  failures: {state.get('consecutive_failures', '-')}")

@@ -450,7 +450,7 @@ fn apply_one(
     let deadline = super::hardening::deadline(authority.proposal_limits.lock_ms);
     // Review and ordinary writes retain their existing admission contracts.
     // The resource guard covers reflect-controlled automatic work and admission.
-    if matches!(&p.action,ops::Action::Proposal(c) if matches!(c.name(),"auto_apply"|"propose"|"compensation_watch"|"rollback"))
+    if matches!(&p.action,ops::Action::Proposal(c) if matches!(c.name(),"auto_apply"|"verify_auto_apply"|"propose"|"compensation_watch"|"rollback"))
         && db
             .progress_handler(1000, Some(move || Instant::now() >= deadline))
             .is_err()
@@ -524,15 +524,14 @@ fn prepare_auto(
     cmd: &mut super::proposals::Command,
     who: &Credential,
     event: &str,
+    request_digest: &str,
     hub: &HubLock,
     config: &Config,
     rate: &mut super::hardening::Rate,
 ) -> Option<(Authority, i64)> {
     use super::hardening as h;
     use serde_json::json;
-    let Ok(body) = &mut cmd.draft else {
-        return None;
-    };
+    let verify_only = cmd.name() == "verify_auto_apply";
     let mut prepared_authority = None;
     let limits = config.proposal_limits.read().unwrap().clone();
     let result = (|| -> rusqlite::Result<Option<Reply>> {
@@ -542,22 +541,33 @@ fn prepare_auto(
         )?;
         db.execute_batch("BEGIN")?;
         let tx = worker::Tx(&db);
-        // Committed retries need no diagnostic work and retain replay semantics.
-        if !crate::writer::ReadTx::query(
+        // Only an exact committed replay bypasses admission. Conflicting event IDs
+        // are refused here so they cannot occupy either writer lock.
+        let stored = crate::writer::ReadTx::query(
             &tx,
-            "SELECT 1 FROM memory_idempotency WHERE principal=?1 AND client_event_id=?2",
+            "SELECT request_digest FROM memory_idempotency WHERE principal=?1 AND client_event_id=?2",
             &[ops::t(who.principal()), ops::t(event)],
-        )?
-        .is_empty()
+        )?;
+        if stored
+            .first()
+            .is_some_and(|row| ops::s(&row[0]) == request_digest)
         {
             return Ok(None);
         }
-        if body["state"] != "pending" {
+        if !stored.is_empty() {
+            return Ok(Some(ops::error(
+                409,
+                "memory_client_event_conflict",
+                "client_event_id was already used for a different request",
+            )));
+        }
+        // Authorization and missing-proposal refusals never spend a rate slot.
+        if cmd.draft.is_err() {
             return Ok(None);
         }
         if !rate.admit(
             who.principal(),
-            super::proposals::string(body, "proposal_id"),
+            super::proposals::string(&cmd.request, "proposal_id"),
             config.clock.now_ms(),
             &limits,
         ) {
@@ -566,6 +576,20 @@ fn prepare_auto(
                 "memory_auto_apply_rate_limited",
                 "automatic apply attempt rate exceeded",
             )));
+        }
+        let Ok(body) = &mut cmd.draft else {
+            return Ok(None);
+        };
+        if body["state"] != "pending" {
+            return Ok(Some(ops::error(
+                409,
+                "memory_proposal_state",
+                "automatic apply requires a pending proposal",
+            )));
+        }
+        // Verify decisions use their recorded admission instead of Tier 0 diagnostics.
+        if verify_only {
+            return Ok(None);
         }
         let deadline = h::deadline(limits.diagnostic_ms);
         db.progress_handler(1000, Some(move || Instant::now() >= deadline))?;
@@ -742,8 +766,7 @@ pub(crate) fn run(
         let mut batch: Vec<Pending> = Vec::new();
         let mut bytes = 0;
         while let Some(next) = writes.front() {
-            let automatic =
-                matches!(&next.command.action,ops::Action::Proposal(c) if c.name()=="auto_apply");
+            let automatic = matches!(&next.command.action,ops::Action::Proposal(c) if matches!(c.name(),"auto_apply"|"verify_auto_apply"));
             if automatic && !batch.is_empty() {
                 break;
             }
@@ -770,11 +793,12 @@ pub(crate) fn run(
         // Corpus diagnostics run in a separate read snapshot before either writer lock.
         for pending in &mut batch {
             if let ops::Action::Proposal(cmd) = &mut pending.command.action {
-                if cmd.name() == "auto_apply" {
+                if matches!(cmd.name(), "auto_apply" | "verify_auto_apply") {
                     pending.auto_authority = prepare_auto(
                         cmd,
                         &pending.command.credential,
                         &pending.command.client_event_id,
+                        &pending.command.request_digest,
                         &hub,
                         &config,
                         &mut auto_rate,
@@ -783,9 +807,28 @@ pub(crate) fn run(
             }
         }
         if batch.iter().any(
-            |p| matches!(&p.command.action,ops::Action::Proposal(cmd) if cmd.name()=="auto_apply"),
+            |p| matches!(&p.command.action,ops::Action::Proposal(cmd) if matches!(cmd.name(),"auto_apply"|"verify_auto_apply")),
         ) {
             hook(&config, Step::AutoPrepared);
+        }
+        // Answer automatic refusals before BEGIN IMMEDIATE, the arbiter and hub lock.
+        batch = batch
+            .into_iter()
+            .filter_map(|pending| {
+                if let ops::Action::Proposal(cmd) = &pending.command.action {
+                    if matches!(cmd.name(), "auto_apply" | "verify_auto_apply") {
+                        if let Err(refusal) = &cmd.draft {
+                            let reply = refusal.clone();
+                            answer(pending, Ok(reply));
+                            return None;
+                        }
+                    }
+                }
+                Some(pending)
+            })
+            .collect();
+        if batch.is_empty() {
+            continue;
         }
         // Step 2: the memory lock.
         if let Err(e) = worker::begin(&db, Instant::now() + config.memory_wait) {
@@ -877,6 +920,7 @@ pub(crate) fn run(
                             ops::Action::Proposal(_)
                                 | ops::Action::Evidence(_)
                                 | ops::Action::RetrievalEval(_)
+                                | ops::Action::VerifyEval(_)
                         ) {
                             p.command.now_ms = config.clock.now_ms();
                         }

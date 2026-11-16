@@ -58,7 +58,19 @@ MAX_SUBMISSIONS = 4096
 LEDGER_EXTRA = frozenset({"ops_sha256", "duplicate", "expired", "card", "unsettled", "created"})
 SCOPE_KEYS = frozenset({"since_day", "never_read", "counts_ms", "cards"})
 CARD_KEYS = frozenset(
-    {"seen", "proposed", "verified", "revision", "evidence", "verdict", "pending", "reads", "review", "rejected"}
+    {
+        "seen",
+        "proposed",
+        "verified",
+        "revision",
+        "evidence",
+        "verdict",
+        "pending",
+        "reads",
+        "review",
+        "rejected",
+        "last_auto_attempt_ms",
+    }
 )
 
 assert io.MAX_STATE_BYTES == MAX_BYTES  # The bounded reader and writer enforce this limit.
@@ -84,7 +96,7 @@ def _card(entry: object) -> bool:
         return False
     if not all(_count(entry.get(name)) for name in ("seen", "proposed")):
         return False
-    if any(name in entry and not _count(entry[name]) for name in ("verified", "revision")):
+    if any(name in entry and not _count(entry[name]) for name in ("verified", "revision", "last_auto_attempt_ms")):
         return False
     if "evidence" in entry and not (isinstance(entry["evidence"], str) and DIGEST.fullmatch(entry["evidence"])):
         return False
