@@ -518,7 +518,7 @@ Event object:
 An item is counted in exactly one exclusion bucket. Check in this order and stop at the first failure:
 
 1. `not-ready` when `status` is not `ready`
-2. `not-eligible` when `burn_eligible` is false
+2. `not-eligible` when `burn_eligible` is false, or when the item is a campaign member whose repository its campaign offer excludes (the same exclusion `take` refuses). Burn selection and `fleet work next` both apply it, whatever else the item qualifies for
 3. `acceptance-required` when effective acceptance is empty or longer than twenty criteria
 4. `manual-mode` when `execution_mode` is `manual`
 5. `blocker` when an unresolved blocker is recorded

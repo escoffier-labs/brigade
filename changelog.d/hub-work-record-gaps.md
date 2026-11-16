@@ -1,0 +1,3 @@
+- A Hub path-scope refusal now reaches the caller. `WorkloreClientError.details` carries the bounded `resolution`, `conflicts` and `truncated` fields, and `brigade fleet work` prints them, instead of only the error code.
+- The burn queue and `fleet work next` no longer select a campaign member whose repository the campaign offer excludes, even when the item is otherwise ready. It counts under the `not-eligible` bucket.
+- An ownership read that presents `X-Worklore-Holder` is now refused with `holder-mismatch` unless the caller is the current holder node with the current capability. Reads without the header are unchanged.

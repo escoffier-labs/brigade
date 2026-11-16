@@ -60,7 +60,12 @@ The existing `fleet work ownership show` command retains its separate reads.
 `GET /work/items/{id}/ownership` returns an `ownership` object for an existing
 item. With no ownership events, the state is `unowned`, revision 0, generation 0.
 The read uses the existing fleet authentication policy. An absent item returns
-`not-found`. Reads and writes never create an item.
+`not-found`. Reads and writes never create an item. A read that also sends
+`X-Worklore-Holder` asks to be treated as the holder: it succeeds only for the
+current holder node with the current capability at the current generation, and
+otherwise returns `holder-mismatch` (403). Admin cannot present a holder
+capability. Python callers pass `holder_nonce` to `worklore_client.get_ownership`,
+which sends it only under the node token.
 
 `POST /work/items/{id}/ownership` takes an action and the exact fields below.
 Every mutation requires `If-Match` with the current ownership revision and an

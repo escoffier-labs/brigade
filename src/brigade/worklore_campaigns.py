@@ -495,6 +495,25 @@ def member_campaign(conn: sqlite3.Connection, work_id: str) -> dict[str, str] | 
     return None if row is None else {"campaign_key": row[0], "work_id": row[1], "repo": row[2]}
 
 
+def member_excluded(conn: sqlite3.Connection, work_id: str) -> bool:
+    """True when the item is a campaign member whose repository its campaign offer excludes.
+
+    ``take_authority`` refuses the same case. Selection reads (burn queue, work-next) share
+    this check so an explicit exclusion also blocks an item that is otherwise ready. An offer
+    that cannot be read fails closed. A database without campaign tables has no exclusions.
+    """
+    try:
+        member = member_campaign(conn, work_id)
+        grant = None if member is None else campaign_offer(conn, member["work_id"])
+        return grant is not None and member is not None and member["repo"] in grant["offer"]["exclusions"]
+    except sqlite3.OperationalError as exc:
+        if str(exc).startswith("no such table"):
+            return False
+        raise
+    except (ValueError, TypeError, KeyError):
+        return True
+
+
 def _eligible_campaign(conn: sqlite3.Connection, member: Mapping[str, str]) -> dict[str, Any]:
     campaign = store._loaded_item(conn, member["work_id"])
     if campaign["status"] in {*TERMINAL_BUCKETS, "blocked", "deferred"} or campaign.get("blocker"):
