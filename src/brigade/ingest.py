@@ -483,6 +483,8 @@ def ingest_lesson(*, source: Path, path: Path, expected_digest: str, admitted_or
         if _is_tracked(path, _git_tracked_files(path.parent)):
             raise TrackedHandoffError("refusing tracked lesson draft")
         review = source / "memory/handoff-inbox" / f"lesson-{expected_digest}.md"
+        # An exit between hard-link publication and temporary cleanup leaves two links.
+        io.recover_publication(review, snapshot)
         existing = io.read_bytes(review, absent=True)
         if existing is None:
             io.write(review, snapshot, exclusive=True)

@@ -13,7 +13,8 @@ from tests.test_lesson_review_r4 import scope as scope
 
 
 @pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX hard-link publication required")
-def test_exit_between_link_and_unlink_delivers_on_restart(scope, monkeypatch):
+@pytest.mark.parametrize("destination", ["outbox", "handoff-inbox"])
+def test_exit_between_link_and_unlink_delivers_on_restart(scope, monkeypatch, destination):
     event(scope)
     event(scope)
     seat(monkeypatch, proposal(scope))
@@ -21,7 +22,7 @@ def test_exit_between_link_and_unlink_delivers_on_restart(scope, monkeypatch):
     interrupted = []
 
     def crash(path, data, *, exclusive=False):
-        if exclusive and path.parent.name == "outbox" and not interrupted:
+        if exclusive and path.parent.name == destination and not interrupted:
             interrupted.append(path)
             script = """
 import os
@@ -51,9 +52,11 @@ io.write(Path(sys.argv[1]), sys.stdin.buffer.read(), exclusive=True)
     assert review.run(scope, now=111)["status"] == "retry"
     assert review.run(scope, now=500)["status"] == "committed"
     assert "quarantine" not in activity.load(scope)
-    assert not list(interrupted[0].parent.glob(".lesson-*.tmp"))
-    archived = list((interrupted[0].parent / "processed").glob("*.md"))
-    copies = list((scope / "memory/handoff-inbox").glob("lesson-*.md"))
+    outbox = scope / ".brigade/lesson-review/outbox"
+    inbox = scope / "memory/handoff-inbox"
+    assert not list(outbox.glob(".lesson-*.tmp")) and not list(inbox.glob(".lesson-*.tmp"))
+    archived = list((outbox / "processed").glob("*.md"))
+    copies = list(inbox.glob("lesson-*.md"))
     assert len(archived) == len(copies) == 1
     assert io.read_bytes(archived[0]) == io.read_bytes(copies[0])
 
