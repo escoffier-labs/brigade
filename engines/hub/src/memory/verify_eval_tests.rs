@@ -4,7 +4,11 @@ use rusqlite::Connection;
 const POLICY: &str = r#"{"auto_apply":true,"max_age_days":7}"#;
 
 async fn ready() -> (Hub, Json) {
-    let h = Hub::with(clean(), None);
+    ready_with_hook(None).await
+}
+
+async fn ready_with_hook(hook: Option<writer::Hook>) -> (Hub, Json) {
+    let h = Hub::with(clean(), hook);
     grant(&h, "fleet", &["read", "reflect"]).await;
     let r = h.call(ADMIN_TOKEN, json!({"action":"verifier","principal":"agent:dot","verifier":true,"client_event_id":h.id()})).await;
     assert_eq!(r.status, 200, "{r:?}");
@@ -40,6 +44,122 @@ async fn publish(h: &Hub, token: &str, class: &str) -> Reply {
 }
 async fn apply(h: &Hub, id: &Json, types: Json) -> Reply {
     h.call(AGENT_TOKEN, json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,"binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),"expected_op_types":types,"client_event_id":h.id()})).await
+}
+
+fn automatic_request(mut request: Json) -> Json {
+    if request["action"] == "auto_apply" {
+        let object = request.as_object_mut().unwrap();
+        for key in ["binding_sha256", "policy_sha256", "expected_op_types"] {
+            object.remove(key);
+        }
+    }
+    request
+}
+
+fn assert_no_writer_locks(h: &Hub, steps: &std::sync::Mutex<Vec<writer::Step>>, batches: u64) {
+    let observed = steps.lock().unwrap();
+    assert!(
+        !observed.contains(&writer::Step::MemoryLocked),
+        "{observed:?}"
+    );
+    assert!(!observed.contains(&writer::Step::HubLocked), "{observed:?}");
+    assert_eq!(h.store.as_ref().unwrap().metrics().batches, batches);
+}
+
+#[tokio::test]
+async fn automatic_prelock_rate_refusals() {
+    for action in ["auto_apply", "verify_auto_apply"] {
+        let steps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = steps.clone();
+        let (h, id) =
+            ready_with_hook(Some(Arc::new(move |s| record.lock().unwrap().push(s)))).await;
+        let request = json!({"action":action,"proposal_id":id,"base_epoch":h.epoch().await,
+            "binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),
+            "expected_op_types":["replace_block"],"client_event_id":h.id()});
+        assert_eq!(
+            h.call(AGENT_TOKEN, automatic_request(request.clone()))
+                .await
+                .status,
+            409
+        );
+        let mut fresh = request;
+        fresh["client_event_id"] = json!(h.id());
+        steps.lock().unwrap().clear();
+        let batches = h.store.as_ref().unwrap().metrics().batches;
+        let refused = h.call(AGENT_TOKEN, automatic_request(fresh)).await;
+        assert_eq!(
+            (refused.status, code(&refused)),
+            (429, "memory_auto_apply_rate_limited")
+        );
+        assert_no_writer_locks(&h, &steps, batches);
+    }
+}
+
+#[tokio::test]
+async fn automatic_prelock_conflicting_replays() {
+    for action in ["auto_apply", "verify_auto_apply"] {
+        let steps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = steps.clone();
+        let (h, id) =
+            ready_with_hook(Some(Arc::new(move |s| record.lock().unwrap().push(s)))).await;
+        assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+        let request = json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,
+            "binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),
+            "expected_op_types":["replace_block"],"client_event_id":h.id()});
+        let applied = h
+            .call(AGENT_TOKEN, automatic_request(request.clone()))
+            .await;
+        assert_eq!(applied.body["state"], "applied");
+        assert_eq!(
+            h.call(AGENT_TOKEN, automatic_request(request.clone()))
+                .await,
+            applied
+        );
+        let mut conflict = request;
+        conflict["action"] = json!(action);
+        conflict["binding_sha256"] = json!("b".repeat(64));
+        steps.lock().unwrap().clear();
+        let batches = h.store.as_ref().unwrap().metrics().batches;
+        let refused = h.call(AGENT_TOKEN, automatic_request(conflict)).await;
+        assert_eq!(
+            (refused.status, code(&refused)),
+            (409, "memory_client_event_conflict")
+        );
+        assert_no_writer_locks(&h, &steps, batches);
+    }
+}
+
+#[tokio::test]
+async fn automatic_prelock_nonpending_requests() {
+    for action in ["auto_apply", "verify_auto_apply"] {
+        let steps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = steps.clone();
+        let (h, id) =
+            ready_with_hook(Some(Arc::new(move |s| record.lock().unwrap().push(s)))).await;
+        assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+        assert_eq!(
+            apply(&h, &id, json!(["replace_block"])).await.body["state"],
+            "applied"
+        );
+        let mut request = json!({"action":action,"proposal_id":id,"base_epoch":h.epoch().await,
+            "binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),
+            "expected_op_types":["replace_block"],"client_event_id":h.id()});
+        steps.lock().unwrap().clear();
+        let batches = h.store.as_ref().unwrap().metrics().batches;
+        let refused = h
+            .call(AGENT_TOKEN, automatic_request(request.clone()))
+            .await;
+        assert_eq!(
+            (refused.status, code(&refused)),
+            (429, "memory_auto_apply_rate_limited")
+        );
+        assert_no_writer_locks(&h, &steps, batches);
+        h.set_clock(h.now() + 60_001);
+        request["client_event_id"] = json!(h.id());
+        let refused = h.call(AGENT_TOKEN, automatic_request(request)).await;
+        assert_eq!(refused.status, 409);
+        assert_no_writer_locks(&h, &steps, batches);
+    }
 }
 
 #[tokio::test]
@@ -82,7 +202,7 @@ async fn verify_auto_rate_preserves_committed_replay() {
     assert_eq!(applied.body["state"], "applied", "{applied:?}");
     assert_eq!(h.call(AGENT_TOKEN, request).await, applied);
     let fresh = apply(&h, &id, json!(["replace_block"])).await;
-    assert_eq!(fresh.status, 409, "{fresh:?}");
+    assert_eq!(fresh.status, 429, "{fresh:?}");
 }
 
 #[tokio::test]
