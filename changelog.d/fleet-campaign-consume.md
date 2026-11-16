@@ -1,0 +1,1 @@
+- `brigade fleet campaign consume KEY --worker SEAT [--watch]` takes the next eligible campaign member through generation-fenced ownership, runs it through `work dispatch`, and records the attempt and run checkpoint. A successful run leaves the member open.

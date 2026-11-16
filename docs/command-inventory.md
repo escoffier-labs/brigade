@@ -208,6 +208,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet actions targets sync`
 - `brigade fleet actions tick`
 - `brigade fleet backup`
+- `brigade fleet campaign consume`
 - `brigade fleet campaign create`
 - `brigade fleet campaign inspect`
 - `brigade fleet campaign preview`

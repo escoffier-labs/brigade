@@ -209,9 +209,8 @@ without a campaign deadline never expire implicitly. Their holders must release 
 
 The deadline fences the Hub ownership protocol. It does not kill a process or replace
 physical checkout locks. Path reservations remain conservative until a release or
-reclaim clears them. No node consumer, process launch, cloud lease, completion gate,
-or automatic selection loop is added by this slice. The request body limit remains
-256 KiB.
+reclaim clears them. The request body limit remains 256 KiB. The node consumer below
+is the only automatic selection loop. Cloud leases and completion gates are not part of it.
 
 ## Campaign execution and attempt writes
 
@@ -241,3 +240,50 @@ Only the admin can observe another node's run. Noncampaign execution and attempt
 behavior is unchanged. Explicit campaign reservation recovery requires the
 acknowledged physical quiescence and audited operator action documented in
 [ownership recovery](worklore-ownership.md#capacity-and-recovery).
+
+## Consume members on a node
+
+```bash
+brigade fleet campaign consume KEY --worker SEAT [--target WORKSPACE] [--watch] [--json]
+```
+
+Run this on a node with the repositories checked out and listed in `.brigade/repos.toml`.
+A pass does this for one member:
+
+1. **Select.** The consumer reads the campaign and keeps members whose repository
+   resolves to a local checkout and whose bucket is `unowned` or `in_flight`. Terminal,
+   `blocked`, `awaiting_gate` and `attempt_limited` members are never selected. A held
+   member is retried only when its lease has expired and its last checkpoint is not
+   parked (`await-review`, `await-checks`, `await-merge` or `blocked`).
+2. **Take.** It takes the member through the generation-fenced `take` above, so the offer,
+   the allowed nodes, exclusions, per-node concurrency and the attempt cap all apply as
+   the Hub decides them. A refusal that rules out only that member moves the pass to the
+   next one. `campaign-concurrency-limit` ends the pass.
+3. **Launch.** It adds one local task for the member's repository (campaign spec plus the
+   member override) and runs it through `work dispatch` apply with `--worker SEAT`, limited
+   to that task, so the worktree, intent, circuit breaker and budget are the dispatch ones.
+4. **Record.** It links the run (`execution-linked`) and records `started`. A failed run
+   records `failed`, which counts against the attempt limit, and releases the member. A
+   successful run records no completion: the consumer checkpoints `await-review` with the
+   run id as a `receipt` evidence ref and the branch in `resume_condition`, and keeps
+   ownership. The member stays open until an operator completes it.
+
+`--watch` repeats passes until no member is eligible. Within one invocation a member is
+taken at most once, so a failing member is not retried in a loop. Running the command
+again is the resume: selection is Hub state, so a terminal member is never dispatched and
+a parked one is left alone.
+
+Every take, launch and attempt leaves a Hub event (`ownership-taken`,
+`execution-linked`, `attempt-started`, `attempt-failed`, `ownership-checkpoint`) and a line
+in `.brigade/campaign-consume/KEY.jsonl`.
+
+Limits of this slice:
+
+- The lease is not renewed. Set `lease_seconds` in the offer to cover a run. When it runs
+  out first, the Hub refuses the late writes, the pass reports `lost-grant`, and the local
+  worktree remains for inspection.
+- The run must be visible to the Hub as a fleet run for this node, or the Hub cannot count
+  an attempt. The consumer then parks the member as `blocked` and reports `unlinked`.
+- `work dispatch` leaves changes uncommitted and never pushes, so there is no PR to
+  checkpoint yet. The checkpoint records the run id, branch and head revision.
+- Completing a member is a separate operator transition and is not part of the consumer.
