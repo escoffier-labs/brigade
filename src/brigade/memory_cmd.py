@@ -1753,8 +1753,15 @@ def _record_search_log(
     query: str,
     matches: list[dict[str, Any]],
     ts: str | None = None,
+    private_query: bool = False,
 ) -> None:
     """Append one search event; fail-open so logging never breaks search."""
+    # Hub query text belongs only in private hub evaluation history.
+    if private_query:
+        from .memory_recall_log import record_recall
+
+        record_recall(target, query=query, query_source="explicit", matches=matches, ts=ts)
+        return
     if not _should_log_search(query):
         return
     entry = {

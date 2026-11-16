@@ -1,4 +1,5 @@
 //! Regression coverage for the four findings in #2379.
+use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{hardening::*, proposal_tests::*, tests::*, *};
 use rusqlite::Connection;
 
@@ -9,8 +10,8 @@ fn count(db: &Connection, table: &str) -> i64 {
 #[tokio::test]
 async fn duplicate_pending_returns_original_without_any_storage_write() {
     let h = Hub::with(clean(), None);
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let operation = op("fleet", "a", rev(&a));
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let operation = op(FIXTURE_SCOPE, "a", rev(&a));
     let first = submit(&h, ADMIN_TOKEN, vec![operation.clone()]).await;
     assert_eq!(first.status, 201);
     let db = Connection::open(h.memory()).unwrap();
@@ -43,11 +44,11 @@ async fn quota_refusal_is_atomic_for_principal_scope_and_bytes() {
         ("bytes_per_scope", "memory_proposal_scope_quota"),
     ] {
         let mut h = Hub::with(clean(), None);
-        let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-        let b = h.put(ADMIN_TOKEN, "fleet", "b", None, OLD).await;
+        let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+        let b = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "b", None, OLD).await;
         if key.starts_with("pending") {
             assert_eq!(
-                submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))])
+                submit(&h, ADMIN_TOKEN, vec![op(FIXTURE_SCOPE, "a", rev(&a))])
                     .await
                     .status,
                 201
@@ -67,7 +68,7 @@ async fn quota_refusal_is_atomic_for_principal_scope_and_bytes() {
             count(&db, "memory_proposals"),
             count(&db, "memory_blobs"),
         );
-        let r = submit(&h, ADMIN_TOKEN, vec![op("fleet", "b", rev(&b))]).await;
+        let r = submit(&h, ADMIN_TOKEN, vec![op(FIXTURE_SCOPE, "b", rev(&b))]).await;
         assert_eq!((r.status, code(&r)), (429, expected));
         assert_eq!(
             before,
@@ -83,8 +84,8 @@ async fn quota_refusal_is_atomic_for_principal_scope_and_bytes() {
 #[tokio::test]
 async fn retention_compacts_text_preserves_immutable_audit_and_event_log() {
     let h = Hub::with(clean(), None);
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op(FIXTURE_SCOPE, "a", rev(&a))]).await;
     let id = opened.body["proposal_id"].as_str().unwrap();
     let r=h.call(ADMIN_TOKEN,json!({"action":"decide","proposal_id":id,"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
     assert_eq!(r.body["state"], "rejected");
@@ -156,8 +157,8 @@ fn diagnostic_row_budget_and_rate_limits_refuse() {
 #[tokio::test]
 async fn policy_off_never_scans_members_and_rate_refusal_writes_nothing() {
     let mut h = Hub::with(clean(), None);
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op(FIXTURE_SCOPE, "a", rev(&a))]).await;
     // Deliberately remove corpus tables after preparation. Cheap gates must not query them.
     let db = Connection::open(h.memory()).unwrap();
     db.execute_batch("ALTER TABLE memory_cards RENAME TO hidden_cards")
@@ -182,9 +183,9 @@ async fn policy_off_never_scans_members_and_rate_refusal_writes_nothing() {
 #[tokio::test]
 async fn read_without_review_gets_no_legacy_proposal_diagnostics_from_log() {
     let h = Hub::with(clean(), None);
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
-    grant(&h, "fleet", &["read"]).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op(FIXTURE_SCOPE, "a", rev(&a))]).await;
+    grant(&h, FIXTURE_SCOPE, &["read"]).await;
     let r = h.call(AGENT_TOKEN, json!({"action":"log"})).await;
     let event = r.body["events"]
         .as_array()
@@ -216,7 +217,7 @@ async fn read_without_review_gets_no_legacy_proposal_diagnostics_from_log() {
         )
         .await;
     assert_eq!(applied.body["state"], "applied");
-    grant(&automatic, "fleet", &["read"]).await;
+    grant(&automatic, FIXTURE_SCOPE, &["read"]).await;
     let admin = automatic.call(ADMIN_TOKEN, json!({"action":"log"})).await;
     let audit = admin.body["events"]
         .as_array()
@@ -259,8 +260,8 @@ async fn read_without_review_gets_no_legacy_proposal_diagnostics_from_log() {
 #[tokio::test]
 async fn version_eight_upgrade_preserves_proposals_and_epoch() {
     let h = Hub::with(clean(), None);
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op(FIXTURE_SCOPE, "a", rev(&a))]).await;
     let source = Connection::open(h.memory()).unwrap();
     let raw: String = source
         .query_row("SELECT body FROM memory_proposals", [], |r| r.get(0))
@@ -367,8 +368,8 @@ async fn sqlite_writer_scan_budget_abort_returns_specific_code_and_rolls_back() 
 #[tokio::test]
 async fn reviewed_apply_retains_its_existing_budget_contract() {
     let mut h = Hub::with(clean(), None);
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![op(FIXTURE_SCOPE, "a", rev(&a))]).await;
     h.store
         .as_mut()
         .unwrap()
@@ -409,8 +410,8 @@ async fn backlog(h: &mut Hub, n: usize) -> Vec<Json> {
     let mut ids = Vec::new();
     for i in 0..n {
         let card = format!("c{i}");
-        let put = h.put(ADMIN_TOKEN, "fleet", &card, None, OLD).await;
-        let r = submit(h, ADMIN_TOKEN, vec![op("fleet", &card, rev(&put))]).await;
+        let put = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, &card, None, OLD).await;
+        let r = submit(h, ADMIN_TOKEN, vec![op(FIXTURE_SCOPE, &card, rev(&put))]).await;
         assert_eq!(r.status, 201, "{r:?}");
         ids.push(r.body["proposal_id"].clone());
     }
@@ -443,8 +444,8 @@ async fn upgraded_backlog_above_default_quota_drains_by_reject_and_accept() {
     limits(&mut h, json!({}));
     let db = Connection::open(h.memory()).unwrap();
     assert_eq!(pending(&db), 34);
-    let extra = h.put(ADMIN_TOKEN, "fleet", "extra", None, OLD).await;
-    let extra_op = op("fleet", "extra", rev(&extra));
+    let extra = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "extra", None, OLD).await;
+    let extra_op = op(FIXTURE_SCOPE, "extra", rev(&extra));
     let refused = submit(&h, ADMIN_TOKEN, vec![extra_op.clone()]).await;
     assert_eq!(
         (refused.status, code(&refused)),
@@ -471,8 +472,8 @@ async fn lowered_pending_limits_below_backlog_drain_and_still_refuse_admission()
         lowered[key] = json!(2);
         limits(&mut h, lowered);
         let db = Connection::open(h.memory()).unwrap();
-        let extra = h.put(ADMIN_TOKEN, "fleet", "extra", None, OLD).await;
-        let extra_op = op("fleet", "extra", rev(&extra));
+        let extra = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "extra", None, OLD).await;
+        let extra_op = op(FIXTURE_SCOPE, "extra", rev(&extra));
         let refused = submit(&h, ADMIN_TOKEN, vec![extra_op.clone()]).await;
         assert_eq!((refused.status, code(&refused)), (429, expected), "{key}");
         drain(&h, &db, &mut ids, 2).await;

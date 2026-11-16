@@ -868,6 +868,24 @@ fn apply_cards(
         }
         scans.push(scan);
     }
+    // History has its own sequence and can change after the read snapshot.
+    // Recompute real-scope authorization and vetoes under the writer lock.
+    if automatic
+        && !verify_automatic
+        && !compensation
+        && cards(body)
+            .iter()
+            .any(|c| c["scope"] != super::retrieval_eval::FIXTURE_SCOPE)
+    {
+        if let Some(reason) = super::retrieval_eval::hold(tx, body, authority, p.now_ms)? {
+            body["preflight"]["checks"] =
+                json!([{"gate":"retrieval_eval","code":reason,"state":"held"}]);
+            body["auto_apply_gates"] = body["preflight"]["checks"].clone();
+            body["state"] = json!("pending");
+            body["reason"] = json!("auto_apply_held");
+            return Ok(None);
+        }
+    }
     let id = string(body, "proposal_id").to_string();
     let rollback = !body["rollback_of"].is_null();
     let digest = body["policy_digest"].as_str().map(String::from);

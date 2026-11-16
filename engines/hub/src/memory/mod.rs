@@ -52,6 +52,7 @@ pub mod retrieval_eval;
 mod retrieval_eval_gates;
 #[cfg(test)]
 mod retrieval_eval_tests;
+mod retrieval_history;
 pub mod scan;
 pub mod schema;
 pub mod search;
@@ -1005,9 +1006,13 @@ impl Store {
         };
         let action = map.get("action").and_then(Json::as_str).unwrap_or("");
         match action {
-            "card" | "log" | "status" | "proposal_list" | "proposal_show" | "read_stats" => {
-                self.read(credential, action, map).await
-            }
+            "card"
+            | "log"
+            | "status"
+            | "proposal_list"
+            | "proposal_show"
+            | "read_stats"
+            | "retrieval_judgments" => self.read(credential, action, map).await,
             // S23: unsolicited connector push hits are not reads. A
             // connector's explicit search (`query_source: "connector"`) gets
             // the same filter from `search::parse` and is counted below.
@@ -1031,6 +1036,8 @@ impl Store {
             | "evidence.attach"
             | "evidence.purge"
             | "auto_apply_switch"
+            | "retrieval_history_rotate"
+            | "retrieval_use"
             | "retrieval_eval.record"
             | "verify_eval.record" => match self.prepare(credential, action, map, &raw) {
                 Ok(prepared) => self.write(prepared).await,
@@ -1195,6 +1202,15 @@ impl Store {
             "retrieval_eval.record" => {
                 &["action", "report_json", "report_sha256", "client_event_id"]
             }
+            "retrieval_history_rotate" => &["action", "limit", "client_event_id"],
+            "retrieval_use" => &[
+                "action",
+                "session_id",
+                "session_kind",
+                "card_id",
+                "content_hash",
+                "client_event_id",
+            ],
             "evidence.attach" => &[
                 "action",
                 "scope",
@@ -1274,6 +1290,7 @@ impl Store {
                 | "auto_apply_switch"
                 | "evidence.purge"
                 | "retrieval_eval.record"
+                | "retrieval_history_rotate"
                 | "verify_eval.record"
         ) && *credential != Credential::Admin
         {
@@ -1361,6 +1378,14 @@ impl Store {
         let action = match action {
             "verify_eval.record" => Action::VerifyEval(raw.clone()),
             "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
+            "retrieval_use" => Action::RetrievalUse(raw.clone()),
+            "retrieval_history_rotate" => Action::RetrievalHistoryRotate(
+                map.get("limit")
+                    .and_then(Json::as_u64)
+                    .filter(|n| (1..=500).contains(n))
+                    .ok_or_else(|| invalid("limit must be from 1 through 500"))?
+                    as usize,
+            ),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
             "verifier_resync" => Action::VerifierResync { generation: 0 },
             "verifier" => Action::Verifier {
@@ -1654,6 +1679,19 @@ impl Store {
                 reply.body["policy_digest"] = json!(authority.policy.as_ref().map(|p| &p.1));
             }
         }
+        if reply.status == 200 && !eval && !push {
+            if let Some(prepared) = retrieval_history::search(
+                credential,
+                &Json::Object(map.clone()),
+                &reply.body,
+                self.clock.now_ms(),
+            ) {
+                let recorded = self.write(prepared).await;
+                if recorded.status == 201 {
+                    reply.body["search_id"] = recorded.body["search_id"].clone();
+                }
+            }
+        }
         reply
     }
 
@@ -1845,6 +1883,30 @@ impl Store {
                         &action,
                         &map,
                         &proposal_cursors,
+                    );
+                }
+                if action == "retrieval_judgments" {
+                    if credential != Credential::Admin {
+                        return Ok(error(
+                            403,
+                            "memory_admin_required",
+                            "judgment export requires evaluation authority",
+                        ));
+                    }
+                    let high = map.get("history_seq").and_then(Json::as_i64);
+                    if map.get("history_seq").is_some() && high.is_none() {
+                        return Ok(invalid("invalid history watermark"));
+                    }
+                    return Ok(
+                        match retrieval_history::derive(
+                            &Conn(c),
+                            map.get("scope").and_then(Json::as_str).unwrap_or(""),
+                            high,
+                            now_ms,
+                        )? {
+                            Ok(judged) => Reply::new(200, judged),
+                            Err(r) => r,
+                        },
                     );
                 }
                 let mut reply = reads(

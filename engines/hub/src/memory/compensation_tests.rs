@@ -1,8 +1,9 @@
+use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{proposal_tests::*, tests::*, *};
 
 async fn applied() -> (Hub, Json, String) {
     let (h, id) = attestation_tests::ready().await;
-    let before = card(&h, "fleet", "a").await["text"]
+    let before = card(&h, FIXTURE_SCOPE, "a").await["text"]
         .as_str()
         .unwrap()
         .to_string();
@@ -23,29 +24,29 @@ async fn compensation_exact_reverse_auto_applies() {
     let restored = compensate(&h, &id, ADMIN_TOKEN).await;
     assert_eq!(restored.body["state"], "applied", "{restored:?}");
     assert_eq!(restored.body["tier"], 0);
-    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
 }
 #[tokio::test]
 async fn compensation_other_actor_and_human_edit_stay_review_only() {
     for edit in [false, true] {
         let (h, id, _) = applied().await;
-        grant(&h, "fleet", &["read", "reflect", "review"]).await;
+        grant(&h, FIXTURE_SCOPE, &["read", "reflect", "review"]).await;
         if edit {
-            let current = card(&h, "fleet", "a").await;
+            let current = card(&h, FIXTURE_SCOPE, "a").await;
             h.put(
                 ADMIN_TOKEN,
-                "fleet",
+                FIXTURE_SCOPE,
                 "a",
                 current["revision"].as_i64(),
                 "Human correction. ^c-abcdef",
             )
             .await;
         }
-        let before = card(&h, "fleet", "a").await;
+        let before = card(&h, FIXTURE_SCOPE, "a").await;
         let result = compensate(&h, &id, if edit { ADMIN_TOKEN } else { AGENT_TOKEN }).await;
         assert_ne!(result.body["state"], "applied");
         assert_eq!(result.body["tier"], 2);
-        assert_eq!(card(&h, "fleet", "a").await, before);
+        assert_eq!(card(&h, FIXTURE_SCOPE, "a").await, before);
     }
 }
 
@@ -76,7 +77,7 @@ async fn verifier_signal_for_card(
     };
     attestation_tests::change_policy(h, "reflect_principals", json!(["hub:admin"]));
     assert_eq!(h.call(ADMIN_TOKEN,json!({"action":"verifier","principal":principal,"verifier":true,"client_event_id":h.id()})).await.status,200);
-    let c = card(h, "fleet", card_id).await;
+    let c = card(h, FIXTURE_SCOPE, card_id).await;
     let credential = attestation::credential_id(
         if token == AGENT_TOKEN {
             "principal"
@@ -86,7 +87,7 @@ async fn verifier_signal_for_card(
         principal,
         &digest(token),
     );
-    let mut manifest = json!({"schema":"brigade.memory-verify-manifest.v1","card":{"scope":"fleet","card_id":card_id,"base_revision":c["revision"],"content_hash":c["content_hash"]},"blocks":[],"effectiveness":{"status":"failed","verifier_credential":credential,"observed_ms":h.now()}});
+    let mut manifest = json!({"schema":"brigade.memory-verify-manifest.v1","card":{"scope":FIXTURE_SCOPE,"card_id":card_id,"base_revision":c["revision"],"content_hash":c["content_hash"]},"blocks":[],"effectiveness":{"status":"failed","verifier_credential":credential,"observed_ms":h.now()}});
     if !negative {
         manifest.as_object_mut().unwrap().remove("effectiveness");
         // Match the normal CLI manifest, which binds by immutable revision.
@@ -106,10 +107,10 @@ async fn verifier_signal_for_card(
     }
     let bytes = manifest.to_string();
     let id = format!("{principal}/workspace-a/signal-{id}");
-    let r=h.call(token,json!({"action":"evidence.attach","scope":"fleet","card_id":card_id,"workspace_id":"workspace-a","evidence_id":id,"artifact_kind":"memory-verify-manifest","artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(bytes),"observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
+    let r=h.call(token,json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":card_id,"workspace_id":"workspace-a","evidence_id":id,"artifact_kind":"memory-verify-manifest","artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(bytes),"observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
     assert_eq!(r.status, 201, "{r:?}");
     if state != "pending_review" && drift != "revision" {
-        let mut operation = op("fleet", card_id, c["revision"].as_i64().unwrap());
+        let mut operation = op(FIXTURE_SCOPE, card_id, c["revision"].as_i64().unwrap());
         operation["type"] = json!("append_evidence");
         operation.as_object_mut().unwrap().remove("text");
         operation["expected_block_hash"] =
@@ -148,7 +149,7 @@ impl Scanner for RefuseInverse {
 }
 
 async fn watch_negative(h: &Hub, ids: Vec<String>) -> Reply {
-    h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":ids})).await
+    h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":FIXTURE_SCOPE,"base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":ids})).await
 }
 
 #[tokio::test]
@@ -195,10 +196,10 @@ async fn compensation_watch_two_independent_failures_apply_but_stale_heads_do_no
         let one = verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
         let two = verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
         if edit {
-            let c = card(&h, "fleet", "a").await;
+            let c = card(&h, FIXTURE_SCOPE, "a").await;
             h.put(
                 ADMIN_TOKEN,
-                "fleet",
+                FIXTURE_SCOPE,
                 "a",
                 c["revision"].as_i64(),
                 "Human correction. ^c-abcdef",
@@ -228,7 +229,7 @@ async fn compensation_watch_two_independent_failures_apply_but_stale_heads_do_no
 }
 
 async fn watch(h: &Hub) -> Reply {
-    h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id()})).await
+    h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":FIXTURE_SCOPE,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await
 }
 
 #[tokio::test]
@@ -307,7 +308,7 @@ async fn compensation_watch_contradictions_require_active_independent_verifiers(
 async fn compensation_tampered_inverse_never_applies_and_preserves_all_card_bytes() {
     let (h, id, _) = applied().await;
     // A different actor may file a reviewed compensation, but cannot grant automatic authority.
-    grant(&h, "fleet", &["read", "reflect", "review"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect", "review"]).await;
     let inverse = compensate(&h, &id, AGENT_TOKEN).await;
     assert_eq!(inverse.body["tier"], 2);
     let before = attestation_tests::bytes_snapshot(&h);
@@ -334,7 +335,7 @@ async fn compensation_watch_window_and_class_hold_require_later_go() {
     let (h, id, _) = applied().await;
     attestation_tests::change_policy(&h, "rollback_watch_seconds", json!(1));
     h.set_clock(h.now() + 2000);
-    let r=h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":["unknown/workspace/failed"]})).await;
+    let r=h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":FIXTURE_SCOPE,"base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":["unknown/workspace/failed"]})).await;
     assert_eq!(r.body["results"], json!([]));
     attestation_tests::change_policy(&h, "rollback_watch_seconds", json!(86400));
     let r = compensate(&h, &id, ADMIN_TOKEN).await;
@@ -349,8 +350,8 @@ async fn compensation_watch_window_and_class_hold_require_later_go() {
         .unwrap(),
         1
     );
-    let current = card(&h, "fleet", "a").await;
-    let mut operation = op("fleet", "a", current["revision"].as_i64().unwrap());
+    let current = card(&h, FIXTURE_SCOPE, "a").await;
+    let mut operation = op(FIXTURE_SCOPE, "a", current["revision"].as_i64().unwrap());
     operation["type"] = json!("append_evidence");
     operation["expected_block_hash"] =
         proposal_blocks::pins(current["text"].as_str().unwrap())[0]["hash"].clone();
@@ -368,7 +369,7 @@ async fn compensation_watch_window_and_class_hold_require_later_go() {
     let r = h
         .call(
             ADMIN_TOKEN,
-            json!({"action":"auto_apply_switch","enabled":true,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()}),
+            json!({"action":"auto_apply_switch","enabled":true,"scope":FIXTURE_SCOPE,"op_type":"append_evidence","client_event_id":h.id()}),
         )
         .await;
     assert_eq!(r.status, 200);
@@ -403,7 +404,7 @@ async fn compensation_failed_scan_keeps_all_cards_identical_and_records_failed()
 async fn compensation_watch_unresolved_evidence_is_ignored() {
     let (h, _, _) = applied().await;
     let before = attestation_tests::bytes_snapshot(&h);
-    let r = h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":["unknown/workspace/failed"]})).await;
+    let r = h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":FIXTURE_SCOPE,"base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":["unknown/workspace/failed"]})).await;
     assert_eq!(r.status, 200, "{r:?}");
     assert_eq!(r.body["results"], json!([]));
     assert_eq!(attestation_tests::bytes_snapshot(&h), before);
@@ -458,7 +459,7 @@ async fn compensation_retrieval_noise_is_ignored_and_changed_corpus_requires_rev
         if unrelated {
             h.put(
                 ADMIN_TOKEN,
-                "fleet",
+                FIXTURE_SCOPE,
                 "decoy",
                 None,
                 "Unrelated corpus change.",
@@ -495,7 +496,8 @@ async fn compensation_holds_are_scoped_and_go_releases_only_one_pair() {
     )
     .unwrap();
     db.execute(
-        "INSERT INTO memory_meta VALUES('compensation_hold:fleet/replace_block','fixture')",
+        &"INSERT INTO memory_meta VALUES('compensation_hold:fleet/replace_block','fixture')"
+            .replace("fleet", FIXTURE_SCOPE),
         [],
     )
     .unwrap();
@@ -521,7 +523,7 @@ async fn compensation_holds_are_scoped_and_go_releases_only_one_pair() {
         .unwrap(),
         3
     );
-    h.call(ADMIN_TOKEN,json!({"action":"auto_apply_switch","enabled":true,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()})).await;
+    h.call(ADMIN_TOKEN,json!({"action":"auto_apply_switch","enabled":true,"scope":FIXTURE_SCOPE,"op_type":"append_evidence","client_event_id":h.id()})).await;
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM memory_meta WHERE key LIKE 'compensation_hold:%'",
@@ -534,7 +536,7 @@ async fn compensation_holds_are_scoped_and_go_releases_only_one_pair() {
     assert!(
         !compensation::class_held(
             &tx,
-            &json!({"ops":[{"scope":"fleet","type":"append_evidence"}]})
+            &json!({"ops":[{"scope":FIXTURE_SCOPE,"type":"append_evidence"}]})
         )
         .unwrap()
     );
@@ -577,7 +579,7 @@ async fn compensation_watch_contradictions_on_other_blocks_are_ignored() {
 #[tokio::test]
 async fn compensation_review_required_inverse_cannot_auto_apply() {
     let (h, _, _) = applied().await;
-    h.put(ADMIN_TOKEN, "fleet", "decoy", None, "Another card.")
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "decoy", None, "Another card.")
         .await;
     h.set_clock(h.now() + 1);
     let mut report = retrieval_eval_tests::gate_report(&h).await;
@@ -612,7 +614,7 @@ async fn compensation_release_can_keep_kill_switch_off() {
         json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
     )
     .await;
-    let result = h.call(ADMIN_TOKEN, json!({"action":"auto_apply_switch","enabled":false,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()})).await;
+    let result = h.call(ADMIN_TOKEN, json!({"action":"auto_apply_switch","enabled":false,"scope":FIXTURE_SCOPE,"op_type":"append_evidence","client_event_id":h.id()})).await;
     assert_eq!(result.status, 200, "{result:?}");
     let db = rusqlite::Connection::open(h.memory()).unwrap();
     assert_eq!(
@@ -626,7 +628,8 @@ async fn compensation_release_can_keep_kill_switch_off() {
     );
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM memory_meta WHERE key='compensation_hold:fleet/append_evidence'",
+            &"SELECT count(*) FROM memory_meta WHERE key='compensation_hold:fleet/append_evidence'"
+                .replace("fleet", FIXTURE_SCOPE),
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -668,7 +671,7 @@ async fn compensation_second_active_verifier_can_upgrade_referral() {
     let r = watch(&h).await;
     assert_eq!(r.body["results"][0]["result"], "applied", "{r:?}");
     assert_eq!(r.body["results"][0]["rollback_of"], id);
-    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
     let db = rusqlite::Connection::open(h.memory()).unwrap();
     let trips: i64 = db.query_row("SELECT count(*) FROM memory_events WHERE kind='proposal.decide' AND json_extract(payload,'$.rollback_of')=?1 AND json_extract(payload,'$.watch_trip.trigger')='contradicted'", [id.as_str().unwrap()], |r| r.get(0)).unwrap();
     assert!(trips > 0);
@@ -678,11 +681,11 @@ async fn compensation_second_active_verifier_can_upgrade_referral() {
 async fn compensation_evidence_appends_do_not_hide_human_edit_and_revert() {
     let (h, _, _) = applied().await;
     verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
-    let c = card(&h, "fleet", "a").await;
+    let c = card(&h, FIXTURE_SCOPE, "a").await;
     let edited = h
         .put(
             ADMIN_TOKEN,
-            "fleet",
+            FIXTURE_SCOPE,
             "a",
             c["revision"].as_i64(),
             "A human edit. ^c-abcdef",
@@ -690,7 +693,7 @@ async fn compensation_evidence_appends_do_not_hide_human_edit_and_revert() {
         .await;
     h.put(
         ADMIN_TOKEN,
-        "fleet",
+        FIXTURE_SCOPE,
         "a",
         Some(rev(&edited)),
         c["text"].as_str().unwrap(),
@@ -767,10 +770,10 @@ async fn compensation_stale_watch_is_final_after_one_attempt() {
     let (h, id, _) = applied().await;
     verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
     verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
-    let c = card(&h, "fleet", "a").await;
+    let c = card(&h, FIXTURE_SCOPE, "a").await;
     h.put(
         ADMIN_TOKEN,
-        "fleet",
+        FIXTURE_SCOPE,
         "a",
         c["revision"].as_i64(),
         "Human correction. ^c-abcdef",
@@ -826,7 +829,7 @@ async fn compensation_watch_scan_refusal_retries_after_scanner_recovers() {
         retried.body["results"][0]["proposal_id"],
         refused.body["results"][0]["proposal_id"]
     );
-    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
     let db = rusqlite::Connection::open(h.memory()).unwrap();
     let inverses: i64 = db
         .query_row(
@@ -868,7 +871,7 @@ async fn compensation_release_leaves_enabled_switch_unchanged() {
         json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
     )
     .await;
-    let result = h.call(ADMIN_TOKEN, json!({"action":"auto_apply_switch","enabled":false,"scope":"fleet","op_type":"append_evidence","client_event_id":h.id()})).await;
+    let result = h.call(ADMIN_TOKEN, json!({"action":"auto_apply_switch","enabled":false,"scope":FIXTURE_SCOPE,"op_type":"append_evidence","client_event_id":h.id()})).await;
     assert_eq!(result.body["auto_apply_enabled"], true);
     let db = rusqlite::Connection::open(h.memory()).unwrap();
     let enabled: String = db
@@ -886,10 +889,10 @@ async fn compensation_stale_trip_does_not_silence_a_distinct_negative_outcome() 
     let (h, id, _) = applied().await;
     verifier_signal(&h, AGENT_TOKEN, "contradiction-one", "active", false, "").await;
     verifier_signal(&h, NODE_TOKEN, "contradiction-two", "active", false, "").await;
-    let c = card(&h, "fleet", "a").await;
+    let c = card(&h, FIXTURE_SCOPE, "a").await;
     h.put(
         ADMIN_TOKEN,
-        "fleet",
+        FIXTURE_SCOPE,
         "a",
         c["revision"].as_i64(),
         "Human correction. ^c-abcdef",
@@ -962,10 +965,10 @@ async fn compensation_retry_rechecks_authority_exactness_and_watch_gates() {
                 b["cards"][0]["after_text"] = json!("An unrelated edit.");
             }),
             "head" => {
-                let c = card(&h, "fleet", "a").await;
+                let c = card(&h, FIXTURE_SCOPE, "a").await;
                 h.put(
                     ADMIN_TOKEN,
-                    "fleet",
+                    FIXTURE_SCOPE,
                     "a",
                     c["revision"].as_i64(),
                     "Human correction. ^c-abcdef",
@@ -1033,7 +1036,8 @@ async fn compensation_watch_continues_across_polls_and_ignores_forged_after() {
         let older = format!("{n:026}");
         db.execute("INSERT INTO memory_proposals(proposal_id,state,body,principal,created_at,decided_by,terminal_ms,compacted) SELECT ?1,state,json_set(body,'$.proposal_id',?1,'$.cards',json('[]')),principal,created_at,decided_by,terminal_ms,compacted FROM memory_proposals WHERE proposal_id=?2", rusqlite::params![older,id.as_str().unwrap()]).unwrap();
         db.execute(
-            "INSERT INTO memory_proposal_scopes(proposal_id,scope) VALUES(?1,'fleet')",
+            &"INSERT INTO memory_proposal_scopes(proposal_id,scope) VALUES(?1,'fleet')"
+                .replace("fleet", FIXTURE_SCOPE),
             [&older],
         )
         .unwrap();
@@ -1041,7 +1045,7 @@ async fn compensation_watch_continues_across_polls_and_ignores_forged_after() {
     verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
     verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
     for _ in 0..32 {
-        let r = h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"after":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ"})).await;
+        let r = h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":FIXTURE_SCOPE,"base_epoch":h.epoch().await,"client_event_id":h.id(),"after":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ"})).await;
         assert_eq!(r.status, 200, "{r:?}");
         assert_eq!(r.body["results"], json!([]), "{r:?}");
         assert!(r.body["next_after"].is_string());
@@ -1075,7 +1079,8 @@ async fn compensation_watch_bounds_cycles_under_sustained_arrivals() {
             let newer = format!("6{run:05}{n:020}");
             db.execute("INSERT INTO memory_proposals(proposal_id,state,body,principal,created_at,decided_by,terminal_ms,compacted) SELECT ?1,'applied',json_set(body,'$.proposal_id',?1,'$.cards',json('[]')),principal,created_at,decided_by,?3,compacted FROM memory_proposals WHERE proposal_id=?2", rusqlite::params![newer,id.as_str().unwrap(),h.now()]).unwrap();
             db.execute(
-                "INSERT INTO memory_proposal_scopes(proposal_id,scope) VALUES(?1,'fleet')",
+                &"INSERT INTO memory_proposal_scopes(proposal_id,scope) VALUES(?1,'fleet')"
+                    .replace("fleet", FIXTURE_SCOPE),
                 [&newer],
             )
             .unwrap();
@@ -1147,10 +1152,17 @@ async fn compensation_watch_retry_rebases_after_evidence_append() {
         again.body["results"][0]["proposal_id"],
         refused.body["results"][0]["proposal_id"]
     );
-    let revision = card(&h, "fleet", "a").await["revision"].as_i64().unwrap();
+    let revision = card(&h, FIXTURE_SCOPE, "a").await["revision"]
+        .as_i64()
+        .unwrap();
     // Retrieval trips do not change when an evidence-only proposal advances the head.
     verifier_signal(&h, AGENT_TOKEN, "later", "active", false, "").await;
-    assert!(card(&h, "fleet", "a").await["revision"].as_i64().unwrap() > revision);
+    assert!(
+        card(&h, FIXTURE_SCOPE, "a").await["revision"]
+            .as_i64()
+            .unwrap()
+            > revision
+    );
     h.store.take();
     h.open(
         Arc::new(Fixed(Scan::Clean {
@@ -1167,7 +1179,7 @@ async fn compensation_watch_retry_rebases_after_evidence_append() {
         retried.body["results"][0]["proposal_id"],
         refused.body["results"][0]["proposal_id"]
     );
-    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
     let db = rusqlite::Connection::open(h.memory()).unwrap();
     let inverses: i64 = db
         .query_row(
@@ -1208,8 +1220,8 @@ async fn compensation_watch_prefers_later_card_quorum() {
     verifier_signal_for_card(&h, "b", NODE_TOKEN, "second-two", "active", true, "").await;
     let result = watch(&h).await;
     assert_eq!(result.body["results"][0]["result"], "applied", "{result:?}");
-    assert_eq!(card(&h, "fleet", "a").await["text"], before);
-    assert_eq!(card(&h, "fleet", "b").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "b").await["text"], before);
 }
 
 #[tokio::test]
@@ -1229,7 +1241,7 @@ async fn compensation_watch_review_retrieval_prefers_later_card_quorum() {
     verifier_signal_for_card(&h, "b", NODE_TOKEN, "second-two", "active", true, "").await;
     h.put(
         ADMIN_TOKEN,
-        "fleet",
+        FIXTURE_SCOPE,
         "decoy",
         None,
         "Unrelated corpus change.",
@@ -1255,8 +1267,8 @@ async fn compensation_watch_review_retrieval_prefers_later_card_quorum() {
     assert_eq!(journal["trip"]["review_required"], false);
     let fingerprint = ids::sha256_hex(ids::canonical(&journal["trip"]).as_bytes());
     assert_eq!(journal["completed_trips"][fingerprint], "applied");
-    assert_eq!(card(&h, "fleet", "a").await["text"], before);
-    assert_eq!(card(&h, "fleet", "b").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "b").await["text"], before);
 }
 
 #[tokio::test]
@@ -1274,7 +1286,7 @@ async fn compensation_pending_retrieval_referral_is_superseded_by_quorum() {
         assert_eq!(first.body["results"][0]["result"], "review_required");
         assert_eq!(first.body["results"][0]["trigger"], "retrieval-regression");
         let referral = first.body["results"][0]["proposal_id"].as_str().unwrap();
-        let head = card(&h, "fleet", "a").await["revision"].clone();
+        let head = card(&h, FIXTURE_SCOPE, "a").await["revision"].clone();
         if scenario == "different-inverse" {
             attestation_tests::mutate_body(&h, &json!(referral), |b| {
                 b["cards"][0]["after_text"] = json!("A different restoration target.");
@@ -1285,7 +1297,7 @@ async fn compensation_pending_retrieval_referral_is_superseded_by_quorum() {
         if scenario != "no-quorum" {
             h.call(ADMIN_TOKEN, json!({"action":"verifier","principal":"node-1","verifier":true,"client_event_id":h.id()})).await;
         }
-        assert_eq!(card(&h, "fleet", "a").await["revision"], head);
+        assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["revision"], head);
         let second = watch(&h).await;
         let db = rusqlite::Connection::open(h.memory()).unwrap();
         let closed = proposals::load(&crate::writer::worker::Tx(&db), referral)
@@ -1295,7 +1307,7 @@ async fn compensation_pending_retrieval_referral_is_superseded_by_quorum() {
             assert_eq!(second.body["results"][0]["result"], "applied", "{second:?}");
             assert_eq!(closed["state"], "rejected");
             assert_eq!(closed["reason"], "superseded_by_automatic_compensation");
-            assert_eq!(card(&h, "fleet", "a").await["text"], before);
+            assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
             let applied: i64 = db.query_row("SELECT count(*) FROM memory_proposals WHERE state='applied' AND json_extract(body,'$.rollback_of')=?1", [id.as_str().unwrap()], |r| r.get(0)).unwrap();
             assert_eq!(applied, 1);
             assert_eq!(watch(&h).await.body["results"], json!([]));
@@ -1343,9 +1355,9 @@ async fn compensation_pending_referral_survives_disabled_apply_until_retry() {
         json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
     )
     .await;
-    let snapshot = card(&h, "fleet", "a").await;
+    let snapshot = card(&h, FIXTURE_SCOPE, "a").await;
     assert_eq!(watch(&h).await.body["results"][0]["result"], "failed");
-    assert_eq!(card(&h, "fleet", "a").await, snapshot);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await, snapshot);
     let db = rusqlite::Connection::open(h.memory()).unwrap();
     let tx = crate::writer::worker::Tx(&db);
     let pending = proposals::load(&tx, referral).unwrap().unwrap();
@@ -1366,7 +1378,7 @@ async fn compensation_pending_referral_survives_disabled_apply_until_retry() {
         retried.body["results"][0]["result"], "applied",
         "{retried:?}"
     );
-    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
     let closed = proposals::load(&tx, referral).unwrap().unwrap();
     assert_eq!(closed["state"], "rejected");
     assert_eq!(closed["reason"], "superseded_by_automatic_compensation");

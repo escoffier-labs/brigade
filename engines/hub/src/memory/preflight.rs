@@ -303,12 +303,19 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     });
     report["structural_anchor_proof"] = json!(structural);
     report["retrieval_eval_record"] = super::retrieval_eval::summary(tx, authority)?;
-    let eval_expiry = super::retrieval_eval::expires(tx, authority)?;
+    let eval_expiry = if proposals::cards(body)
+        .iter()
+        .all(|c| c["scope"] == super::retrieval_eval::FIXTURE_SCOPE)
+    {
+        super::retrieval_eval::expires(tx, authority)?
+    } else {
+        None // Real-scope invariance needs no measurement or report lifetime.
+    };
     report["valid_until_ms"] = json!(
         proof
             .expires_ms
             .unwrap_or(if structural { i64::MAX } else { now })
-            .min(eval_expiry.unwrap_or(now))
+            .min(eval_expiry.unwrap_or(i64::MAX))
     );
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
     bind_evaluation(&mut report);

@@ -1,10 +1,11 @@
 //! S19e review regressions at the wire and transaction boundaries.
+use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{attestation_tests::*, proposal_tests::*, tests::*, *};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rusqlite::Connection;
 
 fn request(h: &Hub, principal: &str, workspace: &str, local: &str, stance: &str) -> Json {
-    json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":workspace,
+    json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":"a","workspace_id":workspace,
         "evidence_id":format!("{principal}/{workspace}/{local}"),"artifact_kind":"verification",
         "artifact_sha256":ids::sha256_hex(b"valid evidence"),"observed_at":h.now(),
         "artifact_base64":STANDARD.encode(b"valid evidence"),"stance":stance,"client_event_id":h.id()})
@@ -31,14 +32,14 @@ async fn automatic_replies_and_cached_replays_enforce_review_redaction() {
     for reviewed_first in [false, true] {
         let (h, id) = ready().await;
         if reviewed_first {
-            grant(&h, "fleet", &["read", "reflect", "review"]).await;
+            grant(&h, FIXTURE_SCOPE, &["read", "reflect", "review"]).await;
         }
         let req = auto_request(&h, &id).await;
         let r = h.call(AGENT_TOKEN, req.clone()).await;
         assert_eq!(r.status, 200);
         if reviewed_first {
             assert!(r.body["preflight"]["candidate_sha256"].is_string());
-            grant(&h, "fleet", &["read", "reflect"]).await;
+            grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
         } else {
             redacted(&r.body["preflight"]);
             assert!(r.body["diff"].is_null());
@@ -129,7 +130,7 @@ async fn contrary_and_negative_records_in_other_workspaces_hold_the_card() {
 #[tokio::test]
 async fn clean_utf8_is_required_before_storing_artifacts() {
     let mut h = Hub::with(clean(), None);
-    h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
     let mut req = request(&h, "hub:admin", "workspace-a", "binary", "support");
     req["artifact_base64"] = json!(STANDARD.encode([255u8]));
     req["artifact_sha256"] = json!(ids::sha256_hex(&[255u8]));
@@ -167,7 +168,7 @@ async fn clean_utf8_is_required_before_storing_artifacts() {
 #[tokio::test]
 async fn principal_cap_spans_workspaces_and_admin_purge_frees_capacity() {
     let h = Hub::with(clean(), None);
-    h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
     for i in 0..8 {
         assert_eq!(
             h.call(
@@ -299,7 +300,7 @@ async fn only_new_ids_on_changed_cards_count_and_compensations_are_refused() {
         )
         .unwrap();
     let mut op: Json = serde_json::from_str::<Json>(&text).unwrap()["ops"][0].clone();
-    op["base_revision"] = card(&h, "fleet", "a").await["revision"].clone();
+    op["base_revision"] = card(&h, FIXTURE_SCOPE, "a").await["revision"].clone();
     op["evidence_ids"] = json!([next]);
     let p=h.call(ADMIN_TOKEN,json!({"action":"propose","workspace_id":"workspace-a","base_epoch":h.epoch().await,"ops":[op],"client_event_id":h.id()})).await;
     assert_eq!(p.status, 201);
@@ -344,8 +345,8 @@ async fn switch_event_has_its_own_kind() {
 async fn source_groups_are_principals_and_exclude_the_proposer() {
     let h = Hub::with(clean(), None);
     policy(&h);
-    grant(&h, "fleet", &["read", "reflect"]).await;
-    h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
     let alias_bearer = "fake-alias-node-token";
     Connection::open(&h.hub)
         .unwrap()
@@ -363,7 +364,9 @@ async fn source_groups_are_principals_and_exclude_the_proposer() {
     }
     let p = proposal(
         &h,
-        card(&h, "fleet", "a").await["revision"].as_i64().unwrap(),
+        card(&h, FIXTURE_SCOPE, "a").await["revision"]
+            .as_i64()
+            .unwrap(),
         json!([
             "hub:admin/workspace-a/one",
             "agent:dot/workspace-a/two",
@@ -432,7 +435,7 @@ fn version_five_upgrade_preserves_rows_epoch_sequence_and_immutability() {
             .is_err()
     );
     db.execute_batch("INSERT INTO memory_meta VALUES('log_epoch','legacy-epoch'); INSERT INTO memory_events(event_id,client_event_id,kind,principal,payload,created_at) VALUES('legacy-event','legacy-client','recall.capture','legacy','{}','created'); UPDATE sqlite_sequence SET seq=500 WHERE name='memory_events';").unwrap();
-    db.execute("INSERT INTO memory_evidence VALUES('legacy/workspace-a/one','fleet','a','workspace-a','legacy','credential','node','verification',?1,?2,0,'support','clean',0)",rusqlite::params![ids::sha256_hex(b"legacy"),b"legacy".as_slice()]).unwrap();
+    db.execute("INSERT INTO memory_evidence VALUES('legacy/workspace-a/one','repo:brigade/retrieval-eval-fixture','a','workspace-a','legacy','credential','node','verification',?1,?2,0,'support','clean',0)",rusqlite::params![ids::sha256_hex(b"legacy"),b"legacy".as_slice()]).unwrap();
     db.pragma_update(None, "application_id", schema::APPLICATION_ID)
         .unwrap();
     db.execute_batch("DROP TABLE memory_retrieval_evals")
@@ -480,7 +483,7 @@ fn version_five_upgrade_preserves_rows_epoch_sequence_and_immutability() {
 #[tokio::test]
 async fn automatic_reply_requires_review_on_every_target_scope() {
     let (h, id) = ready().await;
-    grant(&h, "fleet", &["read", "reflect", "review"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect", "review"]).await;
     let b = h
         .put(ADMIN_TOKEN, "collection:review-source", "b", None, OLD)
         .await;

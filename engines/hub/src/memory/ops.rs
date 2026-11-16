@@ -16,6 +16,9 @@ pub struct Base {
 pub enum Action {
     VerifyEval(Json),
     RetrievalEval(super::retrieval_eval::Report),
+    RetrievalSearch(Json),
+    RetrievalUse(Json),
+    RetrievalHistoryRotate(usize),
     AutoApplySwitch(bool, Option<(String, String)>),
     EvidencePurge(String),
     Evidence(super::attestation::Attachment),
@@ -87,6 +90,9 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Action::RetrievalEval(_) => "retrieval_eval.record",
+            Action::RetrievalSearch(_) => "retrieval_search",
+            Action::RetrievalUse(_) => "retrieval_use",
+            Action::RetrievalHistoryRotate(_) => "retrieval_history_rotate",
             Action::VerifyEval(_) => "verify_eval.record",
             Action::AutoApplySwitch(..) => "auto_apply_switch",
             Action::EvidencePurge(_) => "evidence.purge",
@@ -116,7 +122,10 @@ impl Action {
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
             Action::RetrievalEval(_) | Action::VerifyEval(_) => (None, "admin"),
-            Action::AutoApplySwitch(..) | Action::EvidencePurge(_) => (None, "admin"),
+            Action::RetrievalSearch(_) | Action::RetrievalUse(_) => (None, "read"),
+            Action::RetrievalHistoryRotate(_)
+            | Action::AutoApplySwitch(..)
+            | Action::EvidencePurge(_) => (None, "admin"),
             Action::Evidence(a) => (
                 Some(super::proposals::string(&a.request, "scope")),
                 "reflect",
@@ -169,7 +178,10 @@ impl Action {
     pub fn new_bytes(&self) -> usize {
         match self {
             Action::RetrievalEval(r) => r.raw.len(),
-            Action::AutoApplySwitch(..) | Action::EvidencePurge(_) => 0,
+            Action::RetrievalSearch(r) | Action::RetrievalUse(r) => r.to_string().len(),
+            Action::RetrievalHistoryRotate(_)
+            | Action::AutoApplySwitch(..)
+            | Action::EvidencePurge(_) => 0,
             Action::Evidence(a) => a.bytes.len(),
             Action::Proposal(c) => c.new_bytes(),
             Action::Put { text, .. } | Action::Handoff { text, .. } => text.len(),
@@ -712,6 +724,9 @@ fn run(
     match &p.action {
         Action::VerifyEval(r) => super::verify_eval::record(tx, p, r, _authority),
         Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
+        Action::RetrievalSearch(r) => super::retrieval_history::write(tx, p, r, true),
+        Action::RetrievalUse(r) => super::retrieval_history::write(tx, p, r, false),
+        Action::RetrievalHistoryRotate(limit) => super::retrieval_history::rotate(tx, p, *limit),
         Action::AutoApplySwitch(enabled, release) => {
             if release.is_none() {
                 tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
