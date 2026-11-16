@@ -1,1 +1,3 @@
 - Resolve compensation signals from active, credential-bound hub attestations and require independent verifiers for automatic reversal. Attribute retrieval regressions to the watched proposal with a 0.01 tolerance, scope successful compensation holds, honor operator stop controls, paginate retained signals, and report failed compensation accurately.
+- Prefer an authenticated two-principal verifier quorum over a review-only retrieval regression during the same compensation watch, so automatic reversal does not wait for another polling cycle.
+- Supersede a matching pending compensation review referral when a later verifier quorum authorizes automatic reversal. Record the reason, preserve different inverses, and refresh the digest when retrying a rebased inverse.

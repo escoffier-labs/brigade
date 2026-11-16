@@ -332,10 +332,14 @@ fn trigger(
     authority: &Authority,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<Option<Json>> {
-    if let Some(trip) = retrieval_trip(tx, body, applied, now)? {
-        return Ok(Some(trip));
+    let mut review_trip = retrieval_trip(tx, body, applied, now)?;
+    if review_trip
+        .as_ref()
+        .is_some_and(|trip| trip["review_required"] == false)
+    {
+        return Ok(review_trip);
     }
-    let mut review_trip = None;
+    // Review-only retrieval is a fallback while cards may authorize reversal.
     for card in proposals::cards(body)
         .iter()
         .filter(|c| c["applied_revision"].is_i64())

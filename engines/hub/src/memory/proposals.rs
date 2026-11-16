@@ -923,6 +923,32 @@ pub(super) fn compensate(
     }
     tx.execute("SAVEPOINT compensation", &[])?;
     let result = (|| -> rusqlite::Result<Reply> {
+        if automatic {
+            // open() binds the current policy before checking pending digests.
+            let mut opening = inverse.clone();
+            opening["policy_digest"] = json!(authority.policy.as_ref().map(|a| &a.1));
+            let digest = super::hardening::digest(&opening);
+            for row in tx.query(
+                "SELECT proposal_id FROM memory_proposals WHERE compacted=0 AND state='pending' AND digest=?1 AND json_extract(body,'$.rollback_of')=?2 AND json_extract(body,'$.watch_trip.review_required')=1",
+                &[t(&digest), t(string(original, "proposal_id"))],
+            )? {
+                let mut referral = load(tx, &s(&row[0]))?.unwrap();
+                let mut authorized = referral.clone();
+                authorized["watch_trip"] = inverse["watch_trip"].clone();
+                // The admission digest does not bind the restoration target.
+                // Check the full exact inverse before closing any referral.
+                if !super::compensation::exact(tx, &authorized)? {
+                    continue;
+                }
+                referral["state"] = json!("rejected");
+                referral["decision"] = json!("superseded");
+                referral["reason"] = json!("superseded_by_automatic_compensation");
+                if let Some(r) = update(tx, &referral, p, authority)? {
+                    return Ok(r);
+                }
+                event(tx, p, "proposal.decide", &referral)?;
+            }
+        }
         // Only a failed automatic attempt for this exact freshly attested trip
         // can be retried. Review referrals never enter this path. Include
         // rejected round-4 scan attempts without reviving reviewed rejections.
@@ -966,6 +992,13 @@ pub(super) fn compensate(
                 for key in ["cards", "pins", "diff"] {
                     candidate[key] = inverse[key].clone();
                 }
+                tx.execute(
+                    "UPDATE memory_proposals SET digest=?2 WHERE proposal_id=?1",
+                    &[
+                        t(string(&candidate, "proposal_id")),
+                        t(&super::hardening::digest(&candidate)),
+                    ],
+                )?;
             }
             if !automatic {
                 candidate["state"] = json!(if inverse["state"] == "stale" {

@@ -1177,6 +1177,18 @@ async fn compensation_watch_retry_rebases_after_evidence_append() {
         )
         .unwrap();
     assert_eq!(inverses, 1);
+    let inverse_id = retried.body["results"][0]["proposal_id"].as_str().unwrap();
+    let inverse = proposals::load(&crate::writer::worker::Tx(&db), inverse_id)
+        .unwrap()
+        .unwrap();
+    let digest: String = db
+        .query_row(
+            "SELECT digest FROM memory_proposals WHERE proposal_id=?1",
+            [inverse_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(digest, hardening::digest(&inverse));
 }
 
 #[tokio::test]
@@ -1198,4 +1210,109 @@ async fn compensation_watch_prefers_later_card_quorum() {
     assert_eq!(result.body["results"][0]["result"], "applied", "{result:?}");
     assert_eq!(card(&h, "fleet", "a").await["text"], before);
     assert_eq!(card(&h, "fleet", "b").await["text"], before);
+}
+
+#[tokio::test]
+async fn compensation_watch_review_retrieval_prefers_later_card_quorum() {
+    let (h, id, before) = applied().await;
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    // Seed a second card with the same applied snapshot in this two-card fixture.
+    db.execute("INSERT INTO memory_cards SELECT scope,'b',revision,content_hash,state,trust,writer,writer_class,title,summary,tags,created_at,updated_at FROM memory_cards WHERE card_id='a'", []).unwrap();
+    db.execute("INSERT INTO memory_card_revisions SELECT scope,'b',revision,content_hash,trust,state,writer,seq,proposal_id,scan_state,created_at FROM memory_card_revisions WHERE card_id='a'", []).unwrap();
+    attestation_tests::mutate_body(&h, &id, |b| {
+        let mut second = b["cards"][0].clone();
+        second["card_id"] = json!("b");
+        b["cards"].as_array_mut().unwrap().push(second);
+    });
+    verifier_signal(&h, AGENT_TOKEN, "first", "active", true, "").await;
+    verifier_signal_for_card(&h, "b", AGENT_TOKEN, "second-one", "active", true, "").await;
+    verifier_signal_for_card(&h, "b", NODE_TOKEN, "second-two", "active", true, "").await;
+    h.put(
+        ADMIN_TOKEN,
+        "fleet",
+        "decoy",
+        None,
+        "Unrelated corpus change.",
+    )
+    .await;
+    h.set_clock(h.now() + 1);
+    let mut report = retrieval_eval_tests::gate_report(&h).await;
+    report["adapters"]["hub-lexical"]["overall"]["mrr"] = json!(0.25);
+    assert_eq!(retrieval_eval_tests::record(&h, &report).await.status, 201);
+    let result = watch(&h).await;
+    assert_eq!(result.body["results"][0]["result"], "applied", "{result:?}");
+    assert_eq!(result.body["results"][0]["trigger"], "negative-outcome");
+    let journal: Json = serde_json::from_str(
+        &db.query_row(
+            "SELECT value FROM memory_meta WHERE key=?1",
+            [format!("compensation_watch:{}", id.as_str().unwrap())],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(journal["trip"]["trigger"], "negative-outcome");
+    assert_eq!(journal["trip"]["review_required"], false);
+    let fingerprint = ids::sha256_hex(ids::canonical(&journal["trip"]).as_bytes());
+    assert_eq!(journal["completed_trips"][fingerprint], "applied");
+    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    assert_eq!(card(&h, "fleet", "b").await["text"], before);
+}
+
+#[tokio::test]
+async fn compensation_pending_retrieval_referral_is_superseded_by_quorum() {
+    for scenario in ["quorum", "no-quorum", "different-inverse"] {
+        let (h, id, before) = applied().await;
+        verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
+        verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
+        // Toggle verifier authority without advancing the card head or digest.
+        h.call(ADMIN_TOKEN, json!({"action":"verifier","principal":"node-1","verifier":false,"client_event_id":h.id()})).await;
+        let mut report = retrieval_eval_tests::gate_report(&h).await;
+        report["adapters"]["hub-lexical"]["overall"]["mrr"] = json!(0.25);
+        assert_eq!(retrieval_eval_tests::record(&h, &report).await.status, 201);
+        let first = watch(&h).await;
+        assert_eq!(first.body["results"][0]["result"], "review_required");
+        assert_eq!(first.body["results"][0]["trigger"], "retrieval-regression");
+        let referral = first.body["results"][0]["proposal_id"].as_str().unwrap();
+        let head = card(&h, "fleet", "a").await["revision"].clone();
+        if scenario == "different-inverse" {
+            attestation_tests::mutate_body(&h, &json!(referral), |b| {
+                b["cards"][0]["after_text"] = json!("A different restoration target.");
+                b["cards"][0]["after_hash"] =
+                    json!(ids::sha256_hex(b"A different restoration target."));
+            });
+        }
+        if scenario != "no-quorum" {
+            h.call(ADMIN_TOKEN, json!({"action":"verifier","principal":"node-1","verifier":true,"client_event_id":h.id()})).await;
+        }
+        assert_eq!(card(&h, "fleet", "a").await["revision"], head);
+        let second = watch(&h).await;
+        let db = rusqlite::Connection::open(h.memory()).unwrap();
+        let closed = proposals::load(&crate::writer::worker::Tx(&db), referral)
+            .unwrap()
+            .unwrap();
+        if scenario == "quorum" {
+            assert_eq!(second.body["results"][0]["result"], "applied", "{second:?}");
+            assert_eq!(closed["state"], "rejected");
+            assert_eq!(closed["reason"], "superseded_by_automatic_compensation");
+            assert_eq!(card(&h, "fleet", "a").await["text"], before);
+            let applied: i64 = db.query_row("SELECT count(*) FROM memory_proposals WHERE state='applied' AND json_extract(body,'$.rollback_of')=?1", [id.as_str().unwrap()], |r| r.get(0)).unwrap();
+            assert_eq!(applied, 1);
+            assert_eq!(watch(&h).await.body["results"], json!([]));
+        } else {
+            assert_eq!(closed["state"], "pending");
+            if scenario == "no-quorum" {
+                assert_eq!(second.body["results"], json!([]));
+            } else {
+                assert_eq!(
+                    closed["cards"][0]["after_text"],
+                    "A different restoration target."
+                );
+                assert_eq!(
+                    second.body["results"][0]["reason"],
+                    "memory_proposal_duplicate_pending"
+                );
+            }
+        }
+    }
 }
