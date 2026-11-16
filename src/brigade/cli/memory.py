@@ -20,6 +20,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_verify_cmd
 
     memory_verify_cmd.register(memory_sub)
+    from .. import lesson_cmd
+
+    lesson_cmd.register(memory_sub)
     from .. import memory_hub_cmd
 
     memory_hub_cmd.register(memory_sub)
@@ -99,7 +102,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_care_scan.add_argument(
         "--no-tend", action="store_true", help="Deprecated no-op. Scan does not run automatic care."
     )
-    for name in ("tend", "undo", "archive"):
+    for name in ("tend", "undo", "archive", "recover"):
         command = memory_care_sub.add_parser(name, help=f"Memory care {name}.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
@@ -108,7 +111,7 @@ def register(sub: argparse._SubParsersAction) -> None:
                 "--stage", action="append", choices=("hub", "fixes", "lifecycle", "retire", "inbox", "instructions")
             )
             command.add_argument("--dry-run", action="store_true")
-        elif name == "undo":
+        elif name in ("undo", "recover"):
             command.add_argument("decision_id")
         else:
             command.add_argument("--from-file", type=Path, required=True)
@@ -461,6 +464,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch(args) -> int:
+    if args.memory_command == "lessons":
+        from .. import lesson_cmd
+
+        return lesson_cmd.dispatch(args)
     if args.memory_command in {"embed-worker", "reindex", "rescan"}:
         from .. import memory_embed
 
@@ -624,7 +631,7 @@ def dispatch(args) -> int:
                 update_gitignore=not args.no_gitignore,
                 with_runbooks=args.with_runbooks,
             )
-        if args.memory_care_command in ("tend", "undo", "archive"):
+        if args.memory_care_command in ("tend", "undo", "archive", "recover"):
             from .. import memory_care_tend
 
             return memory_care_tend.dispatch(args)

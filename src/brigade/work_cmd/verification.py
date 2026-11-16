@@ -575,6 +575,7 @@ def _finalize_verify_receipt(
             key, key_id = signing_key
             receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
             receipt["digests"]["key_id"] = key_id
+        receipt_signing.stamp_workspace_signature(target, receipt)
     except Exception:
         receipt.pop("digests", None)
     helpers._write_json(run_dir / "receipt.json", receipt)
@@ -1571,6 +1572,7 @@ def _run_verify_commands(
         receipt_schema.stamp_optional_producer_run_id(receipt)
         _stamp_verify_causal_receipt(receipt)
         _stamp_harness_session(receipt, target)
+        receipt["producer_work_session_id"] = _active_work_session_id(target)
         _stamp_outcome_capture(receipt, capture, capture_kind)
         try:
             graph_delta_before = code_graph_delta.capture_before(target, run_dir, timeout=code_graph_timeout)
@@ -1727,6 +1729,7 @@ def _write_reused_receipt(
     receipt_schema.stamp_optional_producer_run_id(receipt)
     _stamp_verify_causal_receipt(receipt)
     _stamp_harness_session(receipt, target)
+    receipt["producer_work_session_id"] = _active_work_session_id(target)
     _stamp_outcome_capture(receipt, capture, capture_kind)
     reused_from = latest.get("run_id")
     if isinstance(reused_from, str) and reused_from:
@@ -1744,6 +1747,7 @@ def _write_reused_receipt(
         key, key_id = signing_key
         receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
         receipt["digests"]["key_id"] = key_id
+    receipt_signing.stamp_workspace_signature(target, receipt)
     helpers._write_json(run_dir / "receipt.json", receipt)
     _write_verify_markdown(run_dir, receipt)
     try:

@@ -12,7 +12,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import memory_archive, memory_care_hub, memory_care_journal as journal, memory_care_retire, memory_cmd
+from . import (
+    memory_archive,
+    memory_care_hub,
+    memory_care_journal as journal,
+    memory_care_retire,
+    memory_cmd,
+    memory_lifecycle,
+)
 from . import memory_hub_store as store
 
 STAGES = ("hub", "fixes", "lifecycle", "retire", "inbox", "instructions")
@@ -68,8 +75,6 @@ def run(
                 target, memory_cmd._config_or_default(target), today=today or memory_cmd._today(), dry_run=dry_run
             )
         elif stage == "lifecycle":
-            from . import memory_lifecycle
-
             try:
                 payload["stages"][stage] = memory_lifecycle.run(
                     target, today=today or memory_cmd._today(), dry_run=dry_run
@@ -113,6 +118,8 @@ def run(
                     today=today or memory_cmd._today(),
                     dry_run=dry_run,
                 )
+            except memory_lifecycle.InstalledSchedulesUnreadable as exc:
+                payload["stages"][stage] = {"blocked": str(exc)}
             except (OSError, ValueError, KeyError, subprocess.SubprocessError):
                 payload["stages"][stage] = {"blocked": "reference scan incomplete", "error": True}
                 payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
@@ -124,7 +131,7 @@ def run(
 
 @journal.serialized
 def undo(target: Path, decision_id: str) -> journal.Decision:
-    recovery = journal.resolve_prepared(target)
+    recovery = journal.resolve_prepared(target, decision_id=decision_id)
     for item in recovery:
         if item["phase"] in ("abandoned", "quarantined", "unreadable"):
             print(f"memory care: {item['phase']} {item['decision_id']}: {item['reason']}", file=sys.stderr)
@@ -170,7 +177,7 @@ def after_command(target: Path, *, stages: Sequence[str] | None = None) -> None:
 
 @journal.serialized
 def archive_manifest(target: Path, path: Path, *, limit: int | None = None) -> dict[str, Any]:
-    recovery = journal.resolve_prepared(target)
+    recovery: list[dict[str, Any]] = []
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
     config = memory_cmd._config_or_default(target)
@@ -218,6 +225,8 @@ def dispatch(args: Any) -> int:
     try:
         if args.memory_care_command == "undo":
             payload = asdict(undo(args.target, args.decision_id))
+        elif args.memory_care_command == "recover":
+            payload = {"recovery": journal.resolve_prepared(args.target, decision_id=args.decision_id)}
         elif args.memory_care_command == "archive":
             payload = archive_manifest(args.target, args.from_file, limit=args.limit)
         else:

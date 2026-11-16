@@ -767,3 +767,118 @@ If an archive destination is occupied, the lifecycle pass keeps the live card an
 reports the path and `occupied or read-only` reason in `skipped`. Inspect both
 files, then move the existing archive copy to a separate backup location before
 running care again. Brigade never overwrites the existing archive copy.
+
+Prepared removals, moves and effects outside the automatic recovery allowlist
+require `brigade memory care recover <decision-id>`. Automatic recovery only
+replays file creations and byte replacements that leave each file present.
+Quoted native Windows reference paths can contain spaces. Unquoted native
+Windows paths with spaces remain unsupported by the reference scanner.
+
+## Automatic work-session lessons
+
+`brigade memory lessons run` reviews local work-hook activity after 20 tool
+calls and five minutes of idle time. The existing post-tool hooks supply the
+counter and a scanned digest of at most 96 observations, retaining failure
+events ahead of routine activity after evicting reviewed events first. User
+prompts supply correction evidence
+through a private hook cache without writing into the workspace.
+Review workers do not count their own calls.
+
+Install unattended execution once with
+`brigade care install --entry lesson-review --target <scope>`. This selectable
+care entry checks every five minutes through a pinned runbook. It uses the
+existing worker dispatcher and the roster seat `researcher`. Set `seat`,
+`threshold` and `idle_seconds` in `.brigade/lesson-review.json` to change those
+values. There is no provider integration or transcript crawler. Install work
+hooks on each target whose activity should count. Repository and hub targets
+have separate local state.
+
+Automatic lesson admission is disabled in code until the hub anchor in #2620
+exists. Until then, hooks record no observations and keep no prompt text. They
+return `lesson_admission_awaits_hub_anchor` and clear the prompt queue. Manual
+handoff drafting remains available. Candidates return
+`lesson_admission_awaits_hub_anchor (#2620)` without publication.
+
+Lesson review requires a fixed workspace key for all lesson kinds, including
+user corrections. Generate it with
+`brigade receipts keygen --target <scope>` and `BRIGADE_RECEIPT_SIGNING_KEY_FILE`
+unset. That variable selects an audit key only and grants no lesson authority.
+Without a usable key, recording and review return `lesson_review_needs_key`,
+discard queued prompts and run no worker. Setup and care install do not create
+this key automatically.
+Start an active work session with `brigade work start --target <scope>` before
+running either verifier. Use a registered card manifest and a plain
+`brigade work verify run --target <scope> --manifest <id>` invocation in the
+hook-observed command. Shell wrappers, chained commands such as
+`cd <scope> && brigade work verify run`, environment prefixes, and executable
+aliases are not recognized as lesson evidence. Set the working directory in the
+harness and use `--target` instead. Both text output with a single `run:` field
+and complete `--json` receipt output are supported.
+
+`brigade memory lessons status` reports the pending call count and configuration.
+`brigade memory lessons disable` stops recording and reviews without deleting
+pending work. `enable` resumes it. Uninstalling the `lesson-review` care entry
+removes its schedule.
+
+Admission accepts a verified fix, a workaround that worked or a correction
+quoted from a user prompt with at least 24 bytes and five tokens. Lesson content
+must derive from that quote. Fixes and workarounds require registered card
+verification receipts from `brigade work verify run` observations and an exact
+hash of the proposed card bytes. Each receipt
+must carry a workspace signature created by the verifier and name the producing
+work session recorded by its hook observation. The run id must match the
+coordinator output. Printing a receipt path does not bind it to that run. A receipt
+with a harness-session fingerprint must match its hook observation. An earlier
+failing receipt and a later passing receipt must belong to that same work session
+and observed harness session, have different tree fingerprints, and complete after the earliest unreviewed activity. The failing
+patch receipt is checked against its authenticated historical binding. The
+passing patch receipt must still match the current card.
+
+These receipts require a registered card manifest. Ordinary ad hoc code checks
+cannot establish a lesson about card content. New cards need fixture evidence
+with the proposed content hash. Patch evidence can support updates to existing
+cards. Unsigned receipts and receipts from another work session do not qualify.
+The workspace signature uses only the existing operator-owned, private,
+single-link `.brigade/receipt-signing-key`, read through no-follow descriptors.
+It ignores `BRIGADE_RECEIPT_SIGNING_KEY_FILE` and never creates a key. Windows
+cannot supply this authority until the ACL confinement work in #2588 lands.
+The existing configurable audit signature remains separate. This MAC boundary
+prevents text-only receipt forgery. It does not isolate the key from an agent
+with shell access. Verifier session labels are caller-controlled and default
+to a label derived from the run id. Rejecting a matching producer label does not
+prove verifier independence. Receipts without a harness fingerprint establish
+only work-session binding, which is shared by concurrent harnesses.
+
+Failure and success evidence excludes unresolved fixes and unchanged-tree
+retries. Corrections remain quoted user claims screened by content and lexical
+checks, with human review as the final check. An ordinary prompt is not proof
+that its surrounding lesson is correct.
+An empty review creates no handoff or card. Updating a card requires its current
+bytes in the final worker prompt and an unchanged hash at admission.
+
+The coordinator renders through `brigade handoff draft` and publishes into the
+private `.brigade/lesson-review/outbox/`, outside the watched handoff inboxes.
+Crash recovery resumes from that outbox. Descriptor-bound ingest delivers only
+that draft to the review inbox. The draft names
+machine origin
+`brigade.lesson-review.v1` and a local review receipt that binds the session
+digest and draft hash. This marker grants no interactive-origin authority.
+Automatic filing depends on #2577 accepting a receipt-bound machine origin.
+The trusted-origin interface is absent in this version, so every admitted lesson
+stays in `memory/handoff-inbox/` for review. Other pending handoffs stay untouched.
+
+The observed counter and committed watermark survive restart under
+`.brigade/lesson-review/`. New activity during review preserves the counter for
+the next idle window. Prompt hooks keep a bounded private spool outside the
+workspace. The coordinator drains it after the review worker returns and before accepting
+a review, so an in-flight correction interrupts publication. Scanner-blocked
+prompts retain a body-free placeholder so they still interrupt. Malformed or
+oversized spools are quarantined privately with a body-free reason and the next
+tick continues.
+Verification observations from successful and failed tool hooks survive routine
+event eviction. A prepared draft is recovered before another review can
+publish one. Rapid and concurrent triggers share one run lock. The digest keeps
+bounded observations, so older details may require a normal handoff. Each digest
+has a persisted three-attempt budget and exponential backoff. A rejected or stuck
+publication is quarantined with a body-free reason after that bound, advancing
+only its own watermark so newer activity can proceed.

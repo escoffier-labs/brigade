@@ -37,10 +37,10 @@ def restore(target: Path, decision_id: str, draft: str, *, reason: str) -> str |
             continue
         if payload.get("refusal_of") == decision_id:
             if payload.get("phase") == "prepared":
-                if journal.archive_recovery_held(target, record.parent.name):
-                    return f"operator-recovery-required:{record.parent.name}"
-                journal.finish_prepared(target, record.parent.name)
+                journal.resolve_prepared(target, automatic=True, decision_id=record.parent.name)
                 payload = journal._payload(target, record.parent.name)
+                if payload.get("phase") == "prepared":
+                    return f"operator-recovery-required:{record.parent.name}"
             if payload.get("status") == "committed":
                 return payload.get("refusal_reason")
 

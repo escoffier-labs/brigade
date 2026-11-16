@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager, ExitStack
+from collections.abc import Iterator
+
 import string
 import html
 import hashlib
@@ -25,6 +28,12 @@ from .memory_log_retractions import retraction
 # in escoffier-labs/brigade#2620 can detect ledger rollback and erased failures.
 AUTOMATIC_ARCHIVE_ENABLED = False
 ARCHIVE_DISABLED_REASON = "automatic archive awaits hub anchor (#2620)"
+
+
+class InstalledSchedulesUnreadable(ValueError):
+    """Schedule references cannot be checked during this pass."""
+
+
 # Match the shipped defaults. Workspace edits cannot authorize earlier edges.
 MIN_STALE_AFTER_DAYS = 30
 MIN_ARCHIVE_AFTER_DAYS = 90
@@ -73,7 +82,7 @@ def _mentioned(
             return True
     targets = _resolved_targets(text, referring) if resolved_targets is None else resolved_targets
     return bool(targets.intersection(names)) or any(
-        "/" in name and any(path.startswith("windows:") and path.endswith("/" + name) for path in targets)
+        "/" in name and any(path.startswith("windows:") and path.endswith("/" + name.casefold()) for path in targets)
         for name in names
         if name
     )
@@ -84,9 +93,12 @@ def _resolved_targets(text: str, referring: str) -> set[str]:
     targets: set[str] = set()
     # Extract native absolute paths once, before URL parsing treats a drive as
     # a scheme. Component suffixes preserve workspace-independent references.
+    for match in re.finditer(r'"((?:[A-Za-z]:[\\/]|\\\\)[^"\r\n]+)"', text):
+        normalized = re.sub(r"\\+", "/", re.split(r"[?#]", match[1], maxsplit=1)[0])
+        targets.add("windows:" + normalized.casefold())
     for match in re.finditer(r"(?<![\w./\\-])(?:[A-Za-z]:[\\/]|\\\\)[^\s<>\"'()\[\]{},;]+", text):
-        normalized = re.sub(r"\\+", "/", match.group())
-        targets.add("windows:" + normalized)
+        normalized = re.sub(r"\\+", "/", re.split(r"[?#]", match.group(), maxsplit=1)[0])
+        targets.add("windows:" + normalized.casefold())
     if referring and not referring.startswith("scheduler:"):
         destinations = re.findall(r"\]\(\s*(?:<([^>]+)>|((?:\\.|[^\s)])+))", text)
         destinations.extend(
@@ -235,7 +247,7 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
     if sys.platform != "win32" and shutil.which("crontab"):
         text, error = care_cmd._read_crontab()
         if error:
-            raise ValueError("installed care schedules are unreadable")
+            raise InstalledSchedulesUnreadable("installed care schedules are unreadable")
         refs["scheduler:crontab"] = text
     if sys.platform == "win32":
         import subprocess
@@ -245,7 +257,7 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
                 ["schtasks", "/Query", "/FO", "CSV", "/V"], capture_output=True, text=True, check=True, timeout=15
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise ValueError("installed care schedules are unreadable") from exc
+            raise InstalledSchedulesUnreadable("installed care schedules are unreadable") from exc
         refs["scheduler:schtasks"] = raw.stdout
     directories = [care_cmd._systemd_user_dir(None), care_cmd._launchd_dir(None)]
     for directory in directories:
@@ -374,6 +386,23 @@ def _last_use(
     return max((day for day in days if day <= today), default=today)
 
 
+@contextmanager
+def _card_read_lock(target: Path) -> Iterator[bool]:
+    from .inbox_lock import held_file_lock, InboxLockTimeout
+
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(
+                held_file_lock(
+                    journal.safe_path(target, memory_card_reads.READS_REL).with_suffix(".lock"), deadline_seconds=5
+                )
+            )
+        except InboxLockTimeout:
+            yield False
+        else:
+            yield True
+
+
 @journal.serialized
 def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
     rules = policy(target)
@@ -405,7 +434,10 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
     keys = {rel: _keys(text, rel) for rel, text in cards.items()}
     # Match every potential card source before taking the ledger lock. Its
     # freshness is checked under the lock, so a newly read source still vetoes.
-    refs = _references(target, {})
+    try:
+        refs = _references(target, {})
+    except InstalledSchedulesUnreadable as exc:
+        return {**payload, "blocked": str(exc)}
     external_sources = set(refs)
     refs = {**{rel: text for rel, text in cards.items() if rel not in config.index_paths}, **refs}
     targets = {other: _resolved_targets(body, other) for other, body in refs.items()}
@@ -426,13 +458,12 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
             )
         }
     digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
-    from .inbox_lock import held_file_lock
-
     archived_cards: set[str] = set()
     for rel, text in sorted(cards.items()):
-        with held_file_lock(
-            journal.safe_path(target, memory_card_reads.READS_REL).with_suffix(".lock"), deadline_seconds=5
-        ):
+        with _card_read_lock(target) as acquired:
+            if not acquired:
+                payload["skipped"].append({"path": rel, "reason": "local read ledger busy"})
+                continue
             ledger = memory_card_reads.load(target)
             if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
                 return {**payload, "blocked": "local read coverage incomplete"}
@@ -490,7 +521,14 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                 continue
             state_rel = f".brigade/memory/lifecycle/{hashlib.sha256(rel.encode()).hexdigest()}.json"
             before = journal.current(target, state_rel)
-            previous = json.loads(before)["state"] if before else "active"
+            saved_state = json.loads(before) if before else {"state": "active"}
+            if (
+                not isinstance(saved_state, dict)
+                or not isinstance(saved_state.get("state"), str)
+                or saved_state["state"] not in {"active", "stale", "archived"}
+            ):
+                raise ValueError("invalid lifecycle state")
+            previous = saved_state["state"]
             desired = (
                 "archived"
                 if age >= rules["archive_after_days"]

@@ -1,5 +1,7 @@
 """Review regressions for archive safety and publication."""
 
+from tests.memory_read_fixtures import pending_decision_id, operator_recovery
+
 from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
 
 from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
@@ -106,11 +108,12 @@ def test_undo_drift_abandons_and_care_continues(tmp_path, monkeypatch):
         archive.restore(tmp_path, d)
     path.write_bytes(b"edited")
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    result = tend.run(tmp_path, stages=[])
+    recovery_id = pending_decision_id(tmp_path)
+    result = operator_recovery(tmp_path, recovery_id)
     assert result["recovery"][0]["phase"] == "abandoned"
     assert path.read_bytes() == b"edited"
     assert (tmp_path / "memory/archive/cards/old.md").exists()
-    assert tend.run(tmp_path, stages=[])["recovery"] == []
+    assert operator_recovery(tmp_path, recovery_id)["recovery"] == []
 
 
 def test_missing_original_abandonment_remains_restorable(tmp_path, monkeypatch):

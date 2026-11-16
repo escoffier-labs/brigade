@@ -669,7 +669,7 @@ def finish_prepared(target: Path, decision_id: str) -> Decision:
 
 
 @serialized
-def resolve_prepared(target: Path, *, automatic: bool = False) -> list[dict[str, Any]]:
+def resolve_prepared(target: Path, *, automatic: bool = False, decision_id: str | None = None) -> list[dict[str, Any]]:
     from contextlib import nullcontext
     from .ingest import _document_lock
 
@@ -689,37 +689,71 @@ def resolve_prepared(target: Path, *, automatic: bool = False) -> list[dict[str,
     rows = pending_index(target)  # Check all journal paths before kernel recovery can write.
     needs_lock = needs_lock or any(row["document"] for row in rows.values())
     with _document_lock(target) if needs_lock else nullcontext():
-        held = set()
         if automatic:
-            candidates = set(rows)
-            for operation in kernel.unfinished_operations(target):
-                match = re.fullmatch(rf"care-({DECISION_ID})-(prepare|finish|repair)", operation.operation_id)
-                if match:
-                    candidates.add(match[1])
-            held = {decision_id for decision_id in candidates if archive_recovery_held(target, decision_id)}
-        return _resolve_prepared_locked(target, held=held)
+            return _resolve_automatic(target, rows, selected=decision_id)
+        if decision_id is not None:
+            _directory(target, decision_id)
+        return _resolve_prepared_locked(target, selected=decision_id)
 
 
-def archive_recovery_held(target: Path, decision_id: str) -> bool:
-    """Veto archive mutations by their paths and bytes, never their claimed actor."""
-    from .memory_lifecycle import AUTOMATIC_ARCHIVE_ENABLED
+def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | None = None) -> list[dict[str, Any]]:
+    """Only replay additive or in-place bytes from one captured operation list.
+
+    Kernel rollback, append publication and repair can remove files. Those need
+    named operator recovery even when the decision claims to be a harmless fix.
+    """
+    import base64
     from .memory_cmd import _config_or_default
 
-    if AUTOMATIC_ARCHIVE_ENABLED:
-        return False
-    try:
-        p = _validated_payload(target, decision_id)
-    except (JournalConflict, store.StoreError):
-        # Unknown recovery bytes cannot prove that no archive move is pending.
-        return True
-    if p["phase"] != "prepared":
-        return False
-    roots = ("memory/cards", *_config_or_default(target).card_roots)
-    return any(
-        (path.startswith("memory/archive/") and data is not None)
-        or (data is None and any(path == root.rstrip("/") or path.startswith(root.rstrip("/") + "/") for root in roots))
-        for path, data in zip(p["paths"], p["after_bytes"], strict=True)
-    )
+    inflight = set()
+    for operation in kernel.unfinished_operations(target):
+        match = re.fullmatch(rf"care-({DECISION_ID})-(prepare|finish|repair)", operation.operation_id)
+        if match:
+            inflight.add(match[1])
+    results = []
+    for decision_id in sorted(set(rows) | inflight):
+        if selected is not None and decision_id != selected:
+            continue
+        reason = "unfinished kernel operation requires operator recovery"
+        changes: tuple[Change, ...] = ()
+        try:
+            p = _validated_payload(target, decision_id)
+            if decision_id not in inflight:
+                reason = "append or repair effects require operator recovery"
+                if p["phase"] == "prepared" and not any(p.get(key) for key in ("appends", "repair_indexes", "undoes")):
+                    # Capture before-images and decoded after-images once. Neither
+                    # classification nor execution rereads workspace classification.
+                    changes = tuple(
+                        Change(
+                            path,
+                            None if absent else (_directory(target, decision_id) / "before" / f"{n}.bin").read_bytes(),
+                            None if data is None else base64.b64decode(data, validate=True),
+                            p.get("modes", {}).get(path),
+                        )
+                        for n, (path, absent, data) in enumerate(
+                            zip(p["paths"], p["before_absent"], p["after_bytes"], strict=True)
+                        )
+                    )
+                    reason = "removal or move outside automatic recovery allowlist"
+                    if all(c.after is not None for c in changes):
+                        config = _config_or_default(target)
+                        conflict = any(
+                            read_only_pattern(c.path, config.read_only_paths)
+                            or _live(target, c.path) != (c.after if c.path in p["prepared_paths"] else c.before)
+                            for c in changes
+                        )
+                        phase = "abandoned" if conflict else ("undone" if p["kind"] == "undo" else "committed")
+                        final = {**p, "phase": phase, "status": "abandoned" if conflict else "committed"}
+                        pending = [] if conflict else [c for c in changes if c.path not in p["prepared_paths"]]
+                        rel = f"{JOURNAL_REL}/{decision_id}/decision.json"
+                        pending.append(Change(rel, current(target, rel), _json_bytes(final)))
+                        _execute_phase(target, decision_id, "finish", pending)
+                        results.append({"decision_id": decision_id, "phase": phase, "reason": ""})
+                        continue
+        except (JournalConflict, store.StoreError, OSError, ValueError):
+            reason = "unreadable recovery operations require operator recovery"
+        results.append({"decision_id": decision_id, "phase": "operator_required", "reason": reason})
+    return results
 
 
 def _quarantine_decision(target: Path, decision_id: str) -> None:
@@ -740,20 +774,15 @@ def _committed_destinations(target: Path, operation_id: str) -> list[str]:
         return []
 
 
-def _resolve_prepared_locked(target: Path, *, held: set[str]) -> list[dict[str, Any]]:
+def _resolve_prepared_locked(target: Path, *, selected: str | None = None) -> list[dict[str, Any]]:
     """Recover our interrupted kernel plans before interpreting decision phases."""
-    from .memory_lifecycle import ARCHIVE_DISABLED_REASON
-
-    resolved: list[dict[str, Any]] = [
-        {"decision_id": decision_id, "phase": "operator_required", "reason": ARCHIVE_DISABLED_REASON}
-        for decision_id in sorted(held)
-    ]
+    resolved: list[dict[str, Any]] = []
     for operation in kernel.unfinished_operations(target):
         match = re.fullmatch(rf"care-({DECISION_ID})-(prepare|finish|repair)", operation.operation_id)
         if not match:
             continue
         decision_id = match.group(1)
-        if decision_id in held:
+        if selected is not None and decision_id != selected:
             continue
         try:
             p = _validated_payload(target, decision_id)
@@ -838,7 +867,7 @@ def _resolve_prepared_locked(target: Path, *, held: set[str]) -> list[dict[str, 
     from .memory_care_pending import load as pending_index
 
     for decision_id, row in pending_index(target).items():
-        if decision_id in held:
+        if selected is not None and decision_id != selected:
             continue
         if row["repair"]:
             _repair_indexes(target, decision_id)

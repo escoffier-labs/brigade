@@ -50,6 +50,7 @@ CONFIG_REL_PATH = ".brigade/memory-care.toml"
 DEFAULT_OUTPUT_PATH = ".brigade/memory-care/decay"
 MEMORY_CARE_RUNBOOKS_REL = ".brigade/memory-care/runbooks"
 MEMORY_CARE_RUNBOOK_NAMES = (
+    "lesson-review.json",
     "daily-care-pass.json",
     "ingest-sweep.json",
     "weekly-outcome-ratchet.json",

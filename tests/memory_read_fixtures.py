@@ -81,3 +81,28 @@ def automatic_archive_test_mode(monkeypatch):
         return real(target, **kwargs)
 
     monkeypatch.setattr(reads, "hub_last_reads", verified_empty_hub)
+
+
+def pending_decision_id(target):
+    """Select the single interrupted decision, including an unpublished prepare."""
+    import re
+    from brigade import memory_care_journal as journal
+    from brigade.memory_care_pending import load
+
+    ids = set(load(target))
+    for operation in journal.kernel.unfinished_operations(target):
+        match = re.fullmatch(rf"care-({journal.DECISION_ID})-(prepare|finish|repair)", operation.operation_id)
+        if match:
+            ids.add(match[1])
+    assert len(ids) == 1, ids
+    return ids.pop()
+
+
+def operator_recovery(target, decision_id, *, stages=()):
+    """Recover the named decision, then exercise the requested tend stages."""
+    from brigade import memory_care_journal as journal, memory_care_tend as tend
+
+    recovery = journal.resolve_prepared(target, decision_id=decision_id)
+    result = tend.run(target, stages=stages)
+    assert result["recovery"] == []
+    return {**result, "recovery": recovery}

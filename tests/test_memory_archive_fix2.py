@@ -1,5 +1,7 @@
 """Second review regressions, including real kernel crash recovery."""
 
+from tests.memory_read_fixtures import pending_decision_id, operator_recovery
+
 from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
 from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 
@@ -72,7 +74,8 @@ def test_real_kernel_drift_does_not_block_index(tmp_path, monkeypatch):
         move(tmp_path)
     path.write_bytes(b"recreated")
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    result = tend.run(tmp_path, stages=[])
+    recovery_id = pending_decision_id(tmp_path)
+    result = operator_recovery(tmp_path, recovery_id)
     assert result["recovery"][0]["phase"] == "abandoned"
     assert "--force" not in str(result)
     assert not journal.kernel.unfinished_operations(tmp_path)
@@ -87,8 +90,9 @@ def test_read_only_between_phases_abandons(tmp_path, monkeypatch):
         move(tmp_path)
     monkeypatch.setattr(journal.kernel, "execute", execute)
     (tmp_path / ".brigade/memory-care.toml").write_text('read_only_paths = ["memory/cards/**"]\n')
-    assert tend.run(tmp_path, stages=[])["recovery"][0]["phase"] == "abandoned"
-    assert tend.run(tmp_path, stages=[])["recovery"] == []
+    recovery_id = pending_decision_id(tmp_path)
+    assert operator_recovery(tmp_path, recovery_id)["recovery"][0]["phase"] == "abandoned"
+    assert operator_recovery(tmp_path, recovery_id)["recovery"] == []
     assert path.exists()
 
 
@@ -122,7 +126,8 @@ def test_restorable_abandoned_is_listed(tmp_path, monkeypatch):
         move(tmp_path)
     path.unlink()
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    recovered = tend.run(tmp_path, stages=[])["recovery"][0]["decision_id"]
+    recovery_id = pending_decision_id(tmp_path)
+    recovered = operator_recovery(tmp_path, recovery_id)["recovery"][0]["decision_id"]
     assert recovered in [d.decision_id for d in journal.entries(tmp_path)]
 
 

@@ -364,7 +364,11 @@ def test_scheduled_care_cannot_finish_workspace_prepared_archive(tmp_path, monke
     assert path.read_bytes() == original
     assert journal._payload(tmp_path, decision_id) == before
     assert result["recovery"] == [
-        {"decision_id": decision_id, "phase": "operator_required", "reason": life.ARCHIVE_DISABLED_REASON}
+        {
+            "decision_id": decision_id,
+            "phase": "operator_required",
+            "reason": "removal or move outside automatic recovery allowlist",
+        }
     ]
     journal.resolve_prepared(tmp_path)
     assert not path.exists()
@@ -447,3 +451,179 @@ def test_prepared_non_archive_recovers_with_archive_gate_off(tmp_path, monkeypat
     phase = "undone" if kind == "undo" else "committed"
     assert result["recovery"] == [{"decision_id": saved[0], "phase": phase, "reason": ""}]
     assert journal._payload(tmp_path, saved[0])["phase"] == phase
+
+
+def test_custom_root_config_cannot_authorize_prepared_move(tmp_path, monkeypatch):
+    path = tmp_path / "custom/cards/old.md"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"card\n")
+    config = tmp_path / ".brigade/memory-care.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('card_roots = ["custom/cards"]\n')
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted prepare")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted prepare"):
+            journal.commit_phased(
+                tmp_path,
+                kind="fix",
+                reason="repair",
+                card_id="old",
+                hub={},
+                changes=[
+                    journal.Change("custom/cards/old.md", b"card\n", None),
+                    journal.Change("custom/elsewhere/old.md", None, b"card\n"),
+                ],
+                prepared_paths=[],
+                metadata={"actor": "operator"},
+            )
+    config.write_text('card_roots = ["memory/cards"]\n')
+    monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
+    result = tend.run(tmp_path, stages=[])
+    assert path.exists()
+    assert journal._payload(tmp_path, saved[0])["phase"] == "prepared"
+    assert result["recovery"][0]["decision_id"] == saved[0]
+    assert result["recovery"][0]["phase"] == "operator_required"
+
+
+@pytest.mark.parametrize("command", ["manifest", "undo"])
+def test_unrelated_commands_do_not_finish_prepared_archive(tmp_path, monkeypatch, command):
+    path = card(tmp_path)
+    other = journal.commit_phased(
+        tmp_path,
+        kind="fix",
+        reason="repair",
+        card_id=None,
+        hub={},
+        changes=[journal.Change("other.md", None, b"other")],
+        prepared_paths=[],
+    )
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted prepare")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted prepare"):
+            journal.commit_phased(
+                tmp_path,
+                kind="archive",
+                reason="operator",
+                card_id="old",
+                hub={},
+                changes=[journal.Change("memory/cards/old.md", path.read_bytes(), None)],
+                prepared_paths=[],
+            )
+    if command == "manifest":
+        manifest = tmp_path / "empty.jsonl"
+        manifest.write_text("")
+        tend.archive_manifest(tmp_path, manifest)
+    else:
+        tend.undo(tmp_path, other.decision_id)
+    assert path.exists()
+    assert journal._payload(tmp_path, saved[0])["phase"] == "prepared"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        r"C:\Repo\MEMORY\CARDS\OLD.MD",
+        r"C:\Repo\MEMORY\CARDS\OLD.MD#section",
+        r"C:\Repo\MEMORY\CARDS\OLD.MD?raw=1#section",
+        r"\\Server\Share\memory\cards\old.md#section",
+        r"\\Server\Share\MEMORY\CARDS\OLD.MD?raw=1#section",
+    ],
+)
+def test_windows_case_and_fragment_references(reference):
+    assert life._mentioned(reference, "memory/cards/old.md", "old")
+
+
+def test_windows_schedule_timeout_blocks_without_failing_tend(tmp_path, monkeypatch, capsys):
+    import argparse
+    import subprocess
+    import sys
+
+    path = card(tmp_path)
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    original = subprocess.run
+
+    def timeout(command, *args, **kwargs):
+        if command[0] == "schtasks":
+            raise subprocess.TimeoutExpired(command, 15)
+        return original(command, *args, **kwargs)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "run", timeout)
+    monkeypatch.setattr(reads, "record", lambda *args, **kwargs: True)
+    monkeypatch.setattr(life.receipt_signing, "workspace_key", lambda target: bytes.fromhex("12" * 32))
+    args = argparse.Namespace(
+        memory_care_command="tend", target=tmp_path, stage=["lifecycle", "retire"], dry_run=False, json=True
+    )
+    monkeypatch.setattr(memory_cmd, "_today", lambda: TODAY)
+    assert tend.dispatch(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["stages"]["lifecycle"]["blocked"] == "installed care schedules are unreadable"
+    assert result["stages"]["lifecycle"]["transitions"] == []
+    assert not result.get("failed_stages")
+    assert path.exists()
+
+
+@pytest.mark.parametrize("state", ["null", "[]"])
+def test_nonobject_state_keeps_later_stages_and_latest(tmp_path, monkeypatch, state):
+    path = card(tmp_path)
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    state_path = tmp_path / (
+        ".brigade/memory/lifecycle/" + life.hashlib.sha256(b"memory/cards/old.md").hexdigest() + ".json"
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(state)
+    later = []
+    monkeypatch.setattr(tend.memory_care_retire, "apply", lambda *a, **kw: later.append(True) or {})
+    result = tend.run(tmp_path, stages=["lifecycle", "retire"], today=TODAY)
+    assert result["failed_stages"] == ["lifecycle"]
+    assert later == [True]
+    assert json.loads((tmp_path / tend.STATE_REL).read_text()) == result
+    assert path.exists()
+
+
+def test_card_lock_timeout_preserves_prior_transitions(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from brigade import inbox_lock
+
+    card(tmp_path, name="a")
+    card(tmp_path, name="b")
+    card(tmp_path, name="c")
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    original = inbox_lock.held_file_lock
+    calls = []
+
+    @contextmanager
+    def lock(path, **kwargs):
+        if kwargs.get("deadline_seconds") == 5:
+            calls.append(path)
+            if len(calls) == 2:
+                raise inbox_lock.InboxLockTimeout("busy")
+        with original(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(reads, "record", lambda *args, **kwargs: True)
+    monkeypatch.setattr(life, "_references", lambda *args: {})
+    monkeypatch.setattr(inbox_lock, "held_file_lock", lock)
+    monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
+    result = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
+    stage = result["stages"]["lifecycle"]
+    assert [row["card_path"] for row in stage["transitions"]] == ["memory/cards/a.md", "memory/cards/c.md"]
+    assert all(row["decision_id"] for row in stage["transitions"])
+    assert {"path": "memory/cards/b.md", "reason": "local read ledger busy"} in stage["skipped"]
+    assert not result.get("failed_stages")
+
+
+def test_quoted_windows_path_with_spaces():
+    assert life._mentioned(r'"C:\Example Workspace\ws\memory\cards\old.md#section"', "memory/cards/old.md", "old")
