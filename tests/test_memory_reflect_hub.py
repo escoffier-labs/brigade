@@ -949,3 +949,25 @@ def test_rollback_failure_reports_failed_without_missing_proposal(setup, capsys,
     else:
         assert "compensation failed: scan_failed" in output
         assert "None" not in output
+
+
+def test_healthy_watch_budget_does_not_pause_scheduled_reflection(setup, capsys):
+    target, hub, _ = setup
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    def watch(body):
+        return 200, {"results": [], "next_after": hubc.event_id()}
+
+    hub.do_status = status
+    hub.do_compensation_watch = watch
+    for _ in range(4):
+        assert run(target, capsys, "run", "--hub", "--scheduled")[0] == 0
+    schedule = run(target, capsys, "status")[1]["schedule"]
+    assert schedule["consecutive_failures"] == 0
+    assert not schedule["paused"]
+    assert any(c["action"] == "propose" for c in hub.calls)

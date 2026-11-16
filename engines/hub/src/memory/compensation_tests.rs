@@ -1006,3 +1006,40 @@ async fn compensation_retry_rechecks_authority_exactness_and_watch_gates() {
         }
     }
 }
+
+// Seed healthy applied history before the real regression without 1024 apply RPCs.
+#[tokio::test]
+async fn compensation_watch_continues_across_polls_and_ignores_forged_after() {
+    let (mut h, id, _) = applied().await;
+    // Isolate pagination from the 50 ms writer deadline on this bulk fixture.
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"proposal_limits":{"lock_ms":30_000}}))
+        .unwrap();
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    for n in 0..1024 {
+        let older = format!("{n:026}");
+        db.execute("INSERT INTO memory_proposals(proposal_id,state,body,principal,created_at,decided_by,terminal_ms,compacted) SELECT ?1,state,json_set(body,'$.proposal_id',?1,'$.cards',json('[]')),principal,created_at,decided_by,terminal_ms,compacted FROM memory_proposals WHERE proposal_id=?2", rusqlite::params![older,id.as_str().unwrap()]).unwrap();
+        db.execute(
+            "INSERT INTO memory_proposal_scopes(proposal_id,scope) VALUES(?1,'fleet')",
+            [&older],
+        )
+        .unwrap();
+    }
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
+    for _ in 0..32 {
+        let r = h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"after":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ"})).await;
+        assert_eq!(r.status, 200, "{r:?}");
+        assert_eq!(r.body["results"], json!([]), "{r:?}");
+        assert!(r.body["next_after"].is_string());
+    }
+    // A fresh scheduled run starts without any client cursor.
+    let r = watch(&h).await;
+    assert_eq!(r.body["results"][0]["rollback_of"], id, "{r:?}");
+    assert_eq!(r.body["results"][0]["result"], "applied", "{r:?}");
+    assert!(r.body["next_after"].is_null());
+    // A completed cycle wraps to healthy history instead of starving old entries.
+    assert!(watch(&h).await.body["next_after"].is_string());
+}

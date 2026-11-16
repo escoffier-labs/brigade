@@ -1,0 +1,3 @@
+- Treat the automatic compensation watch budget as a successful bounded poll so healthy history cannot pause scheduled reflection.
+- Store scan progress per principal and scope in existing hub metadata and ignore client cursor authority. Reset on cycle completion to revisit healthy proposals for new regressions without a schema change.
+- Scan a stable eligible set of N applies in ceil(N / 1024) scheduled runs from reset, with at most one extra run from an arbitrary position, provided the applies remain in the watch window.

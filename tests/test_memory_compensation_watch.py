@@ -78,3 +78,25 @@ def test_watch_ignores_local_evidence_history(tmp_path):
 
     assert watch.run(Client(), ("repo",), "epoch") == []
     assert len(calls) == 1
+
+
+def test_watch_budget_is_success_and_next_run_continues():
+    from brigade import memory_hub_client as hubc
+
+    class Client:
+        def __init__(self):
+            self.page = 0
+
+        def call(self, action, **fields):
+            if action == "status":
+                return {"capabilities": [watch.CAPABILITY]}
+            self.page += 1
+            return {
+                "results": [{"result": "applied"}] if self.page == 33 else [],
+                "next_after": hubc.event_id() if self.page < 34 else None,
+            }
+
+    client = Client()
+    assert watch.run(client, ("repo",), "epoch") == []
+    assert client.page == 32
+    assert watch.run(client, ("repo",), "epoch") == [{"result": "applied"}]

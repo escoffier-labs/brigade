@@ -1,4 +1,10 @@
-"""Scheduled watch transport. The hub resolves verifier-attested signals."""
+"""Scheduled watch transport with hub-owned continuation and attested signals.
+
+Each scope polls at most 32 pages of 32 applies. For a stable eligible set of N
+applies that remain in the window, a cycle from reset takes ceil(N / 1024) runs.
+Starting partway through a cycle adds at most one run to cover the entire set.
+No workspace cursor is read or written. Only the hub advances or resets progress.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +37,6 @@ def run(
                 raise ValueError("invalid compensation watch cursor")
             seen.add(after)
             fields["after"] = after
-        else:
-            raise ValueError("compensation watch page bound exceeded")
+        # Exhausting the budget is a successful poll. The hub commits each
+        # page continuation, so the next scheduled run resumes without local state.
     return results

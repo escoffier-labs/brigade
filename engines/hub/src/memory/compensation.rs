@@ -483,9 +483,20 @@ pub fn watch(
             "rollback watch window must be 1 through 604800 seconds",
         ));
     };
-    tx.execute("DELETE FROM memory_meta WHERE (key LIKE 'compensation_watch:%' OR key LIKE 'compensation_retrieval:%') AND substr(key,instr(key,':')+1) IN (SELECT proposal_id FROM memory_proposals WHERE terminal_ms<?1 OR compacted=1)", &[Value::Integer(p.now_ms.saturating_sub(604_800_000))])?;
-    let after = string(request, "after");
-    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result')='applied') ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(after),t(scope)])?;
+    // Use the retention index instead of reading every retained proposal body.
+    tx.execute("DELETE FROM memory_meta WHERE (key LIKE 'compensation_watch:%' OR key LIKE 'compensation_retrieval:%') AND substr(key,instr(key,':')+1) IN (SELECT proposal_id FROM memory_proposals WHERE compacted=0 AND terminal_ms<?1 UNION SELECT proposal_id FROM memory_proposals WHERE compacted=1)", &[Value::Integer(p.now_ms.saturating_sub(604_800_000))])?;
+    // Continuation is hub-owned and committed with the scan. Client `after`
+    // remains accepted for wire compatibility but cannot suppress any proposals.
+    let progress_key = format!(
+        "compensation_scan:{}",
+        ids::sha256_hex(ids::canonical(&json!([p.credential.principal(), scope])).as_bytes())
+    );
+    let progress = tx.query(
+        "SELECT value FROM memory_meta WHERE key=?1",
+        &[t(&progress_key)],
+    )?;
+    let after = progress.first().map(|r| s(&r[0])).unwrap_or_default();
+    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4 AND proposal_id>?3) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result')='applied') ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(&after),t(scope)])?;
     let mut results = Vec::new();
     for row in rows.iter().take(32) {
         let id = s(&row[0]);
@@ -591,8 +602,18 @@ pub fn watch(
         }
         results.push(json!({"rollback_of":id,"proposal_id":result.body["proposal_id"],"trigger":trip["trigger"],"result":outcome,"reason":result.body["reason"]}));
     }
+    let next_after = if rows.len() > 32 {
+        rows.get(31).map(|r| s(&r[0]))
+    } else {
+        None
+    };
+    // Reset at the end so healthy proposals are reconsidered for new signals.
+    tx.execute(
+        "INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        &[t(&progress_key), t(next_after.as_deref().unwrap_or(""))],
+    )?;
     Ok(Reply::new(
         200,
-        json!({"results":results,"next_after":if rows.len()>32 {rows.get(31).map(|r|s(&r[0]))} else {None}}),
+        json!({"results":results,"next_after":next_after}),
     ))
 }
