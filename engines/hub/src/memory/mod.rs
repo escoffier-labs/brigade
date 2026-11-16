@@ -14,6 +14,7 @@ mod attestation_review_tests;
 #[cfg(test)]
 mod attestation_tests;
 pub mod auth;
+mod compensation;
 pub mod dense;
 pub mod embedder;
 pub mod embedding;
@@ -65,6 +66,8 @@ pub mod writer;
 
 #[cfg(test)]
 mod collection_tests;
+#[cfg(test)]
+mod compensation_tests;
 #[cfg(test)]
 mod embedder_tests;
 #[cfg(test)]
@@ -1016,9 +1019,8 @@ impl Store {
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
-            "propose" | "decide" | "rollback" | "auto_apply" | "verify_auto_apply" => {
-                self.proposal_request(credential, action, map, &raw).await
-            }
+            "propose" | "decide" | "rollback" | "auto_apply" | "verify_auto_apply"
+            | "compensation_watch" => self.proposal_request(credential, action, map, &raw).await,
             "put"
             | "import"
             | "retire"
@@ -1186,7 +1188,7 @@ impl Store {
                 "client_event_id",
             ],
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
-            "auto_apply_switch" => &["action", "enabled", "client_event_id"],
+            "auto_apply_switch" => &["action", "enabled", "scope", "op_type", "client_event_id"],
             "verifier" => &["action", "principal", "verifier", "client_event_id"],
             "verifier_resync" => &["action", "client_event_id"],
             "evidence.purge" => &["action", "evidence_id", "client_event_id"],
@@ -1213,6 +1215,14 @@ impl Store {
                 "decision",
                 "client_event_id",
                 "expected_policy_digest",
+            ],
+            "compensation_watch" => &[
+                "action",
+                "scope",
+                "base_epoch",
+                "client_event_id",
+                "negative_outcomes",
+                "after",
             ],
             "rollback" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "put" | "import" => &[
@@ -1364,11 +1374,34 @@ impl Store {
                     .ok_or_else(|| invalid("verifier must be a boolean"))?,
                 generation: 0,
             },
-            "auto_apply_switch" => Action::AutoApplySwitch(
-                map.get("enabled")
+            "auto_apply_switch" => {
+                let enabled = map
+                    .get("enabled")
                     .and_then(Json::as_bool)
-                    .ok_or_else(|| invalid("enabled must be a boolean"))?,
-            ),
+                    .ok_or_else(|| invalid("enabled must be a boolean"))?;
+                let release = if map.contains_key("scope") || map.contains_key("op_type") {
+                    let scope = str_field("scope")
+                        .filter(|s| ids::valid_scope(s))
+                        .ok_or_else(|| invalid("hold release requires scope and op_type"))?;
+                    let op = str_field("op_type")
+                        .filter(|s| {
+                            matches!(
+                                *s,
+                                "append_evidence"
+                                    | "replace_block"
+                                    | "remove_block"
+                                    | "add_previously"
+                                    | "supersede_card"
+                                    | "merge_exact_duplicates"
+                            )
+                        })
+                        .ok_or_else(|| invalid("hold release requires scope and op_type"))?;
+                    Some((scope.to_string(), op.to_string()))
+                } else {
+                    None
+                };
+                Action::AutoApplySwitch(enabled, release)
+            }
             "evidence.attach" => Action::Evidence(attestation::prepare(raw, credential, now_ms)?),
             "rescan" => {
                 let limit = match map.get("limit") {
@@ -1402,13 +1435,30 @@ impl Store {
                     after,
                 }
             }
-            "propose" | "decide" | "rollback" | "auto_apply" | "verify_auto_apply" => {
-                if action != "propose"
+            "propose" | "decide" | "rollback" | "auto_apply" | "verify_auto_apply"
+            | "compensation_watch" => {
+                if !matches!(action, "propose" | "compensation_watch")
                     && str_field("proposal_id")
                         .and_then(ids::parse_event_id)
                         .is_none()
                 {
                     return Err(invalid("proposal_id must be a time-ordered id"));
+                }
+                if action == "compensation_watch"
+                    && (str_field("scope").is_none_or(|s| !ids::valid_scope(s))
+                        || map
+                            .get("after")
+                            .is_some_and(|v| v.as_str().and_then(ids::parse_event_id).is_none())
+                        || map.get("negative_outcomes").is_some_and(|v| {
+                            v.as_array().is_none_or(|rows| {
+                                rows.len() > 64
+                                    || rows.iter().any(|r| {
+                                        r.as_str().is_none_or(|s| s.is_empty() || s.len() > 1024)
+                                    })
+                            })
+                        }))
+                {
+                    return Err(invalid("invalid compensation watch scope or signals"));
                 }
                 if action == "decide" && !matches!(str_field("decision"), Some("accept" | "reject"))
                 {
@@ -1999,7 +2049,7 @@ fn reads<T: ReadTx + ?Sized>(
                     "verifier": verifier::flagged(tx, credential.principal())?,
                     "verify_evaluation": verify_eval::latest(tx, credential.principal())?,
                     "verifier_generation": {"memory": verifier::db_generation(tx)?},
-                    "capabilities": [verifier::CAPABILITY, manifest_binding::CAPABILITY],
+                    "capabilities": [verifier::CAPABILITY, manifest_binding::CAPABILITY, compensation::CAPABILITY],
                 }),
             );
             if let Some(names) = readable_scopes {

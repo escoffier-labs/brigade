@@ -1638,8 +1638,9 @@ requirement and refuses to run where those operations are unavailable.
 `--schedule memory-reflect=<value>` uses the selected backend's existing
 schedule syntax. The isolated launcher pins the installed Brigade package,
 passes an absolute workspace target, and invokes `memory reflect run --hub
---scheduled`. It never invokes a decision or apply command. `--hub` refuses
-disabled hub settings rather than switching to local cards.
+--scheduled`. The scheduled run also polls the automatic compensation watch,
+which can reverse the policy actor's own unchanged applies. `--hub` refuses
+disabled hub settings.
 
 A failure means a non-dry reflect run exits non-zero. For runs that can safely write
 workspace state, `.brigade/memory/reflect/schedule.json` records consecutive
@@ -1748,11 +1749,12 @@ Without `--scope`, partial `reflect` grants across configured `read_scopes` will
 after repeated authorization failures.
 
 `brigade memory reflect rollback <proposal-id> --target <workspace>` requests
-the hub's compensating proposal. This separate operator action requires `read`
-plus `review` on every original target scope. It sends the observed log epoch
-and never restores card text directly. The compensation waits for another
-explicit decision, with the same hub scope, self-review, revision and pin
-checks as S19a.
+the hub's compensating proposal and sends the observed log epoch. An exact
+policy-actor reversal requires `read` plus `reflect` on every original target
+scope and applies automatically at the hub. Other compensations require `read`
+plus `review` and wait for another explicit decision, with the existing scope,
+self-review, revision and pin checks. The client does not restore card text
+locally.
 
 
 ## Hub proposal resource limits
@@ -2806,6 +2808,94 @@ paused with the same reason. A card field that is present must hold a value of
 its type, so an explicit `null` is malformed. Only a scope's `since_day` and
 `never_read` may be `null`, meaning not counted yet and unknown.
 
+### Automatic compensation watch
+
+A policy actor listed in `memory.reflect_principals`, under hub curation
+ownership, can automatically compensate its own automatic apply. The hub
+constructs the inverse from its retained snapshots. The actor, applied revision,
+content hash, restored bytes, trust and state must all match. An intervening
+edit, including an edit followed by a content revert, prevents automatic
+compensation. The hub permits up to 128 intervening revisions only when each
+is an applied evidence-only append to that card. It replays those operations
+and checks every revision, hash, state and trust against retained snapshots.
+Compensation restores the original snapshot, including its evidence list.
+Later evidence artifacts remain in the immutable hub store. Other compensations
+retain Tier 2. Ordinary verifier proposals retain their existing review floor.
+
+Scheduled `memory reflect run --hub --scheduled` polls the hub's
+`automatic_compensation` capability before proposing new work. Set
+`memory.rollback_watch_seconds` in fleet policy to change the watch window
+from 86400 seconds. Supported values are 1 through 604800. A manual reflect
+run and a dry run do not poll the watch.
+
+The watch compares post-apply admin-attested retrieval records against the
+pre-apply record for the same fixture, scope, epoch and ranking configuration.
+A drop greater than 0.01 in `hit_rate`, `mrr`, `precision_at_k` or `recall_at_k`,
+overall or by category, is a regression. Automatic reversal requires every
+corpus revision between the baseline evaluation and the later evaluation to
+belong to the watched proposal. An unrelated edit, including an edit followed
+by a revert, sends the compensation to Tier 2 review. Hybrid regressions also
+require review until a counterfactual evaluator can attribute vector changes.
+The hub retains scan progress, so later evaluations remain reachable after the
+first page of 128 records.
+
+Scheduled reflection sends no local receipt paths or receipt batches. Local
+failed receipts have no hub upload or mapping route and cannot trip a watch.
+Only hub-attested verifier failures count. The hub discovers these directly.
+API callers may optionally narrow negative outcomes with at most 64 immutable
+hub evidence IDs.
+
+A failed effectiveness signal must be an active `memory-verify-manifest`
+binding for the applied card revision or a later evidence-only revision.
+Its `card.content_hash` must match that attested revision's retained bytes.
+The manifest's `effectiveness` object must contain `status: "failed"`,
+`verifier_credential` matching the attesting credential ID, and `observed_ms`
+matching the immutable attachment time in the watch window. The credential
+must still be live, flagged as a verifier, and authorized to reflect on that
+scope. Pending and inert bindings have no authority.
+
+Active verifier manifests can also report `contradicted` on a block touched by
+the proposal. The hub resolves the manifest's revision and requires that
+block's hash to match the block in the applied snapshot. Each verifier can
+propose an evidence append against the current revision and obtain review
+before the next verifier attests. Pending and inert bindings never trip the
+watch. Two independent verifier principals are required for automatic reversal from verifier signals.
+Multiple records or credentials from one principal still count once. A signal
+from one principal opens a Tier 2 compensation for review and leaves card bytes
+unchanged. A canary-miss resolver remains deferred until canaries have an
+attested evidence contract.
+
+Trips and compensation results are retained in proposal decision events.
+Failures retain every card's bytes and record `compensation_result: failed`.
+The CLI reports failure with a failing exit status, including when a savepoint
+rollback leaves no compensating proposal. A hub watch journal retains the
+original proposal ID and successful trip so scheduled runs cannot repeat an
+applied compensation or an identical review referral. A later independent
+active verifier can upgrade a referral. Failed attempts leave the watch and
+retrieval cursor retryable. Journal entries and retrieval cursors are pruned
+on a later watch poll after the maximum seven-day window or proposal
+compaction. Decision events
+include `watch_trip` with the signal.
+
+Only a successful automatic compensation installs a hold for each original
+`(scope, operation type)` pair. Failed attempts and review referrals install no
+holds. Reviewer-approved compensations also install no hold. Holds survive
+policy revisions. An admin `auto_apply_switch` request with
+`scope` and `op_type` releases only that pair. Set `enabled: false` to clear
+the hold while keeping automatic apply disabled. Set `enabled: true` to clear
+the hold and enable automatic apply. A switch request without the pair changes
+the kill switch without releasing any hold.
+
+Automatic compensations obey both `memory.auto_apply` and the hub kill switch.
+Recovery compensations remain available while an operation class is held, but
+automatic actor-initiated rollbacks use the same watch window and install the
+same scoped holds on success. A rollback outside that window requires review.
+
+Watch requests require read and reflect on their scope. The hub supplies
+retrieval and verifier signals and checks all negative evidence itself. Watch
+replies contain decision metadata. A request inspects at
+most 32 applied proposals with a continuation. Reflection bounds polling to
+32 pages per scope. Local evidence logs do not authorize watch signals.
 
 ## Verify evaluation and automatic admission
 

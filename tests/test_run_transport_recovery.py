@@ -185,6 +185,7 @@ def _dispatch_recovery(
     direct=True,
     source_env=None,
     quarantine_state=None,
+    allow_reinvocation=True,
 ):
     direct_calls = []
     fallback_calls = []
@@ -212,6 +213,7 @@ def _dispatch_recovery(
         sandbox="read-only" if read_only else None,
         direct=direct,
         quarantine_state=quarantine_state,
+        allow_reinvocation=allow_reinvocation,
     )[0]
     return result, direct_calls, fallback_calls
 
@@ -525,3 +527,13 @@ def test_task_role_strict_roster_blocks_invalid_final_seat_fallback(monkeypatch,
     assert fallback_calls == []
     assert all(attempt.kind != "fallback" for attempt in result.attempts)
     assert roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"
+
+
+def test_disabled_reinvocation_keeps_first_invalid_final(monkeypatch, tmp_path):
+    first = _invalid_final()
+    result, direct_calls, fallback_calls = _dispatch_recovery(monkeypatch, tmp_path, [first], allow_reinvocation=False)
+    assert len(direct_calls) == 1
+    assert fallback_calls == []
+    assert result.ok is False
+    assert result.text == first.text
+    assert result.failure_kind == first.failure_kind
