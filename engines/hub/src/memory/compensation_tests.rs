@@ -120,6 +120,22 @@ async fn verifier_signal(
     id
 }
 
+struct RefuseInverse(String);
+impl Scanner for RefuseInverse {
+    fn scan(&self, text: &str) -> Scan {
+        if text == self.0 {
+            Scan::Failed
+        } else {
+            Scan::Clean {
+                ruleset: "test-v1".into(),
+            }
+        }
+    }
+    fn describe(&self) -> (bool, Option<String>) {
+        (true, Some("test-v1".into()))
+    }
+}
+
 async fn watch_negative(h: &Hub, ids: Vec<String>) -> Reply {
     h.call(ADMIN_TOKEN,json!({"action":"compensation_watch","scope":"fleet","base_epoch":h.epoch().await,"client_event_id":h.id(),"negative_outcomes":ids})).await
 }
@@ -766,25 +782,10 @@ async fn compensation_stale_watch_is_final_after_one_attempt() {
 
 #[tokio::test]
 async fn compensation_watch_scan_refusal_retries_after_scanner_recovers() {
-    let (mut h, _, before) = applied().await;
-    verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
-    verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
+    let (mut h, id, before) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
     h.store.take();
-    struct RefuseInverse(String);
-    impl Scanner for RefuseInverse {
-        fn scan(&self, text: &str) -> Scan {
-            if text == self.0 {
-                Scan::Failed
-            } else {
-                Scan::Clean {
-                    ruleset: "test-v1".into(),
-                }
-            }
-        }
-        fn describe(&self) -> (bool, Option<String>) {
-            (true, Some("test-v1".into()))
-        }
-    }
     h.open(Arc::new(RefuseInverse(before.clone())), None);
     let refused = watch(&h).await;
     assert_eq!(
@@ -792,6 +793,12 @@ async fn compensation_watch_scan_refusal_retries_after_scanner_recovers() {
         "{refused:?}"
     );
     assert_eq!(refused.body["results"][0]["reason"], "scan_not_clean");
+    let again = watch(&h).await;
+    assert_eq!(again.body["results"][0]["result"], "failed");
+    assert_eq!(
+        again.body["results"][0]["proposal_id"],
+        refused.body["results"][0]["proposal_id"]
+    );
     h.store.take();
     h.open(
         Arc::new(Fixed(Scan::Clean {
@@ -804,7 +811,20 @@ async fn compensation_watch_scan_refusal_retries_after_scanner_recovers() {
         retried.body["results"][0]["result"], "applied",
         "{retried:?}"
     );
+    assert_eq!(
+        retried.body["results"][0]["proposal_id"],
+        refused.body["results"][0]["proposal_id"]
+    );
     assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let inverses: i64 = db
+        .query_row(
+            "SELECT count(*) FROM memory_proposals WHERE json_extract(body,'$.rollback_of')=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(inverses, 1);
 }
 
 #[tokio::test]
@@ -848,4 +868,141 @@ async fn compensation_release_leaves_enabled_switch_unchanged() {
         )
         .unwrap();
     assert_eq!(enabled, "true");
+}
+
+#[tokio::test]
+async fn compensation_stale_trip_does_not_silence_a_distinct_negative_outcome() {
+    let (h, id, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "contradiction-one", "active", false, "").await;
+    verifier_signal(&h, NODE_TOKEN, "contradiction-two", "active", false, "").await;
+    let c = card(&h, "fleet", "a").await;
+    h.put(
+        ADMIN_TOKEN,
+        "fleet",
+        "a",
+        c["revision"].as_i64(),
+        "Human correction. ^c-abcdef",
+    )
+    .await;
+    let first = watch(&h).await;
+    assert_eq!(first.body["results"][0]["trigger"], "contradicted");
+    assert_eq!(first.body["results"][0]["result"], "failed");
+    // An existing round-4 journal must retain its fingerprint on upgrade.
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    db.execute(
+        "UPDATE memory_meta SET value=json_remove(value,'$.completed_trips') WHERE key=?1",
+        [format!("compensation_watch:{}", id.as_str().unwrap())],
+    )
+    .unwrap();
+    drop(db);
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    let one = verifier_signal(&h, AGENT_TOKEN, "negative-one", "active", true, "").await;
+    let two = verifier_signal(&h, NODE_TOKEN, "negative-two", "active", true, "").await;
+    let before = attestation_tests::bytes_snapshot(&h);
+    let later = watch_negative(&h, vec![one.clone(), two.clone()]).await;
+    assert_eq!(later.body["results"][0]["rollback_of"], id, "{later:?}");
+    assert_eq!(later.body["results"][0]["trigger"], "negative-outcome");
+    assert_eq!(later.body["results"][0]["result"], "failed");
+    assert_eq!(later.body["results"][0]["reason"], "memory_base_mismatch");
+    assert_ne!(
+        later.body["results"][0]["proposal_id"],
+        first.body["results"][0]["proposal_id"]
+    );
+    assert_eq!(
+        watch_negative(&h, vec![one, two]).await.body["results"],
+        json!([])
+    );
+    // Revisiting the old fingerprint must not create a third inverse.
+    assert_eq!(watch_negative(&h, vec![]).await.body["results"], json!([]));
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let inverses: i64 = db
+        .query_row(
+            "SELECT count(*) FROM memory_proposals WHERE json_extract(body,'$.rollback_of')=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(inverses, 2);
+    assert_eq!(attestation_tests::bytes_snapshot(&h), before);
+}
+
+#[tokio::test]
+async fn compensation_retry_rechecks_authority_exactness_and_watch_gates() {
+    for drift in [
+        "inverse", "head", "kill", "policy", "verifier", "window", "actor",
+    ] {
+        let (mut h, id, before) = applied().await;
+        verifier_signal(&h, AGENT_TOKEN, "one", "active", false, "").await;
+        verifier_signal(&h, NODE_TOKEN, "two", "active", false, "").await;
+        h.store.take();
+        h.open(Arc::new(RefuseInverse(before)), None);
+        let refused = watch(&h).await;
+        assert_eq!(refused.body["results"][0]["result"], "failed");
+        let inverse = refused.body["results"][0]["proposal_id"].clone();
+        h.store.take();
+        h.open(
+            Arc::new(Fixed(Scan::Clean {
+                ruleset: "test-v1".into(),
+            })),
+            None,
+        );
+        match drift {
+            "inverse" => attestation_tests::mutate_body(&h, &inverse, |b| {
+                b["cards"][0]["after_text"] = json!("An unrelated edit.");
+            }),
+            "head" => {
+                let c = card(&h, "fleet", "a").await;
+                h.put(
+                    ADMIN_TOKEN,
+                    "fleet",
+                    "a",
+                    c["revision"].as_i64(),
+                    "Human correction. ^c-abcdef",
+                )
+                .await;
+            }
+            "kill" => {
+                h.call(
+                    ADMIN_TOKEN,
+                    json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
+                )
+                .await;
+            }
+            "policy" => attestation_tests::change_policy(&h, "auto_apply", json!(false)),
+            "verifier" => {
+                h.call(ADMIN_TOKEN, json!({"action":"verifier","principal":"node-1","verifier":false,"client_event_id":h.id()})).await;
+            }
+            "window" => h.set_clock(h.now() + 86_400_001),
+            "actor" => attestation_tests::change_policy(&h, "reflect_principals", json!([])),
+            _ => unreachable!(),
+        }
+        let bytes = attestation_tests::bytes_snapshot(&h);
+        // A retained watch attempt cannot be applied directly to skip a new watch.
+        let direct = h
+            .call(
+                ADMIN_TOKEN,
+                attestation_tests::auto_request(&h, &inverse).await,
+            )
+            .await;
+        assert_ne!(direct.body["state"], "applied", "{drift}: {direct:?}");
+        let retried = watch(&h).await;
+        assert!(
+            retried.body["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["result"] != "applied"),
+            "{drift}: {retried:?}"
+        );
+        assert_eq!(attestation_tests::bytes_snapshot(&h), bytes, "{drift}");
+        if ["inverse", "head", "kill", "policy"].contains(&drift) {
+            assert_eq!(
+                retried.body["results"][0]["proposal_id"], inverse,
+                "{drift}: {retried:?}"
+            );
+            let db = rusqlite::Connection::open(h.memory()).unwrap();
+            let inverses: i64 = db.query_row("SELECT count(*) FROM memory_proposals WHERE json_extract(body,'$.rollback_of')=?1", [id.as_str().unwrap()], |r| r.get(0)).unwrap();
+            assert_eq!(inverses, 1, "{drift}");
+        }
+    }
 }

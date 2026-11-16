@@ -923,11 +923,48 @@ pub(super) fn compensate(
     }
     tx.execute("SAVEPOINT compensation", &[])?;
     let result = (|| -> rusqlite::Result<Reply> {
-        let opened = open(tx, p, inverse, authority, "proposal.rollback", scanner)?;
-        if opened.status >= 400 {
-            return Ok(opened);
+        // Only a failed automatic attempt for this exact freshly attested trip
+        // can be retried. Review referrals never enter this path. Include
+        // rejected round-4 scan attempts without reviving reviewed rejections.
+        let mut retry = None;
+        if policy_actor && original["watch_trip"].is_object() {
+            for row in tx.query(
+                "SELECT proposal_id FROM memory_proposals WHERE compacted=0 AND state IN ('held','pending','rejected') AND json_extract(body,'$.rollback_of')=?1 AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.decision')='failed' AND json_extract(body,'$.compensation_result')='failed' ORDER BY proposal_id",
+                &[t(string(original, "proposal_id"))],
+            )? {
+                let candidate = load(tx, &s(&row[0]))?.unwrap();
+                if candidate["watch_trip"] == original["watch_trip"]
+                    && candidate["watch_trip"]["review_required"] == false
+                {
+                    retry = Some(candidate);
+                    break;
+                }
+            }
         }
-        let mut body = load(tx, string(&opened.body, "proposal_id"))?.unwrap();
+        let mut body = if let Some(mut candidate) = retry {
+            // Do not replace stored pins or policy with the fresh inverse.
+            // apply_cards checks that candidate against the current exact
+            // reverse, actor, policy, window, switch, heads and scans again.
+            if !automatic {
+                candidate["state"] = json!(if inverse["state"] == "stale" {
+                    "stale"
+                } else {
+                    "held"
+                });
+                candidate["reason"] = if inverse["reason"].is_null() {
+                    json!("compensation_not_exact")
+                } else {
+                    inverse["reason"].clone()
+                };
+            }
+            candidate
+        } else {
+            let opened = open(tx, p, inverse, authority, "proposal.rollback", scanner)?;
+            if opened.status >= 400 {
+                return Ok(opened);
+            }
+            load(tx, string(&opened.body, "proposal_id"))?.unwrap()
+        };
         if automatic {
             let mut automatic_p = p.clone();
             automatic_p.action = ops::Action::Proposal(Command {
@@ -939,10 +976,15 @@ pub(super) fn compensate(
             }
         }
         if policy_actor {
-            // Failed automatic inverses are terminal audit records. A retry
-            // opens a fresh inverse under current head, policy and scan checks.
+            // Held watch attempts are retryable only through a fresh watch.
+            // Direct auto_apply requires pending, so it cannot bypass renewed
+            // independent verifier checks after a scan refusal.
             if body["state"] == "pending" {
-                body["state"] = json!("rejected");
+                body["state"] = json!(if original["watch_trip"].is_object() {
+                    "held"
+                } else {
+                    "rejected"
+                });
             }
             body["decision"] = json!(if body["state"] == "applied" {
                 "auto_apply"

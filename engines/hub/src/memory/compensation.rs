@@ -485,7 +485,7 @@ pub fn watch(
     };
     tx.execute("DELETE FROM memory_meta WHERE (key LIKE 'compensation_watch:%' OR key LIKE 'compensation_retrieval:%') AND substr(key,instr(key,':')+1) IN (SELECT proposal_id FROM memory_proposals WHERE terminal_ms<?1 OR compacted=1)", &[Value::Integer(p.now_ms.saturating_sub(604_800_000))])?;
     let after = string(request, "after");
-    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result') IN ('applied','stale')) ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(after),t(scope)])?;
+    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result')='applied') ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(after),t(scope)])?;
     let mut results = Vec::new();
     for row in rows.iter().take(32) {
         let id = s(&row[0]);
@@ -523,11 +523,18 @@ pub fn watch(
             "SELECT value FROM memory_meta WHERE key=?1",
             &[t(&journal_key)],
         )?;
-        if previous.first().is_some_and(|r| {
-            serde_json::from_str::<Json>(&s(&r[0]))
-                .ok()
-                .is_some_and(|v| v["trip"] == trip && v["result"] == "review_required")
-        }) {
+        let mut journal = previous
+            .first()
+            .and_then(|r| serde_json::from_str::<Json>(&s(&r[0])).ok())
+            .filter(Json::is_object)
+            .unwrap_or_else(|| json!({}));
+        let fingerprint = ids::sha256_hex(ids::canonical(&trip).as_bytes());
+        // Retain round-4 journals and every completed fingerprint. A permanent
+        // refusal ends retries of that trip, not watches for the original.
+        if (journal["trip"] == trip
+            && matches!(string(&journal, "result"), "review_required" | "stale"))
+            || journal["completed_trips"].get(&fingerprint).is_some()
+        {
             continue;
         }
         // A changed signal must not multiply referrals awaiting human review.
@@ -560,7 +567,18 @@ pub fn watch(
         );
         if outcome != "failed" || permanent {
             let journal_result = if permanent { "stale" } else { outcome };
-            tx.execute("INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &[t(&journal_key),t(&json!({"trip":trip,"result":journal_result}).to_string())])?;
+            if !journal["completed_trips"].is_object() {
+                journal["completed_trips"] = json!({});
+            }
+            // Migrate the last legacy fingerprint before replacing it.
+            if matches!(string(&journal, "result"), "review_required" | "stale") {
+                let prior = ids::sha256_hex(ids::canonical(&journal["trip"]).as_bytes());
+                journal["completed_trips"][prior] = journal["result"].clone();
+            }
+            journal["trip"] = trip.clone();
+            journal["result"] = json!(journal_result);
+            journal["completed_trips"][fingerprint] = json!(journal_result);
+            tx.execute("INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &[t(&journal_key),t(&journal.to_string())])?;
         } else {
             // A refusal must leave both verifier and retrieval signals retryable.
             tx.execute("DELETE FROM memory_meta WHERE key=?1", &[t(&cursor_key)])?;
