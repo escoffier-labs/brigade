@@ -218,6 +218,8 @@ def test_mutation_unadmitted_class_cannot_apply(verify_hub, resolver, capsys, mo
     result = automatic.apply_pending(target, state, cmd._hub(target)[1], pair=pair, now_ms=1001)
     assert bool(applied) == admit
     assert bool(result) == admit
+    # The run saves verify state after applying, including the attempt time.
+    state_mod.save(target, state)
     if admit:
         assert applied[0]["action"] == "verify_auto_apply"
         assert applied[0]["expected_op_types"] == ["replace_block", "append_evidence"]
@@ -738,3 +740,17 @@ def test_apply_pending_paces_rotates_and_reports_rate_limits(tmp_path, monkeypat
     second = automatic.apply_pending(tmp_path, state, limited, pair=(), now_ms=2000)
     assert limited.sent == ["p-good", "p-stuck"]
     assert {r["proposal_id"]: r["state"] for r in second}["p-stuck"] == "rate-limited"
+
+
+@pytest.mark.parametrize("value", [0, 1700000000000])
+def test_attempt_time_is_a_valid_persisted_card_key(value):
+    from brigade import memory_verify_state as vstate
+
+    assert vstate._card({"seen": 1, "proposed": 1, "last_auto_attempt_ms": value})
+
+
+@pytest.mark.parametrize("value", [-1, "1", 1.5, None, True])
+def test_malformed_attempt_time_is_refused(value):
+    from brigade import memory_verify_state as vstate
+
+    assert not vstate._card({"seen": 1, "proposed": 1, "last_auto_attempt_ms": value})

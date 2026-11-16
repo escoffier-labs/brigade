@@ -4,3 +4,4 @@
 - The gate refuses duplicate case ids across the corpus and feedback as a no-go.
 - `memory verify eval` reports corpus and harness errors with their `verify_eval_*` code (for example `verify_eval_case_invalid` for a malformed case) instead of a generic code or a traceback.
 - Scheduled verify paces `verify_auto_apply` requests, tries the least recently attempted proposals first and reports a throttled attempt as `rate-limited`.
+- Verify state accepts the automatic apply attempt time, so a run that attempts an application saves its state and keeps the rotation order.
