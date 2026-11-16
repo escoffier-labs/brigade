@@ -1,1 +1,2 @@
 - An occupied or refused archive destination now skips only that card. The lifecycle pass and later tending stages keep running.
+- Automatic recovery holds a prepared decision that overlaps another unfinished operation for named recovery instead of stopping the tend run.

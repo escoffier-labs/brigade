@@ -288,3 +288,37 @@ def test_round14_automatic_holds_conflict_and_guard(tmp_path, monkeypatch, exclu
         assert final["phase"] == "abandoned"
         assert final["abandoned_reason"]
         assert "restorable" in final
+
+
+def test_automatic_recovery_holds_a_projection_blocked_decision(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            journal.commit_phased(
+                tmp_path,
+                kind="fix",
+                reason="test",
+                card_id=None,
+                changes=[journal.Change("a.md", b"old a", b"new a")],
+                prepared_paths=[],
+                hub={},
+                metadata={},
+            )
+
+    def blocked(*args, **kwargs):
+        raise journal.kernel.OverlapBlockedError("unfinished projection other-op overlaps a.md")
+
+    monkeypatch.setattr(journal, "_execute_phase", blocked)
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    assert result[0]["decision_id"] == saved[0]
+    assert result[0]["phase"] == "operator_required"
+    assert "other-op" in result[0]["reason"]
+    assert journal._payload(tmp_path, saved[0])["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"old a"

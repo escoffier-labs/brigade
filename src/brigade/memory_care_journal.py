@@ -759,7 +759,19 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
                         pending = [c for c in changes if c.path not in p["prepared_paths"]]
                         rel = f"{JOURNAL_REL}/{decision_id}/decision.json"
                         pending.append(Change(rel, current(target, rel), _json_bytes(final)))
-                        _execute_phase(target, decision_id, "finish", pending)
+                        try:
+                            _execute_phase(target, decision_id, "finish", pending)
+                        except kernel.ProjectionError as exc:
+                            # Another unfinished operation overlaps these paths. The kernel refused
+                            # before writing, so the decision stays prepared for named recovery.
+                            results.append(
+                                {
+                                    "decision_id": decision_id,
+                                    "phase": "operator_required",
+                                    "reason": f"blocked by an unfinished projection: {exc}",
+                                }
+                            )
+                            continue
                         results.append({"decision_id": decision_id, "phase": "committed", "reason": ""})
                         continue
         except (JournalConflict, store.StoreError, OSError, ValueError):
