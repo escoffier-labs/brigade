@@ -317,14 +317,14 @@ def test_missing_gold_ids_are_dropped_before_query_floor():
         live.measure_candidate(cards, [], proposal, bm25_adapter(cards), {})
 
 
-def test_private_search_read_ledger_counts_all_twenty(workspace):
+def test_private_search_leaves_lifecycle_read_counts_unchanged(workspace):
     from brigade.memory_cmd import _record_search_log
     from brigade.memory_card_reads import load
 
+    before = load(workspace).last_read
     matches = [{"card_id": f"c-{i}", "path": f"cards/c-{i}.md"} for i in range(20)]
     _record_search_log(workspace, query="private", matches=matches, private_query=True)
-    counts = load(workspace).last_read
-    assert all(f"c-{i}" in counts for i in range(20))
+    assert load(workspace).last_read == before
 
 
 def test_wire_budget_counts_raw_bytes_before_json_decode(monkeypatch):
