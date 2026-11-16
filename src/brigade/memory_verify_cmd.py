@@ -570,8 +570,8 @@ def dispatch(args: argparse.Namespace) -> int:
     except VerifyRunError as exc:
         payload = _failure(exc.code, str(exc))
     except vc.Abstain as exc:
-        # Abstain carries a fixed code. An unreadable corpus card reports it instead of a traceback.
-        payload = _failure(exc.code, "verify could not read an evaluation card")
+        # Abstain carries a fixed code. An unreadable card reports it instead of a traceback.
+        payload = _failure(exc.code, "verify could not read a card")
     except vstate.VerifyStateError as exc:
         payload = _failure("verify_state", str(exc))
     except store.limits.ReplicaLimitError:

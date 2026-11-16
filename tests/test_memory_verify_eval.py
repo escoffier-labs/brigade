@@ -645,3 +645,19 @@ def test_eval_cli_reports_an_unanchored_corpus_card(verify_hub, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["code"] == "verify_card_invalid"
     assert hub.calls == []
+
+
+def test_deadline_scales_with_card_runs():
+    ticks = iter(range(0, 10**6, 12))
+    cases = [case(id=f"case-{index}") for index in range(60)]
+    # 120 checks at 12 clock seconds pass the old 20 minute limit and fit the 30 minute budget.
+    report = run_eval(cases, clock=lambda: next(ticks))
+    assert report["cases"] == 60
+    slow = iter(range(0, 10**7, 400))
+    with pytest.raises(ValueError, match="verify_eval_timeout"):
+        run_eval(cases, clock=lambda: next(slow))
+
+
+def test_duplicate_ids_across_corpus_and_feedback_are_refused():
+    with pytest.raises(ValueError, match="verify_eval_duplicate_id"):
+        run_eval([case(id="same"), case(id="same")])

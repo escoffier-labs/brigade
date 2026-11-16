@@ -692,6 +692,11 @@ The explicit gate command publishes its policy digest and go/no-go record throug
 hub admin-authenticated `verify_eval.record`. Records are append-only in the hub.
 Local files cannot grant admission or advance the consecutive-pass streak.
 Run the gate separately whenever admission expires or inputs change.
+One evaluation takes the full corpus (up to 256 cases) plus retained feedback
+(up to 128). Its deadline is the larger of 20 minutes and 15 seconds per card run,
+so 384 cases at 3 repeats allow about 4.8 hours. A run past the deadline reports
+`verify_eval_timeout` and records no-go. Duplicate ids across the corpus and
+feedback report `verify_eval_duplicate_id`, also as no-go.
 The report contains precision, recall, true positives, false positives and false
 negatives per class and operation type, repeat agreement and unsafe proposals.
 Operation metrics count emitted operations separately from verdicts. Confirming

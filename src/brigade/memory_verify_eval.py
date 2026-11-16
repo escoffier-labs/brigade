@@ -29,6 +29,10 @@ OP_CLASS = {
 MAX_CASES = 256
 # The gate evaluates the full corpus plus all retained feedback in one run.
 MAX_EVAL_CASES = MAX_CASES + feedback.MAX_CASES
+# The deadline grows with the number of card runs, so a slow seat does not turn a
+# full corpus into a timeout no-go. The case limit bounds it at about 4.8 hours.
+MIN_DEADLINE_SECONDS = 20 * 60
+SECONDS_PER_RUN = 15
 
 
 def read_corpus(path: Path) -> list[dict[str, Any]]:
@@ -113,12 +117,15 @@ def evaluate(
 ) -> dict[str, Any]:
     if not 1 <= len(cases) <= MAX_EVAL_CASES or not 1 <= repeats <= 3:
         raise ValueError("verify_eval_limit")
+    # Repeat agreement groups by id, so a corpus id that matches a feedback id would merge two cases.
+    if len({case.get("id") for case in cases}) != len(cases):
+        raise ValueError("verify_eval_duplicate_id")
     prepared = [(case, *inputs(case)) for case in cases]
     counts = {name: dict(tp=0, fp=0, fn=0, support=0) for name in CLASSES}
     op_counts = {name: dict(tp=0, fp=0, fn=0, support=0) for name in OP_CLASS}
     observed: dict[str, list[str]] = {}
     unsafe = invalid = calls = 0
-    deadline = clock() + 20 * 60
+    deadline = clock() + max(MIN_DEADLINE_SECONDS, len(cases) * repeats * SECONDS_PER_RUN)
     for _ in range(repeats):
         for case, card, assembly in prepared:
             if clock() >= deadline:
