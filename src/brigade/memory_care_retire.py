@@ -33,10 +33,14 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
     from . import memory_review
 
     cards = {}
+    content_hashes = {}
     for path in memory_cmd._iter_cards(target, config):
         try:
             rel = path.relative_to(target).as_posix()
-            cards[rel] = journal.safe_path(target, rel).read_bytes().decode("utf-8")
+            raw = journal.safe_path(target, rel).read_bytes()
+            # Parse universal newlines while binding rechecks to the original bytes.
+            cards[rel] = raw.decode("utf-8").replace("\r\n", "\n")
+            content_hashes[rel] = hashlib.sha256(raw).hexdigest()
         except UnicodeDecodeError:
             continue
     ledger = memory_card_reads.load(target)
@@ -112,7 +116,7 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
                         rel,
                         read.isoformat() if read else None,
                         signal,
-                        hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        content_hashes[rel],
                     )
                 )
             )
@@ -162,7 +166,7 @@ def apply(
                     before = journal.safe_path(target, rel).read_bytes()
                     if hashlib.sha256(before).hexdigest() != candidate["content_sha256"]:
                         raise memory_archive.ArchiveRefused("card changed since expiry planning")
-                    text = before.decode("utf-8")
+                    text = before.decode("utf-8").replace("\r\n", "\n")
                     keys = lifecycle._keys(text, rel)
                     read = max(
                         (

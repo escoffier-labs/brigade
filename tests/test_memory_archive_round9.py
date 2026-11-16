@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, timedelta
+import os
 from threading import Event, current_thread, main_thread
 
 import pytest
@@ -41,7 +42,19 @@ def test_default_code_gate_preserves_card_with_enabled_policy_and_full_coverage(
 
 
 @pytest.mark.usefixtures("archive_path")
-@pytest.mark.parametrize("surface", ["mcp", "dot"])
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "mcp",
+        pytest.param(
+            "dot",
+            marks=pytest.mark.skipif(
+                os.name != "posix",
+                reason="Dot trusted directories require POSIX UID/GID ownership and permission checks",
+            ),
+        ),
+    ],
+)
 def test_reader_after_final_ledger_load_never_returns_moved_live_card(tmp_path, monkeypatch, surface):
     path = card(tmp_path)
     entered = Event()
@@ -212,3 +225,33 @@ def test_stale_marking_stays_live_without_hub_or_archive_gate(tmp_path):
     result = observed(tmp_path)
     assert [row["to_state"] for row in result["transitions"]] == ["stale"]
     assert path.exists()
+
+
+@pytest.mark.usefixtures("archive_path")
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_expiry_preserves_raw_hash_and_parses_newlines(tmp_path, newline):
+    import hashlib
+
+    path = card(tmp_path, meta="trust: agent-unreviewed\nexpires: 2026-01-01\n")
+    raw = path.read_text().replace("\n", newline).encode("utf-8")
+    path.write_bytes(raw)
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    config = memory_cmd.MemoryCareConfig()
+    result = retire.plan(tmp_path, config, tend.TendConfig(), today=TODAY)
+    assert result["candidate_count"] == 1
+    assert result["candidates"][0]["content_sha256"] == hashlib.sha256(raw).hexdigest()
+    result = retire.apply(tmp_path, config, tend.TendConfig(), today=TODAY)
+    assert result["archived"] == 1, result["refused"]
+    assert (tmp_path / "memory/archive/cards/old.md").read_bytes() == raw
+
+
+def test_dot_local_card_refuses_without_posix_ownership_checks(tmp_path, monkeypatch):
+    from brigade.dot import safe_state
+    from brigade.dot.contracts import DotError
+    from brigade.dot.memory_tools import MemoryTools
+
+    tools = object.__new__(MemoryTools)
+    tools.cards = tmp_path / "memory/cards"
+    monkeypatch.setattr(safe_state.os, "name", "nt")
+    with pytest.raises(DotError, match="memory_unavailable"):
+        tools._local_card_text("old")
