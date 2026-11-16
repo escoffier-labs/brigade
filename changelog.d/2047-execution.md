@@ -1,0 +1,3 @@
+- Execute explicit task batches without planner or synthesis calls, preserving task IDs, bounded dispatch waves, and durable request retry refusal.
+- Pin every explicit batch seat through model policy and health checks, retain normal drift and receipt finalization, and allow retries after refusal before any possible task launch.
+- Share batch retry fences across git subdirectories, permit recovery before marker publication, invoke each task at most once, and retain worker outcomes when result observation fails. Batch summaries report task statuses and failure.
