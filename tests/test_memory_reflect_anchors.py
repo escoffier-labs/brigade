@@ -1,5 +1,9 @@
 """Anchoring stays bounded and makes subsequent link repair addressable."""
 
+import os
+
+import pytest
+
 from brigade import memory_reflect_anchors as anchors
 from tests.test_hub_reflect_links import card_text, head, successor_pair, unit
 from tests.test_memory_reflect_hub import setup as setup, run, writes
@@ -16,6 +20,10 @@ def test_non_clean_non_live_and_unverifiable_cards_are_skipped():
     assert anchors.coverage(heads)["fraction"] == 1
 
 
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_budget_and_status(setup, capsys):
     target, hub, _ = setup
     for i in range(30):
