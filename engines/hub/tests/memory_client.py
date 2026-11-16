@@ -96,6 +96,36 @@ class Client(unittest.TestCase):
                 return events
             after = page["next_seq"]
 
+    def test_evidence_chain_append_latest_conflict_and_reset(self):
+        scope = "principal:memory-client-it"
+        workspace = "a" * 64  # Opaque HMAC output from the caller, never a path.
+        admin = hubc.MemoryHubClient(self.hub.url, self.hub.admin_token)
+        client = self.client()
+        with self.assertRaises(hubc.HubRefusal) as caught:
+            client.evidence_chain(scope, workspace, "card_reads")
+        self.assertEqual(caught.exception.code, "memory_grant_missing")
+        admin.call("grant", principal="memory-client-it", scope=scope,
+                   rights=["evidence_chain"], client_event_id=hubc.event_id())
+        for stream in ("card_reads", "lesson_observations"):
+            self.assertIsNone(client.evidence_chain(scope, workspace, stream)["head"])
+            first = client.evidence_chain(scope, workspace, stream, operation="append",
+                                          seq=1, digest="b" * 64)
+            self.assertEqual(first["head"]["seq"], 1)
+            self.assertEqual(first["head"]["kind"], "append")
+            self.assertIsNone(first["head"]["prev_digest"])
+            self.assertTrue(first["head"]["created_at"])
+            self.assertEqual(client.evidence_chain(scope, workspace, stream), first)
+            with self.assertRaises(hubc.HubRefusal) as caught:
+                client.evidence_chain(scope, workspace, stream, operation="append",
+                                      seq=3, digest="c" * 64, prev_digest="b" * 64)
+            self.assertEqual((caught.exception.status, caught.exception.code),
+                             (409, "memory_evidence_chain_conflict"))
+            reset = client.evidence_chain(scope, workspace, stream, operation="append",
+                                          seq=2, digest="c" * 64, prev_digest="b" * 64, kind="reset")
+            self.assertEqual(reset["head"]["kind"], "reset")
+            self.assertEqual(reset["head"]["prev_digest"], "b" * 64)
+            self.assertEqual(client.evidence_chain(scope, workspace, stream), reset)
+
     def test_put_pull_and_search_through_the_hub(self):
         writer = self.workspace("writer", "sync", kiwi=f"# Kiwi\nkiwifruit {'grows on vines ' * 3000}\n")
         settings = hubc.load_settings(writer)

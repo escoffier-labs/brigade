@@ -42,6 +42,37 @@ replica_max_mb = 50            # cap on the replica's heads.json
 
 `read` and `sync` need `scope` or `read_scopes`. Every hub search and card read names the read scopes, so a credential that can read more, such as one with a `principal:` grant, still answers only from them. Dot and Duet read through the same commands and get the same limit.
 
+### Workspace evidence chains
+
+`MemoryHubClient.evidence_chain(scope, workspace_id, stream)` reads the latest
+hub anchor for `card_reads` or `lesson_observations`. It returns `{"head": null}`
+for an empty chain. The hub keys each chain by the authenticated principal,
+workspace and stream. Grant `evidence_chain` on the caller's exact
+`principal:<id>` scope. Node defaults and wildcard grants do not grant access.
+A caller cannot read or append another principal's chain, including with the
+admin credential.
+
+The caller derives `workspace_id` with HMAC on the client and sends its
+64-character lowercase hex output. Paths and card IDs stay on the client.
+The hub validates the format and treats the value as opaque. This slice does
+not derive the identifier or connect either local evidence stream.
+
+Append with `operation="append"`, a positive `seq`, a lowercase SHA-256 `digest`
+and `prev_digest`. The first entry requires `seq=1` and `prev_digest=None`.
+Every later entry requires the next sequence and the current head's digest.
+A gap, replay or previous-digest mismatch returns HTTP 409 with
+`memory_evidence_chain_conflict`. After an uncertain response, fetch `latest`
+before recovery. Appends do not replay cached success responses.
+
+Each head contains `seq`, `digest`, `prev_digest`, `kind` and a hub-generated
+`created_at` timestamp. `kind="reset"` records a reset with the same continuity
+checks. It preserves earlier entries so later consumers can restart coverage
+at the reset. The default kind is `append`.
+
+The hub stores these anchors in memory schema 16, outside workspace files.
+This API alone does not authorize archive or lesson admission. Both code gates
+remain disabled until later slices bind local evidence to these heads.
+
 ### Scopes and default access
 
 A hub scope is part of a card's identity. There are four forms:

@@ -639,6 +639,24 @@ class MemoryHubClient:
     def __repr__(self) -> str:  # never show the credential
         return f"MemoryHubClient({self.identity!r})"
 
+    def evidence_chain(
+        self,
+        scope: str,
+        workspace_id: str,
+        stream: str,
+        *,
+        operation: str = "latest",
+        seq: int | None = None,
+        digest: str | None = None,
+        prev_digest: str | None = None,
+        kind: str = "append",
+    ) -> dict[str, Any]:
+        """Read or compare-and-append a head. The caller supplies an HMAC workspace id."""
+        fields: dict[str, Any] = dict(scope=scope, workspace_id=workspace_id, stream=stream, operation=operation)
+        if operation == "append":
+            fields.update(seq=seq, digest=digest, prev_digest=prev_digest, kind=kind, client_event_id=event_id())
+        return self.call("evidence_chain", **fields)
+
     def call(self, action: str, *, timeout: float | None = None, **fields: Any) -> dict[str, Any]:
         body = {"action": action, **fields}
         try:

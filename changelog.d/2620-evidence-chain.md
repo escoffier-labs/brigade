@@ -1,0 +1,1 @@
+- Add hub append chains for opaque workspace evidence in the card-read and lesson-observation streams, with owner grants, ordered resets and a Python client. Automatic archive and lesson admission remain disabled.
