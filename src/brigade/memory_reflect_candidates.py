@@ -19,7 +19,7 @@ from . import memory_cmd
 from . import memory_proposal_io as io
 from .card_fingerprint import _upsert_frontmatter_fields, content_fingerprint, normalize_card_content
 from .card_identity import CardIdentity, card_identity, identity_collision_aliases
-from .memory_claim_blocks import claim_spans
+from .memory_claim_blocks import ANCHOR_SUFFIX, claim_spans
 from .memory_evidence_log import EvidenceLog, _timestamp
 from .selection import WRITER_INBOXES
 
@@ -423,9 +423,9 @@ def _grouping_text(text: str) -> str:
     header = re.match(r"\A---[ \t]*\r?\n.*?^---[ \t]*(?:\r?\n|\Z)", text, re.MULTILINE | re.DOTALL)
     offset = header.end() if header else 0
     for span in reversed(claim_spans(text, offset)):
-        suffix = re.search(r" \^(c-[0-9a-f]{6})$", text[span.start : span.end])
+        suffix = ANCHOR_SUFFIX.search(text[span.start : span.end])
         if suffix:
-            text = text[: span.start + suffix.start()] + text[span.end :]
+            text = text[: span.start + suffix.start()] + text[span.start + suffix.end() :]
     return text
 
 

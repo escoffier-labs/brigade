@@ -69,6 +69,10 @@ def test_hub_classifier_shared_table():
         assert anchors.coverage([candidate])["fraction"] == int(not missing), case["name"]
 
 
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_limit_counts_deferred_anchors(setup, capsys):
     target, hub, _ = setup
     for i in range(4):
@@ -79,6 +83,10 @@ def test_limit_counts_deferred_anchors(setup, capsys):
     assert report["skipped_reasons"].get("anchor_deferred", 0) == 4
 
 
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_status_never_creates_store(setup):
     from brigade import memory_hub_store as store
 
@@ -88,6 +96,10 @@ def test_status_never_creates_store(setup):
     assert not store.root(target).exists()
 
 
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_status_does_not_take_write_lock(setup, capsys, monkeypatch):
     from brigade import memory_hub_store as store
 
@@ -101,12 +113,28 @@ def test_status_does_not_take_write_lock(setup, capsys, monkeypatch):
     assert anchors.status(target)["clean_live_cards"] == 2
 
 
-@pytest.mark.parametrize("reason, expected", [("op has no delta", 0), ("invalid ops", 1)])
-def test_anchor_no_delta_is_successful_skip(setup, capsys, monkeypatch, reason, expected):
+@pytest.mark.parametrize("hub_code, expected", [("memory_anchor_no_delta", 0), ("memory_proposal_invalid", 1)])
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_anchor_no_delta_is_successful_skip(setup, capsys, monkeypatch, hub_code, expected):
     target, hub, _ = setup
     hub.cards.clear()
     hub._commit("card.put", "fleet", "unique", card_text("Unique.", None), "live", "unique")
-    monkeypatch.setattr(hub, "do_propose", lambda body: (422, {"code": "memory_proposal_invalid", "error": reason}))
+    monkeypatch.setattr(
+        hub,
+        "do_propose",
+        lambda body: (
+            422,
+            {
+                "code": hub_code,
+                "error": "proposal refused because at least one op is invalid",
+                "reason": "proposal refused because at least one op is invalid",
+                "ops": [{"index": 0, "valid": False, "reason": "op has no delta"}],
+            },
+        ),
+    )
     code, report = run(target, capsys, "run")
     assert code == expected
     assert report["status"] == ("completed" if expected == 0 else "failed")
@@ -121,6 +149,10 @@ def test_partly_anchored_card_stays_covered_after_revision_change():
 
 
 @pytest.mark.parametrize("limit, budget, deferred", [(1, 25, 3), (100, 2, 2)])
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_held_anchors_count_deferred_for_limit_and_budget(setup, capsys, monkeypatch, limit, budget, deferred):
     from brigade import memory_reflect_policy as policy
 
@@ -136,3 +168,99 @@ def test_held_anchors_count_deferred_for_limit_and_budget(setup, capsys, monkeyp
     assert code == 0
     assert report["skipped_reasons"]["anchor_deferred"] == deferred
     assert sum(op["type"] == "anchor_blocks" for op in report["ops"]) == 4 - deferred
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_human_anchor_holds_do_not_starve_automated_heads(setup, capsys, monkeypatch):
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    for i in range(anchors.MAX_PROPOSALS + 1):
+        hub._commit("card.put", "fleet", f"human-{i:02}", card_text(f"Human claim {i}.", None), "live", str(i))
+    for i in range(2):
+        hub._commit("card.put", "fleet", f"robot-{i}", card_text(f"Robot claim {i}.", None), "live", str(i))
+    policy.set_enabled(target, True)
+    attempted = []
+
+    def attempt(target, client, proposal_id, ops, epoch, **kwargs):
+        if ops[0]["type"] != "anchor_blocks":
+            return {"state": "pending"}
+        ident = ops[0]["card_id"]
+        attempted.append(ident)
+        if ident.startswith("human"):
+            return {
+                "state": "pending",
+                "reason": "auto_apply_held",
+                "checks": [{"gate": "candidate", "state": "held", "code": "tier_requires_review"}],
+            }
+        text = hub.cards[("fleet", ident)]["text"].replace(".\n", ". ^c-abcdef\n")
+        hub._commit("proposal.apply", "fleet", ident, text, "live", ident)
+        return {"state": "applied", "checks": []}
+
+    monkeypatch.setattr(policy, "attempt", attempt)
+    for _ in range(3):
+        assert run(target, capsys, "run", "--apply", "--limit", "100")[0] == 0
+    assert attempted.count("robot-0") == attempted.count("robot-1") == 1
+    assert all(attempted.count(f"human-{i:02}") == 1 for i in range(anchors.MAX_PROPOSALS + 1))
+    hub._commit("card.put", "fleet", "human-00", card_text("Changed human claim.", None), "live", "changed")
+    assert run(target, capsys, "run", "--apply", "--limit", "100")[0] == 0
+    assert attempted.count("human-00") == 2
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_no_delta_does_not_hide_a_real_refusal(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    hub.cards.clear()
+    for ident in ("already", "refused"):
+        hub._commit("card.put", "fleet", ident, card_text(f"Claim {ident}.", None), "live", ident)
+
+    def refuse(body):
+        code = "memory_anchor_no_delta" if body["ops"][0]["card_id"] == "already" else "memory_proposal_invalid"
+        return 422, {
+            "code": code,
+            "error": "proposal refused because at least one op is invalid",
+            "ops": [
+                {
+                    "index": 0,
+                    "valid": False,
+                    "reason": "op has no delta" if code == "memory_anchor_no_delta" else "card missing",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(hub, "do_propose", refuse)
+    code, report = run(target, capsys, "run")
+    assert code == 1
+    assert report["error"] == "all_ops_refused"
+
+
+@pytest.mark.parametrize("whitespace", ["", "  ", "\t"])
+def test_trailing_whitespace_anchors_support_link_and_near_reflection(whitespace):
+    import hashlib
+    from brigade import memory_proposal_v2_ops as delta, memory_reflect_near as near
+    from tests.test_hub_reflect_near_duplicates import head as near_head, card_text as near_text, words
+
+    heads = successor_pair()
+    heads[0]["text"] = heads[0]["text"].replace("^c-aaaaaa\n", f"^c-aaaaaa{whitespace}\n")
+    [[repair]], skipped, _ = unit(heads)
+    assert "link_missing_pin" not in skipped
+    assert repair["block_id"] == "c-aaaaaa"
+    block = delta.blocks(heads[0]["text"])[0]
+    assert block.text.endswith(whitespace)
+    assert repair["expected_block_hash"] == hashlib.sha256(block.text.encode()).hexdigest()
+    assert delta.claim_body(heads[0]["text"]).endswith(f"See [[old]] for more.{whitespace}\n")
+    pair = [
+        near_head("a", near_text(words(23), "c-aaaaaa").replace("^c-aaaaaa\n", f"^c-aaaaaa{whitespace}\n"), 1),
+        near_head("b", near_text(words(23, "other"), "c-bbbbbb").replace("^c-bbbbbb\n", f"^c-bbbbbb{whitespace}\n"), 2),
+    ]
+    [[operation]], skipped = near.ops(pair, limit=0.9, budget=near.Budget())
+    assert "near_missing_pin" not in skipped
+    assert operation["block_id"] == "c-bbbbbb"
+    assert operation["expected_block_hash"] == delta.blocks(pair[1]["text"])[0].sha256

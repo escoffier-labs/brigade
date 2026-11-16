@@ -105,7 +105,53 @@ fn shared_span_table_and_whitespace_suffixes() {
 }
 
 async fn anchor_ready(token: &str) -> (Hub, Json) {
-    anchor_ready_origin(token, None).await
+    if token != AGENT_TOKEN {
+        return anchor_ready_origin(token, None).await;
+    }
+    let h = Hub::with(clean(), None);
+    attestation_tests::policy(&h);
+    grant(&h, "fleet", &["read", "reflect"]).await;
+    let grant = h.call(ADMIN_TOKEN, json!({"action":"grant","principal":"node-1","scope":"fleet","rights":["read","reflect"],"client_event_id":h.id()})).await;
+    assert_eq!(grant.status, 200);
+    let put = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"a","text":format!("{OLD}\n\nClaim.\n"),"client_event_id":h.id()})).await;
+    assert_eq!(put.status, 201);
+    for (i, id) in attestation_tests::REFS.iter().enumerate() {
+        assert_eq!(
+            attestation_tests::attach(&h, if i == 2 { AGENT_TOKEN } else { NODE_TOKEN }, id)
+                .await
+                .status,
+            201
+        );
+    }
+    let opened = attestation_tests::proposal(&h, rev(&put), json!(attestation_tests::REFS)).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    super::retrieval_eval_tests::record_current(&h).await;
+    let applied = h
+        .call(
+            ADMIN_TOKEN,
+            attestation_tests::auto_request(&h, &opened.body["proposal_id"]).await,
+        )
+        .await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    h.set_clock(h.now() + 86_401_000);
+    let db = rusqlite::Connection::open(&h.hub).unwrap();
+    let raw: String = db
+        .query_row("SELECT document FROM fleet_policy_revisions", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut doc: Json = serde_json::from_str(&raw).unwrap();
+    doc["memory"]["tier0_op_classes"] = json!(["anchor_blocks"]);
+    db.execute(
+        "UPDATE fleet_policy_revisions SET document=?1",
+        [doc.to_string()],
+    )
+    .unwrap();
+    let current = card(&h, "fleet", "a").await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":current["revision"]})]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    super::retrieval_eval_tests::record_current(&h).await;
+    (h, opened.body["proposal_id"].clone())
 }
 
 async fn anchor_ready_origin(token: &str, origin: Option<&str>) -> (Hub, Json) {
@@ -152,7 +198,7 @@ async fn structural_anchoring_applies_with_every_gate_satisfied() {
 }
 
 #[tokio::test]
-async fn human_anchoring_requires_review_and_live_origin_is_rechecked() {
+async fn human_anchoring_requires_review_and_live_authorship_is_rechecked() {
     let (h, id) = anchor_ready(ADMIN_TOKEN).await;
     let report = attestation_tests::report(&h, &id).await;
     assert!(
@@ -174,9 +220,17 @@ async fn human_anchoring_requires_review_and_live_origin_is_rechecked() {
         "{report:?}"
     );
     let (h, id) = anchor_ready(AGENT_TOKEN).await;
-    let db = rusqlite::Connection::open(h.memory()).unwrap();
-    db.execute("UPDATE memory_cards SET writer_class='admin'", [])
-        .unwrap();
+    let current = card(&h, "fleet", "a").await;
+    let changed = h
+        .put(
+            ADMIN_TOKEN,
+            "fleet",
+            "a",
+            current["revision"].as_i64(),
+            "Human edit.\n",
+        )
+        .await;
+    assert_eq!(changed.status, 201, "{changed:?}");
     let reply = h
         .call(ADMIN_TOKEN, attestation_tests::auto_request(&h, &id).await)
         .await;
@@ -218,4 +272,91 @@ async fn anchor_proof_refuses_non_suffix_changes_and_client_fields() {
         let refused = submit(&h, ADMIN_TOKEN, vec![operation]).await;
         assert_eq!(refused.status, 422, "{refused:?}");
     }
+}
+
+async fn forged_origin_stays_review_only(token: &str, origin: Option<&str>, action: &str) {
+    let h = Hub::with(clean(), None);
+    grant(&h, "fleet", &["read", "write", "import", "reflect"]).await;
+    let put = h.call(token, json!({"action":action,"scope":"fleet","card_id":"a","text":"Claim.\n","origin":origin,"client_event_id":h.id()})).await;
+    assert_eq!(put.status, 201, "{put:?}");
+    let opened = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![
+            json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)}),
+        ],
+    )
+    .await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    assert_eq!(opened.body["tier"], 2, "{opened:?}");
+}
+
+#[tokio::test]
+async fn admin_worker_origin_is_not_authority() {
+    for action in ["put", "import"] {
+        forged_origin_stays_review_only(ADMIN_TOKEN, Some("worker"), action).await;
+    }
+}
+
+#[tokio::test]
+async fn node_scheduled_origin_is_not_authority() {
+    let h = Hub::with(clean(), None);
+    let grant = h.call(ADMIN_TOKEN, json!({"action":"grant","principal":"node-1","scope":"fleet","rights":["read","write","import"],"client_event_id":h.id()})).await;
+    assert_eq!(grant.status, 200);
+    for action in ["put", "import"] {
+        let put = h.call(NODE_TOKEN, json!({"action":action,"scope":"fleet","card_id":action,"text":"Claim.\n","origin":"scheduled","client_event_id":h.id()})).await;
+        assert_eq!(put.status, 201, "{put:?}");
+        let opened = submit(&h, ADMIN_TOKEN, vec![json!({"type":"anchor_blocks","scope":"fleet","card_id":action,"base_revision":rev(&put)})]).await;
+        assert_eq!(opened.status, 201, "{opened:?}");
+        assert_eq!(opened.body["tier"], 2, "{opened:?}");
+    }
+}
+
+#[tokio::test]
+async fn principal_without_origin_is_not_authority() {
+    for action in ["put", "import"] {
+        forged_origin_stays_review_only(AGENT_TOKEN, None, action).await;
+    }
+}
+
+#[tokio::test]
+async fn human_reviewed_apply_is_not_automated_authorship() {
+    let h = Hub::with(clean(), None);
+    grant(&h, "fleet", &["read", "review"]).await;
+    let put = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"a","text":format!("{OLD}\n\nClaim.\n"),"origin":"worker","client_event_id":h.id()})).await;
+    assert_eq!(put.status, 201);
+    let edit = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&put))]).await;
+    let applied = decide(&h, AGENT_TOKEN, &edit.body["proposal_id"]).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let current = card(&h, "fleet", "a").await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":current["revision"]})]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    assert_eq!(opened.body["tier"], 2, "{opened:?}");
+}
+
+#[tokio::test]
+async fn anchor_no_delta_has_stable_code_only_for_all_no_delta_anchors() {
+    let h = Hub::with(clean(), None);
+    let put = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let anchor =
+        json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)});
+    let reply = submit(&h, ADMIN_TOKEN, vec![anchor.clone()]).await;
+    assert_eq!(reply.status, 422);
+    assert_eq!(
+        reply.body["error"],
+        "proposal refused because at least one op is invalid"
+    );
+    assert_eq!(
+        reply.body["ops"],
+        json!([{"index":0,"valid":false,"reason":"op has no delta"}])
+    );
+    assert_eq!(reply.body["code"], "memory_anchor_no_delta");
+    let mut invalid = anchor.clone();
+    invalid["card_id"] = json!("missing");
+    let reply = submit(&h, ADMIN_TOKEN, vec![anchor.clone(), invalid]).await;
+    assert_eq!(reply.body["code"], "memory_proposal_invalid");
+    let mut no_delta = op("fleet", "a", rev(&put));
+    no_delta["text"] = json!("Use the focused gate.");
+    let reply = submit(&h, ADMIN_TOKEN, vec![anchor, no_delta]).await;
+    assert_eq!(reply.body["code"], "memory_proposal_invalid");
 }

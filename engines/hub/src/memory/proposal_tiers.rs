@@ -118,16 +118,15 @@ pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite:
         {
             return Ok(false);
         }
-        let rows = tx.query("SELECT c.writer_class, (SELECT e.origin FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1), b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", &[ops::t(scope), ops::t(id)])?;
+        // No existing credential class is automation-only. Only a head made
+        // by the hub's gated automatic apply path establishes authorship.
+        // Bind the exact event, never an older put/import or caller origin.
+        let rows = tx.query("SELECT e.kind, e.payload, b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash JOIN memory_events e ON e.scope=c.scope AND e.card_id=c.card_id AND e.revision=c.revision AND e.content_hash=c.content_hash AND e.principal=c.writer WHERE c.scope=?1 AND c.card_id=?2", &[ops::t(scope), ops::t(id)])?;
         let Some(row) = rows.first() else {
             return Ok(false);
         };
-        let class = ops::s(&row[0]);
-        let origin = ops::s(&row[1]);
-        // Explicit interactive provenance vetoes even a principal credential.
-        if !matches!(origin.as_str(), "" | "scheduled" | "worker")
-            || (class != "principal" && !matches!(origin.as_str(), "scheduled" | "worker"))
-        {
+        let payload = serde_json::from_str::<Json>(&ops::s(&row[1])).unwrap_or(Json::Null);
+        if ops::s(&row[0]) != "proposal.apply" || payload["decision_mode"] != "automatic" {
             return Ok(false);
         }
         let rusqlite::types::Value::Blob(bytes) = &row[2] else {

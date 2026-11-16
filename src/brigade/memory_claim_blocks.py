@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+ANCHOR_SUFFIX = re.compile(r" \^(c-[0-9a-f]{6})(?=[ \t]*\Z)")
+
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _LIST = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])( +|$)")
 _SETEXT = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")

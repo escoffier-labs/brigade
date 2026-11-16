@@ -420,6 +420,13 @@ fn submit<T: ReadTx + ?Sized>(
     }
     if results.iter().any(|r| r["valid"] == false) {
         let mut r = invalid("proposal refused because at least one op is invalid");
+        if ops.iter().all(|op| op["type"] == "anchor_blocks")
+            && results
+                .iter()
+                .all(|r| r["valid"] == false && r["reason"] == "op has no delta")
+        {
+            r.body["code"] = json!("memory_anchor_no_delta");
+        }
         r.body["ops"] = json!(results);
         return Ok(Err(r));
     }

@@ -9,9 +9,9 @@ from typing import Any
 from . import memory_proposal_io as io
 from . import memory_proposals as legacy
 from .memory_reflect_candidates import _evidence_id
-from .memory_claim_blocks import claim_spans
+from .memory_claim_blocks import ANCHOR_SUFFIX, claim_spans
 
-ANCHOR = re.compile(r" \^(c-[0-9a-f]{6})$")
+ANCHOR = ANCHOR_SUFFIX
 ANCHOR_ID = re.compile(r"c-[0-9a-f]{6}\Z")
 MAX_ANCHORS = 4096
 
@@ -24,7 +24,7 @@ def claim_body(text: str) -> str:
         match = ANCHOR.search(text[span.start : span.end])
         if match:
             position = span.start + match.start() - offset
-            body = body[:position] + body[span.end - offset :]
+            body = body[:position] + body[span.start + match.end() - offset :]
     return body
 
 

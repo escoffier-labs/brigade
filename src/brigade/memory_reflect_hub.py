@@ -77,6 +77,7 @@ def _code(value: object) -> bool:
 LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
     "attempted_ms": lambda value: type(value) is int and value >= 0,
+    "anchor_review_only": lambda value: value is True,
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -120,7 +121,7 @@ def schedule_status(target: Path) -> dict[str, Any]:
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
         if not all(
-            valid_submission(digest, pending, frozenset({"pins", "attempted_ms"}))
+            valid_submission(digest, pending, frozenset({"pins", "attempted_ms", "anchor_review_only"}))
             for digest, pending in submissions.items()
         ):
             raise ValueError(STATE_ERROR)
@@ -394,11 +395,7 @@ def submit(
                 FAILED,
                 code=code,
                 refusals=tuple(refusals),
-                anchor_no_delta=(
-                    code == "memory_proposal_invalid"
-                    and exc.body.get("error") == "op has no delta"
-                    and all(op.get("type") == "anchor_blocks" for op in ops)
-                ),
+                anchor_no_delta=(code == "memory_anchor_no_delta"),
             )
         except hubc.HubUnavailable:
             return Submitted(UNAVAILABLE, code="hub_unavailable", refusals=tuple(refusals))
@@ -554,7 +551,9 @@ def _reflect(
         for ops in submissions:
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
-            if remembered.get("proposal_id") and apply and not dry_run:
+            if remembered.get("anchor_review_only") and all(op["type"] == "anchor_blocks" for op in ops):
+                skipped["anchor_review_only"] = skipped.get("anchor_review_only", 0) + 1
+            elif remembered.get("proposal_id") and apply and not dry_run:
                 from .memory_reflect_policy import allowed
 
                 if allowed(target, ops) is None:
@@ -638,6 +637,7 @@ def _reflect(
     refused: list[dict[str, str]] = []
     error = None
     failed_ops = 0
+    no_delta_ops = 0
     attempted = len(selected)
     if not dry_run:
         # Preserve unprocessed submissions under this binding across scope and limit changes.
@@ -680,7 +680,10 @@ def _reflect(
                 error = sent.code
                 break
             if sent.outcome == FAILED:
-                if not sent.anchor_no_delta:
+                if sent.anchor_no_delta:
+                    no_delta_ops += 1
+                    skipped["anchor_no_delta"] = skipped.get("anchor_no_delta", 0) + 1
+                else:
                     failed_ops += 1
                 continue
             if sent.proposal_id is not None:
@@ -702,11 +705,25 @@ def _reflect(
                     proposal["automatic"] = attempt(
                         target, client, sent.proposal_id, ops, report["log_epoch"], pacer=pacer
                     )
+                    automatic = proposal["automatic"]
+                    # This is only a veto. The hub still authorizes every apply.
+                    # Pins expire this veto as soon as the head revision changes.
+                    if all(op["type"] == "anchor_blocks" for op in ops) and (
+                        automatic.get("reason") == "tier_requires_review"
+                        or any(
+                            check.get("gate") == "candidate"
+                            and check.get("state") == "held"
+                            and check.get("code") == "tier_requires_review"
+                            for check in automatic.get("checks", [])
+                        )
+                    ):
+                        previous[digest]["anchor_review_only"] = True
+                        _save(target, state)
                 proposals.append(proposal)
         if served_any:
             state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
         # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.
-        if attempted and failed_ops == attempted and error is None:
+        if failed_ops and failed_ops == attempted - no_delta_ops and error is None:
             error = "all_ops_refused"
     payload = {
         "status": "failed" if error else "completed",
