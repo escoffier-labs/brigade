@@ -2,3 +2,4 @@
 - Keep the latest reset boundary visible in evidence chain heads, bound workspace counts, immutable row growth and principal append rates, require explicit owner grants even for admin, and refuse schema-16 upgrades without schema 15.
 - Allow full evidence streams to reset into a new row-quota generation while retaining history under the principal lifetime cap.
 - Preserve evidence chain quota and append-rate refusal codes in the Python client.
+- Bind evidence chain responses and optional append preconditions to the hub log epoch so consumers can reject history rewound by a database restore.

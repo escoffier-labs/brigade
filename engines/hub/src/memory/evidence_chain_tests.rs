@@ -44,6 +44,7 @@ async fn append_in_order_and_latest_use_server_time() {
     let empty = h.call(NODE_TOKEN, latest()).await;
     assert_eq!(empty.status, 200, "{empty:?}");
     assert_eq!(empty.body["head"], Json::Null);
+    assert_eq!(empty.body["log_epoch"], h.epoch().await);
     for field in [
         "last_reset_seq",
         "last_reset_digest",
@@ -56,6 +57,7 @@ async fn append_in_order_and_latest_use_server_time() {
         .await;
     assert_eq!(r.status, 201, "{r:?}");
     assert_eq!(r.body["head"]["seq"], 1);
+    assert_eq!(r.body["log_epoch"], empty.body["log_epoch"]);
     assert_eq!(r.body["head"]["prev_digest"], Json::Null);
     for field in [
         "last_reset_seq",
@@ -343,6 +345,15 @@ async fn quota_refusals_preserve_head_and_cover_all_principal_streams() {
             "memory_evidence_chain_stream_quota"
         };
         assert_eq!((reply.status, code(&reply)), (429, expected));
+        assert_eq!(reply.body["log_epoch"], before["log_epoch"]);
+        assert_eq!(
+            reply.body["head"],
+            if principal_quota {
+                Json::Null
+            } else {
+                before["head"].clone()
+            }
+        );
         assert_eq!(h.call(NODE_TOKEN, latest()).await.body, before);
         let db = Connection::open(h.memory()).unwrap();
         assert_eq!(
@@ -380,6 +391,7 @@ async fn rate_refusals_span_workspaces_and_survive_reopen_without_moving_head() 
             (reply.status, code(&reply)),
             (429, "memory_evidence_chain_rate_limited")
         );
+        assert_eq!(reply.body["log_epoch"], before["log_epoch"]);
         assert_eq!(h.call(NODE_TOKEN, latest()).await.body, before);
     }
     h.set_clock(h.now() + 1);
@@ -534,4 +546,67 @@ async fn reset_recovers_full_generation_but_not_principal_storage() {
             .unwrap(),
         5
     );
+}
+
+#[tokio::test]
+async fn restored_chain_requires_a_new_epoch_boundary() {
+    let mut h = granted().await;
+    let old_epoch = h.epoch().await;
+    for seq in 1..=40 {
+        h.set_clock(h.now() + 1000);
+        let reply = h
+            .call(
+                NODE_TOKEN,
+                append(&h, seq, (seq > 1).then_some(FIRST), FIRST, "append"),
+            )
+            .await;
+        assert_eq!(reply.status, 201, "{reply:?}");
+    }
+    let copy = h.dir.join("chain-backup.db");
+    Connection::open(h.memory())
+        .unwrap()
+        .execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+        .unwrap();
+    h.set_clock(h.now() + 1000);
+    let reset = h
+        .call(NODE_TOKEN, append(&h, 41, Some(FIRST), SECOND, "reset"))
+        .await;
+    assert_eq!(reset.status, 201);
+    assert_eq!(reset.body["last_reset_seq"], 41);
+
+    h.store.take();
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let path = format!("{}{suffix}", h.memory().display());
+        if std::path::Path::new(&path).exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    std::fs::copy(copy, h.memory()).unwrap();
+    let rotated = super::restore::rotate_restored(&h.memory(), h.now()).unwrap();
+    assert_eq!(rotated.previous, old_epoch);
+    assert_ne!(rotated.epoch, old_epoch);
+    h.open(Arc::new(scan::Unavailable), None);
+    let restored = h.call(NODE_TOKEN, latest()).await;
+    assert_eq!(restored.body["head"]["seq"], 40);
+    assert_eq!(restored.body["head"]["digest"], FIRST);
+    // The matching old prefix is unusable: its epoch changed and the reset was lost.
+    assert_eq!(restored.body["log_epoch"], rotated.epoch);
+    assert_ne!(restored.body["log_epoch"], old_epoch);
+    assert!(restored.body["last_reset_seq"].is_null());
+
+    let mut stale = append(&h, 41, Some(FIRST), SECOND, "reset");
+    stale["base_epoch"] = json!(old_epoch);
+    let refused = h.call(NODE_TOKEN, stale.clone()).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (409, "memory_epoch_changed")
+    );
+    assert_eq!(refused.body["log_epoch"], rotated.epoch);
+    assert_eq!(refused.body["head"], restored.body["head"]);
+    assert_eq!(h.call(NODE_TOKEN, latest()).await.body, restored.body);
+    stale["base_epoch"] = json!(rotated.epoch);
+    let reset = h.call(NODE_TOKEN, stale).await;
+    assert_eq!(reset.status, 201, "{reset:?}");
+    assert_eq!(reset.body["log_epoch"], rotated.epoch);
+    assert_eq!(reset.body["last_reset_seq"], 41);
 }

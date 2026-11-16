@@ -73,12 +73,29 @@ A credentialed worker can add reads or ordered resets, which only delay
 archiving. The local signing key authorizes no admission. This is the client
 contract for the next slice.
 
+Every successful chain response and every append refusal carrying a head includes
+`log_epoch`, read in the same transaction as that head. Consumers must bind the
+local hash chain to this epoch, for example by including it in the chain root or
+comparing the epoch recorded with the local log to the hub response. A matching
+digest and sequence alone do not validate a prefix after a database restore.
+`memory-restore-epoch` rotates the epoch even though the restored rows can match
+an old local log and can predate a reset that was lost with the database.
+After an epoch change, consumers must fail closed until they observe a new
+ordered reset appended in the new epoch. They must not compute a coverage window
+from restored history or treat an older stored reset as a reset in the new epoch.
+Missing epoch binding also fails closed. Archive and lesson gates stay disabled
+until connected consumers enforce this contract.
+
 Append with `operation="append"`, a positive `seq`, a lowercase SHA-256 `digest`
 and `prev_digest`. The first entry requires `seq=1` and `prev_digest=None`.
 Every later entry requires the next sequence and the current head's digest.
 A gap, replay or previous-digest mismatch returns HTTP 409 with
 `memory_evidence_chain_conflict`. After an uncertain response, fetch `latest`
-before recovery. Appends do not replay cached success responses.
+before recovery. Appends do not replay cached success responses. Pass the observed `log_epoch`
+as `base_epoch` when appending. A mismatched claimed epoch returns HTTP 409
+`memory_epoch_changed` with the current epoch and head, before checking sequence,
+quotas or pacing. The optional field preserves compatibility, but consumers
+implementing the coverage contract must supply it to fence a concurrent restore.
 
 Each head contains `seq`, `digest`, `prev_digest`, `kind` and a hub-generated
 `created_at` timestamp. `kind="reset"` records a reset with the same continuity

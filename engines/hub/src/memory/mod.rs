@@ -1164,6 +1164,7 @@ impl Store {
     ) -> Result<Prepared, Reply> {
         let allowed: &[&str] = match action {
             "evidence_chain" => &[
+                "base_epoch",
                 "action",
                 "operation",
                 "scope",

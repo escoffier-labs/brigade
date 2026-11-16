@@ -109,14 +109,17 @@ class Client(unittest.TestCase):
                    rights=["evidence_chain"], client_event_id=hubc.event_id())
         for stream in ("card_reads", "lesson_observations"):
             time.sleep(1.05)  # The append interval spans streams for this principal.
-            self.assertIsNone(client.evidence_chain(scope, workspace, stream)["head"])
+            empty = client.evidence_chain(scope, workspace, stream)
+            self.assertIsNone(empty["head"])
+            self.assertIsInstance(empty["log_epoch"], str)
             first = client.evidence_chain(scope, workspace, stream, operation="append",
-                                          seq=1, digest="b" * 64)
+                                          seq=1, digest="b" * 64, base_epoch=empty["log_epoch"])
             with self.assertRaises(hubc.HubRefusal) as limited:
                 client.evidence_chain(scope, workspace, stream, operation="append",
                                       seq=2, digest="c" * 64, prev_digest="b" * 64)
             self.assertEqual((limited.exception.status, limited.exception.code),
                              (429, "memory_evidence_chain_rate_limited"))
+            self.assertEqual(first["log_epoch"], empty["log_epoch"])
             self.assertEqual(first["head"]["seq"], 1)
             self.assertEqual(first["head"]["kind"], "append")
             self.assertIsNone(first["head"]["prev_digest"])

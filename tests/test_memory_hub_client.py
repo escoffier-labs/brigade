@@ -3130,3 +3130,26 @@ def test_evidence_chain_coded_429_preserves_refusal(code):
     with pytest.raises(hubc.HubRefusal) as refused:
         client.evidence_chain("principal:example", "a" * 64, "card_reads")
     assert (refused.value.status, refused.value.code) == (429, code)
+
+
+def test_evidence_chain_forwards_epoch_and_preserves_changed_epoch_head():
+    def transport(url, token, body, timeout):
+        assert body["base_epoch"] == "old-epoch"
+        return 409, {"code": "memory_epoch_changed", "log_epoch": "new-epoch", "head": {"seq": 40}}
+
+    client = hubc.MemoryHubClient(HUB_URL, NODE_CREDENTIAL, transport=transport)
+    with pytest.raises(hubc.HubRefusal) as refused:
+        client.evidence_chain(
+            "principal:example",
+            "a" * 64,
+            "card_reads",
+            operation="append",
+            seq=41,
+            digest="b" * 64,
+            prev_digest="c" * 64,
+            kind="reset",
+            base_epoch="old-epoch",
+        )
+    assert (refused.value.status, refused.value.code) == (409, "memory_epoch_changed")
+    assert refused.value.body["log_epoch"] == "new-epoch"
+    assert refused.value.body["head"] == {"seq": 40}

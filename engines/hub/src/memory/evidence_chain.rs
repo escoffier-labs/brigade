@@ -36,6 +36,7 @@ pub struct Append {
     digest: String,
     prev: Option<String>,
     kind: String,
+    base_epoch: Option<String>,
 }
 fn hex(s: &str) -> bool {
     s.len() == 64
@@ -47,7 +48,14 @@ fn string<'a>(map: &'a Map<String, Json>, key: &str) -> &'a str {
 }
 fn parse(map: &Map<String, Json>, append: bool) -> Result<Chain, Reply> {
     let allowed = ["action", "operation", "scope", "workspace_id", "stream"];
-    let extra = ["seq", "digest", "prev_digest", "kind", "client_event_id"];
+    let extra = [
+        "seq",
+        "digest",
+        "prev_digest",
+        "kind",
+        "client_event_id",
+        "base_epoch",
+    ];
     if map
         .keys()
         .any(|k| !(allowed.contains(&k.as_str()) || append && extra.contains(&k.as_str())))
@@ -96,12 +104,18 @@ pub(super) fn prepare(map: &Map<String, Json>) -> Result<Append, Reply> {
             "digest must be lowercase hex and kind must be append or reset",
         ));
     }
+    let base_epoch = match map.get("base_epoch") {
+        None => None,
+        Some(Json::String(s)) if ids::parse_event_id(s).is_some() => Some(s.clone()),
+        _ => return Err(invalid("base_epoch must be a log_epoch identifier")),
+    };
     Ok(Append {
         chain,
         seq,
         digest: digest.into(),
         prev,
         kind: kind.into(),
+        base_epoch,
     })
 }
 fn authorized<T: ReadTx + ?Sized>(
@@ -161,13 +175,23 @@ fn head<T: ReadTx + ?Sized>(
         "last_reset_created_at": if r[7] == Value::Null { Json::Null } else { json!(super::ops::s(&r[7])) }
     })))
 }
-fn response(head: Json) -> Json {
+fn response(head: Json, epoch: &str) -> Json {
     json!({
+        "log_epoch": epoch,
         "last_reset_seq": head["last_reset_seq"],
         "last_reset_digest": head["last_reset_digest"],
         "last_reset_created_at": head["last_reset_created_at"],
         "head": head
     })
+}
+fn refusal(status: u16, code: &str, message: &str, head: Json, epoch: &str) -> Reply {
+    let mut reply = super::error(status, code, message);
+    reply
+        .body
+        .as_object_mut()
+        .unwrap()
+        .extend(response(head, epoch).as_object().unwrap().clone());
+    reply
 }
 pub(super) fn latest(
     tx: &dyn ReadTx,
@@ -184,7 +208,10 @@ pub(super) fn latest(
     if !authorized(tx, who, &chain)? {
         return Ok(denied());
     }
-    Ok(Reply::new(200, response(head(tx, who, &chain)?)))
+    Ok(Reply::new(
+        200,
+        response(head(tx, who, &chain)?, &super::ops::epoch(tx)?),
+    ))
 }
 pub(super) fn append(
     tx: &dyn WriteTx,
@@ -196,12 +223,27 @@ pub(super) fn append(
         return Ok(denied());
     }
     let current = head(tx, &p.credential, &a.chain)?;
+    let epoch = super::ops::epoch(tx)?;
+    if a.base_epoch
+        .as_ref()
+        .is_some_and(|claimed| claimed != &epoch)
+    {
+        return Ok(refusal(
+            409,
+            "memory_epoch_changed",
+            "the memory log was restored since this head was read",
+            current,
+            &epoch,
+        ));
+    }
     let seq = current["seq"].as_i64().unwrap_or(0);
     if seq.checked_add(1) != Some(a.seq) || current["digest"].as_str() != a.prev.as_deref() {
-        return Ok(super::error(
+        return Ok(refusal(
             409,
             "memory_evidence_chain_conflict",
             "evidence chain head does not match",
+            current,
+            &epoch,
         ));
     }
     // Admission shares the writer transaction with insertion. Stored timestamps
@@ -240,17 +282,25 @@ pub(super) fn append(
         ),
     ] {
         if full {
-            return Ok(super::error(429, code, "evidence chain row quota reached"));
+            return Ok(refusal(
+                429,
+                code,
+                "evidence chain row quota reached",
+                current,
+                &epoch,
+            ));
         }
     }
     if usage[0][1] != Value::Null
         && super::ops::s(&usage[0][1])
             > ids::isoformat(p.now_ms.saturating_sub(limits.evidence_principal_ms))
     {
-        return Ok(super::error(
+        return Ok(refusal(
             429,
             "memory_evidence_chain_rate_limited",
             "evidence chain append rate exceeded",
+            current,
+            &epoch,
         ));
     }
     let created_at = ids::isoformat(p.now_ms);
@@ -263,6 +313,6 @@ pub(super) fn append(
     )?;
     Ok(Reply::new(
         201,
-        response(head(tx, &p.credential, &a.chain)?),
+        response(head(tx, &p.credential, &a.chain)?, &epoch),
     ))
 }
