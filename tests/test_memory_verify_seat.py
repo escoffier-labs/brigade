@@ -904,3 +904,65 @@ def test_a_failed_probe_is_invalidated_on_disk_before_the_next_seat_runs(target,
         seats.ready(target, "verify-propose", "verify-confirm")
     assert caught.value.code == "verify_seat_not_isolated" and "propose_seat" in str(caught.value)
     assert leftovers(target) == []
+
+
+@POSIX
+def test_a_claude_seat_may_pin_its_effort_level(target):
+    write_roster(
+        target,
+        """
+        [agents.effort]
+        cli = "claude"
+        role = "reviewer"
+        model = "claude-fable-5-2"
+        reasoning = "medium"
+        """,
+    )
+    seat = seats.resolve(target, "effort", "confirm")
+    argv = list(seat.argv)
+    assert argv[argv.index("--effort") + 1] == "medium"
+    assert argv.count("--effort") == 1
+    unpinned = seats.resolve(target, "verify-confirm", "confirm")
+    assert "--effort" not in unpinned.argv
+
+
+@POSIX
+def test_a_changed_effort_changes_the_seat_fingerprint(target):
+    write_roster(
+        target,
+        """
+        [agents.effort]
+        cli = "claude"
+        role = "reviewer"
+        model = "claude-fable-5-2"
+        reasoning = "medium"
+        """,
+    )
+    medium = seats.resolve(target, "effort", "confirm").fingerprint
+    write_roster(
+        target,
+        """
+        [agents.effort]
+        cli = "claude"
+        role = "reviewer"
+        model = "claude-fable-5-2"
+        reasoning = "low"
+        """,
+    )
+    assert seats.resolve(target, "effort", "confirm").fingerprint != medium
+
+
+def test_an_unknown_effort_level_is_not_isolated(target):
+    write_roster(
+        target,
+        """
+        [agents.effort]
+        cli = "claude"
+        role = "reviewer"
+        model = "claude-fable-5-2"
+        reasoning = "extreme"
+        """,
+    )
+    with pytest.raises(seats.SeatRefused) as caught:
+        seats.resolve(target, "effort", "confirm")
+    assert caught.value.code == "verify_seat_not_isolated"

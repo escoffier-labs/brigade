@@ -562,6 +562,14 @@ def doctor(
         if agent.reasoning is not None:
             if agents.supports_reasoning(agent.cli):
                 checks.append((doctor_mod.OK, f"agent: {name} reasoning", f"{agent.reasoning} via {agent.cli}"))
+            elif agent.reasoning in _verify_only_efforts(agent.cli):
+                checks.append(
+                    (
+                        doctor_mod.WARN,
+                        f"agent: {name} reasoning",
+                        f"{agent.reasoning} applies only when memory verify runs this seat; brigade run refuses it",
+                    )
+                )
             else:
                 checks.append(
                     (
@@ -597,3 +605,10 @@ def doctor(
 def _model_inventory_check(agent_name: str, result: model_inventory.ModelInventoryResult) -> doctor_mod.CheckResult:
     status = doctor_mod.OK if result.state == "exact" else doctor_mod.WARN
     return (status, f"agent: {agent_name} model inventory", f"{result.state}: {result.detail}")
+
+
+def _verify_only_efforts(cli: str | None) -> frozenset[str]:
+    """Reasoning levels memory verify passes to this adapter, though brigade run takes none."""
+    from .memory_verify_seat import EFFORTS
+
+    return EFFORTS.get(cli or "", frozenset())

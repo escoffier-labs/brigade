@@ -18,7 +18,7 @@ A seat is refused, before any prompt is written, when:
   nodes are never resolved here (`verify_seat_unknown`).
 - its audience is `connector` (`verify_seat_connector`).
 - its adapter has no isolation profile, it sets a launcher, environment
-  overrides, a reasoning pin or a transport the profile cannot vouch for, or
+  overrides, a transport or a reasoning level the profile cannot vouch for, or
   its executable is a script rather than a native binary
   (`verify_seat_not_isolated`).
 - it pins no exact model (`verify_seat_unpinned`), or both seats resolve to
@@ -314,6 +314,8 @@ PROFILES: dict[str, tuple[Callable[[str, str], list[str]], tuple[str, ...], dict
         },
     ),
 }
+# Reasoning levels each adapter passes as a CLI flag. A roster `reasoning` outside this set is refused.
+EFFORTS: dict[str, frozenset[str]] = {"claude": frozenset({"low", "medium", "high", "xhigh", "max"})}
 # Flags that would reopen a channel the profile closes. None may appear in a built argv.
 FORBIDDEN_FLAGS = frozenset(
     {
@@ -406,10 +408,15 @@ def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | N
         raise SeatRefused("verify_seat_not_isolated", f"{role}_seat refused: {OLLAMA_REFUSAL}")
     if cli is None or cli not in PROFILES:
         raise SeatRefused("verify_seat_not_isolated", f"{role}_seat has no isolation profile for its adapter")
-    if agent.command is not None or agent.env or agent.transport != "direct" or agent.reasoning is not None:
+    if agent.command is not None or agent.env or agent.transport != "direct":
         raise SeatRefused(
             "verify_seat_not_isolated",
-            f"{role}_seat sets a launcher, environment, transport or reasoning the profile cannot vouch for",
+            f"{role}_seat sets a launcher, environment or transport the profile cannot vouch for",
+        )
+    effort = agent.reasoning
+    if effort is not None and effort not in EFFORTS.get(cli, frozenset()):
+        raise SeatRefused(
+            "verify_seat_not_isolated", f"{role}_seat sets a reasoning level the profile cannot vouch for"
         )
     if not roster_mod.is_cli_allowed(cli, loaded):
         raise SeatRefused("verify_seat_disallowed", f"{role}_seat is not allowed by limits.allow_models")
@@ -423,6 +430,9 @@ def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | N
     canonical, identity = _bind(cli)
     builder, _, _ = PROFILES[adapter]
     argv = builder(canonical, model)
+    if effort is not None:
+        # The seat fingerprint covers argv, so a changed effort needs a fresh probe and gate record.
+        argv += ["--effort", effort]
     problem = profile_problem(argv, adapter)
     if problem is not None:
         raise SeatRefused("verify_seat_not_isolated", f"{role}_seat refused: {problem}")
