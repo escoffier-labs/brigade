@@ -268,15 +268,17 @@ def _memory_care_runbooks_dir(target: Path) -> Path:
     return target / MEMORY_CARE_RUNBOOKS_REL
 
 
-def _write_memory_care_runbooks(target: Path) -> int:
+def _write_memory_care_runbooks(target: Path, names: tuple[str, ...] = MEMORY_CARE_RUNBOOK_NAMES) -> int:
     """Copy pinned mechanical memory-care runbook templates into the target.
 
     Templates ship without pins; pins are materialized from the resolved
     ``brigade`` binary at write time so ``brigade runbook run --approved``
     can enforce the binary hash without a separate pin step.
 
-    Writes into a sibling temp directory first so pin-resolution failures do
-    not leave a partial runbook tree behind.
+    Validates every requested template in a sibling temp directory first, so a
+    pin-resolution failure writes nothing. Then each file is moved into place on
+    its own. Other files in the runbook directory, including operator-written
+    runbooks, are never removed.
     """
     from . import runbook_cmd
 
@@ -287,7 +289,7 @@ def _write_memory_care_runbooks(target: Path) -> int:
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True)
     try:
-        for name in MEMORY_CARE_RUNBOOK_NAMES:
+        for name in names:
             src = template_dir / name
             if not src.is_file():
                 print(f"error: memory-care runbook template missing: {src}", file=sys.stderr)
@@ -314,11 +316,9 @@ def _write_memory_care_runbooks(target: Path) -> int:
                 return 2
             validated["pins"] = pins
             _write_json(dest, validated)
-        # Narrow crash window: after rmtree the old tree is gone; if replace fails
-        # before publishing temp_dir, neither directory remains at dest_dir.
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir)
-        temp_dir.replace(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (temp_dir / name).replace(dest_dir / name)
         return 0
     finally:
         if temp_dir.exists():
