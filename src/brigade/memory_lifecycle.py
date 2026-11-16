@@ -317,7 +317,10 @@ def _last_use(
     today: date,
 ) -> date:
     fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
-    days = [ledger.tracking_since, datetime.fromtimestamp((target / rel).stat().st_mtime, timezone.utc).date()]
+    # A new write or restore can be ahead of the policy clock. Keep that
+    # filesystem activity fresh instead of discarding it with untrusted dates.
+    modified = datetime.fromtimestamp((target / rel).stat().st_mtime, timezone.utc).date()
+    days = [ledger.tracking_since, min(modified, today)]
     if ledger.healthy_since:
         days.append(ledger.healthy_since)
     for key in ("created", "created_at", "updated", "updated_at", "last_reviewed"):

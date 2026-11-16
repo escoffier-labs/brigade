@@ -126,9 +126,10 @@ def test_reference_scan_prunes_gitignored_directory(tmp_path):
 
 
 @pytest.mark.parametrize("definition", ["[dependency]: old.md", '[dependency]: <old.md#details> "Title"'])
-def test_reference_style_link_protects_old_card(tmp_path, definition):
+def test_reference_style_link_protects_old_card(tmp_path, definition, monkeypatch):
     from tests.test_memory_lifecycle import card, coverage, TODAY
 
+    monkeypatch.setattr(reads, "_day", lambda: TODAY)
     old = card(tmp_path)
     active = card(tmp_path, name="active", body=f"[details][dependency]\n\n{definition}")
     reads.record_content(tmp_path, active.read_text(), "memory/cards/active.md")

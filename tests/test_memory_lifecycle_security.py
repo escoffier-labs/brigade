@@ -215,15 +215,16 @@ def test_expiry_retire_respects_mixed_case_human(tmp_path, field):
     )["candidates"]
 
 
-def test_stale_undo_records_use(tmp_path):
+def test_stale_undo_records_use(tmp_path, monkeypatch):
     from brigade import memory_care_tend
 
+    monkeypatch.setattr(reads, "_day", lambda: TODAY)
     old_card(tmp_path)
     cover(tmp_path, end=date(2026, 2, 1))
     decision = life.run(tmp_path, today=date(2026, 2, 1))["transitions"][0]
     memory_care_tend.undo(tmp_path, decision["decision_id"])
-    assert reads.last_read(reads.load(tmp_path), [ID]) == date.today()
-    states = life.run(tmp_path, today=date.today())["transitions"]
+    assert reads.last_read(reads.load(tmp_path), [ID]) == TODAY
+    states = life.run(tmp_path, today=TODAY)["transitions"]
     assert all(row["to_state"] not in {"stale", "archived"} for row in states)
 
 
