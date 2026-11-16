@@ -15,6 +15,8 @@ from typing import Any, Iterator
 
 import pytest
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import config, memory_hook_hub, memory_hooks
 from brigade.claude_hooks import hub_recall, install_cmd, recall_audience, runtime
 from brigade.install import install_selection
@@ -127,6 +129,9 @@ def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     assert recall_audience.audience() == "connector"
     assert install_cmd.hooks_update(target=target, quiet=True, recall_audience_choice="local") == 0
     assert recall_audience.audience() == "local"
+    from tests.memory_read_fixtures import signing_key
+
+    signing_key(memory)
     return target, memory
 
 

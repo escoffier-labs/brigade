@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+from tests.memory_read_fixtures import signing_key
 
 from brigade import memory_hub_client as hubc
 from brigade import memory_hub_search as hub_search
@@ -24,6 +28,7 @@ PINNED = "agent:cloud-agent"
 def pulled(hub, tmp_path):  # noqa: F811
     """A read workspace whose replica holds a fleet card, pulled as the host node (`node-1`)."""
     target = workspace(tmp_path, mode="read")
+    signing_key(target)
     _put(hub, "fleet", "x", "otter secret text")
     sync.pull(target, client(hub), settings(target))
     assert store.replica(target).meta["principal"] == "node-1"
@@ -53,6 +58,7 @@ def test_search_with_a_pin_for_the_pulling_principal_still_serves_it(hub, pulled
     assert _replica_ids(found) == {"x"}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX key confinement probes")
 def test_card_with_a_pin_for_another_principal_has_no_replica_fallback(hub, pulled, capsys, monkeypatch):  # noqa: F811
     code, payload, _ = _card_x(pulled, capsys)
     assert code == 0 and payload["source"] == "replica"
@@ -65,6 +71,7 @@ def test_card_with_a_pin_for_another_principal_has_no_replica_fallback(hub, pull
     assert "otter secret text" not in output
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX key confinement probes")
 def test_card_with_a_pin_for_the_pulling_principal_still_serves_it(hub, pulled, capsys, monkeypatch):  # noqa: F811
     monkeypatch.setenv(hubc.ENV_REPLICA_PRINCIPAL, "node-1")
     code, payload, _ = _card_x(pulled, capsys)

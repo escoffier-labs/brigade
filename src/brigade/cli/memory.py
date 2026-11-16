@@ -102,16 +102,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_care_scan.add_argument(
         "--no-tend", action="store_true", help="Deprecated no-op. Scan does not run automatic care."
     )
-    for name in ("tend", "undo", "archive"):
+    for name in ("tend", "undo", "archive", "recover"):
         command = memory_care_sub.add_parser(name, help=f"Memory care {name}.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
         if name == "tend":
             command.add_argument(
-                "--stage", action="append", choices=("hub", "fixes", "retire", "inbox", "instructions")
+                "--stage", action="append", choices=("hub", "fixes", "lifecycle", "retire", "inbox", "instructions")
             )
             command.add_argument("--dry-run", action="store_true")
-        elif name == "undo":
+        elif name in ("undo", "recover"):
             command.add_argument("decision_id")
         else:
             command.add_argument("--from-file", type=Path, required=True)
@@ -366,6 +366,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_search.add_argument("query", help="Search terms (matched against title, tags, summary, and body).")
     p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
     p_memory_search.add_argument("--limit", type=int, default=20, help="Maximum matches to show.")
+    p_memory_search.add_argument("--include-archived", action="store_true", help="Search retained local archives too.")
     p_memory_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_recall = memory_sub.add_parser(
         "recall",
@@ -630,7 +631,7 @@ def dispatch(args) -> int:
                 update_gitignore=not args.no_gitignore,
                 with_runbooks=args.with_runbooks,
             )
-        if args.memory_care_command in ("tend", "undo", "archive"):
+        if args.memory_care_command in ("tend", "undo", "archive", "recover"):
             from .. import memory_care_tend
 
             return memory_care_tend.dispatch(args)
@@ -672,11 +673,17 @@ def dispatch(args) -> int:
         from .. import memory_hub_search
 
         # In `off` mode, the default, search takes the unchanged local path.
-        if memory_hub_search.enabled(args.target):
+        if memory_hub_search.enabled(args.target) and not args.include_archived:
             return memory_hub_search.search(
                 target=args.target, query=args.query, limit=args.limit, json_output=args.json
             )
-        return memory_cmd.search(target=args.target, query=args.query, limit=args.limit, json_output=args.json)
+        return memory_cmd.search(
+            target=args.target,
+            query=args.query,
+            limit=args.limit,
+            json_output=args.json,
+            include_archived=args.include_archived,
+        )
     if args.memory_command == "recall":
         return memory_cmd.recall(
             target=args.target, cwd=args.cwd, limit=args.limit, json_output=args.json, query=args.query

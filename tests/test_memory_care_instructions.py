@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 import json
 import os
 from datetime import date

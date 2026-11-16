@@ -1,3 +1,7 @@
+from tests.memory_read_fixtures import pending_decision_id, operator_recovery
+
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
+
 import json
 
 import pytest
@@ -68,6 +72,10 @@ def test_archive_crash_resolves_before_next_command(tmp_path, monkeypatch, entry
         else:
             tend.undo(tmp_path, p["decision_id"])
             result = None
+    if entry in ("tend", "manifest"):
+        assert journal._payload(tmp_path, p["decision_id"])["phase"] == "prepared"
+        assert path.read_bytes() == (b"Changed" if changed else original)
+        result = operator_recovery(tmp_path, p["decision_id"])
     state = journal._payload(tmp_path, p["decision_id"])
     if changed:
         assert path.read_bytes() == b"Changed"
@@ -94,7 +102,8 @@ def test_undo_crash_keeps_both_copies_and_finishes(tmp_path, monkeypatch):
     assert (tmp_path / "memory/archive/cards/cards.md").read_bytes() == original
     assert "- [Old]" in (tmp_path / "MEMORY.md").read_text()
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    tend.run(tmp_path, stages=[])
+    recovery_id = pending_decision_id(tmp_path)
+    operator_recovery(tmp_path, recovery_id)
     assert path.read_bytes() == original
     assert not (tmp_path / "memory/archive/cards/cards.md").exists()
     assert journal._payload(tmp_path, d.decision_id)["phase"] == "undone"
@@ -122,7 +131,8 @@ def test_kernel_crash_reproduction_preserves_original_until_prepared(tmp_path, m
     else:
         assert (tmp_path / "memory/archive/cards/cards.md").read_bytes() == original
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    tend.run(tmp_path, stages=[])
+    recovery_id = pending_decision_id(tmp_path)
+    operator_recovery(tmp_path, recovery_id)
     if phase == 1:
         assert path.read_bytes() == original
     else:
@@ -150,11 +160,12 @@ def test_hub_waits_for_local_phases_and_offline_recovery_stays_pending(tmp_path,
         archive.archive_card(tmp_path, "memory/cards/cards.md", reason="ended", config=memory_cmd.MemoryCareConfig())
     assert calls == []
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    tend.run(tmp_path, stages=["hub"])
+    recovery_id = pending_decision_id(tmp_path)
+    operator_recovery(tmp_path, recovery_id, stages=["hub"])
     d = journal.entries(tmp_path)[0]
     assert d.hub["status"] == "pending"
     offline = False
-    tend.run(tmp_path, stages=["hub"])
+    operator_recovery(tmp_path, recovery_id, stages=["hub"])
     assert journal.load(tmp_path, d.decision_id).hub["status"] == "done"
     calls.clear()
     execute = interrupt_second_plan(monkeypatch)
@@ -164,12 +175,13 @@ def test_hub_waits_for_local_phases_and_offline_recovery_stays_pending(tmp_path,
     assert path.exists()
     monkeypatch.setattr(journal.kernel, "execute", execute)
     offline = True
-    tend.run(tmp_path, stages=["hub"])
+    recovery_id = pending_decision_id(tmp_path)
+    operator_recovery(tmp_path, recovery_id, stages=["hub"])
     undo = journal.load(tmp_path, journal.load(tmp_path, d.decision_id).undone_by)
     assert undo.hub["status"] == "pending"
     assert calls == ["put"]
     offline = False
-    tend.run(tmp_path, stages=["hub"])
+    operator_recovery(tmp_path, recovery_id, stages=["hub"])
     assert journal.load(tmp_path, undo.decision_id).hub["status"] == "done"
 
 
@@ -181,7 +193,8 @@ def test_prepared_archive_preserves_intervening_index_edits(tmp_path, monkeypatc
     p = prepared(tmp_path)
     (tmp_path / "MEMORY.md").write_text("New header\n- [Old](memory/cards/cards.md)\nNew footer\n")
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    tend.run(tmp_path, stages=[])
+    recovery_id = pending_decision_id(tmp_path)
+    operator_recovery(tmp_path, recovery_id)
     assert not path.exists()
     assert (tmp_path / "MEMORY.md").read_text() == "New header\nNew footer\n"
     tend.undo(tmp_path, p["decision_id"])

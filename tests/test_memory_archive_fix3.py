@@ -1,5 +1,9 @@
 """Third review crash, identity and replay regressions."""
 
+from tests.memory_read_fixtures import pending_decision_id, operator_recovery
+
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
+
 import pytest
 
 from brigade import memory_archive as archive, memory_care_journal as journal, memory_care_tend as tend
@@ -21,7 +25,8 @@ def test_index_identity_survives_empty_rebase(tmp_path, monkeypatch, interrupted
             move(tmp_path)
         index.write_bytes(b"New unrelated index text\n")
         monkeypatch.setattr(journal.kernel, "execute", execute)
-        tend.run(tmp_path, stages=["hub"])
+        recovery_id = pending_decision_id(tmp_path)
+        operator_recovery(tmp_path, recovery_id, stages=["hub"])
         d = journal.entries(tmp_path)[0]
     else:
         d = move(tmp_path)
@@ -128,7 +133,8 @@ def test_finished_archive_drift_remains_visible_and_undoable(tmp_path, monkeypat
         move(tmp_path)
     monkeypatch.setattr(journal.kernel, "_persist_receipt", persist)
     (tmp_path / "MEMORY.md").write_bytes(b"Edited index\n")
-    result = tend.run(tmp_path, stages=["hub"])
+    recovery_id = pending_decision_id(tmp_path)
+    result = operator_recovery(tmp_path, recovery_id, stages=["hub"])
     assert result["recovery"][0]["phase"] == "abandoned"
     d = journal.entries(tmp_path)[0]
     assert any(a == "retire" for a, _ in fake.calls)
@@ -156,9 +162,10 @@ def test_annotate_precedes_supersede_and_retry_keeps_archive(tmp_path, monkeypat
 
     monkeypatch.setattr(journal.kernel, "supersede", stop)
     with pytest.raises(RuntimeError):
-        tend.run(tmp_path, stages=[])
+        recovery_id = pending_decision_id(tmp_path)
+        operator_recovery(tmp_path, recovery_id)
     monkeypatch.setattr(journal.kernel, "supersede", supersede)
-    tend.run(tmp_path, stages=[])
+    operator_recovery(tmp_path, recovery_id)
     if recreated:
         decision_file = next((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))
         d = journal.load(tmp_path, decision_file.parent.name)
@@ -166,7 +173,7 @@ def test_annotate_precedes_supersede_and_retry_keeps_archive(tmp_path, monkeypat
         assert not (tmp_path / "memory/archive/cards/old.md").exists()
     else:
         assert (tmp_path / "memory/archive/cards/old.md").read_bytes() == original
-    assert tend.run(tmp_path, stages=[])["recovery"] == []
+    assert operator_recovery(tmp_path, recovery_id)["recovery"] == []
 
 
 def test_partial_recovery_reports_destinations_and_repairs_index(tmp_path, monkeypatch):
@@ -178,7 +185,8 @@ def test_partial_recovery_reports_destinations_and_repairs_index(tmp_path, monke
         move(tmp_path)
     monkeypatch.setattr(journal.kernel, "execute", execute)
     path.write_bytes(b"recreated")
-    result = tend.run(tmp_path, stages=[])
+    recovery_id = pending_decision_id(tmp_path)
+    result = operator_recovery(tmp_path, recovery_id)
     assert "MEMORY.md" in result["recovery"][0]["committed_destinations"]
     assert index.read_bytes() == before
 
@@ -283,7 +291,8 @@ def test_every_mutation_recovers_to_accounted_state(tmp_path, monkeypatch, actio
         before_images = {
             p.relative_to(target): p.read_bytes() for p in (target / journal.JOURNAL_REL).glob("*/before/*.bin")
         }
-        recovered = tend.run(target, stages=[])
+        recovery_id = pending_decision_id(target)
+        recovered = operator_recovery(target, recovery_id)
         copies = [p.read_bytes() for p in (path, target / "memory/archive/cards/old.md") if p.exists()]
         assert original in copies, (action, phase, side, step)
         assert (target / "MEMORY.md").read_bytes() == (original_index if path.exists() else linkless_index)
@@ -295,7 +304,7 @@ def test_every_mutation_recovers_to_accounted_state(tmp_path, monkeypatch, actio
             # Both the care journal and the real projection recovery journal are expected writes.
             if rel not in allowed and not rel.startswith((".brigade/memory-care/", ".brigade/projection/operations/")):
                 assert initial.get(rel) == final.get(rel), rel
-        assert tend.run(target, stages=[])["recovery"] == []
+        assert operator_recovery(target, recovery_id)["recovery"] == []
         assert not kernel.unfinished_operations(target)
         for rel, data in before_images.items():
             assert (target / rel).read_bytes() == data, rel
@@ -364,12 +373,13 @@ def test_interrupted_index_repair_is_recovered(tmp_path, monkeypatch, side):
 
     monkeypatch.setattr(journal.kernel, "execute", interrupt)
     with pytest.raises(Killed):
-        tend.run(tmp_path, stages=[])
+        recovery_id = pending_decision_id(tmp_path)
+        operator_recovery(tmp_path, recovery_id)
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    tend.run(tmp_path, stages=[])
+    operator_recovery(tmp_path, recovery_id)
     assert index.read_bytes() == original_index
     assert not journal.kernel.unfinished_operations(tmp_path)
-    assert tend.run(tmp_path, stages=[])["recovery"] == []
+    assert operator_recovery(tmp_path, recovery_id)["recovery"] == []
 
 
 def test_pending_destination_survives_configuration_outage(tmp_path, monkeypatch):

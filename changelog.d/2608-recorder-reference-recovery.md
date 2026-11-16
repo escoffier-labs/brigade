@@ -1,0 +1,3 @@
+- Preserve failed card-read recording across processes, recover malformed intents with body-free quarantine reasons, and keep keyless reads free of intent files.
+- Protect unused cards referenced by supported bootstrap files, managed Brigade plans and runbooks, and multiline or workspace-absolute Markdown reference definitions.
+- Report that lifecycle and expiry are disabled when the workspace signing key is unavailable.

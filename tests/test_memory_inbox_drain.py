@@ -1455,7 +1455,10 @@ def test_failed_origin_claim_recovery_abandons_and_keeps_draft(tmp_path, monkeyp
         result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
     else:
         result = tend.run(tmp_path, stages=["inbox"], today=TODAY)
-    recovery = result["recovery"]
+    assert result["recovery"][0]["decision_id"] == decision_id
+    assert result["recovery"][0]["phase"] == "operator_required"
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
+    recovery = journal.resolve_prepared(tmp_path, decision_id=decision_id)
     assert recovery == [
         {"decision_id": decision_id, "phase": "abandoned", "reason": "review origin stamp missing or unavailable"}
     ]

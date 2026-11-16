@@ -316,7 +316,12 @@ def test_undo_prints_quarantine_reason(tmp_path, monkeypatch, capsys):
     crash(tmp_path, monkeypatch, "finish", 1)
     (tmp_path / journal.JOURNAL_REL / ID / "decision.json").write_text("{}")
     memory_care_tend.undo(tmp_path, valid.decision_id)
-    assert "unreadable decision record quarantined" in capsys.readouterr().err
+    assert "unreadable decision record quarantined" not in capsys.readouterr().err
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(memory_care_command="recover", target=tmp_path, decision_id=ID, json=True)
+    assert memory_care_tend.dispatch(args) == 0
+    assert "unreadable decision record quarantined" in capsys.readouterr().out
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
@@ -451,7 +456,7 @@ def test_finish_validates_before_absent(tmp_path, monkeypatch, damage):
 
 
 def test_drain_reports_kernel_projection_error(tmp_path, monkeypatch):
-    def refuse(target):
+    def refuse(target, *, automatic=False):
         raise journal.kernel.ProjectionError("kernel journal unreadable")
 
     monkeypatch.setattr(journal, "resolve_prepared", refuse)

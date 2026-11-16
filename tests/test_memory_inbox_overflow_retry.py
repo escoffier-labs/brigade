@@ -380,8 +380,14 @@ def test_refused_retry_cleanup_recovers_once_after_interruption(tmp_path, monkey
         with pytest.raises(Interrupted):
             memory_inbox_retry.reprocess(ws, draft)
 
+    cleanup = next(
+        journal._payload(ws, path.parent.name)
+        for path in (ws / journal.JOURNAL_REL).glob("*/decision.json")
+        if journal._payload(ws, path.parent.name).get("refusal_of")
+    )
+    journal.resolve_prepared(ws, decision_id=cleanup["decision_id"])
     for _ in range(2):
-        journal.resolve_prepared(ws)
+        journal.resolve_prepared(ws, decision_id=cleanup["refusal_of"])
     assert draft.read_bytes() == original
     assert drain.pending(ws) == [draft]
     assert not list((ws / drain.RESOLVED_REL).glob("*.md"))

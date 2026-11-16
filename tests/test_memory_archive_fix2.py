@@ -1,8 +1,16 @@
 """Second review regressions, including real kernel crash recovery."""
 
+from tests.memory_read_fixtures import pending_decision_id, operator_recovery
+
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 from datetime import date
 
 import pytest
+
+from tests.memory_read_fixtures import signing_key
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
 
 from brigade import memory_archive as archive, memory_card_reads as reads, memory_care_retire as retire
 from brigade import memory_care_journal as journal, memory_care_tend as tend, memory_cmd
@@ -66,7 +74,8 @@ def test_real_kernel_drift_does_not_block_index(tmp_path, monkeypatch):
         move(tmp_path)
     path.write_bytes(b"recreated")
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    result = tend.run(tmp_path, stages=[])
+    recovery_id = pending_decision_id(tmp_path)
+    result = operator_recovery(tmp_path, recovery_id)
     assert result["recovery"][0]["phase"] == "abandoned"
     assert "--force" not in str(result)
     assert not journal.kernel.unfinished_operations(tmp_path)
@@ -81,8 +90,9 @@ def test_read_only_between_phases_abandons(tmp_path, monkeypatch):
         move(tmp_path)
     monkeypatch.setattr(journal.kernel, "execute", execute)
     (tmp_path / ".brigade/memory-care.toml").write_text('read_only_paths = ["memory/cards/**"]\n')
-    assert tend.run(tmp_path, stages=[])["recovery"][0]["phase"] == "abandoned"
-    assert tend.run(tmp_path, stages=[])["recovery"] == []
+    recovery_id = pending_decision_id(tmp_path)
+    assert operator_recovery(tmp_path, recovery_id)["recovery"][0]["phase"] == "abandoned"
+    assert operator_recovery(tmp_path, recovery_id)["recovery"] == []
     assert path.exists()
 
 
@@ -116,7 +126,8 @@ def test_restorable_abandoned_is_listed(tmp_path, monkeypatch):
         move(tmp_path)
     path.unlink()
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    recovered = tend.run(tmp_path, stages=[])["recovery"][0]["decision_id"]
+    recovery_id = pending_decision_id(tmp_path)
+    recovered = operator_recovery(tmp_path, recovery_id)["recovery"][0]["decision_id"]
     assert recovered in [d.decision_id for d in journal.entries(tmp_path)]
 
 
@@ -131,7 +142,11 @@ def test_cap_counts_success_and_plan_shares_pin_check(tmp_path):
         p = tmp_path / f"memory/cards/{name}.md"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"---\nexpires: 2000-01-01\n{extra}---\nended")
+    signing_key(tmp_path)
     reads.record(tmp_path, [], today=date(2000, 1, 1))
+    from tests.test_memory_lifecycle_security import cover
+
+    cover(tmp_path, end=date.today())
     cfg = memory_cmd.MemoryCareConfig()
     tc = tend.TendConfig(max_archives_per_run=1)
     assert retire.plan(tmp_path, cfg, tc, today=date.today())["candidate_count"] == 2
@@ -165,7 +180,11 @@ def test_hub_days_use_validated_client_response(tmp_path, monkeypatch, capsys):
     assert reads.hub_last_reads(tmp_path) is None
     assert "hub read stats unavailable, retiring nothing on use grounds" in capsys.readouterr().err
     setup_card(tmp_path, b"---\ncard_id: old\nexpires_at: 2000-01-01\n---\nEnded\n")
+    signing_key(tmp_path)
     reads.record(tmp_path, [], today=date(2000, 1, 1))
+    from tests.test_memory_lifecycle_security import cover
+
+    cover(tmp_path, end=date.today())
     planned = retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=date.today())
     assert planned["candidates"] == []
     assert planned["skipped"]["hub_reads_unavailable"] == 1

@@ -249,3 +249,90 @@ def test_legacy_committed_review_pending_append_requires_owned_origin(
             }
         ]
     assert journal.resolve_prepared(tmp_path) == []
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_round14_automatic_holds_conflict_and_guard(tmp_path, monkeypatch, excluded):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    (tmp_path / "b.md").write_bytes(b"old b")
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            journal.commit_phased(
+                tmp_path,
+                kind="fix",
+                reason="test",
+                card_id=None,
+                changes=[journal.Change("a.md", b"old a", b"new a"), journal.Change("b.md", b"old b", b"new b")],
+                prepared_paths=["a.md"],
+                hub={},
+                metadata={"append_guards": {"b.md": journal.kernel.content_digest(b"old b")}} if excluded else {},
+            )
+    if not excluded:
+        (tmp_path / "b.md").write_bytes(b"edited")
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    assert result[0]["phase"] == "operator_required"
+    assert journal._payload(tmp_path, saved[0])["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"new a"
+    if not excluded:
+        # The hold sticks after the conflicting bytes return to their captured state.
+        (tmp_path / "b.md").write_bytes(b"old b")
+        again = journal.resolve_prepared(tmp_path, automatic=True)
+        assert again[0]["phase"] == "operator_required"
+        assert journal._payload(tmp_path, saved[0])["phase"] == "prepared"
+        (tmp_path / "b.md").write_bytes(b"edited")
+        journal.resolve_prepared(tmp_path, decision_id=saved[0])
+        assert (tmp_path / "a.md").read_bytes() == b"old a"
+        assert (tmp_path / "b.md").read_bytes() == b"edited"
+        final = journal._payload(tmp_path, saved[0])
+        assert final["phase"] == "abandoned"
+        assert final["abandoned_reason"]
+        assert "restorable" in final
+
+
+def test_automatic_recovery_holds_a_projection_blocked_decision(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            journal.commit_phased(
+                tmp_path,
+                kind="fix",
+                reason="test",
+                card_id=None,
+                changes=[journal.Change("a.md", b"old a", b"new a")],
+                prepared_paths=[],
+                hub={},
+                metadata={},
+            )
+
+    def blocked(*args, **kwargs):
+        raise journal.kernel.OverlapBlockedError("unfinished projection other-op overlaps a.md")
+
+    monkeypatch.setattr(journal, "_execute_phase", blocked)
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    assert result[0]["decision_id"] == saved[0]
+    assert result[0]["phase"] == "operator_required"
+    assert "other-op" in result[0]["reason"]
+    assert journal._payload(tmp_path, saved[0])["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"old a"
+    # Clearing the blocking projection does not let a later automatic run finish it.
+    monkeypatch.undo()
+    again = journal.resolve_prepared(tmp_path, automatic=True)
+    assert again[0]["phase"] == "operator_required"
+    assert journal._payload(tmp_path, saved[0])["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"old a"
+    journal.resolve_prepared(tmp_path, decision_id=saved[0])
+    assert journal._payload(tmp_path, saved[0])["phase"] != "prepared"
