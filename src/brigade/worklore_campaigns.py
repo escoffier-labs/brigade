@@ -505,7 +505,10 @@ def member_excluded(conn: sqlite3.Connection, work_id: str) -> bool:
     try:
         member = member_campaign(conn, work_id)
         grant = None if member is None else campaign_offer(conn, member["work_id"])
-        return grant is not None and member is not None and member["repo"] in grant["offer"]["exclusions"]
+        if grant is None or member is None:
+            return False
+        exclusions = grant["offer"]["exclusions"]
+        return not isinstance(exclusions, list) or member["repo"] in exclusions
     except sqlite3.OperationalError as exc:
         if str(exc).startswith("no such table"):
             return False

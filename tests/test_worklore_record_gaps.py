@@ -216,3 +216,9 @@ def test_hostile_conflict_bodies_are_bounded_and_terminal_safe(monkeypatch):
         len(record["held_path"]) <= client.MAX_CONFLICT_TEXT and "\x1b" not in record["held_path"]
         for record in conflicts
     )
+
+
+def test_conflict_text_drops_bidi_and_zero_width_characters():
+    from brigade import worklore_client
+
+    assert worklore_client._safe_terminal_text("ab\u202ecd\u200bef\u2066gh") == "ab cd ef gh"

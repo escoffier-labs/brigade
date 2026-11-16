@@ -1809,9 +1809,11 @@ def burn_queue(
             after = _burn_key(row)
             summary = _link_summary(conn, str(row[0]))
             item = _row_to_item(row, summary)
-            bucket = exclusion_bucket(
-                item, _source_policies(summary), campaign_excluded=member_excluded(conn, item["work_id"])
-            )
+            try:
+                campaign_excluded = member_excluded(conn, item["work_id"])
+            except Exception:  # one unreadable campaign row holds that item, not the whole page
+                campaign_excluded = True
+            bucket = exclusion_bucket(item, _source_policies(summary), campaign_excluded=campaign_excluded)
             if bucket is None:
                 eligible.append(item)
             else:

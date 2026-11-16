@@ -315,6 +315,28 @@ def test_campaign_members_cannot_bypass_offer_with_legacy_assignment(ledger):
     assert status == 403 and refusal["code"] == "campaign-not-authorized"
 
 
+def test_holder_read_refuses_an_expired_campaign_lease_like_a_holder_write(ledger):
+    conn, _, clock = ledger
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    path = f"/work/items/{work_id}/ownership"
+    holder = {"X-Worklore-Holder": NONCE_A}
+    assert call(conn, path, headers=holder, method="GET")[0] == 200
+    clock[0] = "2026-01-01T00:01:00+00:00"
+    status, refusal = call(conn, path, headers=holder, method="GET")
+    assert status == 409 and refusal["code"] == "stale-generation"
+    assert call(conn, path, method="GET")[0] == 200
+
+
+def test_string_exclusions_in_an_offer_fail_closed(ledger, monkeypatch):
+    conn, _, _ = ledger
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    monkeypatch.setattr(campaigns, "campaign_offer", lambda *_: {"offer": {"exclusions": "acme/other"}})
+    assert campaigns.member_excluded(conn, work_id) is True
+
+
 def test_expired_running_member_can_be_reclaimed_but_attempt_limit_still_applies(ledger):
     conn, _, clock = ledger
     create(conn)

@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import secrets
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -91,9 +92,12 @@ class WorkloreClientError(FleetClientError):
 
 
 def _safe_terminal_text(value: object) -> str:
-    """Return displayable plain text without C0 or C1 terminal controls."""
+    """Return displayable plain text without C0 or C1 controls or Unicode format characters (bidi, zero-width)."""
     text = str(value)
-    without_controls = "".join(" " if ord(char) < 32 or 127 <= ord(char) <= 159 else char for char in text)
+    without_controls = "".join(
+        " " if ord(char) < 32 or 127 <= ord(char) <= 159 or unicodedata.category(char) == "Cf" else char
+        for char in text
+    )
     return " ".join(without_controls.split())
 
 
@@ -225,7 +229,9 @@ def _http_error(exc: urllib.error.HTTPError) -> FleetClientError:
                 code=code,
                 details=_refusal_details(refusal, code),
             )
-        return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}", code=code)
+        return WorkloreClientError(
+            f"fleet hub work failed: HTTP {exc.code}", code=code, details=_refusal_details(refusal, code)
+        )
     return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}", code=code)
 
 

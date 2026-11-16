@@ -327,7 +327,8 @@ def get_ownership(
     """Read an ownership projection only for an existing Worklore item.
 
     A read that presents ``X-Worklore-Holder`` claims to be the holder, so the same node and
-    capability check every holder write uses must pass at the current generation. A foreign
+    capability check every holder write uses must pass at the current generation, and an expired
+    campaign lease is refused as ``stale-generation`` exactly as a holder write would be. A foreign
     node, a foreign or stale capability, an admin token, or an item with no node holder is
     refused as ``holder-mismatch``. A read with no capability header is unchanged.
     """
@@ -343,6 +344,8 @@ def get_ownership(
             generation=current["generation"],
             digest=nonce_hash(holder_nonce),
         )
+        if expired(current, store._utc_now()):
+            raise store.WorkloreConflict("campaign ownership lease expired", code="stale-generation")
     return _public(current)
 
 
