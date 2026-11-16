@@ -21,7 +21,7 @@ func cmdCrawl(args []string, out, errw io.Writer) int {
 	case "docs":
 		return cmdCrawlSourceHarvest("markdown", "docs", args[1:], out, errw)
 	case "files":
-		return cmdCrawlSourceHarvest("files", "files", args[1:], out, errw)
+		return cmdCrawlFiles(args[1:], out, errw)
 	case "repo":
 		return cmdCrawlSourceHarvest("gitlog", "gitlog", args[1:], out, errw)
 	case "markdown", "html", "gitlog", "json", "jsonl":

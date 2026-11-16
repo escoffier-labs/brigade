@@ -244,12 +244,14 @@ def test_configured_limit_still_constrains_one_seat_pool(declared, tmp_path):
 )
 def test_malformed_request_stops_before_scope_fingerprints_or_probes(declared, tmp_path, monkeypatch, changes):
     import json
+    from brigade import fleet_client
 
     request = replace(readiness.ReadinessRequest(("worker",)), **changes)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("malformed request reached scope, fingerprint, or provider probe")
 
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", forbidden)
     monkeypatch.setattr(readiness, "operation_scope", forbidden)
     monkeypatch.setattr(seat_health, "seat_fingerprint", forbidden)
     monkeypatch.setattr(seat_health, "SeatHealthProbe", forbidden)
@@ -403,7 +405,8 @@ def test_operation_isolation_reflects_known_seat_incompatibility(declared, tmp_p
         assert operation["observed_at"] == NOW
 
 
-def test_pool_order_and_duplicates_share_scope_preserving_display_and_probe_order(declared, tmp_path):
+def test_pool_order_and_duplicates_share_scope_preserving_display_and_probe_order(declared, tmp_path, monkeypatch):
+    _stub_standalone_env(monkeypatch)
     request = readiness.ReadinessRequest(("worker", "unused"), concurrency=2)
     evidence = observed(declared, request, tmp_path)
     reordered = replace(request, workers=("unused", "worker", "unused"))
@@ -495,3 +498,818 @@ def test_scope_changes_invalidate_operation_evidence(declared, tmp_path, change)
         for item in result["evidence"]
         if item["category"] in {"route-support", "admission", "capacity"}
     )
+
+
+def _hub_roster_payload(
+    *,
+    source: str = "hub",
+    seats: list[dict] | None = None,
+    fleet_policy: dict | None = None,
+):
+    payload = {
+        "schema": "brigade.fleet_model_roster.v1",
+        "source": source,
+        "revision": 7,
+        "document_sha256": "sha256:" + ("a" * 64),
+        "expires_at": "2099-01-01T00:00:00Z",
+        "seats": seats
+        if seats is not None
+        else [
+            {
+                "seat": "worker",
+                "provider": "openai",
+                "model": "example-model",
+                "reasoning": "medium",
+                "brigade_cli": "codex",
+                "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+                "enabled": True,
+                "limit": None,
+            },
+            {
+                "seat": "unused",
+                "provider": "openai",
+                "model": "example-model",
+                "reasoning": "medium",
+                "brigade_cli": "codex",
+                "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+                "enabled": False,
+                "limit": 0,
+            },
+        ],
+        "consumer_defaults": {},
+        "retired_models": [],
+    }
+    if fleet_policy is not None:
+        payload["fleet_policy"] = fleet_policy
+    return payload
+
+
+def _stub_standalone_env(monkeypatch, *, enrollment_observed: bool = False):
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission
+
+    def _forbidden_hub(*args, **kwargs):
+        raise AssertionError("standalone readiness test attempted a Hub call")
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": ""})
+    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda: enrollment_observed)
+    monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", _forbidden_hub)
+    monkeypatch.setattr(fleet_client, "inspect_claim", _forbidden_hub)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", _forbidden_hub)
+
+
+def _forbid_mutating_hub_calls(monkeypatch):
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("read-only readiness inspection attempted a mutating Hub operation")
+
+    monkeypatch.setattr(fleet_model_admission, "admit_model", _forbidden)
+    monkeypatch.setattr(fleet_client, "acquire_model_lease", _forbidden)
+    monkeypatch.setattr(fleet_client, "acquire_claim", _forbidden)
+    monkeypatch.setattr(fleet_client_policy, "prepare_session", _forbidden)
+    monkeypatch.setattr(fleet_client_policy, "acknowledge_session", _forbidden)
+
+
+def test_brigade_standalone_inspect_readiness_reaches_ready_without_writes(declared, tmp_path, monkeypatch):
+    _stub_standalone_env(monkeypatch)
+    clean_ws = tmp_path / "clean"
+    clean_ws.mkdir()
+
+    request = readiness.ReadinessRequest(("worker",), concurrency=2)
+    result = readiness.inspect_readiness(declared, request, workspace=clean_ws)
+
+    assert result["status"] == "ready"
+    assert result["exit_code"] == 0
+    assert result["admitted_capacity"] == 2
+    assert result["usable_worker_count"] == 1
+    assert result["limiting_reason"] is None
+
+    by_category = {item["category"]: item for item in result["evidence"] if "seat" not in item}
+    assert by_category["admission"]["status"] == "passed"
+    assert by_category["admission"]["freshness"] == "fresh"
+    assert "local roster admissible seats" in by_category["admission"]["detail"]
+    assert by_category["capacity"]["status"] == "passed"
+    assert by_category["capacity"]["freshness"] == "fresh"
+    assert "local run lock (absent)" in by_category["capacity"]["detail"]
+    assert list(clean_ws.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "lock_state,expected_status,expected_exit,expected_cap,expected_reason",
+    [
+        ("unreconciled", "ready", 0, 2, None),
+        ("live", "blocked", 2, 0, "insufficient-capacity"),
+        ("skipped", "blocked", 2, None, "capacity-failed"),
+        ("invalid", "unverified", 3, None, "observation-incomplete"),
+    ],
+)
+def test_brigade_standalone_reflects_local_run_lock_states(
+    declared,
+    tmp_path,
+    monkeypatch,
+    lock_state,
+    expected_status,
+    expected_exit,
+    expected_cap,
+    expected_reason,
+):
+    from brigade import runguard
+
+    _stub_standalone_env(monkeypatch)
+    monkeypatch.setattr(runguard, "inspect_run_lock_reconcile", lambda ws: lock_state)
+
+    result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert result["status"] == expected_status
+    assert result["exit_code"] == expected_exit
+    assert result["admitted_capacity"] == expected_cap
+    assert result["limiting_reason"] == expected_reason
+    capacity_row = next(item for item in result["evidence"] if item["category"] == "capacity")
+    assert "local run lock" in capacity_row["detail"]
+
+
+def test_brigade_standalone_blocks_retired_model_and_prior_enrollment(declared, tmp_path, monkeypatch):
+    _stub_standalone_env(monkeypatch, enrollment_observed=True)
+    result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert result["status"] == "blocked"
+    assert result["exit_code"] == 2
+    assert result["limiting_reason"] == "admission-denied"
+
+    _stub_standalone_env(monkeypatch, enrollment_observed=False)
+    retired_worker = replace(declared.agents["worker"], model="gpt-5.4")
+    retired_roster = replace(declared, agents={**declared.agents, "worker": retired_worker})
+    result = readiness.inspect_readiness(retired_roster, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert result["status"] == "blocked"
+    assert result["exit_code"] == 2
+    assert result["limiting_reason"] == "admission-denied"
+    admission_row = next(item for item in result["evidence"] if item["category"] == "admission")
+    assert "local roster admissible seats" in admission_row["detail"]
+
+
+def test_brigade_hub_ready_uses_read_only_cache_write_false_and_inspect_claim(declared, tmp_path, monkeypatch):
+    from brigade import fleet_client, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    seen_calls = []
+
+    def fake_fetch(*, allow_lkg=True, hub_url=None, cache_write=True, inspect_only=False):
+        seen_calls.append({"allow_lkg": allow_lkg, "hub_url": hub_url, "cache_write": cache_write})
+        return fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", _hub_roster_payload(source="hub"))
+
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", fake_fetch)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda ws: "repo:example/brigade")
+    monkeypatch.setattr(
+        fleet_client,
+        "inspect_claim",
+        lambda target: fleet_client.ClaimDecision(True, "free", None),
+    )
+
+    result = readiness.inspect_readiness(
+        declared,
+        readiness.ReadinessRequest(("worker",), concurrency=2),
+        workspace=tmp_path,
+        hub_discovery_possible=True,
+    )
+
+    assert seen_calls == [{"allow_lkg": True, "hub_url": "https://hub.example.test", "cache_write": False}]
+    assert result["status"] == "ready"
+    assert result["exit_code"] == 0
+    assert result["admitted_capacity"] == 2
+    admission_row = next(item for item in result["evidence"] if item["category"] == "admission")
+    capacity_row = next(item for item in result["evidence"] if item["category"] == "capacity")
+    assert "hub model admission" in admission_row["detail"]
+    assert "hub repo claim" in capacity_row["detail"]
+
+
+def test_brigade_hub_denied_seat_and_held_claim_and_zero_limit_block(declared, tmp_path, monkeypatch):
+    from brigade import fleet_client, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda ws: "repo:example/brigade")
+    monkeypatch.setattr(fleet_client, "inspect_claim", lambda target: fleet_client.ClaimDecision(True, "free", None))
+
+    # 1. Selected seat disabled on Hub -> blocked
+    disabled_payload = _hub_roster_payload(
+        seats=[
+            {
+                "seat": "worker",
+                "provider": "openai",
+                "model": "example-model",
+                "reasoning": "medium",
+                "brigade_cli": "codex",
+                "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+                "enabled": False,
+                "limit": None,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", disabled_payload),
+    )
+    res_denied = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert res_denied["status"] == "blocked"
+    assert res_denied["exit_code"] == 2
+    assert res_denied["limiting_reason"] == "admission-denied"
+
+    # 2. Selected seat enabled with limit=0 -> blocked (admitted_capacity == 0)
+    zero_limit_payload = _hub_roster_payload(
+        seats=[
+            {
+                "seat": "worker",
+                "provider": "openai",
+                "model": "example-model",
+                "reasoning": "medium",
+                "brigade_cli": "codex",
+                "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+                "enabled": True,
+                "limit": 0,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", zero_limit_payload),
+    )
+    res_zero = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert res_zero["status"] == "blocked"
+    assert res_zero["exit_code"] == 2
+    assert res_zero["admitted_capacity"] == 0
+    assert res_zero["limiting_reason"] == "insufficient-capacity"
+
+    # 3. Hub repo claim held by another node -> blocked (admitted_capacity == 0)
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(
+            True, 0, "authoritative", _hub_roster_payload(source="hub")
+        ),
+    )
+    monkeypatch.setattr(
+        fleet_client,
+        "inspect_claim",
+        lambda target: fleet_client.ClaimDecision(
+            True, "held", {"owner_node": "other-node", "lock_owner_token": "tok-1"}
+        ),
+    )
+    res_held = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert res_held["status"] == "blocked"
+    assert res_held["exit_code"] == 2
+    assert res_held["admitted_capacity"] == 0
+    assert res_held["limiting_reason"] == "insufficient-capacity"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "hub-unavailable",
+        "auth-failed",
+        "lkg-capacity-unverified",
+        "positive-seat-limit-unverified",
+        "malformed-payload",
+        "claim-unverified",
+    ],
+)
+def test_brigade_hub_unavailable_lkg_or_unverified_capacity_stays_unverified(declared, tmp_path, monkeypatch, scenario):
+    from brigade import fleet_client, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda ws: "repo:example/brigade")
+    monkeypatch.setattr(fleet_client, "inspect_claim", lambda target: fleet_client.ClaimDecision(True, "free", None))
+
+    if scenario in {"hub-unavailable", "auth-failed"}:
+        monkeypatch.setattr(
+            fleet_model_admission,
+            "fetch_versioned_roster",
+            lambda **kw: fleet_model_admission.ModelAdmissionDecision(False, 1, scenario, {}),
+        )
+    elif scenario == "lkg-capacity-unverified":
+        monkeypatch.setattr(
+            fleet_model_admission,
+            "fetch_versioned_roster",
+            lambda **kw: fleet_model_admission.ModelAdmissionDecision(
+                True, 0, "lkg", _hub_roster_payload(source="lkg")
+            ),
+        )
+    elif scenario == "positive-seat-limit-unverified":
+        limited = _hub_roster_payload(
+            seats=[
+                {
+                    "seat": "worker",
+                    "provider": "openai",
+                    "model": "example-model",
+                    "reasoning": "medium",
+                    "brigade_cli": "codex",
+                    "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+                    "enabled": True,
+                    "limit": 2,
+                }
+            ]
+        )
+        monkeypatch.setattr(
+            fleet_model_admission,
+            "fetch_versioned_roster",
+            lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", limited),
+        )
+    elif scenario == "malformed-payload":
+        monkeypatch.setattr(
+            fleet_model_admission,
+            "fetch_versioned_roster",
+            lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", {"unexpected": 1}),
+        )
+    else:
+        monkeypatch.setattr(
+            fleet_model_admission,
+            "fetch_versioned_roster",
+            lambda **kw: fleet_model_admission.ModelAdmissionDecision(
+                True, 0, "authoritative", _hub_roster_payload(source="hub")
+            ),
+        )
+        monkeypatch.setattr(
+            fleet_client,
+            "inspect_claim",
+            lambda target: fleet_client.ClaimDecision(False, "hub-unavailable", None),
+        )
+
+    result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert result["status"] == "unverified"
+    assert result["exit_code"] == 3
+    if scenario == "lkg-capacity-unverified":
+        admission_row = next(item for item in result["evidence"] if item["category"] == "admission")
+        capacity_row = next(item for item in result["evidence"] if item["category"] == "capacity")
+        assert admission_row["status"] == "passed"
+        assert "hub model admission LKG" in admission_row["detail"]
+        assert capacity_row["status"] == "unknown"
+
+
+def test_brigade_enrolled_fleet_policy_enforces_admissible_seat(declared, tmp_path, monkeypatch):
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda ws: "repo:example/brigade")
+    monkeypatch.setattr(fleet_client, "inspect_claim", lambda target: fleet_client.ClaimDecision(True, "free", None))
+    enrolled_payload = _hub_roster_payload(
+        source="hub",
+        fleet_policy={"active": True, "version": 3, "digest": "sha256:" + ("b" * 64)},
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", enrolled_payload),
+    )
+
+    policy_doc = {
+        "schema": "brigade.fleet_policy.v1",
+        "defaults": {"roles": {}, "data": {"allow_training": False}, "execution": {"concurrency": 1}},
+        "machines": {},
+        "seats": {
+            "worker": {
+                "provider": "openai",
+                "model": "example-model",
+                "enabled": True,
+                "concurrency": 1,
+                "training_allowed": True,
+                "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+            }
+        },
+        "consumers": {
+            "brigade-run": {
+                "reload": "none",
+                "coverage": "verified",
+            }
+        },
+        "repositories": {},
+    }
+    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kw: {"document": policy_doc})
+
+    denied_res = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert denied_res["status"] == "blocked"
+    assert denied_res["exit_code"] == 2
+    assert denied_res["limiting_reason"] == "admission-denied"
+
+    policy_doc["seats"]["worker"]["training_allowed"] = False
+    allowed_res = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    admission_row = next(item for item in allowed_res["evidence"] if item["category"] == "admission")
+    capacity_row = next(item for item in allowed_res["evidence"] if item["category"] == "capacity")
+    assert admission_row["status"] == "passed"
+    assert "fleet policy" in admission_row["detail"]
+    assert capacity_row["status"] == "unknown"
+    assert allowed_res["status"] == "unverified"
+    assert allowed_res["exit_code"] == 3
+
+    policy_doc["seats"]["worker"]["concurrency"] = 0
+    zero_res = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert zero_res["status"] == "blocked"
+    assert zero_res["exit_code"] == 2
+    assert zero_res["admitted_capacity"] == 0
+    assert zero_res["limiting_reason"] == "insufficient-capacity"
+
+
+def test_produced_brigade_observations_invalidate_on_staleness_and_scope_change(declared, tmp_path, monkeypatch):
+    _stub_standalone_env(monkeypatch)
+    request = readiness.ReadinessRequest(("worker",))
+    obs = readiness.brigade_route_observations(declared, request, workspace=tmp_path, now=NOW)
+    assert set(obs) == {"admission", "capacity"}
+    assert obs["admission"].scope == readiness.operation_scope(declared, request, tmp_path)
+    assert obs["capacity"].observed_at == NOW
+
+    stale = evaluate(declared, request, tmp_path, observations=obs)
+    assert stale["status"] == "ready"
+
+    expired_eval = readiness.evaluate_readiness(
+        declared,
+        request,
+        workspace=tmp_path,
+        now=NOW + readiness.OPERATION_TTL_SECONDS + 1.0,
+        health={"worker": health_for(declared, at=NOW + readiness.OPERATION_TTL_SECONDS + 1.0)},
+        observations=obs,
+    )
+    assert expired_eval["status"] == "unverified"
+    assert expired_eval["limiting_reason"] == "observation-stale-or-scope-mismatch"
+
+    changed_eval = evaluate(declared, replace(request, concurrency=2), tmp_path, observations=obs)
+    assert changed_eval["status"] == "unverified"
+    assert changed_eval["limiting_reason"] == "observation-stale-or-scope-mismatch"
+
+
+def test_t3_route_remains_untouched_by_brigade_producer(declared, tmp_path, monkeypatch):
+    from brigade import fleet_client, roster_readiness_brigade
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("T3 must not call brigade producer or fleet settings")
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", _forbidden)
+    monkeypatch.setattr(readiness, "brigade_route_observations", _forbidden)
+    monkeypatch.setattr(roster_readiness_brigade, "brigade_route_readiness", _forbidden)
+    result = readiness.inspect_readiness(
+        declared, readiness.ReadinessRequest(("worker",), route="t3"), workspace=tmp_path
+    )
+    assert result["status"] == "unverified"
+    support = next(item for item in result["evidence"] if item["category"] == "route-support")
+    assert support["reason"] == "t3-contract-unavailable"
+
+
+def test_brigade_roster_ready_cli_end_to_end(tmp_path, monkeypatch, capsys):
+    import json
+    from brigade import cli, fleet_client, roster_cmd, runguard
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    assert roster_cmd.init(ws) == 0
+    capsys.readouterr()
+
+    _stub_standalone_env(monkeypatch)
+    rc_ready = cli.main(["roster", "ready", "--target", str(ws), "--worker", "coder", "--json"])
+    ready_payload = json.loads(capsys.readouterr().out)
+    assert rc_ready == 0
+    assert ready_payload["status"] == "ready"
+    assert ready_payload["admitted_capacity"] == 4
+
+    monkeypatch.setattr(runguard, "inspect_run_lock_reconcile", lambda _: "live")
+    rc_blocked = cli.main(["roster", "ready", "--target", str(ws), "--worker", "coder", "--json"])
+    blocked_payload = json.loads(capsys.readouterr().out)
+    assert rc_blocked == 2
+    assert blocked_payload["status"] == "blocked"
+    assert blocked_payload["admitted_capacity"] == 0
+
+    def _broken_settings():
+        raise fleet_client.FleetClientError("bad fleet.toml")
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", _broken_settings)
+    monkeypatch.setattr(runguard, "inspect_run_lock_reconcile", lambda _: "absent")
+    rc_broken = cli.main(["roster", "ready", "--target", str(ws), "--worker", "coder", "--json"])
+    broken_payload = json.loads(capsys.readouterr().out)
+    assert rc_broken == 3
+    assert broken_payload["status"] == "unverified"
+
+
+def test_brigade_hub_probes_and_scopes_hub_resolved_configuration(declared, tmp_path, monkeypatch):
+    from brigade import fleet_client, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    local_declared = replace(
+        declared,
+        agents={
+            **declared.agents,
+            "worker": replace(declared.agents["worker"], model="local-model"),
+        },
+    )
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(
+            True, 0, "authoritative", _hub_roster_payload(source="hub")
+        ),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda ws: "repo:example/brigade")
+    monkeypatch.setattr(fleet_client, "inspect_claim", lambda target: fleet_client.ClaimDecision(True, "free", None))
+
+    probed_models: list[str | None] = []
+
+    class HubConfiguredProbe:
+        def probe_roster(self, selected, **kwargs):
+            probed_models.append(selected.agents["worker"].model)
+            return [health_for(selected, "worker", at=time_now())]
+
+    class LocalOnlyHealthyProbe:
+        def probe_roster(self, selected, **kwargs):
+            probed_models.append(selected.agents["worker"].model)
+            return [health_for(local_declared, "worker", at=time_now())]
+
+    def time_now():
+        import time
+
+        return time.time()
+
+    request = readiness.ReadinessRequest(("worker",))
+    ready_res = readiness.inspect_readiness(
+        local_declared, request, workspace=tmp_path, health_probe=HubConfiguredProbe()
+    )
+    assert probed_models == ["example-model"]
+    assert ready_res["status"] == "ready"
+    assert ready_res["exit_code"] == 0
+    assert ready_res["selected_seats"][0]["model"] == "example-model"
+    assert ready_res["scope"] != readiness.operation_scope(local_declared, request, tmp_path)
+
+    probed_models.clear()
+    local_only_res = readiness.inspect_readiness(
+        local_declared, request, workspace=tmp_path, health_probe=LocalOnlyHealthyProbe()
+    )
+    assert probed_models == ["example-model"]
+    assert local_only_res["status"] == "unverified"
+    assert local_only_res["exit_code"] == 3
+
+
+@pytest.mark.parametrize("workers", [("alpha", "beta"), ("beta", "alpha")])
+def test_brigade_hub_scans_every_seat_limit_independently_of_worker_order(tmp_path, monkeypatch, workers):
+    from brigade import fleet_client, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    two_worker_roster = roster.Roster(
+        orchestrator="chef",
+        agents={
+            "chef": roster.Agent("chef", "codex", "plan"),
+            "alpha": roster.Agent("alpha", "codex", "implement", model="example-model"),
+            "beta": roster.Agent("beta", "codex", "review", model="example-model"),
+        },
+        max_workers=4,
+    )
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda ws: "repo:example/brigade")
+    monkeypatch.setattr(fleet_client, "inspect_claim", lambda target: fleet_client.ClaimDecision(True, "free", None))
+
+    def _seat(name: str, limit: object) -> dict:
+        return {
+            "seat": name,
+            "provider": "openai",
+            "model": "example-model",
+            "reasoning": "medium",
+            "brigade_cli": "codex",
+            "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+            "enabled": True,
+            "limit": limit,
+        }
+
+    # Positive limit (5) and zero limit (0) must block regardless of --worker order.
+    payload = _hub_roster_payload(seats=[_seat("alpha", 5), _seat("beta", 0)])
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", payload),
+    )
+    res_zero = readiness.inspect_readiness(
+        two_worker_roster, readiness.ReadinessRequest(workers, concurrency=1), workspace=tmp_path
+    )
+    assert res_zero["status"] == "blocked"
+    assert res_zero["exit_code"] == 2
+    assert res_zero["admitted_capacity"] == 0
+    assert res_zero["limiting_reason"] == "insufficient-capacity"
+
+    # Malformed limit must also precede positive limit in either order.
+    malformed_payload = _hub_roster_payload(seats=[_seat("alpha", 5), _seat("beta", "bad")])
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", malformed_payload),
+    )
+    res_malformed = readiness.inspect_readiness(
+        two_worker_roster, readiness.ReadinessRequest(workers, concurrency=1), workspace=tmp_path
+    )
+    assert res_malformed["status"] == "unverified"
+    assert res_malformed["exit_code"] == 3
+    cap_row = next(item for item in res_malformed["evidence"] if item["category"] == "capacity")
+    assert "malformed limit" in cap_row["detail"]
+    assert "beta" in cap_row["detail"]
+
+    # Zero limit still precedes malformed limit in either order.
+    zero_vs_malformed = _hub_roster_payload(seats=[_seat("alpha", "bad"), _seat("beta", 0)])
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", zero_vs_malformed),
+    )
+    res_zero_malformed = readiness.inspect_readiness(
+        two_worker_roster, readiness.ReadinessRequest(workers, concurrency=1), workspace=tmp_path
+    )
+    assert res_zero_malformed["status"] == "blocked"
+    assert res_zero_malformed["exit_code"] == 2
+    assert res_zero_malformed["admitted_capacity"] == 0
+
+
+def test_brigade_hub_enrolled_with_lkg_reports_admission_unknown(declared, tmp_path, monkeypatch):
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    enrolled_lkg = _hub_roster_payload(
+        source="lkg",
+        fleet_policy={"active": True, "version": 3, "digest": "sha256:" + ("b" * 64)},
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "lkg", enrolled_lkg),
+    )
+    policy_doc = {
+        "schema": "brigade.fleet_policy.v1",
+        "defaults": {"roles": {}, "data": {"allow_training": False}, "execution": {"concurrency": 1}},
+        "machines": {},
+        "seats": {
+            "worker": {
+                "provider": "openai",
+                "model": "example-model",
+                "enabled": True,
+                "concurrency": 1,
+                "training_allowed": False,
+                "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+            }
+        },
+        "consumers": {"brigade-run": {"reload": "none", "coverage": "verified"}},
+        "repositories": {},
+    }
+    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kw: {"document": policy_doc})
+
+    result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert result["status"] == "unverified"
+    assert result["exit_code"] == 3
+    admission_row = next(item for item in result["evidence"] if item["category"] == "admission")
+    capacity_row = next(item for item in result["evidence"] if item["category"] == "capacity")
+    assert admission_row["status"] == "unknown"
+    assert "live hub admission" in admission_row["detail"]
+    assert capacity_row["status"] == "unknown"
+
+
+def test_brigade_hub_enrolled_lkg_seat_denial_is_unknown_not_blocked(declared, tmp_path, monkeypatch):
+    """A seat disabled only in the LKG must not read as a definite refusal for an enrolled launch."""
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    seats = _hub_roster_payload()["seats"]
+    seats[0]["enabled"] = False
+    enrolled_lkg = _hub_roster_payload(
+        source="lkg",
+        seats=seats,
+        fleet_policy={"active": True, "version": 3, "digest": "sha256:" + ("b" * 64)},
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "lkg", enrolled_lkg),
+    )
+    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kw: pytest.fail("policy fetch not expected"))
+
+    result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    admission_row = next(item for item in result["evidence"] if item["category"] == "admission")
+    assert admission_row["status"] == "unknown"
+    assert "in the LKG" in admission_row["detail"]
+    assert result["status"] == "unverified"
+    assert result["exit_code"] == 3
+
+
+def test_brigade_hub_claim_auth_failed_blocks_while_other_claim_failures_stay_unknown(declared, tmp_path, monkeypatch):
+    from brigade import fleet_client, fleet_model_admission
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(
+            True, 0, "authoritative", _hub_roster_payload(source="hub")
+        ),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda ws: "repo:example/brigade")
+
+    monkeypatch.setattr(
+        fleet_client,
+        "inspect_claim",
+        lambda target: fleet_client.ClaimDecision(False, "auth-failed", None),
+    )
+    blocked_res = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert blocked_res["status"] == "blocked"
+    assert blocked_res["exit_code"] == 2
+    assert blocked_res["limiting_reason"] == "capacity-failed"
+    cap_row = next(item for item in blocked_res["evidence"] if item["category"] == "capacity")
+    assert cap_row["status"] == "failed"
+    assert "auth-failed" in cap_row["detail"]
+    assert "enroll" in cap_row["detail"].lower()
+
+    for other_reason in ("no-identity", "missing", "hub-unavailable"):
+        monkeypatch.setattr(
+            fleet_client,
+            "inspect_claim",
+            lambda target, r=other_reason: fleet_client.ClaimDecision(False, r, None),
+        )
+        unverified_res = readiness.inspect_readiness(
+            declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path
+        )
+        assert unverified_res["status"] == "unverified"
+        assert unverified_res["exit_code"] == 3
+        other_cap = next(item for item in unverified_res["evidence"] if item["category"] == "capacity")
+        assert other_cap["status"] == "unknown"
+
+
+def test_brigade_hub_enrolled_policy_and_repo_identity_errors_stay_unknown(declared, tmp_path, monkeypatch):
+    import subprocess
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission, fleet_policy, fleet_session_presence
+
+    _forbid_mutating_hub_calls(monkeypatch)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test", "node_token": "tok"}
+    )
+    enrolled_payload = _hub_roster_payload(
+        source="hub",
+        fleet_policy={"active": True, "version": 3, "digest": "sha256:" + ("b" * 64)},
+    )
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", enrolled_payload),
+    )
+    policy_doc = {
+        "schema": "brigade.fleet_policy.v1",
+        "defaults": {"roles": {}, "data": {"allow_training": False}, "execution": {"concurrency": 1}},
+        "machines": {},
+        "seats": {
+            "worker": {
+                "provider": "openai",
+                "model": "example-model",
+                "enabled": True,
+                "concurrency": 1,
+                "training_allowed": False,
+                "bindings": {"brigade": {"cli": "codex", "model": "example-model"}},
+            }
+        },
+        "consumers": {"brigade-run": {"reload": "none", "coverage": "verified"}},
+        "repositories": {},
+    }
+    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kw: {"document": policy_doc})
+
+    def _timeout_repo(ws):
+        raise subprocess.TimeoutExpired(["git", "remote"], 5)
+
+    monkeypatch.setattr(fleet_session_presence, "repository_identity", _timeout_repo)
+    res_timeout = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert res_timeout["status"] == "unverified"
+    assert res_timeout["exit_code"] == 3
+    assert next(item for item in res_timeout["evidence"] if item["category"] == "admission")["status"] == "unknown"
+
+    monkeypatch.setattr(
+        fleet_session_presence,
+        "repository_identity",
+        lambda ws: fleet_session_presence.RepositoryIdentity("repo:example/brigade", "fleet"),
+    )
+    monkeypatch.setattr(
+        fleet_policy,
+        "resolve_policy",
+        lambda *a, **kw: (_ for _ in ()).throw(fleet_policy.FleetPolicyError("bad policy")),
+    )
+    res_policy_err = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    assert res_policy_err["status"] == "unverified"
+    assert res_policy_err["exit_code"] == 3
+    assert next(item for item in res_policy_err["evidence"] if item["category"] == "admission")["status"] == "unknown"

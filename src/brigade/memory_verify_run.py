@@ -55,12 +55,13 @@ but attaches, submits and writes nothing, and leaves the pause counter alone.
 from __future__ import annotations
 
 import base64
+
 import contextlib
 import os
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -230,7 +231,7 @@ def _hub_ms(status: Mapping[str, Any], fallback: int) -> int:
 
 
 def _refresh(
-    target: Path, client: hubc.MemoryHubClient, state: dict[str, Any], bound: frozenset[str]
+    target: Path, client: hubc.MemoryHubClient, state: dict[str, Any], bound: frozenset[str], *, retain: bool = True
 ) -> tuple[dict[str, dict[str, Any]], int]:
     """Entries whose remembered proposal is no longer open, with `pending` cleared, and the reads that failed.
 
@@ -264,10 +265,21 @@ def _refresh(
                 continue
             if current in OPEN_STATES:
                 continue
-            settled = {name: value for name, value in entry.items() if name != "pending"}
+            # Classify feedback from hub decisions, never a workspace journal.
+            if retain and current in ("applied", "rejected"):
+                from .memory_verify_auto import automated
+
+                if not automated(reply):
+                    feedback.retain_case(target, proposal, current, reply)
+            automatic_decision = current == "applied" and reply.get("decision_mode") == "automatic"
+            settled = {
+                name: value
+                for name, value in entry.items()
+                if name != "pending" and (not automatic_decision or name != "review")
+            }
             if current == "rejected":
                 settled["verdict"] = "rejected"
-            if "review" not in settled:
+            if "review" not in settled and not automatic_decision:
                 recovered_review = feedback.legacy_record(target, proposal, scope, key, entry)
                 if recovered_review is not None:
                     settled["review"] = recovered_review
@@ -563,6 +575,33 @@ def review(
         "calls": calls.records,
         "outcomes": [{"block_id": o.block_id, "verdict": o.verdict, "reason": o.reason} for o in result.outcomes],
         "ops": proposal.payload_ops(),
+        "evaluation_case": {
+            "id": io.sha256(io.json_bytes(head)),
+            "card": {
+                "scope": card.scope,
+                "card_id": card.card_id,
+                "revision": card.revision,
+                "updated_ms": card.updated_ms,
+                "text": "\n\n".join(block.text for block in card.blocks),
+            },
+            "evidence": [
+                {
+                    **{key: value for key, value in asdict(item).items() if key not in ("compare", "lineage")},
+                    "lineage": sorted(item.lineage),
+                    "compare_base64": base64.b64encode(item.compare).decode("ascii"),
+                }
+                for item in items
+            ],
+            "expected_ops": proposal.payload_ops(),
+            "commits": {
+                short: full
+                for op in proposal.ops
+                if op.text is not None
+                for block in card.blocks
+                if block.block_id == op.block_id
+                for short, full in contract.commit_expansions(op.text, block.claim)[0].items()
+            },
+        },
     }
     packet_bytes = io.json_bytes(packet)
     manifest = {
@@ -1012,7 +1051,9 @@ def _run(
     pair = READY(target, settings.propose_seat, settings.confirm_seat)
     early = cmd._binding(client.identity, status["principal"], status["log_epoch"])
     bound = frozenset(scope for scope in settings.scopes() if scope in hub_settings.read_scopes)
-    updates, unread = _refresh(target, client, state, bound) if state.get("binding") == early else ({}, 0)
+    updates, unread = (
+        _refresh(target, client, state, bound, retain=not dry_run) if state.get("binding") == early else ({}, 0)
+    )
     blocked: frozenset[str] = frozenset()
     if state.get("binding") == early:
         staged_now = packets.staged_digests(target)
@@ -1151,6 +1192,7 @@ def _run(
         raise VerifyRunError("verify_seats_failed", "every model call in the run failed")
     payload: dict[str, Any] = {
         "status": "completed",
+        "_verify_pair": pair,
         "dry_run": dry_run,
         "model": True,
         **cmd.report(picked, state, list_ids=list_ids),
@@ -1321,6 +1363,25 @@ def run_payload(
             RecursionError,
         ) as exc:
             payload = _failure(exc)
+        pair = payload.pop("_verify_pair", None)
+        if not dry_run and payload.get("status") == "completed" and pair is not None:
+            from . import memory_verify_auto as automatic
+
+            try:
+                # No corrections apply after any failed or malformed model call in this run.
+                if payload["calls"]["ok"] == payload["calls"]["made"] and not any(
+                    row.get("abstain") in (contract.SEAT_FAILED, contract.OUTPUT_INVALID, contract.CARD_INVALID)
+                    or any(
+                        block.get("reason") in (contract.UNCONFIRMED, contract.OUTPUT_INVALID)
+                        for block in row.get("blocks", [])
+                    )
+                    for row in payload["cards"]
+                ):
+                    payload["applications"] = automatic.apply_pending(
+                        target, state, client=cmd._hub(target)[1], pair=pair, now_ms=now
+                    )
+            except (OSError, ValueError, KeyError, TypeError, hubc.HubUnavailable, hubc.HubRefusal):
+                payload["auto_apply"] = "proposal-only"
         if not dry_run:
             # The pause counter rule: a failed run adds one. A completed run resets it only when it
             # did work (a seat call answered, or a submission reached a result). An idle run leaves it.

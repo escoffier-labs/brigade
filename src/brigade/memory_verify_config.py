@@ -21,7 +21,7 @@ import re
 import stat
 import tomllib
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import memory_hub_client as hubc
@@ -42,6 +42,7 @@ PROJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 VERIFY_KEYS = frozenset(
     {
         "enabled",
+        "new_workspace_version",
         "propose_seat",
         "confirm_seat",
         "cards_per_run",
@@ -296,7 +297,10 @@ def parse(data: dict[str, Any]) -> VerifyConfig:
     unknown = sorted(set(table) - VERIFY_KEYS)
     if unknown:
         raise VerifyConfigError(f"[verify] has unknown keys: {', '.join(unknown)}")
-    enabled = table.get("enabled", False)
+    marker = table.get("new_workspace_version")
+    if marker is not None and (type(marker) is not int or marker != 1):
+        raise VerifyConfigError("[verify] new_workspace_version must be 1")
+    enabled = table.get("enabled", marker == 1)
     if type(enabled) is not bool:
         raise VerifyConfigError("[verify] enabled must be true or false")
     propose, confirm = _seat(table, "propose_seat"), _seat(table, "confirm_seat")
@@ -326,3 +330,33 @@ def load(target: Any) -> VerifyConfig:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
         raise VerifyConfigError("invalid memory-care config") from None
     return parse(data)
+
+
+# A table header may carry a trailing comment, for example "[verify] # settings".
+_VERIFY_HEADER = re.compile(r"^\s*\[\s*verify\s*\]\s*(#.*)?$")
+
+
+def enable(target: Path) -> None:
+    """Explicitly opt an existing configuration into verification, preserving its other tables."""
+    from .memory_verify_packets import atomic_write
+
+    raw = io.read_bytes(target / CONFIG)
+    if raw is None:
+        raise VerifyConfigError("memory-care configuration is required")
+    data = raw.decode("utf-8-sig")
+    parse(tomllib.loads(data))
+    lines = data.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if _VERIFY_HEADER.match(line)), None)
+    if start is None:
+        lines.extend(["\n[verify]\nenabled = true\n"])
+    else:
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+        enabled = next((i for i in range(start + 1, end) if re.match(r"\s*enabled\s*=", lines[i])), None)
+        if enabled is None:
+            lines.insert(start + 1, "enabled = true\n")
+        else:
+            lines[enabled] = "enabled = true\n"
+    updated = "".join(lines).encode()
+    parse(tomllib.loads(updated.decode()))
+    with io.directory((target / CONFIG).parent, private=True) as fd:
+        atomic_write(fd, Path(CONFIG).name, updated)

@@ -191,3 +191,17 @@ def test_unknown_model_switch_does_not_reuse_previous_identity(target):
     record = observed_checks.read_checks(target)[0][0]
     assert record.model == "unknown"
     assert record.model_source == "hook-model-switch"
+
+
+def test_lesson_contention_preserves_existing_capture(target, monkeypatch):
+    from brigade import lesson_activity
+
+    now = [0.0]
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: now[0])
+
+    def contended(*args, **kwargs):
+        now[0] += 0.4
+
+    monkeypatch.setattr(lesson_activity, "on_event", contended)
+    runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", "pytest"))
+    assert len(observed_checks.read_checks(target)[0]) == 1

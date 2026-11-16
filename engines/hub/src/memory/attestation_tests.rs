@@ -181,6 +181,8 @@ async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_re
     let after = card(&h, FIXTURE_SCOPE, "a").await;
     assert_eq!(after["trust"], before["trust"]);
     assert_eq!(h.call(ADMIN_TOKEN, request).await, applied);
+    // A fresh terminal-state request is admitted only after the rate window.
+    h.set_clock(h.now() + 60_001);
     assert_eq!(
         h.call(ADMIN_TOKEN, auto_request(&h, &id).await)
             .await
@@ -203,14 +205,11 @@ async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_re
     );
     assert_eq!(audit["gates"]["checks"].as_array().unwrap().len(), 17);
     assert!(!payload.contains(OLD));
-    let inverse=h.call(ADMIN_TOKEN,json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
-    assert_eq!(inverse.body["state"], "pending");
-    assert_eq!(
-        decide(&h, ADMIN_TOKEN, &inverse.body["proposal_id"])
-            .await
-            .body["state"],
-        "applied"
-    );
+    let request = json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()});
+    let inverse = h.call(ADMIN_TOKEN, request.clone()).await;
+    assert_eq!(inverse.body["state"], "applied");
+    assert_eq!(inverse.body["tier"], 0);
+    assert_eq!(h.call(ADMIN_TOKEN, request).await, inverse);
     assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before["text"]);
 }
 #[tokio::test]
@@ -468,12 +467,8 @@ async fn imported_trust_is_preserved_and_rollback_pins_the_actual_applied_trust(
     assert_eq!(r.body["state"], "applied");
     assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["trust"], "imported");
     let inverse=h.call(ADMIN_TOKEN,json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
-    assert_eq!(
-        decide(&h, ADMIN_TOKEN, &inverse.body["proposal_id"])
-            .await
-            .body["state"],
-        "applied"
-    );
+    assert_eq!(inverse.body["state"], "applied", "{inverse:?}");
+    assert_eq!(inverse.body["tier"], 0);
     assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["trust"], "imported");
 }
 #[tokio::test]

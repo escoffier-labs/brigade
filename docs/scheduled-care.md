@@ -758,9 +758,15 @@ Add new sections here as adapters land. Future candidates include a beads reconc
 ### Hub memory reflection
 
 `brigade memory care install --entry memory-reflect --target <workspace>`
-installs an optional daily 10:00 hub reflection entry through the existing
-care scheduler. It runs `memory reflect run --hub --scheduled` and submits
-proposals only. A reviewer must decide each proposal separately.
+installs a daily 10:00 reflection entry through the existing care scheduler.
+The default care set now includes this entry. It runs
+`memory reflect run --scheduled --apply`, selecting configured hub memory or
+local candidates. A missing workspace reflect policy is created with Tier 0
+application enabled. Existing policies, including an off switch, are preserved.
+Hub authority gates decide whether each proposal can apply. Gate holds stay
+proposal-only without failing care. Local authority gates remain unbound.
+Use `brigade memory reflect auto-apply off --target .` to stop application
+before the next candidate. See [Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection).
 
 Three consecutive non-zero reflect runs pause the job in workspace state.
 Scheduled triggers then skip hub work. Inspect `memory reflect status`,

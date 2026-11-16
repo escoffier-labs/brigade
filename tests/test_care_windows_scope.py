@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -138,6 +139,21 @@ def test_unscoped_reflect_shares_bootstrap_without_changing_arguments(tmp_path):
     def literal(value):
         return "'" + value.replace("'", "''") + "'"
 
+    from brigade import __file__ as initializer
+
+    assert care_windows.split_windows_argv(arguments) == [
+        "-I",
+        "-c",
+        bootstrap,
+        str(Path(initializer).resolve()),
+        "brigade",
+        "memory",
+        "reflect",
+        "run",
+        "--scheduled",
+        "--target",
+        str(tmp_path.resolve()),
+    ]
     assert script.count(literal(bootstrap)) == 1
     assert f"$h={literal(bootstrap)}; $v=({literal(before)}+$h+{literal(after)});" in script
     helper = module_argv("brigade.care_windows")

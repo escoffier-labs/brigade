@@ -1,0 +1,1 @@
+- New workspaces enable Tier 0 reflect application intent. Care installation includes scheduled reflection with gated hub application and proposal-only fallback. Existing policies are preserved. Use `brigade memory reflect auto-apply off` to stop application before the next candidate.

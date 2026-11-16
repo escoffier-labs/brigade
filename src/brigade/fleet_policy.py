@@ -799,6 +799,7 @@ def parse_memory(raw: Any) -> dict[str, Any]:
             "curation_owner",
             "evidence_freshness_seconds",
             "retrieval_eval",
+            "rollback_watch_seconds",
         ),
         "memory",
     )
@@ -806,6 +807,11 @@ def parse_memory(raw: Any) -> dict[str, Any]:
         raise FleetPolicyError("fleet policy memory.auto_apply must be a boolean")
     parsed: dict[str, Any] = {"auto_apply": body.get("auto_apply", False)}
     # Do not add defaults to older documents, preserving their canonical digest.
+    if "rollback_watch_seconds" in body:
+        window = body["rollback_watch_seconds"]
+        if type(window) is not int or not 1 <= window <= 604800:
+            raise FleetPolicyError("fleet policy memory.rollback_watch_seconds must be 1 through 604800")
+        parsed["rollback_watch_seconds"] = window
     if "curation_owner" in body:
         owner = body["curation_owner"]
         if owner not in ("hub", "external", "handoff-only"):

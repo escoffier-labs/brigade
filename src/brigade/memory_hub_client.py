@@ -673,6 +673,8 @@ class MemoryHubClient:
             return payload
         code = payload.get("code")
         coded = QUOTA_REFUSALS | EVIDENCE_QUOTA_REFUSALS | {READ_STATS_RATE_LIMITED}
+        if action == "auto_apply":
+            coded = coded | {"memory_auto_apply_rate_limited"}
         if status == 429 and isinstance(code, str) and code in coded:
             raise HubRefusal(status, payload)
         if 300 <= status < 400 or status in _UNAVAILABLE_STATUSES:

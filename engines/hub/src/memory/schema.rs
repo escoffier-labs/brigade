@@ -143,7 +143,7 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}{}{}{}{}{}{}{}
+{}{}{}{}{}{}{}{}{}
 ",
         super::embedding::DDL,
         super::proposals::DDL,
@@ -152,6 +152,7 @@ CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
         super::read_counts::DDL,
         super::verifier::DDL,
         super::manifest_binding::DDL,
+        super::verify_eval::DDL,
         super::retrieval_history::DDL
     )
 }
@@ -178,6 +179,7 @@ pub const TABLES: &[&str] = &[
     "memory_verifiers",
     "memory_verifier_credentials",
     "memory_evidence_bindings",
+    "memory_verify_evals",
 ];
 
 /// Create a fresh file's schema, or check an existing one. Never downgrades,
@@ -278,7 +280,9 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     if version < 13 {
         step(c, super::manifest_binding::DDL, 13).map_err(err)?;
     }
-    // Version 14 is reserved for #2606. Rebase its migration before landing.
+    if version < 14 {
+        step(c, super::verify_eval::DDL, 14).map_err(err)?;
+    }
     if version < 15 {
         step(
             c,

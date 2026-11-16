@@ -1110,7 +1110,15 @@ def test_packaged_presets_remain_byte_identical_after_suggest_and_stats(tmp_targ
     assert preset.read_bytes() == original
 
 
-def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, capsys):
+def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, monkeypatch, capsys):
+    from brigade import fleet_client, roster_readiness_brigade
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": ""})
+    monkeypatch.setattr(
+        roster_readiness_brigade,
+        "brigade_route_readiness",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("blocked orchestrator selection must not call producer")),
+    )
     assert roster_cmd.init(tmp_target) == 0
     capsys.readouterr()
     assert cli.main(["roster", "ready", "--target", str(tmp_target), "--worker", "orchestrator", "--json"]) == 2

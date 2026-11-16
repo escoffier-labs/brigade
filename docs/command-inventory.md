@@ -42,7 +42,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
-- `brigade memory`: 60 command path(s)
+- `brigade memory`: 68 command path(s)
 - `brigade model`: 12 command path(s)
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -60,7 +60,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 5 command path(s)
 - `brigade route`: 1 command path(s)
-- `brigade run`: 47 command path(s)
+- `brigade run`: 48 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 21 command path(s)
 - `brigade scrub`: 1 command path(s)
@@ -389,6 +389,10 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory hub status`
 - `brigade memory init-git`
 - `brigade memory inventory`
+- `brigade memory lessons disable`
+- `brigade memory lessons enable`
+- `brigade memory lessons run`
+- `brigade memory lessons status`
 - `brigade memory lint`
 - `brigade memory project-vault`
 - `brigade memory proposal apply`
@@ -400,6 +404,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory proposals list`
 - `brigade memory proposals show`
 - `brigade memory recall`
+- `brigade memory reflect auto-apply`
 - `brigade memory reflect candidates`
 - `brigade memory reflect preflight`
 - `brigade memory reflect propose`
@@ -420,6 +425,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory vault-search`
 - `brigade memory vault-show`
 - `brigade memory verify doctor`
+- `brigade memory verify enable`
+- `brigade memory verify eval`
+- `brigade memory verify gate`
 - `brigade memory verify run`
 - `brigade memory verify show`
 - `brigade memory verify status`
@@ -636,6 +644,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade route`
 - `brigade run`
 - `brigade run approve`
+- `brigade run batch`
 - `brigade run cloud adopt`
 - `brigade run cloud canary`
 - `brigade run cloud compact`

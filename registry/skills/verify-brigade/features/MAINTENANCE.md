@@ -199,6 +199,7 @@ workflow             no feature file yet; extras surface
 guard *              only guard scan and guard redact are driven (guard-parity)
 handoff *            only handoff lint has a feature, and it is paused
 run approve          no feature file yet
+run batch            offline dry-run and execution tests; no drive feature yet
 run cloud            provider adapters and removal tombstones have no dedicated drive feature
 work checks          report tests cover observations. No standalone drive yet
 work *               only work verify run is driven

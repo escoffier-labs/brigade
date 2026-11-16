@@ -17,6 +17,53 @@ brigade memory care closeout
 
 `init` writes `.brigade/memory-care.toml`. The config is host-local and should stay gitignored.
 
+## Automatic Tier 0 reflection
+
+New `brigade init` and setup installs create
+`.brigade/memory/reflect/policy.json` with `auto_apply: true` and
+`tier0_op_classes: ["append_evidence", "merge_exact_duplicates"]`.
+Initialization records these defaults in `.brigade/new-workspace.v1.json`.
+Existing Brigade or legacy workspace state prevents new-workspace seeding.
+Reinitializing an existing workspace does not opt it in or change its policy.
+`brigade care install --target .` now includes the daily `memory-reflect`
+entry. Selecting `--entry memory-reflect` installs just that entry. Care
+installation leaves a missing reflect policy off and preserves an existing one.
+The explicit `--reflect-auto-apply` install flag enables the workspace policy.
+Installing OS timers remains an explicit care-install action.
+
+The entry runs `memory reflect run --scheduled` and checks workspace intent
+before automatic application. On a configured hub,
+it opens pinned proposals and calls the hub's `auto_apply` path. The hub checks
+Tier 0 class, cited proof, trusted scan-clean sources, ownership, retrieval
+evaluation, blast caps, cooldown and policy bindings before changing cards.
+A gate hold, including an unsupported retrieval scope, keeps the proposal
+pending and records its checks or refusal code. It does not fail the care entry.
+External memory owners and handoff-only policies cannot pass the ownership gate.
+The hub decision ledger records automatic decisions with the policy actor and
+digest. `memory reflect rollback <proposal-id>` opens the existing compensating
+proposal, which still requires a reviewed decision.
+
+Use one workspace switch to stop automatic application:
+
+```bash
+brigade memory reflect auto-apply off --target .
+```
+
+This sets `auto_apply` to `false` in the workspace policy. The scheduled run
+re-reads it before each candidate, including during an in-flight run. A request
+already sent to the hub can finish. Existing workspaces opt in with
+`brigade memory reflect auto-apply on --target .`. Existing timers using
+`--scheduled` also honor this opt-in without reinstallation. Workspace intent cannot override
+the hub's fleet memory policy or its kill switch.
+
+Without a configured hub, scheduled runs derive local candidates and record
+holds.
+Local repository candidates remain proposal-only while their evidence,
+ownership, retrieval and cooldown authority contracts are unbound. Their
+`automatic.json` run artifact records the preflight holds. Hub runs retain the
+latest automatic results in `schedule.json`. Tier 1 and Tier 2 application is
+outside this Tier 0 change.
+
 ## Deterministic reflection candidates
 
 `brigade memory reflect run --dry-run` derives `stale-newer-evidence`, `duplicate`,
@@ -140,8 +187,8 @@ and back up `.brigade/memory/reflect/evidence-log.jsonl`. Manually quarantine th
 invalid line outside the log, or truncate an incomplete final line. Preserve
 valid rows, then rerun reflection before resuming writers. Rows with an unknown
 `kind` also require recovery or a Brigade version that supports that kind.
-Policy promotion and model-authored claim changes are not available through
-reflection. Reviewed proposal creation is available as described below.
+Hub Tier 0 policy application is available as described above. Model-authored
+claim changes remain outside this deterministic reflection path.
 
 ## Reviewed consolidation proposals
 
@@ -592,3 +639,275 @@ instrument. Hub read counts have budgets and can miss reads. Reads therefore
 only ever protect a card. Missing, incomplete, or too-young read history blocks
 automatic retirement. `memory care archive --from-file` applies an outside
 judgment and does not consult reads.
+
+`--limit` applies per lane: up to that many cached retries and, independently,
+up to that many new proposals per run. Cached retries run least recently
+attempted first, so held proposals rotate through the retry budget. They cannot
+consume slots for new proposals.
+
+Automatic `auto_apply` requests are paced at least one second after the previous
+request completes, matching the hub default per-principal interval. The hub does
+not currently expose its configured interval to clients. A rate-limited refusal
+gets one retry after pacing, with a fresh request id and a fresh policy check.
+A second refusal stays pending for a later run. With `--limit N`, requested sleep
+is bounded by `4 * N - 1` seconds, at most 399 seconds at the maximum limit of
+100. Hub request time is additional. Longer configured hub intervals or
+per-proposal cooldowns can still leave proposals pending. A lost hub response records an
+unknown result. The hub refuses repeated application of a decided proposal.
+Client tests verify request behavior and fallback. Hub transactional tests
+provide the card-write atomicity coverage.
+
+## Model-backed verification admission
+
+Existing verify configurations that omit `enabled` remain disabled. Run
+`brigade memory verify enable --target <verify-folder>` to opt in explicitly.
+New memory-care configurations carry `new_workspace_version = 1` in `[verify]`.
+Only that versioned initialization marker enables an omitted `enabled` field.
+Set `[verify] enabled = false` to stop model calls.
+`memory care init --force` replaces an existing configuration and drops its
+`[verify]` table, including the new-workspace marker. Verification then defaults
+to disabled, even if it was previously enabled. Rebind the workspaces and use
+`memory verify enable` explicitly after reinitializing. Reinitialization cannot
+silently opt an existing workspace into scheduled model calls.
+The scheduled `memory-verify` care entry checks existing hub admission and uses
+`verify_auto_apply`. It never calls the human `decide` action or runs evaluation.
+A class without current hub admission stays proposal-only. Failed or invalid
+runs do not apply corrections. A valid run may apply pending proposals retained
+from earlier valid runs.
+Requests to `verify_auto_apply` share the hub's automatic attempt rate limit
+with `auto_apply`. The client waits one second between requests and tries the
+least recently attempted proposals first, so a proposal the hub keeps refusing
+cannot hold back the others. A throttled attempt is reported as `rate-limited`,
+and the next run tries that proposal again.
+
+`brigade memory verify eval --corpus <directory> --target <verify-folder> --json`
+scores labeled cards with the production two-seat contract, without contacting
+the hub or submitting proposals. The directory contains `cases.json` with schema
+`brigade.memory-verify-corpus.v1`. Each case includes an id, anchored card input,
+serialized evidence items with provenance and digests, an expected class and
+expected operation fields. Labels stay outside prompts. Optional `commits` maps
+abbreviations to independently established full commit ids for offline replay.
+The test corpus contains 70 synthetic cases covering incorrect, drifted, confirmed,
+adversarial, shared-source, history and supersede outcomes.
+
+`brigade memory verify gate --target <verify-folder> --json` reads
+`.brigade/memory/verify/eval/cases.json`, adds retained decision-feedback cases,
+runs the harness and writes a diagnostic `.brigade/memory/verify/decision.json`.
+The explicit gate command publishes its policy digest and go/no-go record through
+hub admin-authenticated `verify_eval.record`. Records are append-only in the hub.
+Local files cannot grant admission or advance the consecutive-pass streak.
+Run the gate separately whenever admission expires or inputs change.
+One evaluation takes the full corpus (up to 256 cases) plus retained feedback
+(up to 128). Its deadline is the larger of 20 minutes and 15 seconds per card run,
+so 384 cases at 3 repeats allow about 4.8 hours. A run past the deadline reports
+`verify_eval_timeout` and records no-go. Duplicate ids across the corpus and
+feedback report `verify_eval_duplicate_id`, also as no-go.
+The gate and `memory verify eval` hold the verify lock for the whole evaluation.
+Scheduled `memory verify run` passes during that time report
+`verify state is locked by another run` and skip without counting toward the pause.
+Holding the lock also keeps `feedback.json` stable while the gate reads it.
+Run the gate outside the scheduled verify window.
+The report contains precision, recall, true positives, false positives and false
+negatives per class and operation type, repeat agreement and unsafe proposals.
+Operation metrics count emitted operations separately from verdicts. Confirming
+a card without an operation cannot qualify automatic evidence additions.
+A replacement only counts as correct when its expected operation fields match.
+An unsupported history or supersede remains a recall miss, so those classes do
+not receive go records merely because the verifier abstained.
+
+The packaged `fixtures/memory-verify-policy.v1.json` supplies the defaults.
+A complete override belongs at `.brigade/memory/verify/policy.json`:
+
+| Setting | Default |
+| --- | ---: |
+| Precision | 0.9 |
+| Recall | 0.6 |
+| Repeat agreement | 0.9 |
+| Cases per class | 5 |
+| Repeats per evaluation | 3 |
+| Consecutive passing evaluations | 2 |
+| Minimum decided feedback cases per class | 0 |
+| Accept rate when feedback exists | 0.7 |
+| Decision lifetime in days | 7 |
+| Automatic application | true |
+
+A nonzero feedback minimum is optional. The default gate can pass from a labeled
+corpus without waiting for anyone to review live proposals. Healthy-card or
+adversarial correction proposals and invalid model outputs block all classes.
+Shared-source cases exercise the same independence checks as production.
+
+The decision digest binds its metrics and reasons. Its input binding covers the
+exact policy bytes, corpus and feedback bytes, prompt contract, seat fingerprints,
+hub identity, principal, log epoch and verifier implementation digests. A policy edit, changed input, expired record,
+changed seat or invalid digest removes admission immediately. A no-go record names
+the failed bars for every class. Set policy `auto_apply` to false to retain model
+verification and proposals while stopping new local attempts. For an authoritative
+off switch that also holds requests already in flight, use the hub admin
+`auto_apply_switch` action with `enabled: false`. That switch is rechecked inside
+the automatic application transaction.
+
+New private review packets retain replayable card and evidence inputs. A subsequent
+external applied or rejected decision supplies a labeled case when its manifest
+and packet hashes match. Legacy packets still supply slice 10's verdict counters
+but cannot supply replay inputs. The hub's immutable `decision_mode` excludes
+automatic applications from labels and verdict counters. A diagnostic journal
+records an automatic application only after the hub reports it applied.
+Deleting or forging that journal cannot change feedback classification.
+Feedback retains the latest 128 cases. Text stays in private packets and evaluation
+inputs, never the text-free decision record or run summary.
+Replay labels cover cards where the verifier proposed a change. They do not
+measure missed corrections on cards where it proposed nothing. Replay and
+synthetic cases currently share the metric pool, so accepted replays can raise
+reported recall without measuring those misses. The reported recall describes
+this combined corpus and omits unproposed production corrections.
+
+The explicit gate command requires an evaluator admin credential held outside
+workspace worker access. Configure its absolute token path in user-level
+`fleet.toml` under `[memory_verify] eval_token_file`, or set
+`BRIGADE_MEMORY_VERIFY_EVAL_TOKEN_FILE`. Scheduled runs never load this credential.
+The verifier uses its own `read` and `reflect` grants for automatic application,
+and needs `review` to authenticate the retained manifest hash chain.
+The hub transaction checks the current curation owner, fleet auto-apply policy,
+kill switch, verifier authority, policy digest, epoch, record lifetime, exact
+operation classes and pinned card snapshot. Automatic changes retain prior trust.
+The client sends the full stored operation-type list, including the trailing
+manifest attachment. Class admission excludes only that exact attachment when
+the hub's authenticated evidence binding names the same proposal, proposer,
+card, scope and base revision, with the first correction's block pin. Ordinary
+evidence appends still require `confirm=go`. A correction and its manifest can
+apply with only `correct=go`.
+The existing human review and rollback actions remain available.
+
+The hub cannot recompute `binding_sha256` from its stored state. That digest also
+covers local seat identities, corpus and feedback bytes, prompt and implementation
+hashes. The client recomputes it before applying, so local seat, corpus, feedback,
+prompt and implementation changes revoke admission through the client. The hub
+compares the submitted digest with the admin evaluator's admitted digest, but a
+worker can read and echo that value. This comparison does not attest the worker's
+current local files. The hub independently enforces evaluator credential rotation,
+principal, epoch, fleet policy revision and digest, the admitted policy snapshot
+and record expiry. Treat the scheduled client and its local files as trusted for
+the local revocation checks.
+
+Keep the admin evaluator credential outside the scheduled worker's OS access.
+A separate path under the same OS user does not provide that isolation. Use a
+separate OS identity or equivalent credential isolation. The CLI does not prove
+that the scheduler cannot read the evaluator token file.
+
+Before applying, Brigade rechecks admission, authenticates the manifest and packet,
+checks local evidence freshness and acknowledges the hub policy digest. Existing
+proposal caps, revision checks and cooldowns remain. The private applications
+journal retains up to 4096 diagnostic entries and does not authorize application.
+Application uses `verify_auto_apply`, which retains before-state and supports
+`brigade memory reflect rollback <proposal-id>`. That opens a compensating proposal
+under the existing rollback checks. No direct card write or Tier 2 floor bypass is
+introduced. The maintainer soak remains tracked separately by #762.
+
+## Automatic work-session lessons
+
+`brigade memory lessons run` reviews local work-hook activity after 20 tool
+calls and five minutes of idle time. The existing post-tool hooks supply the
+counter and a scanned digest of at most 96 observations, retaining failure
+events ahead of routine activity after evicting reviewed events first. User
+prompts supply correction evidence
+through a private hook cache without writing into the workspace.
+Review workers do not count their own calls.
+
+Install unattended execution once with
+`brigade care install --entry lesson-review --target <scope>`. This selectable
+care entry checks every five minutes through a pinned runbook. It uses the
+existing worker dispatcher and the roster seat `researcher`. Set `seat`,
+`threshold` and `idle_seconds` in `.brigade/lesson-review.json` to change those
+values. There is no provider integration or transcript crawler. Install work
+hooks on each target whose activity should count. Repository and hub targets
+have separate local state.
+
+Automatic lesson admission is disabled in code until the hub anchor in #2620
+exists. Until then, hooks record no observations and keep no prompt text. They
+return `lesson_admission_awaits_hub_anchor` and clear the prompt queue. Manual
+handoff drafting remains available. Candidates return
+`lesson_admission_awaits_hub_anchor (#2620)` without publication.
+
+Lesson review requires a fixed workspace key for all lesson kinds, including
+user corrections. Generate it with
+`brigade receipts keygen --target <scope>` and `BRIGADE_RECEIPT_SIGNING_KEY_FILE`
+unset. That variable selects an audit key only and grants no lesson authority.
+Without a usable key, recording and review return `lesson_review_needs_key`,
+discard queued prompts and run no worker. Setup and care install do not create
+this key automatically.
+Start an active work session with `brigade work start --target <scope>` before
+running either verifier. Use a registered card manifest and a plain
+`brigade work verify run --target <scope> --manifest <id>` invocation in the
+hook-observed command. Shell wrappers, chained commands such as
+`cd <scope> && brigade work verify run`, environment prefixes, and executable
+aliases are not recognized as lesson evidence. Set the working directory in the
+harness and use `--target` instead. Both text output with a single `run:` field
+and complete `--json` receipt output are supported.
+
+`brigade memory lessons status` reports the pending call count and configuration.
+`brigade memory lessons disable` stops recording and reviews without deleting
+pending work. `enable` resumes it. Uninstalling the `lesson-review` care entry
+removes its schedule.
+
+Admission accepts a verified fix, a workaround that worked or a correction
+quoted from a user prompt with at least 24 bytes and five tokens. Lesson content
+must derive from that quote. Fixes and workarounds require registered card
+verification receipts from `brigade work verify run` observations and an exact
+hash of the proposed card bytes. Each receipt
+must carry a workspace signature created by the verifier and name the producing
+work session recorded by its hook observation. The run id must match the
+coordinator output. Printing a receipt path does not bind it to that run. A receipt
+with a harness-session fingerprint must match its hook observation. An earlier
+failing receipt and a later passing receipt must belong to that same work session
+and observed harness session, have different tree fingerprints, and complete after the earliest unreviewed activity. The failing
+patch receipt is checked against its authenticated historical binding. The
+passing patch receipt must still match the current card.
+
+These receipts require a registered card manifest. Ordinary ad hoc code checks
+cannot establish a lesson about card content. New cards need fixture evidence
+with the proposed content hash. Patch evidence can support updates to existing
+cards. Unsigned receipts and receipts from another work session do not qualify.
+The workspace signature uses only the existing operator-owned, private,
+single-link `.brigade/receipt-signing-key`, read through no-follow descriptors.
+It ignores `BRIGADE_RECEIPT_SIGNING_KEY_FILE` and never creates a key. Windows
+cannot supply this authority until the ACL confinement work in #2588 lands.
+The existing configurable audit signature remains separate. This MAC boundary
+prevents text-only receipt forgery. It does not isolate the key from an agent
+with shell access. Verifier session labels are caller-controlled and default
+to a label derived from the run id. Rejecting a matching producer label does not
+prove verifier independence. Receipts without a harness fingerprint establish
+only work-session binding, which is shared by concurrent harnesses.
+
+Failure and success evidence excludes unresolved fixes and unchanged-tree
+retries. Corrections remain quoted user claims screened by content and lexical
+checks, with human review as the final check. An ordinary prompt is not proof
+that its surrounding lesson is correct.
+An empty review creates no handoff or card. Updating a card requires its current
+bytes in the final worker prompt and an unchanged hash at admission.
+
+The coordinator renders through `brigade handoff draft` and publishes into the
+private `.brigade/lesson-review/outbox/`, outside the watched handoff inboxes.
+Crash recovery resumes from that outbox. Descriptor-bound ingest delivers only
+that draft to the review inbox. The draft names
+machine origin
+`brigade.lesson-review.v1` and a local review receipt that binds the session
+digest and draft hash. This marker grants no interactive-origin authority.
+Automatic filing depends on #2577 accepting a receipt-bound machine origin.
+The trusted-origin interface is absent in this version, so every admitted lesson
+stays in `memory/handoff-inbox/` for review. Other pending handoffs stay untouched.
+
+The observed counter and committed watermark survive restart under
+`.brigade/lesson-review/`. New activity during review preserves the counter for
+the next idle window. Prompt hooks keep a bounded private spool outside the
+workspace. The coordinator drains it after the review worker returns and before accepting
+a review, so an in-flight correction interrupts publication. Scanner-blocked
+prompts retain a body-free placeholder so they still interrupt. Malformed or
+oversized spools are quarantined privately with a body-free reason and the next
+tick continues.
+Verification observations from successful and failed tool hooks survive routine
+event eviction. A prepared draft is recovered before another review can
+publish one. Rapid and concurrent triggers share one run lock. The digest keeps
+bounded observations, so older details may require a normal handoff. Each digest
+has a persisted three-attempt budget and exponential backoff. A rejected or stuck
+publication is quarantined with a body-free reason after that bound, advancing
+only its own watermark so newer activity can proceed.

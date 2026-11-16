@@ -30,7 +30,7 @@ type busyRetryExhaustedError struct {
 }
 
 func (e busyRetryExhaustedError) Error() string {
-	return fmt.Sprintf("evidence database still locked after %d retries; %s", e.attempts, e.diagnosis)
+	return fmt.Sprintf("evidence database still locked after %d attempts, %s", e.attempts, e.diagnosis)
 }
 
 func (e busyRetryExhaustedError) Code() int {
@@ -135,7 +135,9 @@ func RetryOnBusy(fn func() error, opts BusyRetryOptions) error {
 	wait := opts.InitialWait
 	started := opts.Now()
 	var last error
+	attempts := 0
 	for attempt := 1; attempt <= opts.Attempts; attempt++ {
+		attempts = attempt
 		last = fn()
 		if last == nil || !IsBusy(last) {
 			return last
@@ -166,7 +168,7 @@ func RetryOnBusy(fn func() error, opts BusyRetryOptions) error {
 		}
 	}
 	code, _ := sqliteErrorCode(last)
-	return busyRetryExhaustedError{attempts: opts.Attempts, diagnosis: diag, code: code}
+	return busyRetryExhaustedError{attempts: attempts, diagnosis: diag, code: code}
 }
 
 // DiagnoseLockHolder names the evidence database and any process that

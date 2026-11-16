@@ -1,0 +1,8 @@
+{
+  "id": "lesson-review",
+  "description": "Review idle work-session lessons through a read-only seat and normal handoff ingest.",
+  "allowed_commands": ["brigade"],
+  "steps": [
+    {"id": "review", "run": "brigade memory lessons run --target ."}
+  ]
+}

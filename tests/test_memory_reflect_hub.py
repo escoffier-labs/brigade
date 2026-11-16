@@ -141,8 +141,8 @@ def test_care_install_memory_reflect(setup, capsys):
     argv = shlex.split(
         next(line.removeprefix("ExecStart=") for line in body.splitlines() if line.startswith("ExecStart="))
     )
-    assert argv[-7:] == ["memory", "reflect", "run", "--hub", "--scheduled", "--target", str(target)]
-    assert "decide" not in body and "apply" not in body
+    assert argv[-6:] == ["memory", "reflect", "run", "--scheduled", "--target", str(target)]
+    assert "decide" not in body and "--apply" not in body
     environment = [line for line in body.splitlines() if line.startswith("Environment=")]
     assert len(environment) == 1 and "PATH=" in environment[0]
     assert "BRIGADE_MEMORY_HUB" not in body and "BRIGADE_HOME" not in body
@@ -291,13 +291,13 @@ def test_other_scheduler_backends_pin_the_reflect_command(setup):
     entry = care_cmd._catalog_by_id()["memory-reflect"]
     plists = care_cmd._launchd_plists(workspace=target, home=home, entries=(entry,))
     argv = plistlib.loads(next(iter(plists.values())))["ProgramArguments"]
-    assert argv[-7:] == ["memory", "reflect", "run", "--hub", "--scheduled", "--target", str(target)]
+    assert argv[-6:] == ["memory", "reflect", "run", "--scheduled", "--target", str(target)]
     assert set(plistlib.loads(next(iter(plists.values())))["EnvironmentVariables"]) == {"PATH"}
     cron = care_cmd._cron_command(entry, workspace=target)
-    assert '"reflect" "run" "--hub" "--scheduled"' in cron
+    assert '"reflect" "run" "--scheduled"' in cron
     windows = care_cmd._schtasks_create_command(entry, workspace=target)
     decoded = base64.b64decode(windows.split("-EncodedCommand ")[1]).decode("utf-16le")
-    assert "reflect run --hub --scheduled" in decoded
+    assert "reflect run --scheduled" in decoded
 
 
 @pytest.mark.parametrize("source", ["env", "table"])
@@ -874,3 +874,100 @@ def test_changed_or_retired_card_prunes_submission(setup, capsys, state):
     hub._commit("card.put", "fleet", "a", text, state, hubc.event_id())
     assert run(target, capsys, "run")[0] == 0
     assert original not in json.loads(path.read_text())["submissions"]
+
+
+def test_scheduled_compensation_watch_runs_before_proposing(setup, capsys):
+    target, hub, _ = setup
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    hub.do_status = status
+    calls = []
+
+    def watch(body):
+        calls.append(body)
+        return 200, {"results": [{"result": "applied", "trigger": "retrieval-regression"}], "next_after": None}
+
+    hub.do_compensation_watch = watch
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code == 0
+    assert calls[0]["scope"] == "fleet"
+    assert payload["compensation_watch"][0]["result"] == "applied"
+    assert next(i for i, c in enumerate(hub.calls) if c["action"] == "compensation_watch") < next(
+        i for i, c in enumerate(hub.calls) if c["action"] == "propose"
+    )
+
+
+def test_compensation_watch_dry_run_does_not_write(setup, capsys):
+    target, hub, _ = setup
+    run(target, capsys, "run", "--hub", "--scheduled", "--dry-run")
+    assert not any(c["action"] == "compensation_watch" for c in hub.calls)
+
+
+@pytest.mark.parametrize("window", [0, -1, True, 604801, "86400"])
+def test_compensation_watch_rejects_invalid_policy_windows(window):
+    from brigade.fleet_policy import FleetPolicyError, parse_memory
+
+    with pytest.raises(FleetPolicyError, match="rollback_watch_seconds"):
+        parse_memory({"rollback_watch_seconds": window})
+
+
+def test_compensation_watch_preserves_explicit_policy_window():
+    from brigade.fleet_policy import parse_memory
+
+    assert parse_memory({"rollback_watch_seconds": 3600})["rollback_watch_seconds"] == 3600
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("state", ["held", "stale", "pending"])
+def test_rollback_failure_reports_failed_without_missing_proposal(setup, capsys, monkeypatch, json_output, state):
+    target, hub, _ = setup
+    monkeypatch.setattr(
+        hub,
+        "do_rollback",
+        lambda body: (
+            200,
+            {
+                "state": state,
+                "reason": "scan_failed",
+                "compensation_result": "failed",
+                **({"proposal_id": hubc.event_id()} if state in {"stale", "pending"} else {"result": "failed"}),
+            },
+        ),
+    )
+    args = ["memory", "reflect", "rollback", hubc.event_id(), "--target", str(target)]
+    if json_output:
+        args.append("--json")
+    assert cli.main(args) == 1
+    output = capsys.readouterr().out
+    if json_output:
+        assert json.loads(output)["status"] == "failed"
+    else:
+        assert "compensation failed: scan_failed" in output
+        assert "None" not in output
+
+
+def test_healthy_watch_budget_does_not_pause_scheduled_reflection(setup, capsys):
+    target, hub, _ = setup
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    def watch(body):
+        return 200, {"results": [], "next_after": hubc.event_id()}
+
+    hub.do_status = status
+    hub.do_compensation_watch = watch
+    for _ in range(4):
+        assert run(target, capsys, "run", "--hub", "--scheduled")[0] == 0
+    schedule = run(target, capsys, "status")[1]["schedule"]
+    assert schedule["consecutive_failures"] == 0
+    assert not schedule["paused"]
+    assert any(c["action"] == "propose" for c in hub.calls)

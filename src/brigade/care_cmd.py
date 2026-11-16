@@ -168,11 +168,23 @@ MEMORY_REFLECT_ENTRY = CareEntry(
     entry_id="memory-reflect",
     schedule="0 10 * * *",
     on_calendar="*-*-* 10:00:00",
-    description="Brigade hub memory reflection proposals",
+    description="Brigade policy-gated memory reflection",
     kind="reflect",
 )
 
+CARE_ENTRIES = (*CARE_ENTRIES, MEMORY_REFLECT_ENTRY)
+
 MEMORY_VERIFY_ENTRY = verify_entry(CareEntry)
+
+LESSON_REVIEW_ENTRY = CareEntry(
+    entry_id="lesson-review",
+    schedule="*/5 * * * *",
+    on_calendar="*:0/5",
+    description="Brigade automatic work-session lesson review",
+    kind="runbook",
+    runbook_rel=".brigade/memory-care/runbooks/lesson-review.json",
+    runbook_id="lesson-review",
+)
 
 MEMORY_JOB_ENTRIES: tuple[CareEntry, ...] = (
     CareEntry(
@@ -234,7 +246,14 @@ def _catalog_by_id() -> dict[str, CareEntry]:
     patrol_entry = care_patrol.entry(CareEntry)
     return {
         entry.entry_id: entry
-        for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, MEMORY_REFLECT_ENTRY, MEMORY_VERIFY_ENTRY, patrol_entry)
+        for entry in (
+            *CARE_ENTRIES,
+            *MEMORY_JOB_ENTRIES,
+            MEMORY_REFLECT_ENTRY,
+            MEMORY_VERIFY_ENTRY,
+            LESSON_REVIEW_ENTRY,
+            patrol_entry,
+        )
     }
 
 
@@ -1035,6 +1054,7 @@ def install(
     entry_ids: list[str] | None = None,
     schedule_specs: list[str] | None = None,
     scope: str | None = None,
+    reflect_auto_apply: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1100,6 +1120,11 @@ def install(
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    if not dry_run and reflect_auto_apply and any(entry.kind == "reflect" for entry in entries):
+        from .memory_reflect_policy import set_enabled
+
+        set_enabled(target, True)
 
     if _uses_schtasks(backend):
         if not dry_run:
