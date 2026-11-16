@@ -276,7 +276,15 @@ def _item_route(
         if query:
             raise WorkloreValidationError("unknown ownership query field", code="unknown-field")
         if method == "GET":
-            return 200, {"ownership": ownership.get_ownership(conn, work_id)}
+            return 200, {
+                "ownership": ownership.get_ownership(
+                    conn,
+                    work_id,
+                    actor_id=_actor_id(request),
+                    is_admin=request.is_admin,
+                    holder_nonce=_header(request, "X-Worklore-Holder"),
+                )
+            }
         return 200, {
             "ownership": ownership.ownership_action(
                 conn,

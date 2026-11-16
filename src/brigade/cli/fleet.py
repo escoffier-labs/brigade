@@ -1637,9 +1637,12 @@ def _run_work(args: argparse.Namespace, producer: Callable[[], object]) -> int:
             code = worklore_client._error_code(getattr(exc, "code", None))
             if code is not None:
                 payload["code"] = code
+            payload.update(getattr(exc, "details", None) or {})
             print(json.dumps(payload, sort_keys=True), file=sys.stderr)
             return 1
         print(f"error: {error}", file=sys.stderr)
+        for line in worklore_client.describe_refusal_details(exc):
+            print(f"  {line}", file=sys.stderr)
         return 1
     return _print_work_payload(payload, json_output=bool(getattr(args, "json", False)))
 

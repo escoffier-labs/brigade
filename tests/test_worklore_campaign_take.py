@@ -315,6 +315,28 @@ def test_campaign_members_cannot_bypass_offer_with_legacy_assignment(ledger):
     assert status == 403 and refusal["code"] == "campaign-not-authorized"
 
 
+def test_holder_read_refuses_an_expired_campaign_lease_like_a_holder_write(ledger):
+    conn, _, clock = ledger
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    path = f"/work/items/{work_id}/ownership"
+    holder = {"X-Worklore-Holder": NONCE_A}
+    assert call(conn, path, headers=holder, method="GET")[0] == 200
+    clock[0] = "2026-01-01T00:01:00+00:00"
+    status, refusal = call(conn, path, headers=holder, method="GET")
+    assert status == 409 and refusal["code"] == "stale-generation"
+    assert call(conn, path, method="GET")[0] == 200
+
+
+def test_string_exclusions_in_an_offer_fail_closed(ledger, monkeypatch):
+    conn, _, _ = ledger
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    monkeypatch.setattr(campaigns, "campaign_offer", lambda *_: {"offer": {"exclusions": "acme/other"}})
+    assert campaigns.member_excluded(conn, work_id) is True
+
+
 def test_expired_running_member_can_be_reclaimed_but_attempt_limit_still_applies(ledger):
     conn, _, clock = ledger
     create(conn)
@@ -1006,3 +1028,46 @@ def test_recovery_requires_complete_body_and_cannot_force_noncampaign_release(li
     assert store.list_events(conn, work_id) == before
     item = store.create_item(conn, {"title": "Legacy holder", "kind": "fleet"}, actor_id="admin")
     assert recovery_request(request, item["work_id"], revision=0, generation=0)[0] == 403
+
+
+def make_members_selectable(conn, ids):
+    marks = ",".join("?" for _ in ids)
+    conn.execute(f"UPDATE work_items SET status='ready', burn_eligible=1 WHERE work_id IN ({marks})", tuple(ids))
+    conn.commit()
+
+
+def test_burn_queue_never_selects_a_campaign_member_the_offer_excludes(ledger):
+    conn, _, _ = ledger
+    create(conn)
+    ids = members(conn)
+    make_members_selectable(conn, list(ids.values()))
+    queue = store.burn_queue(conn)
+    assert {item["work_id"] for item in queue["items"]} == {ids["acme/one"], ids["acme/two"]}
+    assert ids["acme/excluded"] not in {item["work_id"] for item in queue["items"]}
+    assert queue["exclusions"]["not-eligible"] == 1
+    # Items outside any campaign are never excluded by this check.
+    loose = store.create_item(conn, {"title": "Loose", "kind": "repo"}, actor_id="admin")
+    assert campaigns.member_excluded(conn, loose["work_id"]) is False
+
+
+def test_unreadable_offer_fails_closed_for_selection(ledger):
+    conn, _, _ = ledger
+    create(conn)
+    ids = members(conn)
+    conn.execute("UPDATE work_events SET detail_json='[]' WHERE event_type='campaign-offered'")
+    conn.commit()
+    assert campaigns.member_excluded(conn, ids["acme/one"]) is True
+
+
+def test_exclusion_bucket_blocks_an_otherwise_eligible_item_only_when_excluded():
+    item = {
+        "status": "ready",
+        "burn_eligible": True,
+        "effective_acceptance": ["x"],
+        "execution_mode": "agent",
+        "attempt_count": 0,
+        "blocker": None,
+        "review_after": None,
+    }
+    assert store.exclusion_bucket(item, []) is None
+    assert store.exclusion_bucket(item, [], campaign_excluded=True) == "not-eligible"

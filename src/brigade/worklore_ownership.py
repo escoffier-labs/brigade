@@ -316,10 +316,37 @@ def _public(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in snapshot.items() if key != "holder_hash"}
 
 
-def get_ownership(conn: sqlite3.Connection, work_id: str) -> dict[str, Any]:
-    """Read an ownership projection only for an existing Worklore item."""
+def get_ownership(
+    conn: sqlite3.Connection,
+    work_id: str,
+    *,
+    actor_id: str = "",
+    is_admin: bool = False,
+    holder_nonce: object = None,
+) -> dict[str, Any]:
+    """Read an ownership projection only for an existing Worklore item.
+
+    A read that presents ``X-Worklore-Holder`` claims to be the holder, so the same node and
+    capability check every holder write uses must pass at the current generation, and an expired
+    campaign lease is refused as ``stale-generation`` exactly as a holder write would be. A foreign
+    node, a foreign or stale capability, an admin token, or an item with no node holder is
+    refused as ``holder-mismatch``. A read with no capability header is unchanged.
+    """
     store.get_item(conn, work_id)
-    return _public(_current(conn, work_id))
+    current = _current(conn, work_id)
+    if holder_nonce is not None:
+        _authorize(
+            "checkpoint",
+            current,
+            actor_id=actor_id,
+            is_admin=is_admin,
+            is_operator=False,
+            generation=current["generation"],
+            digest=nonce_hash(holder_nonce),
+        )
+        if expired(current, store._utc_now()):
+            raise store.WorkloreConflict("campaign ownership lease expired", code="stale-generation")
+    return _public(current)
 
 
 def _enrolled(conn: sqlite3.Connection, node: str) -> None:

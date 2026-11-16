@@ -683,15 +683,18 @@ def exclusion_bucket(
     source_policies: Sequence[str],
     *,
     now: datetime | None = None,
+    campaign_excluded: bool = False,
 ) -> str | None:
     """Return the first burn-queue exclusion bucket an item falls into, or None when it is eligible.
 
     ``now`` lets a caller with its own clock (fleet routing) evaluate ``review_after``
-    against that clock instead of the wall clock.
+    against that clock instead of the wall clock. ``campaign_excluded`` is the campaign
+    offer's explicit repository exclusion (``worklore_campaigns.member_excluded``). It
+    blocks selection like ``burn_eligible=False``, whatever else the item qualifies for.
     """
     if item["status"] != "ready":
         return "not-ready"
-    if not item["burn_eligible"]:
+    if campaign_excluded or not item["burn_eligible"]:
         return "not-eligible"
     acceptance = item.get("effective_acceptance") or []
     if not isinstance(acceptance, list) or not acceptance or len(acceptance) > ACCEPTANCE_MAX_ITEMS:
@@ -1789,6 +1792,8 @@ def burn_queue(
     counts cover the rows this page examined; walking ``next_cursor`` to the end sums them to
     the whole-ledger totals, and a ledger smaller than one page reports them in one read.
     """
+    from .worklore_campaigns import member_excluded
+
     _pragma_foreign_keys(conn)
     page_size = _parse_limit(limit)
     after = _burn_cursor_key(_decode_cursor(cursor, "burn", _BURN_CURSOR_FIELDS)) if cursor is not None else None
@@ -1804,7 +1809,11 @@ def burn_queue(
             after = _burn_key(row)
             summary = _link_summary(conn, str(row[0]))
             item = _row_to_item(row, summary)
-            bucket = exclusion_bucket(item, _source_policies(summary))
+            try:
+                campaign_excluded = member_excluded(conn, item["work_id"])
+            except Exception:  # one unreadable campaign row holds that item, not the whole page
+                campaign_excluded = True
+            bucket = exclusion_bucket(item, _source_policies(summary), campaign_excluded=campaign_excluded)
             if bucket is None:
                 eligible.append(item)
             else:
