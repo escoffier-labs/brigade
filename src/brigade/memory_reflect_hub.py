@@ -1,4 +1,4 @@
-"""Scheduled hub reflection with optional authority-gated Tier 0 application."""
+"""Scheduled hub reflection with optional Tier 0 application and a watch over policy-actor applies."""
 
 from __future__ import annotations
 
@@ -438,6 +438,7 @@ def _reflect(
     scope: str | None,
     limit: int,
     dry_run: bool,
+    watch: bool = False,
     apply: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= limit <= 100:
@@ -507,6 +508,18 @@ def _reflect(
         sync.refresh_scan_metadata(target, client, settings)
         heads = read_heads()
         check_bounds()
+    watched = []
+    if watch and not dry_run:
+        from . import memory_compensation_watch
+
+        watched = memory_compensation_watch.run(client, settings.read_scopes, report["log_epoch"])
+        if watched:
+            # Rollbacks invalidate the inputs for proposing. Pull their committed heads first.
+            report = sync.pull(target, client, settings)
+            if report.get("warnings") or report.get("seq") is None:
+                raise ReflectError("hub_reflect_replica_incomplete", "compensation watch requires a fresh replica")
+            heads = read_heads()
+            check_bounds()
     # Each submission is one propose request. Exact merges stay one op each and
     # always come before every near-duplicate and link-repair submission, so they get the quota first.
     exact: list[list[dict[str, Any]]] = []
@@ -695,6 +708,7 @@ def _reflect(
         "proposals": proposals,
         "refused_ops": refused,
         "seq": report["seq"],
+        "compensation_watch": watched,
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
         "link_repair": {"max_proposals": link_cap, **link_stats},
     }
@@ -717,7 +731,15 @@ def run_payload(
             settings, client = _client(target)
             with store.limits.bounded(max_cards=MAX_SCOPE_CARDS, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
                 payload = _reflect(
-                    target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run, apply=apply
+                    target,
+                    settings,
+                    client,
+                    state,
+                    scope=scope,
+                    limit=limit,
+                    dry_run=dry_run,
+                    watch=scheduled,
+                    apply=apply,
                 )
         except (hubc.HubConfigError, hubc.HubUnavailable, hubc.HubRefusal, OSError, ValueError) as exc:
             # Never retain hub-supplied text, card bytes or credential-bearing errors.
@@ -766,4 +788,13 @@ def rollback_payload(*, target: Path, proposal_id: str) -> dict[str, Any]:
     result = client.call(
         "rollback", proposal_id=proposal_id, base_epoch=status["log_epoch"], client_event_id=hubc.event_id()
     )
-    return {"status": "proposed", "proposal": result}
+    failed = (
+        result.get("compensation_result") == "failed"
+        or result.get("result") == "failed"
+        or result.get("state") in {"held", "stale", "rejected"}
+        or not result.get("proposal_id")
+    )
+    return {
+        "status": "failed" if failed else "applied" if result.get("state") == "applied" else "proposed",
+        "proposal": result,
+    }

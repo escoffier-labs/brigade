@@ -180,11 +180,14 @@ def load_batch(path: Path) -> object:
 
 
 def dry_run_cli(args) -> int:
-    """Fail closed before entering any single-worker run machinery."""
+    """Validate before dry-run output or explicit-batch execution."""
     try:
-        plan = plan_batch(load_batch(args.batch_file))
+        payload = validate_batch(load_batch(args.batch_file))
+        plan = plan_batch(payload)
         if not args.dry_run:
-            raise BatchError("execution-not-implemented", "batch execution not yet implemented (#2047)")
+            from .run_batch_execute import execute_cli
+
+            return execute_cli(args, {**plan, "tasks": payload["tasks"], "synthesis": payload["synthesis"]})
     except BatchError as exc:
         if args.json:
             print(json.dumps({"error": {"code": exc.code, "message": str(exc)}}))

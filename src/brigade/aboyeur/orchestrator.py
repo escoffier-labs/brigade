@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from functools import partial, wraps
 from json import JSONDecoder
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from .. import agents
 from .. import claim_loss_cancellation
@@ -65,6 +65,9 @@ from ..route_policy import (
 
 from . import briefs, run_io, planning, prompts, artifacts, model_admission
 from . import direct_worker_finish
+
+if TYPE_CHECKING:
+    from ..run_batch_execute import BatchExecution
 
 
 @dataclass(frozen=True)
@@ -466,6 +469,7 @@ def run(
     model_policy_snapshot: Mapping[str, Any] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     check_cancellation: Callable[[], None] | None = None,
+    batch_execution: BatchExecution | None = None,
 ) -> int:
     check_cancellation = check_cancellation or (lambda: None)
     claim_process_registry = process_registry
@@ -493,7 +497,7 @@ def run(
     transport_routing_payload: dict[str, object] | None = None
     quarantine_state = seat_health_policy.SeatQuarantineState()
     active_health_probe = seat_health.SeatHealthProbe(collect_executable_version=False)
-    model_policy = resolve_fleet_model_policy(
+    model_policy = (batch_execution.resolve_model_policy if batch_execution else resolve_fleet_model_policy)(
         roster,
         worker=worker,
         model_override=model_override,
@@ -864,7 +868,7 @@ def run(
             require_hard_isolation=read_only,
             sandbox=effective_sandbox,
         )
-        routing = resolve_orchestrator_health_routing(
+        routing = (batch_execution.resolve_health_routing if batch_execution else resolve_orchestrator_health_routing)(
             roster,
             health_results,
             pinned_seats=frozenset({worker}) if worker is not None else frozenset(),
@@ -982,14 +986,11 @@ def run(
         if bind_error is not None:
             print(f"error: {bind_error}", file=sys.stderr)
             return 2
-        assignments = [
-            Assignment(
-                worker=worker,
-                task=task,
-                stage=1,
-                selected_skill_ids=selected_skill_ids,
-            )
-        ]
+        assignments = (
+            batch_execution.assignments(roster)
+            if batch_execution
+            else [Assignment(worker=worker, task=task, stage=1, selected_skill_ids=selected_skill_ids)]
+        )
     else:
         if output_dir is not None:
             run_io._write_json(
@@ -1574,7 +1575,7 @@ def run(
         )
         try:
             worker_results = planning._call_with_process_registry(
-                planning.dispatch,
+                batch_execution.dispatch if batch_execution is not None else planning.dispatch,
                 assignments,
                 roster,
                 cwd=cwd,
@@ -1757,7 +1758,10 @@ def run(
             print(f"  -> {roster.orchestrator}")
 
     synth_captured = None
-    if direct_worker:
+    if batch_execution is not None:
+        final = batch_execution.finish(worker_results)
+        direct_worker = False
+    elif direct_worker:
         direct_result = (
             worker_results[0]
             if worker_results
@@ -1855,9 +1859,7 @@ def run(
                     failure_kind=final.failure_kind or "unclassified",
                 )
         final = replace(final, duration_seconds=max(0.0, round(time.monotonic() - synthesis_started, 3)))
-    # Drift checkpoint: after synthesis. A concurrent commit or branch switch
-    # during synthesis must fail the run before the synthesized answer is
-    # finalized on top of drifted state.
+    # Check drift after synthesis or batch result processing, before finalization.
     drift_rc = _drift_failure_rc()
     if drift_rc is not None:
         return drift_rc

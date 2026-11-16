@@ -786,6 +786,152 @@ replays file creations and byte replacements that leave each file present.
 Quoted native Windows reference paths can contain spaces. Unquoted native
 Windows paths with spaces remain unsupported by the reference scanner.
 
+## Model-backed verification admission
+
+Existing verify configurations that omit `enabled` remain disabled. Run
+`brigade memory verify enable --target <verify-folder>` to opt in explicitly.
+New memory-care configurations carry `new_workspace_version = 1` in `[verify]`.
+Only that versioned initialization marker enables an omitted `enabled` field.
+Set `[verify] enabled = false` to stop model calls.
+`memory care init --force` replaces an existing configuration and drops its
+`[verify]` table, including the new-workspace marker. Verification then defaults
+to disabled, even if it was previously enabled. Rebind the workspaces and use
+`memory verify enable` explicitly after reinitializing. Reinitialization cannot
+silently opt an existing workspace into scheduled model calls.
+The scheduled `memory-verify` care entry checks existing hub admission and uses
+`verify_auto_apply`. It never calls the human `decide` action or runs evaluation.
+A class without current hub admission stays proposal-only. Failed or invalid
+runs do not apply corrections. A valid run may apply pending proposals retained
+from earlier valid runs.
+Requests to `verify_auto_apply` share the hub's automatic attempt rate limit
+with `auto_apply`. The client waits one second between requests and tries the
+least recently attempted proposals first, so a proposal the hub keeps refusing
+cannot hold back the others. A throttled attempt is reported as `rate-limited`,
+and the next run tries that proposal again.
+
+`brigade memory verify eval --corpus <directory> --target <verify-folder> --json`
+scores labeled cards with the production two-seat contract, without contacting
+the hub or submitting proposals. The directory contains `cases.json` with schema
+`brigade.memory-verify-corpus.v1`. Each case includes an id, anchored card input,
+serialized evidence items with provenance and digests, an expected class and
+expected operation fields. Labels stay outside prompts. Optional `commits` maps
+abbreviations to independently established full commit ids for offline replay.
+The test corpus contains 70 synthetic cases covering incorrect, drifted, confirmed,
+adversarial, shared-source, history and supersede outcomes.
+
+`brigade memory verify gate --target <verify-folder> --json` reads
+`.brigade/memory/verify/eval/cases.json`, adds retained decision-feedback cases,
+runs the harness and writes a diagnostic `.brigade/memory/verify/decision.json`.
+The explicit gate command publishes its policy digest and go/no-go record through
+hub admin-authenticated `verify_eval.record`. Records are append-only in the hub.
+Local files cannot grant admission or advance the consecutive-pass streak.
+Run the gate separately whenever admission expires or inputs change.
+One evaluation takes the full corpus (up to 256 cases) plus retained feedback
+(up to 128). Its deadline is the larger of 20 minutes and 15 seconds per card run,
+so 384 cases at 3 repeats allow about 4.8 hours. A run past the deadline reports
+`verify_eval_timeout` and records no-go. Duplicate ids across the corpus and
+feedback report `verify_eval_duplicate_id`, also as no-go.
+The gate and `memory verify eval` hold the verify lock for the whole evaluation.
+Scheduled `memory verify run` passes during that time report
+`verify state is locked by another run` and skip without counting toward the pause.
+Holding the lock also keeps `feedback.json` stable while the gate reads it.
+Run the gate outside the scheduled verify window.
+The report contains precision, recall, true positives, false positives and false
+negatives per class and operation type, repeat agreement and unsafe proposals.
+Operation metrics count emitted operations separately from verdicts. Confirming
+a card without an operation cannot qualify automatic evidence additions.
+A replacement only counts as correct when its expected operation fields match.
+An unsupported history or supersede remains a recall miss, so those classes do
+not receive go records merely because the verifier abstained.
+
+The packaged `fixtures/memory-verify-policy.v1.json` supplies the defaults.
+A complete override belongs at `.brigade/memory/verify/policy.json`:
+
+| Setting | Default |
+| --- | ---: |
+| Precision | 0.9 |
+| Recall | 0.6 |
+| Repeat agreement | 0.9 |
+| Cases per class | 5 |
+| Repeats per evaluation | 3 |
+| Consecutive passing evaluations | 2 |
+| Minimum decided feedback cases per class | 0 |
+| Accept rate when feedback exists | 0.7 |
+| Decision lifetime in days | 7 |
+| Automatic application | true |
+
+A nonzero feedback minimum is optional. The default gate can pass from a labeled
+corpus without waiting for anyone to review live proposals. Healthy-card or
+adversarial correction proposals and invalid model outputs block all classes.
+Shared-source cases exercise the same independence checks as production.
+
+The decision digest binds its metrics and reasons. Its input binding covers the
+exact policy bytes, corpus and feedback bytes, prompt contract, seat fingerprints,
+hub identity, principal, log epoch and verifier implementation digests. A policy edit, changed input, expired record,
+changed seat or invalid digest removes admission immediately. A no-go record names
+the failed bars for every class. Set policy `auto_apply` to false to retain model
+verification and proposals while stopping new local attempts. For an authoritative
+off switch that also holds requests already in flight, use the hub admin
+`auto_apply_switch` action with `enabled: false`. That switch is rechecked inside
+the automatic application transaction.
+
+New private review packets retain replayable card and evidence inputs. A subsequent
+external applied or rejected decision supplies a labeled case when its manifest
+and packet hashes match. Legacy packets still supply slice 10's verdict counters
+but cannot supply replay inputs. The hub's immutable `decision_mode` excludes
+automatic applications from labels and verdict counters. A diagnostic journal
+records an automatic application only after the hub reports it applied.
+Deleting or forging that journal cannot change feedback classification.
+Feedback retains the latest 128 cases. Text stays in private packets and evaluation
+inputs, never the text-free decision record or run summary.
+Replay labels cover cards where the verifier proposed a change. They do not
+measure missed corrections on cards where it proposed nothing. Replay and
+synthetic cases currently share the metric pool, so accepted replays can raise
+reported recall without measuring those misses. The reported recall describes
+this combined corpus and omits unproposed production corrections.
+
+The explicit gate command requires an evaluator admin credential held outside
+workspace worker access. Configure its absolute token path in user-level
+`fleet.toml` under `[memory_verify] eval_token_file`, or set
+`BRIGADE_MEMORY_VERIFY_EVAL_TOKEN_FILE`. Scheduled runs never load this credential.
+The verifier uses its own `read` and `reflect` grants for automatic application,
+and needs `review` to authenticate the retained manifest hash chain.
+The hub transaction checks the current curation owner, fleet auto-apply policy,
+kill switch, verifier authority, policy digest, epoch, record lifetime, exact
+operation classes and pinned card snapshot. Automatic changes retain prior trust.
+The client sends the full stored operation-type list, including the trailing
+manifest attachment. Class admission excludes only that exact attachment when
+the hub's authenticated evidence binding names the same proposal, proposer,
+card, scope and base revision, with the first correction's block pin. Ordinary
+evidence appends still require `confirm=go`. A correction and its manifest can
+apply with only `correct=go`.
+The existing human review and rollback actions remain available.
+
+The hub cannot recompute `binding_sha256` from its stored state. That digest also
+covers local seat identities, corpus and feedback bytes, prompt and implementation
+hashes. The client recomputes it before applying, so local seat, corpus, feedback,
+prompt and implementation changes revoke admission through the client. The hub
+compares the submitted digest with the admin evaluator's admitted digest, but a
+worker can read and echo that value. This comparison does not attest the worker's
+current local files. The hub independently enforces evaluator credential rotation,
+principal, epoch, fleet policy revision and digest, the admitted policy snapshot
+and record expiry. Treat the scheduled client and its local files as trusted for
+the local revocation checks.
+
+Keep the admin evaluator credential outside the scheduled worker's OS access.
+A separate path under the same OS user does not provide that isolation. Use a
+separate OS identity or equivalent credential isolation. The CLI does not prove
+that the scheduler cannot read the evaluator token file.
+
+Before applying, Brigade rechecks admission, authenticates the manifest and packet,
+checks local evidence freshness and acknowledges the hub policy digest. Existing
+proposal caps, revision checks and cooldowns remain. The private applications
+journal retains up to 4096 diagnostic entries and does not authorize application.
+Application uses `verify_auto_apply`, which retains before-state and supports
+`brigade memory reflect rollback <proposal-id>`. That opens a compensating proposal
+under the existing rollback checks. No direct card write or Tier 2 floor bypass is
+introduced. The maintainer soak remains tracked separately by #762.
+
 ## Automatic work-session lessons
 
 `brigade memory lessons run` reviews local work-hook activity after 20 tool

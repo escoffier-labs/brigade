@@ -1,5 +1,7 @@
 # Memory verification implementation plan
 
+> The 2026-11-15 owner decision in #2591 supersedes this plan's review-only and manual go/no-go rollout. The shipped slice 11 behavior is documented in [Memory Care](memory-care.md#model-backed-verification-admission): configured verify is on by default and admitted classes apply automatically. Historical rollout steps below are retained as design history.
+
 Design: [phase-memory-verify.md](phase-memory-verify.md). Issues: #2385
 (model-backed verification pass) and #2387 (access-weighted cadence). Sibling:
 #2386 (deterministic link repair), which shares the fairness helper from
