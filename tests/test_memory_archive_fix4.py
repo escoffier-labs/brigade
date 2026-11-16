@@ -1,5 +1,7 @@
 """Fourth review ownership and abandoned-copy regressions."""
 
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
+
 import pytest
 
 from brigade import memory_archive as archive, memory_care_journal as journal, memory_care_tend as tend

@@ -34,10 +34,11 @@ def test_checkout_recall_does_not_record_opens(tmp_path, source):
     assert not (tmp_path / ".brigade/memory/search-log.jsonl").exists()
 
 
-def test_read_tool_records_in_owning_memory_root(wired):  # noqa: F811
+def test_read_tool_records_in_owning_memory_root(wired, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(reads, "_day", lambda: date(2026, 11, 1))
     target, memory = wired
     assert _read(target, memory / "memory/cards/comet.md")
-    assert reads.last_read(reads.load(memory), ["memory/cards/comet.md"]) == date.today()
+    assert reads.last_read(reads.load(memory), ["memory/cards/comet.md"]) == date(2026, 11, 1)
     assert reads.load(target).last_read == {}
 
 
@@ -49,9 +50,10 @@ def test_dispatch_local_context_does_not_record_opens(tmp_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="vault containment checks are unavailable on Windows")
 @pytest.mark.parametrize("operation", ["search", "show"])
-def test_vault_projection_reads_protect_canonical_card(tmp_path, operation, capsys):
+def test_vault_projection_reads_protect_canonical_card(tmp_path, operation, capsys, monkeypatch):
     from tests.memory_read_fixtures import signing_key
 
+    monkeypatch.setattr(reads, "_day", lambda: date(2026, 11, 1))
     signing_key(tmp_path)
     _write_card(tmp_path, "alpha", title="Alpha", body="rotation policy", tags=["rotation"])
     vault = tmp_path / "vault"
@@ -66,7 +68,7 @@ def test_vault_projection_reads_protect_canonical_card(tmp_path, operation, caps
         (tmp_path / reads.READS_REL).unlink(missing_ok=True)
         memory_vault.show_payload(tmp_path, hits[0]["id"])
     assert reads.last_read(reads.load(tmp_path), ["memory/cards/alpha.md"]) == (
-        date.today() if operation == "show" else None
+        date(2026, 11, 1) if operation == "show" else None
     )
 
 

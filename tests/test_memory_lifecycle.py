@@ -257,3 +257,193 @@ def test_unread_workspace_starts_observation_window(tmp_path):
     assert not life.run(tmp_path, today=date(2026, 1, 1))["transitions"]
     assert reads.load(tmp_path).tracking_since == date(2026, 1, 1)
     assert observed_run(tmp_path, today=date(2026, 4, 1))["transitions"][-1]["to_state"] == "archived"
+
+
+def test_reference_scan_does_not_block_concurrent_reader(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    card(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("Unrelated instructions")
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    original = life._mentioned
+    observed = []
+
+    def slow_scan(*args, **kwargs):
+        if not observed:
+            # Wait for a real reader while scanning. If the ledger is locked,
+            # this lasts longer than the reader's five-second lock deadline.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                observed.append(pool.submit(reads.record, tmp_path, ["old"], today=TODAY).result(timeout=10))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(life, "_mentioned", slow_scan)
+    result = life.run(tmp_path, today=TODAY)
+    assert observed == [True]
+    assert reads.covered(reads.load(tmp_path), today=TODAY, days=90)
+    assert not result["transitions"]
+
+
+def test_source_read_during_reference_scan_protects_dependency(tmp_path, monkeypatch):
+    path = card(tmp_path)
+    card(tmp_path, name="source", body="[dependency](old.md)")
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    original = life._mentioned
+
+    def scanned(*args, **kwargs):
+        assert reads.record(tmp_path, ["source"], today=TODAY)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(life, "_mentioned", scanned)
+    result = life.run(tmp_path, today=TODAY)
+    assert path.exists()
+    assert {"path": "memory/cards/old.md", "reason": "referenced"} in result["skipped"]
+    assert not result["transitions"]
+
+
+def test_unused_cycle_parses_once_and_does_not_protect(tmp_path, monkeypatch):
+    first = card(tmp_path, name="cyclefirst", body="[Second](cyclesecond.md)")
+    second = card(tmp_path, name="cyclesecond", body="[First](cyclefirst.md)")
+    keys, targets = [], []
+    original_keys, original_targets = life._keys, life._resolved_targets
+
+    def counted_keys(text, rel):
+        keys.append(rel)
+        return original_keys(text, rel)
+
+    def counted_targets(text, referring):
+        targets.append(referring)
+        return original_targets(text, referring)
+
+    monkeypatch.setattr(life, "_keys", counted_keys)
+    monkeypatch.setattr(life, "_resolved_targets", counted_targets)
+    result = observed_run(tmp_path, today=TODAY)
+    assert sorted(keys) == ["memory/cards/cyclefirst.md", "memory/cards/cyclesecond.md"]
+    assert len(targets) == len(set(targets))
+    assert not first.exists(), result
+    assert not second.exists(), result
+
+
+def test_unused_pinned_source_still_protects_dependency(tmp_path):
+    path = card(tmp_path)
+    source = card(tmp_path, name="pinned", body="memory/cards/old.md")
+    source.rename(tmp_path / "memory/pinned.md")
+    result = observed_run(tmp_path, today=TODAY)
+    assert path.exists()
+    assert {"path": "memory/cards/old.md", "reason": "referenced"} in result["skipped"]
+
+
+@pytest.mark.parametrize("kind,reason,actor", [("archive", "unused-card", "policy"), ("fix", "repair", "operator")])
+def test_scheduled_care_cannot_finish_workspace_prepared_archive(tmp_path, monkeypatch, kind, reason, actor):
+    from brigade import memory_care_journal as journal, memory_care_tend as tend
+
+    path = card(tmp_path)
+    original = path.read_bytes()
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted prepare")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted prepare"):
+            journal.commit_phased(
+                tmp_path,
+                kind=kind,
+                reason=reason,
+                card_id="old",
+                changes=[journal.Change("memory/cards/old.md", original, None)],
+                prepared_paths=[],
+                hub={},
+                metadata={"actor": actor},
+            )
+    decision_id = saved[0]
+    before = journal._payload(tmp_path, decision_id)
+    monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
+    result = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
+    assert path.read_bytes() == original
+    assert journal._payload(tmp_path, decision_id) == before
+    assert result["recovery"] == [
+        {"decision_id": decision_id, "phase": "operator_required", "reason": life.ARCHIVE_DISABLED_REASON}
+    ]
+    journal.resolve_prepared(tmp_path)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("operation", ["payload", "update"])
+def test_committed_archive_with_unreadable_recovery_reports_id(tmp_path, monkeypatch, operation):
+    from brigade import memory_archive, memory_care_journal as journal, memory_care_tend as tend
+
+    path = card(tmp_path)
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    commit = journal.commit_phased
+    calls = []
+
+    def committed(*args, **kwargs):
+        decision = commit(*args, **kwargs)
+        if kwargs["kind"] == "archive":
+            calls.append(decision.decision_id)
+
+            def failed(*args, **kwargs):
+                raise OSError("stored decision unavailable")
+
+            monkeypatch.setattr(journal, "load", failed)
+            monkeypatch.setattr(journal, "_payload" if operation == "payload" else "update_hub", failed)
+        return decision
+
+    monkeypatch.setattr(journal, "commit_phased", committed)
+    care = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
+    assert care["failed_stages"] == ["lifecycle"]
+    result = care["stages"]["lifecycle"]
+    assert len(calls) == 1
+    assert not path.exists()
+    assert result["error"] is True
+    assert result["recovery_unverified"] == calls
+    assert all(row["to_state"] != "archived" for row in result["transitions"])
+    assert (tmp_path / memory_archive.archive_rel("memory/cards/old.md")).exists()
+
+
+@pytest.mark.parametrize("source", ["runbooks/job.md", "memory/scoped/AGENTS.md", "scheduler:schtasks"])
+@pytest.mark.parametrize("prefix", ["C:\\repo\\", "C:/repo/", "\\\\server\\share\\"])
+@pytest.mark.parametrize(
+    "name,protects",
+    [("memory/cards/old.md", True), ("othermemory/cards/old.md", False), ("memory/cards/old.md.extra", False)],
+)
+def test_native_windows_absolute_references(tmp_path, monkeypatch, source, prefix, name, protects):
+    path = card(tmp_path)
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    reference = prefix + (name.replace("/", "\\") if "\\" in prefix else name)
+    monkeypatch.setattr(life, "_references", lambda *args: {source: reference})
+    result = life.run(tmp_path, today=TODAY)
+    assert path.exists() == protects, result
+
+
+@pytest.mark.parametrize("kind", ["lifecycle", "fix", "instructions", "undo"])
+def test_prepared_non_archive_recovers_with_archive_gate_off(tmp_path, monkeypatch, kind):
+    from brigade import memory_care_journal as journal, memory_care_tend as tend
+
+    rel = ".brigade/memory/lifecycle/example.json"
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted prepare")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted prepare"):
+            journal.commit_phased(
+                tmp_path,
+                kind=kind,
+                reason="test recovery",
+                card_id=None,
+                changes=[journal.Change(rel, None, b'{"state":"stale"}\n')],
+                prepared_paths=[],
+                hub={},
+            )
+    monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
+    result = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
+    assert (tmp_path / rel).read_bytes() == b'{"state":"stale"}\n'
+    phase = "undone" if kind == "undo" else "committed"
+    assert result["recovery"] == [{"decision_id": saved[0], "phase": phase, "reason": ""}]
+    assert journal._payload(tmp_path, saved[0])["phase"] == phase

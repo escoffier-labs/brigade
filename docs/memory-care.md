@@ -1,6 +1,6 @@
 # Memory Care
 
-Brigade memory care scans durable memory cards and tends them. The scan is local and never edits cards. It detects cards that need review, writes findings and a refresh queue, and routes review tasks into the existing work inbox. Tending then retries pending hub operations, applies an allowlist of derived fixes, archives eligible cards, drains the review inbox and reports instruction budgets. Every automatic card change is recorded with undo. Tending runs when you call `memory care tend`, and a successful CLI ingest runs its inbox stage. It is not on a schedule unless you add one. See [Safe Fix Planning](#safe-fix-planning), [Boundary](#boundary) and [Tending](#tending).
+Brigade memory care scans durable memory cards and tends them. The scan is local and never edits cards. It detects cards that need review, writes findings and a refresh queue, and routes review tasks into the existing work inbox. Tending then retries pending hub operations, applies an allowlist of derived fixes, evaluates retirement eligibility, drains the review inbox and reports instruction budgets. Every automatic card change is recorded with undo. Tending runs when you call `memory care tend`, and a successful CLI ingest runs its inbox stage. It is not on a schedule unless you add one. See [Safe Fix Planning](#safe-fix-planning), [Boundary](#boundary) and [Tending](#tending).
 
 ## Commands
 
@@ -384,11 +384,11 @@ Receipts with malformed fields are ignored rather than honored: only a `reviewed
 
 ## Boundary
 
-Memory care archives eligible cards automatically and records every change with before-bytes and undo. It never deletes memory. Paths covered by `read_only_paths` and cards with frontmatter `archive: never` are exempt. Content guard, secret and credential scanning, and pre-push checks remain in force. Scheduling care commands is the operator's job: see the [execution model](execution-model.md).
+Automatic archiving of unused cards, including expiry retirement, is switched off in code until [#2620](https://github.com/escoffier-labs/brigade/issues/2620) lands. It will require a configured hub with explicit card-read coverage. Stale marking remains live. Card changes retain before-bytes and undo. It never deletes memory. Paths covered by `read_only_paths` and cards with frontmatter `archive: never` are exempt. Content guard, secret and credential scanning, and pre-push checks remain in force. Scheduling care commands is the operator's job: see the [execution model](execution-model.md).
 
 ## Tending
 
-`brigade memory care tend` runs five stages in this order: `hub` retries pending hub operations, `fixes` applies the automatic allowlist from [Safe Fix Planning](#safe-fix-planning), `retire` archives eligible cards, `inbox` drains the [review inbox](#review-inbox), and `instructions` reports [instruction budgets](#instruction-budgets) without moving anything. Use `--stage` with one of those names to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. CLI scans do not run automatic care or recover pending decisions. Use explicit `memory care tend` for those operations. `memory care scan --no-tend` remains accepted as a deprecated no-op. Library scans remain read-only.
+`brigade memory care tend` runs five stages in this order: `hub` retries pending hub operations, `fixes` applies the automatic allowlist from [Safe Fix Planning](#safe-fix-planning), `retire` reports eligibility while automatic archiving is switched off, `inbox` drains the [review inbox](#review-inbox), and `instructions` reports [instruction budgets](#instruction-budgets) without moving anything. Use `--stage` with one of those names to select a stage, `--dry-run` to preview without writing, and `--json` for structured output. CLI scans do not run automatic care or recover pending decisions. Use explicit `memory care tend` for those operations. `memory care scan --no-tend` remains accepted as a deprecated no-op. Library scans remain read-only.
 
 Workspace `.brigade/memory-care.toml` accepts:
 
@@ -400,9 +400,9 @@ deadline_days = 14
 max_archives_per_run = 20
 ```
 
-A read ledger records last-read days from search and prompt recall. Retirement requires a ledger at least 120 days old, no read within that window (including available hub read stats), and a past `expires_at` or `expires` date. `fresh_until` alone never means the subject ended. A new or reset ledger archives nothing on use grounds. This stage makes no model calls.
+A read ledger records explicit card opens. Search hits and automatic prompt recall do not count as use. Automatic expiry retirement is switched off until #2620 lands and will require a configured hub. Retirement requires a ledger at least 120 days old, no read within that window (including available hub read stats), and a past `expires_at` or `expires` date. `fresh_until` alone never means the subject ended. A new or reset ledger archives nothing on use grounds. This stage makes no model calls.
 
-Archive moves `memory/cards/x.md` to `memory/archive/cards/x.md`. Cards outside `memory/` keep their relative path under the archive. Archived cards leave search, recall, scan, proposals, hub push and retrieval evaluation. Writable index files lose only the card's link lines.
+An explicit archive moves `memory/cards/x.md` to `memory/archive/cards/x.md`. Cards outside `memory/` keep their relative path under the archive. Archived cards leave search, recall, scan, proposals, hub push and retrieval evaluation. Writable index files lose only the card's link lines.
 
 `brigade memory care undo <decision-id>` restores the exact bytes and reinserts removed links without replacing unrelated index edits. It refuses when either card path changed after the decision. An occupied original path is never overwritten. The journal lives under `.brigade/memory-care/journal/` with owner-only before-images. In hub sync mode, published cards are retired and restored cards revived. Unavailable hub operations remain pending for retry. Local undo remains available. Hub revision conflicts enter the existing sync conflict path.
 
@@ -622,13 +622,13 @@ For operator-owned cron, systemd, and CI recipes (and `brigade care`), see [sche
 
 ### Reads protect cards
 
-Automatic retirement needs a positive reason, currently an `expires_at` or
-`expires` date in the past. Being unread never archives a card by itself.
+Automatic expiry retirement is switched off in code until #2620 lands and will
+require a configured hub. Its eligibility policy requires an `expires_at` or
+`expires` date in the past. The lifecycle policy below handles non-use alone.
 A recorded read within `unused_after_days` blocks automatic retirement.
 
-Search results, recall at session start and after compaction, explicit card
-reads, local connector reads, replica card reads, and local dispatch memory
-context count as reads. The Claude Code Read hook also records an opened card
+Explicit card opens and supported connector content reads count as use.
+Search results and automatic recall at session start or after compaction do not. The Claude Code Read hook also records an opened card
 in its owning memory root. Vault search and show count projected notes when
 their identity matches a canonical card in the target memory root. Projection
 maps, notes without an identifiable card, and projections of another root
@@ -660,10 +660,21 @@ provide the card-write atomicity coverage.
 ## Unused agent cards (#2603)
 
 The daily scheduled care runbook runs `memory care tend --stage lifecycle`.
-The pass marks an unused agent card stale after 30 days and moves it to
-`memory/archive/` after 90 days. It never deletes a card. A first pass beyond
-the archive window records both transitions. A recent read returns a stale
-card to active. Stale cards remain searchable.
+The pass marks an unused agent card stale after 30 days. Stale marking remains
+live, and stale cards remain searchable. A recent read returns a stale card to
+active. Automatic archiving of unused cards, including expiry retirement, is
+switched off in code until [#2620](https://github.com/escoffier-labs/brigade/issues/2620)
+lands. It will require a configured hub that supplies `last_card_read_day`.
+Local-only workspaces cannot automatically archive cards. The 90-day archive
+policy is retained for that future gate. Expiry retirement currently reports
+`refused: ["automatic archive awaits hub anchor (#2620)"]`, which is expected.
+Lifecycle reports the same reason in `skipped` after marking an old card stale.
+While the gate is off, automated care also leaves prepared archive recovery
+untouched and reports each decision id as `operator_required`. Recovery cannot
+trust workspace-supplied kind, reason or actor fields to authorize writes.
+Use `memory care undo DECISION_ID` for explicit operator recovery. A committed
+archive whose stored decision cannot be reloaded reports `recovery_unverified`
+with its decision id. The archive move is never retried.
 
 The policy lives in `[lifecycle]` in `.brigade/memory-care.toml`. Its shipped
 defaults are in `templates/memory/lifecycle-policy.json`:
@@ -675,6 +686,10 @@ stale_after_days = 30
 archive_after_days = 90
 max_transitions_per_run = 20
 ```
+
+The policy floors are 30 days before stale and 90 days before archive. Values
+below these floors are raised to the floors in code. Larger values delay the
+transitions. Changing these values cannot enable automatic archiving.
 
 Set `enabled = false` to disable this pass. `[tend] enabled = false` disables
 all tending. Preview with `memory care tend --stage lifecycle --dry-run --json`.
@@ -727,8 +742,9 @@ supported. Provision the workspace key through `brigade receipts keygen` before
 starting the observation window, with the receipt-key override unset.
 The signing process and key are trusted. This prevents direct JSON forgery,
 but does not isolate the key from a process with the same user's shell access.
-An unavailable configured hub blocks the pass. Hub statistics that expose only
-combined search and read dates also block it, because those totals cannot prove
+A missing or unavailable hub blocks automatic archiving. Stale marking can
+continue using local coverage. Hub statistics that expose only combined search
+and read dates also block automatic archiving because those totals cannot prove
 explicit opens. A compatible hub must supply `last_card_read_day` separately.
 Malformed evidence logs stop the pass before transitions. Uninstrumented
 external reads remain outside this observation model.

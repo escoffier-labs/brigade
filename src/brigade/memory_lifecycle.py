@@ -49,7 +49,15 @@ def policy(target: Path) -> dict[str, Any]:
     return values
 
 
-def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (), *, referring: str = "") -> bool:
+def _mentioned(
+    text: str,
+    rel: str,
+    card_id: str,
+    aliases: tuple[str, ...] = (),
+    *,
+    referring: str = "",
+    resolved_targets: set[str] | None = None,
+) -> bool:
     # Match complete identities and paths, never a filename's incidental stem.
     names = (rel, card_id, *aliases)
     for name in names:
@@ -63,8 +71,22 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
         candidates = (name, "./" + name) if path_shaped else (name,)
         if any(re.search(r"(?<![\w./-])" + re.escape(value) + endings, text) for value in candidates):
             return True
-    # Resolve link destinations in the source file's directory. A basename in
-    # unrelated prose or another directory must not protect this card.
+    targets = _resolved_targets(text, referring) if resolved_targets is None else resolved_targets
+    return bool(targets.intersection(names)) or any(
+        "/" in name and any(path.startswith("windows:") and path.endswith("/" + name) for path in targets)
+        for name in names
+        if name
+    )
+
+
+def _resolved_targets(text: str, referring: str) -> set[str]:
+    """Parse each source's local link destinations once per lifecycle pass."""
+    targets: set[str] = set()
+    # Extract native absolute paths once, before URL parsing treats a drive as
+    # a scheme. Component suffixes preserve workspace-independent references.
+    for match in re.finditer(r"(?<![\w./\\-])(?:[A-Za-z]:[\\/]|\\\\)[^\s<>\"'()\[\]{},;]+", text):
+        normalized = re.sub(r"\\+", "/", match.group())
+        targets.add("windows:" + normalized)
     if referring and not referring.startswith("scheduler:"):
         destinations = re.findall(r"\]\(\s*(?:<([^>]+)>|((?:\\.|[^\s)])+))", text)
         destinations.extend(
@@ -88,9 +110,8 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
                 if destination.startswith("/")
                 else posixpath.join(posixpath.dirname(referring), destination)
             )
-            if resolved in names:
-                return True
-    return False
+            targets.add(resolved)
+    return targets
 
 
 def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
@@ -333,6 +354,7 @@ def _last_use(
     hub_reads: dict,
     *,
     today: date,
+    keys: tuple[str, ...] | None = None,
 ) -> date:
     fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
     # A new write or restore can be ahead of the policy clock. Keep that
@@ -346,7 +368,7 @@ def _last_use(
     for key in ("created", "created_at", "updated", "updated_at", "last_reviewed"):
         if day := memory_cmd._parse_date(fm.get(key)):
             days.append(day)
-    for key in _keys(text, rel):
+    for key in _keys(text, rel) if keys is None else keys:
         days.extend(mapping[key] for mapping in (signals, hub_reads, ledger.last_read) if key in mapping)
         days.extend(opens.get(key, (set(), set()))[1])
     return max((day for day in days if day <= today), default=today)
@@ -380,36 +402,43 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
         payload["blocked"] = "hub read coverage unavailable"
     if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
         return {**payload, "blocked": "local read coverage incomplete"}
-    last_use = {
-        rel: _last_use(target, rel, text, ledger, signals, opens, hub_reads or {}, today=today)
-        for rel, text in cards.items()
-    }
-    # An unused card cannot confer use on another unused card through a cycle.
-    active_cards = {
-        rel: text for rel, text in cards.items() if (today - last_use[rel]).days < rules["stale_after_days"]
-    }
-    refs = _references(target, active_cards)
+    keys = {rel: _keys(text, rel) for rel, text in cards.items()}
+    # Match every potential card source before taking the ledger lock. Its
+    # freshness is checked under the lock, so a newly read source still vetoes.
+    refs = _references(target, {})
+    external_sources = set(refs)
+    refs = {**{rel: text for rel, text in cards.items() if rel not in config.index_paths}, **refs}
+    targets = {other: _resolved_targets(body, other) for other, body in refs.items()}
+    referenced = {}
+    for rel, text in cards.items():
+        fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
+        referenced[rel] = {
+            other
+            for other, body in refs.items()
+            if other != rel
+            and _mentioned(
+                body,
+                rel,
+                keys[rel][0] if fm.get("id") or fm.get("card_id") else "",
+                tuple(k for k in keys[rel] if k != Path(rel).stem),
+                referring=other,
+                resolved_targets=targets[other],
+            )
+        }
+    digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
     from .inbox_lock import held_file_lock
 
-    with held_file_lock(
-        journal.safe_path(target, memory_card_reads.READS_REL).with_suffix(".lock"), deadline_seconds=5
-    ):
-        ledger = memory_card_reads.load(target)
-        if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
-            return {**payload, "blocked": "local read coverage incomplete"}
-        last_use = {
-            rel: _last_use(target, rel, text, ledger, signals, opens, hub_reads or {}, today=today)
-            for rel, text in cards.items()
-        }
-        refs.update(
-            {
-                rel: text
-                for rel, text in cards.items()
-                if rel not in config.index_paths and (today - last_use[rel]).days < rules["stale_after_days"]
-            }
-        )
-        digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
-        for rel, text in sorted(cards.items()):
+    archived_cards: set[str] = set()
+    for rel, text in sorted(cards.items()):
+        with held_file_lock(
+            journal.safe_path(target, memory_card_reads.READS_REL).with_suffix(".lock"), deadline_seconds=5
+        ):
+            ledger = memory_card_reads.load(target)
+            if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
+                return {**payload, "blocked": "local read coverage incomplete"}
+            last_use = _last_use(
+                target, rel, text, ledger, signals, opens, hub_reads or {}, today=today, keys=keys[rel]
+            )
             fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
             identity = card_identity(fm, rel).card_id
             reason = None
@@ -427,22 +456,31 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
             ):
                 reason = "pinned or protected"
             elif any(
-                other != rel
-                and _mentioned(
-                    body,
-                    rel,
-                    identity if fm.get("id") or fm.get("card_id") else "",
-                    tuple(k for k in _keys(text, rel) if k != Path(rel).stem),
-                    referring=other,
-                )
-                for other, body in refs.items()
+                other in external_sources
+                or (
+                    today
+                    - _last_use(
+                        target,
+                        other,
+                        cards[other],
+                        ledger,
+                        signals,
+                        opens,
+                        hub_reads or {},
+                        today=today,
+                        keys=keys[other],
+                    )
+                ).days
+                < rules["stale_after_days"]
+                for other in referenced[rel]
+                if other not in archived_cards
             ):
                 reason = "referenced"
             if reason:
                 payload["skipped"].append({"path": rel, "reason": reason})
                 continue
-            days = [last_use[rel]]
-            age = (today - last_use[rel]).days
+            days = [last_use]
+            age = (today - last_use).days
             if not memory_card_reads.covered(
                 ledger,
                 today=today,
@@ -503,6 +541,11 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                                 state_change=change,
                                 expected_before=text.encode("utf-8"),
                             )
+                        except memory_archive.ArchiveRecoveryUnverified as exc:
+                            payload["error"] = True
+                            payload.setdefault("recovery_unverified", []).append(exc.decision_id)
+                            payload["skipped"].append({"path": rel, "reason": str(exc), "decision_id": exc.decision_id})
+                            break
                         except memory_archive.ArchiveRefused as exc:
                             # A refusal leaves the card and any existing archive in place.
                             # Skip only this card so the rest of the pass still runs.
@@ -519,7 +562,9 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                             hub={"status": "skipped"},
                             metadata=metadata,
                         )
+                    if state == "archived":
+                        archived_cards.add(rel)
                     entry["decision_id"] = decision.decision_id
                 payload["transitions"].append(entry)
                 previous, before = state, after
-        return payload
+    return payload

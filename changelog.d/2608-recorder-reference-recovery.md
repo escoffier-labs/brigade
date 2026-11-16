@@ -1,3 +1,4 @@
 - Preserve failed card-read recording across processes, recover malformed intents with body-free quarantine reasons, and keep keyless reads free of intent files.
 - Protect unused cards referenced by supported bootstrap files, managed Brigade plans and runbooks, and multiline or workspace-absolute Markdown reference definitions.
 - Report that lifecycle and expiry are disabled when the workspace signing key is unavailable.
+- Automatic archiving of unused cards, including expiry retirement, is switched off in code until #2620 lands and will require a configured hub. Stale marking stays live with policy floors of 30 days before stale and 90 days before archive.

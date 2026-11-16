@@ -1,3 +1,5 @@
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
+
 import json
 
 import pytest

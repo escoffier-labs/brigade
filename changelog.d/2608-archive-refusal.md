@@ -1,1 +1,2 @@
 - An occupied or refused archive destination now skips only that card. The lifecycle pass and later tending stages keep running.
+- Automatic archiving of unused cards, including expiry retirement, is switched off in code until #2620 lands and will require a configured hub. Stale marking stays live with policy floors of 30 days before stale and 90 days before archive.

@@ -17,6 +17,21 @@ class ArchiveRefused(ValueError):
     """A protected, missing or changed card cannot be moved."""
 
 
+class ArchiveRecoveryUnverified(ArchiveRefused):
+    """The move committed but its stored recovery decision cannot be verified."""
+
+    def __init__(self, decision_id: str):
+        self.decision_id = decision_id
+        super().__init__(f"recovery_unverified: {decision_id}")
+
+
+def _reload_committed(target: Path, decision: journal.Decision) -> journal.Decision:
+    try:
+        return journal.load(target, decision.decision_id)
+    except (OSError, ValueError, KeyError, journal.kernel.ProjectionError) as exc:
+        raise ArchiveRecoveryUnverified(decision.decision_id) from exc
+
+
 def archive_rel(card_rel: str) -> str:
     journal.safe_path(Path("."), card_rel)
     return f"{ARCHIVE_ROOT}/{card_rel.removeprefix('memory/')}"
@@ -163,7 +178,7 @@ def archive_card(
     try:
         abandoned = journal._payload(target, d.decision_id)["phase"] == "abandoned"
     except (OSError, ValueError, KeyError):
-        return d
+        return _reload_committed(target, d)
     if abandoned:
         raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
     try:
@@ -180,7 +195,7 @@ def archive_card(
             ),
         )
     except (OSError, ValueError, journal.kernel.ProjectionError):
-        return d
+        return _reload_committed(target, d)
 
 
 @journal.serialized

@@ -48,7 +48,7 @@ def run(
     target: Path, *, stages: Sequence[str] | None = None, dry_run: bool = False, today: date | None = None
 ) -> dict[str, Any]:
     target = target.resolve()
-    recovery = [] if dry_run else journal.resolve_prepared(target)
+    recovery = [] if dry_run else journal.resolve_prepared(target, automatic=True)
     tend = load_config(target)
     selected = tuple(stages) if stages is not None else STAGES
     if any(stage not in STAGES for stage in selected):
@@ -74,6 +74,9 @@ def run(
                 payload["stages"][stage] = memory_lifecycle.run(
                     target, today=today or memory_cmd._today(), dry_run=dry_run
                 )
+                if payload["stages"][stage].get("recovery_unverified"):
+                    payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
+                    payload["failed"] = len(payload["failed_stages"])
             except (OSError, ValueError, KeyError, subprocess.SubprocessError):
                 payload["stages"][stage] = {"blocked": "lifecycle signals unreadable", "error": True}
                 payload["failed_stages"] = [*payload.get("failed_stages", []), stage]

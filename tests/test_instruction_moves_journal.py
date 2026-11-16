@@ -451,7 +451,7 @@ def test_finish_validates_before_absent(tmp_path, monkeypatch, damage):
 
 
 def test_drain_reports_kernel_projection_error(tmp_path, monkeypatch):
-    def refuse(target):
+    def refuse(target, *, automatic=False):
         raise journal.kernel.ProjectionError("kernel journal unreadable")
 
     monkeypatch.setattr(journal, "resolve_prepared", refuse)

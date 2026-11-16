@@ -254,7 +254,7 @@ def apply_fixes(
     if not load_config(target).enabled:
         return result
     if not dry_run:
-        journal.resolve_prepared(target)
+        journal.resolve_prepared(target, automatic=True)
     if plan is None:
         try:
             plan = plan_payload(target, config, care._scan_payload(target, config))

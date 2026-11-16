@@ -1,1 +1,2 @@
-- Scheduled memory care marks unused agent cards stale and archives them under a configurable policy. References, pins and human cards protect against archiving. Search retained archives with `memory search --include-archived` and restore them with `memory care undo`.
+- Scheduled memory care marks unused agent cards stale under a configurable policy. References, pins and human cards protect against archiving. Search retained archives with `memory search --include-archived` and restore them with `memory care undo`.
+- Automatic archiving of unused cards, including expiry retirement, is switched off in code until #2620 lands and will require a configured hub. Stale marking stays live with policy floors of 30 days before stale and 90 days before archive.
