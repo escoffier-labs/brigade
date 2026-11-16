@@ -366,8 +366,6 @@ struct Pending {
     deadline: Instant,
     reply: oneshot::Sender<Answer>,
     auto_authority: Option<(Authority, i64)>,
-    // An exact committed replay still reaches the in-lock idempotency lookup.
-    exact_replay: bool,
 }
 fn answer(p: Pending, result: Answer) {
     let _ = p.reply.send(result);
@@ -530,12 +528,11 @@ fn prepare_auto(
     hub: &HubLock,
     config: &Config,
     rate: &mut super::hardening::Rate,
-) -> (Option<(Authority, i64)>, bool) {
+) -> Option<(Authority, i64)> {
     use super::hardening as h;
     use serde_json::json;
     let verify_only = cmd.name() == "verify_auto_apply";
     let mut prepared_authority = None;
-    let mut exact_replay = false;
     let limits = config.proposal_limits.read().unwrap().clone();
     let result = (|| -> rusqlite::Result<Option<Reply>> {
         let db = Connection::open_with_flags(
@@ -555,7 +552,6 @@ fn prepare_auto(
             .first()
             .is_some_and(|row| ops::s(&row[0]) == request_digest)
         {
-            exact_replay = true;
             return Ok(None);
         }
         if !stored.is_empty() {
@@ -643,7 +639,7 @@ fn prepare_auto(
             ))
         }
     }
-    (prepared_authority, exact_replay)
+    prepared_authority
 }
 
 pub(crate) fn run(
@@ -679,7 +675,6 @@ pub(crate) fn run(
             deadline,
             reply,
             auto_authority: None,
-            exact_replay: false,
         }),
         Job::Sweep { now_ms } => {
             if sweeps.len() < 4 {
@@ -799,7 +794,7 @@ pub(crate) fn run(
         for pending in &mut batch {
             if let ops::Action::Proposal(cmd) = &mut pending.command.action {
                 if matches!(cmd.name(), "auto_apply" | "verify_auto_apply") {
-                    (pending.auto_authority, pending.exact_replay) = prepare_auto(
+                    pending.auto_authority = prepare_auto(
                         cmd,
                         &pending.command.credential,
                         &pending.command.client_event_id,
@@ -821,9 +816,7 @@ pub(crate) fn run(
             .into_iter()
             .filter_map(|pending| {
                 if let ops::Action::Proposal(cmd) = &pending.command.action {
-                    if matches!(cmd.name(), "auto_apply" | "verify_auto_apply")
-                        && !pending.exact_replay
-                    {
+                    if matches!(cmd.name(), "auto_apply" | "verify_auto_apply") {
                         if let Err(refusal) = &cmd.draft {
                             let reply = refusal.clone();
                             answer(pending, Ok(reply));

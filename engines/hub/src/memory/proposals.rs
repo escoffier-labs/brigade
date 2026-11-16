@@ -425,8 +425,9 @@ fn submit<T: ReadTx + ?Sized>(
         json!({"base_epoch":epoch,"workspace_id":request["workspace_id"],"cards":by_card.into_values().collect::<Vec<_>>(),"ops":ops,"diff":diff,"tier":2,"rollback_of":null}),
     ))
 }
-/// Prepare CPU work and diffs on a query-only reader. A refusal is carried to
-/// the writer so a committed retry still reaches the idempotency lookup first.
+/// Prepare CPU work and diffs on a query-only reader. Ordinary commands carry a
+/// refusal to the writer. Automatic applies answer it before the writer locks,
+/// because `ops::apply` re-runs authorization before the idempotency lookup.
 pub fn prepare<T: ReadTx + ?Sized>(
     tx: &T,
     who: &auth::Credential,
