@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -12,6 +12,7 @@ import pytest
 
 from brigade import fleet_campaign_consume as consumer
 from brigade import fleet_hub
+from brigade.work_cmd.ledger import locking
 from brigade.worklore_client import WorkloreClientError
 from tests.test_work_dispatch import dispatch_target, requires_dispatch_apply  # noqa: F401
 from tests.test_work_dispatch_apply import apply_target  # noqa: F401
@@ -65,16 +66,34 @@ class Node:
 class Runs:
     """A fake local launcher that records what it ran and tells the Hub about the run, as brigade run does."""
 
-    def __init__(self, conn, node, *, state="completed", visible=True, die=False, launched=None):
+    def __init__(
+        self,
+        conn,
+        node,
+        *,
+        state="completed",
+        visible=True,
+        die=False,
+        launched=None,
+        advance=None,
+        during=None,
+        norun=False,
+    ):
         self.conn, self.node, self.state, self.visible, self.die = conn, node, state, visible, die
+        self.norun = norun
         self.launched: list[str] = [] if launched is None else launched
+        self.deadlines: list[float] = []
+        self.advance, self.during = advance, during  # advance(seconds) moves the injected clock
 
-    def __call__(self, path, *, title, repo, work_id, description, acceptance):
+    def __call__(self, path, *, title, repo, work_id, description, acceptance, deadline_seconds):
         self.launched.append(repo)
+        self.deadlines.append(deadline_seconds)
         if self.die:
             raise Killed
         if self.state == "refused":
-            return consumer.Launch("refused")
+            return consumer.Launch("refused", detail="dispatch exit 2: no roster")
+        if self.norun:  # an intent that failed before any run id existed
+            return consumer.Launch(self.state, detail="dispatch exit 1: claim lost")
         run_id = f"run-{self.node}-{len(self.launched)}-{repo.replace('/', '_')}"
         if self.visible:
             self.conn.execute(
@@ -83,6 +102,10 @@ class Runs:
                 (self.node, run_id),
             )
             self.conn.commit()
+        if self.advance:
+            self.advance(deadline_seconds)  # the run lasts exactly until its deadline
+        if self.during:
+            self.during()
         return consumer.Launch(self.state, run_id, "brigade/dispatch/task-1", REVISION)
 
 
@@ -98,17 +121,18 @@ def hub(ledger):  # noqa: F811
     return conn, path, clock, now
 
 
-def run(conn, node, clock_now, launcher, *, watch=True, tried=None, hub_override=None):
+def run(conn, node, clock_now, launcher, *, watch=True, tried=None, hub_override=None, holds=None, repos=None):
     events: list[dict] = []
     passes = consumer.consume(
         hub_override or Node(conn, node),
         watch=watch,
         campaign_key=KEY,
         node_id=node,
-        repos=REPOS,
+        repos=repos or REPOS,
         launcher=launcher,
         emit=events.append,
         tried=set() if tried is None else tried,
+        holds=holds or consumer.Holds(),
         now=clock_now,
     )
     return passes, events
@@ -176,7 +200,12 @@ def test_killed_holder_is_fenced_out_by_the_next_holders_generation(hub):
     # The lease has not run out, so another node must not take the member.
     assert [p.outcome for p in run(conn, "node-b", now, Runs(conn, "node-b"), watch=False)[0]] == ["parked"]
     assert Node(conn, "node-b").get_ownership(ids["acme/two"])["ownership"]["generation"] == 1
-    # The dead holder had already linked its run under generation 1 before it stopped.
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    passes, _ = run(conn, "node-b", now, Runs(conn, "node-b"), watch=False)
+    assert [(p.repo, p.outcome, p.generation) for p in passes] == [("acme/one", "parked", 2)]
+    owned = Node(conn, "node-b").get_ownership(work_id)["ownership"]
+    assert owned["generation"] == 2 and owned["owner_node"] == "node-b"
+    # The dead holder wakes up late and tries to link its run under the old generation.
     run_id = "run-node-a-late"
     conn.execute(
         "INSERT INTO events (node_id, run_id, sequence, digest, state, ts, received_at) "
@@ -184,12 +213,9 @@ def test_killed_holder_is_fenced_out_by_the_next_holders_generation(hub):
         (run_id,),
     )
     conn.commit()
-    dead.link_execution(work_id, {"node_id": "node-a", "run_id": run_id}, generation=1, holder_nonce=stale_nonce)
-    clock[0] = "2026-01-01T00:02:00+00:00"
-    passes, _ = run(conn, "node-b", now, Runs(conn, "node-b"), watch=False)
-    assert [(p.repo, p.outcome, p.generation) for p in passes] == [("acme/one", "parked", 2)]
-    owned = Node(conn, "node-b").get_ownership(work_id)["ownership"]
-    assert owned["generation"] == 2 and owned["owner_node"] == "node-b"
+    with pytest.raises(WorkloreClientError) as link:
+        dead.link_execution(work_id, {"node_id": "node-a", "run_id": run_id}, generation=1, holder_nonce=stale_nonce)
+    assert link.value.code in {"stale-generation", "holder-mismatch"}
     attempts = conn.execute("SELECT attempt_count FROM work_items WHERE work_id=?", (work_id,)).fetchone()[0]
     # The old holder wakes up late and tries to spend an attempt on its old generation.
     version = dead.get_item(work_id)["item"]["version"]
@@ -197,7 +223,7 @@ def test_killed_holder_is_fenced_out_by_the_next_holders_generation(hub):
         dead.record_attempt(
             work_id, {"action": "failed", "run_id": run_id}, if_match=version, generation=1, holder_nonce=stale_nonce
         )
-    assert attempt.value.code in {"stale-generation", "holder-mismatch"}
+    assert attempt.value.code in {"stale-generation", "holder-mismatch", "attempt-forbidden"}
     assert conn.execute("SELECT attempt_count FROM work_items WHERE work_id=?", (work_id,)).fetchone()[0] == attempts
     stale = {"action": "release", "generation": 1}
     with pytest.raises(WorkloreClientError) as release:
@@ -287,6 +313,218 @@ def test_refused_launch_hands_the_member_back_without_an_attempt(hub):
     assert [p.outcome for p in passes] == ["refused"]
     assert Node(conn, "node-a").get_ownership(work_id)["ownership"]["state"] == "unowned"
     assert conn.execute("SELECT attempt_count FROM work_items WHERE work_id=?", (work_id,)).fetchone()[0] == 0
+
+
+def mover(clock):
+    """Advance the injected clock by seconds; the Hub and the consumer both read it."""
+    return lambda seconds: clock.__setitem__(
+        0, (datetime.fromisoformat(clock[0]) + timedelta(seconds=seconds)).isoformat()
+    )
+
+
+def test_run_is_stopped_before_its_lease_and_no_second_consumer_overlaps(hub):
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    rival = Runs(conn, "node-b")
+    during = []
+
+    def contend():
+        # The run is still going, at its deadline and inside the lease: node-b gets the other member only.
+        expires = datetime.fromisoformat(Node(conn, "node-a").get_ownership(work_id)["ownership"]["expires_at"])
+        during.append(now() < expires)
+        run(conn, "node-b", now, rival)
+
+    runs = Runs(conn, "node-a", state="failed", advance=mover(clock), during=contend)
+    passes, events = run(conn, "node-a", now, runs, watch=False)
+    assert runs.deadlines == [45.0] and during == [True] and rival.launched == ["acme/two"]
+    assert [p.outcome for p in passes] == ["failed"]
+    assert [e["action"] for e in events if e["event"] == "attempt"] == ["started", "failed"]
+    item = Node(conn, "node-a").get_item(work_id)["item"]
+    assert item["attempt_count"] == 1 and Node(conn, "node-a").get_ownership(work_id)["ownership"]["state"] == "unowned"
+
+
+def test_lease_too_short_to_start_is_refused_without_launching(ledger):  # noqa: F811
+    conn, _, clock = ledger
+    create(conn, offer={**OFFER, "lease_seconds": 20})
+    now = lambda: datetime.fromisoformat(clock[0])  # noqa: E731
+    runs = Runs(conn, "node-a")
+    passes, events = run(conn, "node-a", now, runs, watch=False)
+    assert runs.launched == [] and [p.outcome for p in passes] == ["refused"]
+    assert "lease_seconds=20" in passes[0].detail and "raise lease_seconds" in passes[0].detail
+    assert events[-1]["detail"] == passes[0].detail
+    assert Node(conn, "node-a").get_ownership(member_ids(conn)["acme/one"])["ownership"]["state"] == "unowned"
+
+
+def test_lost_grant_after_a_started_run_is_not_selected_again_on_this_node(hub, tmp_path):
+    conn, _, clock, now = hub
+    ids = member_ids(conn)
+    path = tmp_path / "holds.json"
+    # A run that ignored its deadline: the lease runs out before the consumer can link it.
+    slow = Runs(conn, "node-a")
+
+    def overrun(*args, **kwargs):
+        launched = slow(*args, **kwargs)
+        mover(clock)(120)
+        return launched
+
+    first, events = run(conn, "node-a", now, overrun, watch=False, holds=consumer.Holds(path))
+    assert [p.outcome for p in first] == ["lost-grant"] and first[0].repo == "acme/one"
+    assert any(e["event"] == "hold" for e in events)
+    assert Node(conn, "node-a").get_item(ids["acme/one"])["item"]["attempt_count"] == 0
+    # A later invocation (a fresh tried set and a fresh Holds reading the same file) skips it.
+    later = Runs(conn, "node-a")
+    passes, _ = run(conn, "node-a", now, later, holds=consumer.Holds(path))
+    assert "acme/one" not in later.launched and [p.repo for p in passes if p.outcome != "idle"] == ["acme/two"]
+
+
+def test_reclaimed_member_whose_previous_generation_linked_a_run_is_not_launched_again(hub):
+    conn, _, clock, now = hub
+    ids = member_ids(conn)
+    work_id = ids["acme/one"]
+    dead = Node(conn, "node-a")
+    with pytest.raises(Killed):
+        run(conn, "node-a", now, Runs(conn, "node-a", die=True), watch=False, hub_override=dead)
+    run(conn, "node-b", now, Runs(conn, "node-b"), watch=False)
+    conn.execute(
+        "INSERT INTO events (node_id, run_id, sequence, digest, state, ts, received_at) "
+        "VALUES ('node-a', 'run-node-a-late', 1, 'd', 'running', 'now', 'now')"
+    )
+    conn.commit()
+    dead.link_execution(
+        work_id, {"node_id": "node-a", "run_id": "run-node-a-late"}, generation=1, holder_nonce=dead.nonces[-1]
+    )
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    again = Runs(conn, "node-b")
+    passes, events = run(conn, "node-b", now, again)
+    assert again.launched == [] and [(p.repo, p.outcome) for p in passes] == [("acme/one", "previous-run")]
+    parked = Node(conn, "node-b").get_ownership(work_id)["ownership"]
+    assert parked["next_action"]["kind"] == "blocked" and events[-1]["event"] == "previous-run"
+    # Parked for an operator, so a later pass leaves it alone.
+    clock[0] = "2026-01-01T00:10:00+00:00"
+    assert [p.outcome for p in run(conn, "node-b", now, again)[0]] == ["idle"]
+
+
+@pytest.mark.parametrize("state", ["failed", "lost_race"])
+def test_failed_intent_with_no_run_id_counts_an_attempt_and_is_not_repeated(hub, tmp_path, state):
+    conn, _, _, now = hub
+    ids = member_ids(conn)
+    holds = consumer.Holds(tmp_path / "holds.json")
+    runs = Runs(conn, "node-a", state=state, norun=True)
+    passes, events = run(conn, "node-a", now, runs, holds=holds)
+    assert {p.outcome for p in passes} == {"failed"} and sorted(runs.launched) == ["acme/one", "acme/two"]
+    assert [e["action"] for e in events if e["event"] == "attempt"] == ["failed", "failed"]
+    assert Node(conn, "node-a").get_ownership(ids["acme/one"])["ownership"]["state"] == "unowned"
+    again = Runs(conn, "node-a", state=state, norun=True)
+    assert [p.outcome for p in run(conn, "node-a", now, again, holds=consumer.Holds(tmp_path / "holds.json"))[0]] == [
+        "idle"
+    ]
+    assert again.launched == []
+
+
+def test_only_a_completed_state_is_parked_as_a_finished_run(hub):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    passes, _ = run(conn, "node-a", now, Runs(conn, "node-a", state="running"), watch=False)
+    assert [p.outcome for p in passes] == ["failed"]
+    assert Node(conn, "node-a").get_item(work_id)["item"]["attempt_count"] == 1
+
+
+def test_unexpected_error_hands_the_member_back_instead_of_holding_it(hub):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    passes, events = run(conn, "node-a", now, broken, watch=False)
+    assert [(p.outcome, p.detail) for p in passes] == [("error", "RuntimeError")]
+    assert events[-1]["event"] == "error"
+    assert Node(conn, "node-a").get_ownership(work_id)["ownership"]["state"] == "unowned"
+
+
+def test_failing_receipt_writer_still_hands_the_member_back(hub):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+
+    def emit(event):
+        if event["event"] == "launch":
+            raise OSError("disk full")
+
+    passes = consumer.consume(
+        Node(conn, "node-a"),
+        watch=False,
+        campaign_key=KEY,
+        node_id="node-a",
+        repos=REPOS,
+        launcher=Runs(conn, "node-a", state="refused"),
+        emit=emit,
+        now=now,
+    )
+    assert [p.outcome for p in passes] == ["error"]
+    assert Node(conn, "node-a").get_ownership(work_id)["ownership"]["state"] == "unowned"
+
+
+@requires_dispatch_apply
+def test_local_ledger_keeps_no_ready_campaign_task_after_refused_failed_or_lost_grant(hub, apply_target, monkeypatch):  # noqa: F811
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    repos = {"acme/one": apply_target}
+
+    def campaign_tasks():
+        tasks = locking._read_task_ledger(apply_target)["tasks"]
+        return [t for t in tasks if (t.get("metadata") or {}).get("campaign_work_id") == work_id]
+
+    refused = consumer.launch_local(
+        apply_target, title="T", repo="acme/one", work_id=work_id, description="", acceptance=[], worker="nope"
+    )
+    assert refused.state == "refused" and "unknown roster seat" in refused.detail and campaign_tasks() == []
+    monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
+    for _ in range(2):
+        failed = consumer.launch_local(
+            apply_target,
+            title="T",
+            repo="acme/one",
+            work_id=work_id,
+            description="",
+            acceptance=[],
+            worker="coder",
+            deadline_seconds=45,
+        )
+        assert failed.state == "failed"
+        assert [t["status"] for t in campaign_tasks()] == ["cancelled"]
+    monkeypatch.delenv("FAKE_DISPATCH_STATUS")
+
+    def launch(*args, **kwargs):
+        launched = consumer.launch_local(*args, worker="coder", **kwargs)
+        conn.execute(
+            "INSERT INTO events (node_id, run_id, sequence, digest, state, ts, received_at) "
+            "VALUES ('node-a', ?, 1, 'd', 'running', 'now', 'now')",
+            (launched.run_id,),
+        )
+        conn.commit()
+        mover(clock)(120)  # the grant is gone by the time the consumer writes
+        return launched
+
+    passes, _ = run(conn, "node-a", now, launch, watch=False, repos=repos)
+    assert [p.outcome for p in passes] == ["lost-grant"]
+    assert [t["status"] for t in campaign_tasks()] != ["pending"] and len(campaign_tasks()) == 1
+
+
+def test_consume_json_exits_nonzero_when_a_pass_failed(tmp_path, monkeypatch, capsys):
+    from brigade import cli, fleet_client
+    from brigade.cli import fleet_campaign
+
+    monkeypatch.setattr(fleet_campaign, "_local_repos", lambda target: {"acme/one": tmp_path})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda target: "node-a")
+    monkeypatch.setattr(
+        consumer, "consume", lambda hub, **kw: [consumer.Pass("failed", "acme/one", "w-1", 1, "r-1", "boom")]
+    )
+    code = cli.main(["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder", "--json"])
+    assert code == 1 and json.loads(capsys.readouterr().out)["passes"][0]["detail"] == "boom"
+    monkeypatch.setattr(consumer, "consume", lambda hub, **kw: [consumer.Pass("parked", "acme/one", "w-1", 1, "r-1")])
+    assert (
+        cli.main(["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder", "--json"]) == 0
+    )
 
 
 def test_receipt_writer_appends_one_json_line_per_step(tmp_path):

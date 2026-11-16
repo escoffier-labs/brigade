@@ -252,19 +252,32 @@ A pass does this for one member:
 
 1. **Select.** The consumer reads the campaign and keeps members whose repository
    resolves to a local checkout and whose bucket is `unowned` or `in_flight`. Terminal,
-   `blocked`, `awaiting_gate` and `attempt_limited` members are never selected. A held
+   `awaiting_gate`, `attempt_limited` and `blocked` members (the Hub bucket, an item
+   status) are never selected, and neither is a member this node holds (below). A held
    member is retried only when its lease has expired and its last checkpoint is not
-   parked (`await-review`, `await-checks`, `await-merge` or `blocked`).
+   parked (`await-review`, `await-checks`, `await-merge` or `blocked`, here the
+   ownership `next_action`, which leaves the bucket at `in_flight`). A member reclaimed
+   from an expired holder that had linked a run the Hub never counted is parked as
+   `blocked` without launching.
 2. **Take.** It takes the member through the generation-fenced `take` above, so the offer,
    the allowed nodes, exclusions, per-node concurrency and the attempt cap all apply as
    the Hub decides them. A refusal that rules out only that member moves the pass to the
    next one. `campaign-concurrency-limit` ends the pass.
-3. **Launch.** It adds one local task for the member's repository (campaign spec plus the
-   member override) and runs it through `work dispatch` apply with `--worker SEAT`, limited
-   to that task, so the worktree, intent, circuit breaker and budget are the dispatch ones.
+3. **Launch.** It reuses one local task per member (campaign spec plus the member
+   override) and runs it through `work dispatch` apply with `--worker SEAT`, limited to
+   that task, so the worktree, intent and circuit breaker are the dispatch ones. The run
+   gets dispatch's wall-clock deadline: the shorter of the offer's `lease_seconds` and the
+   grant's remaining time, less a 15 second margin. It is stopped there and counts as a
+   failed attempt. A member with under 45 seconds of lease is handed back unlaunched, and
+   the message names the offer's `lease_seconds`. The local task is cancelled again unless
+   a run is still using it, so a refused, failed or timed-out pass leaves nothing for a
+   plain `work dispatch` to run outside the fence.
 4. **Record.** It links the run (`execution-linked`) and records `started`. A failed run
-   records `failed`, which counts against the attempt limit, and releases the member. A
-   successful run records no completion: the consumer checkpoints `await-review` with the
+   records `failed`, which counts against the attempt limit, and releases the member.
+   Only a `completed` run is parked; any other end state is a failed attempt. A dispatch
+   that failed before a run existed cannot be counted by the Hub (it counts attempts only
+   against a linked run), so it is recorded in the receipt and the member is held on this
+   node. A successful run records no completion: the consumer checkpoints `await-review` with the
    run id as a `receipt` evidence ref and the branch in `resume_condition`, and keeps
    ownership. The member stays open until an operator completes it.
 
@@ -279,9 +292,19 @@ in `.brigade/campaign-consume/KEY.jsonl`.
 
 Limits of this slice:
 
-- The lease is not renewed. Set `lease_seconds` in the offer to cover a run. When it runs
-  out first, the Hub refuses the late writes, the pass reports `lost-grant`, and the local
-  worktree remains for inspection.
+- The Hub does not enforce the park. A parked member keeps its item status, so once its
+  lease expires another node can take it through the ownership API above. Only this
+  consumer leaves it alone.
+- There is no renew action. The consumer bounds each run to its lease and refuses leases
+  that are too short. Set `lease_seconds` in the offer well above the longest run you
+  expect. A run that still outlives its grant (for example the child ignored the stop) ends
+  as `lost-grant`: the Hub refuses the late writes, the member is held on this node in
+  `.brigade/campaign-consume/KEY.holds.json`, and the local worktree remains for
+  inspection. Delete the member's entry in that file to clear the hold.
+- The Hub's clock decides expiry. The consumer budgets from the offer's `lease_seconds` and
+  the grant's `expires_at`, whichever is shorter, so node clock skew can only shorten a run.
+- An unexpected error after a take releases the member if nothing ran, or parks it as
+  `blocked` and holds it if a run may have happened. The pass reports `error`.
 - The run must be visible to the Hub as a fleet run for this node, or the Hub cannot count
   an attempt. The consumer then parks the member as `blocked` and reports `unlinked`.
 - `work dispatch` leaves changes uncommitted and never pushes, so there is no PR to

@@ -563,18 +563,26 @@ def _consume(args: argparse.Namespace) -> int:
             repos=repos,
             launcher=partial(consumer.launch_local, worker=args.worker),
             emit=consumer.receipt_writer(target, key),
+            holds=consumer.Holds(consumer.holds_path(target, key)),
         )
     except worklore_client.FleetClientError as exc:
         return _hub_failure(args, exc)
     rows = [
-        {"outcome": p.outcome, "repo": p.repo, "work_id": p.work_id, "generation": p.generation, "run_id": p.run_id}
+        {
+            "outcome": p.outcome,
+            "repo": p.repo,
+            "work_id": p.work_id,
+            "generation": p.generation,
+            "run_id": p.run_id,
+            "detail": p.detail,
+        }
         for p in passes
     ]
+    code = 1 if any(p.outcome in consumer.FAILING for p in passes) else 0
     if args.json:
         print(json.dumps({"passes": rows}, sort_keys=True, indent=2))
-        return 0
+        return code
     for row in rows:
-        print(
-            f"{_text(row['outcome'])}  {_text(row['repo'])}  generation {_text(row['generation'])}  run {_text(row['run_id'])}"
-        )
-    return 1 if any(p.outcome in {"failed", "unlinked", "refused", "lost-grant"} for p in passes) else 0
+        line = f"{_text(row['outcome'])}  {_text(row['repo'])}  generation {_text(row['generation'])}  run {_text(row['run_id'])}"
+        print(f"{line}  {_text(row['detail'])}" if row["detail"] else line)
+    return code
