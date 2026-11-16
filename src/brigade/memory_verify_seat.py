@@ -134,11 +134,23 @@ QUOTA_ERRORS = frozenset({"rate_limit", "rate_limit_error", "quota_exceeded", "b
 AUTH_ERRORS = frozenset({"authentication_failed", "authentication_error", "oauth_token_expired"})
 # Built-in plugins and agents of the Claude CLI. Plugins are switched off and must be reported
 # absent. Agents cannot be removed, but without the Agent tool none of them can run.
+# Claude CLI releases add built-in plugins, and some load only on part of a rollout. One missing
+# here fails a verify run at random with verify_seat_not_isolated, so list every name the
+# installed CLI ships (2.1.325 ships these 13). The init check still refuses any plugin.
 CLAUDE_BUILTIN_PLUGINS = (
     "cc-plugin-agents-md",
-    "cc-plugin-telemetry",
-    "cc-plugin-privacy",
+    "cc-plugin-claude-test",
+    "cc-plugin-diff",
+    "cc-plugin-easel",
+    "cc-plugin-mermaid",
+    "cc-plugin-mods-guide",
     "cc-plugin-plugin-authoring",
+    "cc-plugin-privacy",
+    "cc-plugin-responsive-mode",
+    "cc-plugin-sec-default",
+    "cc-plugin-telemetry",
+    "cc-plugin-tips",
+    "cc-plugin-you-should-know",
 )
 CLAUDE_BUILTIN_AGENTS = frozenset({"claude", "Explore", "general-purpose", "Plan"})
 CLAUDE_SETTINGS = json.dumps(
