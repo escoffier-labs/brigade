@@ -96,6 +96,7 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
             prompts.append(
                 {
                     "prompt": prompt,
+                    "prompt_id": uuid.uuid4().hex,
                     "at": time.time() if now is None else now,
                 }
             )
@@ -223,10 +224,23 @@ def drain_prompts(target: Path, state: dict[str, Any]) -> None:
     path = prompt_path(target)
     with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1):
         prompts = _read_prompts(path)
+        if not prompts:
+            return
+        # Upgrade legacy entries before recording them so retries have stable ids.
+        if any(not isinstance(p.get("prompt_id"), str) or not p["prompt_id"] for p in prompts):
+            for prompt in prompts:
+                if not isinstance(prompt.get("prompt_id"), str) or not prompt["prompt_id"]:
+                    prompt["prompt_id"] = uuid.uuid4().hex
+            io.write(path, io.json_bytes(prompts))
+        recorded = state.get("drained_prompt_ids", [])
         for prompt in prompts:
-            append_event(state, "UserPromptSubmit", prompt["prompt"], prompt["at"])
-        if prompts:
-            io.write(path, b"null\n")
+            if prompt["prompt_id"] not in recorded:
+                append_event(state, "UserPromptSubmit", prompt["prompt"], prompt["at"])
+        state["drained_prompt_ids"] = [p["prompt_id"] for p in prompts]
+        # io.write fsyncs the state and its directory before acknowledging. Keep
+        # ids in that same save to deduplicate a restart between save and ack.
+        save(target, state)
+        io.write(path, b"null\n")
 
 
 def append_event(state: dict[str, Any], kind: str, text: str, at: float, **metadata: Any) -> None:

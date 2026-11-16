@@ -111,8 +111,16 @@ def verified_receipt(
         raise ValueError("lesson verifier identity must differ from the work session")
     try:
         completed = datetime.fromisoformat(receipt["completed_at"].replace("Z", "+00:00"))
-        if completed.tzinfo is None or completed.timestamp() < earliest:
+        if completed.tzinfo is None:
             raise ValueError("stale lesson receipt")
+        if completed.timestamp() < earliest:
+            # Codex has no pre-tool observation. Its first post-tool observation
+            # follows receipt completion. Only that observation's own HMAC-
+            # authenticated, session-bound receipt may cross the boundary. Five
+            # seconds allows hook dispatch latency without reviving old evidence.
+            first = min(events, key=lambda e: e["id"])
+            if observed is not first or observed.get("at") != earliest or earliest - completed.timestamp() > 5:
+                raise ValueError("stale lesson receipt")
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("invalid lesson receipt completion time") from exc
     receipt["_completed"] = completed.timestamp()

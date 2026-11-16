@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -161,17 +162,17 @@ def test_real_signed_failure_and_pass_are_admitted(scope, monkeypatch, capsys, b
                 "tool_input": {"command": "brigade work verify run --manifest lesson"},
                 "tool_output": json.dumps(receipt),
             },
-            now=100,
+            now=time.time(),
         )
         (scope / "check.py").write_text("print('ok')\n")
     activity.record_event(
-        scope, "PostToolUse", {"session_id": "example-session", "tool_output": candidate["quote"]}, now=100
+        scope, "PostToolUse", {"session_id": "example-session", "tool_output": candidate["quote"]}, now=time.time()
     )
     candidate["event"] = activity.load(scope)["sequence"]
     reads = {card.name: sha256_hex(card.read_bytes())} if binding_mode == "patch_backed" else {}
     admission.admit(scope, candidate, activity.load(scope)["events"], reads)
     seat(monkeypatch, candidate, reads=list(reads))
-    result = review.run(scope, now=111)
+    result = review.run(scope, now=time.time() + 11)
     assert result["status"] == "committed", result
     assert len(list((scope / "memory/handoff-inbox").glob("lesson-*.md"))) == 1
     if binding_mode == "fixture_eval":
