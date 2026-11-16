@@ -584,3 +584,19 @@ def test_binding_reads_corpus_with_the_corpus_reader_limit(tmp_path, monkeypatch
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass  # Placeholder seats fail after both reads, which is all this test needs.
     assert seen.get(Path(gate.CORPUS).name) == gate.io.MAX_STATE_BYTES
+
+
+def test_eval_cli_reports_a_stopped_seat(verify_hub, capsys, monkeypatch):
+    from brigade import cli, memory_verify_run
+
+    target, _, _, _ = verify_hub
+    path = corpus(target)
+
+    def stop(self, seat):
+        raise memory_verify_run.SeatStop("seat_quota", fatal=False)
+
+    monkeypatch.setattr(memory_verify_run.Calls, "seat", stop)
+    code = cli.main(["memory", "verify", "eval", "--corpus", str(path), "--target", str(target), "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code != 0
+    assert report.get("code") == "seat_quota"

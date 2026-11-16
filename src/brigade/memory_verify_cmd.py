@@ -548,9 +548,13 @@ def dispatch(args: argparse.Namespace) -> int:
                 cases = memory_verify_eval.read_corpus(args.corpus.absolute())
                 with memory_verify_run.WORK_AREA(target) as area:
                     calls = memory_verify_run.Calls(area)
-                    payload = memory_verify_eval.evaluate(
-                        cases, propose=calls.seat(pair[0]), confirm=calls.seat(pair[1])
-                    )
+                    try:
+                        payload = memory_verify_eval.evaluate(
+                            cases, propose=calls.seat(pair[0]), confirm=calls.seat(pair[1])
+                        )
+                    except memory_verify_run.SeatStop as exc:
+                        # Quota and fatal seat replies end the evaluation with a report, as the gate does.
+                        raise VerifyRunError(str(exc), "verifier seat stopped the evaluation") from None
         elif args.dry_run and args.no_model:
             payload = run_payload(target=target, dry_run=True, no_model=True, list_ids=args.list_ids)
         elif args.no_model:
