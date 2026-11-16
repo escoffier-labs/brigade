@@ -421,3 +421,39 @@ def test_real_hold_reply_suppresses_revision_and_selects_fresh_head(setup, capsy
     assert "anchor_review_only" not in third["skipped_reasons"]
     again = [call for call in writes(hub) if call["action"] == "propose"][proposed:]
     assert any(call["ops"][0]["card_id"] == "robot-a" for call in again)
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_future_withdrawal_time_does_not_extend_suppression(setup, capsys, monkeypatch):
+    import json
+    from brigade import memory_reflect_hub as reflect_hub
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "robot-a", card_text("Unique robot-a.", None), "live", "robot-a")
+    policy.set_enabled(target, True)
+    held = [{"gate": "candidate", "state": "held", "code": "tier_requires_review"}]
+    monkeypatch.setattr(
+        hub,
+        "do_auto_apply",
+        lambda body: (200, {"state": "pending", "reason": "auto_apply_held", "preflight": {"checks": held}}),
+        raising=False,
+    )
+    assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+    state = json.loads(path.read_text())
+    for record in state["submissions"].values():
+        if "anchor_review_only" in record:
+            record["anchor_review_only"] = reflect_hub._now_ms() + 10 * reflect_hub.ANCHOR_WITHDRAWN_RETRY_MS
+    path.write_text(json.dumps(state))
+    proposed = len([call for call in writes(hub) if call["action"] == "propose"])
+    code, second = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert "anchor_review_only" not in second["skipped_reasons"]
+    again = [call for call in writes(hub) if call["action"] == "propose"][proposed:]
+    assert [call["ops"][0]["card_id"] for call in again] == ["robot-a"]

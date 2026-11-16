@@ -557,7 +557,8 @@ def _reflect(
             remembered = previous.get(digest, {})
             withdrawn_ms = remembered.get("anchor_review_only")
             if type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
-                if _now_ms() - withdrawn_ms < ANCHOR_WITHDRAWN_RETRY_MS:
+                # A future timestamp counts as expired, so local state cannot stretch the window.
+                if 0 <= _now_ms() - withdrawn_ms < ANCHOR_WITHDRAWN_RETRY_MS:
                     skipped["anchor_review_only"] = skipped.get("anchor_review_only", 0) + 1
                 else:
                     # The withdrawal only delays this anchor. Forget the rejected proposal so a
