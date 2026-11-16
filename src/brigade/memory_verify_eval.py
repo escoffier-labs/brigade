@@ -48,7 +48,7 @@ def read_corpus(path: Path) -> list[dict[str, Any]]:
     seen = set()
     for case in cases:
         inputs(case)
-        ident = case["id"]
+        ident = case.get("id")
         if not isinstance(ident, str) or not ident or ident in seen:
             raise ValueError("verify_eval_case_identity")
         seen.add(ident)

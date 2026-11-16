@@ -54,12 +54,23 @@ DOCTOR_DISABLED_REASON = "[verify] enabled is false, so doctor checked the confi
 UNRESOLVED_REQUEST = "verify_unresolved_request"
 
 
+EVAL_CODE = re.compile(r"verify_eval_[a-z_]{1,48}")
+
+
 class VerifyRunError(ValueError):
     """A fixed code and reason, safe for logs. Never formatted with hub or card text."""
 
     def __init__(self, code: str, reason: str) -> None:
         super().__init__(reason)
         self.code = code
+
+
+def _eval_error(exc: ValueError) -> VerifyRunError:
+    """Keep a fixed verify_eval_* code from the corpus reader or harness."""
+    code = str(exc)
+    if not EVAL_CODE.fullmatch(code):
+        code = "verify_invalid"
+    return VerifyRunError(code, "verify could not evaluate the corpus")
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -546,7 +557,10 @@ def dispatch(args: argparse.Namespace) -> int:
                     )
                 payload["status"] = "completed"
             else:
-                cases = memory_verify_eval.read_corpus(args.corpus.absolute())
+                try:
+                    cases = memory_verify_eval.read_corpus(args.corpus.absolute())
+                except ValueError as exc:
+                    raise _eval_error(exc) from None
                 # The work area sweeps stale call directories, so share the run and gate lock.
                 with vstate.locked(target), memory_verify_run.WORK_AREA(target) as area:
                     calls = memory_verify_run.Calls(area)
@@ -554,6 +568,8 @@ def dispatch(args: argparse.Namespace) -> int:
                         payload = memory_verify_eval.evaluate(
                             cases, propose=calls.seat(pair[0]), confirm=calls.seat(pair[1])
                         )
+                    except ValueError as exc:
+                        raise _eval_error(exc) from None
                     except memory_verify_run.SeatStop as exc:
                         # Quota and fatal seat replies end the evaluation with a report, as the gate does.
                         raise VerifyRunError(str(exc), "verifier seat stopped the evaluation") from None

@@ -663,12 +663,28 @@ def test_duplicate_ids_across_corpus_and_feedback_are_refused():
         run_eval([case(id="same"), case(id="same")])
 
 
-@pytest.mark.parametrize("bad", [None, "case", {"id": "x", "expected": "no-change", "expected_ops": []}])
-def test_eval_cli_reports_malformed_corpus_cases(verify_hub, capsys, bad):
+def _without_id():
+    value = case()
+    del value["id"]
+    return value
+
+
+@pytest.mark.parametrize(
+    ("bad", "code"),
+    [
+        (None, "verify_eval_case_invalid"),
+        ("case", "verify_eval_case_invalid"),
+        ({"id": "x", "expected": "no-change", "expected_ops": []}, "verify_eval_case_invalid"),
+        (_without_id(), "verify_eval_case_identity"),
+    ],
+)
+def test_eval_cli_reports_malformed_corpus_cases(verify_hub, capsys, bad, code):
     from brigade import cli
 
     target, hub, _, _ = verify_hub
     path = corpus(target, [bad])
     assert cli.main(["memory", "verify", "eval", "--corpus", str(path), "--target", str(target), "--json"]) != 0
-    assert json.loads(capsys.readouterr().out)["status"] == "failed"
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "failed"
+    assert report["code"] == code
     assert hub.calls == []
