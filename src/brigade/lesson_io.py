@@ -72,6 +72,29 @@ def text(path: Path, **kwargs) -> str | None:
     return data.decode("utf-8") if data is not None else None
 
 
+def recover_publication(path: Path, data: bytes) -> None:
+    """Remove only the second name left by interrupted no-replace publication."""
+    if not dirfd.posix_available():
+        return
+    key = hashlib.sha256(data).hexdigest()
+    with held_file_lock(path.parent / f".lesson-{key}.lock", deadline_seconds=1):
+        with directory(path.parent, private=True) as parent:
+            temporary = f".lesson-{key}.tmp"
+            try:
+                draft = dirfd.stat_child(parent, path.name)
+                staged = dirfd.stat_child(parent, temporary)
+            except FileNotFoundError:
+                return
+            if (
+                stat.S_ISREG(draft.st_mode)
+                and stat.S_ISREG(staged.st_mode)
+                and draft.st_nlink == staged.st_nlink == 2
+                and (draft.st_dev, draft.st_ino) == (staged.st_dev, staged.st_ino)
+            ):
+                dirfd.unlink_child(parent, temporary)
+                dirfd.fsync_directory(parent)
+
+
 def write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
     # Serialize matching exclusive writes so recovery can remove abandoned
     # temporaries even when a retried draft gets a new timestamped filename.

@@ -176,6 +176,8 @@ def _publish(target: Path, pending: dict[str, Any]) -> None:
         (inbox / "processed").glob(f"*-{pending['run_id']}.md")
     )
     if matches:
+        if len(matches) == 1 and matches[0].parent == inbox:
+            io.recover_publication(matches[0], text.encode())
         if len(matches) != 1 or io.text(matches[0]) != text:
             raise ValueError("lesson publication differs from prepared draft")
     else:

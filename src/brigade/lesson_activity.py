@@ -194,7 +194,7 @@ def _read_prompts(path: Path) -> list[dict[str, Any]]:
             info = dirfd.stat_child(parent, path.name)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise OSError("lesson prompt spool must be regular and single-link") from None
-            dirfd.rename_child(parent, path.name, parent, name)
+            dirfd.rename_file_child(parent, path.name, parent, name)
             dirfd.fsync_directory(parent)
         io.write(path.parent / (name + ".json"), io.json_bytes({"reason": "invalid-prompt-spool"}))
         return []

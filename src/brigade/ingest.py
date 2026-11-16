@@ -504,7 +504,7 @@ def ingest_lesson(*, source: Path, path: Path, expected_digest: str, admitted_or
                 archived = None
             if archived is not None:
                 raise ChangedHandoffError("lesson archive already exists")
-            dirfd.rename_child(parent, path.name, processed, path.name)
+            dirfd.rename_file_child(parent, path.name, processed, path.name)
 
 
 def strip_section_blank_lines(text: str) -> str:
