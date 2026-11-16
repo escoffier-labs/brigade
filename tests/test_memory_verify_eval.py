@@ -688,3 +688,53 @@ def test_eval_cli_reports_malformed_corpus_cases(verify_hub, capsys, bad, code):
     assert report["status"] == "failed"
     assert report["code"] == code
     assert hub.calls == []
+
+
+def test_apply_pending_paces_rotates_and_reports_rate_limits(tmp_path, monkeypatch):
+    from brigade import memory_hub_client as hubc
+    from brigade import memory_verify_auto as automatic
+    from brigade import memory_verify_cmd as cmd
+    from brigade import memory_verify_show as show
+
+    state = {
+        "binding": "b",
+        "scopes": {"s": {"cards": {"a": {"pending": "p-stuck"}, "b": {"pending": "p-good"}}}},
+    }
+    monkeypatch.setattr(gate, "allowed", lambda *a, **k: {"correct"})
+    monkeypatch.setattr(gate, "policy", lambda target: ({}, "d"))
+    monkeypatch.setattr(gate, "binding_digest", lambda *a: "x")
+    monkeypatch.setattr(cmd, "_binding", lambda *a: "b")
+    monkeypatch.setattr(show, "show_payload", lambda target, ident: {"findings": [], "evidence": []})
+    packet = json.dumps({"ops": [{"type": "replace_block"}]})
+    monkeypatch.setattr(show, "_local", lambda target, ident: (None, packet))
+
+    class Client:
+        identity = ("hub", "me")
+
+        def __init__(self, refusal):
+            self.refusal, self.sent = refusal, []
+
+        def call(self, action, **fields):
+            if action == "status":
+                return {"principal": "me", "log_epoch": 1}
+            if action == "proposal_show":
+                return {"state": "pending", "policy_digest": "d"}
+            self.sent.append(fields["proposal_id"])
+            if fields["proposal_id"] == "p-stuck":
+                raise hubc.HubRefusal(*self.refusal)
+            return {"state": "applied", "decision_mode": "automatic"}
+
+    pauses = []
+    monkeypatch.setattr("time.sleep", pauses.append)
+    stale = Client((409, {"code": "memory_base_mismatch"}))
+    first = automatic.apply_pending(tmp_path, state, stale, pair=(), now_ms=1000)
+    # Both proposals reach the hub in one run, one pace apart, despite the refused head.
+    assert stale.sent == ["p-stuck", "p-good"]
+    assert pauses == [1.0]
+    assert [r["state"] for r in first] == ["proposal-only", "applied"]
+    # The next run tries the least recently attempted proposal first.
+    state["scopes"]["s"]["cards"]["b"]["last_auto_attempt_ms"] = 500
+    limited = Client((429, {"code": "memory_auto_apply_rate_limited"}))
+    second = automatic.apply_pending(tmp_path, state, limited, pair=(), now_ms=2000)
+    assert limited.sent == ["p-good", "p-stuck"]
+    assert {r["proposal_id"]: r["state"] for r in second}["p-stuck"] == "rate-limited"

@@ -3,3 +3,4 @@
 - The verify gate deadline scales with card runs (20 minute floor, 15 seconds per run), so a full corpus plus feedback can finish with real seats.
 - The gate refuses duplicate case ids across the corpus and feedback as a no-go.
 - `memory verify eval` reports corpus and harness errors with their `verify_eval_*` code (for example `verify_eval_case_invalid` for a malformed case) instead of a generic code or a traceback.
+- Scheduled verify paces `verify_auto_apply` requests, tries the least recently attempted proposals first and reports a throttled attempt as `rate-limited`.

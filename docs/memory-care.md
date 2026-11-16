@@ -674,6 +674,11 @@ The scheduled `memory-verify` care entry checks existing hub admission and uses
 A class without current hub admission stays proposal-only. Failed or invalid
 runs do not apply corrections. A valid run may apply pending proposals retained
 from earlier valid runs.
+Requests to `verify_auto_apply` share the hub's automatic attempt rate limit
+with `auto_apply`. The client waits one second between requests and tries the
+least recently attempted proposals first, so a proposal the hub keeps refusing
+cannot hold back the others. A throttled attempt is reported as `rate-limited`,
+and the next run tries that proposal again.
 
 `brigade memory verify eval --corpus <directory> --target <verify-folder> --json`
 scores labeled cards with the production two-seat contract, without contacting
