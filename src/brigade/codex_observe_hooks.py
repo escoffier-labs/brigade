@@ -19,7 +19,11 @@ def _entries(target: Path) -> dict[str, list[dict[str, Any]]]:
     # Match the base Claude project package: resolve Brigade through PATH.
     command = f"{CODEX_HOOK_COMMAND} --target {shlex.quote(str(target.resolve()))}"
     handler = {"type": "command", "command": command, "async": True}
-    return {"PostToolUse": [{"matcher": CODEX_POST_TOOL_MATCHER, "hooks": [handler]}], "Stop": [{"hooks": [handler]}]}
+    return {
+        "PostToolUse": [{"matcher": CODEX_POST_TOOL_MATCHER, "hooks": [handler]}],
+        "Stop": [{"hooks": [handler]}],
+        "UserPromptSubmit": [{"hooks": [handler]}],
+    }
 
 
 def _load(target: Path) -> tuple[str, dict[str, Any], int]:

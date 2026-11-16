@@ -176,6 +176,16 @@ CARE_ENTRIES = (*CARE_ENTRIES, MEMORY_REFLECT_ENTRY)
 
 MEMORY_VERIFY_ENTRY = verify_entry(CareEntry)
 
+LESSON_REVIEW_ENTRY = CareEntry(
+    entry_id="lesson-review",
+    schedule="*/5 * * * *",
+    on_calendar="*:0/5",
+    description="Brigade automatic work-session lesson review",
+    kind="runbook",
+    runbook_rel=".brigade/memory-care/runbooks/lesson-review.json",
+    runbook_id="lesson-review",
+)
+
 MEMORY_JOB_ENTRIES: tuple[CareEntry, ...] = (
     CareEntry(
         entry_id="handoff-ingest",
@@ -236,7 +246,14 @@ def _catalog_by_id() -> dict[str, CareEntry]:
     patrol_entry = care_patrol.entry(CareEntry)
     return {
         entry.entry_id: entry
-        for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, MEMORY_REFLECT_ENTRY, MEMORY_VERIFY_ENTRY, patrol_entry)
+        for entry in (
+            *CARE_ENTRIES,
+            *MEMORY_JOB_ENTRIES,
+            MEMORY_REFLECT_ENTRY,
+            MEMORY_VERIFY_ENTRY,
+            LESSON_REVIEW_ENTRY,
+            patrol_entry,
+        )
     }
 
 

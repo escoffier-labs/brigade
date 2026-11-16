@@ -17,6 +17,7 @@ from brigade.templates import template_root
 MEMORY_CARE_RUNBOOK_NAMES = memory_cmd.MEMORY_CARE_RUNBOOK_NAMES
 
 EXPECTED_RUNBOOK_STEP_FRAGMENTS = {
+    "lesson-review.json": ("memory lessons run",),
     "daily-care-pass.json": ("memory care scan", "memory care import-issues"),
     "ingest-sweep.json": ("handoff lint", "ingest"),
     "weekly-outcome-ratchet.json": ("outcome rank", "outcome reconcile"),

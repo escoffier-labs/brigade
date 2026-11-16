@@ -11,7 +11,7 @@ import json
 import os
 import stat
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator
 
 from .dirfd import directory_flags
@@ -37,8 +37,10 @@ def json_bytes(value: object) -> bytes:
 def relative(value: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 1024 or "\\" in value:
         raise ValueError("invalid relative path")
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts or str(path) != value or value == ".":
+    # Stored paths are POSIX on every platform, so Windows separators never change the check.
+    path = PurePosixPath(value)
+    drive = PureWindowsPath(value).anchor
+    if path.is_absolute() or drive or ".." in path.parts or str(path) != value or value == ".":
         raise ValueError("path must be canonical and relative without traversal")
     return value
 

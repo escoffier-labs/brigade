@@ -369,9 +369,14 @@ def _load_sources(target: Path, sources_path: Path) -> SourceConfig:
         if not isinstance(inbox_values, list) or not all(isinstance(item, str) for item in inbox_values):
             raise ValueError(f"sources[{index}].inboxes must be a list of strings")
         root = _resolve_source_root(target, root_value)
+        lesson_outbox = (target / ".brigade/lesson-review").resolve()
         for inbox in inbox_values:
             normalized = _normalize_inbox(inbox)
             if normalized:
+                # Lesson drafts wait in a private outbox until review delivery. A watched
+                # source there would let a promoting sweep file them without review.
+                if (root / normalized).resolve().is_relative_to(lesson_outbox):
+                    raise ValueError(f"sources[{index}].inboxes may not include the lesson review outbox")
                 watched.append(WatchedInbox(root=root, inbox=normalized))
     return SourceConfig(
         watched=tuple(watched),

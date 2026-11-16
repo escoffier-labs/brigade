@@ -460,6 +460,21 @@ def rename_child(source_parent: int, source: str, destination_parent: int, desti
     raise unavailable("directory moves")
 
 
+def rename_file_child(source_parent: int, source: str, destination_parent: int, destination: str) -> None:
+    """Move a regular child file between held parents without following links."""
+    _validate_child_component(source)
+    _validate_child_component(destination)
+    if posix_available():
+        os.rename(source, destination, src_dir_fd=source_parent, dst_dir_fd=destination_parent)
+        return
+    if nt_available():
+        _nt_dirfd().replace_children(
+            source_parent, source, destination, replace=False, destination_parent=destination_parent
+        )
+        return
+    raise unavailable("file moves")
+
+
 def fsync_directory(descriptor: int) -> None:
     """Flush a held descriptor; directory fsync is best-effort on Windows."""
     try:

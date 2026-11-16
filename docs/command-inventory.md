@@ -42,7 +42,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
-- `brigade memory`: 61 command path(s)
+- `brigade memory`: 65 command path(s)
 - `brigade model`: 12 command path(s)
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -389,6 +389,10 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory hub status`
 - `brigade memory init-git`
 - `brigade memory inventory`
+- `brigade memory lessons disable`
+- `brigade memory lessons enable`
+- `brigade memory lessons run`
+- `brigade memory lessons status`
 - `brigade memory lint`
 - `brigade memory project-vault`
 - `brigade memory proposal apply`
