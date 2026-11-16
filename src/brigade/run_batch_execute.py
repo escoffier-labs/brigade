@@ -23,6 +23,8 @@ class BatchExecution:
         self.run_dir = run_dir
         self.workspace = workspace
         self.by_prompt = {f"Batch task_id: {t['task_id']}\n\n{t['text']}": t for t in plan["tasks"]}
+        # Tasks refused at the launch point keep their journal state untouched.
+        self.refused: set[str] = set()
 
     def assignments(self, roster: Roster) -> list[Assignment]:
         from .aboyeur import artifacts
@@ -47,6 +49,8 @@ class BatchExecution:
 
     def observe(self, result: WorkerResult) -> None:
         task = self.by_prompt[result.task]
+        if task["task_id"] in self.refused:
+            return
         current = next(r for r in run_tasks.read_tasks(self.run_dir) if r.handle.spec.task_id == task["task_id"])
         if current.result_id is not None:
             return
@@ -86,9 +90,15 @@ class BatchExecution:
         original_prompt = kwargs["build_prompt"]
 
         def build_prompt(agent, assignment, **prompt_kwargs):
-            handle = run_tasks.prepare_attempt(
-                self.run_dir, workspace=self.workspace, task_id=self.by_prompt[assignment.task]["task_id"]
-            )
+            task_id = self.by_prompt[assignment.task]["task_id"]
+            # Launch-point fence, independent of the request marker: a task the
+            # journal shows as attempted is never invoked again. The request and
+            # run locks serialize dispatchers, so this read cannot race a launch.
+            current = next(r for r in run_tasks.read_tasks(self.run_dir) if r.handle.spec.task_id == task_id)
+            if current.handle.attempt_id is not None or current.status != "queued":
+                self.refused.add(task_id)
+                raise BatchError("launch-refused", f"task {task_id} already has a recorded attempt; refusing relaunch")
+            handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
             run_tasks.observe_task(
                 self.run_dir,
                 workspace=self.workspace,
@@ -236,8 +246,14 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
             raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
         if marker is not None and marker.get("fingerprint") != plan["fingerprint"]:
             raise BatchError("request-conflict", "request_id already belongs to a different batch")
-        if marker is not None and not retryable_before_launch(run_dir):
-            pass
+        # The journal, not the marker, records launches. Read it even when the
+        # marker is missing, so a removed marker cannot authorize a relaunch.
+        if not retryable_before_launch(run_dir):
+            if marker is None:
+                raise BatchError(
+                    "request-unknown",
+                    "journal shows a possible launch but the request marker is missing; refusing launch",
+                )
         else:
             localio.write_json(marker_path, plan)
             run_journal._fsync_directory(run_dir)

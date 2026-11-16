@@ -85,7 +85,7 @@ Multilingual Plane as surrogate pairs. A golden vector in
 | `invalid-fingerprint` | Stored fingerprint passed to `compare_request` is malformed |
 | `synthesis-not-implemented` | Execution requested with synthesis |
 | `request-conflict` | Request ID already reserved with a different fingerprint |
-| `request-unknown` | Request reservation has no readable fingerprint |
+| `request-unknown` | Request reservation has no readable fingerprint, or the marker is missing while the journal shows a possible launch |
 | `request-busy` | Another caller holds this request’s dispatch lock |
 
 
@@ -119,9 +119,19 @@ after preflight refusal. Once any task may have launched, a matching retry
 reports stored states without launching any tasks, including queued, unknown,
 or in-flight tasks. Unreadable journals refuse replay, and a different
 fingerprint exits 2.
-A missing marker permits a new request while holding the request lock because
-dispatch cannot begin before marker publication. A present unreadable or corrupt
-marker refuses launch with `request-unknown`.
+The lifecycle journal, not the marker, is the record of launches, and it is
+read on every retry. A missing marker permits a new request while holding the
+request lock only when the journal shows no prepared attempt. If the journal
+shows a possible launch, a missing marker refuses with `request-unknown`. A
+present unreadable or corrupt marker also refuses launch with `request-unknown`.
+Independently of the marker, each task is checked again at the launch point:
+a task the journal shows as attempted or not queued is never invoked again, and
+its journal state is left as it was.
+
+When Fleet Hub routing sends a batch seat to another machine, Brigade still
+invokes that task once and marks it `unknown` first, so the local fence holds.
+At-most-once on the remote side then depends on that transport, which #2048
+covers for T3.
 
 Task launch claims remain deferred: the existing dispatch callback binds budget
 reservations to a seat and attempt, without exposing an exact task candidate to

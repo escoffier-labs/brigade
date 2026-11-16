@@ -399,3 +399,38 @@ def test_result_sidecar_omits_raw_captures(setup, capsys, monkeypatch):
     stored = (run_dir / ref).read_text()
     assert "RAW-STDOUT-MARKER" not in stored and "RAW-STDERR-MARKER" not in stored
     assert json.loads(stored)["ok"] is True
+
+
+def _batch_run_dir(root):
+    return next((root / ".brigade" / "runs").glob("batch-*"))
+
+
+def test_removed_marker_never_authorizes_relaunch(setup, capsys):
+    rc, _, err = invoke(setup, capsys, [task("a"), task("b")])
+    assert rc == 0, err
+    assert len(setup[1]) == 2
+    (_batch_run_dir(setup[0]) / "batch-request.json").unlink()
+    rc, result, err = invoke(setup, capsys, [task("a"), task("b")])
+    assert rc == 2
+    assert result["error"]["code"] == "request-unknown"
+    assert len(setup[1]) == 2
+
+
+def test_launch_point_refuses_unknown_task_if_fence_regresses(setup, capsys, monkeypatch):
+    from brigade import run_batch_execute
+
+    def crash(agent, prompt, **kwargs):
+        setup[1].append(prompt)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(agents, "run_agent", crash)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert result["tasks"]["a"]["status"] == "unknown", err
+    assert len(setup[1]) == 1
+    # Simulate a regressed request fence. The journal accepts unknown -> unknown,
+    # so only the launch-point check stands between this retry and a relaunch.
+    monkeypatch.setattr(run_batch_execute, "retryable_before_launch", lambda run_dir: True)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert len(setup[1]) == 1
+    assert rc != 0
+    assert result["tasks"]["a"]["status"] == "unknown"
