@@ -175,11 +175,7 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
                 yield base / name
 
     paths = [p for root in roots for p in walk(target / root)]
-    paths.extend(
-        p
-        for p in walk(target, explicit=False)
-        if p.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"} and "memory" not in p.relative_to(target).parts
-    )
+    paths.extend(p for p in walk(target, explicit=False) if p.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"})
     paths.extend(
         target / name
         for name in (*ROOT_NAMES, ".brigade/work.json", ".brigade/hooks.json")
@@ -189,7 +185,12 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
         p
         for p in walk(target / "memory")
         if p.is_file()
-        and any(Path(part).stem.lower() in {"pin", "pins", "pinned"} for part in p.relative_to(target / "memory").parts)
+        and (
+            p.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}
+            or any(
+                Path(part).stem.lower() in {"pin", "pins", "pinned"} for part in p.relative_to(target / "memory").parts
+            )
+        )
     )
     outputs = {"runs", "verify-runs", "receipts", "logs", "sessions", "claude-hooks", "memory-handoffs"}
     for path in paths:
@@ -218,9 +219,12 @@ def _references(target: Path, cards: dict[str, str]) -> dict[str, str]:
     if sys.platform == "win32":
         import subprocess
 
-        raw = subprocess.run(
-            ["schtasks", "/Query", "/FO", "CSV", "/V"], capture_output=True, text=True, check=True, timeout=15
-        )
+        try:
+            raw = subprocess.run(
+                ["schtasks", "/Query", "/FO", "CSV", "/V"], capture_output=True, text=True, check=True, timeout=15
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("installed care schedules are unreadable") from exc
         refs["scheduler:schtasks"] = raw.stdout
     directories = [care_cmd._systemd_user_dir(None), care_cmd._launchd_dir(None)]
     for directory in directories:

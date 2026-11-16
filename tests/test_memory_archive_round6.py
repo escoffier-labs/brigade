@@ -156,7 +156,7 @@ def test_explicit_reference_roots_ignore_managed_exclusions(tmp_path, rel):
 def test_multiline_and_workspace_absolute_reference_destinations(tmp_path, definition):
     card = old_card(tmp_path)
     cover(tmp_path)
-    card.with_name("active.md").write_text(f"[details][dep]\n\n{definition}\n")
+    card.with_name("active.md").write_text(f"[details][dep]\n\n{definition}\n", newline="")
     result = life.run(tmp_path, today=TODAY)
     assert card.exists(), result
 

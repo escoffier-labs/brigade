@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import subprocess
 import tomllib
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -73,8 +74,8 @@ def run(
                 payload["stages"][stage] = memory_lifecycle.run(
                     target, today=today or memory_cmd._today(), dry_run=dry_run
                 )
-            except OSError:
-                payload["stages"][stage] = {"blocked": "reference scan incomplete", "error": True}
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                payload["stages"][stage] = {"blocked": "lifecycle signals unreadable", "error": True}
                 payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
                 payload["failed"] = len(payload["failed_stages"])
         elif stage == "inbox":
@@ -109,7 +110,7 @@ def run(
                     today=today or memory_cmd._today(),
                     dry_run=dry_run,
                 )
-            except OSError:
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
                 payload["stages"][stage] = {"blocked": "reference scan incomplete", "error": True}
                 payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
                 payload["failed"] = len(payload["failed_stages"])

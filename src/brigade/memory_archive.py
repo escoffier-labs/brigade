@@ -150,8 +150,23 @@ def archive_card(
                 "index_warnings": index_warnings,
             },
         )
-        if journal._payload(target, d.decision_id)["phase"] == "abandoned":
-            raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
+    except (
+        OSError,
+        UnicodeError,
+        journal.JournalConflict,
+        journal.ReadOnlyPath,
+        journal.kernel.ProjectionError,
+    ) as exc:
+        raise ArchiveRefused(str(exc)) from exc
+    # The commit already persisted a pending hub action. Annotation failures
+    # must retain its decision id so recovery can retry the committed archive.
+    try:
+        abandoned = journal._payload(target, d.decision_id)["phase"] == "abandoned"
+    except (OSError, ValueError, KeyError):
+        return d
+    if abandoned:
+        raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
+    try:
         return journal.update_hub(
             target,
             d.decision_id,
@@ -164,14 +179,8 @@ def archive_card(
                 decision=d,
             ),
         )
-    except (
-        OSError,
-        UnicodeError,
-        journal.JournalConflict,
-        journal.ReadOnlyPath,
-        journal.kernel.ProjectionError,
-    ) as exc:
-        raise ArchiveRefused(str(exc)) from exc
+    except (OSError, ValueError, journal.kernel.ProjectionError):
+        return d
 
 
 @journal.serialized

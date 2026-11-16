@@ -746,3 +746,8 @@ brigade memory care undo DECISION_ID --target .
 Restoration verifies saved hashes and preserves the original card bytes. Both
 restoration and undoing a stale transition record a fresh read for a new use window.
 This unused-card policy revises the earlier expiry-only retirement rule above.
+
+If an archive destination is occupied, the lifecycle pass keeps the live card and
+reports the path and `occupied or read-only` reason in `skipped`. Inspect both
+files, then move the existing archive copy to a separate backup location before
+running care again. Brigade never overwrites the existing archive copy.
