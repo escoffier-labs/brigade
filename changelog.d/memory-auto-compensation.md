@@ -1,1 +1,2 @@
 - Automatically reverse a policy actor's own applied memory edit when its exact applied revision is unchanged. Scheduled reflection watches retrieval regressions, failed card outcomes and contradicted blocks, records compensation decisions and holds the affected operation class until an explicit go record.
+- Keep pending human review referrals open until the matching automatic compensation applies, including retries after automatic apply is re-enabled.

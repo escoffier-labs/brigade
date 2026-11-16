@@ -144,10 +144,19 @@ fn number(v: &Value) -> i64 {
     if let Value::Integer(n) = v { *n } else { 0 }
 }
 pub fn admit(tx: &dyn WriteTx, body: &Json, limits: &Limits) -> rusqlite::Result<Option<Reply>> {
+    admit_excluding(tx, body, limits, None)
+}
+/// Only an exact compensation may exclude its validated review referral.
+pub(super) fn admit_excluding(
+    tx: &dyn WriteTx,
+    body: &Json,
+    limits: &Limits,
+    referral: Option<&str>,
+) -> rusqlite::Result<Option<Reply>> {
     let d = digest(body);
     let rows = tx.query(
-        "SELECT proposal_id,json_extract(body,'$.tier') FROM memory_proposals WHERE digest=?1 AND state='pending' LIMIT 1",
-        &[ops::t(&d)],
+        "SELECT proposal_id,json_extract(body,'$.tier') FROM memory_proposals WHERE digest=?1 AND state='pending' AND (?2 IS NULL OR proposal_id<>?2) LIMIT 1",
+        &[ops::t(&d), referral.map(ops::t).unwrap_or(Value::Null)],
     )?;
     if let Some(row) = rows.first() {
         let mut reply = ops::error(

@@ -1316,3 +1316,60 @@ async fn compensation_pending_retrieval_referral_is_superseded_by_quorum() {
         }
     }
 }
+
+#[tokio::test]
+async fn compensation_pending_referral_survives_disabled_apply_until_retry() {
+    let (h, id, before) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"verifier","principal":"node-1","verifier":false,"client_event_id":h.id()}),
+    )
+    .await;
+    let mut report = retrieval_eval_tests::gate_report(&h).await;
+    report["adapters"]["hub-lexical"]["overall"]["mrr"] = json!(0.25);
+    assert_eq!(retrieval_eval_tests::record(&h, &report).await.status, 201);
+    let first = watch(&h).await;
+    assert_eq!(first.body["results"][0]["result"], "review_required");
+    let referral = first.body["results"][0]["proposal_id"].as_str().unwrap();
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"verifier","principal":"node-1","verifier":true,"client_event_id":h.id()}),
+    )
+    .await;
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
+    )
+    .await;
+    let snapshot = card(&h, "fleet", "a").await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "failed");
+    assert_eq!(card(&h, "fleet", "a").await, snapshot);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let tx = crate::writer::worker::Tx(&db);
+    let pending = proposals::load(&tx, referral).unwrap().unwrap();
+    assert_eq!(pending["state"], "pending");
+    let superseded_events = || {
+        db.query_row("SELECT count(*) FROM memory_events WHERE kind='proposal.decide' AND json_extract(payload,'$.proposal_id')=?1 AND json_extract(payload,'$.reason')='superseded_by_automatic_compensation'", [referral], |r| r.get::<_, i64>(0)).unwrap()
+    };
+    assert_eq!(superseded_events(), 0);
+    let pending_count: i64 = db.query_row("SELECT count(*) FROM memory_proposals WHERE state='pending' AND json_extract(body,'$.rollback_of')=?1", [id.as_str().unwrap()], |r| r.get(0)).unwrap();
+    assert_eq!(pending_count, 1);
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
+    )
+    .await;
+    let retried = watch(&h).await;
+    assert_eq!(
+        retried.body["results"][0]["result"], "applied",
+        "{retried:?}"
+    );
+    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    let closed = proposals::load(&tx, referral).unwrap().unwrap();
+    assert_eq!(closed["state"], "rejected");
+    assert_eq!(closed["reason"], "superseded_by_automatic_compensation");
+    assert_eq!(superseded_events(), 1);
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+}

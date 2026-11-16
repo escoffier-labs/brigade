@@ -579,10 +579,21 @@ pub(super) fn update(
 fn open(
     tx: &dyn WriteTx,
     p: &Prepared,
+    body: Json,
+    authority: &Authority,
+    kind: &str,
+    scanner: &dyn Scanner,
+) -> rusqlite::Result<Reply> {
+    open_excluding(tx, p, body, authority, kind, scanner, None)
+}
+fn open_excluding(
+    tx: &dyn WriteTx,
+    p: &Prepared,
     mut body: Json,
     authority: &Authority,
     kind: &str,
     scanner: &dyn Scanner,
+    referral: Option<&str>,
 ) -> rusqlite::Result<Reply> {
     body["proposal_id"] = json!(ids::mint(p.now_ms));
     body["proposer"] = json!(p.credential.principal());
@@ -609,7 +620,12 @@ fn open(
         }
     }
     body["created_at"] = json!(ids::isoformat(p.now_ms));
-    if let Some(refusal) = super::hardening::admit(tx, &body, &authority.proposal_limits)? {
+    let refusal = if referral.is_some() {
+        super::hardening::admit_excluding(tx, &body, &authority.proposal_limits, referral)?
+    } else {
+        super::hardening::admit(tx, &body, &authority.proposal_limits)?
+    };
+    if let Some(refusal) = refusal {
         return Ok(refusal);
     }
     tx.execute("INSERT INTO memory_proposals(proposal_id,state,body,principal,created_at,digest,retained_bytes,terminal_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",&[t(string(&body,"proposal_id")),t(string(&body,"state")),t(&body.to_string()),t(p.credential.principal()),t(&ids::isoformat(p.now_ms)),t(&super::hardening::digest(&body)),Value::Integer(body.to_string().len() as i64),if body["state"]=="stale" {Value::Integer(p.now_ms)} else {Value::Null}])?;
@@ -923,6 +939,7 @@ pub(super) fn compensate(
     }
     tx.execute("SAVEPOINT compensation", &[])?;
     let result = (|| -> rusqlite::Result<Reply> {
+        let mut matched_referral = None;
         if automatic {
             // open() binds the current policy before checking pending digests.
             let mut opening = inverse.clone();
@@ -932,7 +949,7 @@ pub(super) fn compensate(
                 "SELECT proposal_id FROM memory_proposals WHERE compacted=0 AND state='pending' AND digest=?1 AND json_extract(body,'$.rollback_of')=?2 AND json_extract(body,'$.watch_trip.review_required')=1",
                 &[t(&digest), t(string(original, "proposal_id"))],
             )? {
-                let mut referral = load(tx, &s(&row[0]))?.unwrap();
+                let referral = load(tx, &s(&row[0]))?.unwrap();
                 let mut authorized = referral.clone();
                 authorized["watch_trip"] = inverse["watch_trip"].clone();
                 // The admission digest does not bind the restoration target.
@@ -940,13 +957,8 @@ pub(super) fn compensate(
                 if !super::compensation::exact(tx, &authorized)? {
                     continue;
                 }
-                referral["state"] = json!("rejected");
-                referral["decision"] = json!("superseded");
-                referral["reason"] = json!("superseded_by_automatic_compensation");
-                if let Some(r) = update(tx, &referral, p, authority)? {
-                    return Ok(r);
-                }
-                event(tx, p, "proposal.decide", &referral)?;
+                matched_referral = Some(referral);
+                break;
             }
         }
         // Only a failed automatic attempt for this exact freshly attested trip
@@ -1014,7 +1026,17 @@ pub(super) fn compensate(
             }
             candidate
         } else {
-            let opened = open(tx, p, inverse, authority, "proposal.rollback", scanner)?;
+            // Exclude only the validated referral during this attempt. Failed
+            // automatic attempts become held, never a second pending duplicate.
+            let opened = open_excluding(
+                tx,
+                p,
+                inverse,
+                authority,
+                "proposal.rollback",
+                scanner,
+                matched_referral.as_ref().map(|r| string(r, "proposal_id")),
+            )?;
             if opened.status >= 400 {
                 return Ok(opened);
             }
@@ -1028,6 +1050,17 @@ pub(super) fn compensate(
             });
             if let Some(r) = apply_cards(tx, &automatic_p, &mut body, authority, scanner)? {
                 return Ok(r);
+            }
+        }
+        if body["state"] == "applied" {
+            if let Some(mut referral) = matched_referral {
+                referral["state"] = json!("rejected");
+                referral["decision"] = json!("superseded");
+                referral["reason"] = json!("superseded_by_automatic_compensation");
+                if let Some(r) = update(tx, &referral, p, authority)? {
+                    return Ok(r);
+                }
+                event(tx, p, "proposal.decide", &referral)?;
             }
         }
         if policy_actor {
