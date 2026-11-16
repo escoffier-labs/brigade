@@ -1,8 +1,9 @@
 """Scheduled watch transport with hub-owned continuation and attested signals.
 
-Each scope polls at most 32 pages of 32 applies. For a stable eligible set of N
-applies that remain in the window, a cycle from reset takes ceil(N / 1024) runs.
-Starting partway through a cycle adds at most one run to cover the entire set.
+Each scope polls at most 32 pages of 32 applies. A cycle fixes its high-water
+mark at the maximum eligible proposal id at its start and covers those N applies
+within ceil(N / 1024) runs. Any proposal that remains eligible is scanned within
+two cycles, including proposals that become eligible behind the current cursor.
 No workspace cursor is read or written. Only the hub advances or resets progress.
 """
 

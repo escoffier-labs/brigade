@@ -57,6 +57,17 @@ async fn verifier_signal(
     negative: bool,
     drift: &str,
 ) -> String {
+    verifier_signal_for_card(h, "a", token, id, state, negative, drift).await
+}
+async fn verifier_signal_for_card(
+    h: &Hub,
+    card_id: &str,
+    token: &str,
+    id: &str,
+    state: &str,
+    negative: bool,
+    drift: &str,
+) -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let principal = if token == AGENT_TOKEN {
         "agent:dot"
@@ -65,7 +76,7 @@ async fn verifier_signal(
     };
     attestation_tests::change_policy(h, "reflect_principals", json!(["hub:admin"]));
     assert_eq!(h.call(ADMIN_TOKEN,json!({"action":"verifier","principal":principal,"verifier":true,"client_event_id":h.id()})).await.status,200);
-    let c = card(h, "fleet", "a").await;
+    let c = card(h, "fleet", card_id).await;
     let credential = attestation::credential_id(
         if token == AGENT_TOKEN {
             "principal"
@@ -75,7 +86,7 @@ async fn verifier_signal(
         principal,
         &digest(token),
     );
-    let mut manifest = json!({"schema":"brigade.memory-verify-manifest.v1","card":{"scope":"fleet","card_id":"a","base_revision":c["revision"],"content_hash":c["content_hash"]},"blocks":[],"effectiveness":{"status":"failed","verifier_credential":credential,"observed_ms":h.now()}});
+    let mut manifest = json!({"schema":"brigade.memory-verify-manifest.v1","card":{"scope":"fleet","card_id":card_id,"base_revision":c["revision"],"content_hash":c["content_hash"]},"blocks":[],"effectiveness":{"status":"failed","verifier_credential":credential,"observed_ms":h.now()}});
     if !negative {
         manifest.as_object_mut().unwrap().remove("effectiveness");
         // Match the normal CLI manifest, which binds by immutable revision.
@@ -95,10 +106,10 @@ async fn verifier_signal(
     }
     let bytes = manifest.to_string();
     let id = format!("{principal}/workspace-a/signal-{id}");
-    let r=h.call(token,json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a","evidence_id":id,"artifact_kind":"memory-verify-manifest","artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(bytes),"observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
+    let r=h.call(token,json!({"action":"evidence.attach","scope":"fleet","card_id":card_id,"workspace_id":"workspace-a","evidence_id":id,"artifact_kind":"memory-verify-manifest","artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(bytes),"observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
     assert_eq!(r.status, 201, "{r:?}");
     if state != "pending_review" && drift != "revision" {
-        let mut operation = op("fleet", "a", c["revision"].as_i64().unwrap());
+        let mut operation = op("fleet", card_id, c["revision"].as_i64().unwrap());
         operation["type"] = json!("append_evidence");
         operation.as_object_mut().unwrap().remove("text");
         operation["expected_block_hash"] =
@@ -1042,4 +1053,149 @@ async fn compensation_watch_continues_across_polls_and_ignores_forged_after() {
     assert!(r.body["next_after"].is_null());
     // A completed cycle wraps to healthy history instead of starving old entries.
     assert!(watch(&h).await.body["next_after"].is_string());
+}
+
+#[tokio::test]
+async fn compensation_watch_bounds_cycles_under_sustained_arrivals() {
+    let (mut h, id, _) = applied().await;
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"proposal_limits":{"lock_ms":30_000}}))
+        .unwrap();
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    // The real proposal was opened first but becomes eligible after scanning starts.
+    db.execute(
+        "UPDATE memory_proposals SET state='pending',terminal_ms=NULL WHERE proposal_id=?1",
+        [id.as_str().unwrap()],
+    )
+    .unwrap();
+    let insert_ahead = |run: usize| {
+        for n in 0..1025 {
+            let newer = format!("6{run:05}{n:020}");
+            db.execute("INSERT INTO memory_proposals(proposal_id,state,body,principal,created_at,decided_by,terminal_ms,compacted) SELECT ?1,'applied',json_set(body,'$.proposal_id',?1,'$.cards',json('[]')),principal,created_at,decided_by,?3,compacted FROM memory_proposals WHERE proposal_id=?2", rusqlite::params![newer,id.as_str().unwrap(),h.now()]).unwrap();
+            db.execute(
+                "INSERT INTO memory_proposal_scopes(proposal_id,scope) VALUES(?1,'fleet')",
+                [&newer],
+            )
+            .unwrap();
+        }
+    };
+    insert_ahead(0);
+    verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;
+    verifier_signal(&h, NODE_TOKEN, "two", "active", true, "").await;
+    let mut scanned = false;
+    let mut completed_cycles = 0;
+    for run in 0..3 {
+        if run > 0 {
+            // More than a run's budget arrives ahead of the previous cursor.
+            insert_ahead(run);
+            if run == 1 {
+                db.execute(
+                    "UPDATE memory_proposals SET state='applied',terminal_ms=?2 WHERE proposal_id=?1",
+                    rusqlite::params![id.as_str().unwrap(), h.now()],
+                )
+                .unwrap();
+                h.set_clock(h.now() + 1);
+                // Failure attestations must follow the delayed apply time.
+                verifier_signal(&h, AGENT_TOKEN, "late-one", "active", true, "").await;
+                verifier_signal(&h, NODE_TOKEN, "late-two", "active", true, "").await;
+            }
+        }
+        for _ in 0..32 {
+            let r = watch(&h).await;
+            assert_eq!(r.status, 200, "{r:?}");
+            scanned |= r.body["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["rollback_of"] == id && r["result"] == "applied");
+            if r.body["next_after"].is_null() {
+                completed_cycles += 1;
+                break;
+            }
+        }
+        if scanned {
+            break;
+        }
+    }
+    assert!(
+        scanned,
+        "older proposal must be compensated within the next cycle despite sustained arrivals"
+    );
+    assert!(completed_cycles >= 1, "the initial cycle must finish");
+}
+
+#[tokio::test]
+async fn compensation_watch_retry_rebases_after_evidence_append() {
+    let (mut h, id, before) = applied().await;
+    attestation_tests::change_policy(&h, "reflect_principals", json!(["hub:admin"]));
+    let mut report = retrieval_eval_tests::gate_report(&h).await;
+    report["adapters"]["hub-lexical"]["overall"]["mrr"] = json!(0.25);
+    assert_eq!(retrieval_eval_tests::record(&h, &report).await.status, 201);
+    h.store.take();
+    h.open(Arc::new(RefuseInverse(before.clone())), None);
+    let refused = watch(&h).await;
+    assert_eq!(
+        refused.body["results"][0]["result"], "failed",
+        "{refused:?}"
+    );
+    assert_eq!(refused.body["results"][0]["reason"], "scan_not_clean");
+    let again = watch(&h).await;
+    assert_eq!(again.body["results"][0]["result"], "failed");
+    assert_eq!(
+        again.body["results"][0]["proposal_id"],
+        refused.body["results"][0]["proposal_id"]
+    );
+    let revision = card(&h, "fleet", "a").await["revision"].as_i64().unwrap();
+    // Retrieval trips do not change when an evidence-only proposal advances the head.
+    verifier_signal(&h, AGENT_TOKEN, "later", "active", false, "").await;
+    assert!(card(&h, "fleet", "a").await["revision"].as_i64().unwrap() > revision);
+    h.store.take();
+    h.open(
+        Arc::new(Fixed(Scan::Clean {
+            ruleset: "test-v1".into(),
+        })),
+        None,
+    );
+    let retried = watch(&h).await;
+    assert_eq!(
+        retried.body["results"][0]["result"], "applied",
+        "{retried:?}"
+    );
+    assert_eq!(
+        retried.body["results"][0]["proposal_id"],
+        refused.body["results"][0]["proposal_id"]
+    );
+    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let inverses: i64 = db
+        .query_row(
+            "SELECT count(*) FROM memory_proposals WHERE json_extract(body,'$.rollback_of')=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(inverses, 1);
+}
+
+#[tokio::test]
+async fn compensation_watch_prefers_later_card_quorum() {
+    let (h, id, before) = applied().await;
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    // Seed a second card with the same applied snapshot in this two-card fixture.
+    db.execute("INSERT INTO memory_cards SELECT scope,'b',revision,content_hash,state,trust,writer,writer_class,title,summary,tags,created_at,updated_at FROM memory_cards WHERE card_id='a'", []).unwrap();
+    db.execute("INSERT INTO memory_card_revisions SELECT scope,'b',revision,content_hash,trust,state,writer,seq,proposal_id,scan_state,created_at FROM memory_card_revisions WHERE card_id='a'", []).unwrap();
+    attestation_tests::mutate_body(&h, &id, |b| {
+        let mut second = b["cards"][0].clone();
+        second["card_id"] = json!("b");
+        b["cards"].as_array_mut().unwrap().push(second);
+    });
+    verifier_signal(&h, AGENT_TOKEN, "first", "active", true, "").await;
+    verifier_signal_for_card(&h, "b", AGENT_TOKEN, "second-one", "active", true, "").await;
+    verifier_signal_for_card(&h, "b", NODE_TOKEN, "second-two", "active", true, "").await;
+    let result = watch(&h).await;
+    assert_eq!(result.body["results"][0]["result"], "applied", "{result:?}");
+    assert_eq!(card(&h, "fleet", "a").await["text"], before);
+    assert_eq!(card(&h, "fleet", "b").await["text"], before);
 }

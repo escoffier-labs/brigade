@@ -335,6 +335,7 @@ fn trigger(
     if let Some(trip) = retrieval_trip(tx, body, applied, now)? {
         return Ok(Some(trip));
     }
+    let mut review_trip = None;
     for card in proposals::cards(body)
         .iter()
         .filter(|c| c["applied_revision"].is_i64())
@@ -449,12 +450,16 @@ fn trigger(
             }
         }
         if !principals.is_empty() {
-            return Ok(Some(
-                json!({"trigger":kind,"evidence_ids":evidence_ids,"review_required":principals.len()<2}),
-            ));
+            let trip = json!({"trigger":kind,"evidence_ids":evidence_ids,"review_required":principals.len()<2});
+            if principals.len() >= 2 {
+                return Ok(Some(trip));
+            }
+            if review_trip.is_none() {
+                review_trip = Some(trip);
+            }
         }
     }
-    Ok(None)
+    Ok(review_trip)
 }
 
 pub fn watch(
@@ -495,8 +500,35 @@ pub fn watch(
         "SELECT value FROM memory_meta WHERE key=?1",
         &[t(&progress_key)],
     )?;
-    let after = progress.first().map(|r| s(&r[0])).unwrap_or_default();
-    let rows = tx.query("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id>?3 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?4 AND proposal_id>?3) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result')='applied') ORDER BY proposal_id LIMIT 33", &[t(p.credential.principal()),Value::Integer(p.now_ms.saturating_sub(window*1000)),t(&after),t(scope)])?;
+    // Legacy lower-bound-only cursors restart safely on upgrade.
+    let saved = progress
+        .first()
+        .and_then(|r| serde_json::from_str::<Json>(&s(&r[0])).ok());
+    let bounds = saved.as_ref().and_then(|v| {
+        let after = v["after"].as_str()?;
+        let through = v["through"].as_str()?;
+        (after < through).then(|| (after.to_owned(), through.to_owned()))
+    });
+    let eligible = "principal=?1 AND state='applied' AND compacted=0 AND terminal_ms>=?2 AND proposal_id IN (SELECT proposal_id FROM memory_proposal_scopes WHERE scope=?3) AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of') IS NULL AND NOT EXISTS(SELECT 1 FROM memory_meta WHERE key='compensation_watch:' || memory_proposals.proposal_id AND json_extract(value,'$.result')='applied')";
+    let mut params = vec![
+        t(p.credential.principal()),
+        Value::Integer(p.now_ms.saturating_sub(window * 1000)),
+        t(scope),
+    ];
+    let (after, through) = if let Some(bounds) = bounds {
+        bounds
+    } else {
+        let maximum = tx.query(
+            &format!("SELECT MAX(proposal_id) FROM memory_proposals WHERE {eligible}"),
+            &params,
+        )?;
+        (String::new(), s(&maximum[0][0]))
+    };
+    params.extend([t(&after), t(&through)]);
+    let rows = tx.query(
+        &format!("SELECT proposal_id,terminal_ms FROM memory_proposals WHERE {eligible} AND proposal_id>?4 AND proposal_id<=?5 ORDER BY proposal_id LIMIT 33"),
+        &params,
+    )?;
     let mut results = Vec::new();
     for row in rows.iter().take(32) {
         let id = s(&row[0]);
@@ -607,10 +639,11 @@ pub fn watch(
     } else {
         None
     };
-    // Reset at the end so healthy proposals are reconsidered for new signals.
+    // The fixed high-water mark ends this cycle even under sustained arrivals.
+    // Reset so the next cycle includes proposals that became eligible behind us.
     tx.execute(
         "INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        &[t(&progress_key), t(next_after.as_deref().unwrap_or(""))],
+        &[t(&progress_key), t(&next_after.as_ref().map(|after| json!({"after":after,"through":through})).unwrap_or(Json::Null).to_string())],
     )?;
     Ok(Reply::new(
         200,

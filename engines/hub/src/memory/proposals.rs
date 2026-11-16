@@ -942,9 +942,31 @@ pub(super) fn compensate(
             }
         }
         let mut body = if let Some(mut candidate) = retry {
-            // Do not replace stored pins or policy with the fresh inverse.
-            // apply_cards checks that candidate against the current exact
-            // reverse, actor, policy, window, switch, heads and scans again.
+            // Evidence-only heads may have advanced since the refused attempt.
+            // Refresh the exact reverse while retaining this proposal's identity
+            // and policy. apply_cards still checks every current safety gate.
+            // A changed restoration target must still fail the exactness check.
+            let same_target = cards(&candidate).len() == cards(&inverse).len()
+                && cards(&candidate)
+                    .iter()
+                    .zip(cards(&inverse))
+                    .all(|(old, fresh)| {
+                        [
+                            "scope",
+                            "card_id",
+                            "after_hash",
+                            "after_text",
+                            "after_state",
+                            "restore_trust",
+                        ]
+                        .iter()
+                        .all(|key| old[*key] == fresh[*key])
+                    });
+            if same_target {
+                for key in ["cards", "pins", "diff"] {
+                    candidate[key] = inverse[key].clone();
+                }
+            }
             if !automatic {
                 candidate["state"] = json!(if inverse["state"] == "stale" {
                     "stale"
