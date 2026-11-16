@@ -42,3 +42,11 @@ def test_new_observation_history_protects_old_card(tmp_path):
     assert not result["transitions"]
     assert result["blocked"] == "local read coverage incomplete"
     assert path.exists()
+
+
+def test_far_future_filesystem_date_does_not_protect(tmp_path):
+    path = card(tmp_path)
+    stamp = datetime(2099, 1, 1, tzinfo=timezone.utc).timestamp()
+    os.utime(path, (stamp, stamp))
+    assert observed_run(tmp_path, today=TODAY)["transitions"][-1]["to_state"] == "archived"
+    assert not path.exists()

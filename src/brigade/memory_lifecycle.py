@@ -320,7 +320,9 @@ def _last_use(
     # A new write or restore can be ahead of the policy clock. Keep that
     # filesystem activity fresh instead of discarding it with untrusted dates.
     modified = datetime.fromtimestamp((target / rel).stat().st_mtime, timezone.utc).date()
-    days = [ledger.tracking_since, min(modified, today)]
+    days = [ledger.tracking_since]
+    if modified <= datetime.now(timezone.utc).date():
+        days.append(min(modified, today))
     if ledger.healthy_since:
         days.append(ledger.healthy_since)
     for key in ("created", "created_at", "updated", "updated_at", "last_reviewed"):
