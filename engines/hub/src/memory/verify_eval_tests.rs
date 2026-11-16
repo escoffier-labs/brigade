@@ -483,3 +483,25 @@ fn version_thirteen_upgrade_adds_immutable_admission_store() {
     .unwrap();
     assert!(db.execute("DELETE FROM memory_verify_evals", []).is_err());
 }
+
+#[tokio::test]
+async fn automatic_refusals_before_authorization_spend_no_rate_slot() {
+    for action in ["auto_apply", "verify_auto_apply"] {
+        let (h, id) = ready().await;
+        let request = json!({"action":action,"proposal_id":id,"base_epoch":h.epoch().await,
+            "binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),
+            "expected_op_types":["replace_block"],"client_event_id":h.id()});
+        // A request for an unknown proposal is refused without using the principal's window.
+        let mut missing = request.clone();
+        missing["proposal_id"] = json!(h.id());
+        missing["client_event_id"] = json!(h.id());
+        let refused = h.call(AGENT_TOKEN, automatic_request(missing)).await;
+        assert_eq!(refused.status, 404, "{action}");
+        let next = h.call(AGENT_TOKEN, automatic_request(request)).await;
+        assert_ne!(
+            (next.status, code(&next)),
+            (429, "memory_auto_apply_rate_limited"),
+            "{action}"
+        );
+    }
+}
