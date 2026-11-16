@@ -43,6 +43,63 @@ async fn apply(h: &Hub, id: &Json, types: Json) -> Reply {
 }
 
 #[tokio::test]
+async fn verify_auto_rate_limits_pending_proposal_retries() {
+    let (h, id) = ready().await;
+    assert_eq!(apply(&h, &id, json!(["replace_block"])).await.status, 409);
+    // The principal window expires while the proposal window remains active.
+    h.set_clock(h.now() + 1_001);
+    let refused = apply(&h, &id, json!(["replace_block"])).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_auto_apply_rate_limited")
+    );
+    h.set_clock(h.now() + 60_000);
+    assert_eq!(apply(&h, &id, json!(["replace_block"])).await.status, 409);
+}
+
+#[tokio::test]
+async fn verify_auto_rate_limits_principal_across_proposals() {
+    let (h, id) = ready().await;
+    let b = h.put(ADMIN_TOKEN, "fleet", "b", None, OLD).await;
+    let opened = submit(&h, AGENT_TOKEN, vec![op("fleet", "b", rev(&b))]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    assert_eq!(apply(&h, &id, json!(["replace_block"])).await.status, 409);
+    let refused = apply(&h, &opened.body["proposal_id"], json!(["replace_block"])).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_auto_apply_rate_limited")
+    );
+}
+
+#[tokio::test]
+async fn verify_auto_rate_preserves_committed_replay() {
+    let (h, id) = ready().await;
+    assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+    let request = json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,
+        "binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),
+        "expected_op_types":["replace_block"],"client_event_id":h.id()});
+    let applied = h.call(AGENT_TOKEN, request.clone()).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    assert_eq!(h.call(AGENT_TOKEN, request).await, applied);
+    let fresh = apply(&h, &id, json!(["replace_block"])).await;
+    assert_eq!(fresh.status, 409, "{fresh:?}");
+}
+
+#[tokio::test]
+async fn verify_auto_rate_is_shared_with_auto_apply() {
+    let (h, id) = ready().await;
+    let request = super::attestation_tests::auto_request(&h, &id).await;
+    let held = h.call(AGENT_TOKEN, request).await;
+    assert_eq!((held.status, code(&held)), (409, "memory_verifier_floor"));
+    h.set_clock(h.now() + 1_001);
+    let refused = apply(&h, &id, json!(["replace_block"])).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_auto_apply_rate_limited")
+    );
+}
+
+#[tokio::test]
 async fn only_the_exact_proposal_manifest_is_exempt_from_class_admission() {
     use base64::{Engine, engine::general_purpose::STANDARD};
     for shape in [
@@ -134,6 +191,7 @@ async fn evaluator_authority_and_append_only_admission() {
     assert_eq!(publish(&h, AGENT_TOKEN, "correct").await.status, 403);
     assert_eq!(apply(&h, &id, json!(["replace_block"])).await.status, 409);
     assert_eq!(card(&h, "fleet", "a").await, before);
+    h.set_clock(h.now() + 60_001);
     assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
     let status = h.call(AGENT_TOKEN, json!({"action":"status"})).await;
     let forged = h

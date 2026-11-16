@@ -170,6 +170,9 @@ class Client(unittest.TestCase):
 
         # Each case is a fresh real proposal, with a correction followed by _manifest_op.
         for admitted_class in ("confirm", "correct"):
+            # Independent class cases must clear the shared principal attempt window.
+            if admitted_class == "correct":
+                time.sleep(1.01)
             with self.subTest(admitted_class=admitted_class):
                 card_id = value["card"]["card_id"] = f"verify-{admitted_class}"
                 admin.call("put", scope="fleet", card_id=card_id, text=value["card"]["text"],

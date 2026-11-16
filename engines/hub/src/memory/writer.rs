@@ -530,6 +530,7 @@ fn prepare_auto(
 ) -> Option<(Authority, i64)> {
     use super::hardening as h;
     use serde_json::json;
+    let verify_only = cmd.name() == "verify_auto_apply";
     let Ok(body) = &mut cmd.draft else {
         return None;
     };
@@ -566,6 +567,10 @@ fn prepare_auto(
                 "memory_auto_apply_rate_limited",
                 "automatic apply attempt rate exceeded",
             )));
+        }
+        // Verify decisions use their recorded admission instead of Tier 0 diagnostics.
+        if verify_only {
+            return Ok(None);
         }
         let deadline = h::deadline(limits.diagnostic_ms);
         db.progress_handler(1000, Some(move || Instant::now() >= deadline))?;
@@ -770,7 +775,7 @@ pub(crate) fn run(
         // Corpus diagnostics run in a separate read snapshot before either writer lock.
         for pending in &mut batch {
             if let ops::Action::Proposal(cmd) = &mut pending.command.action {
-                if cmd.name() == "auto_apply" {
+                if matches!(cmd.name(), "auto_apply" | "verify_auto_apply") {
                     pending.auto_authority = prepare_auto(
                         cmd,
                         &pending.command.credential,
