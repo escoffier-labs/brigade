@@ -1,0 +1,1 @@
+- Add bounded Tier 0 hub reflection proposals that anchor clean live claim blocks without rewriting other text, with replica coverage in reflection status and exact rollback through the existing journal.

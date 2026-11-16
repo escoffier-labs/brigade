@@ -86,6 +86,53 @@ fn spans(text: &str) -> Vec<(usize, usize)> {
     result
 }
 
+/// Add only suffix bytes. Reserve every anchor spelling, even in opaque text.
+pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> {
+    let mut used = BTreeSet::new();
+    for (i, _) in text.match_indices('^') {
+        if let Some(id) = text.get(i + 1..i + 9).filter(|id| anchor(id)) {
+            used.insert(id.to_string());
+        }
+    }
+    // Retired anchors in metadata remain reserved too.
+    for id in super::proposal_metadata::list(text, "claim_anchor_ids")? {
+        if !anchor(&id) {
+            return Err("invalid claim anchor reservation");
+        }
+        used.insert(id);
+    }
+    let mut result = text.to_string();
+    let mut edits = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (position, (start, end)) in spans(text).into_iter().enumerate() {
+        let block = &text[start..end];
+        if let Some((_, id)) = block.rsplit_once(" ^").filter(|(_, id)| anchor(id)) {
+            if !seen.insert(id) {
+                return Err("duplicate block id");
+            }
+            continue;
+        }
+        let mut nonce = 0;
+        let id = loop {
+            let digest =
+                ids::sha256_hex(format!("{card_id}\0{position}\0{block}\0{nonce}").as_bytes());
+            let id = format!("c-{}", &digest[..6]);
+            if used.insert(id.clone()) {
+                break id;
+            }
+            nonce += 1;
+        };
+        if used.len() > 4096 {
+            return Err("claim anchor reservation limit exceeded");
+        }
+        edits.push((end, id));
+    }
+    for (end, id) in edits.into_iter().rev() {
+        result.insert_str(end, &format!(" ^{id}"));
+    }
+    Ok(result)
+}
+
 pub fn pin(text: &str, id: &str, hash: &str) -> Result<Json, &'static str> {
     if !anchor(id) {
         return Err("invalid block id");

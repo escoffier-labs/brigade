@@ -13,7 +13,7 @@ from . import memory_hub_client as hubc, memory_proposal_io as io
 
 PATH = ".brigade/memory/reflect/policy.json"
 NEW_WORKSPACE_PATH = ".brigade/new-workspace.v1.json"
-CLASSES = ["append_evidence", "merge_exact_duplicates"]
+CLASSES = ["append_evidence", "merge_exact_duplicates", "anchor_blocks"]
 DEFAULT = {"schema": "brigade.memory-reflect-policy.v1", "auto_apply": True, "tier0_op_classes": CLASSES}
 
 

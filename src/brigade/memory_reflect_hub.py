@@ -19,6 +19,7 @@ from . import memory_hub_store as store
 from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
+from . import memory_reflect_anchors as anchors
 from . import memory_reflect_candidates as derive
 from . import memory_reflect_ledger as ledger
 from . import memory_reflect_links as links
@@ -605,12 +606,23 @@ def _reflect(
     if first == LINK_LANE:
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
-    remaining = unremembered(exact) + alternating
+    pending_anchors = unremembered(anchors.ops(heads))
+    if len(pending_anchors) > anchors.MAX_PROPOSALS:
+        skipped["anchor_deferred"] = len(pending_anchors) - anchors.MAX_PROPOSALS
+    remaining = unremembered(exact) + alternating + pending_anchors[: anchors.MAX_PROPOSALS]
     # Retry budget is separate so held proposals cannot consume new-work slots.
     # Retries reuse an opened proposal and never submit, so they run first and a
     # full new-proposal quota cannot block them.
     retries.sort(key=lambda item: (previous[item[0]].get("attempted_ms", 0), item[0]))
-    selected = retries[:limit] + remaining[:limit]
+    # Held anchoring proposals share the same per-run card budget as new ones.
+    selected = []
+    anchored_count = 0
+    for digest, ops in retries[:limit] + remaining[:limit]:
+        anchoring = ops[0]["type"] == "anchor_blocks"
+        if anchoring and anchored_count >= anchors.MAX_PROPOSALS:
+            continue
+        anchored_count += anchoring
+        selected.append((digest, ops))
     proposals = []
     refused: list[dict[str, str]] = []
     error = None
@@ -697,6 +709,7 @@ def _reflect(
         "seq": report["seq"],
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
         "link_repair": {"max_proposals": link_cap, **link_stats},
+        "anchoring": {"max_proposals": anchors.MAX_PROPOSALS, **anchors.coverage(heads)},
     }
     if error:
         payload["error"] = error

@@ -282,9 +282,12 @@ def inspect_payload(*, target: Path, command: str, candidate_id: str | None = No
     if command == "status":
         from .memory_reflect_hub import schedule_summary
 
+        from .memory_reflect_anchors import status
+
         schedule = schedule_summary(target)
         return {
             "schedule": schedule,
+            "anchoring": status(target),
             "status": "ok",
             "run_count": len(runs),
             "invalid_runs": invalid,

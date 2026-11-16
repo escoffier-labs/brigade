@@ -656,3 +656,23 @@ per-proposal cooldowns can still leave proposals pending. A lost hub response re
 unknown result. The hub refuses repeated application of a decided proposal.
 Client tests verify request behavior and fallback. Hub transactional tests
 provide the card-write atomicity coverage.
+
+### Gradual block anchoring
+
+Hub reflection proposes `anchor_blocks` for clean live cards with unanchored
+claim blocks. It adds deterministic `^c-xxxxxx` suffixes and preserves all other
+bytes, including existing anchors. Unsupported Markdown stays opaque.
+Each run handles at most 25 anchoring proposals, including retries. The normal
+run limit and hub quotas can reduce that number.
+
+Anchoring uses the existing Tier 0 proposal, policy, journal and rollback path.
+The hub policy must list `anchor_blocks` in `tier0_op_classes`. Existing local
+policies must also list it to permit automatic attempts. Local policy can only
+veto application. Hub authority and evidence checks still apply.
+`memory reflect status` reports `anchoring.anchored_cards` over
+`anchoring.clean_live_cards` and their `fraction` from the last pulled replica.
+This cached fraction is diagnostic and grants no permission to apply edits.
+
+Use `memory reflect rollback <proposal-id>` to open a compensating proposal.
+After a separate review and acceptance, it restores the exact prior bytes.
+Non-clean cards remain skipped until a separate scan updates their receipts.

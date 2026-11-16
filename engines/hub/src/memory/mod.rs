@@ -2216,3 +2216,6 @@ fn reads<T: ReadTx + ?Sized>(
         }
     }
 }
+
+#[cfg(test)]
+mod anchor_tests;

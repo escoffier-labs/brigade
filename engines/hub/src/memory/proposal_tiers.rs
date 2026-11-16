@@ -169,6 +169,20 @@ pub fn classify<T: ReadTx + ?Sized>(
             return Ok(2);
         };
         match string(op, "type") {
+            "anchor_blocks" => {
+                if card["before_state"] != "live"
+                    || card["after_state"] != "live"
+                    || super::proposal_blocks::anchor_blocks(
+                        string(card, "before_text"),
+                        string(card, "card_id"),
+                    )
+                    .ok()
+                    .as_deref()
+                        != Some(string(card, "after_text"))
+                {
+                    return Ok(2);
+                }
+            }
             "append_evidence" => (),
             "merge_exact_duplicates" => {
                 let Some(other) = cards.iter().find(|c| {
