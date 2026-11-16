@@ -1164,6 +1164,16 @@ def health(target: Path) -> dict[str, Any]:
                     "detail": (f"{explicit_ids} cards have explicit IDs" if explicit_ids else "no cards"),
                 }
             )
+    from . import receipt_signing
+
+    if receipt_signing.workspace_key(target) is None:
+        checks.append(
+            {
+                "status": "warn",
+                "name": "memory_lifecycle_authority",
+                "detail": "workspace key unavailable, lifecycle and expiry disabled",
+            }
+        )
     issues = [check for check in checks if check["status"] != "ok"]
     metadata = (
         scan_payload.get("metadata")
@@ -1752,11 +1762,6 @@ def _record_search_log(
 
         record_recall(target, query=query, query_source="explicit", matches=matches, ts=ts)
         return
-    from .memory_card_reads import record
-
-    # The read ledger counts every returned card, whatever the search log caps or skips.
-    shown = [m for m in matches if isinstance(m, dict)] if isinstance(matches, list) else []
-    record(target, _search_log_card_ids(shown, top_k=len(shown)) + _search_log_aliases(shown, top_k=len(shown)))
     if not _should_log_search(query):
         return
     entry = {
@@ -1822,12 +1827,51 @@ def card_fields_from_text(text: str, rel: str, *, stem: str) -> dict[str, Any]:
 
 
 def search_card_fields(
-    target: Path, config: MemoryCareConfig | None = None, *, keep: Callable[[Path], bool] | None = None
+    target: Path,
+    config: MemoryCareConfig | None = None,
+    *,
+    keep: Callable[[Path], bool] | None = None,
+    include_archived: bool = False,
 ) -> list[dict[str, Any]]:
     """Searchable fields for every card under a resolved ``target``; ``keep`` filters paths before any read."""
     if config is None:
         config = load_config(target) or MemoryCareConfig()
     paths = [path for path in _iter_cards(target, config) if keep is None or keep(path)]
+    if include_archived:
+        from .memory_care_journal import safe_path
+        from .memory_archive import archive_rel
+
+        def original_paths(path: Path) -> tuple[str, ...]:
+            suffix = path.relative_to(target / "memory/archive").as_posix()
+            candidates = (suffix, "memory/" + suffix)
+            return tuple(
+                rel
+                for rel in candidates
+                if any(_path_matches(rel, (root,)) for root in config.card_roots)
+                and archive_rel(rel) == path.relative_to(target).as_posix()
+            )
+
+        root = safe_path(target, "memory/archive")
+        if root.is_dir():
+            paths.extend(
+                p
+                for p in sorted(root.rglob("*.md"))
+                if not p.is_symlink()
+                and (keep is None or keep(p))
+                and (
+                    not config.include_paths
+                    or any(_path_matches(rel, config.include_paths) for rel in original_paths(p))
+                    or _path_matches(p.relative_to(target).as_posix(), config.include_paths)
+                )
+                and (
+                    not config.exclude_paths
+                    or not (
+                        any(_path_matches(rel, config.exclude_paths) for rel in original_paths(p))
+                        or _path_matches(p.relative_to(target).as_posix(), config.exclude_paths)
+                    )
+                )
+                and safe_path(target, p.relative_to(target).as_posix()).is_file()
+            )
     return [fields for path in paths if (fields := _card_search_fields(path, target))]
 
 
@@ -1838,12 +1882,12 @@ def card_search_match(fields: dict[str, Any], score: float) -> dict[str, Any]:
 
 
 def search_cards_payload(
-    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None
+    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None, include_archived: bool = False
 ) -> dict[str, Any]:
     target = target.expanduser().resolve()
     # BM25 over one field per card, rebuilt per call (no cache, no index file).
     # Scores are floats rounded to 4 decimals; ties break by path.
-    cards = search_card_fields(target, config)
+    cards = search_card_fields(target, config, include_archived=include_archived)
     ranked = memory_bm25.rank([memory_bm25.card_text(fields) for fields in cards], query)
     matches = [card_search_match(cards[index], score) for index, score in ranked]
     matches.sort(key=lambda item: (-item["score"], item["path"]))
@@ -1855,12 +1899,17 @@ def search_cards_payload(
     }
 
 
-def search(*, target: Path, query: str, limit: int = 20, json_output: bool = False) -> int:
+def search(
+    *, target: Path, query: str, limit: int = 20, json_output: bool = False, include_archived: bool = False
+) -> int:
     try:
-        payload = search_cards_payload(target, query, limit=limit)
+        payload = search_cards_payload(target, query, limit=limit, include_archived=include_archived)
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
+    if include_archived:
+        payload["search_scope"] = "local-only"
+        print("memory search: --include-archived uses local-only search", file=sys.stderr)
     # Side-effect only on the CLI path so search_cards_payload (and the
     # retrieval eval harness that calls it) stay pure.
     _record_search_log(target, query=query, matches=payload.get("matches") or [])

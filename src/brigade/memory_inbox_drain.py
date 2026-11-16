@@ -307,7 +307,7 @@ def drain(
         raise ValueError("deadline_days must be positive")
     try:
         if not dry_run:
-            result["recovery"] = journal.resolve_prepared(target)
+            result["recovery"] = journal.resolve_prepared(target, automatic=True)
             result["pruned_review_stamps"] = handoff_origin.prune_missing_review_stamps(target)
         paths = pending(target)
         for inbox in ingest._resolve_inbox_paths(target):

@@ -576,29 +576,18 @@ class MemoryTools:
             return {"error": "hub_memory_required"}
         return self._hub_card(name, offset, scope) or {"error": "card_not_found", "name": name}
 
-    def memory_card(self, name: str, offset: int = 0, scope: str | None = None) -> dict[str, Any]:
-        if self.profile.principal_memory:
-            # A principal profile never opens a local card: the hub, under its own grants, is the only source.
-            return self._principal_card(name, offset, scope)
-        if scope is not None:
-            # A hub match's scope: read that hub card, never a local file of the same name.
-            return self._hub_card(name, offset, scope) or {"error": "card_not_found", "name": name}
+    def _local_card_text(self, name: str) -> str:
         directory = descriptor = None
         try:
             directory = trusted_directory(self.cards, allow_group_write=True, code="memory_unavailable")
-            try:
-                descriptor = os.open(
-                    name + ".md", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
-                )
-            except FileNotFoundError:
-                return self._hub_card(name, offset) or {"error": "card_not_found", "name": name}
-            except OSError:
-                return {"error": "card_unavailable", "name": name}
+            descriptor = os.open(
+                name + ".md", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
+            )
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
-                return {"error": "card_unavailable", "name": name}
+                raise OSError("card is not a regular file")
             if info.st_size > MAX_CARD_FILE_BYTES:
-                return {"error": "card_too_large", "name": name, "bytes": info.st_size}
+                raise ValueError(info.st_size)
             with os.fdopen(descriptor, "rb") as stream:
                 descriptor = None
                 data = stream.read(MAX_CARD_FILE_BYTES + 1)
@@ -607,19 +596,33 @@ class MemoryTools:
                 if item is not None:
                     os.close(item)
         if len(data) > MAX_CARD_FILE_BYTES:
-            return {"error": "card_too_large", "name": name}
+            raise ValueError(len(data))
+        return data.decode("utf-8")
+
+    def memory_card(self, name: str, offset: int = 0, scope: str | None = None) -> dict[str, Any]:
+        if self.profile.principal_memory:
+            # A principal profile never opens a local card: the hub, under its own grants, is the only source.
+            return self._principal_card(name, offset, scope)
+        if scope is not None:
+            # A hub match's scope: read that hub card, never a local file of the same name.
+            return self._hub_card(name, offset, scope) or {"error": "card_not_found", "name": name}
+        from ..memory_card_reads import read_content
+
+        rel = (self.cards.relative_to(self.workspace) / (name + ".md")).as_posix()
         try:
-            text = data.decode("utf-8")
-        except UnicodeError:
+            text = read_content(self.workspace, rel, lambda: self._local_card_text(name))
+        except FileNotFoundError:
+            return self._hub_card(name, offset) or {"error": "card_not_found", "name": name}
+        except (OSError, UnicodeError):
             return {"error": "card_unavailable", "name": name}
+        except ValueError as exc:
+            return {"error": "card_too_large", "name": name, "bytes": exc.args[0]}
+        data = text.encode("utf-8")
         if self.profile.prompt_load_scan:
             # The whole card is scanned, so no chunk boundary can split a hit.
             refusal = egress_refusal([text])
             if refusal:
                 return {"card_id": name, **refusal}
-        from ..memory_card_reads import record_content
-
-        record_content(self.workspace, text, (self.cards.relative_to(self.workspace) / (name + ".md")).as_posix())
         chunk = text[offset : offset + CARD_CHUNK_CHARS]
         following = offset + len(chunk)
         # A remote connector sees the path under the workspace, never the local absolute one.

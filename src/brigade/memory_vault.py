@@ -253,6 +253,7 @@ def build_index(target: Path) -> dict[str, Any]:
 
 def _record_projected_reads(target: Path, notes: list[dict[str, Any]]) -> None:
     """Protect identifiable projected cards. Ordinary notes and maps have no card to protect."""
+    opened = []
     try:
         from . import memory_card_reads, memory_cmd
         from .obsidian_vault import PROJECTION_FOLDER
@@ -264,9 +265,11 @@ def _record_projected_reads(target: Path, notes: list[dict[str, Any]]) -> None:
             rel = path.relative_to(target).as_posix()
             text = path.read_text(encoding="utf-8")
             if memory_cmd.card_identity_from_text(text, rel) in ids:
-                memory_card_reads.record_content(target, text, rel)
-    except Exception:  # noqa: BLE001 - accounting must never fail vault retrieval
-        pass
+                opened.append((text, rel))
+    except Exception:  # noqa: BLE001 - an unidentifiable projection cannot claim a canonical read
+        return
+    for text, rel in opened:
+        memory_card_reads.record_content(target, text, rel)
 
 
 def search_payload(
@@ -297,7 +300,6 @@ def search_payload(
             continue
         hits.append(_hit(note, score=score, query_tokens=query_tokens))
     hits.sort(key=lambda item: (-item["score"], item["relative_path"], item["id"]))
-    _record_projected_reads(target, hits[:limit])
     return {
         "schema": SEARCH_SCHEMA,
         "query": query,

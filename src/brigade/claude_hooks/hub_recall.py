@@ -125,6 +125,8 @@ def load(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("v") != LEDGER_VERSION:
         return _empty()
     ledger = _empty()
+    if isinstance(raw.get("interactive_open_auth"), str):
+        ledger["interactive_open_auth"] = raw["interactive_open_auth"]
     for name in ("brief", "pushed", "opened"):
         ledger[name] = _keys(raw.get(name))
     days = raw.get("interactive_open_days")
@@ -465,13 +467,13 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
     card_id = opened_card_id(*found)
     if card_id is None:
         return False
-    try:
-        from ..memory_card_reads import record
+    from ..memory_card_reads import record, authenticate, authenticated
+    from ..memory_review import interactive_context, note_open
 
+    interactive = interactive_context(payload)
+    if interactive:
         record(found[1], [card_id, found[0].relative_to(found[1]).as_posix()])
-    except Exception:  # noqa: BLE001 - accounting must never fail a file read
-        pass
-    from ..memory_review import note_open
+    context = ledger_path(found[1], session_id).relative_to(found[1]).as_posix()
 
     from ..memory_retrieval_eval.live import interactive_session, record_use
 
@@ -488,7 +490,12 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
 
     def observed(ledger: dict[str, Any]) -> None:
         _append(ledger, "opened", [card_id])
+        if not interactive:
+            return
+        if not authenticated(found[1], context, ledger["interactive_open_days"], ledger.get("interactive_open_auth")):
+            ledger["interactive_open_days"] = {}
         note_open(ledger, card_id, payload)
+        ledger["interactive_open_auth"] = authenticate(found[1], context, ledger["interactive_open_days"])
 
     # Stop capture consumes the wired ledger, while review reads beside the cards.
     if found[1] != target:

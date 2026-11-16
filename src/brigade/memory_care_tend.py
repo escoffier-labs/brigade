@@ -5,16 +5,24 @@ from __future__ import annotations
 import io
 import json
 import sys
+import subprocess
 import tomllib
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import memory_archive, memory_care_hub, memory_care_journal as journal, memory_care_retire, memory_cmd
+from . import (
+    memory_archive,
+    memory_care_hub,
+    memory_care_journal as journal,
+    memory_care_retire,
+    memory_cmd,
+    memory_lifecycle,
+)
 from . import memory_hub_store as store
 
-STAGES = ("hub", "fixes", "retire", "inbox", "instructions")
+STAGES = ("hub", "fixes", "lifecycle", "retire", "inbox", "instructions")
 STATE_REL = ".brigade/memory-care/tend/latest.json"
 
 
@@ -47,12 +55,17 @@ def run(
     target: Path, *, stages: Sequence[str] | None = None, dry_run: bool = False, today: date | None = None
 ) -> dict[str, Any]:
     target = target.resolve()
-    recovery = [] if dry_run else journal.resolve_prepared(target)
+    recovery = [] if dry_run else journal.resolve_prepared(target, automatic=True)
     tend = load_config(target)
     selected = tuple(stages) if stages is not None else STAGES
     if any(stage not in STAGES for stage in selected):
         raise ValueError("unknown tend stage")
     payload: dict[str, Any] = {"enabled": tend.enabled, "dry_run": dry_run, "stages": {}, "recovery": recovery}
+    payload["operator_recovery"] = [
+        f"brigade memory care recover {item['decision_id']} --target ."
+        for item in recovery
+        if item["phase"] == "operator_required"
+    ]
     if not tend.enabled:
         return payload
     for stage in STAGES:
@@ -66,6 +79,23 @@ def run(
             payload["stages"][stage] = apply_fixes(
                 target, memory_cmd._config_or_default(target), today=today or memory_cmd._today(), dry_run=dry_run
             )
+        elif stage == "lifecycle":
+            try:
+                payload["stages"][stage] = memory_lifecycle.run(
+                    target, today=today or memory_cmd._today(), dry_run=dry_run
+                )
+                if payload["stages"][stage].get("error") or payload["stages"][stage].get("recovery_unverified"):
+                    payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
+                    payload["failed"] = len(payload["failed_stages"])
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError, journal.kernel.ProjectionError) as exc:
+                payload["stages"][stage] = {
+                    "blocked": str(exc)
+                    if isinstance(exc, journal.kernel.ProjectionError)
+                    else "lifecycle signals unreadable",
+                    "error": True,
+                }
+                payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
+                payload["failed"] = len(payload["failed_stages"])
         elif stage == "inbox":
             from .memory_inbox_drain import drain
 
@@ -90,9 +120,25 @@ def run(
                 payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
                 payload["failed"] = len(payload["failed_stages"])
         else:
-            payload["stages"][stage] = memory_care_retire.apply(
-                target, memory_cmd._config_or_default(target), tend, today=today or memory_cmd._today(), dry_run=dry_run
-            )
+            try:
+                payload["stages"][stage] = memory_care_retire.apply(
+                    target,
+                    memory_cmd._config_or_default(target),
+                    tend,
+                    today=today or memory_cmd._today(),
+                    dry_run=dry_run,
+                )
+            except memory_lifecycle.InstalledSchedulesUnreadable as exc:
+                payload["stages"][stage] = {"blocked": str(exc)}
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError, journal.kernel.ProjectionError) as exc:
+                payload["stages"][stage] = {
+                    "blocked": str(exc)
+                    if isinstance(exc, journal.kernel.ProjectionError)
+                    else "reference scan incomplete",
+                    "error": True,
+                }
+                payload["failed_stages"] = [*payload.get("failed_stages", []), stage]
+                payload["failed"] = len(payload["failed_stages"])
     if not dry_run:
         store.write_json(target / STATE_REL, payload)
     return payload
@@ -100,7 +146,7 @@ def run(
 
 @journal.serialized
 def undo(target: Path, decision_id: str) -> journal.Decision:
-    recovery = journal.resolve_prepared(target)
+    recovery = journal.resolve_prepared(target, decision_id=decision_id)
     for item in recovery:
         if item["phase"] in ("abandoned", "quarantined", "unreadable"):
             print(f"memory care: {item['phase']} {item['decision_id']}: {item['reason']}", file=sys.stderr)
@@ -109,9 +155,17 @@ def undo(target: Path, decision_id: str) -> journal.Decision:
         raise journal.JournalConflict("cannot undo an undo decision")
     if d.undone_by and journal._payload(target, d.undone_by).get("phase") != "abandoned":
         return journal.load(target, d.undone_by)
-    return (
-        memory_archive.restore(target, d) if d.kind == "archive" else journal.revert(target, decision_id, reason="undo")
-    )
+    if d.kind == "archive":
+        return memory_archive.restore(target, d)
+    reverted = journal.revert(target, decision_id, reason="undo")
+    if d.kind == "lifecycle":
+        from .memory_card_reads import record_content
+
+        rel = journal._payload(target, decision_id).get("card_path")
+        if isinstance(rel, str):
+            path = journal.safe_path(target, rel)
+            record_content(target, path.read_text(encoding="utf-8"), rel)
+    return reverted
 
 
 def inbox_summary(payload: dict[str, Any]) -> None:
@@ -138,7 +192,7 @@ def after_command(target: Path, *, stages: Sequence[str] | None = None) -> None:
 
 @journal.serialized
 def archive_manifest(target: Path, path: Path, *, limit: int | None = None) -> dict[str, Any]:
-    recovery = journal.resolve_prepared(target)
+    recovery: list[dict[str, Any]] = []
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
     config = memory_cmd._config_or_default(target)
@@ -186,6 +240,8 @@ def dispatch(args: Any) -> int:
     try:
         if args.memory_care_command == "undo":
             payload = asdict(undo(args.target, args.decision_id))
+        elif args.memory_care_command == "recover":
+            payload = {"recovery": journal.resolve_prepared(args.target, decision_id=args.decision_id)}
         elif args.memory_care_command == "archive":
             payload = archive_manifest(args.target, args.from_file, limit=args.limit)
         else:

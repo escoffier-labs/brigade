@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import mcp_server, memory_mcp_core
 from tests._home import set_home
 
@@ -194,6 +196,7 @@ def test_write_handoff_without_repo_uses_user_store(stores, monkeypatch, tmp_pat
     monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
     tools = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude")
     result, failed = tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})
+    assert isinstance(result, dict)
     assert failed is False and result["origin"] == "user"
     assert result["path"].startswith("memory/handoffs/")
     assert (user / result["path"]).is_file()
@@ -223,6 +226,7 @@ def test_work_brief_outside_wired_repo_points_at_user_store(stores, monkeypatch,
 
     monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
     result, failed = memory_mcp_core.MemoryTools(cwd=tmp_path).call("work_brief", {})
+    assert isinstance(result, dict)
     assert failed is False and result["wired"] is False
     assert Path(result["user_store"]).parts[-2:] == (".brigade", "memory")
 
@@ -272,23 +276,27 @@ def test_write_handoff_uses_repo_inbox_when_repo_config_is_invalid(stores):
 def test_memory_status_reports_the_real_handoff_destination(stores, monkeypatch, tmp_path: Path):
     repo, user = stores
     status, _ = _tools(repo).call("memory_status", {})
+    assert isinstance(status, dict)
     assert status["handoff_inbox"] == "claude"
     from brigade import memory_scope
 
     monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
     outside, _ = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude").call("memory_status", {})
+    assert isinstance(outside, dict)
     assert outside["handoff_inbox"] == str(user.resolve() / "memory" / "handoffs")
 
 
 def test_unwired_hint_names_the_user_store_only_without_a_repo_store(stores, monkeypatch, tmp_path: Path):
     repo, _ = stores
     explicit, _ = _tools(repo).call("work_brief", {})
+    assert isinstance(explicit, dict)
     assert explicit["wired"] is False
     assert "user store" not in explicit["hint"]
     from brigade import memory_scope
 
     monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
     outside, _ = memory_mcp_core.MemoryTools(cwd=tmp_path).call("work_brief", {})
+    assert isinstance(outside, dict)
     assert "use the user store" in outside["hint"]
 
 
@@ -328,6 +336,7 @@ def test_symlinked_card_root_yields_no_cards(stores, tmp_path: Path):
     assert tools.resources() == []
     assert tools.call("get_card", {"path": "repo:memory/cards/leak.md"})[1] is True
     status, _ = tools.call("memory_status", {})
+    assert isinstance(status, dict)
     assert status["repo"]["card_count"] == 0
 
 
@@ -338,6 +347,7 @@ def test_write_handoff_refuses_symlinked_inbox(stores, tmp_path: Path):
     (repo / ".claude").mkdir()
     (repo / ".claude" / "memory-handoffs").symlink_to(outside)
     message, failed = _tools(repo).call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})
+    assert isinstance(message, str)
     assert failed is True
     assert "outside the memory store" in message
     assert list(outside.iterdir()) == []
@@ -352,6 +362,7 @@ def test_write_handoff_user_store_modes_are_private(stores, monkeypatch, tmp_pat
     monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
     tools = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude")
     result, failed = tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})
+    assert isinstance(result, dict)
     assert failed is False
     _assert_mode((user / "memory" / "handoffs"), 0o700)
     _assert_mode((user / result["path"]), 0o600)
@@ -440,12 +451,16 @@ def test_card_refs_keep_literal_backslashes_where_they_are_filename_characters(m
     assert memory_mcp_core.card_uri("user", "memory/cards/a\\b.md") == "user-card://memory/cards/a%5Cb.md"
 
 
-def test_mcp_reads_and_searches_count_as_use(stores):
+def test_only_explicit_mcp_opens_count_as_use(stores):
     from datetime import date
 
     from brigade import memory_card_reads as reads
 
     repo, user = stores
+    from tests.memory_read_fixtures import signing_key
+
+    signing_key(repo)
+    signing_key(user)
     _card(repo, "fetched.md", "Fetched", "alpha repo text")
     _card(repo, "found.md", "Found", "zebra unique word")
     _card(repo, "untouched.md", "Untouched", "nothing asks for this")
@@ -455,10 +470,12 @@ def test_mcp_reads_and_searches_count_as_use(stores):
     assert tools.call("search_cards", {"query": "zebra"})[1] is False
     repo_ledger = reads.load(repo.resolve())
     assert reads.last_read(repo_ledger, ["memory/cards/fetched.md"]) == date.today()
-    assert reads.last_read(repo_ledger, ["memory/cards/found.md"]) == date.today()
+    assert reads.last_read(repo_ledger, ["memory/cards/found.md"]) is None
     assert reads.last_read(repo_ledger, ["memory/cards/untouched.md"]) is None
     # A card from the user store is counted in the user store's ledger, not the repo's.
     assert reads.last_read(repo_ledger, ["memory/cards/mine.md"]) is None
+    assert reads.last_read(reads.load(user.resolve()), ["memory/cards/mine.md"]) is None
+    assert "zebra" in tools.call("get_card", {"path": "user:memory/cards/mine.md"})[0]
     assert reads.last_read(reads.load(user.resolve()), ["memory/cards/mine.md"]) == date.today()
 
 
@@ -472,7 +489,7 @@ def test_a_failed_read_records_nothing(stores):
     assert reads.last_read(reads.load(repo.resolve()), ["memory/cards/missing.md"]) is None
 
 
-def test_a_broken_read_ledger_never_fails_a_memory_tool(stores, monkeypatch):
+def test_an_unrecordable_open_returns_a_tool_error(stores, monkeypatch):
     from brigade import memory_card_reads as reads
 
     repo, _ = stores
@@ -481,7 +498,7 @@ def test_a_broken_read_ledger_never_fails_a_memory_tool(stores, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("ledger broken")
 
-    monkeypatch.setattr(reads, "record", boom)
+    monkeypatch.setattr(reads, "_record_locked", boom)
     tools = _tools(repo)
-    assert "body text" in tools.call("get_card", {"path": "memory/cards/real.md"})[0]
+    assert tools.call("get_card", {"path": "memory/cards/real.md"})[1] is True
     assert tools.call("search_cards", {"query": "body"})[1] is False
