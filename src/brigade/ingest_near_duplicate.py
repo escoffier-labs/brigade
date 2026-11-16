@@ -99,6 +99,27 @@ def merge_pending(
         name = re.sub(r"[^A-Za-z0-9._-]", "_", handoff_name)[:160]
         pointer = f"\n<!-- merged handoff: {name} sha256={digest} -->\n"
         if pointer not in text:
-            write_text_nofollow_atomic(item.path, text + pointer)
+            write_review_text(target, item.path, text + pointer, previous=text.encode("utf-8"))
         return item.path, text.encode("utf-8")
     return None
+
+
+def write_review_text(target: Path, path: Path, text: str, *, previous: bytes | None = None) -> None:
+    """Retain existing authorization when consolidating or restoring known review bytes."""
+    from . import handoff_origin
+
+    if previous is None:
+        previous = read_text_nofollow(path).encode("utf-8")
+    review = handoff_origin.verify_review_draft(target, path, previous)
+    write_text_nofollow_atomic(path, text)
+    if review is not None:
+        try:
+            handoff_origin.stamp_review_draft(
+                target,
+                path,
+                text.encode("utf-8"),
+                handoff_origin.ReviewDraft(review.code, review.promote_cards, review.route_documents),
+            )
+        except OSError:
+            # The draft remains for human review if signing fails.
+            handoff_origin.remove_stamp(handoff_origin.stamp_path(target, path))

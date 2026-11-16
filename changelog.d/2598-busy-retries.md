@@ -1,0 +1,1 @@
+- File crawls retry concurrent SQLite writer conflicts within the remaining budget and return a successful bounded stop with a safe resume cursor when the lock persists. Scan metadata reuses the crawl's content digest.

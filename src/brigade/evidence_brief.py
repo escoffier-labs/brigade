@@ -40,6 +40,7 @@ class EvidenceBrief:
     attached: bool
     text: str = ""
     bytes: int = 0
+    memory_refs: tuple[dict[str, str], ...] = ()
 
 
 def _miseledger_bin() -> str | None:

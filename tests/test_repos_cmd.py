@@ -1,8 +1,11 @@
 import json
 import subprocess
 
+import pytest
+
 from brigade import cli
 from brigade import repos_cmd
+from tests._handoff_origin_fixtures import trusted_handoff
 
 
 def _init_git_repo(path):
@@ -247,7 +250,8 @@ def test_repos_scan_no_backlog_warn_for_fresh_handoff(tmp_path, capsys):
     assert "repo_handoff_backlog" not in names
 
 
-def test_repos_ingest_routes_fleet_handoffs_into_owner(tmp_path, capsys):
+@pytest.mark.parametrize("stamped", [False, True])
+def test_repos_ingest_routes_fleet_handoffs_into_owner(tmp_path, capsys, stamped):
     """brigade repos ingest sweeps each fleet repo's handoffs into the owner."""
     owner = tmp_path / "workspace"
     repo = tmp_path / "writer-repo"
@@ -269,6 +273,9 @@ def test_repos_ingest_routes_fleet_handoffs_into_owner(tmp_path, capsys):
         "---\ntopic: fleet\n---\n\n# Fleet note\nbody\n"
     )
 
+    if stamped:
+        trusted_handoff(inbox / "note.md", repo)
+
     # dry run writes nothing
     assert repos_cmd.ingest_fleet(target=owner, apply=False, json_output=True) == 0
     dry = json.loads(capsys.readouterr().out)
@@ -278,8 +285,12 @@ def test_repos_ingest_routes_fleet_handoffs_into_owner(tmp_path, capsys):
     # apply routes the card into the OWNER and archives the source handoff in the REPO
     assert repos_cmd.ingest_fleet(target=owner, apply=True, json_output=True) == 0
     applied = json.loads(capsys.readouterr().out)
-    assert applied["totals"]["promoted"] == 1
-    assert (owner / "memory" / "cards" / "fleet-note.md").is_file()
+    assert applied["totals"]["promoted"] == int(stamped)
+    assert applied["totals"]["inboxed"] == int(not stamped)
+    assert (owner / "memory" / "cards" / "fleet-note.md").is_file() == stamped
+    if not stamped:
+        review = next((owner / "memory/handoff-inbox").glob("*.md"))
+        assert "reason: origin-review-required" in review.read_text()
     assert (inbox / "processed" / "note.md").is_file()
     assert not (inbox / "note.md").exists()
 

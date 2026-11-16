@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-
 from brigade import handoff_cmd, ingest as ingest_mod
 from brigade.install import install_selection
 from brigade.selection import Selection
+from tests._handoff_origin_fixtures import trusted_handoff
 
 
 def _seed(tmp_target: Path) -> Path:
@@ -30,7 +30,7 @@ def _seed(tmp_target: Path) -> Path:
 def _write_handoff(dir_: Path, name: str, body: str) -> Path:
     p = dir_ / name
     p.write_text(textwrap.dedent(body))
-    return p
+    return trusted_handoff(p) if dir_.name == "memory-handoffs" else p
 
 
 def test_create_card_handoff_promotes_to_memory_cards(tmp_target: Path):
@@ -605,6 +605,7 @@ def test_ingest_processes_configured_non_target_root(tmp_path):
         """,
     )
 
+    trusted_handoff(remote_inbox / "2026-08-19-1500-repro.md", workspace)
     rc = ingest_mod.run(target=workspace, promote_cards=True, route_documents=True)
     assert rc == 0
     assert (workspace / "TOOLS.md").read_text().count("second-root entry") == 1
@@ -613,19 +614,21 @@ def test_ingest_processes_configured_non_target_root(tmp_path):
 
 
 def test_ingest_scans_multiple_writer_inboxes(tmp_path):
-    from brigade.install import install_selection
-    from brigade.selection import Selection
     from brigade.ingest import run as ingest_run
 
     sel = Selection(depth="workspace", harnesses=["claude", "codex"], owner="this-repo", includes=[])
     install_selection(tmp_path, sel)
 
     # Drop a handoff in each writer's inbox.
-    (tmp_path / ".claude/memory-handoffs/2026-01-01-claude.md").write_text(
-        "# Memory Handoff\n## Type\nsetup\n## Title\nclaude\n## Summary\nfrom claude\n## Recommended memory action\nno-card\n## Target document\nTOOLS.md\n## Suggested document content\n- claude entry\n"
+    _write_handoff(
+        tmp_path / ".claude/memory-handoffs",
+        "2026-01-01-claude.md",
+        "# Memory Handoff\n## Type\nsetup\n## Title\nclaude\n## Summary\nfrom claude\n## Recommended memory action\nno-card\n## Target document\nTOOLS.md\n## Suggested document content\n- claude entry\n",
     )
-    (tmp_path / ".codex/memory-handoffs/2026-01-01-codex.md").write_text(
-        "# Memory Handoff\n## Type\nsetup\n## Title\ncodex\n## Summary\nfrom codex\n## Recommended memory action\nno-card\n## Target document\nTOOLS.md\n## Suggested document content\n- codex entry\n"
+    _write_handoff(
+        tmp_path / ".codex/memory-handoffs",
+        "2026-01-01-codex.md",
+        "# Memory Handoff\n## Type\nsetup\n## Title\ncodex\n## Summary\nfrom codex\n## Recommended memory action\nno-card\n## Target document\nTOOLS.md\n## Suggested document content\n- codex entry\n",
     )
 
     rc = ingest_run(target=tmp_path, promote_cards=True, route_documents=True)
@@ -636,7 +639,6 @@ def test_ingest_scans_multiple_writer_inboxes(tmp_path):
 
 
 def test_opencode_handoff_is_ingested(tmp_target: Path):
-    from brigade.install import install_selection
     from brigade.selection import Selection
 
     install_selection(tmp_target, Selection(depth="workspace", harnesses=["opencode"], owner="opencode", includes=[]))
@@ -667,7 +669,6 @@ def test_opencode_handoff_is_ingested(tmp_target: Path):
 
 
 def test_antigravity_handoff_is_ingested(tmp_target: Path):
-    from brigade.install import install_selection
     from brigade.selection import Selection
 
     install_selection(
@@ -700,7 +701,6 @@ def test_antigravity_handoff_is_ingested(tmp_target: Path):
 
 
 def test_pi_handoff_is_ingested(tmp_target: Path):
-    from brigade.install import install_selection
     from brigade.selection import Selection
 
     install_selection(tmp_target, Selection(depth="workspace", harnesses=["pi"], owner="pi", includes=[]))

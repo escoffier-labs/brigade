@@ -39,6 +39,24 @@ since 0.31.0. Remaining work is tracked in
 [#1850](https://github.com/escoffier-labs/brigade/issues/1850) and
 [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
+## Scheduled memory application
+
+New workspaces enable Tier 0 reflect intent by default. Care installation
+includes `memory-reflect`, running `memory reflect run --scheduled --apply`.
+Hub candidates apply automatically only when the hub's evidence, ownership,
+retrieval, policy, blast-cap and cooldown gates all pass. A gate hold leaves a
+pending proposal without failing the care entry. External owners and handoff-only
+hosts never apply. Local repository candidates retain authority holds and stay
+proposal-only. Existing workspace policies are preserved.
+
+`memory reflect auto-apply off --target .` sets the workspace policy's
+`auto_apply` field to false. An in-flight run reads it before its next candidate.
+`memory reflect auto-apply on --target .` opts an existing workspace in.
+Automatic hub decisions retain the policy actor and digest in the decision
+ledger and can be compensated with `memory reflect rollback`.
+See [memory care](memory-care.md#automatic-tier-0-reflection) for the boundaries
+and the separate care-install step that activates OS timers.
+
 ## Long-running modes
 
 The operator starts these processes and chooses any service manager and restart

@@ -301,13 +301,46 @@ namespace BrigadeAcceptance {
 }
 '@
     }
+    $bootstrap = 'import importlib.util as u,os,pathlib as p,runpy as r,sys as s;' +
+        'i,m=s.argv.pop(1),s.argv.pop(1);' +
+        'f=p.Path(i).is_file() and u.spec_from_file_location(m.partition(''.'')[0],i);' +
+        'f and f.loader or (s.stderr.write(''brigade:cannot-load:''+i+''\n''),s.exit(78));' +
+        'd=p.Path(f.origin).resolve().parent;os.chdir(d);s.path.append(str(d.parent));' +
+        'q=u.module_from_spec(f);s.modules[f.name]=q;f.loader.exec_module(q);' +
+        'r.run_module(m,run_name=''__main__'',alter_sys=True)'
     $literal = "'(?:[^']|'')*'"
-    $argumentMatch = [regex]::Match($Script, ('\$action\.Arguments=(?<value>' + $literal + ');'))
-    if (-not $argumentMatch.Success) { throw "care action arguments missing for $TaskName" }
-    $rawArguments = $argumentMatch.Groups['value'].Value
-    $arguments = $rawArguments.Substring(1, $rawArguments.Length - 2).Replace("''", "'")
     $pythonLiteral = "'" + $Python.Replace("'", "''") + "'"
+    $initializerLiteral = "'" + $Initializer.Replace("'", "''") + "'"
     $cwdLiteral = "'" + (Split-Path -Parent $Initializer).Replace("'", "''") + "'"
+    $prepare = ''
+    if ($TaskName -ceq 'BrigadeCare-memory-reflect') {
+        $match = [regex]::Match($Script, ('\$h=(?<bootstrap>' + $literal + '); \$v=\((?<before>' +
+            $literal + ')\+\$h\+(?<after>' + $literal + ')\); '))
+        if (-not $match.Success) { throw 'reflect shared bootstrap/arguments missing' }
+        $bootstrapLiteral = "'" + $bootstrap.Replace("'", "''") + "'"
+        if ($match.Groups['bootstrap'].Value -cne $bootstrapLiteral) { throw 'wrong reflect bootstrap' }
+        $before = $match.Groups['before'].Value
+        $after = $match.Groups['after'].Value
+        $arguments = $before.Substring(1, $before.Length - 2).Replace("''", "'") + $bootstrap +
+            $after.Substring(1, $after.Length - 2).Replace("''", "'")
+        $rawArguments = '$v'
+        # The helper may retain a validated existing scope, using the same pinned
+        # interpreter and isolated bootstrap as the desired scheduled action.
+        $prepare = "`$h=$bootstrapLiteral; `$v=($before+`$h+$after); " +
+            'if ($o) { $a=$o.Definition.Actions; ' +
+            "if (`$a.Count -ne 1 -or `$a.Item(1).Type -ne 0) { throw 'invalid existing reflect action' }; " +
+            '$j=ConvertTo-Json -InputObject @($v,($a.Item(1).Arguments)) -Compress; ' +
+            '$p=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)); ' +
+            "`$r=`$p | & $pythonLiteral '-I' '-c' `$h $initializerLiteral 'brigade.care_windows'; " +
+            "if (`$LASTEXITCODE -ne 0) { throw 'cannot preserve existing reflect scope' }; " +
+            '$v=($r | ConvertFrom-Json) }; '
+    }
+    else {
+        $argumentMatch = [regex]::Match($Script, ('\$action\.Arguments=(?<value>' + $literal + ');'))
+        if (-not $argumentMatch.Success) { throw "care action arguments missing for $TaskName" }
+        $rawArguments = $argumentMatch.Groups['value'].Value
+        $arguments = $rawArguments.Substring(1, $rawArguments.Length - 2).Replace("''", "'")
+    }
     # Exact script grammar rejects extra commands/options, elevated/noninteractive
     # principals, executable lookup, or a live action during schtasks creation.
     $expected = "`$ErrorActionPreference='Stop'; `$n='$TaskName'; `$s=New-Object -ComObject Schedule.Service; `$s.Connect(); " +
@@ -316,7 +349,7 @@ namespace BrigadeAcceptance {
         "try { `$o=`$f.GetTask(`$n) } " +
         'catch { ' +
         'if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw } }; ' +
-        'if ($o) { $x=$o.Xml }; ' +
+        'if ($o) { $x=$o.Xml }; ' + $prepare +
         "`$z=`$false; try { & 'C:\Windows\System32\schtasks.exe' /Create /TN `$n " +
         "/TR 'C:\Windows\System32\cmd.exe /d /c exit 1' $Schedule /RU `$env:USERNAME /IT /F; " +
         "if (`$LASTEXITCODE -ne 0) { throw 'cannot create care task' }; `$z=`$true; " +
@@ -339,14 +372,11 @@ namespace BrigadeAcceptance {
         'try { $k=& $m } catch { $k=$_.Exception.Message } } }; ' +
         "throw ('care task {0}: {1}; rollback: {2}; cleanup: {3}' -f `$n,`$c.Message,`$b,`$k) }"
     if ($Script -cne $expected) { throw "unexpected encoded care creation/action for $TaskName" }
-    $bootstrap = 'import importlib.util as u,os,pathlib as p,runpy as r,sys as s;' +
-        'i,m=s.argv.pop(1),s.argv.pop(1);' +
-        'f=p.Path(i).is_file() and u.spec_from_file_location(m.partition(''.'')[0],i);' +
-        'f and f.loader or (s.stderr.write(''brigade:cannot-load:''+i+''\n''),s.exit(78));' +
-        'd=p.Path(f.origin).resolve().parent;os.chdir(d);s.path.append(str(d.parent));' +
-        'q=u.module_from_spec(f);s.modules[f.name]=q;f.loader.exec_module(q);' +
-        'r.run_module(m,run_name=''__main__'',alter_sys=True)'
     $expectedArgv = @('-I', '-c', $bootstrap, $Initializer, 'brigade', 'runbook', 'run', '--approved', $Approved, '--target', $Workspace)
+    if ($TaskName -ceq 'BrigadeCare-memory-reflect') {
+        $expectedArgv = @('-I', '-c', $bootstrap, $Initializer, 'brigade', 'memory', 'reflect', 'run',
+            '--scheduled', '--target', $Workspace)
+    }
     $actualArgv = [BrigadeAcceptance.NativeArgv]::Parse($arguments)
     if ($actualArgv.Count -ne $expectedArgv.Count) { throw "wrong care argv length for $TaskName" }
     for ($index = 0; $index -lt $expectedArgv.Count; $index++) {
@@ -464,6 +494,7 @@ function Assert-CarePlanSet {
         "BrigadeCare-weekly-outcome-ratchet" = "/SC WEEKLY /D MON /ST 07:00"
         "BrigadeCare-daily-observability"    = "/SC DAILY /ST 08:00"
         "BrigadeCare-nightly-ops"            = "/SC DAILY /ST 04:00"
+        "BrigadeCare-memory-reflect"         = "/SC DAILY /ST 10:00"
     }
     $expectedRunbooks = @{
         "BrigadeCare-daily-care" = ".brigade/memory-care/runbooks/daily-care-pass.json"
@@ -477,7 +508,7 @@ function Assert-CarePlanSet {
         throw 'care JSON must describe a non-mutating dry-run for this workspace'
     }
     $tasks = @($CarePlan.tasks)
-    if ($tasks.Count -ne $expectedSchedules.Count) { throw 'care JSON must contain exactly five tasks' }
+    if ($tasks.Count -ne $expectedSchedules.Count) { throw 'care JSON must contain exactly six tasks' }
     $createByTask = @{}
     foreach ($task in $tasks) {
         $name = [string]$task.task_name
@@ -488,7 +519,10 @@ function Assert-CarePlanSet {
         $command = [string]$task.command
         $decoded = Read-EncodedCarePlan -Line $command
         if ($null -eq $decoded) { throw "care task must use the exact encoded PowerShell command: $name" }
-        $approved = [IO.Path]::GetFullPath((Join-Path $WorkRepo $expectedRunbooks[$name]))
+        $approved = ''
+        if ($name -cne 'BrigadeCare-memory-reflect') {
+            $approved = [IO.Path]::GetFullPath((Join-Path $WorkRepo $expectedRunbooks[$name]))
+        }
         Assert-EncodedCarePlan -Script $decoded -TaskName $name -Schedule $expectedSchedules[$name] `
             -Python $CarePython -Initializer $CareInitializer -Approved $approved -Workspace $WorkRepo
         $createByTask[$name] = $command
@@ -506,7 +540,7 @@ function Assert-CarePlanSet {
         -not $_.StartsWith(':: ', [StringComparison]::Ordinal) -and
         -not $_.StartsWith('schedule_hint: ', [StringComparison]::Ordinal)
     })
-    if ($printedCommands.Count -ne $expectedSchedules.Count) { throw 'care text must contain exactly five commands' }
+    if ($printedCommands.Count -ne $expectedSchedules.Count) { throw 'care text must contain exactly six commands' }
     foreach ($name in $expectedSchedules.Keys) {
         if (-not $createByTask.ContainsKey($name)) { throw "missing care task: $name" }
         $matchesForTask = @($printedCommands | Where-Object { $_ -ceq $createByTask[$name] })
@@ -519,7 +553,7 @@ function Test-CarePlanRejections {
     param($CarePlan, [string[]]$CareInstallLines, [string]$CarePython, [string]$CareInitializer, [string]$WorkRepo)
     $parameters = @{CarePython=$CarePython; CareInitializer=$CareInitializer; WorkRepo=$WorkRepo}
     $validated = Assert-CarePlanSet -CarePlan $CarePlan -CareInstallLines $CareInstallLines @parameters
-    if ($validated.Count -ne 5) { throw 'positive care fixture must validate exactly five commands' }
+    if ($validated.Count -ne 6) { throw 'positive care fixture must validate exactly six commands' }
     $cases = New-Object 'System.Collections.Generic.List[object]'
     $clone = { $CarePlan | ConvertTo-Json -Depth 20 | ConvertFrom-Json }
     $first = [string]$CarePlan.tasks[0].command
@@ -569,12 +603,38 @@ function Test-CarePlanRejections {
         $lines = @($CareInstallLines | ForEach-Object { if ($_ -ceq $old) { $replacement } else { $_ } })
         $cases.Add(@{name=('plain-command-' + $plan.tasks[$index].id); plan=$plan; lines=$lines})
     }
+    $reflectIndex = 0
+    while ($CarePlan.tasks[$reflectIndex].id -cne 'memory-reflect') { $reflectIndex++ }
+    $reflectCommand = [string]$CarePlan.tasks[$reflectIndex].command
+    $reflectScript = Read-EncodedCarePlan -Line $reflectCommand
+    $reflectMutations = @(
+        @{name='reflect-schedule'; script=$reflectScript.Replace('/SC DAILY /ST 10:00', '/SC DAILY /ST 23:59')},
+        @{name='reflect-interpreter'; script=$reflectScript.Replace($CarePython, 'python.exe')},
+        @{name='reflect-initializer'; script=$reflectScript.Replace($CareInitializer, ($CareInitializer + '.wrong'))},
+        @{name='reflect-workspace'; script=$reflectScript.Replace($WorkRepo, ($WorkRepo + '-wrong'))},
+        @{name='reflect-isolation'; script=$reflectScript.Replace('-I -c', '-E -c')},
+        @{name='reflect-bootstrap'; script=$reflectScript.Replace('s.path.append', 's.path.insert')},
+        @{name='reflect-unscheduled'; script=$reflectScript.Replace('--scheduled', '--auto-apply')},
+        @{name='reflect-extra-argument'; script=$reflectScript.Replace('--scheduled', '--scheduled --auto-apply')},
+        @{name='reflect-helper'; script=$reflectScript.Replace('brigade.care_windows', 'brigade')},
+        @{name='reflect-action'; script=$reflectScript.Replace('$action.Arguments=$v;', "`$action.Arguments='wrong';")},
+        @{name='reflect-extra-statement'; script=($reflectScript + '; exit 0')}
+    )
+    foreach ($mutation in $reflectMutations) {
+        if ($mutation.script -ceq $reflectScript) { throw "ineffective care mutation: $($mutation.name)" }
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($mutation.script))
+        $replacement = $reflectCommand.Substring(0, $reflectCommand.LastIndexOf(' ') + 1) + $encoded
+        $plan = & $clone
+        $plan.tasks[$reflectIndex].command = $replacement
+        $lines = @($CareInstallLines | ForEach-Object { if ($_ -ceq $reflectCommand) { $replacement } else { $_ } })
+        $cases.Add(@{name=$mutation.name; plan=$plan; lines=$lines})
+    }
     $extra = & $clone
-    $sixth = $extra.tasks[0] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-    $sixth.id='unexpected'; $sixth.task_name='BrigadeCare-unexpected'
-    $sixth.command='cmd.exe /c exit 0'
-    $extra.tasks = @($extra.tasks) + @($sixth)
-    $cases.Add(@{name='sixth-task'; plan=$extra; lines=($CareInstallLines + @($sixth.command))})
+    $unexpected = $extra.tasks[0] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $unexpected.id='unexpected'; $unexpected.task_name='BrigadeCare-unexpected'
+    $unexpected.command='cmd.exe /c exit 0'
+    $extra.tasks = @($extra.tasks) + @($unexpected)
+    $cases.Add(@{name='extra-task'; plan=$extra; lines=($CareInstallLines + @($unexpected.command))})
     $duplicate = & $clone
     $duplicate.tasks[1] = $duplicate.tasks[0]
     $cases.Add(@{name='duplicate-identity'; plan=$duplicate; lines=$CareInstallLines})

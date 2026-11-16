@@ -405,6 +405,7 @@ def reinforce_existing_card(
     evidence_pointer: str,
     fingerprint: str | None = None,
     lstat_probe: Callable[[Path], int | None] | None = None,
+    before_write: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Reinforce an existing card in place and return the applied patch.
 
@@ -435,6 +436,8 @@ def reinforce_existing_card(
         "evidence": evidence,
     }
     patched = _upsert_frontmatter_fields(text, updates)
+    if before_write is not None:
+        before_write()
     write_text_nofollow_atomic(card_path, patched, lstat_probe=lstat_probe)
     return updates
 
