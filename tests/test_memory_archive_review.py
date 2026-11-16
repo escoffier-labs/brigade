@@ -1,5 +1,11 @@
 """Review regressions for archive safety and publication."""
 
+from tests.memory_read_fixtures import pending_decision_id, operator_recovery
+
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
+
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 import json
 from datetime import date
 
@@ -102,11 +108,12 @@ def test_undo_drift_abandons_and_care_continues(tmp_path, monkeypatch):
         archive.restore(tmp_path, d)
     path.write_bytes(b"edited")
     monkeypatch.setattr(journal.kernel, "execute", execute)
-    result = tend.run(tmp_path, stages=[])
+    recovery_id = pending_decision_id(tmp_path)
+    result = operator_recovery(tmp_path, recovery_id)
     assert result["recovery"][0]["phase"] == "abandoned"
     assert path.read_bytes() == b"edited"
     assert (tmp_path / "memory/archive/cards/old.md").exists()
-    assert tend.run(tmp_path, stages=[])["recovery"] == []
+    assert operator_recovery(tmp_path, recovery_id)["recovery"] == []
 
 
 def test_missing_original_abandonment_remains_restorable(tmp_path, monkeypatch):
@@ -227,10 +234,14 @@ def test_legacy_publication_identity_retire_revive_and_reads(tmp_path, monkeypat
     path.write_text(text)
     identity = sync.publication_identity(text, "memory/cards/Old Note.md")[0]
     fake = configure_hub(tmp_path, monkeypatch, identity, "memory/cards/Old Note.md")
-    monkeypatch.setattr(reads, "load", lambda _: reads.ReadLedger(date(2000, 1, 1), {}))
+    monkeypatch.setattr(reads, "load", lambda _: reads.ReadLedger(date(2000, 1, 1), {}, date(2000, 1, 1), date.today()))
     monkeypatch.setattr(reads, "hub_last_reads", lambda _, **_kw: {identity: date.today()})
     assert (
         retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), TendConfig(), today=date.today())["candidate_count"] == 0
+    )
+    monkeypatch.setattr(reads, "hub_last_reads", lambda _, **_kw: {})
+    assert (
+        retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), TendConfig(), today=date.today())["candidate_count"] == 1
     )
     d = move(tmp_path, "memory/cards/Old Note.md")
     assert d.hub["status"] == "done"
