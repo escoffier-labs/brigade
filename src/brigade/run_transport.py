@@ -590,6 +590,7 @@ def dispatch(
     remote_transport: RemoteTransport | None = None,
     coordinator_prompt_sha256: str | None = None,
     codex_transport: str | None = None,
+    on_result: Callable[[WorkerResult], None] | None = None,
     policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
@@ -1319,6 +1320,16 @@ def dispatch(
         transport=lambda agent: _receipt_transport(agent, appserver=appserver),
         coordinator_prompt_sha256=coordinator_prompt_sha256,
     )
+
+    recorded_run_one = run_one
+
+    def observed_run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
+        result = recorded_run_one(assignment, prior_results)
+        if on_result is not None:
+            on_result(result)
+        return result
+
+    run_one = observed_run_one
 
     if not assignments:
         return []

@@ -361,10 +361,12 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     from ..run_batch import dry_run_cli
 
-    p_batch = run_sub.add_parser("batch", help="Validate an explicit batch without execution.")
+    p_batch = run_sub.add_parser("batch", help="Validate or execute an explicit task batch.")
     p_batch.add_argument("batch_file", type=Path, help="Versioned batch JSON file.")
     p_batch.add_argument("--dry-run", action="store_true", help="Print the validated batch plan.")
     p_batch.add_argument("--json", action="store_true", help="Print JSON plan or error.")
+    p_batch.add_argument("--cwd", type=Path, default=Path.cwd(), help="Workspace to execute in.")
+    p_batch.add_argument("--roster", type=Path, help="Roster TOML path.")
     p_batch.set_defaults(func=dry_run_cli)
 
     p_approve = run_sub.add_parser("approve", help="Record a signed human approval for a run.")
@@ -953,6 +955,8 @@ def dispatch(args) -> int:
             if fleet_claim_granted:
                 run_kwargs["process_registry"] = claim_cancellation.process_registry
                 run_kwargs["check_cancellation"] = claim_cancellation.raise_if_requested
+            if getattr(args, "batch_execution", None) is not None:
+                run_kwargs["batch_execution"] = args.batch_execution
             try:
                 claim_cancellation.raise_if_requested()
                 rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)

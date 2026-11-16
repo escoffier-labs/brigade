@@ -1,12 +1,13 @@
-# Explicit batch dry run
+# Explicit task batches
 
 `brigade run batch batch.json --dry-run [--json]` validates a caller-supplied
 batch and prints deterministic topological layers, task seats, and a SHA-256
-request fingerprint. It makes zero planner, worker, or synthesis calls and
-requires no roster. Seat selection is syntactic only: execution-time roster
-validation and admission are not implemented. Without `--dry-run`, a valid
-batch is refused with exit 2: `batch execution not yet implemented (#2047)`.
-Errors also exit 2, with a stable code in text or `error.code` in JSON.
+request fingerprint. Dry runs make zero model calls and require no roster.
+
+Without `--dry-run`, the command executes through the existing run orchestrator.
+Use `--cwd WORKSPACE` and optionally `--roster ROSTER.toml`. Execution makes no
+planner or synthesis call. Remove `synthesis` from this example to execute it.
+Errors exit 2, with a stable code in text or `error.code` in JSON.
 
 ```json
 {
@@ -30,8 +31,7 @@ and `seat`. `depends_on` defaults to an empty list of unique task IDs.
 invalid, the reported code belongs to the first invalid row. A row error names
 the row as `tasks[N]` until its `task_id` is valid, and by `task_id` after that.
 Selecting a task by admitted capability instead of a named seat, which #2047
-also allows, is not part of v1. It needs the admission wiring that execution
-will add.
+also allows, is not part of v1. It remains a later capability-selection slice.
 
 The batch admits 1 through 8 tasks, matching the existing durable assignment
 batch bound. Each task or synthesis text is limited to 16,384 UTF-8 bytes.
@@ -41,7 +41,7 @@ with a letter or digit, followed by letters, digits, `.`, `_`, `:`, or `-`.
 Seat tokens use the same alphabet with a 512-character limit.
 
 `task_id` is preserved verbatim as the existing `run_tasks.TaskSpec.task_id`
-and `run_control.ActiveTurn.task_id`. It uses `run_task_journal.task_id` for
+in the lifecycle journal. It uses `run_task_journal.task_id` for
 validation. Attempt IDs, run IDs, and provider IDs remain separate lifecycle
 identities and are not caller-supplied in this contract. Equal text or equal
 seats never merge distinct task IDs. This command does not dispatch ledger
@@ -56,7 +56,7 @@ change the fingerprint. Text changes do. `compare_request(stored_fingerprint,
 payload)` returns `new` for no stored fingerprint, `same` for a match, and
 `conflict` otherwise. The caller must look up the stored fingerprint under the
 same request ID. A stored value that is not 64 lowercase hex characters is
-refused with `invalid-fingerprint` rather than reported as a conflict. This
+refused with `invalid-fingerprint`. This
 helper provides no storage or resume behavior. The fingerprint is defined by
 those exact bytes: Python `json.dumps` with `ensure_ascii=True`, so non-ASCII
 text is written as lowercase `\uXXXX` escapes and characters outside the Basic
@@ -83,4 +83,44 @@ Multilingual Plane as surrogate pairs. A golden vector in
 | `input-limit` | File exceeds the input byte bound |
 | `invalid-json` | Malformed UTF-8/JSON, excessive nesting, or duplicate object keys |
 | `invalid-fingerprint` | Stored fingerprint passed to `compare_request` is malformed |
-| `execution-not-implemented` | Valid batch submitted without `--dry-run` |
+| `synthesis-not-implemented` | Execution requested with synthesis |
+| `request-conflict` | Request ID already reserved with a different fingerprint |
+| `request-unknown` | Request reservation has no readable fingerprint |
+
+
+## Execution and retries
+
+The adapter builds assignments directly, with the topological layer as their
+stage. Assignment text starts with `Batch task_id: ID`, followed by the exact
+caller text. This keeps same-seat tasks distinct in existing assignment IDs,
+transport results, and receipts. Task payload digests hash only the exact caller
+text bytes. Layers larger than the effective roster `max_workers` split into
+consecutive waves through the existing dispatcher. Its fail-fast behavior skips
+later waves after a failure, including tasks that do not depend on that failure.
+Existing admission, provider limits, model policy, run locks, and seat health
+checks still apply.
+
+A request reserves `.brigade/runs/batch-<SHA-256 of request ID>/` by atomic
+directory creation before dispatch. `batch-request.json` retains its fingerprint
+and canonical plan. This is part of existing run storage.
+The lifecycle journal records task acceptance, attempts, observations, and result
+references. A matching retry reports stored states without launching any tasks,
+including queued, unknown, or in-flight tasks. A different fingerprint exits 2.
+A crash between directory reservation and fingerprint publication refuses any
+retry with `request-unknown`. Keep the run directory to preserve the retry fence.
+
+Task launch claims remain deferred: the existing dispatch callback binds budget
+reservations to a seat and attempt, without exposing an exact task candidate to
+`claim_task_launch`. The request reservation prevents replay launches instead.
+A task becomes unknown before its prompt is built, so this state can include a
+launch that was never accepted. It is never retried automatically.
+
+JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
+`tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`, and
+`result_ref` (relative to the run directory, or null). Completed results persist
+as each worker finishes. Failed workers retain their result receipt too. Skipped
+tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation
+and timeout preserve completed results and report unresolved tasks as stored.
+Exit 0 requires every task to be completed successfully. Other outcomes exit 1.
+Synthesis execution exits 2 with `synthesis-not-implemented`. Dry run still shows
+its requested seat. No synthesis budget or receipt is created.

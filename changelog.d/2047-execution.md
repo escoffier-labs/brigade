@@ -1,0 +1,1 @@
+- Execute explicit task batches without planner or synthesis calls, preserving task IDs, bounded dispatch waves, and durable request retry refusal.

@@ -466,6 +466,7 @@ def run(
     model_policy_snapshot: Mapping[str, Any] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     check_cancellation: Callable[[], None] | None = None,
+    batch_execution: Any = None,
 ) -> int:
     check_cancellation = check_cancellation or (lambda: None)
     claim_process_registry = process_registry
@@ -982,14 +983,9 @@ def run(
         if bind_error is not None:
             print(f"error: {bind_error}", file=sys.stderr)
             return 2
-        assignments = [
-            Assignment(
-                worker=worker,
-                task=task,
-                stage=1,
-                selected_skill_ids=selected_skill_ids,
-            )
-        ]
+        from ..run_batch_execute import direct_assignments
+
+        assignments = direct_assignments(worker, task, selected_skill_ids, batch_execution, roster)
     else:
         if output_dir is not None:
             run_io._write_json(
@@ -1574,7 +1570,7 @@ def run(
         )
         try:
             worker_results = planning._call_with_process_registry(
-                planning.dispatch,
+                batch_execution.dispatch if batch_execution is not None else planning.dispatch,
                 assignments,
                 roster,
                 cwd=cwd,
@@ -1755,6 +1751,9 @@ def run(
         if not direct_worker:
             print("synthesis:")
             print(f"  -> {roster.orchestrator}")
+
+    if batch_execution is not None:
+        return batch_execution.finish(worker_results)
 
     synth_captured = None
     if direct_worker:
