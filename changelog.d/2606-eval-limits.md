@@ -6,3 +6,4 @@
 - Scheduled verify paces `verify_auto_apply` requests, tries the least recently attempted proposals first and reports a throttled attempt as `rate-limited`.
 - Verify state accepts the automatic apply attempt time, so a run that attempts an application saves its state and keeps the rotation order.
 - Automatic apply requests refused for authorization or an unknown proposal no longer use a rate slot.
+- Verifier automatic applies keep the 24 hour card cooldown that Tier 0 applies use. A card applied or rolled back in the last day is refused with `memory_card_cooldown_active`.

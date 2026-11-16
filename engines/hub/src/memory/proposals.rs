@@ -649,6 +649,17 @@ fn apply_cards(
         if let Some(refusal) = super::verify_eval::check(tx, p, body, authority)? {
             return Ok(Some(refusal));
         }
+        // Verifier applies skip Tier 0 diagnostics but keep the shared card cooldown.
+        let changed = cards(body).iter().filter(|c| {
+            c["before_text"] != c["after_text"] || c["before_state"] != c["after_state"]
+        });
+        if super::preflight::cooldown_active(tx, changed, p.now_ms)? {
+            return Ok(Some(error(
+                409,
+                "memory_card_cooldown_active",
+                "a changed card was applied or rolled back in the last 24 hours",
+            )));
+        }
         body["preflight"] = json!({"checks":[{"gate":"verify_evaluation","state":"satisfied"}]});
     } else if automatic {
         let snapshot = match &p.action {

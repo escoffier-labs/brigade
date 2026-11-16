@@ -505,3 +505,27 @@ async fn automatic_refusals_before_authorization_spend_no_rate_slot() {
         );
     }
 }
+
+#[tokio::test]
+async fn verifier_applies_keep_the_card_cooldown() {
+    let (h, id) = ready().await;
+    assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+    // A reviewed change applied to the same card less than 24 hours ago.
+    Connection::open(h.memory())
+        .unwrap()
+        .execute(
+            "INSERT INTO memory_events(seq,event_id,client_event_id,kind,principal,scope,card_id,revision,payload,created_at) \
+             VALUES(900000,'recent-apply','recent-apply','proposal.apply','reviewer','fleet','a',900000,'{}',?1)",
+            [ids::isoformat(h.now() - 60_000)],
+        )
+        .unwrap();
+    let request = json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,
+        "binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),
+        "expected_op_types":["replace_block"],"client_event_id":h.id()});
+    let refused = h.call(AGENT_TOKEN, automatic_request(request)).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (409, "memory_card_cooldown_active"),
+        "{refused:?}"
+    );
+}
