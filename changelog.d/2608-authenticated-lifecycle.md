@@ -1,3 +1,2 @@
 - Authenticate unused-card coverage and accepted opens with the fixed workspace receipt key. Unsigned or broken history blocks automatic retirement, and automated hook contexts cannot count as use.
 - Preserve dependencies referenced by relative Markdown links or IDs followed by sentence punctuation. Skip symlinked reference files during lifecycle and expiry scans.
-- Automatic archiving of unused cards, including expiry retirement, is switched off in code until #2620 lands and will require a configured hub. Stale marking stays live with policy floors of 30 days before stale and 90 days before archive.
