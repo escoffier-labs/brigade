@@ -301,6 +301,10 @@ def test_trailing_whitespace_anchors_support_link_and_near_reflection(whitespace
     assert operation["expected_block_hash"] == delta.blocks(pair[1]["text"])[0].sha256
 
 
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_human_heads_preserve_repair_quota_across_runs(setup, capsys, monkeypatch):
     target, hub, _ = setup
     hub.cards.clear()
@@ -343,6 +347,10 @@ def test_history_strips_anchor_before_final_newline(ending):
     assert _history("New.\n", "Old. ^c-abcdef" + ending) == "New.\n\npreviously Old.\n"
 
 
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_anchor_quota_reserves_four_repair_slots(setup, capsys, monkeypatch):
     target, hub, _ = setup
     hub._commit("card.put", "fleet", "robot", card_text("Unique.", None), "live", "robot")
@@ -360,6 +368,10 @@ def test_anchor_quota_reserves_four_repair_slots(setup, capsys, monkeypatch):
     assert [call["ops"][0]["type"] for call in writes(hub)] == ["merge_exact_duplicates"]
 
 
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_real_hold_reply_suppresses_revision_and_selects_fresh_head(setup, capsys, monkeypatch):
     import json
     from brigade import memory_reflect_policy as policy
