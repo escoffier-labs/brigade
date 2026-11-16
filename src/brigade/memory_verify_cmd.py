@@ -546,7 +546,8 @@ def dispatch(args: argparse.Namespace) -> int:
                 payload["status"] = "completed"
             else:
                 cases = memory_verify_eval.read_corpus(args.corpus.absolute())
-                with memory_verify_run.WORK_AREA(target) as area:
+                # The work area sweeps stale call directories, so share the run and gate lock.
+                with vstate.locked(target), memory_verify_run.WORK_AREA(target) as area:
                     calls = memory_verify_run.Calls(area)
                     try:
                         payload = memory_verify_eval.evaluate(

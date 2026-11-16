@@ -600,3 +600,25 @@ def test_eval_cli_reports_a_stopped_seat(verify_hub, capsys, monkeypatch):
     report = json.loads(capsys.readouterr().out)
     assert code != 0
     assert report.get("code") == "seat_quota"
+
+
+def test_eval_cli_holds_the_verify_lock(verify_hub, capsys, monkeypatch):
+    from contextlib import contextmanager
+
+    from brigade import cli, memory_verify_cmd
+
+    target, _, _, _ = verify_hub
+    path = corpus(target)
+    held = []
+    real = memory_verify_cmd.vstate.locked
+
+    @contextmanager
+    def spy(where):
+        with real(where):
+            held.append(where)
+            yield
+
+    monkeypatch.setattr(memory_verify_cmd.vstate, "locked", spy)
+    assert cli.main(["memory", "verify", "eval", "--corpus", str(path), "--target", str(target), "--json"]) == 0
+    capsys.readouterr()
+    assert held
