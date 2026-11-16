@@ -14,8 +14,9 @@ pub struct Base {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    VerifyEval(Json),
     RetrievalEval(super::retrieval_eval::Report),
-    AutoApplySwitch(bool),
+    AutoApplySwitch(bool, Option<(String, String)>),
     EvidencePurge(String),
     Evidence(super::attestation::Attachment),
     Rescan {
@@ -86,7 +87,8 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Action::RetrievalEval(_) => "retrieval_eval.record",
-            Action::AutoApplySwitch(_) => "auto_apply_switch",
+            Action::VerifyEval(_) => "verify_eval.record",
+            Action::AutoApplySwitch(..) => "auto_apply_switch",
             Action::EvidencePurge(_) => "evidence.purge",
             Action::Evidence(_) => "evidence.attach",
             Action::Rescan { .. } => "rescan",
@@ -113,8 +115,8 @@ impl Action {
     /// The grant an action needs, and the scope it needs it on.
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
-            Action::RetrievalEval(_) => (None, "admin"),
-            Action::AutoApplySwitch(_) | Action::EvidencePurge(_) => (None, "admin"),
+            Action::RetrievalEval(_) | Action::VerifyEval(_) => (None, "admin"),
+            Action::AutoApplySwitch(..) | Action::EvidencePurge(_) => (None, "admin"),
             Action::Evidence(a) => (
                 Some(super::proposals::string(&a.request, "scope")),
                 "reflect",
@@ -159,6 +161,7 @@ impl Action {
             Action::Proposal(_)
                 | Action::Evidence(_)
                 | Action::RetrievalEval(_)
+                | Action::VerifyEval(_)
                 | Action::Verifier { .. }
         )
     }
@@ -166,7 +169,7 @@ impl Action {
     pub fn new_bytes(&self) -> usize {
         match self {
             Action::RetrievalEval(r) => r.raw.len(),
-            Action::AutoApplySwitch(_) | Action::EvidencePurge(_) => 0,
+            Action::AutoApplySwitch(..) | Action::EvidencePurge(_) => 0,
             Action::Evidence(a) => a.bytes.len(),
             Action::Proposal(c) => c.new_bytes(),
             Action::Put { text, .. } | Action::Handoff { text, .. } => text.len(),
@@ -589,7 +592,7 @@ pub fn apply(
         if s(&row[0]) == p.request_digest {
             let mut body: Json = serde_json::from_str(&s(&row[2])).unwrap_or(Json::Null);
             if let Action::Proposal(c) = &p.action {
-                if c.name() == "auto_apply" {
+                if matches!(c.name(), "auto_apply" | "verify_auto_apply") {
                     if let Some(proposal) = super::proposals::load(
                         tx,
                         super::proposals::string(&c.request, "proposal_id"),
@@ -630,18 +633,39 @@ pub fn apply(
                 }
             }
             Action::Proposal(c)
-                if matches!(c.name(), "decide" | "auto_apply")
-                    && reply.body["state"] == "applied" =>
+                if matches!(
+                    c.name(),
+                    "decide"
+                        | "auto_apply"
+                        | "verify_auto_apply"
+                        | "rollback"
+                        | "compensation_watch"
+                ) =>
             {
-                for row in tx.query(
-                    "SELECT scope,card_id FROM memory_card_revisions WHERE proposal_id=?1",
-                    &[t(reply.body["proposal_id"].as_str().unwrap())],
-                )? {
-                    let scope = s(&row[0]);
-                    let card_id = s(&row[1]);
-                    super::embedding::cleanup_card(tx, &scope, &card_id)?;
-                    if let Some((id, private)) = embedder {
-                        super::embedding::queue_card(tx, &scope, &card_id, id, private)?;
+                let applied: Vec<&Json> = if c.name() == "compensation_watch" {
+                    reply.body["results"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|r| r["result"] == "applied")
+                        .map(|r| &r["proposal_id"])
+                        .collect()
+                } else if reply.body["state"] == "applied" {
+                    vec![&reply.body["proposal_id"]]
+                } else {
+                    Vec::new()
+                };
+                for id in applied {
+                    for row in tx.query(
+                        "SELECT scope,card_id FROM memory_card_revisions WHERE proposal_id=?1",
+                        &[t(id.as_str().unwrap())],
+                    )? {
+                        let scope = s(&row[0]);
+                        let card_id = s(&row[1]);
+                        super::embedding::cleanup_card(tx, &scope, &card_id)?;
+                        if let Some((id, private)) = embedder {
+                            super::embedding::queue_card(tx, &scope, &card_id, id, private)?;
+                        }
                     }
                 }
             }
@@ -686,10 +710,26 @@ fn run(
         )
     };
     match &p.action {
+        Action::VerifyEval(r) => super::verify_eval::record(tx, p, r, _authority),
         Action::RetrievalEval(r) => super::retrieval_eval::record(tx, p, r, _authority),
-        Action::AutoApplySwitch(enabled) => {
-            tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
-            let payload = json!({"auto_apply_enabled":enabled});
+        Action::AutoApplySwitch(enabled, release) => {
+            if release.is_none() {
+                tx.execute("INSERT INTO memory_meta(key,value) VALUES('auto_apply_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",&[t(if *enabled {"true"}else{"false"})])?;
+            }
+            let enabled = tx
+                .query(
+                    "SELECT value FROM memory_meta WHERE key='auto_apply_enabled'",
+                    &[],
+                )?
+                .first()
+                .is_none_or(|r| s(&r[0]) == "true");
+            if let Some((scope, op)) = release {
+                tx.execute(
+                    "DELETE FROM memory_meta WHERE key=?1",
+                    &[t(&super::compensation::hold_key(scope, op))],
+                )?;
+            }
+            let payload = json!({"auto_apply_enabled":enabled,"compensation_go":release});
             append(
                 tx,
                 p,

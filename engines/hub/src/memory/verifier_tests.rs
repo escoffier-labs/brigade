@@ -317,7 +317,11 @@ async fn status_reports_verifier_and_reflect_principal_for_the_caller() {
     assert_eq!(both(&dot), (json!(false), json!(false)));
     assert_eq!(
         dot.body["capabilities"],
-        json!(["verifier_floor", "verifier_manifests"])
+        json!([
+            "verifier_floor",
+            "verifier_manifests",
+            "automatic_compensation"
+        ])
     );
     let node = status(&h, NODE_TOKEN).await;
     assert_eq!(both(&node), (json!(false), json!(true)));

@@ -151,7 +151,10 @@ def register(sub: argparse._SubParsersAction) -> None:
             command.add_argument("--apply", action="store_true", help="Attempt policy-gated Tier 0 application.")
             command.add_argument("--dry-run", action="store_true", help="Print metadata diffs and duplicate summaries.")
         elif name == "rollback":
-            command.add_argument("proposal_id", help="Applied hub proposal to compensate. Requires separate review.")
+            command.add_argument(
+                "proposal_id",
+                help="Applied hub proposal to compensate. Exact policy-actor reversals can apply automatically.",
+            )
         elif name in ("show", "propose", "preflight"):
             command.add_argument("candidate_id")
             if name == "preflight":
@@ -403,10 +406,13 @@ def dispatch(args: argparse.Namespace) -> int:
                 )
         if payload.get("status") == "paused":
             print("scheduled reflection is paused. Run memory reflect run --hub manually to resume after a success.")
-        if args.memory_reflect_command == "rollback" and "proposal" in payload:
+        if args.memory_reflect_command == "rollback" and "proposal" in payload and payload.get("status") == "failed":
+            print(_terminal_text(f"compensation failed: {payload['proposal'].get('reason', 'unknown')}"))
+        elif args.memory_reflect_command == "rollback" and "proposal" in payload:
             print(
                 _terminal_text(
-                    f"compensating proposal: {payload['proposal'].get('proposal_id')} (separate decision required)"
+                    f"compensating proposal: {payload['proposal'].get('proposal_id')} "
+                    f"({payload['proposal'].get('state', 'pending')})"
                 )
             )
         if "latest_run" in payload:

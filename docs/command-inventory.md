@@ -42,7 +42,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
-- `brigade memory`: 65 command path(s)
+- `brigade memory`: 68 command path(s)
 - `brigade model`: 12 command path(s)
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -425,6 +425,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory vault-search`
 - `brigade memory vault-show`
 - `brigade memory verify doctor`
+- `brigade memory verify enable`
+- `brigade memory verify eval`
+- `brigade memory verify gate`
 - `brigade memory verify run`
 - `brigade memory verify show`
 - `brigade memory verify status`

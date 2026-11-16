@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 
@@ -95,6 +96,133 @@ class Client(unittest.TestCase):
             if page["next_seq"] <= after:
                 return events
             after = page["next_seq"]
+
+    def test_production_verifier_proposal_automatic_admission(self):
+        """A _propose correction applies only when its class has a hub go record."""
+        from dataclasses import replace
+        import re
+        import time
+        from brigade import memory_fairness as fairness, memory_proposal_io as io
+        from brigade import memory_verify_auto as automatic, memory_verify_cmd as cmd
+        from brigade import memory_verify_contract as contract, memory_verify_run as runner
+        from brigade import memory_verify_eval as evaluation, memory_verify_gate as gate
+        from brigade import memory_verify_seat as seats, memory_verify_state as vstate
+
+        value = evaluation.read_corpus(ROOT / "tests/fixtures/memory_verify_eval")[0]
+        value["card"]["scope"] = "fleet"
+        card_id = value["card"]["card_id"]
+        replacement = value["expected_ops"][0]["text"]
+        commit = next(iter(value["commits"].values()))
+        quotes = [f'"commit": "{commit}"', f"to commit {commit} on 2026-11-02"]
+
+        def scripted(prompt):
+            starts = list(re.finditer(r"<<([0-9a-f]{32}) evidence (\d+) [^\n]*>>\n", prompt))
+            regions = [(m[2], prompt[m.end():prompt.index(f"<<{m[1]} ", m.end())]) for m in starts]
+            return json.dumps({"schema": contract.SCHEMA, "card_id": card_id, "blocks": [{
+                "block_id": "c-abcdef", "verdict": "contradicted", "confidence": "high",
+                "quotes": [{"evidence": int(index), "text": quote} for quote in quotes
+                           for index, text in regions if quote in text],
+                "replacement": replacement, "previously": None, "superseded_by": None,
+            }]})
+
+        admin = hubc.MemoryHubClient(self.hub.url, self.hub.admin_token)
+        registered = hc.request(self.hub.url, "POST", "/nodes", token=self.hub.admin_token,
+                                body={"action": "add", "node_id": "verify-automatic-it"})
+        self.assertEqual(registered.status, 200, registered)
+        client = hubc.MemoryHubClient(self.hub.url, registered.json["token"])
+        status = client.call("status")
+        principal, epoch = status["principal"], status["log_epoch"]
+        for action, fields in [
+            ("grant", {"scope": "fleet", "rights": ["read", "reflect", "review"]}),
+            ("verifier", {"verifier": True}),
+        ]:
+            admin.call(action, principal=principal, client_event_id=hubc.event_id(), **fields)
+        with sqlite3.connect(self.hub.state_dir / "hub.db") as db:
+            db.execute("UPDATE fleet_policy_revisions SET document=?", (
+                json.dumps({"memory": {"curation_owner": "hub", "auto_apply": True}}),
+            ))
+        target = self.workspace("verify-automatic", "read")
+        evidence_root = self.work / "verify-evidence"
+        evidence_root.mkdir()
+        (target / ".brigade/memory-care.toml").write_text(
+            '[hub]\nmode="read"\nread_scopes=["fleet"]\n[verify]\nenabled=true\n'
+            f'[[verify.workspace]]\nscope="fleet"\npath="{evidence_root}"\narchive_projects=[]\n'
+        )
+        # Persist the fixture evidence so show_payload also checks real file freshness.
+        for item in value["evidence"]:
+            path = evidence_root / item["source"].split(":", 3)[3]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text(item["text"])
+            item["file_sha256"] = io.sha256(path.read_bytes())
+        root = target / gate.ROOT
+        root.mkdir(parents=True)
+        policy = {**gate.DEFAULT_POLICY, "min_cases": 1, "repeats": 1, "consecutive_passes": 1}
+        (target / gate.POLICY).write_bytes(io.json_bytes(policy))
+        (target / gate.CORPUS).parent.mkdir()
+        (target / gate.CORPUS).write_bytes(io.json_bytes({"schema": "brigade.memory-verify-corpus.v1", "cases": [value]}))
+        pair = tuple(seats.Seat(role=role, name=role, cli="claude", adapter="claude", model=model,
+            model_key=("anthropic", model), argv=("claude",), executable="/usr/bin/true",
+            identity=(1, 2), fingerprint="0" * 64)
+            for role, model in (("propose", "test-small"), ("confirm", "test-large")))
+        binding = cmd._binding(client.identity, principal, epoch)
+        settings = hubc.load_settings(target)
+
+        # Each case is a fresh real proposal, with a correction followed by _manifest_op.
+        for admitted_class in ("confirm", "correct"):
+            # Independent class cases must clear the shared principal attempt window.
+            if admitted_class == "correct":
+                time.sleep(1.01)
+            with self.subTest(admitted_class=admitted_class):
+                card_id = value["card"]["card_id"] = f"verify-{admitted_class}"
+                admin.call("put", scope="fleet", card_id=card_id, text=value["card"]["text"],
+                           base_revision=None, base_epoch=epoch,
+                           client_event_id=hubc.event_id())
+                before = client.call("card", scope="fleet", card_id=card_id)["card"]
+                original, assembly = evaluation.inputs(value)
+                card = replace(original, revision=before["revision"])
+                result = contract.verify_card(card, assembly, propose=scripted,
+                    confirm=scripted, resolve_commit=value["commits"].get)
+                self.assertIsNotNone(result.proposal, result)
+                now = int(time.time() * 1000)
+                key = fairness.key_digest("fleet", [card_id])
+                state = vstate.fresh()
+                state.update(binding=binding, scopes={"fleet": {"cards": {key: {"seen": now, "proposed": 0}}}})
+                sender = runner.Sender(target=target, state=state, client=client, tally=runner.Tally({}),
+                    tables={"fleet": state["scopes"]["fleet"]["cards"]}, epoch=epoch, observed=now,
+                    now=now, pending=0, state_principal=principal, bound=frozenset({"fleet"}))
+                runner._propose(sender, card=card, result=result, assembly=assembly,
+                    calls=runner.Calls(None), pair=pair, dry_run=False)
+                self.assertEqual(len(sender.tally.proposals), 1, sender.tally)
+                ident = sender.tally.proposals[0]["proposal_id"]
+                shown = client.call("proposal_show", proposal_id=ident)
+                self.assertEqual(len(shown["verifier_manifests"]), 1)
+                with sqlite3.connect(self.hub.state_dir / "fleet-hub-memory.db") as db:
+                    stored = json.loads(db.execute("SELECT body FROM memory_proposals WHERE proposal_id=?", (ident,)).fetchone()[0])
+                self.assertEqual([op["type"] for op in stored["ops"]], ["replace_block", "append_evidence"])
+                report = evaluation.evaluate([value], propose=scripted, confirm=scripted, repeats=1)
+                if admitted_class == "confirm":
+                    report["classes"]["confirm"] = report["classes"].pop("correct")
+                    report["ops"]["append_evidence"] = report["ops"]["replace_block"]
+                record = gate.record(target, report, pair=pair, binding=binding, now_ms=now)
+                admin.call("verify_eval.record", principal=principal, base_epoch=epoch,
+                    record=record, policy=gate.policy_bytes(target).decode(), client_event_id=hubc.event_id())
+                with patch.object(cmd, "_hub", return_value=(settings, client)):
+                    applied = automatic.apply_pending(target, state, client, pair=pair, now_ms=int(time.time() * 1000))
+                if admitted_class == "correct":
+                    self.assertEqual(applied, [{"proposal_id": ident, "state": "applied", "decision_mode": "automatic"}])
+                    self.assertIn(replacement, client.call("card", scope="fleet", card_id=card_id)["card"]["text"])
+                else:
+                    self.assertEqual(applied, [])
+                    # Bypass the client prefilter to prove that the hub also refuses this class.
+                    with self.assertRaises(hubc.HubRefusal) as refused:
+                        client.call("verify_auto_apply", proposal_id=ident, base_epoch=epoch,
+                            binding_sha256=record["binding_sha256"], policy_sha256=record["policy_sha256"],
+                            expected_op_types=["replace_block", "append_evidence"], client_event_id=hubc.event_id())
+                    self.assertIn("verify_class_not_admitted", str(refused.exception.body))
+                    self.assertEqual(client.call("card", scope="fleet", card_id=card_id)["card"], before)
+                    admin.call("decide", proposal_id=ident, decision="reject", base_epoch=epoch,
+                        client_event_id=hubc.event_id())
 
     def test_put_pull_and_search_through_the_hub(self):
         writer = self.workspace("writer", "sync", kiwi=f"# Kiwi\nkiwifruit {'grows on vines ' * 3000}\n")

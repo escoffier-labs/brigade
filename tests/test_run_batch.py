@@ -111,11 +111,11 @@ def test_dry_run_cli(tmp_path, capsys, no_models, as_json):
     assert not (tmp_path / ".brigade").exists()
 
 
-def test_execution_refused(tmp_path, capsys, no_models):
+def test_synthesis_execution_refused(tmp_path, capsys, no_models):
     path = tmp_path / "batch.json"
-    path.write_text(json.dumps(batch()))
+    path.write_text(json.dumps(batch(synthesis={"seat": "coder", "text": "Summarize"})))
     assert cli.main(["run", "batch", str(path)]) == 2
-    assert "batch execution not yet implemented (#2047)" in capsys.readouterr().err
+    assert "synthesis-not-implemented" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -176,7 +176,7 @@ def test_validation_cli_and_synthesis(tmp_path, capsys, no_models):
     assert cli.main(["run", "batch", str(path), "--dry-run", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["synthesis"] == {"seat": "writer"}
     assert cli.main(["run", "batch", str(path), "--json"]) == 2
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "execution-not-implemented"
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "synthesis-not-implemented"
 
 
 def test_fingerprint_golden_vector():
