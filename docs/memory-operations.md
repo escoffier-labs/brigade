@@ -2439,7 +2439,7 @@ A seat is refused before any prompt is written when:
 | `verify_seat_unconfigured` | `[verify]` is missing either seat |
 | `verify_seat_unknown` | The seat is not in the local roster. Seats the hub synthesizes for other fleet nodes are never used in v1 |
 | `verify_seat_connector` | The seat's audience is `connector`: a `codex-cloud:` seat, a hosted chat session (`oracle`), an endpoint outside loopback, or an Ollama cloud model |
-| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a reasoning pin, its CLI is a script or launcher rather than a native binary, it is an `ollama:` seat (below), or it has no passing probe for its current fingerprint |
+| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a `reasoning` level outside `low`, `medium`, `high`, `xhigh` and `max`, its CLI is a script or launcher rather than a native binary, it is an `ollama:` seat (below), or it has no passing probe for its current fingerprint |
 | `verify_seat_disallowed` | `limits.allow_models` does not allow the seat |
 | `verify_seat_unpinned` | The seat pins no exact model id. A Claude seat needs a full `claude-...` id, not an alias such as `opus` |
 | `verify_seat_same_model` | Both seats resolve to one model, ignoring a bracketed context suffix such as `[1m]` |
@@ -2462,6 +2462,8 @@ reports, never on what the model says. One adapter has a profile in v1:
   event later in the stream refuses the call too. The init event does not list
   loaded instruction files, so the working directory is placed where no
   parent holds any (below).
+
+A claude seat may set `reasoning` to one of those levels. Verify passes it as `--effort` and the seat fingerprint covers it, so changing it needs a fresh probe and gate record.
 
 `ollama:<model>` seats are refused with `verify_seat_not_isolated` ("ollama
 tags are mutable, and v1 has no immutable launch"). Ollama names a model only
