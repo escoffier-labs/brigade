@@ -5,12 +5,13 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from . import agents, fleet_client, inbox_lock, localio, run_tasks, run_lifecycle, run_journal
+from . import agents, fleet_client, inbox_lock, localio, run_tasks, run_lifecycle, run_journal, runguard
 from .run_batch import BatchError
 from .run_transport import Assignment, WorkerResult
 from .roster import Roster
@@ -38,6 +39,7 @@ class BatchExecution:
             self.run_dir, workspace=self.workspace, request_id=self.plan["request_id"], specs=specs
         )
         layers = {task_id: index for index, layer in enumerate(self.plan["layers"]) for task_id in layer}
+        # Batch assignments intentionally omit run-level selected_skill_ids; the caller supplies each task.
         return [
             Assignment(worker=t["seat"], task=prompt, stage=layers[t["task_id"]])
             for prompt, t in self.by_prompt.items()
@@ -96,6 +98,7 @@ class BatchExecution:
 
         kwargs["build_prompt"] = build_prompt
         kwargs["on_result"] = self.observe
+        kwargs["allow_reinvocation"] = False
         return planning.dispatch(waves, roster, **kwargs)
 
     def resolve_model_policy(self, roster: Roster, **kwargs: Any) -> Any:
@@ -143,7 +146,12 @@ class BatchExecution:
             self.observe(result)
         # Use the planned-run finish path with no synthesis invocation. It
         # records incomplete workers and retains every result and artifact.
-        return agents.AgentResult(text="Explicit batch completed", ok=True)
+        return agents.AgentResult(
+            text="\n".join(
+                f"{self.by_prompt[r.task]['task_id']}: {'completed' if r.ok else r.status or 'failed'}" for r in results
+            ),
+            ok=all(r.ok for r in results),
+        )
 
 
 def stored_result(plan: dict[str, Any], run_dir: Path) -> dict[str, Any]:
@@ -205,24 +213,27 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     if plan["synthesis"] is not None:
         raise BatchError("synthesis-not-implemented", "batch synthesis execution is not implemented")
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
-    run_dir = workspace / ".brigade" / "runs" / ("batch-" + hashlib.sha256(plan["request_id"].encode()).hexdigest())
+    run_dir = (
+        runguard.lock_path(workspace).parent
+        / "runs"
+        / ("batch-" + hashlib.sha256(plan["request_id"].encode()).hexdigest())
+    )
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
         run_journal._fsync_directory(run_dir.parent)
-        reserved_here = True
     except FileExistsError:
-        reserved_here = False
+        pass
     dispatch_rc = None
     # Serialize retry eligibility with dispatch, including preflight. The
     # workspace run lock remains the authority for executing worker processes.
     with request_lock(run_dir):
         marker_path = run_dir / "batch-request.json"
         marker = localio.read_json_dict(marker_path)
-        if marker is None:
-            # An empty reservation from an interrupted publication is ambiguous.
-            if not reserved_here:
-                raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
-        elif marker.get("fingerprint") != plan["fingerprint"]:
+        if marker_path.exists() and (
+            marker is None or re.fullmatch(r"[0-9a-f]{64}", str(marker.get("fingerprint"))) is None
+        ):
+            raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
+        if marker is not None and marker.get("fingerprint") != plan["fingerprint"]:
             raise BatchError("request-conflict", "request_id already belongs to a different batch")
         if marker is not None and not retryable_before_launch(run_dir):
             pass
@@ -257,6 +268,8 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
         for task_id, task in result["tasks"].items():
             print(f"{task_id}: {task['status']} {task['result_ref'] or ''}".rstrip())
     if dispatch_rc:
+        if any(t["status"] == "failed" for t in result["tasks"].values()):
+            return 1
         return 1 if dispatch_rc in {3, 130} else dispatch_rc
     return (
         0 if result["run_status"] == "ok" and all(t["status"] == "completed" for t in result["tasks"].values()) else 1

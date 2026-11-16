@@ -103,10 +103,15 @@ checks still apply. Each selected seat is resolved against the same model-policy
 snapshot and receives runtime admission. Selected seats cannot use health or
 invalid-final fallbacks. An unusable seat fails visibly. Cached run preferences
 and task classification do not select batch seats or modify batch text.
+Each task permits at most one worker invocation. Batch dispatch disables
+same-seat retries, continuations, and fallback dispatch after the first result.
+The first failure is retained as the task result. Planned and `--worker` runs
+retain their existing retry policy.
 
 A request reserves `.brigade/runs/batch-<SHA-256 of request ID>/` by atomic
 directory creation before dispatch. `batch-request.json` retains its fingerprint
-and canonical plan. This is part of existing run storage.
+and canonical plan. The directory is rooted at the git worktree root, or the
+resolved cwd outside git, using the same root as the run lock.
 The lifecycle journal records task acceptance, attempts, observations, and result
 references. Retry eligibility and dispatch share a request lock. If no attempt
 was prepared and no task may have launched, a matching retry can execute again
@@ -114,8 +119,9 @@ after preflight refusal. Once any task may have launched, a matching retry
 reports stored states without launching any tasks, including queued, unknown,
 or in-flight tasks. Unreadable journals refuse replay, and a different
 fingerprint exits 2.
-A crash between directory reservation and fingerprint publication refuses any
-retry with `request-unknown`. Keep the run directory to preserve the retry fence.
+A missing marker permits a new request while holding the request lock because
+dispatch cannot begin before marker publication. A present unreadable or corrupt
+marker refuses launch with `request-unknown`.
 
 Task launch claims remain deferred: the existing dispatch callback binds budget
 reservations to a seat and attempt, without exposing an exact task candidate to

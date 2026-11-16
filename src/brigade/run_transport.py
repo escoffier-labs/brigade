@@ -591,9 +591,13 @@ def dispatch(
     coordinator_prompt_sha256: str | None = None,
     codex_transport: str | None = None,
     on_result: Callable[[WorkerResult], None] | None = None,
+    allow_reinvocation: bool = True,
     policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
+
+    ``allow_reinvocation=False`` preserves the first result without retries,
+    continuations, or fallback invocations. Explicit batches require this bound.
 
     ``on_scheduler_resolved`` receives the scheduler that actually ran and the
     fallback reason, so a receipt can distinguish a real DAG dispatch from a
@@ -1187,6 +1191,8 @@ def dispatch(
         initial_started = _attempt_timestamp()
         result = invoke(agent, prompt)
         initial_finished = _attempt_timestamp()
+        if not allow_reinvocation:
+            return finish(result, agent)
         recovery_candidate = direct and effective_read_only and agent.cli == "grok" and agent.transport == "direct"
         if not recovery_candidate:
             if result.ok:
@@ -1326,7 +1332,10 @@ def dispatch(
     def observed_run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         result = recorded_run_one(assignment, prior_results)
         if on_result is not None:
-            on_result(result)
+            try:
+                on_result(result)
+            except Exception as exc:
+                print(f"warning: worker result observation failed: {exc}", file=sys.stderr)
         return result
 
     run_one = observed_run_one

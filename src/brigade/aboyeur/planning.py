@@ -1256,6 +1256,7 @@ def dispatch(
     remote_transport: Any | None = None,
     codex_transport: str | None = None,
     on_result: Callable[[WorkerResult], None] | None = None,
+    allow_reinvocation: bool = True,
     policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     from .. import run_transport
@@ -1308,5 +1309,6 @@ def dispatch(
         remote_transport=remote_transport,
         codex_transport=codex_transport,
         on_result=on_result,
+        allow_reinvocation=allow_reinvocation,
         policy_workspace=policy_workspace,
     )

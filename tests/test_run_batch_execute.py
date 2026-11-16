@@ -148,15 +148,15 @@ def test_cancellation_keeps_completed_sibling(setup, capsys, monkeypatch):
     assert len(setup[1]) == 2
 
 
-def test_crash_before_fingerprint_refuses_launch(setup, capsys):
+def test_crash_before_fingerprint_allows_launch(setup, capsys):
     import hashlib
 
     run_dir = setup[0] / ".brigade" / "runs" / ("batch-" + hashlib.sha256(b"req").hexdigest())
     run_dir.mkdir(parents=True)
     rc, result, _ = invoke(setup, capsys, [task("a")])
-    assert rc == 2
-    assert result["error"]["code"] == "request-unknown"
-    assert setup[1] == []
+    assert rc == 0
+    assert result["tasks"]["a"]["status"] == "completed"
+    assert len(setup[1]) == 1
 
 
 def test_timeout_retains_success_and_reports_unfinished(setup, capsys, monkeypatch):
@@ -289,3 +289,90 @@ def test_request_dispatch_lock_refuses_concurrent_retry(setup, capsys):
     assert rc == 2
     assert result["error"]["code"] == "request-busy"
     assert len(setup[1]) == 1
+
+
+@pytest.mark.parametrize("explicit_cwd", [False, True])
+def test_retry_from_git_subdirectory_uses_same_fence(setup, capsys, monkeypatch, explicit_cwd):
+    import subprocess
+
+    root = setup[0]
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".git" / "info" / "exclude").write_text("batch.json\n")
+    subdir = root / "src"
+    subdir.mkdir()
+    rc, first, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    path = root / "batch.json"
+    monkeypatch.chdir(subdir)
+    argv = ["run", "batch", str(path), "--json"]
+    if explicit_cwd:
+        argv.extend(["--cwd", str(subdir)])
+    assert cli.main(argv) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second == first
+    assert len(setup[1]) == 1
+    assert not (subdir / ".brigade" / "runs").exists()
+
+
+@pytest.mark.parametrize("failure_kind", ["network-unavailable", "transport-unavailable", "capacity-exhausted"])
+def test_batch_transport_failure_invokes_once(setup, capsys, monkeypatch, failure_kind):
+    model = Mock(return_value=agents.AgentResult(text="first failure", ok=False, failure_kind=failure_kind))
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 1, err
+    assert model.call_count == 1
+    assert result["tasks"]["a"]["status"] == "failed"
+    receipt = setup[0] / ".brigade" / "runs" / result["run_id"] / result["tasks"]["a"]["result_ref"]
+    assert json.loads(receipt.read_text())["text"] == "first failure"
+
+
+def test_observation_failure_preserves_real_worker_result(setup, capsys, monkeypatch):
+    from brigade.run_batch_execute import BatchExecution
+
+    original = BatchExecution.observe
+    observations = []
+
+    def observe(self, result):
+        observations.append(result)
+        if len(observations) == 1:
+            raise OSError("observation unavailable")
+        original(self, result)
+
+    monkeypatch.setattr(BatchExecution, "observe", observe)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    assert "observation unavailable" in err
+    assert len(observations) == 2
+    assert all(r.ok and r.text == "done" for r in observations)
+    assert result["tasks"]["a"]["status"] == "completed"
+    assert len(setup[1]) == 1
+
+
+@pytest.mark.parametrize("marker", [None, "{broken", "[]", '{"no-fingerprint": true}'])
+def test_interrupted_reservation_only_retries_missing_marker(setup, capsys, marker):
+    import hashlib
+
+    run_dir = setup[0] / ".brigade" / "runs" / ("batch-" + hashlib.sha256(b"req").hexdigest())
+    run_dir.mkdir(parents=True)
+    if marker is not None:
+        (run_dir / "batch-request.json").write_text(marker)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    if marker is None:
+        assert rc == 0, err
+        assert len(setup[1]) == 1
+    else:
+        assert rc == 2
+        assert result["error"]["code"] == "request-unknown"
+        assert not setup[1]
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_batch_final_summary_reports_task_outcomes(setup, capsys, monkeypatch, ok):
+    monkeypatch.setattr(agents, "run_agent", Mock(return_value=agents.AgentResult(text="output", ok=ok)))
+    rc, result, err = invoke(setup, capsys, [task("a"), task("b", ["a"])])
+    assert rc == (0 if ok else 1), err
+    run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
+    summary = json.loads((run_dir / "synthesis.json").read_text())["result"]
+    assert "a: completed" in summary["text"] if ok else "a: failed" in summary["text"]
+    assert "b: completed" in summary["text"] if ok else "b: skipped" in summary["text"]
+    assert summary["ok"] is ok
