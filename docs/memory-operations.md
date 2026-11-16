@@ -2463,7 +2463,7 @@ reports, never on what the model says. One adapter has a profile in v1:
   loaded instruction files, so the working directory is placed where no
   parent holds any (below).
 
-A claude seat may set `reasoning` to one of those levels. Verify passes it as `--effort` and the seat fingerprint covers it, so changing it needs a fresh probe and gate record.
+A claude seat may set `reasoning` to one of those levels. Verify passes it as `--effort` and the seat fingerprint covers it, so changing it needs a fresh probe and gate record. The init event does not report effort, so the probe shows the CLI accepted the flag, not the level it applied. `brigade run` does not pass reasoning to claude and refuses such a seat, and `brigade roster doctor` reports it as a verify-only warning. Use a seat dedicated to verify.
 
 `ollama:<model>` seats are refused with `verify_seat_not_isolated` ("ollama
 tags are mutable, and v1 has no immutable launch"). Ollama names a model only

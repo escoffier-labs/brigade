@@ -1126,3 +1126,30 @@ def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, monke
     assert report["status"] == "blocked"
     assert report["selected_seats"][0]["selection_role"] == "orchestrator"
     assert any(item["reason"] == "orchestrator-selected" for item in report["evidence"])
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "status", "detail"),
+    [
+        ("medium", "[warn]", "applies only when memory verify runs this seat"),
+        ("extreme", "[fail]", "claude does not support reasoning pins"),
+    ],
+)
+def test_roster_doctor_treats_a_claude_effort_pin_as_verify_only(
+    monkeypatch, tmp_target, capsys, reasoning, status, detail
+):
+    roster = tmp_target / ".brigade" / "roster.toml"
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    roster.write_text(
+        'orchestrator = "verify"\n'
+        "[agents.verify]\n"
+        'cli = "claude"\n'
+        'model = "claude-fable-5-2"\n'
+        f'reasoning = "{reasoning}"\n'
+        'role = "reviewer"\n'
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: None)
+    roster_cmd.doctor(tmp_target)
+    line = next(row for row in capsys.readouterr().out.splitlines() if "agent: verify reasoning" in row)
+    assert status in line
+    assert detail in line
