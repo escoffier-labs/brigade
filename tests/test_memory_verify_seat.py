@@ -185,6 +185,8 @@ def test_claude_profile_disables_every_channel_and_launches_the_canonical_binary
     assert json.loads(argv[argv.index("--settings") + 1]) == {
         "enabledPlugins": {f"{name}@builtin": False for name in seats.CLAUDE_BUILTIN_PLUGINS}
     }
+    # A rollout loads easel on some calls only, which failed whole verify runs at random.
+    assert json.loads(argv[argv.index("--settings") + 1])["enabledPlugins"]["cc-plugin-easel@builtin"] is False
     assert seat.identity[-1] == seats.hashlib.sha256(ELF).hexdigest()
     agent = seats.roster_mod.load_roster(target / ".brigade" / "roster.toml").agents["verify-propose"]
     assert seats.audience(agent) == audiences.LOCAL
@@ -365,6 +367,8 @@ def test_ollama_seats_are_refused_because_their_tags_are_mutable(target, name):
         {"tools": ["Read"]},
         {"mcp_servers": [{"name": "memory", "status": "connected"}]},
         {"plugins": [{"name": "cc-plugin-agents-md"}]},
+        # The shape a Claude CLI 2.1.325 rollout reported mid-run, before easel was switched off.
+        {"plugins": [{"name": "cc-plugin-easel", "path": "builtin", "source": "cc-plugin-easel@builtin"}]},
         {"slash_commands": ["review"]},
         {"skills": ["notes"]},
         {"agents": ["claude", "project-agent"]},
