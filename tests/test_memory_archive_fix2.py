@@ -1,5 +1,6 @@
 """Second review regressions, including real kernel crash recovery."""
 
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
 from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 
 from datetime import date

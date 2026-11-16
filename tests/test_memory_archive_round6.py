@@ -11,6 +11,7 @@ import pytest
 
 from brigade import memory_card_reads as reads, memory_lifecycle as life, memory_cmd
 from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
 from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 from tests.test_memory_lifecycle_security import ID, TODAY, old_card, cover
 

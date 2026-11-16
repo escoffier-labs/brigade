@@ -60,3 +60,24 @@ def windows_scheduler(monkeypatch):
             return run(args, *positional, **kwargs)
 
         monkeypatch.setattr(subprocess, "run", isolated)
+
+
+@pytest.fixture(autouse=True)
+def automatic_archive_test_mode(monkeypatch):
+    """Exercise the gated archive implementation with simulated verified hub coverage.
+
+    Explicitly configured hub scenarios still use the real stats validator.
+    Gate and absent-hub regressions deliberately do not import this fixture.
+    """
+    from brigade import memory_hub_client as hubc, memory_lifecycle
+
+    monkeypatch.setattr(memory_lifecycle, "AUTOMATIC_ARCHIVE_ENABLED", True)
+    real = reads.hub_last_reads
+
+    def verified_empty_hub(target, **kwargs):
+        settings = hubc.load_settings(target)
+        if not settings.enabled:
+            return {}
+        return real(target, **kwargs)
+
+    monkeypatch.setattr(reads, "hub_last_reads", verified_empty_hub)

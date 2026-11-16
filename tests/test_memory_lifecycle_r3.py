@@ -7,6 +7,7 @@ import os
 import pytest
 
 from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
 from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 
 from brigade import memory_card_reads as reads, memory_lifecycle as life, memory_review, memory_hooks

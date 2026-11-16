@@ -498,7 +498,7 @@ def test_an_unrecordable_open_returns_a_tool_error(stores, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("ledger broken")
 
-    monkeypatch.setattr(reads, "record", boom)
+    monkeypatch.setattr(reads, "_record_locked", boom)
     tools = _tools(repo)
     assert tools.call("get_card", {"path": "memory/cards/real.md"})[1] is True
     assert tools.call("search_cards", {"query": "body"})[1] is False

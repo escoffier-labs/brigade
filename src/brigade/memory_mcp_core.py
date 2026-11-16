@@ -8,6 +8,8 @@ the shape mcp_server.ToolCaller expects.
 
 from __future__ import annotations
 
+from functools import partial
+
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -100,13 +102,6 @@ def _store_cards(store: MemoryStore) -> list[Path]:
     return [path for path in memory_cmd._iter_cards(store.root, store.config) if _inside(path, store.root)]
 
 
-def _record_reads(store: MemoryStore, keys: list[str]) -> None:
-    """Count a successful retrieval as use, so memory care never retires a card an agent just read."""
-    from .memory_card_reads import record
-
-    record(store.root.expanduser().resolve(), [key for key in keys if key])
-
-
 def _read_in_store(store: MemoryStore, rel: str) -> str | None:
     candidate = (store.root / rel).resolve()
     if not candidate.is_relative_to(store.root.resolve()):
@@ -114,7 +109,9 @@ def _read_in_store(store: MemoryStore, rel: str) -> str | None:
     for path in _store_cards(store):
         if path.resolve() == candidate:
             try:
-                return read_text_nofollow(path)
+                from .memory_card_reads import read_content
+
+                return read_content(store.root.expanduser().resolve(), _posix(rel), partial(read_text_nofollow, path))
             except OSError:
                 return None
     return None
@@ -266,8 +263,6 @@ class MemoryTools:
                 continue
             text = _read_in_store(store, rel)
             if text is not None:
-                posix = _posix(rel)
-                _record_reads(store, [posix, memory_cmd.card_identity_from_text(text, posix)])
                 return text, store.origin
         return None, None
 

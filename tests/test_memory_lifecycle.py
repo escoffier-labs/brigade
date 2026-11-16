@@ -1,5 +1,6 @@
 """Unused-card lifecycle, protection, search and rollback acceptance."""
 
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
 from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 
 from datetime import date, datetime, timezone
@@ -224,7 +225,10 @@ def test_occupied_archive_skips_only_that_card(tmp_path):
     held.write_bytes(b"earlier archive\n")
     for _ in range(2):
         payload = observed_run(tmp_path, today=TODAY)
-        assert any(row["path"] == "memory/cards/occupiedwidget.md" and "occupied" in row["reason"] for row in payload["skipped"])
+        assert any(
+            row["path"] == "memory/cards/occupiedwidget.md" and "occupied" in row["reason"]
+            for row in payload["skipped"]
+        )
     assert first.exists()
     assert held.read_bytes() == b"earlier archive\n"
     assert not second.exists()

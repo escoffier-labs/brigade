@@ -13,6 +13,7 @@ from brigade import memory_care_tend as tend
 from tests.test_memory_lifecycle import card, observed_run, TODAY
 from tests.memory_read_fixtures import coverage
 from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
 from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 
 

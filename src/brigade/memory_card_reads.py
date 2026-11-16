@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import sys
@@ -200,14 +201,26 @@ def covered(ledger: ReadLedger, *, today: date, days: int) -> bool:
 
 
 def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> bool:
+    """Record use and its intent under the same lock as lifecycle moves."""
+    from .inbox_lock import held_file_lock
+    from .memory_care_journal import safe_path
+
+    if receipt_signing.workspace_key(target) is None:
+        return _record_locked(target, keys, today=today)
+    try:
+        with held_file_lock(safe_path(target, READS_REL).with_suffix(".lock"), deadline_seconds=5):
+            return _record_locked(target, keys, today=today)
+    except (OSError, ValueError):
+        _record_failure(target)
+        return False
+
+
+def _record_locked(target: Path, keys: Iterable[str], *, today: date | None = None) -> bool:
     """Persist intent before recording. Failed or interrupted writes block coverage.
 
     A subsequent successful heartbeat starts a new window after recorded errors.
     Expired pending intents reset the window before they are removed.
     """
-    from .inbox_lock import held_file_lock
-    from .memory_care_journal import safe_path
-
     today = today or _day()
     keys = tuple(keys)
     intent = f"{COVERAGE_REL}/{secrets.token_hex(16)}.json"
@@ -227,70 +240,68 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
         if _disabled(target):
             return False
         _write_json(target, intent, {"state": "pending", "day": today.isoformat()})
-        path = safe_path(target, READS_REL)
-        with held_file_lock(path.with_suffix(".lock"), deadline_seconds=5):
-            ledger = load(target)
-            limits = _coverage_policy(target)
-            failures = _failures(target)
-            errors = []
-            for pending in _pending(target):
-                if pending == intent:
-                    continue
-                malformed = False
-                try:
-                    payload = _read_json(target, pending)
-                    if not isinstance(payload, dict) or payload.get("state") not in {"error", "pending"}:
-                        raise ValueError("invalid intent state")
-                    day = date.fromisoformat(payload["day"])
-                    if day > today:
-                        raise ValueError("future intent day")
-                except (ValueError, TypeError, KeyError):
-                    malformed = True
-                if malformed:
-                    # Keep only a body-free reason. Do not copy attacker-controlled
-                    # payloads or filenames into the quarantine receipt.
-                    quarantine = hashlib.sha256(pending.encode()).hexdigest()
-                    _write_json(
-                        target,
-                        f".brigade/memory/read-coverage-quarantine/{quarantine}.json",
-                        {"reason": "malformed-intent", "day": today.isoformat()},
-                    )
-                    errors.append(pending)
-                elif payload["state"] == "error" or (today - day).days >= limits["pending_intent_max_age_days"]:
-                    errors.append(pending)
-            since = ledger.healthy_since
-            if (
-                errors
-                or failures
-                or target.resolve() in _FAILED_ROOTS
-                or since is None
-                or ledger.heartbeat is None
-                or not 0 <= (today - ledger.heartbeat).days <= limits["heartbeat_gap_allowance_days"] + 1
-            ):
-                since = today
-            days = {k: v for k, v in ledger.last_read.items() if v <= today}
-            for key in keys:
-                days[key] = max(today, days.get(key, today))
-            history = [] if since == today else _read_json(target, READS_REL)["coverage_days"]
-            history = sorted(set([*history, today.isoformat()]))
-            value = {
-                "tracking_since": min(ledger.tracking_since, today).isoformat(),
-                "healthy_since": since.isoformat(),
-                "heartbeat": today.isoformat(),
-                "coverage_days": history,
-                "last_read": {k: v.isoformat() for k, v in days.items()},
-            }
-            mac = authenticate(target, READS_REL, value)
-            if mac is None:
-                raise ValueError("workspace receipt signing key unavailable")
-            _write_json(
-                target,
-                READS_REL,
-                {**value, "mac": mac},
-            )
-            for error in [*errors, *failures]:
-                _unlink(target, error)
-            _unlink(target, intent)
+        ledger = load(target)
+        limits = _coverage_policy(target)
+        failures = _failures(target)
+        errors = []
+        for pending in _pending(target):
+            if pending == intent:
+                continue
+            malformed = False
+            try:
+                payload = _read_json(target, pending)
+                if not isinstance(payload, dict) or payload.get("state") not in {"error", "pending"}:
+                    raise ValueError("invalid intent state")
+                day = date.fromisoformat(payload["day"])
+                if day > today:
+                    raise ValueError("future intent day")
+            except (ValueError, TypeError, KeyError):
+                malformed = True
+            if malformed:
+                # Keep only a body-free reason. Do not copy attacker-controlled
+                # payloads or filenames into the quarantine receipt.
+                quarantine = hashlib.sha256(pending.encode()).hexdigest()
+                _write_json(
+                    target,
+                    f".brigade/memory/read-coverage-quarantine/{quarantine}.json",
+                    {"reason": "malformed-intent", "day": today.isoformat()},
+                )
+                errors.append(pending)
+            elif payload["state"] == "error" or (today - day).days >= limits["pending_intent_max_age_days"]:
+                errors.append(pending)
+        since = ledger.healthy_since
+        if (
+            errors
+            or failures
+            or target.resolve() in _FAILED_ROOTS
+            or since is None
+            or ledger.heartbeat is None
+            or not 0 <= (today - ledger.heartbeat).days <= limits["heartbeat_gap_allowance_days"] + 1
+        ):
+            since = today
+        days = {k: v for k, v in ledger.last_read.items() if v <= today}
+        for key in keys:
+            days[key] = max(today, days.get(key, today))
+        history = [] if since == today else _read_json(target, READS_REL)["coverage_days"]
+        history = sorted(set([*history, today.isoformat()]))
+        value = {
+            "tracking_since": min(ledger.tracking_since, today).isoformat(),
+            "healthy_since": since.isoformat(),
+            "heartbeat": today.isoformat(),
+            "coverage_days": history,
+            "last_read": {k: v.isoformat() for k, v in days.items()},
+        }
+        mac = authenticate(target, READS_REL, value)
+        if mac is None:
+            raise ValueError("workspace receipt signing key unavailable")
+        _write_json(
+            target,
+            READS_REL,
+            {**value, "mac": mac},
+        )
+        for error in [*errors, *failures]:
+            _unlink(target, error)
+        _unlink(target, intent)
         _FAILED_ROOTS.discard(target.resolve())
         return True
     except (OSError, ValueError, TypeError, AttributeError):
@@ -303,14 +314,35 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
         return False
 
 
-def record_content(target: Path, text: str, rel: str) -> None:
-    """Record an explicit content open before returning its content to the caller."""
+def read_content(target: Path, rel: str, reader: Callable[[], str]) -> str:
+    """Record and re-read under the ledger lock shared with archive moves.
+
+    A failed lock or recorder still permits retrieval, but leaves a failure
+    veto. The hub anchor in #2620 is required before local coverage authorizes
+    archiving in production.
+    """
+    from .inbox_lock import held_file_lock
+    from .memory_care_journal import safe_path
     from .memory_cmd import card_identity_from_text
 
-    try:
-        record(target, [rel, card_identity_from_text(text.lstrip("\ufeff").replace("\r\n", "\n"), rel)])
-    except (OSError, ValueError):
-        _record_failure(target)
+    if receipt_signing.workspace_key(target) is None:
+        text = reader()
+        _record_locked(target, [rel, card_identity_from_text(text, rel)])
+        return text
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(held_file_lock(safe_path(target, READS_REL).with_suffix(".lock"), deadline_seconds=5))
+        except (OSError, ValueError):
+            _record_failure(target)
+            return reader()
+        text = reader()
+        _record_locked(target, [rel, card_identity_from_text(text.lstrip("\ufeff").replace("\r\n", "\n"), rel)])
+        return reader()
+
+
+def record_content(target: Path, text: str, rel: str) -> None:
+    """Record already-delivered remote or restored content, without authorizing moves."""
+    read_content(target, rel, lambda: text)
 
 
 def last_read(ledger: ReadLedger, keys: Iterable[str], *, today: date | None = None) -> date | None:
@@ -326,7 +358,7 @@ HUB_PAGE_GAP_SECONDS = 1.1
 def hub_last_reads(
     target: Path, *, unused_after_days: int = 120, sleep: Callable[[float], None] = time.sleep
 ) -> dict[str, date] | None:
-    """Last read day per hub card, or ``None`` when a configured hub could not be read in full.
+    """Last read day per hub card, or ``None`` without verifiable hub coverage.
 
     ``None`` is not "nobody read anything": callers must not retire on use grounds without it.
     The hub allows one read-stat request per second per principal, so pages are paced.
@@ -334,7 +366,7 @@ def hub_last_reads(
     try:
         settings = hubc.load_settings(target)
         if not settings.enabled or not settings.scope:
-            return {}
+            return None
         client = hubc.client_for(settings)
         after = None
         result = {}

@@ -21,6 +21,15 @@ from .card_identity import card_identity
 from .memory_log_retractions import retraction
 
 
+# Workspace files can only veto. Enable archive moves only after the hub anchor
+# in escoffier-labs/brigade#2620 can detect ledger rollback and erased failures.
+AUTOMATIC_ARCHIVE_ENABLED = False
+ARCHIVE_DISABLED_REASON = "automatic archive awaits hub anchor (#2620)"
+# Match the shipped defaults. Workspace edits cannot authorize earlier edges.
+MIN_STALE_AFTER_DAYS = 30
+MIN_ARCHIVE_AFTER_DAYS = 90
+
+
 def policy(target: Path) -> dict[str, Any]:
     defaults = Path(__file__).parent / "templates/memory/lifecycle-policy.json"
     values = json.loads(defaults.read_text(encoding="utf-8"))
@@ -33,6 +42,8 @@ def policy(target: Path) -> dict[str, Any]:
         if type(value) is not type(default) or (type(value) is int and value < 1):
             raise ValueError(f"invalid lifecycle.{key}")
         values[key] = value
+    values["stale_after_days"] = max(values["stale_after_days"], MIN_STALE_AFTER_DAYS)
+    values["archive_after_days"] = max(values["archive_after_days"], MIN_ARCHIVE_AFTER_DAYS)
     if values["archive_after_days"] <= values["stale_after_days"]:
         raise ValueError("lifecycle archive window must exceed stale window")
     return values
@@ -44,6 +55,9 @@ def _mentioned(text: str, rel: str, card_id: str, aliases: tuple[str, ...] = (),
     for name in names:
         if not name:
             continue
+        # Absolute runbook paths protect any component-boundary suffix.
+        if "/" in name and re.search(r"(?<![\w./-])/(?:[^\r\n/]+/)*" + re.escape(name) + r"(?![\w./-])", text):
+            return True
         path_shaped = "/" in name or name.endswith(".md")
         endings = r"(?![\w./-])" if path_shaped else r"(?![\w/-]|\.[\w./-])"
         candidates = (name, "./" + name) if path_shaped else (name,)
@@ -359,11 +373,12 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
     opens = memory_review._opens(target)
     hub_reads = memory_card_reads.hub_last_reads(target, unused_after_days=rules["archive_after_days"])
     if hub_reads is None:
-        return {**payload, "blocked": "hub read coverage unavailable"}
+        payload["blocked"] = "hub read coverage unavailable"
     if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
         return {**payload, "blocked": "local read coverage incomplete"}
     last_use = {
-        rel: _last_use(target, rel, text, ledger, signals, opens, hub_reads, today=today) for rel, text in cards.items()
+        rel: _last_use(target, rel, text, ledger, signals, opens, hub_reads or {}, today=today)
+        for rel, text in cards.items()
     }
     # An unused card cannot confer use on another unused card through a cycle.
     active_cards = {
@@ -379,7 +394,7 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
         if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
             return {**payload, "blocked": "local read coverage incomplete"}
         last_use = {
-            rel: _last_use(target, rel, text, ledger, signals, opens, hub_reads, today=today)
+            rel: _last_use(target, rel, text, ledger, signals, opens, hub_reads or {}, today=today)
             for rel, text in cards.items()
         }
         refs.update(
@@ -446,8 +461,14 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
             for state in states:
                 if state == previous or len(payload["transitions"]) >= rules["max_transitions_per_run"]:
                     continue
-                # A reader waiting on this lock has already persisted its intent.
-                # Recheck before each edge so it blocks the rest of this pass.
+                if state == "archived" and (not AUTOMATIC_ARCHIVE_ENABLED or hub_reads is None):
+                    reason = (
+                        ARCHIVE_DISABLED_REASON if not AUTOMATIC_ARCHIVE_ENABLED else "hub read coverage unavailable"
+                    )
+                    payload["skipped"].append({"path": rel, "reason": reason})
+                    break
+                # Failure markers can arrive without the lock and only veto.
+                # Successful readers hold this lock until their final content read.
                 if not memory_card_reads.covered(
                     memory_card_reads.load(target),
                     today=today,
