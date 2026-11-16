@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs
 
+from . import fleet_form_fields as ff
 from . import fleet_policy, fleet_policy_pr_rules
 
 _MAX_FIELDS = 1024
@@ -233,16 +234,72 @@ def _seat_record(existing: Mapping[str, Any] | None, submission: Submission) -> 
     bindings_raw = submission.value("bindings")
     if bindings_raw is not None:
         record["bindings"] = _json_field(bindings_raw, "seat bindings")
-    if record.get("provider") is None:
-        raise DocumentError("a seat needs a provider")
-    if record.get("model") is None:
-        raise DocumentError("a seat needs an exact model id")
+    if blank := ff.missing(SEAT_FORM, {name: str(record.get(name) or "") for name in ("provider", "model")}):
+        raise DocumentError(blank[0].error)
     return {
         key: value for key, value in record.items() if value is not None or key in SEAT_TEXT_FIELDS + SEAT_INT_FIELDS
     }
 
 
 NEW_TARGET = "@new"
+
+_CONDITION_LABELS = fleet_policy_pr_rules.CONDITION_LABELS
+# One declaration for the PR rule form. The page renders its markers and `required`
+# attributes from it, and `_pr_rules_document` refuses a blank required field from it.
+# The when_* and act_* fields are needed only for some conditions or actions, so they are
+# conditional: the core validator in fleet_policy_pr_rules enforces them.
+REASON = ff.optional("reason")
+PR_RULE_FORM = ff.form(
+    ff.required("id", "a PR rule needs an id"),
+    ff.required("title", "a PR rule needs a title"),
+    ff.required("condition", "a PR rule needs a condition"),
+    ff.optional("when_paths"),
+    ff.conditional("when_reviewer", f"for the condition \u201c{_CONDITION_LABELS['review_quota_exhausted']}\u201d"),
+    ff.conditional("when_label", f"for the condition \u201c{_CONDITION_LABELS['label_present']}\u201d"),
+    ff.conditional("when_repos", f"for the condition \u201c{_CONDITION_LABELS['repository']}\u201d"),
+    ff.optional("act_kind"),
+    ff.conditional("act_reviewer", "for reviewer actions"),
+    ff.conditional("act_value", "for label and note actions"),
+    ff.conditional("act_count", "for a limit action"),
+    ff.conditional("act_period", "for a limit action"),
+    ff.optional("scope_repos"),
+    ff.optional("why"),
+    ff.optional("enabled"),
+    REASON,
+)
+
+# The other policy forms. Only a seat's provider and model are required: every other
+# leaf is blank-to-inherit or has a default in fleet_policy.
+_ROLES = tuple(f"role_{role}" for role in POLICY_ROLES)
+_DATA = ("data_allow_training", "data_allow_free", "data_retention")
+_EXECUTION = ("execution_machine", "execution_concurrency", "execution_timeout_seconds")
+
+
+def _optionals(*names: str) -> tuple[ff.Field, ...]:
+    return tuple(ff.optional(name) for name in names)
+
+
+DEFAULTS_FORM = ff.form(*_optionals(*_ROLES, *_DATA, *_EXECUTION), REASON)
+SEAT_FORM = ff.form(
+    ff.required("provider", "a seat needs a provider"),
+    ff.required("model", "a seat needs an exact model id"),
+    *_optionals(
+        *(
+            name
+            for name in (*SEAT_TEXT_FIELDS, *SEAT_INT_FIELDS, *SEAT_LIST_FIELDS, *SEAT_BOOL_FIELDS)
+            if name not in ("provider", "model")
+        ),
+        "bindings",
+    ),
+    REASON,
+)
+CONSUMER_FORM = ff.form(*_optionals("reload", "coverage", "adapter_version", "notes", *_ROLES, "seat_bindings"), REASON)
+REPOSITORY_FORM = ff.form(
+    *_optionals("privacy", "owner", "eligible_machines", "notes"),
+    *_optionals(*(f"patch_{name}" for name in (*_DATA[:3], "execution_concurrency", "execution_machine"))),
+    REASON,
+)
+ROLLBACK_FORM = ff.form(ff.required("to_revision", "rollback needs an integer revision"), REASON)
 
 
 def _split_items(raw: str) -> list[str]:
@@ -297,7 +354,7 @@ def _pr_rules_document(document: dict[str, Any], submission: Submission) -> dict
     is_new = target == NEW_TARGET
     rule_id = (fields.get("id") or "").strip() if is_new else target
     if not rule_id:
-        raise DocumentError("a PR rule needs an id")
+        raise DocumentError(PR_RULE_FORM["id"].error)
     index = next((i for i, rule in enumerate(rules) if rule["id"] == rule_id), None)
     if is_new and index is not None:
         raise DocumentError(f"PR rule {rule_id!r} already exists")
@@ -311,6 +368,8 @@ def _pr_rules_document(document: dict[str, Any], submission: Submission) -> dict
             raise DocumentError("toggle must be enable or disable")
         rules[index]["enabled"] = toggle == "enable"
     else:
+        if blank := ff.missing(PR_RULE_FORM, {**fields, "id": rule_id}):
+            raise DocumentError(blank[0].error)
         rule = {
             "id": rule_id,
             "title": fields.get("title", "").strip(),

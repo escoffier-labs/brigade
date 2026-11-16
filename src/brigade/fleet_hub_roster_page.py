@@ -22,7 +22,9 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from . import fleet_command_deck, fleet_hub, fleet_hub_model_roster, fleet_hub_preference, fleet_model_roster
+from . import fleet_form_fields as ff
 from . import fleet_hub_policy, fleet_policy_page, run_preference
+from .fleet_policy_form import CONSUMER_FORM, DEFAULTS_FORM
 from .fleet_policy_form import KEEP_CURRENT as KEEP_CURRENT
 
 CSRF_PURPOSE = b"brigade.fleet-roster-form.v1"
@@ -32,6 +34,9 @@ ROLES = run_preference.ROLE_FIELDS
 CONSUMERS = ("brigade-run", "t3-fleet")
 UPDATED_BY = "deck-form"
 _MAX_FIELDS = 512
+# The legacy roster form: every control is a "(unset)" dropdown, an on/off box, or free notes, so
+# nothing here is required. A group is one name for all the controls with that prefix.
+ROSTER_FORM = ff.form(*(ff.optional(group) for group in ("role", "seat", "cloud", "default", "notes")))
 
 
 class FormError(ValueError):
@@ -262,6 +267,11 @@ def _esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
+def _cap(text: str, field: ff.Field, *, live: bool = True) -> str:
+    """Label text with its marker, or plain text when the control is a read-only value."""
+    return ff.caption(text, field) if live else _esc(text)
+
+
 def _select(name: str, current: str, seats: tuple[SeatRow, ...], *, editable: bool, binding: str | None = None) -> str:
     """One ``<select>``: ``(unset)`` first, usable seats, then an optgroup of the rest."""
     if not editable:
@@ -350,7 +360,7 @@ ADMISSION_HINT = (
 def _authoritative_roles_panel(view: RosterView, policy_csrf: str) -> str:
     """The same Roles dropdowns, submitting one scoped ``defaults.roles`` preview."""
     cells = "".join(
-        f"<label>{_esc(fleet_policy_page.ROLE_LABELS.get(role, role))} ({_esc(role)})"
+        f"<label>{_cap(f'{fleet_policy_page.ROLE_LABELS.get(role, role)} ({role})', DEFAULTS_FORM[f'role_{role}'])}"
         f"{_policy_select(f'field.role_{role}', view.policy.roles.get(role) or '', view.policy.seats, retired_seats=view.policy.retired_seats)}</label>"
         for role in ROLES
     )
@@ -374,7 +384,7 @@ def _authoritative_admission_panel(view: RosterView, policy_csrf: str) -> str:
     blocks = "".join(
         '<form method="post" action="/deck/policy" class="roster-form">'
         + _policy_hidden("consumer", consumer, view.policy.revision, policy_csrf)
-        + f"<label>{_esc(consumer)}"
+        + f"<label>{_cap(consumer, CONSUMER_FORM[f'role_{fleet_policy_page.ADMISSION_ROLE}'])}"
         + _policy_select(
             f"field.role_{fleet_policy_page.ADMISSION_ROLE}",
             view.policy.admission_defaults.get(consumer) or "",
@@ -590,12 +600,12 @@ def render(
         legacy.append(f'<input type="hidden" name="csrf" value="{_esc(csrf)}">')
     if not authoritative:
         role_cells = "".join(
-            f"<label>{_esc(fleet_policy_page.ROLE_LABELS.get(role, role))} ({_esc(role)})"
+            f"<label>{_cap(f'{fleet_policy_page.ROLE_LABELS.get(role, role)} ({role})', ROSTER_FORM['role'], live=legacy_editable)}"
             f"{_select(f'role.{role}', roles.get(role) or '', view.seats, editable=legacy_editable)}</label>"
             for role in ROLES
         )
         notes_control = (
-            f'<label>notes<textarea name="notes" maxlength="240" rows="2">{_esc(notes)}</textarea></label>'
+            f'<label>{_cap("notes", ROSTER_FORM["notes"])}<textarea name="notes" maxlength="240" rows="2">{_esc(notes)}</textarea></label>'
             if legacy_editable
             else (f"<p>{'Legacy notes' if view.activation.active else 'Notes'}: {_esc(notes)}</p>" if notes else "")
         )
@@ -651,7 +661,7 @@ def render(
                     "T3 instance": row.t3_instance_id,
                 }
             )
-            + f"<label>Enabled {box}</label>",
+            + f"<label>{_cap('Enabled', ROSTER_FORM['seat'])} {box}</label>",
             status=row.provider + "/" + row.model,
         )
     # 3. cloud lanes
@@ -661,12 +671,12 @@ def render(
             cloud_row.provider,
             explorer.hero(cloud_row.provider, cloud_row.circuit_state)
             + explorer.facts({"Limit": cloud_row.limit, "Hosted": "yes" if cloud_row.hosted else "no"})
-            + f"<label>Enabled {_checkbox(f'cloud.{cloud_row.provider}', cloud_row.provider in cloud_on, editable=editable)}</label>",
+            + f"<label>{_cap('Enabled', ROSTER_FORM['cloud'])} {_checkbox(f'cloud.{cloud_row.provider}', cloud_row.provider in cloud_on, editable=editable)}</label>",
             status="Cloud lanes",
         )
     # 4. admission fallback seat (the old "consumer defaults")
     default_cells = "".join(
-        f"<label>{_esc(consumer)}{_select(f'default.{consumer}', defaults.get(consumer) or '', view.seats, editable=legacy_editable, binding='brigade_cli' if consumer == 'brigade-run' else 't3_instance_id')}</label>"
+        f"<label>{_cap(consumer, ROSTER_FORM['default'], live=legacy_editable)}{_select(f'default.{consumer}', defaults.get(consumer) or '', view.seats, editable=legacy_editable, binding='brigade_cli' if consumer == 'brigade-run' else 't3_instance_id')}</label>"
         for consumer in CONSUMERS
     )
     if not authoritative:
