@@ -656,7 +656,14 @@ def _reflect(
                 tables[lane][name][key][1] = now
 
         for position, (digest, ops) in enumerate(selected):
+            anchoring = all(op["type"] == "anchor_blocks" for op in ops)
             remembered_id = previous.get(digest, {}).get("proposal_id")
+            if anchoring and not remembered_id:
+                quota = client.call("status").get("proposal_quota", {})
+                pending, cap = quota.get("pending"), quota.get("pending_per_principal")
+                if type(pending) is not int or type(cap) is not int or pending >= max(0, cap - 4):
+                    skipped["anchor_quota_reserve"] = skipped.get("anchor_quota_reserve", 0) + 1
+                    continue
             sent = (
                 Submitted(OPENED, proposal_id=remembered_id)
                 if remembered_id and apply
@@ -705,20 +712,23 @@ def _reflect(
                     proposal["automatic"] = attempt(
                         target, client, sent.proposal_id, ops, report["log_epoch"], pacer=pacer
                     )
-                    automatic = proposal["automatic"]
-                    # This is only a veto. The hub still authorizes every apply.
-                    # Pins expire this veto as soon as the head revision changes.
-                    if all(op["type"] == "anchor_blocks" for op in ops) and (
-                        automatic.get("reason") == "tier_requires_review"
-                        or any(
-                            check.get("gate") == "candidate"
-                            and check.get("state") == "held"
-                            and check.get("code") == "tier_requires_review"
-                            for check in automatic.get("checks", [])
-                        )
-                    ):
-                        previous[digest]["anchor_review_only"] = True
-                        _save(target, state)
+                if (
+                    anchoring
+                    and sent.proposal_id is not None
+                    and proposal.get("automatic", {}).get("state") != "applied"
+                ):
+                    closed = client.call(
+                        "decide",
+                        proposal_id=sent.proposal_id,
+                        decision="reject",
+                        base_epoch=report["log_epoch"],
+                        client_event_id=hubc.event_id(),
+                    )
+                    if closed.get("state") != "rejected":
+                        raise ReflectError("hub_anchor_withdraw_failed", "anchoring proposal was not closed")
+                    proposal["withdrawal"] = {"state": "rejected", "reason": "anchor_withdrawn"}
+                    previous[digest]["anchor_review_only"] = True
+                    _save(target, state)
                 proposals.append(proposal)
         if served_any:
             state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE

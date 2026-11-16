@@ -9,9 +9,34 @@ from tests.test_hub_reflect_links import card_text, head, successor_pair, unit
 from tests.test_memory_reflect_hub import setup as setup, run, writes
 
 
+@pytest.fixture(autouse=True)
+def automatic_heads(setup, monkeypatch):
+    # Most tests here exercise anchoring mechanics on eligible replica heads.
+    _, hub, _ = setup
+    original = hub.do_card
+
+    def card(body):
+        status, payload = original(body)
+        if status == 200:
+            payload["card"]["auto_authored"] = not body["card_id"].startswith("human")
+        return status, payload
+
+    monkeypatch.setattr(hub, "do_card", card)
+    status = hub.do_status
+
+    def quota(body):
+        code, payload = status(body)
+        payload["proposal_quota"] = {"pending": 0, "pending_per_principal": 32}
+        return code, payload
+
+    monkeypatch.setattr(hub, "do_status", quota)
+    monkeypatch.setattr(hub, "do_decide", lambda body: (200, {"state": "rejected"}), raising=False)
+
+
 def test_non_clean_non_live_and_unverifiable_cards_are_skipped():
     heads = [head("a", "Claim.", state="live"), head("b", "Other.", scan="blocked", state="live")]
     heads += [head("c", "Retired.", state="retired"), head("d", "Unknown state.")]
+    heads[0]["auto_authored"] = True
     [[op]] = anchors.ops(heads)
     assert op["card_id"] == "a"
     assert anchors.coverage(heads)["clean_live_cards"] == 1
@@ -64,6 +89,7 @@ def test_hub_classifier_shared_table():
     for case in cases:
         assert [block.text for block in anchors.blocks(case["text"])] == case["blocks"], case["name"]
         candidate = head(case["name"], case["text"], state="live")
+        candidate["auto_authored"] = True
         missing = any(not anchors.suffix(block) for block in case["blocks"])
         assert bool(anchors.ops([candidate])) == missing, case["name"]
         assert anchors.coverage([candidate])["fraction"] == int(not missing), case["name"]
@@ -153,14 +179,14 @@ def test_partly_anchored_card_stays_covered_after_revision_change():
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
     reason="safe directory descriptors unavailable",
 )
-def test_held_anchors_count_deferred_for_limit_and_budget(setup, capsys, monkeypatch, limit, budget, deferred):
+def test_unapplied_anchors_count_deferred_for_limit_and_budget(setup, capsys, monkeypatch, limit, budget, deferred):
     from brigade import memory_reflect_policy as policy
 
     target, hub, _ = setup
     hub.cards.clear()
+    hub.events.clear()
     for i in range(4):
         hub._commit("card.put", "fleet", f"unique-{i}", card_text(f"Unique {i}.", None), "live", str(i))
-    assert run(target, capsys, "run")[0] == 0
     policy.set_enabled(target, True)
     monkeypatch.setattr(policy, "attempt", lambda *args, **kwargs: {"state": "pending"})
     monkeypatch.setattr(anchors, "MAX_PROPOSALS", budget)
@@ -174,11 +200,12 @@ def test_held_anchors_count_deferred_for_limit_and_budget(setup, capsys, monkeyp
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
     reason="safe directory descriptors unavailable",
 )
-def test_human_anchor_holds_do_not_starve_automated_heads(setup, capsys, monkeypatch):
+def test_human_heads_do_not_starve_automated_heads(setup, capsys, monkeypatch):
     from brigade import memory_reflect_policy as policy
 
     target, hub, _ = setup
     hub.cards.clear()
+    hub.events.clear()
     for i in range(anchors.MAX_PROPOSALS + 1):
         hub._commit("card.put", "fleet", f"human-{i:02}", card_text(f"Human claim {i}.", None), "live", str(i))
     for i in range(2):
@@ -186,29 +213,37 @@ def test_human_anchor_holds_do_not_starve_automated_heads(setup, capsys, monkeyp
     policy.set_enabled(target, True)
     attempted = []
 
-    def attempt(target, client, proposal_id, ops, epoch, **kwargs):
-        if ops[0]["type"] != "anchor_blocks":
-            return {"state": "pending"}
+    opened_ops = {}
+    propose = hub.do_propose
+
+    def opened(body):
+        code, payload = propose(body)
+        opened_ops[payload["proposal_id"]] = body["ops"]
+        return code, payload
+
+    def auto_apply(body):
+        ops = opened_ops[body["proposal_id"]]
         ident = ops[0]["card_id"]
         attempted.append(ident)
         if ident.startswith("human"):
-            return {
+            return 200, {
                 "state": "pending",
                 "reason": "auto_apply_held",
-                "checks": [{"gate": "candidate", "state": "held", "code": "tier_requires_review"}],
+                "preflight": {"checks": [{"gate": "candidate", "state": "held", "code": "tier_requires_review"}]},
             }
         text = hub.cards[("fleet", ident)]["text"].replace(".\n", ". ^c-abcdef\n")
         hub._commit("proposal.apply", "fleet", ident, text, "live", ident)
-        return {"state": "applied", "checks": []}
+        return 200, {"state": "applied", "preflight": {"checks": []}}
 
-    monkeypatch.setattr(policy, "attempt", attempt)
+    monkeypatch.setattr(hub, "do_propose", opened)
+    monkeypatch.setattr(hub, "do_auto_apply", auto_apply, raising=False)
     for _ in range(3):
         assert run(target, capsys, "run", "--apply", "--limit", "100")[0] == 0
     assert attempted.count("robot-0") == attempted.count("robot-1") == 1
-    assert all(attempted.count(f"human-{i:02}") == 1 for i in range(anchors.MAX_PROPOSALS + 1))
+    assert all(attempted.count(f"human-{i:02}") == 0 for i in range(anchors.MAX_PROPOSALS + 1))
     hub._commit("card.put", "fleet", "human-00", card_text("Changed human claim.", None), "live", "changed")
     assert run(target, capsys, "run", "--apply", "--limit", "100")[0] == 0
-    assert attempted.count("human-00") == 2
+    assert attempted.count("human-00") == 0
 
 
 @pytest.mark.skipif(
@@ -264,3 +299,102 @@ def test_trailing_whitespace_anchors_support_link_and_near_reflection(whitespace
     assert "near_missing_pin" not in skipped
     assert operation["block_id"] == "c-bbbbbb"
     assert operation["expected_block_hash"] == delta.blocks(pair[1]["text"])[0].sha256
+
+
+def test_human_heads_preserve_repair_quota_across_runs(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    pending = {}
+    original_card = hub.do_card
+
+    def card(body):
+        status, payload = original_card(body)
+        if status == 200:
+            payload["card"]["auto_authored"] = False
+        return status, payload
+
+    def propose(body):
+        from brigade import memory_hub_client as hubc
+
+        if len(pending) >= 32:
+            return 429, {"code": "memory_proposal_principal_quota"}
+        ident = hubc.event_id()
+        pending[ident] = body["ops"]
+        return 201, {"proposal_id": ident, "state": "pending"}
+
+    monkeypatch.setattr(hub, "do_card", card)
+    monkeypatch.setattr(hub, "do_propose", propose)
+    for i in range(40):
+        hub._commit("card.put", "fleet", f"human-{i:02}", card_text(f"Unique claim {i}.", None), "live", str(i))
+    for _ in range(3):
+        assert run(target, capsys, "run", "--limit", "100")[0] == 0
+    assert not pending
+    for ident, anchor in (("duplicate-a", "c-aaaaaa"), ("duplicate-b", "c-bbbbbb")):
+        hub._commit("card.put", "fleet", ident, card_text("Same claim.", anchor), "live", ident)
+    assert run(target, capsys, "run", "--limit", "100")[0] == 0
+    assert [ops[0]["type"] for ops in pending.values()] == ["merge_exact_duplicates"]
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_history_strips_anchor_before_final_newline(ending):
+    from brigade.memory_proposal_v2_ops import _history
+
+    assert _history("New.\n", "Old. ^c-abcdef" + ending) == "New.\n\npreviously Old.\n"
+
+
+def test_anchor_quota_reserves_four_repair_slots(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    hub._commit("card.put", "fleet", "robot", card_text("Unique.", None), "live", "robot")
+    status = hub.do_status
+
+    def full(body):
+        code, payload = status(body)
+        payload["proposal_quota"] = {"pending": 28, "pending_per_principal": 32}
+        return code, payload
+
+    monkeypatch.setattr(hub, "do_status", full)
+    code, report = run(target, capsys, "run", "--limit", "100")
+    assert code == 0
+    assert report["skipped_reasons"]["anchor_quota_reserve"] == 1
+    assert [call["ops"][0]["type"] for call in writes(hub)] == ["merge_exact_duplicates"]
+
+
+def test_real_hold_reply_suppresses_revision_and_selects_fresh_head(setup, capsys, monkeypatch):
+    import json
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    for ident in ("robot-a", "robot-b"):
+        hub._commit("card.put", "fleet", ident, card_text(f"Unique {ident}.", None), "live", ident)
+    policy.set_enabled(target, True)
+    held_checks = [{"gate": "candidate", "state": "held", "code": "tier_requires_review"}]
+    # proposals::reply exports a hold through preflight, with no auto_apply_gates.
+    monkeypatch.setattr(
+        hub,
+        "do_auto_apply",
+        lambda body: (
+            200,
+            {
+                "state": "pending",
+                "reason": "auto_apply_held",
+                "preflight": {"checks": held_checks},
+            },
+        ),
+        raising=False,
+    )
+    code, first = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert first["proposals"][0]["automatic"]["checks"] == held_checks
+    assert first["ops"][0]["card_id"] == "robot-a"
+    assert first["proposals"][0]["withdrawal"]["reason"] == "anchor_withdrawn"
+    state = json.loads((target / ".brigade/memory/reflect/schedule.json").read_text())
+    assert any(record.get("anchor_review_only") for record in state["submissions"].values())
+    code, second = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert second["ops"][0]["card_id"] == "robot-b"
+    assert second["skipped_reasons"]["anchor_review_only"] == 1
+    closed = [call for call in writes(hub) if call["action"] == "decide"]
+    assert len(closed) == 2 and all(call["decision"] == "reject" for call in closed)

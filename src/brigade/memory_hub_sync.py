@@ -32,7 +32,7 @@ CONFLICT_CODES = {
     "memory_client_event_conflict",
 }
 # Card metadata a head keeps beside its text. Replicas pulled before S18 lack all of it.
-SCAN_FIELDS = ("state", "scan_state", "writer", "updated_at")
+SCAN_FIELDS = ("state", "scan_state", "writer", "updated_at", "auto_authored")
 HEAD_KINDS = {"card.put", "card.import", "card.retire", "card.trust", "proposal.apply", "proposal.rollback"}
 
 

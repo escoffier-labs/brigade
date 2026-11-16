@@ -161,7 +161,7 @@ def attempt(
                 "state": result.get("state")
                 if result.get("state") in ("pending", "applied", "rejected")
                 else "pending",
-                "checks": _checks(result.get("auto_apply_gates")),
+                "checks": _checks(hubc.obj(result.get("preflight")).get("checks", result.get("auto_apply_gates"))),
                 "reason": _code(result.get("reason")),
             }
         except hubc.HubRefusal as exc:

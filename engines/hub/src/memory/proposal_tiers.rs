@@ -80,6 +80,20 @@ fn merge_metadata<'a>(text: &'a str, excluded: &[&str]) -> Option<Vec<&'a str>> 
 
 /// Proof is reconstructed from the current hub blob and writer provenance.
 /// No candidate-supplied evidence, text or provenance can establish it.
+// This is a derived read fact, never a caller-provided authorization input.
+pub(super) fn auto_authored<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    id: &str,
+    revision: i64,
+) -> rusqlite::Result<bool> {
+    let rows = tx.query("SELECT e.payload FROM memory_cards c JOIN memory_events e ON e.scope=c.scope AND e.card_id=c.card_id AND e.revision=c.revision AND e.content_hash=c.content_hash AND e.principal=c.writer WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND e.kind='proposal.apply'", &[ops::t(scope), ops::t(id), rusqlite::types::Value::Integer(revision)])?;
+    Ok(rows.iter().any(|row| {
+        serde_json::from_str::<Json>(&ops::s(&row[0]))
+            .is_ok_and(|payload| payload["decision_mode"] == "automatic")
+    }))
+}
+
 pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
     let Some(operations) = body["ops"].as_array().filter(|o| !o.is_empty()) else {
         return Ok(false);
@@ -126,7 +140,10 @@ pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite:
             return Ok(false);
         };
         let payload = serde_json::from_str::<Json>(&ops::s(&row[1])).unwrap_or(Json::Null);
-        if ops::s(&row[0]) != "proposal.apply" || payload["decision_mode"] != "automatic" {
+        if ops::s(&row[0]) != "proposal.apply"
+            || payload["decision_mode"] != "automatic"
+            || !auto_authored(tx, scope, id, head.revision)?
+        {
             return Ok(false);
         }
         let rusqlite::types::Value::Blob(bytes) = &row[2] else {

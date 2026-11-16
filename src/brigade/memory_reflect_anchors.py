@@ -86,7 +86,7 @@ def clean_live(head: dict[str, Any]) -> bool:
 def ops(heads: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     proposals = []
     for head in sorted(heads, key=lambda h: (h["scope"], h["card_id"])):
-        if not clean_live(head):
+        if not clean_live(head) or head.get("auto_authored") is not True:
             continue
         try:
             card_blocks = blocks(head["text"])

@@ -247,18 +247,16 @@ def test_workspace_cannot_redirect_credentials(setup, capsys):
     assert hub.calls == []
 
 
-def test_unpinned_cards_get_anchoring_proposals_before_duplicate_repair(setup, capsys):
+def test_unpinned_human_cards_are_not_proposed_for_anchoring(setup, capsys):
     target, hub, _ = setup
     for ident in ("a", "b"):
         hub._commit("card.put", "fleet", ident, "Same claim.\n", "live", hubc.event_id())
-    for attempt in range(4):
+    for _attempt in range(4):
         code, report = run(target, capsys, "run")
         assert code == 0
-        assert report["skipped_reasons"] == (
-            {"missing_pin": 1} if attempt == 0 else {"missing_pin": 1, "already_proposed": 2}
-        )
+        assert report["skipped_reasons"] == {"missing_pin": 1}
         assert not report["schedule"]["paused"]
-    assert [call["ops"][0]["type"] for call in writes(hub)] == ["anchor_blocks", "anchor_blocks"]
+    assert writes(hub) == []
 
 
 def test_duplicate_comparison_preserves_opaque_whitespace(setup, capsys):

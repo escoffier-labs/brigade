@@ -538,7 +538,9 @@ pub fn apply(
         return Ok(r);
     }
     let (scope, right) = p.action.requirement();
-    if !auth::has_right(tx, &p.credential, scope, right)? {
+    // Rejections receive the exact scoped review or own-anchor reflect check below.
+    let rejection = matches!(&p.action, Action::Proposal(c) if c.name() == "decide" && c.request["decision"] == "reject");
+    if !rejection && !auth::has_right(tx, &p.credential, scope, right)? {
         return Ok(error(
             403,
             "memory_grant_missing",

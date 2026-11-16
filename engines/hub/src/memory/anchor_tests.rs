@@ -39,6 +39,7 @@ async fn human_anchoring_is_review_only_and_rollback_restores_exact_bytes() {
     let original = "---\nevidence: []\n---\nSee [[missing]].\n\n- Keep this. ^c-abcdef\n";
     let put = h.put(ADMIN_TOKEN, "fleet", "a", None, original).await;
     let before = card(&h, "fleet", "a").await;
+    assert_eq!(before["auto_authored"], false);
     let operation =
         json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)});
     let opened = submit(&h, ADMIN_TOKEN, vec![operation]).await;
@@ -148,6 +149,7 @@ async fn anchor_ready(token: &str) -> (Hub, Json) {
     )
     .unwrap();
     let current = card(&h, "fleet", "a").await;
+    assert_eq!(current["auto_authored"], token == AGENT_TOKEN);
     let opened = submit(&h, ADMIN_TOKEN, vec![json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":current["revision"]})]).await;
     assert_eq!(opened.status, 201, "{opened:?}");
     super::retrieval_eval_tests::record_current(&h).await;
@@ -209,6 +211,18 @@ async fn human_anchoring_requires_review_and_live_authorship_is_rechecked() {
             .any(|c| c["code"] == "tier_requires_review"),
         "{report:?}"
     );
+    let automatic = h
+        .call(ADMIN_TOKEN, attestation_tests::auto_request(&h, &id).await)
+        .await;
+    assert_eq!(automatic.body["reason"], "auto_apply_held");
+    assert!(
+        automatic.body["preflight"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["code"] == "tier_requires_review")
+    );
+    assert!(automatic.body.get("auto_apply_gates").is_none());
     let (h, id) = anchor_ready_origin(AGENT_TOKEN, Some("interactive")).await;
     let report = attestation_tests::report(&h, &id).await;
     assert!(
@@ -359,4 +373,45 @@ async fn anchor_no_delta_has_stable_code_only_for_all_no_delta_anchors() {
     no_delta["text"] = json!("Use the focused gate.");
     let reply = submit(&h, ADMIN_TOKEN, vec![anchor, no_delta]).await;
     assert_eq!(reply.body["code"], "memory_proposal_invalid");
+}
+
+#[tokio::test]
+async fn reflector_withdraws_only_own_anchors_and_releases_quota() {
+    let h = Hub::with(clean(), None);
+    grant(&h, "fleet", &["read", "reflect"]).await;
+    let put = h.put(ADMIN_TOKEN, "fleet", "a", None, "Claim.\n").await;
+    let op =
+        json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)});
+    let other = submit(&h, ADMIN_TOKEN, vec![op.clone()]).await;
+    let epoch = h.epoch().await;
+    let reject = |id: Json| json!({"action":"decide","proposal_id":id,"decision":"reject","base_epoch":epoch,"client_event_id":h.id()});
+    let denied = h
+        .call(AGENT_TOKEN, reject(other.body["proposal_id"].clone()))
+        .await;
+    assert_eq!(denied.status, 403, "{denied:?}");
+    let reviewed = h
+        .call(ADMIN_TOKEN, reject(other.body["proposal_id"].clone()))
+        .await;
+    assert_eq!(reviewed.body["state"], "rejected", "{reviewed:?}");
+    let own = submit(&h, AGENT_TOKEN, vec![op]).await;
+    assert_eq!(own.status, 201, "{own:?}");
+    let before = h.call(AGENT_TOKEN, json!({"action":"status"})).await;
+    assert_eq!(before.body["proposal_quota"]["pending"], 1);
+    assert_eq!(before.body["proposal_quota"]["pending_per_principal"], 32);
+    let closed = h
+        .call(AGENT_TOKEN, reject(own.body["proposal_id"].clone()))
+        .await;
+    assert_eq!(closed.body["state"], "rejected", "{closed:?}");
+    assert_eq!(closed.body["reason"], "anchor_withdrawn");
+    let after = h.call(AGENT_TOKEN, json!({"action":"status"})).await;
+    assert_eq!(after.body["proposal_quota"]["pending"], 0);
+    let put = h
+        .put(ADMIN_TOKEN, "fleet", "b", None, "Claim. ^c-abcdef\n")
+        .await;
+    let non_anchor = submit(&h, AGENT_TOKEN, vec![json!({"type":"remove_block","scope":"fleet","card_id":"b","base_revision":rev(&put),"block_id":"c-abcdef","expected_block_hash":ids::sha256_hex(b"Claim. ^c-abcdef")})]).await;
+    assert_eq!(non_anchor.status, 201, "{non_anchor:?}");
+    let denied = h
+        .call(AGENT_TOKEN, reject(non_anchor.body["proposal_id"].clone()))
+        .await;
+    assert_eq!(denied.status, 403, "{denied:?}");
 }

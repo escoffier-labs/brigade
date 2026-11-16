@@ -659,11 +659,15 @@ provide the card-write atomicity coverage.
 
 ### Gradual block anchoring
 
-Hub reflection proposes `anchor_blocks` for clean live cards with unanchored
-claim blocks. It adds deterministic `^c-xxxxxx` suffixes and preserves all other
-bytes, including existing anchors. Unsupported Markdown stays opaque.
+Hub reflection proposes `anchor_blocks` only for clean live cards whose current
+head came from a gated automatic hub apply and has unanchored claim blocks.
+Cards written by put, import or human-reviewed applies are not proposed.
+Anchoring adds deterministic `^c-xxxxxx` suffixes and preserves all other bytes,
+including existing anchors. Unsupported Markdown stays opaque.
 Each run handles at most 25 anchoring proposals, including retries. The normal
-run limit and hub quotas can reduce that number.
+run limit and hub quotas can reduce that number. Anchoring stops with four
+pending slots reserved for repair proposals. Unapplied anchoring proposals are
+withdrawn in the same run with a recorded reason.
 
 Anchoring uses the existing Tier 0 proposal, policy, journal and rollback path.
 The hub policy must list `anchor_blocks` in `tier0_op_classes`. Existing local

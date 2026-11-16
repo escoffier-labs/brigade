@@ -92,7 +92,7 @@ def anchor_text(text: str, path: str) -> str:
 
 
 def _history(text: str, old: str, now: str | None = None) -> str:
-    old = ANCHOR.sub("", old)
+    old = ANCHOR.sub("", old.rstrip("\r\n"))
     old = " ".join(old.splitlines())
     suffix = f", now {now}" if now is not None else ""
     return text.rstrip("\r\n") + f"\n\npreviously {old}{suffix}\n"

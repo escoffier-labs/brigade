@@ -140,6 +140,16 @@ pub fn authorize<T: ReadTx + ?Sized>(
         let Some(proposal) = load(tx, string(request, "proposal_id"))? else {
             return Ok(Some(missing()));
         };
+        // A reflector can withdraw only its own pure anchoring proposal.
+        // This never grants acceptance or access to another proposer's work.
+        let own_anchor = request["action"] == "decide"
+            && request["decision"] == "reject"
+            && string(&proposal, "proposer") == who.principal()
+            && !cards(&proposal).is_empty()
+            && proposal["ops"].as_array().is_some_and(|ops| {
+                !ops.is_empty() && ops.iter().all(|op| op["type"] == "anchor_blocks")
+            });
+        let right = if own_anchor { "reflect" } else { right };
         for card in cards(&proposal) {
             if !scoped_right(tx, who, string(card, "scope"), right)? {
                 return Ok(Some(denied(right)));
@@ -1039,7 +1049,14 @@ pub fn run(
     }
     if cmd.request["decision"] == "reject" {
         body["state"] = json!("rejected");
-        body["reason"] = Json::Null;
+        body["reason"] = if string(&body, "proposer") == p.credential.principal()
+            && body["ops"].as_array().is_some_and(|ops| {
+                !ops.is_empty() && ops.iter().all(|op| op["type"] == "anchor_blocks")
+            }) {
+            json!("anchor_withdrawn")
+        } else {
+            Json::Null
+        };
         body["rules"] = json!([]);
     } else if body["policy_revision"] != json!(policy.map(|a| a.0))
         || body["policy_digest"] != json!(policy.map(|a| &a.1))
