@@ -717,6 +717,8 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
         reason = "unfinished kernel operation requires operator recovery"
         changes: tuple[Change, ...] = ()
         try:
+            if _automatic_hold(target, decision_id).exists():
+                raise _AutomaticHeld
             p = _validated_payload(target, decision_id)
             if decision_id not in inflight:
                 reason = "append or repair effects require operator recovery"
@@ -747,6 +749,7 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
                             for c in changes
                         )
                         if conflict:
+                            _hold_automatic(target, decision_id)
                             results.append(
                                 {
                                     "decision_id": decision_id,
@@ -764,6 +767,7 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
                         except kernel.ProjectionError as exc:
                             # Another unfinished operation overlaps these paths. The kernel refused
                             # before writing, so the decision stays prepared for named recovery.
+                            _hold_automatic(target, decision_id)
                             results.append(
                                 {
                                     "decision_id": decision_id,
@@ -774,10 +778,31 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
                             continue
                         results.append({"decision_id": decision_id, "phase": "committed", "reason": ""})
                         continue
+        except _AutomaticHeld:
+            reason = "an earlier automatic run held this decision for operator recovery"
         except (JournalConflict, store.StoreError, OSError, ValueError):
             reason = "unreadable recovery operations require operator recovery"
         results.append({"decision_id": decision_id, "phase": "operator_required", "reason": reason})
     return results
+
+
+class _AutomaticHeld(Exception):
+    pass
+
+
+def _automatic_hold(target: Path, decision_id: str) -> Path:
+    return _directory(target, decision_id) / "automatic-hold"
+
+
+def _hold_automatic(target: Path, decision_id: str) -> None:
+    """Keep later automatic runs off a decision that once needed an operator.
+
+    The conflict can clear later, for example when edited bytes return to their
+    captured state. Only named recovery may finish the decision after that. The
+    marker is a separate file, so it never touches paths a kernel operation owns.
+    """
+    store.write_private(_automatic_hold(target, decision_id), "operator recovery required\n")
+    store.fsync_dir(_directory(target, decision_id))
 
 
 def _quarantine_decision(target: Path, decision_id: str) -> None:
