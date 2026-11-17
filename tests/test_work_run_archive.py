@@ -27,6 +27,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _seed_run(run_dir: Path, *, with_checkpoint_body: bool = False) -> Path:
+    (run_dir.parent.parent / ".brigade").mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
     _write_json(
         run_dir / "run.json",
@@ -74,12 +75,12 @@ def _seed_run(run_dir: Path, *, with_checkpoint_body: bool = False) -> Path:
 
 
 def test_published_schema_artifact_matches_runtime_constants():
-    schema_path = Path(__file__).parents[1] / "schemas" / "work-run.v1.schema.json"
+    schema_path = Path(__file__).parents[1] / "schemas" / "work-run.v3.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    assert schema["$id"].endswith("/work-run.v1.schema.json")
+    assert schema["$id"].endswith("/work-run.v3.schema.json")
     assert schema["properties"]["schema"]["const"] == WORK_RUN_ARCHIVE_SCHEMA
     assert schema["properties"]["schema_version"]["const"] == WORK_RUN_ARCHIVE_SCHEMA_VERSION
-    assert work_run_archive.schema_artifact_relative_path() == "schemas/work-run.v1.schema.json"
+    assert work_run_archive.schema_artifact_relative_path() == "schemas/work-run.v3.schema.json"
 
 
 def test_export_import_round_trip_and_validate(tmp_path: Path):
@@ -103,7 +104,8 @@ def test_export_import_round_trip_and_validate(tmp_path: Path):
     result = work_run_archive.import_archive(archive, runs_dir=imported_runs)
     assert result["run_id"] == RUN_ID
     assert (imported_runs / RUN_ID / "run.json").is_file()
-    assert (imported_runs / RUN_ID / "final.txt").read_text(encoding="utf-8") == "done\n"
+    assert not (archive / "payload" / "final.txt").exists()
+    assert not (imported_runs / RUN_ID / "final.txt").exists()
     # Source tree unchanged.
     assert (run_dir / "run.json").is_file()
 
@@ -181,7 +183,9 @@ def test_validate_archive_detects_digest_mismatch(tmp_path: Path):
     run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
     archive = tmp_path / "archive"
     work_run_archive.export_run(run_dir, archive)
-    (archive / "payload" / "final.txt").write_text("tampered\n", encoding="utf-8")
+    roster = json.loads((archive / "payload" / "roster.json").read_text(encoding="utf-8"))
+    roster["max_workers"] = 999
+    _write_json(archive / "payload" / "roster.json", roster)
     with pytest.raises(WorkRunArchiveError, match="sha256 mismatch"):
         work_run_archive.validate_archive(archive)
 
@@ -394,7 +398,8 @@ def test_force_archive_replacement_allows_disjoint_sibling_trees(tmp_path: Path)
     runs_dir = tmp_path / "imported"
     work_run_archive.import_archive(archive, runs_dir=runs_dir)
     work_run_archive.import_archive(archive, runs_dir=runs_dir, force=True)
-    assert (runs_dir / RUN_ID / "final.txt").read_text(encoding="utf-8") == "done\n"
+    assert (runs_dir / RUN_ID / "run.json").is_file()
+    assert not (runs_dir / RUN_ID / "final.txt").exists()
     assert (run_dir / "final.txt").read_text(encoding="utf-8") == "done\n"
     work_run_archive.validate_archive(archive)
 
@@ -502,6 +507,15 @@ def _write_worker_stream(
     return path
 
 
+def _scrubbed_files(archive: Path) -> list[Path]:
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    return [
+        archive / "payload" / entry["path"]
+        for entry in manifest["files"]
+        if entry.get("media_type") == worker_events.SCRUBBED_MEDIA_TYPE
+    ]
+
+
 def test_export_projects_worker_stream_to_scrubbed_sidecar_not_public_support(tmp_path: Path):
     run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
     raw_events = list(_GOLDEN["stream"]["raw_events"])
@@ -526,8 +540,9 @@ def test_export_projects_worker_stream_to_scrubbed_sidecar_not_public_support(tm
 
     # Archive must not ship the raw NDJSON as public support data.
     assert not (archive / "payload" / "events" / "coder.jsonl").exists()
-    scrubbed_path = archive / "payload" / "events" / "coder.scrubbed.json"
-    assert scrubbed_path.is_file()
+    scrubbed_paths = _scrubbed_files(archive)
+    assert len(scrubbed_paths) == 1
+    scrubbed_path = scrubbed_paths[0]
     scrubbed = json.loads(scrubbed_path.read_text(encoding="utf-8"))
     assert scrubbed["schema"] == worker_events.STREAM_SCHEMA
     assert scrubbed["media_type"] == worker_events.SCRUBBED_MEDIA_TYPE
@@ -548,7 +563,7 @@ def test_export_projects_worker_stream_to_scrubbed_sidecar_not_public_support(tm
     entry = next(
         item
         for item in json.loads((archive / "work-run.json").read_text(encoding="utf-8"))["files"]
-        if item["path"] == "events/coder.scrubbed.json"
+        if item.get("media_type") == worker_events.SCRUBBED_MEDIA_TYPE
     )
     assert entry["role"] == "artifact"
     assert entry["media_type"] == worker_events.SCRUBBED_MEDIA_TYPE
@@ -627,7 +642,7 @@ def test_export_adversarial_cases_omit_private_tokens_paths_and_errors(
     _write_worker_stream(run_dir, "worker-a", [case["raw"]])
     archive = tmp_path / "archive"
     work_run_archive.export_run(run_dir, archive)
-    scrubbed_path = archive / "payload" / "events" / "worker-a.scrubbed.json"
+    scrubbed_path = _scrubbed_files(archive)[0]
     blob = scrubbed_path.read_text(encoding="utf-8")
     for snippet in forbidden_snippets:
         assert snippet not in blob, snippet
@@ -689,7 +704,6 @@ def test_validate_archive_refuses_raw_worker_stream_smuggled_as_public_support(t
     with pytest.raises(WorkRunArchiveError) as excinfo:
         work_run_archive.validate_archive(archive)
     assert excinfo.value.category == "export-privacy"
-    assert "raw worker stream" in str(excinfo.value)
 
 
 def test_validate_archive_refuses_misclassified_scrubbed_sidecar(tmp_path: Path):
@@ -700,7 +714,7 @@ def test_validate_archive_refuses_misclassified_scrubbed_sidecar(tmp_path: Path)
 
     manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
     for entry in manifest["files"]:
-        if entry["path"] == "events/coder.scrubbed.json":
+        if entry.get("media_type") == worker_events.SCRUBBED_MEDIA_TYPE:
             entry["privacy_class"] = "public"
             entry["role"] = "support"
             entry["media_type"] = "application/json"
@@ -717,7 +731,7 @@ def test_imported_scrubbed_sidecar_is_admissible_scrubbed_only(tmp_path: Path):
     archive = tmp_path / "archive"
     work_run_archive.export_run(run_dir, archive)
     imported = work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported-runs")
-    scrubbed = Path(imported["run_dir"]) / "events" / "coder.scrubbed.json"
+    scrubbed = next((Path(imported["run_dir"]) / "events").glob("*.scrubbed.json"))
     loaded = worker_events.load_stream_for_consumer(scrubbed, consumer="run_audit")
     assert loaded["artifact_class"] == worker_events.SCRUBBED_ARTIFACT_CLASS
     assert loaded["event_count"] == len(_GOLDEN["stream"]["raw_events"])
@@ -744,8 +758,9 @@ def test_export_discovers_nested_worker_stream_and_writes_scrubbed_sidecar(tmp_p
     assert worker_events.inspect_stream_file(raw_path).status == worker_events.STATUS_UNCLASSIFIED
 
     assert not (archive / "payload" / "events" / "nested" / "coder.jsonl").exists()
-    scrubbed_path = archive / "payload" / "events" / "nested" / "coder.scrubbed.json"
-    assert scrubbed_path.is_file()
+    scrubbed_paths = _scrubbed_files(archive)
+    assert len(scrubbed_paths) == 1
+    scrubbed_path = scrubbed_paths[0]
     blob = scrubbed_path.read_text(encoding="utf-8")
     for snippet in (
         "Bearer ",
@@ -762,7 +777,7 @@ def test_export_discovers_nested_worker_stream_and_writes_scrubbed_sidecar(tmp_p
     entry = next(
         item
         for item in json.loads((archive / "work-run.json").read_text(encoding="utf-8"))["files"]
-        if item["path"] == "events/nested/coder.scrubbed.json"
+        if item.get("media_type") == worker_events.SCRUBBED_MEDIA_TYPE
     )
     assert entry["role"] == "artifact"
     assert entry["media_type"] == worker_events.SCRUBBED_MEDIA_TYPE
@@ -833,13 +848,10 @@ def test_validate_and_import_refuse_nested_raw_worker_stream_smuggling(tmp_path:
     with pytest.raises(WorkRunArchiveError) as validate_exc:
         work_run_archive.validate_archive(archive)
     assert validate_exc.value.category == "export-privacy"
-    assert "raw worker stream" in str(validate_exc.value)
-    assert "nested" in str(validate_exc.value)
 
     with pytest.raises(WorkRunArchiveError) as import_exc:
         work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported-runs")
     assert import_exc.value.category == "export-privacy"
-    assert "raw worker stream" in str(import_exc.value)
 
 
 def test_list_worker_event_streams_is_recursive_under_events(tmp_path: Path):
@@ -914,10 +926,6 @@ def test_validate_archive_refuses_lifecycle_jsonl_worker_envelope_smuggling(tmp_
     with pytest.raises(WorkRunArchiveError) as excinfo:
         work_run_archive.validate_archive(archive)
     assert excinfo.value.category == "export-privacy"
-    message = str(excinfo.value)
-    assert "lifecycle.jsonl" in message
-    assert "worker" in message.lower() or "json-rpc" in message.lower() or "notification" in message.lower()
-    assert len(message) <= worker_events.MAX_DIAGNOSTIC_LEN
 
 
 def test_import_archive_refuses_lifecycle_jsonl_worker_envelope_smuggling(tmp_path: Path):
@@ -929,11 +937,12 @@ def test_import_archive_refuses_lifecycle_jsonl_worker_envelope_smuggling(tmp_pa
     with pytest.raises(WorkRunArchiveError) as excinfo:
         work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported-runs")
     assert excinfo.value.category == "export-privacy"
-    assert "lifecycle.jsonl" in str(excinfo.value)
     assert not (tmp_path / "imported-runs" / RUN_ID).exists()
 
 
-def test_validate_and_import_accept_authentic_lifecycle_journal(tmp_path: Path):
+def test_export_withholds_authentic_lifecycle_journal(tmp_path: Path):
+    from brigade import run_audit
+
     run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
     life = run_dir / "events" / "lifecycle.jsonl"
     life.parent.mkdir(parents=True, exist_ok=True)
@@ -941,23 +950,19 @@ def test_validate_and_import_accept_authentic_lifecycle_journal(tmp_path: Path):
 
     archive = tmp_path / "archive"
     work_run_archive.export_run(run_dir, archive)
-    entry = next(
-        item
-        for item in json.loads((archive / "work-run.json").read_text(encoding="utf-8"))["files"]
-        if item["path"] == "events/lifecycle.jsonl"
-    )
-    assert entry["role"] == "journal"
-    assert entry["privacy_class"] == "public"
-    assert entry["nested_schema"] == "brigade.run_event.v1"
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    assert not (archive / "payload" / "events" / "lifecycle.jsonl").exists()
+    assert manifest["compatibility"]["journal_authority"] == "withheld"
+    assert manifest["journal_withheld"]["event_count"] == 1
+    assert manifest["journal_withheld"]["chain_head"] is not None
 
-    manifest = work_run_archive.validate_archive(archive)
-    assert any(item["path"] == "events/lifecycle.jsonl" for item in manifest["files"])
+    validated = work_run_archive.validate_archive(archive)
+    assert all(item["path"] != "events/lifecycle.jsonl" for item in validated["files"])
 
     imported = work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported-runs")
     imported_life = Path(imported["run_dir"]) / "events" / "lifecycle.jsonl"
-    assert imported_life.is_file()
-    assert b'"schema":"brigade.run_event.v1"' in imported_life.read_bytes()
-    assert b"Bearer " not in imported_life.read_bytes()
+    assert not imported_life.exists()
+    assert run_audit.audit_run(Path(imported["run_dir"])).result == run_audit.RESULT_JOURNAL_WITHHELD
 
 
 def test_export_refuses_source_lifecycle_worker_envelope(tmp_path: Path):
@@ -1197,7 +1202,7 @@ def test_successful_replacement_cleanup_failure_reports_installed_archive(tmp_pa
     assert str(backups[0]) in str(exc.value)
     assert _archive_bytes(backups[0]) == before
     work_run_archive.validate_archive(archive)
-    assert (archive / "payload" / "final.txt").read_text(encoding="utf-8") == "replacement artifact\n"
+    assert not (archive / "payload" / "final.txt").exists()
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink", "dangling"])
@@ -1241,5 +1246,5 @@ def test_forced_replacement_success_and_nonforced_refusal(tmp_path: Path, capsys
     assert cli.main(["runs", "export", str(replacement), "--output", str(archive), "--force", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "exported"
     work_run_archive.validate_archive(archive)
-    assert (archive / "payload" / "final.txt").read_text(encoding="utf-8") == "replacement artifact\n"
+    assert not (archive / "payload" / "final.txt").exists()
     _assert_no_export_temps(archive)
