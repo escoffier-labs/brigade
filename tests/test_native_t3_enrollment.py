@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import stat
+import struct
+import subprocess
+from contextlib import contextmanager
+from ctypes import wintypes
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,13 +31,15 @@ from brigade import (
     runguard,
 )
 from brigade.native_t3_contract import NativeIntentTemplate
+from brigade.work_cmd import nt_dirfd, nt_private
 
 TASK_TEXT = "retained-input-marker"
 ATTEMPT = "a" * 64
-POSIX_ONLY = pytest.mark.skipif(
-    os.name == "nt", reason="native T3 enrollment refuses Windows for lack of owner-only DACLs"
-)
-WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows policy refusal")
+FULL_CONTROL = 0x001F01FF
+DACL_PRESENT = 0x0004
+DACL_PROTECTED = 0x1000
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit custody assertions")
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows owner-only DACL custody")
 
 
 def _git(repo: Path, *args: str):
@@ -113,6 +120,98 @@ def _run_dir(workspace: Path, run_id: str) -> Path:
 
 def _open(batch: Path, workspace: Path) -> int:
     return cli.main(["t3", "open", str(batch), "--target", str(workspace)])
+
+
+def _stored_security(handle: int):
+    """Read owner, control flags and raw ACEs with test-side bindings."""
+    api = nt_private._security_api()
+    descriptor, owner, dacl = (ctypes.c_void_p() for _ in range(3))
+    try:
+        error = api.GetSecurityInfo(
+            handle, 1, 5, ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor)
+        )
+        assert error == 0, f"fixture GetSecurityInfo failed: {error}"
+        assert descriptor.value
+        control, revision = wintypes.WORD(), wintypes.DWORD()
+        assert api.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision))
+        aces = None
+        if dacl.value:
+            assert api.IsValidAcl(dacl)
+            _, _, size, count, _ = struct.unpack("<BBHHH", ctypes.string_at(dacl, 8))
+            data = ctypes.string_at(dacl, size)
+            aces, offset = [], 8
+            for _ in range(count):
+                kind, flags, length, mask = struct.unpack_from("<BBHI", data, offset)
+                assert length >= 16 and offset + length <= size
+                aces.append((kind, flags, mask, data[offset + 8 : offset + length]))
+                offset += length
+        return nt_private._copy_sid(api, owner), control.value, aces
+    finally:
+        if descriptor.value:
+            api.LocalFree(descriptor)
+
+
+def _assert_owner_only(handle: int) -> None:
+    """Assert a protected DACL with exactly one unflagged owner allow ACE."""
+    owner = nt_private._effective_owner(nt_private._security_api())
+    stored_owner, control, aces = _stored_security(handle)
+    assert stored_owner == owner
+    assert control & DACL_PRESENT and control & DACL_PROTECTED
+    assert aces == [(0, 0, FULL_CONTROL, owner)]
+
+
+@contextmanager
+def _native_descriptor(sddl: str):
+    """Build an unsafe test fixture without adding setters to production."""
+    api = nt_private._security_api()
+    value = ctypes.c_void_p()
+    try:
+        if not api.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(value), None):
+            raise nt_dirfd._win_error()
+        yield value.value
+    finally:
+        if value.value:
+            api.LocalFree(value)
+
+
+def _set_fixture_security(path: Path, sddl: str, *, information: int) -> None:
+    """Install an exact DACL on a temporary test object only."""
+    api = ctypes.WinDLL("advapi32", use_last_error=True)
+    api.GetSecurityDescriptorOwner.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    api.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    api.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    api.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    api.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    api.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    with _native_descriptor(sddl) as descriptor:
+        owner, dacl = ctypes.c_void_p(), ctypes.c_void_p()
+        defaulted, present = wintypes.BOOL(), wintypes.BOOL()
+        if information & 1:
+            assert api.GetSecurityDescriptorOwner(descriptor, ctypes.byref(owner), ctypes.byref(defaulted))
+        if information & 4:
+            assert api.GetSecurityDescriptorDacl(
+                descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+            )
+            assert present.value
+        error = api.SetNamedSecurityInfoW(str(path), 1, information, owner, None, dacl, None)
+        assert error == 0, f"fixture SetNamedSecurityInfoW failed: {error}"
 
 
 @POSIX_ONLY
@@ -422,17 +521,91 @@ def test_generic_launch_paths_refuse_an_enrolled_run(tmp_path, capsys):
 
 
 @WINDOWS_ONLY
-def test_windows_open_refuses_before_writing(tmp_path, capsys):
-    target = tmp_path / "workspace"
-    target.mkdir()
-    assert _open(_batch(tmp_path), target) == 2
-    captured = capsys.readouterr()
-    assert captured.out == "" and "[unsupported-platform]" in captured.err
-    assert not (target / ".brigade").exists()
+def test_windows_open_creates_owner_only_run_dir_and_assets(tmp_path, capsys):
+    workspace = _workspace(tmp_path)
+    assert _open(_batch(tmp_path), workspace) == 0
+    out = capsys.readouterr().out
+    assert TASK_TEXT not in out
+    report = json.loads(out)
+    run_dir = _run_dir(workspace, report["run_id"])
+    parent = nt_dirfd.open_root_directory(run_dir.parent)
+    try:
+        descriptor = nt_private.open_child_directory(parent, run_dir.name)
+        try:
+            _assert_owner_only(nt_dirfd._handle_from_fd(descriptor))
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+    results = run_tasks.read_tasks(run_dir)
+    assert [item.handle.spec.task_id for item in results] == ["one", "two"]
+    parent = nt_dirfd.open_root_directory(run_dir)
+    try:
+        for result in results:
+            assert result.enrollment is not None
+            descriptor = nt_private.open_file(parent, result.enrollment.asset_path, os.O_RDONLY)
+            try:
+                _assert_owner_only(nt_dirfd._handle_from_fd(descriptor))
+            finally:
+                os.close(descriptor)
+    finally:
+        os.close(parent)
+    assert enrollment.read_delegation_input(run_dir, task_id="one").text == f"{TASK_TEXT} one"
 
 
 @WINDOWS_ONLY
-def test_windows_readback_refuses(tmp_path):
+def test_windows_readback_refuses_a_widened_asset_dacl(tmp_path):
+    workspace = _workspace(tmp_path)
+    batch = _batch(tmp_path)
+    report = enrollment.enroll(batch_path=batch, target=workspace)
+    run_dir = _run_dir(workspace, report["run_id"])
+    owner = nt_private._sid_string(nt_private._effective_owner(nt_private._security_api()))
+    _set_fixture_security(_asset(run_dir, "one"), f"D:P(A;;FA;;;{owner})(A;;FR;;;WD)", information=4 | 0x80000000)
     with pytest.raises(enrollment.EnrollmentError) as refused:
-        enrollment.read_delegation_input(tmp_path / "missing-run", task_id="one")
-    assert refused.value.code == "unsupported-platform"
+        enrollment.read_delegation_input(run_dir, task_id="one")
+    assert refused.value.code == "asset-custody"
+    with pytest.raises(enrollment.EnrollmentError) as replay:
+        enrollment.enroll(batch_path=batch, target=workspace)
+    assert replay.value.code == "asset-custody"
+
+
+@WINDOWS_ONLY
+def test_windows_refuses_a_pre_existing_unverified_run_dir(tmp_path):
+    workspace = _workspace(tmp_path)
+    batch = _batch(tmp_path)
+    plan = enrollment.plan_enrollment(workspace=workspace, batch_path=batch)
+    plan.run_dir.mkdir(parents=True)
+    owner = nt_private._sid_string(nt_private._effective_owner(nt_private._security_api()))
+    _set_fixture_security(plan.run_dir, f"D:(A;;FA;;;{owner})", information=4 | 0x20000000)
+    with pytest.raises(enrollment.EnrollmentError) as refused:
+        enrollment.enroll(batch_path=batch, target=workspace)
+    assert refused.value.code == "run-dir"
+    assert plan.run_dir.is_dir()
+
+
+@WINDOWS_ONLY
+def test_windows_refuses_a_reparse_point_and_a_hardlinked_asset(tmp_path):
+    workspace = _workspace(tmp_path)
+    batch = _batch(tmp_path)
+    plan = enrollment.plan_enrollment(workspace=workspace, batch_path=batch)
+    plan.run_dir.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    result = subprocess.run(["cmd", "/c", "mklink", "/J", str(plan.run_dir), str(outside)], capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    try:
+        with pytest.raises(enrollment.EnrollmentError) as refused:
+            enrollment.enroll(batch_path=batch, target=workspace)
+        assert refused.value.code == "run-dir"
+    finally:
+        plan.run_dir.rmdir()
+
+    report = enrollment.enroll(batch_path=batch, target=workspace)
+    run_dir = _run_dir(workspace, report["run_id"])
+    os.link(_asset(run_dir, "one"), tmp_path / "linked.json")
+    with pytest.raises(enrollment.EnrollmentError) as linked:
+        enrollment.read_delegation_input(run_dir, task_id="one")
+    assert linked.value.code == "asset-custody"
+    with pytest.raises(enrollment.EnrollmentError) as replay:
+        enrollment.enroll(batch_path=batch, target=workspace)
+    assert replay.value.code == "asset-custody"
