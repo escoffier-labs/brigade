@@ -275,14 +275,9 @@ def _write_memory_care_runbooks(target: Path, names: tuple[str, ...] = MEMORY_CA
     ``brigade`` binary at write time so ``brigade runbook run --approved``
     can enforce the binary hash without a separate pin step.
 
-    Every requested template is validated first in a sibling temp directory, so
-    a pin-resolution failure writes nothing. Each validated file is then moved
-    into place on its own, and any name already present at the destination is
-    left alone. Checked with ``os.path.lexists`` semantics, so files, symlinks
-    and directories all count as existing and are never clobbered. If a move
-    fails partway, the files already published stay in place and a rerun adds
-    the remaining runbooks. Other files in the runbook directory, including
-    operator-written runbooks, are never removed.
+    Templates are validated in a sibling temp directory first, so a pin failure
+    writes nothing. Existing names, including symlinks, are never replaced, and
+    a partial publish is finished by a rerun. Nothing is ever removed.
     """
     from . import runbook_cmd
 
@@ -323,9 +318,7 @@ def _write_memory_care_runbooks(target: Path, names: tuple[str, ...] = MEMORY_CA
         dest_dir.mkdir(parents=True, exist_ok=True)
         for name in names:
             dest = dest_dir / name
-            # Preserve anything already at the name, including a broken symlink.
-            # A real directory is an obstruction rather than a runbook, so let
-            # the move below fail and report it with the runbook name.
+            # A directory at the name falls through so the move fails and is reported.
             if os.path.lexists(dest) and (not os.path.isdir(dest) or os.path.islink(dest)):
                 continue
             try:
