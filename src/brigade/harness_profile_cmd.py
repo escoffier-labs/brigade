@@ -12,7 +12,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__ as BRIGADE_VERSION
-from . import brief_sections, harness_profiles, localio, managed_block, mcp_adapters, mcp_cmd, skills_cmd
+from . import (
+    brief_sections,
+    harness_profiles,
+    localio,
+    managed_block,
+    mcp_adapters,
+    mcp_cmd,
+    mcp_native_auth,
+    skills_cmd,
+)
 from . import cursor_profile_hooks
 from .harness_profile_doctor import (
     _doctor_receipt_item,
@@ -1197,7 +1206,9 @@ def _mcp_plan(
                 item.update(status="unmanaged", action="preserve")
             elif name not in live:
                 item.update(status="absent", action="remove")
-            elif localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
+            elif mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == record.get(
+                "projected_fingerprint"
+            ):
                 if record.get(_LEGACY_MIGRATED):
                     item.update(status="current", action="none")
                     ownership[name] = dict(record)
@@ -1229,7 +1240,7 @@ def _mcp_plan(
             conflicts.append(item)
             items.append(item)
             continue
-        fingerprint = localio.stable_hash(provider)
+        fingerprint = mcp_native_auth.entry_fingerprint(profile.mcp_harness, provider)
         record = state["mcp"].get(name, {}) if isinstance(state["mcp"].get(name), dict) else {}
         auth = _native_auth_record(profile, live.get(name, {}), state["mcp"].get(name), server)
         item = {"surface": "mcp", "path": str(path), "name": name}
@@ -1247,15 +1258,20 @@ def _mcp_plan(
                 conflicts.append(item)
             else:
                 item.update(
-                    status="adopted", action="none" if localio.stable_hash(live[name]) == fingerprint else "update"
+                    status="adopted",
+                    action="none"
+                    if mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == fingerprint
+                    else "update",
                 )
                 if item["action"] == "update":
                     updates[name] = provider
                 ownership[name] = {"projected_fingerprint": fingerprint, "managed": False, **auth}
-        elif localio.stable_hash(live[name]) == fingerprint:
+        elif mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == fingerprint:
             item.update(status="current", action="none")
             ownership[name] = {**record, **auth}
-        elif record.get("managed") and localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
+        elif record.get("managed") and mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == record.get(
+            "projected_fingerprint"
+        ):
             item.update(status="stale", action="update")
             updates[name] = provider
             ownership[name] = {"projected_fingerprint": fingerprint, "managed": True, **auth}
@@ -1273,7 +1289,9 @@ def _mcp_plan(
         try:
             final_live = adapter.read_file(adapter.write_file(text, updates, remove))
             for name in ownership:
-                ownership[name]["projected_fingerprint"] = localio.stable_hash(final_live[name])
+                ownership[name]["projected_fingerprint"] = mcp_native_auth.entry_fingerprint(
+                    profile.mcp_harness, final_live[name]
+                )
         except ValueError as exc:
             conflicts.append({"surface": "mcp", "path": str(path), "status": "conflict", "detail": str(exc)})
     return {
@@ -1314,7 +1332,7 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
             item.update(status="unmanaged", action="preserve")
         elif name not in live:
             item.update(status="absent", action="remove")
-        elif localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
+        elif mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == record.get("projected_fingerprint"):
             item.update(status="managed", action="remove")
             remove.add(name)
         else:
@@ -1396,7 +1414,9 @@ def _verify_mcp(profile, state: dict[str, Any], workspace: Path) -> tuple[dict[s
             )
         ) is None:
             ok = False
-        elif localio.stable_hash(live[name]) != localio.stable_hash(projected):
+        elif mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) != mcp_native_auth.entry_fingerprint(
+            profile.mcp_harness, projected
+        ):
             item.update(status="edited")
             ok = False
         elif not isinstance(record, dict):

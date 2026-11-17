@@ -154,6 +154,30 @@ are routing metadata and description stays in the catalog. These intentional
 omissions can accompany a faithful projection. Generic headers shadowed by
 explicit or retained native auth are reported with `native_auth_precedence`.
 
+### Remote-server auth that stays native
+
+Two kinds of tool-native auth survive `import` and `sync` without becoming catalog
+data you edit by hand:
+
+- **Claude Code `headersHelper`** (`claude`, `claude-user`). It is a command the tool runs to
+  print a header map, so Brigade keeps it out of the catalog and out of `.brigade/mcp/state.json`
+  (no command, no hash of it). A sync that rewrites the same live entry carries the key over only
+  while the entry stays remote and its URL origin (scheme, host, port) is unchanged. If the catalog
+  moves the server to another origin, or to stdio, that server is blocked on that harness
+  (`native_auth_origin_changed` or `native_auth_transport_changed`) and nothing is written for it.
+  `--force` and `--adopt` do not override the block; remove the live entry or restore its auth by
+  hand. Other servers in the same file are still written. Ownership fingerprints ignore this key, so
+  an entry that differs from the projection only by the helper reads `current` and a second sync is a
+  no-op. Other unmodeled keys are still replaced by a rewrite: only `headersHelper` is allowlisted.
+- **Codex `bearer_token_env_var`, `http_headers`, `env_http_headers`**. `import --merge` copies them
+  into an existing catalog entry only when the name matches, both entries are remote on the exact
+  same normalized URL, and the existing entry has no auth of its own. It reports the server under
+  `native_auth_merged` instead of `skipped_existing`. A different URL, a different name, or existing
+  auth is left alone.
+
+A literal header or a kept secret (`--keep-secrets`) can still put a value in the catalog; this
+section is about the two native forms above, which carry a command or a variable name, never a token.
+
 Explicit canonical HTTP auth on stdio, OpenCode OAuth settings discarded by
 another adapter, and explicit disabled activation without a destination
 equivalent are blocking losses. This includes `oauth: false`, which explicitly

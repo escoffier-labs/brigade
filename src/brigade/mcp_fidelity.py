@@ -17,6 +17,8 @@ _OPENCODE = {"opencode", "opencode-user"}
 _AUTH = ("http_headers", "env_http_headers", "bearer_token_env_var")
 _ERROR_REASONS = {
     "native_auth_collision",
+    "native_auth_origin_changed",
+    "native_auth_transport_changed",
     "auth_interpolation_unsupported",
     "native_auth_unrepresentable",
     "native_timeout_flat_unsupported",

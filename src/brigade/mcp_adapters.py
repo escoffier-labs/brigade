@@ -297,7 +297,8 @@ class McpAdapter:
     supports_remote: bool
     env_style: str  # "passthrough" | "expand" | "vscode-inputs"
     to_provider: Callable[[CanonicalServer], dict[str, Any]]
-    from_provider: Callable[[str, dict[str, Any]], tuple[CanonicalServer, list[str]]]
+    # Callers pass ``keep_secrets=`` as a keyword; a bare Callable signature cannot say so.
+    from_provider: Callable[..., tuple[CanonicalServer, list[str]]]
     read_file: Callable[[str | None], dict[str, dict[str, Any]]]
     write_file: Callable[[str | None, dict[str, dict[str, Any]], set[str]], str]
 
