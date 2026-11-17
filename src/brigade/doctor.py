@@ -845,6 +845,10 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
             f"{detail}; {legacy_count} legacy hook handler(s) in .claude/settings.json - "
             f"run `brigade work hooks install --target {target}` to reconcile"
         )
+    if "stale skill" in (payload.get("issues") or []):
+        from .skills_cmd.inbox import stale_skill_hint
+
+        detail += stale_skill_hint(target, ".claude/skills/brigade-work/SKILL.md")
     return (status, "claude work loop", detail)
 
 
