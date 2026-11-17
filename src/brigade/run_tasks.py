@@ -7,11 +7,12 @@ only their digest enters the lifecycle journal. There is no automatic retry.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from brigade import run_events, run_journal
+from brigade import run_events, run_journal, run_lifecycle
 from brigade import run_task_journal as journal
 from brigade.run_task_journal import TaskJournalError
 
@@ -133,6 +134,11 @@ class TaskLaunchDecision:
 
 def _attempt_id(handle: TaskHandle) -> str:
     return _digest({"run_id": handle.run_id, "task_id": handle.spec.task_id, "spec_digest": handle.spec.spec_digest})
+
+
+def planned_attempt_id(handle: TaskHandle) -> str:
+    """The attempt identity ``prepare_attempt`` will mint, known before any journal write."""
+    return _attempt_id(handle)
 
 
 def _result_id(result: TaskResult) -> str:
@@ -549,6 +555,29 @@ def read_tasks(run_dir: Path) -> tuple[TaskResult, ...]:
     """Read durable results, including consumed results, with a fresh barrier."""
     with journal.transaction(run_dir) as (run_dir, events):
         return tuple(_fold(run_dir.name, events).values())
+
+
+def batch_accepted(run_dir: Path) -> bool:
+    """True when any journal line records an explicit batch acceptance.
+
+    A raw scan, not a verified fold: resume uses it as a fence that does not
+    depend on the request marker or sentinel, and leaves journal trust checks
+    to its own later diagnostics. Unparseable lines are skipped.
+    """
+    try:
+        raw = run_journal.bound_read_bytes(run_lifecycle._journal_path(run_dir))
+    except (OSError, run_journal.RunJournalError):
+        return False
+    for line in raw.splitlines():
+        if b"task.batch-accepted" not in line:
+            continue
+        try:
+            env = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(env, dict) and env.get("event_type") == "task.batch-accepted":
+            return True
+    return False
 
 
 def acknowledge_result(run_dir: Path, *, workspace: Path, task_id: str, result_id: str) -> TaskResult:
