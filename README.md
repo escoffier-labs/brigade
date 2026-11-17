@@ -32,8 +32,6 @@ Claude Code, Codex and Cursor each keep their own notes and their own MCP config
 
 BrigadeStack keeps memory as markdown cards in your repository. An agent that learns something durable writes a handoff. A reviewer files it as a card. Commit the card, and any checkout finds it with `brigade memory search`.
 
-MCP servers and skills follow the same rule. List a server once, and `brigade mcp sync` writes it into the config each tool reads. It previews until you pass `--write`. The targets are Claude Code, Codex, Cursor, OpenCode, Grok and Antigravity.
-
 Claude Code also gets recall at session start. Codex gets memory through its handoff inbox and an agent-run `memory search`.
 
 <p align="center">
@@ -71,6 +69,14 @@ memory search: retry backoff (1 match(es))
 ```
 
 </details>
+
+### One list of MCP servers and skills
+
+MCP servers and skills follow the same rule as memory. List a server once in `.brigade/mcp.json`, and `brigade mcp sync` writes it into the config each tool reads. It previews until you pass `--write`. The targets are Claude Code, Codex, Cursor, OpenCode, Grok and Antigravity. `brigade skills sync` does the same for reviewed skills.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-tools.svg" alt="The MCP catalog .brigade/mcp.json and the skill registry are each kept once, then written to the config and skills folder of Claude Code, Codex, Cursor and OpenCode." width="720">
+</p>
 
 ## Then prove it
 
