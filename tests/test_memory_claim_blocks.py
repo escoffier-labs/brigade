@@ -389,3 +389,27 @@ def test_hub_addressable_needs_span_and_suffix():
     assert (opaque.block_id, plain.block_id) == ("c-aaaaaa", "c-bbbbbb")
     assert not claim_blocks.hub_addressable(text, opaque)
     assert claim_blocks.hub_addressable(text, plain)
+
+
+def test_a_repeated_hub_anchor_id_leaves_nothing_pinnable():
+    # proposal_blocks.rs pin(): a second addressable span with the same suffix
+    # id fails the whole card with "duplicate block id". The client parser
+    # treats the backtick fence info string as opaque and sees only one block.
+    text = "```a`b\n```\nFirst. ^c-aaaaaa\n\nSecond. ^c-aaaaaa\n"
+    assert claim_blocks.hub_pins(text) == {}
+    second = next(block for block in delta.blocks(text) if block.text.startswith("Second."))
+    assert not claim_blocks.hub_addressable(text, second)
+
+
+def test_hub_pins_maps_each_addressable_anchor_to_its_text():
+    text = "`code` here. ^c-111111\n\nPlain words. ^c-222222\n"
+    assert claim_blocks.hub_pins(text) == {"c-222222": "Plain words. ^c-222222"}
+
+
+def test_a_hub_only_fence_span_with_a_reused_anchor_blocks_the_pin():
+    # The hub closes a fence at any indent (proposal_blocks.rs fence close), the
+    # client only up to three spaces, so "Hidden" is a span only the hub sees.
+    text = "```\n    ```\n\nHidden ^c-aaaaaa\n\n    ```\n```\n\nPlain ^c-aaaaaa\n"
+    plain = next(block for block in delta.blocks(text) if block.text.startswith("Plain"))
+    assert claim_blocks.hub_pins(text) == {}
+    assert not claim_blocks.hub_addressable(text, plain)

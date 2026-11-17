@@ -274,7 +274,8 @@ def _ops(heads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, i
         reason = "missing_pin"
         try:
             blocks = delta.blocks(keeper["text"])
-            block = next((b for b in blocks if b.block_id and claim_blocks.hub_addressable(keeper["text"], b)), None)
+            pins = claim_blocks.hub_pins(keeper["text"])
+            block = next((b for b in blocks if claim_blocks.hub_addressable(keeper["text"], b, pins)), None)
             if block is None:
                 raise ValueError("duplicate keeper has no pinned block")
             reason = "invalid_metadata"

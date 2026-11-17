@@ -265,12 +265,9 @@ def _pairs(sets: list[array], limit: float, budget: Budget, skipped: dict[str, i
 
 def _pin(head: dict[str, Any]) -> delta.Block | None:
     try:
+        pins = claim_blocks.hub_pins(head["text"])
         return next(
-            (
-                block
-                for block in delta.blocks(head["text"])
-                if block.block_id and claim_blocks.hub_addressable(head["text"], block)
-            ),
+            (block for block in delta.blocks(head["text"]) if claim_blocks.hub_addressable(head["text"], block, pins)),
             None,
         )
     except ValueError:

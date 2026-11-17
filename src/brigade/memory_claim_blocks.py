@@ -343,16 +343,36 @@ def hub_suffix_id(block: str) -> str | None:
     return ident if all(char in "0123456789abcdef" for char in ident[2:]) else None
 
 
-def hub_addressable(card_text: str, block: Block) -> bool:
+def hub_pins(card_text: str) -> dict[str, str]:
+    """Map each anchor id the hub can pin in this card to its exact block text.
+
+    Mirrors the hub's `pin()`: only addressable spans count, and a repeated id
+    among them makes the hub refuse every pin in the card, so none are returned.
+    Compute this once per card and pass it to `hub_addressable`.
+    """
+    data = card_text.encode("utf-8")
+    pins: dict[str, str] = {}
+    for start, end in hub_spans(card_text):
+        block = data[start:end].decode("utf-8")
+        ident = hub_suffix_id(block)
+        if ident is None:
+            continue
+        if ident in pins:
+            return {}
+        pins[ident] = block
+    return pins
+
+
+def hub_addressable(card_text: str, block: Block, pins: dict[str, str] | None = None) -> bool:
     """True only when the hub can pin this client block by its anchor id.
 
     The client parser is more lenient than the hub's, so a block can look
-    addressable here yet be opaque to the hub. Require the exact byte span and
-    a hub-parsable suffix that resolves to the block's own id.
+    addressable here yet be opaque to the hub. The hub accepts a pin when the
+    id resolves to exactly one addressable block whose bytes hash to the
+    client's, so the block text must equal the hub's text for that id.
     """
     if not block.block_id:
         return False
-    spans = hub_spans(card_text)
-    start = len(card_text[: block.start].encode("utf-8"))
-    stop = len(card_text[: block.end].encode("utf-8"))
-    return (start, stop) in spans and hub_suffix_id(block.text) == block.block_id
+    if pins is None:
+        pins = hub_pins(card_text)
+    return pins.get(block.block_id) == block.text

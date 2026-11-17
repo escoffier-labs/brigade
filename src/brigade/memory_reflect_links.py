@@ -330,7 +330,10 @@ def _wording(block: delta.Block, edits: list[tuple[int, int, str]]) -> str | Non
         parsed = delta.blocks(wording)
     except ValueError:
         return None
-    return wording if len(parsed) == 1 and parsed[0].text == wording else None
+    if len(parsed) != 1 or parsed[0].text != wording:
+        return None
+    # The hub's apply() also requires the replacement to be one addressable span on its own rules.
+    return wording if claim_blocks.hub_spans(wording) == {(0, len(wording.encode("utf-8")))} else None
 
 
 def _bump(counts: dict[str, int], reason: str, amount: int = 1) -> None:
@@ -364,15 +367,22 @@ def ops(
         elif head.get("trust") not in near.KNOWN_TRUST:
             reason = "link_unknown_trust"
         card_ops = []
+        pins: dict[str, str] | None = None
         for block in blocks:
             edits: list[tuple[int, int, str]] = []
+            pinnable: bool | None = None
             for start, end, raw in _links(block.text):
                 stats["links"] += 1
                 name = _target(raw)
                 if index.valid(head["scope"], name):
                     continue
                 stats["broken"] += 1
-                if reason or not block.block_id or not claim_blocks.hub_addressable(head["text"], block):
+                if pinnable is None and not reason:
+                    # Scan the card once, and only when it has a broken link to repair.
+                    if pins is None:
+                        pins = claim_blocks.hub_pins(head["text"])
+                    pinnable = claim_blocks.hub_addressable(head["text"], block, pins)
+                if reason or not pinnable:
                     _bump(skipped, reason or "link_missing_pin")
                     continue
                 target, why = index.resolve(head["scope"], raw, head.get("trust"))
