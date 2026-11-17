@@ -1404,6 +1404,192 @@ def test_install_dir_still_rejects_external_symlink_target(tmp_path):
         skills_cmd._install_dir(workspace, "claude", "example")
 
 
+def _import_and_install_copies(workspace, tmp_path, names):
+    for name in names:
+        assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name=name)) == 0
+        assert (
+            skills_cmd.install(workspace=workspace, skill=f"registry:{name}", harness="claude", json_output=True) == 0
+        )
+
+
+def _replace_install_with_symlink(workspace, skill_id, target_dir):
+    installed = workspace / ".claude" / "skills" / skill_id
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(installed), str(target_dir))
+    installed.symlink_to(target_dir, target_is_directory=True)
+    return installed
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_fleet_status_reports_symlinked_install_and_continues(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_copies(workspace, tmp_path, ("linked-copy", "plain-copy"))
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    installed = _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+
+    assert skills_cmd.fleet_status(target=workspace, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["skill_id"]: row for row in payload["copies"]}
+
+    assert rows["linked-copy"]["status"] == "symlink"
+    assert rows["linked-copy"]["link_target"] == str(target_dir)
+    assert "symlink" in rows["linked-copy"]["status_detail"]
+    assert rows["plain-copy"]["status"] == "current"
+    assert payload["symlink_count"] == 1
+    assert payload["current_count"] == 1
+    assert installed.is_symlink()
+
+    assert skills_cmd.fleet_status(target=workspace) == 0
+    out = capsys.readouterr().out
+    assert "symlink=1" in out
+    assert "linked-copy [claude] symlink ->" in out
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_doctor_reports_symlinked_install_as_warning(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_copies(workspace, tmp_path, ("linked-copy", "plain-copy"))
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+
+    assert skills_cmd.doctor(target=workspace, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["valid"] is True
+    issue = next(item for item in payload["issues"] if item.get("installed_state") == "symlink")
+    assert issue["status"] == "warn"
+    assert issue["skill_id"] == "linked-copy"
+    assert issue["harness"] == "claude"
+    assert issue["link_target"] == str(target_dir)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_sync_dry_run_reports_symlinked_install_and_continues(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_copies(workspace, tmp_path, ("linked-copy", "plain-copy"))
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+
+    assert skills_cmd.sync(workspace=workspace, harness="claude", trust="workspace", write=False, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {item["skill_id"]: item for item in payload["items"]}
+
+    assert rows["linked-copy"]["state"] == "symlink"
+    assert rows["linked-copy"]["action"] == "none"
+    assert rows["linked-copy"]["result"] == "skipped"
+    assert rows["linked-copy"]["link_target"] == str(target_dir)
+    assert "symlink" in rows["linked-copy"]["reason"]
+    assert rows["plain-copy"]["state"] == "current"
+    assert payload["counts"]["symlink"] == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_sync_write_leaves_symlinked_install_and_target_untouched(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="linked-copy")) == 0
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="plain-copy")) == 0
+    assert (
+        skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    installed = _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+    before = (target_dir / "SKILL.md").read_bytes()
+
+    assert skills_cmd.sync(workspace=workspace, harness="claude", trust="workspace", write=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {item["skill_id"]: item for item in payload["items"]}
+
+    assert rows["linked-copy"]["state"] == "symlink"
+    assert rows["linked-copy"]["result"] == "skipped"
+    assert rows["plain-copy"]["result"] == "installed"
+    assert payload["applied"]["installed"] == 1
+    assert installed.is_symlink()
+    assert installed.resolve() == target_dir.resolve()
+    assert (target_dir / "SKILL.md").read_bytes() == before
+    assert (workspace / ".claude" / "skills" / "plain-copy" / "SKILL.md").is_file()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_reports_dangling_link_and_regular_file_install(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for name in ("dangling-copy", "file-copy"):
+        assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name=name)) == 0
+    capsys.readouterr()
+    skills_root = workspace / ".claude" / "skills"
+    skills_root.mkdir(parents=True)
+    dangling_target = workspace / "missing-target"
+    (skills_root / "dangling-copy").symlink_to(dangling_target, target_is_directory=True)
+    (skills_root / "file-copy").write_text("not a skill directory\n")
+
+    assert skills_cmd.fleet_status(target=workspace, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["skill_id"]: row for row in payload["copies"]}
+
+    assert rows["dangling-copy"]["status"] == "symlink"
+    assert rows["dangling-copy"]["link_target"] == str(dangling_target)
+    assert rows["file-copy"]["status"] == "unusable"
+    assert payload["symlink_count"] == 1
+    assert payload["unusable_count"] == 1
+
+    assert skills_cmd.doctor(target=workspace, json_output=True) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["valid"] is True
+    states = {issue.get("installed_state") for issue in doctor["issues"]}
+    assert {"symlink", "file"} <= states
+
+    assert skills_cmd.sync(workspace=workspace, harness="claude", trust="workspace", write=False, json_output=True) == 0
+    sync_payload = json.loads(capsys.readouterr().out)
+    sync_rows = {item["skill_id"]: item for item in sync_payload["items"]}
+    assert sync_rows["dangling-copy"]["state"] == "symlink"
+    assert sync_rows["file-copy"]["state"] == "unusable"
+    assert (skills_root / "dangling-copy").is_symlink()
+    assert not dangling_target.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_skills_install_and_uninstall_skip_symlinked_copy(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="linked-copy")) == 0
+    assert (
+        skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    installed = _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+    before = (target_dir / "SKILL.md").read_bytes()
+
+    assert (
+        skills_cmd.install(
+            workspace=workspace, skill="registry:linked-copy", harness="claude", force=True, json_output=True
+        )
+        == 0
+    )
+    install_payload = json.loads(capsys.readouterr().out)
+    skipped = install_payload["receipt"]["skipped"]
+    assert [item["target"] for item in skipped] == ["claude"]
+    assert "symlink" in skipped[0]["reason"]
+    assert installed.is_symlink()
+    assert (target_dir / "SKILL.md").read_bytes() == before
+
+    assert skills_cmd.uninstall(workspace=workspace, skill="linked-copy", harness="claude", json_output=True) == 0
+    uninstall_payload = json.loads(capsys.readouterr().out)
+    assert uninstall_payload["uninstalled"] == []
+    assert uninstall_payload["skipped"][0]["harness"] == "claude"
+    assert "symlink" in uninstall_payload["skipped"][0]["reason"]
+    assert installed.is_symlink()
+    assert (target_dir / "SKILL.md").read_bytes() == before
+
+
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
 def test_install_refuses_symlinked_brigade_state_root(tmp_path, capsys):
     workspace = tmp_path / "ws"

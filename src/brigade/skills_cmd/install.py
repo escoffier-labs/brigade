@@ -311,40 +311,124 @@ def _anchor_subtree_is_plain(anchor: registry._StateRootAnchor, *relative: str) 
             os.close(held)
 
 
+def _link_target(installed_dir: Path) -> str | None:
+    """Read one symlink's target string without following the link."""
+    try:
+        return os.readlink(installed_dir)
+    except OSError:
+        return None
+
+
+def _installed_path_state(
+    workspace: Path, installed_dir: Path, anchor: registry._StateRootAnchor | None = None
+) -> tuple[str, str | None]:
+    """Classify an installed copy path and return ``(state, link_target)``.
+
+    States are ``dir``, ``missing``, ``symlink``, ``file``, ``other``, and
+    ``unreadable``. Nothing here follows a link: ``lstat``/``readlink`` and the
+    anchored state-root walk classify the leaf, so callers can report a
+    symlinked or otherwise non-plain install instead of walking through it.
+    """
+    parts = _packs_mod._lexical_state_root_parts(workspace, installed_dir)
+    if parts is not None:
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            return "other", None
+        try:
+            if anchor is not None:
+                kind = registry._state_entry_kind(anchor, *parts)
+            else:
+                with registry._held_state_root(workspace, writable=False) as held:
+                    kind = registry._state_entry_kind(held, *parts)
+        except registry.SkillsStatePathError:
+            # A redirected component is never followed; report the leaf as the
+            # non-plain entry it is.
+            return ("symlink", _link_target(installed_dir)) if installed_dir.is_symlink() else ("unreadable", None)
+        if kind == "missing":
+            return "missing", None
+        return ("dir", None) if kind == "dir" else ("other", None)
+    try:
+        info = os.lstat(installed_dir)
+    except FileNotFoundError:
+        return "missing", None
+    except OSError:
+        return "other", None
+    if stat_module.S_ISLNK(info.st_mode):
+        return "symlink", _link_target(installed_dir)
+    if stat_module.S_ISDIR(info.st_mode):
+        return "dir", None
+    if stat_module.S_ISREG(info.st_mode):
+        return "file", None
+    return "other", None
+
+
+def _installed_state_reason(state: str, link_target: str | None, installed_dir: Path) -> str:
+    """One human-readable line explaining why an installed copy was skipped."""
+    if state == "symlink":
+        target = f" to {link_target}" if link_target else ""
+        return f"installed copy is a symlink{target} ({installed_dir}); left untouched"
+    if state == "file":
+        return f"installed path is a regular file ({installed_dir}); left untouched"
+    return f"installed copy is not a plain readable directory ({installed_dir}); left untouched"
+
+
+@dataclass(frozen=True)
+class InstalledTreeInspection:
+    """Read-only view of one installed copy, never following a link."""
+
+    state: str
+    link_target: str | None
+    dirs: list[tuple[str, ...]]
+    files: dict[tuple[str, ...], bytes]
+
+
+def _inspect_installed_tree(
+    workspace: Path, installed_dir: Path, anchor: registry._StateRootAnchor | None = None
+) -> InstalledTreeInspection:
+    """Inspect an installed copy, reporting a non-plain path as its own state.
+
+    Copies located inside ``.brigade`` (e.g. the built-in ``mcp`` target's
+    ``mcp-resources``) are state-root content: they are read through the held
+    state-root descriptor, so a planted symlink is skipped or refuses instead
+    of dragging outside bytes into diffs, drift, or rollback material. Trusted
+    harness directories outside the state root keep the plain descriptor walk.
+    A symlinked, dangling, regular-file, or otherwise refused leaf yields an
+    empty snapshot and the state that explains it, so read-only callers never
+    raise and never follow the link.
+    """
+    state, link_target = _installed_path_state(workspace, installed_dir, anchor=anchor)
+    if state != "dir":
+        return InstalledTreeInspection(state, link_target, [], {})
+    parts = _packs_mod._lexical_state_root_parts(workspace, installed_dir)
+    if parts is None:
+        try:
+            dirs, files = registry._collect_source_tree(installed_dir)
+        except registry.SkillsStatePathError:
+            return InstalledTreeInspection("unreadable", link_target, [], {})
+        return InstalledTreeInspection("dir", link_target, dirs, files)
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return InstalledTreeInspection("unreadable", link_target, [], {})
+    try:
+        if anchor is not None:
+            dirs, files = registry._read_tree_from_anchor(anchor, *parts)
+        else:
+            with registry._held_state_root(workspace, writable=False) as held:
+                dirs, files = registry._read_tree_from_anchor(held, *parts)
+    except registry.SkillsStatePathError:
+        return InstalledTreeInspection("unreadable", link_target, [], {})
+    return InstalledTreeInspection("dir", link_target, dirs, files)
+
+
 def _installed_tree_snapshot(
     workspace: Path, installed_dir: Path, anchor: registry._StateRootAnchor | None = None
 ) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
     """Collect an installed copy's plain files for inspection.
 
-    Copies located inside ``.brigade`` (e.g. the built-in ``mcp`` target's
-    ``mcp-resources``) are state-root content: they are read through the held
-    state-root descriptor, so a planted symlink is skipped or refuses instead
-    of dragging outside bytes into diffs, drift, or rollback material.
-    Trusted harness directories outside the state root keep the plain
-    descriptor walk.
+    A non-plain installed path (symlink, dangling link, regular file, refused
+    subtree) contributes an empty snapshot; use ``_inspect_installed_tree``
+    when the caller also needs the state that explains the absence.
     """
-    parts = _packs_mod._lexical_state_root_parts(workspace, installed_dir)
-    if parts is None:
-        if not installed_dir.is_dir():
-            return [], {}
-        return registry._collect_source_tree(installed_dir)
-    if any(part in {"", ".", ".."} for part in parts):
-        return [], {}
-
-    def _collect(held: registry._StateRootAnchor) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
-        if registry._state_entry_kind(held, *parts) != "dir":
-            return [], {}
-        return registry._read_tree_from_anchor(held, *parts)
-
-    if anchor is not None:
-        return _collect(anchor)
-    try:
-        with registry._held_state_root(workspace, writable=False) as fresh_anchor:
-            return _collect(fresh_anchor)
-    except registry.SkillsStatePathError:
-        # A redirected or planted component contributes nothing rather than
-        # being followed; callers report absence instead of outside content.
-        return [], {}
+    inspection = _inspect_installed_tree(workspace, installed_dir, anchor=anchor)
+    return inspection.dirs, inspection.files
 
 
 def _drift_payload(
@@ -355,9 +439,13 @@ def _drift_payload(
     lint_payload: dict[str, Any],
     rendered: str,
     installed_dir: Path,
+    inspection: InstalledTreeInspection | None = None,
 ) -> dict[str, Any]:
     receipt = _latest_install_receipt(target, skill_id, harness)
-    snapshot_dirs, snapshot_files = _installed_tree_snapshot(target, installed_dir)
+    if inspection is None:
+        inspection = _inspect_installed_tree(target, installed_dir)
+    path_state = inspection.state
+    snapshot_files = inspection.files
     installed_raw = snapshot_files.get(("SKILL.md",))
     installed_present = installed_raw is not None
     installed_text = installed_raw.decode("utf-8", errors="replace") if installed_raw is not None else ""
@@ -368,7 +456,18 @@ def _drift_payload(
     installed_bundle_fingerprint = registry._files_fingerprint(snapshot_files) if snapshot_files else None
     installed_metadata_fingerprint = registry._bytes_fingerprint(snapshot_files.get(("skill.json",)))
     known = _valid_receipt_contract(receipt, skill_id=skill_id, harness=harness)
-    if not installed_present and receipt and not known:
+    if path_state == "symlink":
+        # A linked installed copy is reported, never followed or diffed.
+        overall = "symlink"
+        source_state = "unknown"
+        render_state = "unknown"
+        local_state = "unknown"
+    elif path_state != "dir" and path_state != "missing":
+        overall = "unusable"
+        source_state = "unknown"
+        render_state = "unknown"
+        local_state = "unknown"
+    elif not installed_present and receipt and not known:
         overall = "unknown"
         source_state = "unknown"
         render_state = "unknown"
@@ -411,6 +510,8 @@ def _drift_payload(
         "receipt_known": known,
         "content_changed": installed_text != rendered,
         "installed": installed_present,
+        "path_state": path_state,
+        "link_target": inspection.link_target,
         "installed_skill_fingerprint": installed_skill_fingerprint,
         "installed_bundle_fingerprint": installed_bundle_fingerprint,
         "installed_metadata_fingerprint": installed_metadata_fingerprint,
@@ -721,6 +822,14 @@ def install(
                 return 1
             install_files = dict(snapshot_files)
             install_files[("SKILL.md",)] = rendered_text.encode("utf-8")
+            dest_state, dest_link_target = _installed_path_state(workspace, dest, anchor=state_anchor)
+            if dest_state not in {"dir", "missing"}:
+                # A symlinked, dangling, or otherwise non-plain destination is
+                # never replaced, followed, or cleaned up.
+                skipped.append(
+                    {"target": install_target, "reason": _installed_state_reason(dest_state, dest_link_target, dest)}
+                )
+                continue
             install_rel = str(_adapter_map(workspace)[install_target]["install_path"]).format(skill_id=skill_id)
             under_state_root = install_rel.startswith(".brigade/")
             state_parts = tuple(part for part in install_rel.split("/") if part)[1:]

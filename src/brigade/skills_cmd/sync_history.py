@@ -124,7 +124,24 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 item["reason"] = "; ".join(render_errors)
                 items.append(item)
                 continue
-            installed_dir = _install_mod._install_dir(workspace, install_target, skill_id)
+            install_dir, escapes = _install_mod._evaluate_install_dir(workspace, install_target, skill_id)
+            if escapes:
+                # A copy resolving outside the workspace is reported and left
+                # alone rather than refused with an exception.
+                item.update(
+                    state="external",
+                    action="none",
+                    result="skipped",
+                    reason=f"installed copy resolves outside the workspace ({install_dir}); left untouched",
+                )
+                items.append(item)
+                continue
+            try:
+                installed_dir = _install_mod._install_dir(workspace, install_target, skill_id)
+            except (ValueError, _registry_mod.SkillsStatePathError) as exc:
+                item.update(state="unusable", action="none", result="skipped", reason=str(exc))
+                items.append(item)
+                continue
             drift = _install_mod._drift_payload(
                 target=workspace,
                 skill_id=skill_id,
@@ -137,6 +154,21 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 key: drift[key]
                 for key in ("overall", "source", "render", "local_edit", "receipt_known", "content_changed")
             }
+            path_state = str(drift.get("path_state") or "dir")
+            link_target = raw_link_target if isinstance((raw_link_target := drift.get("link_target")), str) else None
+            if path_state not in {"dir", "missing"}:
+                # A symlinked, dangling, or otherwise non-plain installed copy is
+                # reported and skipped here, so neither the dry-run nor a later
+                # write plans any mutation through it.
+                item.update(
+                    state="symlink" if path_state == "symlink" else "unusable",
+                    action="none",
+                    result="skipped",
+                    link_target=link_target,
+                    reason=_install_mod._installed_state_reason(path_state, link_target, installed_dir),
+                )
+                items.append(item)
+                continue
             if drift["overall"] == "current":
                 item.update(state="current", result="unchanged")
             elif drift["overall"] == "missing":
@@ -150,12 +182,15 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
 
 
 def _sync_file_entries(root: Path) -> dict[str, tuple[bytes, int]]:
-    if not root.is_dir():
+    try:
+        if not stat_module.S_ISDIR(root.lstat().st_mode):
+            return {}
+    except OSError:
         return {}
     return {
         path.relative_to(root).as_posix(): (path.read_bytes(), path.stat().st_mode & 0o777)
         for path in sorted(root.rglob("*"))
-        if path.is_file()
+        if not path.is_symlink() and path.is_file()
     }
 
 
@@ -300,6 +335,22 @@ def _sync_projection_plan(
                 continue
             desired_files = _sync_rendered_files(snapshot_files, metadata, skill_id, harness)
             installed_dir = _install_mod._install_dir(workspace, harness, skill_id)
+            dest_state, dest_link_target = _install_mod._installed_path_state(
+                workspace, installed_dir, anchor=state_anchor
+            )
+            if dest_state not in {"dir", "missing"}:
+                # Planning already skipped non-plain copies; this re-check covers
+                # a destination swapped between planning and writing, so no
+                # mutation is ever planned through a link.
+                item.update(
+                    state="symlink" if dest_state == "symlink" else "unusable",
+                    action="none",
+                    result="skipped",
+                    link_target=dest_link_target,
+                    reason=_install_mod._installed_state_reason(dest_state, dest_link_target, installed_dir),
+                )
+                item["receipt"] = None
+                continue
             installed_parts = _packs_mod._lexical_state_root_parts(workspace, installed_dir)
             if installed_parts is not None:
                 # State-backed install destinations are inspected through the
@@ -489,7 +540,7 @@ def sync(
 
     counts = {
         state: sum(item["state"] == state for item in items)
-        for state in ("current", "missing", "changed", "blocked", "excluded")
+        for state in ("current", "missing", "changed", "blocked", "excluded", "external", "symlink", "unusable")
     }
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -516,7 +567,10 @@ def sync(
             print(f"projection operation: {projection_view['operation_id']}")
             print(f"projection status: {projection_view['terminal_state']}")
         print(
-            " ".join(f"{state}={counts[state]}" for state in ("current", "missing", "changed", "blocked", "excluded"))
+            " ".join(
+                f"{state}={counts[state]}"
+                for state in ("current", "missing", "changed", "blocked", "excluded", "external", "symlink", "unusable")
+            )
         )
         for item in items:
             detail_value = item.get("error") or item.get("reason")
@@ -553,6 +607,7 @@ def uninstall(
         return 2
     targets = install_targets if harness == "all" else (harness,)
     removed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     try:
         state_anchor = _registry_mod._hold_state_root(workspace)
     except _registry_mod.SkillsStatePathError as exc:
@@ -579,9 +634,22 @@ def uninstall(
                 _install_mod._check_review_binding(
                     expected_binding, workspace, skill_id, install_target, anchor=state_anchor
                 )
-            if not dest.exists() and not has_receipt:
+            dest_state, dest_link_target = _install_mod._installed_path_state(workspace, dest, anchor=state_anchor)
+            if dest_state not in {"dir", "missing"}:
+                # A symlinked, dangling, or otherwise non-plain copy is left
+                # exactly as it is; its receipt stays authoritative.
+                skipped.append(
+                    {
+                        "harness": install_target,
+                        "path": str(dest),
+                        "state": dest_state,
+                        "reason": _install_mod._installed_state_reason(dest_state, dest_link_target, dest),
+                    }
+                )
                 continue
-            if dest.exists():
+            if dest_state == "missing" and not has_receipt:
+                continue
+            if dest_state == "dir":
                 if under_state_root:
                     _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 else:
@@ -613,16 +681,24 @@ def uninstall(
         return 2
     finally:
         state_anchor.close()
-    if not removed:
+    if not removed and not skipped:
         print(f"error: skill not installed: {skill} ({harness})", file=sys.stderr)
         return 1
-    payload = {"workspace": str(workspace), "skill_id": skill_id, "uninstalled": removed, "count": len(removed)}
+    payload = {
+        "workspace": str(workspace),
+        "skill_id": skill_id,
+        "uninstalled": removed,
+        "skipped": skipped,
+        "count": len(removed),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"skills uninstall: {skill_id}")
     for record in removed:
         print(f"removed: {record['harness']} -> {record['path']}")
+    for record in skipped:
+        print(f"skipped: {record['harness']} -> {record['reason']}")
     return 0
 
 
@@ -687,6 +763,16 @@ def rollback(
                 print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
                 return 1
             dest = _install_mod._install_dir(workspace, harness, skill_id)
+            dest_state, dest_link_target = _install_mod._installed_path_state(workspace, dest)
+            if dest_state not in {"dir", "missing"}:
+                # A symlinked, dangling, or otherwise non-plain install is left
+                # untouched; the rollback snapshot stays recorded for later.
+                print(
+                    f"skipped: rollback left {skill_id} on {harness} untouched: "
+                    + _install_mod._installed_state_reason(dest_state, dest_link_target, dest),
+                    file=sys.stderr,
+                )
+                return 2
             install_rel = str(_install_mod._adapter_map(workspace)[harness]["install_path"]).format(skill_id=skill_id)
             under_state_root = install_rel.startswith(".brigade/")
             state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
@@ -745,7 +831,7 @@ def rollback(
                 _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 _registry_mod._write_collected_tree_into_anchor(dirs, files, state_anchor, *state_parts)
             else:
-                if dest.exists():
+                if dest_state == "dir":
                     shutil.rmtree(dest)
                 dest.mkdir(parents=True, exist_ok=True)
                 for parts in dirs:
@@ -834,7 +920,13 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
     else:
         source_text = _registry_mod._skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
     rendered = _registry_mod._render_skill_text_for_harness(source_text, metadata, skill_id, harness)
-    installed_dir = _install_mod._install_dir(target, harness, skill_id)
+    try:
+        installed_dir = _install_mod._install_dir(target, harness, skill_id)
+    except ValueError as exc:
+        # A linked install resolving outside the workspace is reported, never
+        # followed into an outside diff.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     # The installed side is inspected through one anchored snapshot; a
     # symlinked SKILL.md in a state-backed install target contributes
     # absence, never outside file content.
@@ -869,6 +961,8 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
         "baseline_skill": baseline_skill,
         "installed": installed_present,
         "installed_path": str(installed_skill),
+        "installed_state": drift["path_state"],
+        "link_target": drift["link_target"],
         "changed": bool(diff_lines),
         "diff": diff_lines,
         "drift": {
