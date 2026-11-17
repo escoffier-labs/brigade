@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import memory_claim_blocks as claim_blocks
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
 
@@ -264,7 +265,11 @@ def _pairs(sets: list[array], limit: float, budget: Budget, skipped: dict[str, i
 
 def _pin(head: dict[str, Any]) -> delta.Block | None:
     try:
-        return next((block for block in delta.blocks(head["text"]) if block.block_id), None)
+        pins = claim_blocks.hub_pins(head["text"])
+        return next(
+            (block for block in delta.blocks(head["text"]) if claim_blocks.hub_addressable(head["text"], block, pins)),
+            None,
+        )
     except ValueError:
         return None
 
