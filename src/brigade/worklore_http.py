@@ -54,6 +54,7 @@ _STATUS_BY_CODE = {
     "campaign-not-authorized": 403,
     "campaign-ineligible": 409,
     "campaign-concurrency-limit": 409,
+    "campaign-incomplete": 409,
     "adapter-owner-mismatch": 403,
     "execution-mismatch": 403,
     "attempt-forbidden": 403,
@@ -352,6 +353,8 @@ def _item_route(
         return 200, {"item": item}
     if tail == ["attempts"] and method == "POST":
         return _record_attempt(conn, request, work_id)
+    if tail == ["completions"] and method == "POST":
+        return _complete_item(conn, request, work_id)
     if tail == ["links"] and method == "POST":
         _require_operator(request)
         added = store.add_link(
@@ -379,6 +382,34 @@ def _item_route(
     if tail == ["execution"] and method == "POST":
         return _link_execution(conn, request, work_id)
     return _error("not-found")
+
+
+def _complete_item(
+    conn: sqlite3.Connection,
+    request: Request,
+    work_id: str,
+) -> tuple[int, dict[str, Any]]:
+    _require_operator(request)
+    expected_version = _if_match(request)
+    body = _object_body(request.body, allowed={"evidence_refs"})
+    campaign_key = campaigns.campaign_for_work_id(conn, work_id)
+    if campaign_key is not None:
+        summary = campaigns.show_campaign(conn, campaign_key)["campaign"]["summary"]
+        if summary["done"] is not True:
+            raise store.WorkloreConflict(
+                "campaign has members that are not terminal",
+                code="campaign-incomplete",
+            )
+    item = store.complete_item(
+        conn,
+        work_id,
+        expected_version=expected_version,
+        actor_id=_actor_id(request),
+        actor_type=_actor_type(request),
+        node_id=_event_node_id(request),
+        evidence_refs=body.get("evidence_refs") or (),
+    )
+    return 200, {"item": item}
 
 
 def _record_attempt(

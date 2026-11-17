@@ -1,0 +1,1 @@
+- Add `brigade fleet campaign complete KEY [--repo R] [--evidence REF]...` and `POST /work/items/<id>/completions` so an operator can complete a campaign member or, once every member is terminal, the campaign item. The completion walks the existing lifecycle edges in one transaction and records the path and evidence.

@@ -1699,6 +1699,56 @@ def patch_item(
     return _in_transaction(conn, _write)
 
 
+def _transition_locked(
+    conn: sqlite3.Connection,
+    work_id: str,
+    *,
+    to_status: str,
+    expected_version: int,
+    actor_id: str,
+    actor_type: str = "operator",
+    node_id: str | None = None,
+) -> dict[str, Any]:
+    """Apply one legal lifecycle edge inside a transaction the caller already holds."""
+    current = _loaded_item(conn, work_id)
+    _require_version(current, expected_version)
+    if not can_transition(str(current["status"]), to_status):
+        raise WorkloreValidationError(
+            f"cannot transition from {current['status']} to {to_status}",
+            code="invalid-transition",
+        )
+    if to_status == "ready":
+        assert_ready({"acceptance": current["effective_acceptance"]})
+    now = _utc_now()
+    ready_at = current["ready_at"]
+    archived_at = current["archived_at"]
+    if to_status == "ready" and current["status"] != "ready":
+        ready_at = now
+    if to_status == "archived":
+        archived_at = now
+    updated = {
+        **current,
+        "status": to_status,
+        "ready_at": ready_at,
+        "archived_at": archived_at,
+        "version": int(current["version"]) + 1,
+        "updated_at": now,
+    }
+    _update_item(conn, updated)
+    _append_event(
+        conn,
+        work_id=work_id,
+        event_type="transitioned",
+        from_status=str(current["status"]),
+        to_status=to_status,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        now=now,
+        node_id=node_id,
+    )
+    return _loaded_item(conn, work_id)
+
+
 def transition(
     conn: sqlite3.Connection,
     work_id: str,
@@ -1710,47 +1760,18 @@ def transition(
     node_id: str | None = None,
 ) -> dict[str, Any]:
     """Move one item along a legal lifecycle edge in one transaction."""
-
-    def _write() -> dict[str, Any]:
-        current = _loaded_item(conn, work_id)
-        _require_version(current, expected_version)
-        if not can_transition(str(current["status"]), to_status):
-            raise WorkloreValidationError(
-                f"cannot transition from {current['status']} to {to_status}",
-                code="invalid-transition",
-            )
-        if to_status == "ready":
-            assert_ready({"acceptance": current["effective_acceptance"]})
-        now = _utc_now()
-        ready_at = current["ready_at"]
-        archived_at = current["archived_at"]
-        if to_status == "ready" and current["status"] != "ready":
-            ready_at = now
-        if to_status == "archived":
-            archived_at = now
-        updated = {
-            **current,
-            "status": to_status,
-            "ready_at": ready_at,
-            "archived_at": archived_at,
-            "version": int(current["version"]) + 1,
-            "updated_at": now,
-        }
-        _update_item(conn, updated)
-        _append_event(
+    return _in_transaction(
+        conn,
+        lambda: _transition_locked(
             conn,
-            work_id=work_id,
-            event_type="transitioned",
-            from_status=str(current["status"]),
+            work_id,
             to_status=to_status,
-            actor_type=actor_type,
+            expected_version=expected_version,
             actor_id=actor_id,
-            now=now,
+            actor_type=actor_type,
             node_id=node_id,
-        )
-        return _loaded_item(conn, work_id)
-
-    return _in_transaction(conn, _write)
+        ),
+    )
 
 
 def _burn_key(row: Any) -> tuple[Any, ...]:
@@ -1947,6 +1968,7 @@ _worklore_store_operations.bind_core(sys.modules[__name__])
 
 from .worklore_store_operations import (  # noqa: E402, F401
     add_link,
+    complete_item,
     delete_link,
     import_batch,
     link_execution,

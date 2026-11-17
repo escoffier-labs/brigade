@@ -10,7 +10,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .fleet_client import (
     FleetClientError,
@@ -46,6 +46,7 @@ __all__ = [
     "burn_queue",
     "create_campaign",
     "create_item",
+    "complete_item",
     "delete_link",
     "get_campaign",
     "get_item",
@@ -538,6 +539,25 @@ def transition(work_id: str, body: Mapping[str, Any], *, if_match: object = None
     return _request(
         "POST",
         _item_path(work_id, "transitions"),
+        token=_token(admin=False),
+        body=body,
+        if_match=if_match,
+    )
+
+
+def complete_item(
+    work_id: str,
+    *,
+    evidence_refs: Sequence[str] = (),
+    if_match: object = None,
+) -> dict[str, Any]:
+    """Complete one item through the Hub's operator-only completion route."""
+    body: dict[str, Any] = {}
+    if evidence_refs:
+        body["evidence_refs"] = list(evidence_refs)
+    return _request(
+        "POST",
+        _item_path(work_id, "completions"),
         token=_token(admin=False),
         body=body,
         if_match=if_match,
