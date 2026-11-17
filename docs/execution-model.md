@@ -97,7 +97,14 @@ writer accepts evidence appends and exact duplicate merges for this route.
 
 The hub rechecks the Tier 0 class, cited evidence, ownership, retrieval
 evaluation, one-card blast cap, 24-hour cooldown, card heads, pins, trust, scans
-and the admin kill switch in one transaction. External and handoff-only curation
+and the admin kill switch in one transaction.
+
+On a real scope today, the retrieval evaluation holds every automatic apply. It
+requires each target card's search projection to stay unchanged, and any applied
+edit changes it. Tier 0 applies only on the evaluation fixture scope until that
+gate is reworked, which epic #2591 tracks.
+
+External and handoff-only curation
 policies never pass the ownership gate. Local repository candidates stay
 proposal-only because their authority contracts are unbound.
 
