@@ -151,8 +151,19 @@ supports it. OpenCode's remote shape collapses HTTP/SSE, so SSE projects with
 Canonical `enabled` controls membership. OpenCode native enabled/disabled
 controls activation and follows the destination layout's precedence. Targets
 are routing metadata and description stays in the catalog. These intentional
-omissions can accompany a faithful projection. Generic headers shadowed by
-explicit or retained native auth are reported with `native_auth_precedence`.
+omissions can accompany a faithful projection. What happens when a catalog entry
+carries generic headers and the live entry already has native auth depends on the
+harness:
+
+- **Codex.** Retained native auth wins over a generic header of the same name. The shadowed
+  header is reported with `native_auth_precedence`. If you change that generic header after
+  adoption, the server is blocked with `native_auth_collision`.
+- **OpenCode.** A canonical header replaces a retained native header of the same name, reported
+  as `explicit_canonical_replacement`; other retained native headers are kept.
+- **Claude Code (`headersHelper`).** There is no precedence rule. A catalog entry that
+  emits any header next to a live helper is blocked with `native_auth_source_collision`:
+  nothing is written for that server, and neither `--force` nor `--adopt` overrides it.
+  Remove the catalog headers or the live helper to continue.
 
 ### Remote-server auth that stays native
 
@@ -160,20 +171,31 @@ Two kinds of tool-native auth survive `import` and `sync` without becoming catal
 data you edit by hand:
 
 - **Claude Code `headersHelper`** (`claude`, `claude-user`). It is a command the tool runs to
-  print a header map, so Brigade keeps it out of the catalog and out of `.brigade/mcp/state.json`
-  (no command, no hash of it). A sync that rewrites the same live entry carries the key over only
-  while the entry stays remote and its URL origin (scheme, host, port) is unchanged. If the catalog
-  moves the server to another origin, or to stdio, that server is blocked on that harness
-  (`native_auth_origin_changed` or `native_auth_transport_changed`) and nothing is written for it.
-  `--force` and `--adopt` do not override the block; remove the live entry or restore its auth by
-  hand. Other servers in the same file are still written. Ownership fingerprints ignore this key, so
-  an entry that differs from the projection only by the helper reads `current` and a second sync is a
-  no-op. Other unmodeled keys are still replaced by a rewrite: only `headersHelper` is allowlisted.
+  print a header map, so Brigade keeps it out of the catalog and out of
+  `.brigade/mcp/state.json` (no command, no hash of it). A sync that rewrites
+  the same live entry carries the key over only while the entry stays remote and both URLs are
+  strictly canonical and name the same origin. The origin check fails closed: a URL with
+  userinfo, a backslash, whitespace or control characters, a percent-encoded or non-ASCII
+  host, an empty host, a port that is empty, zero, above 65535 or not plain decimal, a
+  scheme other than `http` or `https`, or text after the host that does not start with `/`
+  has no origin, so the helper is never kept for it. Two URLs match only when their host text
+  is identical after lowercasing and dropping an explicit default port; a trailing dot, an IPv6
+  literal written another way, or an IDNA spelling is a different origin. This is deliberate:
+  Python's URL parser and the WHATWG parser Claude Code runs on can read the same string
+  differently, and a disagreement would send the helper's credentials to a host you never
+  approved. If the catalog moves the server to another origin, or to stdio, that server is
+  blocked on that harness (`native_auth_origin_changed` or `native_auth_transport_changed`) and
+  nothing is written for it. `--force` and `--adopt` do not override the block; remove the live
+  entry or restore its auth by hand. Other servers in the same file are still written.
+  Ownership fingerprints ignore this key, so an entry that differs from the projection only by
+  the helper reads `current` and a second sync is a no-op. Other unmodeled keys are still
+  replaced by a rewrite: only `headersHelper` is allowlisted.
 - **Codex `bearer_token_env_var`, `http_headers`, `env_http_headers`**. `import --merge` copies them
   into an existing catalog entry only when the name matches, both entries are remote on the exact
-  same normalized URL, and the existing entry has no auth of its own. It reports the server under
-  `native_auth_merged` instead of `skipped_existing`. A different URL, a different name, or existing
-  auth is left alone.
+  same normalized URL (a URL with userinfo or any other non-canonical form never matches), and the
+  existing entry has no auth of its own: any `headers`, `http_headers`, `env_http_headers` or
+  `bearer_token_env_var` counts as existing auth. It reports the server under `native_auth_merged`
+  instead of `skipped_existing`. A different URL, a different name, or existing auth is left alone.
 
 A literal header or a kept secret (`--keep-secrets`) can still put a value in the catalog; this
 section is about the two native forms above, which carry a command or a variable name, never a token.

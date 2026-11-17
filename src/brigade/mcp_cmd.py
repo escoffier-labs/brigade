@@ -1299,6 +1299,19 @@ def _recovery_records(target: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _project_or_block(
+    item: dict[str, Any], target: Path, harness: str, server: CanonicalServer, context: ProjectionContext, scope: str
+) -> dict[str, Any] | None:
+    """Re-project at write time; a native-auth block (the live file may have moved) is a per-server conflict."""
+    try:
+        return _project_server(target, harness, server, context)
+    except NativeAuthConflict as exc:
+        reason = exc.fields["reason"]
+        item.update(status="conflicted", action="conflict", detail=f"{server.name}: {exc}", reason=reason)
+        item["_fidelity"] = mcp_fidelity.evaluate(server, harness, scope=scope, error_code=reason)
+        return None
+
+
 def build_sync_plan(
     *,
     target: Path,
@@ -1489,16 +1502,19 @@ def build_sync_plan(
                 source = item.get("_source")
                 source_live = live.get(source or server_name, {})
                 source_record = planned_owned.get(source) if source else owner_map.get(server_name)
-                to_write[server_name] = _project_server(
+                projected = _project_or_block(
+                    item,
                     target,
                     h,
                     servers[server_name],
-                    ProjectionContext(
-                        source_live,
-                        source_record,
-                        _opencode_location(h, existing, server_name),
-                    ),
+                    ProjectionContext(source_live, source_record, _opencode_location(h, existing, server_name)),
+                    "user" if adapter.user_scope else "project",
                 )
+                if projected is None:
+                    if source:  # a rename pairs a create with a legacy removal; neither may half-apply
+                        plan_errors.append(item["detail"])
+                    continue
+                to_write[server_name] = projected
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
@@ -1513,7 +1529,8 @@ def build_sync_plan(
             elif status == "current":
                 if owner_map is None:
                     owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
-                to_write[server_name] = _project_server(
+                projected = _project_or_block(
+                    item,
                     target,
                     h,
                     servers[server_name],
@@ -1522,7 +1539,11 @@ def build_sync_plan(
                         owner_map.get(server_name),
                         _opencode_location(h, existing, server_name),
                     ),
+                    "user" if adapter.user_scope else "project",
                 )
+                if projected is None:
+                    continue
+                to_write[server_name] = projected
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],

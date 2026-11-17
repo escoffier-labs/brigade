@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tomllib
 
 import pytest
@@ -138,18 +139,16 @@ def test_helper_is_kept_when_modeled_fields_change_on_the_same_origin(box, capsy
     path = _write_claude(home, {"docs": {"type": "http", "url": URL, "headersHelper": HELPER}})
     _import_claude(capsys, repo)
     assert _sync(capsys, repo)[0] == 0
-    # Same host, new path and a new generated header: a real rewrite of the entry.
-    doc = json.loads(mcp_cmd.canonical_path(repo).read_text())
-    doc["servers"]["docs"]["url"] = "https://mcp.example.com:443/v2"
-    doc["servers"]["docs"]["headers"] = {"X-Team": {"literal": "blue"}}
-    mcp_cmd.canonical_path(repo).write_text(json.dumps(doc, indent=2) + "\n")
+    # Same origin, new path (explicit default port): a real rewrite of the entry. A catalog
+    # header here would be a second credential source and is blocked instead (see below).
+    _set_catalog_url(repo, "docs", "https://mcp.example.com:443/v2")
     assert _statuses(capsys, repo)["docs"]["status"] == "stale"
     rc, out, payload = _sync(capsys, repo)
     assert rc == 0 and payload["files_written"]
     entry = _claude_servers(path)["docs"]
     assert entry["headersHelper"] == HELPER
     assert entry["url"] == "https://mcp.example.com:443/v2"
-    assert entry["headers"] == {"X-Team": "blue"}
+    assert "headers" not in entry
     assert _statuses(capsys, repo)["docs"]["status"] == "current"
 
 
@@ -203,26 +202,135 @@ def test_unknown_native_keys_are_still_replaced_by_a_rewrite(box, capsys):
     live = {"docs": {"type": "http", "url": URL, "headersHelper": HELPER, "unrelated": {"x": 1}}}
     path = _write_claude(home, live)
     _import_claude(capsys, repo)
-    doc = json.loads(mcp_cmd.canonical_path(repo).read_text())
-    doc["servers"]["docs"]["headers"] = {"X-Team": {"literal": "blue"}}
-    mcp_cmd.canonical_path(repo).write_text(json.dumps(doc, indent=2) + "\n")
+    _set_catalog_url(repo, "docs", "https://mcp.example.com/v2")
     assert _sync(capsys, repo)[0] == 0
     entry = _claude_servers(path)["docs"]
     assert entry["headersHelper"] == HELPER and "unrelated" not in entry
 
 
-def test_origin_and_url_normalization():
-    origin = mcp_native_auth.url_origin
-    assert origin("HTTPS://Mcp.Example.com/v1") == origin("https://mcp.example.com:443/other")
-    assert origin("http://h:80/") == origin("http://h/")
-    assert origin("https://h/") != origin("http://h/")
-    assert origin("https://h:8443/") != origin("https://h/")
-    assert origin("https://a.example.com/") != origin("https://b.example.com/")
-    assert origin("not a url") is None and origin(None) is None and origin("https://h:bad/") is None
+AT = "@"  # spelled out so userinfo test URLs are not mistaken for email addresses
+BASE = "https://mcp.example.com/v1"
+BASE_ORIGIN = ("https", "mcp.example.com", 443)
+
+
+def _o(scheme, host, port):
+    return (scheme, host, port)
+
+
+# (url, expected origin or None, True when it names exactly the BASE origin). An origin of None means
+# "no provable origin": the helper is never kept for it and an import merge never matches it.
+ORIGIN_CASES = [
+    # the same origin, spelled the ways that are provably identical
+    (BASE, BASE_ORIGIN, True),
+    ("HTTPS://MCP.Example.COM/other", BASE_ORIGIN, True),
+    ("https://mcp.example.com:443/v1", BASE_ORIGIN, True),
+    ("https://mcp.example.com", BASE_ORIGIN, True),
+    (f"https://mcp.example.com/v1#frag{AT}evil.com", BASE_ORIGIN, True),
+    ("https://mcp.example.com/v1?next=@evil.com", BASE_ORIGIN, True),
+    ("https://mcp.example.com/../v1", BASE_ORIGIN, True),
+    # a different but well-formed origin
+    ("https://mcp.example.com:8443/v1", _o("https", "mcp.example.com", 8443), False),
+    ("https://mcp.example.com:65535/v1", _o("https", "mcp.example.com", 65535), False),
+    ("http://mcp.example.com/v1", _o("http", "mcp.example.com", 80), False),
+    ("http://mcp.example.com:443/v1", _o("http", "mcp.example.com", 443), False),
+    ("https://mcp.example.com./v1", _o("https", "mcp.example.com.", 443), False),  # trailing dot kept literally
+    ("https://xn--mcp-example-abc.com/v1", _o("https", "xn--mcp-example-abc.com", 443), False),
+    ("https://127.1/v1", _o("https", "127.1", 443), False),
+    ("https://[::1]/v1", _o("https", "[::1]", 443), False),
+    ("https://[::1]:8443/v1", _o("https", "[::1]", 8443), False),
+    ("https://[::1:8443]/v1", _o("https", "[::1:8443]", 443), False),  # a different, valid IPv6 literal
+    ("https://[0:0:0:0:0:0:0:1]/v1", _o("https", "[0:0:0:0:0:0:0:1]", 443), False),
+    ("https://[::ffff:1.2.3.4]/v1", _o("https", "[::ffff:1.2.3.4]", 443), False),
+    # parser-differential and malformed forms: never an origin
+    ("https://evil.com\\@mcp.example.com/v1", None, False),
+    ("https://evil.com/\\@mcp.example.com/v1", None, False),
+    ("https:\\\\mcp.example.com/v1", None, False),
+    ("https://mcp.example.com\\/v1", None, False),
+    (f"https://evil.com{AT}mcp.example.com/v1", None, False),
+    (f"https://user:pw{AT}mcp.example.com/v1", None, False),
+    (f"https://mcp.example.com{AT}evil.com/v1", None, False),
+    ("https://@mcp.example.com/v1", None, False),
+    ("https://mcp.example.com%2f.evil.com/v1", None, False),
+    ("https://mcp.example.com%40evil.com/v1", None, False),
+    ("https://mcp%2eexample.com/v1", None, False),
+    ("https://mcp.example.com\t.evil.com/v1", None, False),
+    ("https://mcp.example.com\n.evil.com/v1", None, False),
+    ("https://mcp.example.com\r\n/v1", None, False),
+    ("https://mcp.exam\tple.com/v1", None, False),
+    ("https://mcp.example.com\x00/v1", None, False),
+    ("https://mcp.example.com\x7f/v1", None, False),
+    ("https://mcp.example.com /v1", None, False),
+    (" https://mcp.example.com/v1", None, False),
+    ("https://mcp.example.com/v1 ", None, False),
+    ("https://mcp.example.com/v1\n", None, False),
+    ("https://mcp.example.com#@evil.com/v1", None, False),
+    ("https://mcp.example.com?@evil.com/v1", None, False),
+    ("https://mcp.example.com,evil.com/v1", None, False),
+    ("https://mcp.example.com!/v1", None, False),
+    ("https://mcp..example.com/v1", None, False),
+    ("https://mcp.example.com:0/v1", None, False),
+    ("https://mcp.example.com:65536/v1", None, False),
+    ("https://mcp.example.com:/v1", None, False),
+    ("https://mcp.example.com:0443/v1", None, False),
+    ("https://mcp.example.com:+443/v1", None, False),
+    ("https://mcp.example.com:44a/v1", None, False),
+    ("https://mcp.example.com:443:443/v1", None, False),
+    ("https://[::1]:0/v1", None, False),
+    ("https://[::1]:/v1", None, False),
+    ("https://[::1%25eth0]/v1", None, False),
+    ("https://[::1%eth0]/v1", None, False),
+    ("https://[::1/v1", None, False),
+    ("https://[::1]x/v1", None, False),
+    ("https://[zz::1]/v1", None, False),
+    ("https://::1/v1", None, False),
+    ("https://mcpéxample.com/v1", None, False),  # non-ASCII hosts are refused, never IDNA-mapped
+    ("https://ｍｃｐ.example.com/v1", None, False),
+    ("https:///v1", None, False),
+    ("https://:443/v1", None, False),
+    ("mcp.example.com/v1", None, False),
+    ("//mcp.example.com/v1", None, False),
+    ("https:/mcp.example.com/v1", None, False),
+    ("https:mcp.example.com/v1", None, False),
+    ("ftp://mcp.example.com/v1", None, False),
+    ("file:///etc/passwd", None, False),
+    ("javascript:alert(1)", None, False),
+    ("", None, False),
+    ("not a url", None, False),
+]
+
+
+@pytest.mark.parametrize(("url", "origin", "same_as_base"), ORIGIN_CASES, ids=[repr(c[0]) for c in ORIGIN_CASES])
+def test_origin_comparison_fails_closed(url, origin, same_as_base):
+    assert mcp_native_auth.url_origin(url) == origin
+    assert mcp_native_auth.same_origin(BASE, url) is same_as_base
+    assert mcp_native_auth.same_origin(url, BASE) is same_as_base
+    assert (mcp_native_auth.normalized_url(url) is None) is (origin is None)
+    if origin is not None:  # a canonical URL always matches itself
+        assert mcp_native_auth.same_origin(url, url)
+    if same_as_base:  # whatever else holds, the authority text really is the base host
+        assert re.match(r"https://mcp\.example\.com(:443)?([/?#]|$)", url, re.IGNORECASE)
+    else:
+        assert not mcp_native_auth.same_origin(url, "https://evil.example.org/v1")
+
+
+@pytest.mark.parametrize("value", [None, 443, b"https://mcp.example.com/v1", ["https://mcp.example.com/v1"]])
+def test_non_string_urls_have_no_origin(value):
+    assert mcp_native_auth.url_origin(value) is None
+    assert mcp_native_auth.normalized_url(value) is None
+    assert mcp_native_auth.same_origin(value, BASE) is False
+
+
+def test_normalized_url_keeps_ipv6_brackets_and_refuses_userinfo():
     norm = mcp_native_auth.normalized_url
-    assert norm("https://H.example.com:443") == norm("https://h.example.com/")
-    assert norm("https://h/mcp") != norm("https://h/mcp/")
-    assert norm("https://h/mcp?a=1") != norm("https://h/mcp")
+    assert norm("https://[::1]:8443/v1") == "https://[::1]:8443/v1"
+    assert norm("https://[::1]:8443/v1") != norm("https://[::1:8443]/v1")
+    assert norm(f"https://alice{AT}h.example.com/v1") is None
+    assert norm("https://h.example.com:443/v1#x") == "https://h.example.com/v1"
+    assert norm("https://h.example.com") == norm("https://H.EXAMPLE.com:443/")
+    assert norm("https://h.example.com/mcp") != norm("https://h.example.com/mcp/")
+    assert norm("https://h.example.com/mcp?a=1") != norm("https://h.example.com/mcp")
+    assert norm("http://h.example.com:0/") is None  # a falsy port is not "the default"
+    assert norm("http://h.example.com:80/") == "http://h.example.com/"
 
 
 def test_entry_fingerprint_is_unchanged_without_a_preserved_key():
@@ -236,6 +344,121 @@ def test_entry_fingerprint_is_unchanged_without_a_preserved_key():
     assert mcp_native_auth.entry_fingerprint("cursor-user", {**entry, "headersHelper": "x"}) != localio.stable_hash(
         entry
     )
+
+
+def _set_catalog_fields(repo, name, **fields):
+    path = mcp_cmd.canonical_path(repo)
+    doc = json.loads(path.read_text())
+    doc["servers"][name].update(fields)
+    path.write_text(json.dumps(doc, indent=2) + "\n")
+
+
+def _blocked(payload, reason, server="docs"):
+    rows = [i for i in payload["items"] if i["server"] == server]
+    assert [(i["status"], i["action"], i["reason"]) for i in rows] == [("conflicted", "conflict", reason)]
+    fidelity = [r for r in payload["fidelity"]["servers"] if r["server"] == server]
+    assert any(f["blocking"] and f["reason"] == reason for r in fidelity for f in r["fields"])
+
+
+@pytest.mark.parametrize("adopt", [False, True])
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("owned", [True, False], ids=["owned", "not-owned"])
+def test_origin_change_is_blocked_whatever_the_flags_and_ownership(box, capsys, owned, force, adopt):
+    repo, home = box
+    live = {"docs": {"type": "http", "url": URL, "headersHelper": HELPER}}
+    path = _write_claude(home, live)
+    _import_claude(capsys, repo)
+    if owned:  # Brigade wrote (adopted) the entry once; otherwise it never did
+        assert _sync(capsys, repo)[0] == 0
+    _set_catalog_url(repo, "docs", OTHER_URL)
+    sidecar = mcp_cmd.state_path(repo).read_text() if mcp_cmd.state_path(repo).is_file() else ""
+    rc, out, payload = _sync(capsys, repo, force=force, adopt=adopt)
+    assert rc == 1
+    _blocked(payload, "native_auth_origin_changed")
+    assert _claude_servers(path) == live
+    assert (mcp_cmd.state_path(repo).read_text() if mcp_cmd.state_path(repo).is_file() else "") == sidecar
+    _assert_no_markers(out)
+
+
+COLLISIONS = [
+    {"headers": {"X-Team": {"literal": "blue"}}},
+    {"headers": {"Authorization": {"ref": "SOME_TOKEN_VAR"}}},
+    {"env_http_headers": {"X-Env": "SOME_ENV_VAR"}},
+    {"http_headers": {"X-Static": "fake-value"}},
+    {"bearer_token_env_var": "SOME_TOKEN_VAR"},
+]
+
+
+@pytest.mark.parametrize("extra", COLLISIONS, ids=[next(iter(c)) for c in COLLISIONS])
+@pytest.mark.parametrize("adopt_force", [(False, False), (True, True)])
+def test_catalog_auth_next_to_a_live_helper_is_blocked_not_double_written(box, capsys, extra, adopt_force):
+    repo, home = box
+    live = {"docs": {"type": "http", "url": URL, "headersHelper": HELPER}}
+    path = _write_claude(home, live)
+    _import_claude(capsys, repo)
+    assert _sync(capsys, repo)[0] == 0
+    _set_catalog_fields(repo, "docs", **extra)
+    adopt, force = adopt_force
+    before = path.read_text()
+    rc, out, payload = _sync(capsys, repo, adopt=adopt, force=force)
+    assert rc == 1
+    _blocked(payload, "native_auth_source_collision")
+    assert path.read_text() == before and _claude_servers(path) == live
+    _assert_no_markers(out)
+
+
+def test_collision_blocks_one_server_and_still_writes_its_sibling(box, capsys):
+    repo, home = box
+    path = _write_claude(home, {"docs": {"type": "http", "url": URL, "headersHelper": HELPER}})
+    _import_claude(capsys, repo)
+    _set_catalog_fields(repo, "docs", headers={"X-Team": {"literal": "blue"}})
+    servers, _, _ = mcp_cmd.load_canonical(repo)
+    servers["sibling"] = mcp_adapters.CanonicalServer(
+        name="sibling", transport="http", url="https://sibling.example.com/mcp"
+    )
+    mcp_cmd._write_canonical(repo, servers)
+    rc, out, payload = _sync(capsys, repo)
+    assert rc == 1
+    _blocked(payload, "native_auth_source_collision")
+    entries = _claude_servers(path)
+    assert entries["docs"] == {"type": "http", "url": URL, "headersHelper": HELPER}
+    assert entries["sibling"]["url"] == "https://sibling.example.com/mcp"
+
+
+def test_a_helper_with_no_catalog_auth_is_still_kept(box, capsys):
+    """The collision rule needs BOTH sources; a helper alone keeps working."""
+    repo, home = box
+    path = _write_claude(home, {"docs": {"type": "http", "url": URL, "headersHelper": HELPER}})
+    _import_claude(capsys, repo)
+    assert _sync(capsys, repo)[0] == 0
+    assert _claude_servers(path)["docs"]["headersHelper"] == HELPER
+
+
+@pytest.mark.parametrize("planned_owned", [True, False], ids=["owned", "not-owned"])
+def test_live_file_moving_between_plan_and_write_is_a_clean_conflict(box, capsys, monkeypatch, planned_owned):
+    repo, home = box
+    path = _write_claude(home, {"docs": {"type": "http", "url": URL, "headersHelper": HELPER}})
+    _import_claude(capsys, repo)
+    if planned_owned:
+        assert _sync(capsys, repo)[0] == 0
+    # Same origin, so the plan is a clean update; the live file moves to another origin afterwards.
+    _set_catalog_url(repo, "docs", "https://mcp.example.com/v2")
+    moved = {"type": "http", "url": OTHER_URL, "headersHelper": HELPER}
+    real, calls = mcp_cmd._plan_for_harness, []
+
+    def plan_then_edit_the_live_file(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if not calls:
+            calls.append(1)
+            _write_claude(home, {"docs": moved})
+        return result
+
+    monkeypatch.setattr(mcp_cmd, "_plan_for_harness", plan_then_edit_the_live_file)
+    rc, out, payload = _sync(capsys, repo)  # no traceback: _sync parses the JSON payload
+    assert calls and rc == 1
+    _blocked(payload, "native_auth_origin_changed")
+    assert _claude_servers(path)["docs"] == moved
+    _assert_no_markers(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -264,7 +487,7 @@ def test_codex_auth_merges_into_the_same_server_and_codex_sync_keeps_it(box, cap
     assert rc == 0
     assert payload["native_auth_merged"] == ["docs"] and payload["skipped_existing"] == []
     assert payload["added"] == []
-    _assert_no_markers(*(line for line in out.splitlines() if "bearer" not in line))
+    _assert_no_markers(out)  # the whole output: nothing is excluded from the leak check
     servers, _, _ = mcp_cmd.load_canonical(repo)
     assert servers["docs"].bearer_token_env_var == TOKEN_VAR
 
@@ -300,6 +523,10 @@ def test_codex_auth_merges_into_the_same_server_and_codex_sync_keeps_it(box, cap
         ),
         # existing entry is stdio
         ({"transport": "stdio", "command": "npx"}, CODEX_DOCS, [], ["docs"], []),
+        # ANY header on the existing entry counts as auth, not only names that look sensitive
+        ({"transport": "http", "url": URL, "headers": {"X-Auth": {"literal": "fake"}}}, CODEX_DOCS, [], ["docs"], []),
+        ({"transport": "http", "url": URL, "http_headers": {"X-Team": "blue"}}, CODEX_DOCS, [], ["docs"], []),
+        ({"transport": "http", "url": URL, "env_http_headers": {"X-Team": "FAKE_VAR"}}, CODEX_DOCS, [], ["docs"], []),
     ],
 )
 def test_codex_auth_is_not_merged_unless_name_url_and_authlessness_all_match(
@@ -316,6 +543,34 @@ def test_codex_auth_is_not_merged_unless_name_url_and_authlessness_all_match(
     assert servers["docs"].bearer_token_env_var == expected
     if "wiki" in added:
         assert servers["wiki"].bearer_token_env_var == TOKEN_VAR
+
+
+@pytest.mark.parametrize(
+    ("catalog_url", "codex_url"),
+    [
+        (f"https://alice{AT}mcp.example.com/v1", URL),  # userinfo is never "the same server"
+        (URL, f"https://alice{AT}mcp.example.com/v1"),
+        ("https://[::1]:8443/v1", "https://[::1:8443]/v1"),  # different IPv6 literals
+        ("https://mcp.example.com\\@evil.example.net/v1", "https://mcp.example.com\\@evil.example.net/v1"),
+        ("https://mcp.example.com:0/v1", "https://mcp.example.com:0/v1"),  # falsy port is not the default
+        ("https://mcp.example.com/v1", "https://mcp.example.com/v1 "),
+    ],
+)
+def test_merge_never_attaches_auth_when_either_url_is_not_canonical_or_equal(catalog_url, codex_url):
+    existing = mcp_adapters.CanonicalServer(name="docs", transport="http", url=catalog_url)
+    imported = mcp_adapters.CanonicalServer(
+        name="docs", transport="http", url=codex_url, bearer_token_env_var=TOKEN_VAR
+    )
+    assert mcp_native_auth.merge_imported_native_auth(existing, imported) is None
+
+
+def test_merge_attaches_auth_for_the_same_canonical_url_only():
+    existing = mcp_adapters.CanonicalServer(name="docs", transport="http", url="https://[::1]:8443/v1")
+    imported = mcp_adapters.CanonicalServer(
+        name="docs", transport="http", url="HTTPS://[::1]:8443/v1#x", bearer_token_env_var=TOKEN_VAR
+    )
+    merged = mcp_native_auth.merge_imported_native_auth(existing, imported)
+    assert merged is not None and merged.bearer_token_env_var == TOKEN_VAR
 
 
 def test_codex_auth_merge_is_reported_in_preview_without_writing(box, capsys):

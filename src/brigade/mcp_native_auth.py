@@ -7,13 +7,18 @@ it, the ownership sidecar does not hold it, and no hash of it is stored anywhere
 Instead a rewrite of the SAME live entry keeps the key when the entry still points at
 the same endpoint, and refuses to write when it would not.
 
-Two rules keep that safe:
+Three rules keep that safe:
 
-* Origin binding. The helper is generated credentials for one host. It is kept only
-  when the entry stays remote and its URL origin (scheme, host, port) is unchanged.
-  Otherwise the projection is blocked for that server (``NativeAuthEndpointChanged``),
-  which no flag overrides, rather than sending the credentials somewhere new or
-  writing an entry with no auth.
+* Origin binding, fail closed. The helper is generated credentials for one host. It is
+  kept only when the entry stays remote and both URLs are strictly canonical and name
+  the same origin. A URL that Python and a WHATWG parser (Claude Code runs on Node)
+  could read differently has no origin here (``url_origin`` returns None), so it never
+  compares equal to anything. Otherwise the projection is blocked for that server
+  (``NativeAuthEndpointChanged``), which no flag overrides, rather than sending the
+  credentials somewhere new or writing an entry with no auth.
+* One credential source. When the live entry holds a helper and the projection would
+  also carry catalog headers, the projection is blocked
+  (``NativeAuthSourceCollision``) instead of writing both with no signal.
 * Fingerprints ignore preserved keys. Ownership fingerprints are computed over the
   entry minus these keys, so a live entry that differs from the projection only by a
   preserved key reads ``current`` and the sidecar carries nothing derived from it.
@@ -24,12 +29,14 @@ This module also merges Codex native auth into an existing catalog entry on impo
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit
 
 from . import localio
-from .mcp_adapters import CanonicalServer, _sensitive_http_header
+from .mcp_adapters import CanonicalServer
 
 # Allowlist, not "every unknown key": only keys with a known auth meaning are kept, so a
 # rewrite still drops stale or unrelated native settings. Only Claude Code defines
@@ -41,6 +48,11 @@ PRESERVED_NATIVE_KEYS: dict[str, tuple[str, ...]] = {
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _NATIVE_AUTH_FIELDS = ("http_headers", "env_http_headers", "bearer_token_env_var")
+# Anything on the existing catalog entry that can authenticate the server for the merge check.
+_EXISTING_AUTH_FIELDS = ("headers", *_NATIVE_AUTH_FIELDS)
+_SCHEME_RE = re.compile(r"(https?)://", re.IGNORECASE)
+_HOST_RE = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_.-])?")
+_V6_RE = re.compile(r"\[([0-9A-Fa-f:.]+)\](?::([0-9]+))?")
 
 
 class NativeAuthConflict(ValueError):
@@ -67,33 +79,98 @@ class NativeAuthEndpointChanged(NativeAuthConflict):
         self.fields = {"reason": reason}
 
 
+class NativeAuthSourceCollision(NativeAuthConflict):
+    """The live entry authenticates natively and the catalog entry also supplies headers."""
+
+    def __init__(self) -> None:
+        ValueError.__init__(
+            self,
+            "the live entry authenticates through a native helper, but the catalog entry also supplies "
+            "headers; two credential sources are ambiguous; nothing was written for this server; remove "
+            "the catalog headers or the live helper to continue",
+        )
+        self.fields = {"reason": "native_auth_source_collision"}
+
+
 def preserved_keys(harness: str) -> tuple[str, ...]:
     return PRESERVED_NATIVE_KEYS.get(harness, ())
 
 
-def url_origin(url: object) -> tuple[str, str, int] | None:
-    """Scheme, host and port of an http(s) URL; None when it has no usable origin."""
-    if not isinstance(url, str):
+def _split(url: object) -> tuple[str, str, str, int, str] | None:
+    """Strictly canonical http(s) URL -> (scheme, authority, host, port, rest); else None.
+
+    ``authority`` is the raw text lowercased with the default port made explicit-free, so two
+    URLs name one origin only when that text is identical. No parser-level normalization is
+    trusted: Python's ``urlsplit`` and the WHATWG parser disagree on ``\\``, tabs, userinfo,
+    percent-encoded hosts and more, and a disagreement would send retained credentials to a
+    host the user never approved. Rejected (None): non-str, any whitespace or control or
+    backslash anywhere, a non-ASCII or percent-encoded or userinfo-bearing authority, an empty
+    or malformed host, a port that is empty, zero, above 65535, signed, padded or non-decimal,
+    and a ``?`` or ``#`` right after the authority. Non-ASCII hosts are rejected, never IDNA
+    mapped; a trailing dot is kept literally, so ``h.`` and ``h`` are different origins.
+    """
+    if not isinstance(url, str) or any(ord(c) <= 0x20 or ord(c) == 0x7F or c == "\\" for c in url):
         return None
-    try:
-        parts = urlsplit(url.strip())
-        scheme, host, port = parts.scheme.lower(), parts.hostname, parts.port
+    match = _SCHEME_RE.match(url)
+    if match is None:
+        return None
+    scheme, tail = match.group(1).lower(), url[match.end() :]
+    cut = next((i for i, c in enumerate(tail) if c in "/?#"), len(tail))
+    authority, rest = tail[:cut], tail[cut:]
+    if rest and rest[0] != "/":
+        return None
+    if not authority.isascii() or "@" in authority or "%" in authority:
+        return None
+    v6 = _V6_RE.fullmatch(authority)
+    port_text: str
+    if v6 is not None:
+        try:
+            ipaddress.IPv6Address(v6.group(1))
+        except ValueError:
+            return None
+        host, port_text = f"[{v6.group(1).lower()}]", v6.group(2) or ""
+    else:
+        host, sep, port_text = authority.partition(":")
+        if (sep and not port_text) or ":" in port_text or "[" in authority or "]" in authority:
+            return None
+        if _HOST_RE.fullmatch(host) is None or ".." in host:
+            return None
+        host = host.lower()
+    if port_text and not port_text.isdigit():
+        return None
+    port = int(port_text) if port_text else _DEFAULT_PORTS[scheme]
+    if port_text and (port_text != str(port) or not 0 < port <= 65535):
+        return None
+    try:  # An independent parser must agree on the pieces; any disagreement is a refusal.
+        parts = urlsplit(url)
+        if (parts.hostname or "") != host.strip("[]") or (parts.port or _DEFAULT_PORTS[scheme]) != port:
+            return None
     except ValueError:
         return None
-    if scheme not in _DEFAULT_PORTS or not host:
-        return None
-    return scheme, host.lower(), port or _DEFAULT_PORTS[scheme]
+    shown = host if port == _DEFAULT_PORTS[scheme] else f"{host}:{port}"
+    return scheme, shown, host, port, rest
+
+
+def url_origin(url: object) -> tuple[str, str, int] | None:
+    """Scheme, host and port of a strictly canonical http(s) URL; None means "no provable origin"."""
+    parts = _split(url)
+    return None if parts is None else (parts[0], parts[2], parts[3])
+
+
+def same_origin(old: object, new: object) -> bool:
+    """True only when both URLs are canonical and their raw authority text is identical."""
+    a, b = _split(old), _split(new)
+    return a is not None and b is not None and a[:4] == b[:4] and a[1] == b[1]
 
 
 def normalized_url(url: object) -> str | None:
-    """Exact-match form: case-folded origin, default port dropped, fragment ignored."""
-    origin = url_origin(url)
-    if origin is None:
+    """Exact-match form: case-folded origin, default port dropped, fragment ignored; None if unsafe."""
+    parts = _split(url)
+    if parts is None:
         return None
-    parts = urlsplit(str(url).strip())
-    scheme, host, port = origin
-    netloc = host if port == _DEFAULT_PORTS[scheme] else f"{host}:{port}"
-    return f"{scheme}://{netloc}{parts.path or '/'}" + (f"?{parts.query}" if parts.query else "")
+    scheme, authority, _, _, rest = parts
+    path, _, query = rest.split("#", 1)[0].partition("?")
+    return f"{scheme}://{authority}{path or '/'}" + (f"?{query}" if query else "")
 
 
 def carry_native_keys(harness: str, projected: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
@@ -103,9 +180,10 @@ def carry_native_keys(harness: str, projected: dict[str, Any], live: dict[str, A
         return projected
     if "url" not in projected:
         raise NativeAuthEndpointChanged("native_auth_transport_changed")
-    old, new = url_origin(live.get("url")), url_origin(projected["url"])
-    if old is None or new is None or old != new:
+    if not same_origin(live.get("url"), projected["url"]):
         raise NativeAuthEndpointChanged("native_auth_origin_changed")
+    if projected.get("headers"):
+        raise NativeAuthSourceCollision()
     return {**projected, **kept}
 
 
@@ -116,9 +194,8 @@ def entry_fingerprint(harness: str, entry: dict[str, Any]) -> str:
 
 
 def _has_auth(server: CanonicalServer) -> bool:
-    return any(getattr(server, key) for key in _NATIVE_AUTH_FIELDS) or any(
-        _sensitive_http_header(name) for name in server.headers
-    )
+    """Any header or native auth setting counts: a header name pattern is not proof of "no auth"."""
+    return any(getattr(server, key) for key in _EXISTING_AUTH_FIELDS)
 
 
 def merge_imported_native_auth(existing: CanonicalServer, imported: CanonicalServer) -> CanonicalServer | None:

@@ -27,7 +27,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 
 from . import toml_format
@@ -287,6 +287,14 @@ def _parse_env(raw: object, *, keep_secrets: bool = False) -> tuple[dict[str, di
 # --------------------------------------------------------------------------- #
 
 
+class FromProvider(Protocol):
+    """Read one provider-native server dict back; ``keep_secrets`` is passed by keyword."""
+
+    def __call__(
+        self, name: str, raw: dict[str, Any], *, keep_secrets: bool = False
+    ) -> tuple[CanonicalServer, list[str]]: ...
+
+
 @dataclass(frozen=True)
 class McpAdapter:
     harness: str
@@ -297,8 +305,7 @@ class McpAdapter:
     supports_remote: bool
     env_style: str  # "passthrough" | "expand" | "vscode-inputs"
     to_provider: Callable[[CanonicalServer], dict[str, Any]]
-    # Callers pass ``keep_secrets=`` as a keyword; a bare Callable signature cannot say so.
-    from_provider: Callable[..., tuple[CanonicalServer, list[str]]]
+    from_provider: FromProvider
     read_file: Callable[[str | None], dict[str, dict[str, Any]]]
     write_file: Callable[[str | None, dict[str, dict[str, Any]], set[str]], str]
 
