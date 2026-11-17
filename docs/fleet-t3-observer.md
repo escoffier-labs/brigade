@@ -151,6 +151,64 @@ A machine without a binding is stored but read as unbound. Reads recompute the
 binding from the current policy, so a policy change applies without a
 republish, and placement must skip unbound rows.
 
+## Placement
+
+`brigade fleet place --repo <canonical key> [--threshold 0.70] [--json]` asks the
+Hub which machine should run a new child agent for a repository. It prints one
+line: the recommended machine, its T3 environment id and project id, and the
+reason, or why no machine qualifies. Run it on an enrolled node with a node
+token; it exits 1 when nothing is recommended.
+
+The answer is advice, never admission. Trust statement: node-reported telemetry
+and inventory; advisory only, never admission. The Hub does not reserve a slot,
+store a decision, or write anything while answering (one read snapshot with
+writes refused, and the quota and routing schemas are never created on a Hub
+that lacks them). A caller that wants a slot still goes through `route`, which
+re-checks every gate.
+
+Placement reuses the routing candidate evaluator and adds three checks:
+
+- The repository must be a bound, fresh T3 project on the machine. A machine
+  with no row is `repo-not-placeable`, an unbound row is `inventory-unbound`,
+  and an expired row is `inventory-stale`. A repository with no usable row
+  anywhere is denied as `repo-not-placeable`. A policy
+  `repositories.<id>.eligible_machines` list narrows the set further
+  (`repo-machine-not-eligible`).
+- Effective load is the higher of the node-reported CPU `load` and the
+  Hub-counted live sessions on the node divided by the machine's policy
+  `concurrency`. Missing or stale telemetry, or a null `load`, excludes the
+  machine (`machine-unknown-telemetry`, `machine-stale-telemetry`,
+  `machine-load-unknown`). Node memory joins this maximum once nodes report it.
+- A machine at or over the threshold (default 0.70, range 0 to 1) is shed
+  (`machine-load-shed`).
+
+If the caller's own machine is eligible and under the threshold it wins
+(`local-under-threshold`). Otherwise the remaining machines are ordered by the
+existing routing rank (preferred and discouraged workloads, then priority) and
+then by lower effective load (`peer-ranked`). Machine preference stays in the
+existing policy fields, so a low-weight machine is configured with
+`discouraged_workloads`, `priority` or `os`, not a placement setting.
+
+The response schema is `brigade.fleet_placement.v1`. Only the recommended
+machine carries its `environment_id` and `project_id`; every candidate carries
+its eligibility, effective load and reasons only. `expires_at` is the earliest
+of the telemetry expiry, the inventory expiry and two minutes after
+`decided_at`.
+
+```mermaid
+flowchart TD
+    A[place request: repo, threshold] --> B[One read snapshot, writes refused]
+    B --> C{Routing enabled and repo has a bound fresh project?}
+    C -- no --> N[status none: repo-not-placeable or routing reason]
+    C -- yes --> D[Routing evaluator per machine: telemetry, capacity, quota read]
+    D --> E[Placement checks: inventory, repo policy, effective load vs threshold]
+    E --> F{Caller machine eligible and under threshold?}
+    F -- yes --> L[Recommend local machine]
+    F -- no --> G{Any peer eligible?}
+    G -- no --> N2[status none: no-eligible-candidate]
+    G -- yes --> P[Recommend best peer by rank, then lower load]
+```
+
 ## Keeping local Claude Code and Codex sessions open
 
 The optional session heartbeat renews the exact snapshot last published by a

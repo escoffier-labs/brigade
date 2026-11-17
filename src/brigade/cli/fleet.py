@@ -594,6 +594,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     register_projects(fleet_sub)
 
+    from .fleet_place import register as register_place
+
+    register_place(fleet_sub)
+
 
 def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:
     from .. import fleet_command_deck, fleet_hub

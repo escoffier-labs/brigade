@@ -253,6 +253,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet nodes list`
 - `brigade fleet nodes revoke`
 - `brigade fleet owners show`
+- `brigade fleet place`
 - `brigade fleet policy classify`
 - `brigade fleet policy delegation create`
 - `brigade fleet policy delegation show`
