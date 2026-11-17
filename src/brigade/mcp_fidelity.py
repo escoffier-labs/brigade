@@ -16,6 +16,7 @@ _CODEX = {"codex", "codex-user"}
 _OPENCODE = {"opencode", "opencode-user"}
 _AUTH = ("http_headers", "env_http_headers", "bearer_token_env_var")
 _ERROR_REASONS = {
+    "native_auth_blocks_removal",
     "native_auth_collision",
     "native_auth_origin_changed",
     "native_auth_source_collision",

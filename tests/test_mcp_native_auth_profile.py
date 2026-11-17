@@ -101,10 +101,13 @@ def test_helper_is_kept_through_profile_update_verify_and_uninstall(pbox, capsys
     assert _doctor(capsys, ws, home)[0] == 0
     assert MARKER not in _profile_files(home)
 
-    # Uninstall still recognises the entry as the one the profile wrote.
+    # Uninstall still recognises the entry as the one the profile wrote, but never erases the
+    # helper with it: the entry stays, ownership stays, and the run reports itself incomplete.
     rc, payload = _run(capsys, harness_profile_cmd.uninstall, ws, home, write=True)
-    assert rc == 0 and [(i["status"], i["action"]) for i in _mcp_items(payload)] == [("managed", "remove")]
-    assert "docs" not in _live(home)
+    assert rc == 1 and [(i["status"], i["reason"]) for i in _mcp_items(payload)] == [
+        ("blocked", "native_auth_blocks_removal")
+    ]
+    assert _live(home)["docs"]["headersHelper"] == HELPER
 
 
 @pytest.mark.parametrize("adopt", [False, True])

@@ -24,6 +24,13 @@ Three rules keep that safe:
   preserved key reads ``current`` and the sidecar carries nothing derived from it.
   An entry with no preserved key hashes exactly as before.
 
+* No removal. Every rewrite gate above would be moot if a delete could erase the same
+  key, and an entry with a preserved key looks pristine to the fingerprint. So no path
+  removes a live entry that carries one (sync ``--prune``, profile catalog removal,
+  profile uninstall): that server is blocked (``native_auth_blocks_removal``), nothing
+  is removed for it, siblings proceed, and ``--force``/``--adopt``/``--prune`` do not
+  override it. The operator removes the key or the entry by hand.
+
 This module also merges Codex native auth into an existing catalog entry on import.
 """
 
@@ -32,7 +39,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import replace
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlsplit
 
 from . import localio
@@ -94,6 +101,27 @@ class NativeAuthSourceCollision(NativeAuthConflict):
 
 def preserved_keys(harness: str) -> tuple[str, ...]:
     return PRESERVED_NATIVE_KEYS.get(harness, ())
+
+
+REMOVAL_BLOCKED = "native_auth_blocks_removal"
+
+
+def has_preserved_native_keys(harness: str, entry: object) -> bool:
+    """True when a live entry carries a key Brigade keeps but does not own (see module docs)."""
+    return isinstance(entry, dict) and any(entry.get(key) for key in preserved_keys(harness))
+
+
+def removal_blockers(harness: str, live: dict[str, Any], names: Iterable[str]) -> list[str]:
+    """The names among ``names`` whose live entry must not be removed."""
+    return sorted(name for name in names if has_preserved_native_keys(harness, live.get(name)))
+
+
+def removal_block_message(server: str, harness: str) -> str:
+    """Actionable and value-free: names the server and harness, never the key's content."""
+    return (
+        f"{server}: the live {harness} entry carries native auth Brigade does not manage; it was not "
+        "removed; remove the native auth key or the entry by hand to continue"
+    )
 
 
 def _split(url: object) -> tuple[str, str, str, int, str] | None:

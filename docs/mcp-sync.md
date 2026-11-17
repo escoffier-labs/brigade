@@ -187,6 +187,11 @@ data you edit by hand:
   blocked on that harness (`native_auth_origin_changed` or `native_auth_transport_changed`) and
   nothing is written for it. `--force` and `--adopt` do not override the block; remove the live
   entry or restore its auth by hand. Other servers in the same file are still written.
+  The same key is never removed with its entry: `sync --prune`, a harness profile catalog
+  removal and a profile uninstall block that server with `native_auth_blocks_removal`, remove
+  nothing for it and finish the rest. No flag overrides it. Remove the `headersHelper` line
+  or the entry by hand; a later run then completes. A profile run with a blocked server exits
+  1 and reports `incomplete`, and its ownership record stays so the next run can finish.
   Ownership fingerprints ignore this key, so an entry that differs from the projection only by
   the helper reads `current` and a second sync is a no-op. Other unmodeled keys are still
   replaced by a rewrite: only `headersHelper` is allowlisted.

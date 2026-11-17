@@ -770,7 +770,11 @@ def _plan_from_inputs(
                 )
             )
         elif prune or name in prune_names:
-            items.append(_item(harness, rel, name, "orphan", "remove", None, None))
+            item = _item(harness, rel, name, "orphan", "remove", None, None)
+            # A rename source hands its native auth to the replacement, so only it may go.
+            if name not in sources.values() and mcp_native_auth.has_preserved_native_keys(harness, live[name]):
+                _block_removal(item, harness, scope)
+            items.append(item)
         else:
             items.append(
                 _item(
@@ -785,6 +789,17 @@ def _plan_from_inputs(
         server = servers.get(item["server"])
         item["transport"] = server.transport if server is not None else None
     return items
+
+
+def _block_removal(item: dict[str, Any], harness: str, scope: str) -> None:
+    """Turn a planned removal into a per-server conflict: native auth would be erased with the entry."""
+    reason = mcp_native_auth.REMOVAL_BLOCKED
+    message = mcp_native_auth.removal_block_message(item["server"], harness)
+    item.update(status="conflicted", action="conflict", detail=message, reason=reason)
+    item["_fidelity"] = {
+        **mcp_fidelity.evaluate(None, harness, scope=scope, error_code=reason),
+        "server": item["server"],
+    }
 
 
 def _rename_sources(
@@ -1492,6 +1507,7 @@ def build_sync_plan(
         planned_owned = state.get("ownership", {}).get(h, {}).get(adapter.path, {})
         to_write: dict[str, dict[str, Any]] = {}
         to_remove: set[str] = set()
+        renamed_sources: set[str] = set()
         changed = False
         for item in items:
             server_name = item["server"]
@@ -1515,6 +1531,8 @@ def build_sync_plan(
                         plan_errors.append(item["detail"])
                     continue
                 to_write[server_name] = projected
+                if source:
+                    renamed_sources.add(source)
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
@@ -1522,6 +1540,12 @@ def build_sync_plan(
                 }
                 changed = True
             elif action == "remove":
+                # Re-checked at write time: the live entry may have gained native auth since the plan.
+                if server_name not in renamed_sources and mcp_native_auth.has_preserved_native_keys(
+                    h, live.get(server_name)
+                ):
+                    _block_removal(item, h, "user" if adapter.user_scope else "project")
+                    continue
                 to_remove.add(server_name)
                 if owner_map is not None:
                     owner_map.pop(server_name, None)
