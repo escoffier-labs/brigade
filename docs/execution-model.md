@@ -39,6 +39,25 @@ since 0.31.0. Remaining work is tracked in
 [#1850](https://github.com/escoffier-labs/brigade/issues/1850) and
 [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
+## Kinds of delegated work
+
+Five mechanisms hand work to another actor. They differ in who owns execution,
+where the record lives, and how much Brigade governance covers the far side.
+Only the ledger, run-lineage, and batch rows are Brigade-owned today. The ledger
+and batch rows launch workers. The run-lineage row creates a branched run record
+for later use.
+
+| Mechanism | Who creates it | Who owns execution | Where identity and results are recorded | Started by | Current status |
+| --- | --- | --- | --- | --- | --- |
+| T3 app-owned child task | A parent T3 session | The T3 app: selected environment, app-owned worktree, provider run, cancellation, and completion wake | Native T3 task, thread, and run identifiers plus the completion wake. Brigade records no governed task or result. The optional [thread-presence observer](fleet-t3-observer.md) publishes operational metadata only. | Native `delegate_task` tool in the parent session | Available natively. Brigade governance is not wired. The [native T3 design](phase-2046-native-t3-app-hosted-design.md) and [governed-child contract](phase-2046-governed-native-child-contract.md) keep production dispatch unwired, and closeout is operator-assisted per [the closeout runbook](runbooks/native-t3-assisted-closeout.md). |
+| Remote fleet request | An operator, an agent, or `brigade run` routing a seat to another machine | The target machine's T3. The source keeps the orchestration receipt and takes no model lease. | `t3-fleet` request id and delegation id, the source `WorkerResult.remote` handoff, and Hub lifecycle observations through [`brigade fleet events report`](fleet-t3-events.md). | `t3-fleet submit`, directly or through the source transport in [fleet_t3_transport.py](../src/brigade/fleet_t3_transport.py) | Separate supported path. Remote `brigade run` routing needs an enrolled fleet, routing enabled, and the [deployment prerequisites](phase-fleet-remote-transport.md#deployment-prerequisites). There is no local fallback. |
+| Ledger task | `brigade work task add` or a work import | Brigade: one `brigade run` child per task, in a linked worktree | Task id and claim generation in the work ledger, session and chained intent receipts under `.brigade/dispatch/<dispatch-id>/`, and child run artifacts | `brigade work dispatch` | Shipped. Successful children stay claimed and `in_progress` until the operator lands them. |
+| Durable run-lineage child | An operator or agent branching a checkpoint-covered parent lifecycle event | Brigade, under the new child run identity | New run id and the `run.json` `lineage` block (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`), plus child artifacts and lifecycle journal, as defined in [run receipt schemas](receipt-schemas.md) | `brigade runs child <parent> <event-id>` | Shipped. It creates the branched run record and journal and does not launch workers. |
+| Explicit batch task | A caller or agent supplying a batch file | The Brigade run orchestrator, with no planner or synthesis call | `request_id` and `task_id` under `.brigade/runs/batch-<request-hash>/`, with the lifecycle journal and per-task result references, per [explicit task batches](run-batch.md) | `brigade run batch batch.json` | Shipped for 1 through 8 tasks. Synthesis is refused with `synthesis-not-implemented`. It does not dispatch ledger tasks or use the T3 route. |
+
+The Grok Bot `t3-dispatch` pack, an earlier front end for `t3-fleet`, is retired
+in 0.32.0 ([retirement notice](grokbot-t3-dispatch.md)).
+
 ## Scheduled memory application
 
 New workspaces enable Tier 0 reflect intent by default. Care installation
