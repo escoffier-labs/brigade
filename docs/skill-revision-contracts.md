@@ -60,25 +60,43 @@ existing destination:
 | Byte-identical regular file | Kept. No write and no proposal. |
 | Differing regular file | Kept untouched. Init files one inbox proposal with the bundled text and prints `kept (edited)` or `kept (pristine-stale)` with the proposal id. |
 
-Every path component from the target root down is checked with `lstat` before
-any directory is created or file written, so a skill installed as a link (the
-shape in #2677) is never reached through it.
+SKILL.md wiring walks, reads and creates the destination relative to a held
+descriptor for the target root (`brigade.dirfd`), one component at a time, so a
+skill installed as a link (the shape in #2677), a linked parent directory or a
+Windows junction is never reached through it, and a parent swapped mid-run
+cannot redirect the write. The read is non-blocking and requires a regular
+file, so a FIFO at the destination cannot hang init. A race (a component
+vanishing or changing type) resolves to a kept outcome, never to a write. This
+guarantee covers SKILL.md wiring only; the other template files keep their own
+write path. Line endings do not count as an edit: bundled text is written as LF
+and a CRLF copy compares equal to it.
 
 The proposal is filed with a `dedupe_key` of
-`init:<skill_id>:<sha256 of the proposed files>`. `inbox_add` accepts the key
-on any caller: when a proposal in any status already carries it, the existing
-id is returned with exit code 0 and nothing new is written, so a repeated init
-does not pile up proposals. The proposal carries a behavioral contract only if
-the bundled `skill.json` ships one. Brigade does not infer a failure for it.
+`init:<skill_id>:<destination path>:<sha256 of the proposed files>`. `inbox_add`
+accepts the key on any caller: when a proposal in any status already carries it,
+the existing id is returned, with the same exit code the first filing gave (0
+when its lint passed), and nothing new is written, so a repeated init does not
+pile up proposals. The destination path is part of the key, so the same text
+proposed for two installed copies is two proposals. A proposal's `source` is
+`brigade://bundled-skills/<skill_id>@<brigade version>`, not a temporary path.
+The proposal carries a behavioral contract only if the bundled `skill.json`
+ships one. Brigade does not infer a failure for it.
 
 `.brigade/skills/wired.json` records, per file init wrote, the harness, skill
 id, `sha256` of the installed bytes, `brigade_version` and `template_sha256`.
 Init uses it only to label a differing copy: a copy whose bytes still match the
 recorded `sha256` is `pristine-stale` (the bundled template moved on), anything
-else is `edited`. Nothing refreshes a file in place from it. A failed record
-write is a warning. `brigade skills install` and `brigade skills sync` keep
-their own semantics and are unchanged. Review a filed proposal with
+else is `edited`. Nothing refreshes a file in place from it. The file is read
+and written under the skills mutation lock, so concurrent inits keep each
+other's records, and an unreadable file is copied to
+`wired.json.corrupt-<digest>` before it is replaced. A failed record write is a
+warning. `brigade skills install` and `brigade skills sync` keep their own
+semantics and are unchanged. Review a filed proposal with
 `brigade skills inbox diff <id>`.
+
+`brigade reconfigure --prune` still removes a pruned harness directory whole.
+Before it does, it prints a warning naming each `SKILL.md` under it that differs
+from the bundled text, so an operator edit is not deleted silently.
 
 ## Fleet report and review compatibility
 

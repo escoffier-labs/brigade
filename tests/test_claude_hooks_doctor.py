@@ -398,3 +398,17 @@ def test_doctor_skips_old_state_files_and_caps_recent_candidates(tmp_path: Path,
 
     assert check["status"] == "OK"
     assert len(session_reads) == runtime.MAX_RECENT_SESSION_STATES
+
+
+def test_doctor_treats_a_crlf_template_checkout_as_current(tmp_path: Path, monkeypatch):
+    from brigade.claude_hooks import classify
+    from brigade.templates import template_root
+
+    target = _wired(tmp_path)
+    crlf_root = tmp_path / "crlf-templates"
+    skill = crlf_root / "skills" / "brigade-work" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((template_root() / "skills" / "brigade-work" / "SKILL.md").read_bytes().replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(classify, "template_root", lambda: crlf_root)
+
+    assert classify._skill_current(target) == (True, True)

@@ -229,6 +229,7 @@ def inbox_add(
     force: bool = False,
     json_output: bool = False,
     dedupe_key: str | None = None,
+    provenance: str | None = None,
 ) -> int:
     """File a skill proposal in the inbox.
 
@@ -236,6 +237,9 @@ def inbox_add(
     (pending, accepted or rejected) already carries the key, that proposal is
     reported and nothing new is written. Callers that re-file the same text on
     every run (``brigade init``) rely on it so repeats do not pile up.
+
+    ``provenance`` replaces the recorded ``source`` when the staged ``source``
+    directory is temporary and will not outlive the call.
     """
     try:
         if behavioral_contract is not None:
@@ -275,7 +279,12 @@ def inbox_add(
             if dedupe_key is not None:
                 prior = _find_proposal_by_dedupe_key(state_anchor, dedupe_key)
                 if prior is not None:
-                    return _report_proposal(prior, json_output=json_output, deduped=True)
+                    return _report_proposal(
+                        prior,
+                        json_output=json_output,
+                        valid=bool((prior.get("lint") or {}).get("valid")),
+                        deduped=True,
+                    )
             baseline = _registry_mod._baseline_identity(state_anchor, resolved_skill_id)
             if behavioral_contract is not None and behavioral_contract["baseline_fingerprint"] != baseline:
                 print("error: behavioral_contract baseline does not match current registry", file=sys.stderr)
@@ -306,7 +315,7 @@ def inbox_add(
                 "skill_id": resolved_skill_id,
                 "status": "pending",
                 "summary": summary or "",
-                "source": str(source.expanduser().resolve()),
+                "source": provenance or str(source.expanduser().resolve()),
                 "created_at": created,
                 "path": str(proposal_dir),
                 "skill_path": str(skill_dest),

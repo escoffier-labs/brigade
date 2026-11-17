@@ -448,3 +448,17 @@ def test_inbox_add_dedupe_key_is_idempotent_across_statuses(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["proposal_id"] != first["proposal_id"]
     assert skills_cmd.inbox_add(target=tmp_path, source=source, json_output=True) == 0
     assert "dedupe_key" not in json.loads(capsys.readouterr().out)
+
+
+def test_inbox_add_dedupe_return_keeps_the_exit_code_of_a_failed_lint(tmp_path, capsys):
+    source = tmp_path / "source" / "bad-skill"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("   \n")  # lint error: SKILL.md is empty
+    key = "init:bad-skill:x:" + "b" * 64
+
+    first = skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True)
+    capsys.readouterr()
+    again = skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True)
+
+    assert first == 1, "the fixture must fail lint for this test to mean anything"
+    assert again == first

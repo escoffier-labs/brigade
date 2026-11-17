@@ -55,3 +55,21 @@ def test_reconfigure_never_overwrites_a_wired_skill_md(tmp_path):
     # the newly added harness still gets its missing skill
     assert (tmp_path / ".codex" / "skills" / "brigade-work" / "SKILL.md").is_file()
     assert len(list((tmp_path / ".brigade" / "skills" / "inbox").glob("*/proposal.json"))) == 1
+
+
+def test_prune_warns_about_each_edited_skill_md_before_deleting(tmp_path, capsys):
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    install_selection(tmp_path, sel)
+    edited = tmp_path / ".codex" / "skills" / "brigade-work" / "SKILL.md"
+    edited.write_bytes(b"# edited by the operator\n")
+    pristine = tmp_path / ".codex" / "skills" / "ultra-work-scout" / "SKILL.md"
+    assert pristine.is_file()
+    capsys.readouterr()
+
+    new_sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    assert reconfigure(tmp_path, new_selection=new_sel, prune=True) == 0
+
+    err = capsys.readouterr().err
+    assert str(edited) in err
+    assert str(pristine) not in err
+    assert not (tmp_path / ".codex").exists()

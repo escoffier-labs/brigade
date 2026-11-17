@@ -7,11 +7,19 @@ skills inbox proposal instead, so the operator reviews it with
 `brigade skills inbox diff`. `skills install` and `skills sync` keep their own
 semantics and do not use this module.
 
-Every path component from the target root down is checked with lstat before a
-directory is created or a file is written. A symlink anywhere on the way (a
-SKILL.md installed as a link, or a linked parent directory) is kept as it is,
-with no write and no proposal, so a skill that lives elsewhere is never reached
-through the link.
+The destination is walked, read and created relative to a held directory
+descriptor for the target root (`brigade.dirfd`), one component at a time. No
+component is ever resolved by pathname, so a parent directory swapped for a
+link after the check cannot redirect the write, and a Windows junction or
+symlink is refused by the same helpers. A link anywhere on the way (a SKILL.md
+installed as a link, or a linked parent directory) is kept as it is, with no
+write and no proposal, so a skill that lives elsewhere is never reached through
+the link. Any race (a component vanishing or changing type mid-walk) resolves to
+a kept outcome and never to a write.
+
+Newlines: bundled text is written as LF (the same policy as the template copy
+loop in `install.py`), and a comparison treats CRLF and LF as the same text so a
+Windows checkout, or a copy an older release wrote with CRLF, is not "edited".
 """
 
 from __future__ import annotations
@@ -28,10 +36,16 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__ as BRIGADE_VERSION
+from . import dirfd
 
 WIRED_STATE_REL = ("skills", "wired.json")
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _BINARY = getattr(os, "O_BINARY", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# O_NONBLOCK keeps a FIFO swapped in at the destination from hanging the read;
+# fstat then rejects anything that is not a regular file.
+_READ_FLAGS = os.O_RDONLY | _NOFOLLOW | _BINARY | _CLOEXEC | getattr(os, "O_NONBLOCK", 0)
+_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _BINARY | _CLOEXEC
 
 # Statuses that mean the destination already holds a skill and was not written.
 WRITTEN = "written"
@@ -46,11 +60,46 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def normalize_newlines(data: bytes) -> bytes:
+    """Return ``data`` with CRLF folded to LF, the form SKILL.md text is compared in."""
+    return data.replace(b"\r\n", b"\n")
+
+
+_RACE_ERRORS = (FileExistsError, FileNotFoundError, NotADirectoryError)
+
+
+def _parse_recorded(raw: bytes | None) -> tuple[dict[str, Any], bool]:
+    """Return ``(records, corrupt)`` for the bytes of wired.json (``None`` is an empty file)."""
+    if raw is None:
+        return {}, False
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {}, True
+    skills = payload.get("skills") if isinstance(payload, dict) else None
+    if not isinstance(skills, dict):
+        return {}, True
+    return dict(skills), False
+
+
+def _refusal(parent: int, name: str, exc: OSError) -> str:
+    """Name why ``name`` under the held ``parent`` could not be entered: a link, or something else."""
+    if dirfd.is_reparse_point_refusal(exc):
+        return SYMLINKED
+    try:
+        info = dirfd.stat_child(parent, name, allow_reparse=True)
+    except OSError:
+        return BLOCKED
+    return SYMLINKED if stat.S_ISLNK(info.st_mode) else BLOCKED
+
+
 class SkillWirer:
     """Places bundled SKILL.md files under one target and records what init wrote."""
 
     def __init__(self, target: Path) -> None:
-        self.target = target
+        # Resolved once: the root is the operator's choice (a linked checkout is
+        # fine); everything below it is walked without following a link.
+        self.target = target.expanduser().resolve()
         self._recorded = self._load_recorded()
         self._written: dict[str, dict[str, str]] = {}
 
@@ -67,9 +116,7 @@ class SkillWirer:
         rel = "/".join(rel_parts)
         data = text.encode("utf-8")
         dst = self.target.joinpath(*rel_parts)
-        state, existing = self._probe(rel_parts)
-        if state == "missing":
-            state = self._create(rel_parts, data)
+        state, existing = self._walk(rel_parts, data)
         if state == WRITTEN:
             self._written[rel] = {
                 "harness": harness,
@@ -81,11 +128,12 @@ class SkillWirer:
             return WRITTEN
         if state == "existing":
             assert existing is not None
-            if existing == data:
+            if normalize_newlines(existing) == normalize_newlines(data):
                 print(f"brigade: kept (identical): {dst}")
                 return IDENTICAL
             record = self._recorded.get(rel)
-            pristine = isinstance(record, dict) and record.get("sha256") == _sha256(existing)
+            recorded_sha = record.get("sha256") if isinstance(record, dict) else None
+            pristine = recorded_sha in (_sha256(existing), _sha256(normalize_newlines(existing)))
             label = PRISTINE_STALE if pristine else EDITED
             proposal_id = self._file_proposal(template_dir, data, skill_id=skill_id, label=label, rel=rel)
             suffix = f"; bundled template differs, proposal {proposal_id}" if proposal_id else ""
@@ -95,14 +143,29 @@ class SkillWirer:
         return state
 
     def finish(self) -> None:
-        """Persist the records of the files init just wrote. A failure is a warning."""
+        """Persist the records of the files init just wrote. A failure is a warning.
+
+        The read-merge-write runs under the skills mutation lock and re-reads the
+        file inside it, so two inits do not drop each other's records. A corrupt
+        file is copied aside before it is replaced.
+        """
         if not self._written:
             return
         from .skills_cmd import registry
+        from .skills_cmd.mutation import skill_mutation
 
         try:
-            payload = {"version": 1, "skills": {**self._recorded, **self._written}}
-            with registry._held_state_root(self.target) as anchor:
+            with skill_mutation(self.target), registry._held_state_root(self.target) as anchor:
+                raw = registry._read_state_file_bytes(anchor, *WIRED_STATE_REL)
+                current, corrupt = _parse_recorded(raw)
+                if corrupt and raw is not None:
+                    backup = f"{WIRED_STATE_REL[1]}.corrupt-{_sha256(raw)[:12]}"
+                    registry._write_state_file(anchor, WIRED_STATE_REL[0], backup, data=raw)
+                    print(
+                        f"warning: .brigade/skills/wired.json was unreadable; kept a copy as .brigade/skills/{backup}",
+                        file=sys.stderr,
+                    )
+                payload = {"version": 1, "skills": {**current, **self._written}}
                 registry._write_state_file(
                     anchor, *WIRED_STATE_REL, data=(json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
                 )
@@ -110,70 +173,85 @@ class SkillWirer:
             print(f"warning: could not record wired skills in .brigade/skills/wired.json: {exc}", file=sys.stderr)
 
     def _load_recorded(self) -> dict[str, Any]:
+        """Read-only view of the records, used only to label a differing copy."""
         from .skills_cmd import registry
 
         try:
             with registry._held_state_root(self.target, writable=False) as anchor:
                 raw = registry._read_state_file_bytes(anchor, *WIRED_STATE_REL)
-            payload = json.loads(raw.decode("utf-8")) if raw is not None else {}
-            skills = payload.get("skills") if isinstance(payload, dict) else None
         except (OSError, ValueError, registry.SkillsStatePathError):
             return {}
-        return dict(skills) if isinstance(skills, dict) else {}
+        return _parse_recorded(raw)[0]
 
-    def _probe(self, rel_parts: tuple[str, ...]) -> tuple[str, bytes | None]:
-        """Classify the destination without following any link.
+    def _walk(self, rel_parts: tuple[str, ...], data: bytes) -> tuple[str, bytes | None]:
+        """Classify the destination and create it if missing, all under a held root descriptor.
 
-        Returns ``(state, bytes)``: ``missing`` (safe to create), ``existing``
-        (a plain regular file, with its bytes), ``symlinked``, or
-        ``not-a-regular-file``.
+        Returns ``(state, bytes)``: ``written`` (created now), ``existing`` (a
+        plain regular file, with its bytes), ``symlinked`` or ``not-a-regular-file``.
+        Missing parents are created one level at a time; every open is relative
+        to the descriptor of the level above, so no later swap of a parent can
+        redirect it.
         """
-        current = self.target
-        last = len(rel_parts) - 1
-        for index, part in enumerate(rel_parts):
-            current = current / part
-            try:
-                info = os.lstat(current)
-            except FileNotFoundError:
-                return "missing", None
-            if stat.S_ISLNK(info.st_mode):
-                return SYMLINKED, None
-            if index < last and not stat.S_ISDIR(info.st_mode):
-                return BLOCKED, None
-            if index == last and not stat.S_ISREG(info.st_mode):
-                return BLOCKED, None
+        held: list[int] = []
         try:
-            fd = os.open(current, os.O_RDONLY | _NOFOLLOW | _BINARY)
-        except OSError:
-            return SYMLINKED if current.is_symlink() else BLOCKED, None
-        with os.fdopen(fd, "rb") as handle:
-            return "existing", handle.read()
-
-    def _create(self, rel_parts: tuple[str, ...], data: bytes) -> str:
-        """Create the missing tail: lstat each level, mkdir one level at a time, write O_EXCL."""
-        current = self.target
-        last = len(rel_parts) - 1
-        for index, part in enumerate(rel_parts):
-            current = current / part
-            if index < last:
-                try:
-                    os.mkdir(current)
-                except FileExistsError:
-                    pass
-                info = os.lstat(current)
-                if stat.S_ISLNK(info.st_mode):
-                    return SYMLINKED
-                if not stat.S_ISDIR(info.st_mode):
-                    return BLOCKED
-                continue
             try:
-                fd = os.open(current, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _BINARY, 0o666)
+                parent = dirfd.open_directory_nofollow(self.target)
+            except OSError:
+                return BLOCKED, None
+            held.append(parent)
+            for part in rel_parts[:-1]:
+                child, refusal = self._enter_directory(parent, part)
+                if child is None:
+                    return refusal or BLOCKED, None
+                held.append(child)
+                parent = child
+            return self._place_file(parent, rel_parts[-1], data)
+        finally:
+            for fd in reversed(held):
+                os.close(fd)
+
+    def _enter_directory(self, parent: int, name: str) -> tuple[int | None, str | None]:
+        """Open (creating if absent) one child directory without following a link."""
+        for _ in range(3):
+            try:
+                return dirfd.open_child_directory(parent, name), None
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                return None, _refusal(parent, name, exc)
+            try:
+                dirfd.mkdir_child(parent, name, 0o777)
             except FileExistsError:
-                # Lost a race with another writer; that file is theirs to keep.
-                return SYMLINKED if current.is_symlink() else BLOCKED
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-        return WRITTEN
+                continue  # raced with another creator: reopen it, still no-follow
+            except _RACE_ERRORS as exc:
+                return None, _refusal(parent, name, exc)
+        return None, BLOCKED
+
+    def _place_file(self, parent: int, name: str, data: bytes) -> tuple[str, bytes | None]:
+        try:
+            fd = dirfd.open_child_file(parent, name, _READ_FLAGS)
+        except FileNotFoundError:
+            fd = None
+        except OSError as exc:
+            return _refusal(parent, name, exc), None
+        if fd is not None:
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return BLOCKED, None
+                chunks: list[bytes] = []
+                while chunk := os.read(fd, 1 << 16):
+                    chunks.append(chunk)
+            finally:
+                os.close(fd)
+            return "existing", b"".join(chunks)
+        try:
+            fd = dirfd.open_child_file(parent, name, _CREATE_FLAGS, 0o666)
+        except _RACE_ERRORS as exc:
+            # Lost a race with another writer; that file is theirs to keep.
+            return _refusal(parent, name, exc), None
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        return WRITTEN, None
 
     def _file_proposal(self, template_dir: Path, data: bytes, *, skill_id: str, label: str, rel: str) -> str | None:
         """File the bundled text as an inbox proposal; return its id, or None with a warning."""
@@ -187,7 +265,9 @@ class SkillWirer:
         digest = hashlib.sha256()
         for name in sorted(files):
             digest.update(name.encode("utf-8") + b"\0" + files[name] + b"\0")
-        key = f"init:{skill_id}:{digest.hexdigest()}"
+        # The destination is part of the key: the same bundled text proposed for two
+        # different installed copies is two proposals, and rejecting one must not mute the other.
+        key = f"init:{skill_id}:{rel}:{digest.hexdigest()}"
         summary = f"Bundled {skill_id} template differs from the installed copy at {rel} ({label}); the installed file was kept."
         out = io.StringIO()
         try:
@@ -204,6 +284,7 @@ class SkillWirer:
                         summary=summary,
                         json_output=True,
                         dedupe_key=key,
+                        provenance=f"brigade://bundled-skills/{skill_id}@{BRIGADE_VERSION}",
                     )
             if rc in (0, 1):
                 return str(json.loads(out.getvalue())["proposal_id"])

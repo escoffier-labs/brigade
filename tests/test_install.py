@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -446,3 +448,238 @@ def test_failed_wired_record_is_a_warning(tmp_path, monkeypatch, capsys):
     assert install_selection(tmp_path, _claude_sel()) == 0
     assert "warning: could not record wired skills" in capsys.readouterr().err
     assert (tmp_path / BRIGADE_WORK).is_file()
+
+
+# --- #1844 fix round: newlines, held-descriptor walk, dedupe, provenance, wired.json ------
+
+POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="needs POSIX symlinks and FIFOs")
+WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="needs Windows junctions")
+
+
+def test_crlf_copy_of_the_bundled_skill_reads_as_identical(tmp_path, capsys):
+    # A copy an older release wrote on Windows (write_text turned LF into CRLF).
+    path = tmp_path / BRIGADE_WORK
+    path.parent.mkdir(parents=True)
+    crlf = _bundled_text("brigade-work").replace("\n", "\r\n").encode("utf-8")
+    path.write_bytes(crlf)
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    assert f"kept (identical): {path}" in capsys.readouterr().out
+    assert path.read_bytes() == crlf
+    assert _proposals(tmp_path) == []
+
+
+def test_a_crlf_pristine_stale_copy_is_labelled_by_its_normalized_hash(tmp_path, capsys):
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    old_lf = b"# older bundled brigade-work\n"
+    (tmp_path / BRIGADE_WORK).write_bytes(old_lf.replace(b"\n", b"\r\n"))
+    state = tmp_path / ".brigade" / "skills" / "wired.json"
+    payload = json.loads(state.read_text())
+    payload["skills"][BRIGADE_WORK.as_posix()]["sha256"] = hashlib.sha256(old_lf).hexdigest()
+    state.write_text(json.dumps(payload))
+    capsys.readouterr()
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    assert f"kept (pristine-stale): {tmp_path / BRIGADE_WORK}" in capsys.readouterr().out
+
+
+def test_the_written_skill_is_lf_on_every_platform(tmp_path):
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    assert b"\r" not in (tmp_path / BRIGADE_WORK).read_bytes()
+
+
+def _install_open_hook(monkeypatch, hook) -> None:
+    # dirfd only trusts descriptor-relative opens when os.open is in supports_dir_fd.
+    monkeypatch.setattr(os, "open", hook)
+    monkeypatch.setattr(os, "supports_dir_fd", set(os.supports_dir_fd) | {hook})
+
+
+def _swap_parent_when_skill_is_created(monkeypatch, parent: Path, outside: Path) -> list[bool]:
+    """Replace ``parent`` with a link to ``outside`` the instant SKILL.md is created."""
+    real_open = os.open
+    swapped: list[bool] = []
+
+    def racing_open(path, flags, *args, **kwargs):
+        if flags & os.O_EXCL and str(path).endswith("SKILL.md") and not swapped:
+            swapped.append(True)
+            parent.rename(parent.with_name(parent.name + ".moved"))
+            parent.symlink_to(outside, target_is_directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    _install_open_hook(monkeypatch, racing_open)
+    return swapped
+
+
+@POSIX_ONLY
+def test_a_parent_swapped_for_a_link_mid_create_cannot_redirect_the_write(tmp_path, monkeypatch):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    ws = tmp_path / "ws"
+    swapped = _swap_parent_when_skill_is_created(monkeypatch, ws / ".claude" / "skills" / "brigade-work", outside)
+    (ws / ".claude" / "skills").mkdir(parents=True)
+
+    assert install_selection(ws, _claude_sel()) == 0
+
+    assert swapped, "the race hook never fired"
+    assert list(outside.iterdir()) == []
+
+
+@POSIX_ONLY
+def test_a_skill_md_swapped_for_a_fifo_mid_read_does_not_hang(tmp_path, monkeypatch, capsys):
+    import signal
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    skill = tmp_path / BRIGADE_WORK
+    real_open = os.open
+    swapped: list[bool] = []
+
+    def racing_open(path, flags, *args, **kwargs):
+        if str(path).endswith("SKILL.md") and not flags & os.O_CREAT and not swapped:
+            swapped.append(True)
+            skill.unlink()
+            os.mkfifo(skill)
+        return real_open(path, flags, *args, **kwargs)
+
+    def hung(*_args):
+        raise AssertionError("reading the destination blocked on a FIFO")
+
+    _install_open_hook(monkeypatch, racing_open)
+    previous = signal.signal(signal.SIGALRM, hung)
+    signal.alarm(10)
+    capsys.readouterr()
+    try:
+        assert install_selection(tmp_path, _claude_sel()) == 0
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+    assert swapped
+    assert f"kept (not-a-regular-file): {skill}" in capsys.readouterr().out
+    assert _proposals(tmp_path) == []
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, NotADirectoryError])
+def test_a_directory_race_is_kept_and_never_written(tmp_path, monkeypatch, capsys, error):
+    from brigade import dirfd
+
+    def lost_race(*_args, **_kwargs):
+        raise error()
+
+    monkeypatch.setattr(dirfd, "open_child_directory", lost_race)
+    monkeypatch.setattr(dirfd, "mkdir_child", lost_race)
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    assert "kept (not-a-regular-file)" in capsys.readouterr().out
+    assert not (tmp_path / ".claude" / "skills").exists()
+
+
+def test_a_reparse_refusal_is_kept_as_a_link(tmp_path, monkeypatch, capsys):
+    from brigade import dirfd
+
+    def refused(_error):
+        return True
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("reparse point refused")
+
+    monkeypatch.setattr(dirfd, "is_reparse_point_refusal", refused)
+    monkeypatch.setattr(dirfd, "open_child_directory", refuse)
+    monkeypatch.setattr(dirfd, "mkdir_child", refuse)
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    assert "kept (symlinked)" in capsys.readouterr().out
+    assert _proposals(tmp_path) == []
+
+
+@WINDOWS_ONLY
+def test_a_junctioned_parent_directory_is_kept(tmp_path, capsys):
+    import subprocess
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    ws = tmp_path / "ws"
+    (ws / ".claude").mkdir(parents=True)
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(ws / ".claude" / "skills"), str(outside)], check=True)
+
+    assert install_selection(ws, _claude_sel(), force=True) == 0
+
+    assert list(outside.iterdir()) == []
+    assert "kept (symlinked)" in capsys.readouterr().out
+
+
+@POSIX_ONLY
+def test_the_same_edit_in_two_harnesses_files_two_proposals(tmp_path, capsys):
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    assert install_selection(tmp_path, sel) == 0
+    claude = tmp_path / ".claude" / "skills" / "brigade-work" / "SKILL.md"
+    codex = tmp_path / ".codex" / "skills" / "brigade-work" / "SKILL.md"
+    claude.write_bytes(b"# mine in claude\n")
+    codex.write_bytes(b"# mine in codex\n")
+
+    assert install_selection(tmp_path, sel) == 0
+    proposals = _proposals(tmp_path)
+    assert len(proposals) == 2
+    assert len({p["dedupe_key"] for p in proposals}) == 2
+
+    # Rejecting one must not mute the other destination on the next run.
+    from brigade import skills_cmd
+
+    victim = next(p for p in proposals if ".claude/" in p["dedupe_key"])
+    assert skills_cmd.inbox_reject(target=tmp_path, proposal_id=victim["proposal_id"], reason="no") == 0
+    capsys.readouterr()
+    codex.write_bytes(b"# mine in codex, again\n")
+    assert install_selection(tmp_path, sel) == 0
+    assert len(_proposals(tmp_path)) == 2
+
+
+def test_a_proposal_records_stable_provenance_not_the_staging_dir(tmp_path):
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    (tmp_path / BRIGADE_WORK).write_bytes(b"# mine\n")
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    (proposal,) = _proposals(tmp_path)
+    assert proposal["source"] == f"brigade://bundled-skills/brigade-work@{brigade_version}"
+
+    from brigade import skills_cmd
+
+    assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal["proposal_id"], force=True) in (0, 2)
+    accepted = _proposals(tmp_path)[0]
+    assert "brigade-init-skill-" not in json.dumps(accepted)
+
+
+def test_a_corrupt_wired_json_is_backed_up_not_silently_dropped(tmp_path, capsys):
+    state = tmp_path / ".brigade" / "skills" / "wired.json"
+    state.parent.mkdir(parents=True)
+    state.write_bytes(b"{not json")
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    err = capsys.readouterr().err
+    assert "wired.json was unreadable" in err
+    backups = list(state.parent.glob("wired.json.corrupt-*"))
+    assert [b.read_bytes() for b in backups] == [b"{not json"]
+    assert BRIGADE_WORK.as_posix() in _wired(tmp_path)
+
+
+def test_concurrent_wirers_keep_each_others_records(tmp_path):
+    from brigade.skill_wiring import SkillWirer
+
+    (tmp_path / ".brigade").mkdir()
+    first, second = SkillWirer(tmp_path), SkillWirer(tmp_path)
+    template_dir = template_root() / "skills" / "brigade-work"
+    text = _bundled_text("brigade-work")
+    first.place(
+        (".claude", "skills", "brigade-work", "SKILL.md"), template_dir, text, skill_id="brigade-work", harness="claude"
+    )
+    second.place(
+        (".codex", "skills", "brigade-work", "SKILL.md"), template_dir, text, skill_id="brigade-work", harness="codex"
+    )
+
+    first.finish()
+    second.finish()
+
+    assert set(_wired(tmp_path)) == {".claude/skills/brigade-work/SKILL.md", ".codex/skills/brigade-work/SKILL.md"}

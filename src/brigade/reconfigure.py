@@ -9,6 +9,8 @@ from pathlib import Path
 from .config import load_config
 from .install import install_selection
 from .selection import Selection
+from .skill_wiring import normalize_newlines
+from .templates import template_root
 
 
 _WRITER_DIRS = {
@@ -23,6 +25,27 @@ _HARNESS_BRIDGE_FILES = {
     "claude": ["CLAUDE.md"],
     "codex": [],
 }
+
+
+def _warn_edited_skills(directory: Path) -> None:
+    """Name every SKILL.md under a directory about to be pruned that differs from the bundled text.
+
+    Prune keeps its semantics (the whole directory goes); this only makes the loss
+    of an operator-edited or operator-authored skill visible before it happens.
+    """
+    bundled_root = template_root() / "skills"
+    for path in sorted(directory.rglob("SKILL.md")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        bundled = bundled_root / path.parent.name / "SKILL.md"
+        try:
+            installed_bytes = normalize_newlines(path.read_bytes())
+            if bundled.is_file() and installed_bytes == normalize_newlines(bundled.read_bytes()):
+                continue
+        except OSError:
+            continue
+        reason = "differs from the bundled template" if bundled.is_file() else "has no bundled template"
+        print(f"warning: pruning {path}: SKILL.md {reason}; its contents are deleted", file=sys.stderr)
 
 
 def reconfigure(target: Path, new_selection: Selection, prune: bool) -> int:
@@ -55,6 +78,7 @@ def reconfigure(target: Path, new_selection: Selection, prune: bool) -> int:
         for h in sorted(removed):
             wdir = _WRITER_DIRS.get(h)
             if wdir and (target / wdir).is_dir():
+                _warn_edited_skills(target / wdir)
                 shutil.rmtree(target / wdir)
             for bridge in _HARNESS_BRIDGE_FILES.get(h, []):
                 bp = target / bridge
@@ -62,6 +86,7 @@ def reconfigure(target: Path, new_selection: Selection, prune: bool) -> int:
                     bp.unlink()
             rdir = _READER_DIRS.get(h)
             if rdir and (target / rdir).is_dir():
+                _warn_edited_skills(target / rdir)
                 shutil.rmtree(target / rdir)
             print(f"brigade: pruned {h}")
 
