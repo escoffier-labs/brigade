@@ -257,7 +257,7 @@ PR_RULE_FORM = ff.form(
     ff.conditional("when_reviewer", f"for the condition \u201c{_CONDITION_LABELS['review_quota_exhausted']}\u201d"),
     ff.conditional("when_label", f"for the condition \u201c{_CONDITION_LABELS['label_present']}\u201d"),
     ff.conditional("when_repos", f"for the condition \u201c{_CONDITION_LABELS['repository']}\u201d"),
-    ff.optional("act_kind"),
+    ff.conditional("act_kind", "for the first action"),
     ff.conditional("act_reviewer", "for reviewer actions"),
     ff.conditional("act_value", "for label and note actions"),
     ff.conditional("act_count", "for a limit action"),
