@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import dirfd, proc, run_checkpoint, run_dirfd, run_journal, run_lifecycle, run_redaction, runguard, runs_cmd
+from . import runs_status
 
 SCHEMA = "brigade.runs-reap.v1"
 DEFAULT_OLDER_THAN = "2h"
@@ -51,7 +52,7 @@ MAX_UNCOMMITTED_CHANGE_COUNT = 10_000
 ORPHAN_SCAN_LIMIT = 50
 _OLDER_THAN_RE = re.compile(r"^(\d+)([smhd])$", re.IGNORECASE)
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-_REAPABLE_STATUSES = runs_cmd._NONTERMINAL_STATUSES
+_REAPABLE_STATUSES = runs_status.NONTERMINAL_STATUSES - {runs_status.EXTERNALLY_CONTROLLED_STATUS}
 _MALFORMED_PUBLIC_RUN_ID = "malformed"
 _UNKNOWN_STATUS = "unknown"
 
@@ -358,6 +359,9 @@ def _revalidate_metadata(
     status = meta.get("status")
     if status == "orphaned":
         return "already-orphaned"
+    if status == runs_status.EXTERNALLY_CONTROLLED_STATUS:
+        # An external parent advances this run. There is no local owner to reap.
+        return "externally-controlled"
     if not isinstance(status, str) or status not in _REAPABLE_STATUSES or meta.get("finished_at"):
         return "terminal"
     started = _parse_timestamp(meta.get("started_at"))
@@ -496,7 +500,7 @@ def _reap_one(
                         raise RetainRunLockError("concurrently-changed")
                     if _run_fingerprint(raw) != fingerprint:
                         stale_reason = _revalidate_metadata(current, older_than=older_than, now=now)
-                        if stale_reason in {"terminal", "already-orphaned"}:
+                        if stale_reason in {"terminal", "already-orphaned", "externally-controlled"}:
                             return None, _skip(run_dir.name, "concurrently-changed")
                         raise RetainRunLockError("concurrently-changed")
                     # Under the reaper's newly claimed live lock, re-check run.json

@@ -205,11 +205,18 @@ _TASK_EVENT_TYPES = frozenset(
         "task.launch-claimed",
         "task.observed",
         "task.acknowledged",
+        "task.native-enrolled",
     }
 )
 EVENT_TYPES.update(
     {
         "task.batch-accepted": frozenset({"descriptor_version", "request_id", "members", "membership_digest"}),
+        # Native T3 enrollment holds one immutable delegation input asset
+        # outside the journal. Only its relative name and digests are retained
+        # here, never task text, options values, or raw native JSON.
+        "task.native-enrolled": frozenset(
+            {"descriptor_version", "task_id", "asset_path", "asset_digest", "template_digest"}
+        ),
         "task.accepted": frozenset({"task_id", "request_id", "seat", "payload_digest", "spec_digest"}),
         "task.attempt-prepared": frozenset({"task_id", "attempt_id"}),
         "task.launch-claimed": frozenset({"task_id", "attempt_id", "seat", "dispatch_attempt"}),

@@ -16,6 +16,7 @@ exact helper calls (`Driving it with control-brigade`), and what bites
 | Work verification receipts | [work-verify-receipts.md](work-verify-receipts.md) | `work-verify` |
 | Handoff inbox lint | [handoff-lint.md](handoff-lint.md) | `handoff-lint` |
 | Guard scan and redact parity | [guard-parity.md](guard-parity.md) | `guard-parity` |
+| Native T3 enrollment | [t3-enrollment.md](t3-enrollment.md) | `t3-enrollment` |
 | Fleet Hub wire contract | [hub-contract.md](hub-contract.md) | `hub-contract` |
 | Fleet Hub storage parity | [storage-parity.md](storage-parity.md) | `storage-parity` |
 | Run plan preview | [run-dry-run.md](run-dry-run.md) | none yet (paused) |

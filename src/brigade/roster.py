@@ -84,6 +84,9 @@ class Roster:
     # Run-local admission evidence, carried on the effective roster so that
     # subsequent run.json rewrites cannot discard a routing decision.
     seat_routing: tuple[dict[str, object], ...] = ()
+    # Supplied native T3 target bindings keyed by seat name. A binding is a
+    # declaration only: it grants no readiness, admission or launch authority.
+    t3_targets: dict[str, dict[str, object]] = field(default_factory=dict)
 
     task_role_instructions: dict[str, str] = field(default_factory=dict)
     worker_instructions: str = field(default="", repr=False)
@@ -447,6 +450,17 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
         raise ValueError("limits.allow_models must be a list of strings")
     allow_models = tuple(raw_allow_models)
 
+    raw_targets = data.get("t3_targets", {})
+    if raw_targets is None:
+        raw_targets = {}
+    if not isinstance(raw_targets, dict):
+        raise ValueError("[t3_targets] must be a TOML table")
+    t3_targets: dict[str, dict[str, object]] = {}
+    for seat_name, target_config in raw_targets.items():
+        if not isinstance(target_config, dict):
+            raise ValueError(f"t3_targets.{seat_name} must be a TOML table")
+        t3_targets[_as_str(seat_name, "t3_targets seat name")] = dict(target_config)
+
     parsed_agents: dict[str, Agent] = {}
     for name, raw_agent in raw_agents.items():
         if not isinstance(raw_agent, dict):
@@ -651,6 +665,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
         scheduler=scheduler,
         codex_transport=codex_transport,
         resolution=resolution,
+        t3_targets=t3_targets,
     )
 
 

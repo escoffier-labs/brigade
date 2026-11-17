@@ -696,6 +696,12 @@ def dispatch(args) -> int:
     output_dir = None
     if not args.no_artifacts:
         output_dir = args.output_dir or aboyeur_mod.make_run_dir(run_cwd / ".brigade" / "runs")
+    if output_dir is not None:
+        from .. import localio, runs_status
+
+        existing = localio.read_json_dict(output_dir / "run.json")
+        if existing is not None and runs_status.refuse_launch(existing):
+            return 2
 
     if args.detach:
         assert output_dir is not None
