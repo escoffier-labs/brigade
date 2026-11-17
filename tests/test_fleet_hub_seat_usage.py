@@ -197,3 +197,19 @@ def test_legacy_usage_counts_only_unexpired_unreleased_leases(tmp_path):
         assert usage["seats"][SEAT]["occupied"] == 1
     finally:
         conn.close()
+
+
+def test_usage_route_reads_inside_one_snapshot(tmp_path, monkeypatch):
+    seen = []
+    real = fleet_hub_model_roster.seat_usage
+
+    def spy(conn, **kwargs):
+        # Counts, revision and digest must come from one read transaction.
+        seen.append(conn.in_transaction)
+        return real(conn, **kwargs)
+
+    monkeypatch.setattr(fleet_hub_model_roster, "seat_usage", spy)
+    with _hub(tmp_path) as hub:
+        status, _ = _request(hub, "/models/usage", token=ADMIN_TOKEN)
+    assert status == 200
+    assert seen == [True]

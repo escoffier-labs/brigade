@@ -132,7 +132,13 @@ def serve_get(request: Any, hub: HubContext, path: str, query: str) -> None:
         elif path == "/models/usage":
             # Occupancy reads alone: never admit, extend, or release a seat.
             conn.execute("PRAGMA query_only=ON")
-            payload = fleet_hub_model_roster.seat_usage(conn)
+            # One read snapshot, so the counts and the revision and digest
+            # they are reported against cannot straddle a concurrent write.
+            conn.execute("BEGIN")
+            try:
+                payload = fleet_hub_model_roster.seat_usage(conn)
+            finally:
+                conn.rollback()
         elif path == "/preference":
             pref = _hub.get_run_preference(conn)
             payload = {"preference": {key: value for key, value in pref.items() if value is not None}}
