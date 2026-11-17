@@ -260,6 +260,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     from ... import (
         aboyeur,
         care_cmd,
+        care_receipts,
         center_cmd,
         chat_cmd,
         context_cmd,
@@ -418,6 +419,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "autofix_plan": memory_health.get("autofix_plan"),
         },
         "scheduled_care": care_cmd.repeated_failure_summary(target),
+        "care_schedule_health": care_receipts.schedule_health(target),
         "instruction_budget": memory_care_instructions.brief_payload(target),
         "security_health": {
             "config_path": security_health["config_path"],
@@ -1027,6 +1029,13 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if not isinstance(rec, dict):
                 continue
             print(f"care_repeated_failure: {rec.get('id')} consecutive={rec.get('consecutive_failures')}")
+
+    raw_schedule_health = payload.get("care_schedule_health")
+    schedule_health: dict[str, Any] = raw_schedule_health if isinstance(raw_schedule_health, dict) else {}
+    for warning in schedule_health.get("warnings") or []:
+        if not isinstance(warning, dict):
+            continue
+        print(f"care_schedule_warning: {warning.get('entry')} {warning.get('code')} fix={warning.get('fix_command')}")
 
     raw_instruction_budget = payload.get("instruction_budget")
     instruction_budget: dict[str, Any] = raw_instruction_budget if isinstance(raw_instruction_budget, dict) else {}

@@ -855,6 +855,7 @@ def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_memory_cards(ctx.target))
     checks.extend(_check_memory_index(ctx.target))
     checks.extend(_check_memory_care(ctx.target))
+    checks.extend(_check_care_schedule_health(ctx.target))
     checks.extend(_check_memory_care_producer_collision(ctx.target))
     return checks
 
@@ -1560,6 +1561,18 @@ def _check_memory_care_producer_collision(target: Path) -> List[CheckResult]:
         )
         results.append((WARN, "memory-care: producer collision", detail))
     return results
+
+
+def _check_care_schedule_health(target: Path) -> List[CheckResult]:
+    from . import care_receipts
+
+    warnings = care_receipts.schedule_health(target)["warnings"]
+    if not warnings:
+        return [(OK, "care: schedule health", "installed timers are enabled and reporting")]
+    return [
+        (WARN, f"care: schedule health ({item['entry']})", f"{item['detail']}; run `{item['fix_command']}`")
+        for item in warnings
+    ]
 
 
 def _check_memory_care_scan_freshness(scan: Path, scan_date: object) -> CheckResult:

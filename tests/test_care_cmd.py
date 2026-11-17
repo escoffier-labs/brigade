@@ -759,6 +759,9 @@ def test_care_cli_dispatch(monkeypatch, tmp_path):
     assert cli.main(["care", "install", "--target", str(tmp_path), "--backend", "systemd", "--dry-run"]) == 0
     assert seen["install"]["backend"] == "systemd"
     assert seen["install"]["dry_run"] is True
+    assert seen["install"]["enable"] is True
+    assert cli.main(["care", "install", "--target", str(tmp_path), "--backend", "systemd", "--no-enable"]) == 0
+    assert seen["install"]["enable"] is False
     assert cli.main(["care", "status", "--target", str(tmp_path), "--json"]) == 0
     assert seen["status"]["json_output"] is True
     assert cli.main(["care", "uninstall", "--target", str(tmp_path)]) == 0
@@ -1267,19 +1270,19 @@ def test_care_bare_status_enumerates_per_entry_registrations_and_systemd_enablem
     if backend == "launchd":
         return
 
-    assert installed["enabled"] is False
+    assert installed["enabled"] is True
 
+    # #2589: install links each timer into timers.target.wants by default.
     wants_dir = care_cmd._systemd_user_dir(home) / "timers.target.wants"
-    wants_dir.mkdir(parents=True)
     for entry_id in entry_ids:
-        timer = _unit_path(home, target, entry_id, ".timer")
-        (wants_dir / timer.name).symlink_to(Path("..") / timer.name)
+        assert (wants_dir / _unit_path(home, target, entry_id, ".timer").name).is_symlink()
 
+    (wants_dir / _unit_path(home, target, entry_ids[0], ".timer").name).unlink()
     assert care_cmd.status(target=target, backend=backend, home=home, json_output=True) == 0
-    enabled = json.loads(capsys.readouterr().out)
-    assert enabled["status"] == "current"
-    assert enabled["enabled"] is True
-    assert [entry["id"] for entry in enabled["entries"]] == entry_ids
+    disabled = json.loads(capsys.readouterr().out)
+    assert disabled["status"] == "current"
+    assert disabled["enabled"] is False
+    assert [entry["id"] for entry in disabled["entries"]] == entry_ids
 
 
 def test_care_install_without_entry_still_writes_atomic_default_set(tmp_path, monkeypatch):

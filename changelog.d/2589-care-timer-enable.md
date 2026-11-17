@@ -1,0 +1,3 @@
+- `brigade care install` now enables each systemd timer it writes by linking it into `timers.target.wants`, so an installed schedule actually fires after `systemctl --user daemon-reload`; `--no-enable` opts out and `--dry-run` reports the planned per-timer enable action.
+- `brigade care install` prints the remaining `systemctl --user enable --now <timer>` commands for any timer it left disabled, and reports a foreign `timers.target.wants` entry as a conflict instead of replacing it.
+- `brigade care status` reports `enabled` false while an installed timer is disabled, and `brigade care status`, `brigade work brief`, and `brigade doctor` warn when a timer is disabled, never produced a receipt, or runs a runbook entry while `brigade extras` is off.

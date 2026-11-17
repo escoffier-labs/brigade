@@ -29,6 +29,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_install.add_argument("--dry-run", action="store_true", help="Show the plan without writing.")
     p_install.add_argument(
+        "--no-enable",
+        dest="enable",
+        action="store_false",
+        help="Write systemd unit files without linking the timers into timers.target.wants.",
+    )
+    p_install.add_argument(
         "--adopt",
         action="store_true",
         help="Replace a hand-edited managed block instead of reporting a conflict.",
@@ -116,6 +122,7 @@ def dispatch(args) -> int:
             schedule_specs=args.schedule_specs,
             scope=args.scope,
             reflect_auto_apply=args.reflect_auto_apply,
+            enable=args.enable,
         )
     if args.care_command == "status":
         return care_cmd.status(

@@ -5,7 +5,10 @@ Each runbook run records step exit codes and log paths for later inspection. Cop
 one of the recipes below into your own crontab, user timer, or CI job after
 `brigade init` wires the target, or explicitly opt in with
 `brigade care install --target .`. With the default `auto` backend it installs
-systemd user timers on Linux or launchd agents on macOS. On Windows it prints
+systemd user timers on Linux or launchd agents on macOS. On Linux, install also
+links every timer it wrote into `timers.target.wants`, so one
+`systemctl --user daemon-reload` enables the whole set; pass `--no-enable` to
+write unit files without the links. On Windows it prints
 a Task Scheduler plan without creating tasks and exits 3. Other platforms report
 an unsupported scheduler. Use the manual crontab recipes on this page
 when cron is your trigger.
@@ -52,6 +55,26 @@ receipt; nightly ops calls
 `.brigade/runbooks/nightly-maintenance.json` (operator-authored). Entries live
 inside a `# BEGIN BRIGADE CARE ... hash:...` managed block so status can detect
 drift and uninstall can remove only Brigade's span.
+
+On the systemd backend, install enables each timer it writes by creating a
+relative `timers.target.wants/<timer>` symlink to `../<timer>`. Linking is a file
+operation; install never runs `systemctl`. A timer is left alone when its unit was
+preserved, when the entry was adopted from an installed predecessor, when the unit
+is not a Brigade-owned managed block, or when the timer file is absent. An
+existing foreign entry at the link path is reported as a conflict and never
+replaced. Reinstalling an already-linked timer changes nothing. Pass `--no-enable`
+to write unit files only. `--dry-run` reports the planned per-timer `enable`
+action without writing. The JSON payload lists the result under `enable`, and
+`next_commands` prints `systemctl --user daemon-reload` plus
+`systemctl --user enable --now <timer>` for every timer that is still disabled.
+
+`brigade care status`, `brigade work brief`, and `brigade doctor` report schedule
+health from the installed unit files and runbook receipts, without running
+`systemctl`. You get one warning per installed entry whose timer is disabled, one
+when a timer file is older than its schedule period and no run has ever written a
+receipt, and one when runbook-backed entries are enabled while `brigade extras` is
+off (those runs exit 2 without a receipt). The status aggregate `enabled` is false
+while any installed timer is disabled. Each warning names the exact fix command.
 
 `--schedule JOB_ID=VALUE` is repeatable and applies only to entries selected by
 `--entry` (or to entries in the default set). Its value uses the selected
@@ -170,7 +193,10 @@ User timers stop when you log out unless lingering is enabled. Run once per acco
 sudo loginctl enable-linger "$USER"
 ```
 
-Then `systemctl --user daemon-reload`, `systemctl --user enable --now <timer>.timer`, and `systemctl --user list-timers` to confirm the next fire time.
+Then `systemctl --user daemon-reload`, `systemctl --user list-timers` to confirm the
+next fire time, and `systemctl --user enable --now <timer>.timer` only for a timer
+you wrote by hand. Timers written by `brigade care install` already carry the
+`timers.target.wants` link, so they need the reload and nothing else.
 
 ### Tracked runbooks
 

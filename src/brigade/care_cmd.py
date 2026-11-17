@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
+from . import care_enable, care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
 from .care_launchers import entry_argv, explicit_workspace, install_refusal, persisted_scope
 from .care_launchers import hub_job_status as hub_job_status
 from .care_launchers import runbook_argv, scoped_entries, verify_entry
@@ -1055,6 +1055,7 @@ def install(
     schedule_specs: list[str] | None = None,
     scope: str | None = None,
     reflect_auto_apply: bool = False,
+    enable: bool = True,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1168,6 +1169,7 @@ def install(
         home=home,
         entries=entries,
         adopted=adopted,
+        enable=enable,
     )
 
 
@@ -1355,6 +1357,7 @@ def _install_systemd(
     home: Path | None,
     entries: tuple[CareEntry, ...],
     adopted: list[dict[str, Any]] | None = None,
+    enable: bool = True,
 ) -> int:
     unit_dir = _systemd_user_dir(home)
     identity = _target_identity(target)
@@ -1435,6 +1438,15 @@ def _install_systemd(
                 "detail": outcome.detail or plan.detail,
             }
             continue
+    timer_enable = care_enable.enable_timers(
+        unit_dir=unit_dir,
+        results=results,
+        identity=identity,
+        adopted=adopted,
+        enable=enable,
+        dry_run=dry_run,
+        blocked=blocked,
+    )
     payload: dict[str, Any] = {
         "target": str(target),
         "backend": "systemd",
@@ -1442,18 +1454,9 @@ def _install_systemd(
         "dry_run": dry_run,
         "blocked": blocked,
         "units": results,
+        "enable": timer_enable,
         "entries": [_entry_status(target, entry) for entry in entries],
-        "next_commands": [
-            "systemctl --user daemon-reload",
-            *(
-                [
-                    f"systemctl --user enable --now brigade-care-{identity}-{entries[0].entry_id}.timer",
-                    f"systemctl --user list-timers 'brigade-care-{identity}-*.timer'",
-                ]
-                if entries
-                else [f"systemctl --user list-timers 'brigade-care-{identity}-*.timer'"]
-            ),
-        ],
+        "next_commands": care_enable.next_commands(identity=identity, enable=timer_enable),
     }
     if adopted:
         payload["adopted"] = adopted
@@ -1466,18 +1469,12 @@ def _install_systemd(
             print("error: one or more systemd units were hand-edited; refusing without --adopt", file=sys.stderr)
         return 1
     if not json_output and not dry_run:
-        print("note: Brigade wrote unit files only; enable timers with systemctl --user.")
+        print("\n".join(care_enable.install_notes(enable=timer_enable)))
         print("note: scheduled runbook entries require `brigade extras on` (or BRIGADE_EXTRAS=1).")
     return 0
 
 
-_INSTALLED_CARE_STATUSES = frozenset(
-    {
-        managed_block.STATUS_CURRENT,
-        managed_block.STATUS_STALE,
-        "tampered",
-    }
-)
+_INSTALLED_CARE_STATUSES = frozenset({managed_block.STATUS_CURRENT, managed_block.STATUS_STALE, "tampered"})
 
 _SYSTEMD_STATUS_RANK: dict[str, int] = {
     managed_block.STATUS_MALFORMED: 0,
@@ -1560,14 +1557,7 @@ def _installed_systemd_entries(*, target: Path, home: Path | None) -> tuple[Care
 
 
 def _systemd_timer_is_enabled(*, unit_dir: Path, timer_name: str) -> bool:
-    enabled_link = unit_dir / "timers.target.wants" / timer_name
-    timer = unit_dir / timer_name
-    if not enabled_link.is_symlink() or not timer.is_file():
-        return False
-    try:
-        return enabled_link.resolve() == timer.resolve()
-    except OSError:
-        return False
+    return care_enable.links_to_timer(unit_dir=unit_dir, timer_name=timer_name)
 
 
 def _crontab_backend_status(
@@ -1766,10 +1756,15 @@ def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
         selected_entries = CARE_ENTRIES
     selected_entries = care_patrol.select(selected_entries, None, "crontab" if crontab_enabled else "", CareEntry)
     entry_payloads = [_entry_status(target, entry) for entry in selected_entries]
+    installed = [unit for unit in systemd.get("units") or [] if unit.get("status") in _INSTALLED_CARE_STATUSES]
+    disabled_timers = [
+        str(unit["name"]) for unit in installed if str(unit["name"]).endswith(".timer") and not unit.get("enabled")
+    ]
     return {
-        "enabled": crontab_enabled or systemd_enabled,
+        "enabled": (crontab_enabled or systemd_enabled) and not disabled_timers,
         "target_match": bool(crontab.get("target_match")) or bool(systemd.get("target_match")),
         "backends": {"crontab": crontab, "systemd": systemd},
+        "installed_disabled_timers": disabled_timers,
         "entries": entry_payloads,
         "repeated_failures": _repeated_failure_records(entry_payloads),
     }
