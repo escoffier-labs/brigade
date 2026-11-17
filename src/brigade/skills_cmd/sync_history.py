@@ -45,6 +45,22 @@ def _trust_at_least(actual: str, minimum: str) -> bool:
         return False
 
 
+def _local_edit_kept_reason(item: dict[str, Any], installed_dir: Path, workspace: Path) -> str:
+    """Why an edited copy is kept, naming the diff and the explicit override."""
+    skill_id = str(item["skill_id"])
+    harness = str(item["harness"])
+    selector = f"registry:{skill_id}"
+    return _install_mod._local_edit_reason(
+        installed_dir=installed_dir,
+        diff_command=_install_mod._local_edit_diff_command(
+            workspace=workspace, selector=selector, harness=harness, against="registry"
+        ),
+        discard_command=_install_mod._local_edit_discard_command(
+            workspace=workspace, selector=selector, harness=harness
+        ),
+    )
+
+
 def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[str, Any]], str | None]:
     install_targets = _install_mod._install_targets(workspace)
     if harness not in (*install_targets, "all"):
@@ -173,6 +189,16 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 item.update(state="current", result="unchanged")
             elif drift["overall"] == "missing":
                 item.update(state="missing", action="install", result="planned")
+            elif drift["local_edit"] == "changed":
+                # A hand-edited copy is kept: no mutation, receipt, history row
+                # or snapshot. The operator decides with the diff and the
+                # explicit override, never a scheduled sync.
+                item.update(
+                    state="edited",
+                    action="none",
+                    result="kept",
+                    reason=_local_edit_kept_reason(item, installed_dir, workspace),
+                )
             elif drift["overall"] == "changed":
                 item.update(state="changed", action="update", result="planned")
             else:
@@ -376,6 +402,47 @@ def _sync_projection_plan(
                 }
             else:
                 previous_files = _sync_file_entries(installed_dir)
+            receipt_before = _registry_mod._read_state_file_bytes(
+                state_anchor, "skills", "installs", f"{skill_id}-{harness}.json"
+            )
+            previous_receipt: dict[str, Any] = {}
+            if receipt_before is not None:
+                try:
+                    parsed = json.loads(receipt_before.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    previous_receipt = parsed
+            # Re-check the edit state against the exact bytes this plan would
+            # replace: an edit made after the dry-run plan is still kept, and
+            # a copy no receipt can vouch for is never overwritten here.
+            edit_state = (
+                _install_mod._local_edit_state(
+                    previous_receipt,
+                    {tuple(Path(relative).parts): data for relative, (data, _mode) in previous_files.items()},
+                    skill_id=skill_id,
+                    harness=harness,
+                )
+                if previous_files
+                else "current"
+            )
+            if edit_state != "current":
+                if edit_state == "changed":
+                    item.update(
+                        state="edited",
+                        action="none",
+                        result="kept",
+                        reason=_local_edit_kept_reason(item, installed_dir, workspace),
+                    )
+                else:
+                    item.update(
+                        state="blocked",
+                        action="none",
+                        result="blocked",
+                        reason="installed copy has no valid provenance receipt",
+                    )
+                item["receipt"] = None
+                continue
             mutations.extend(
                 _sync_file_mutations(
                     root=installed_dir,
@@ -404,17 +471,6 @@ def _sync_projection_plan(
             render = _install_mod._renderer_contract(workspace, harness)
             skill_content = desired_files.get("SKILL.md", (b"", 0))[0].decode("utf-8", errors="replace")
             receipt_path = _registry_mod._installs_root(workspace) / f"{skill_id}-{harness}.json"
-            receipt_before = _registry_mod._read_state_file_bytes(
-                state_anchor, "skills", "installs", f"{skill_id}-{harness}.json"
-            )
-            previous_receipt: dict[str, Any] = {}
-            if receipt_before is not None:
-                try:
-                    parsed = json.loads(receipt_before.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    parsed = None
-                if isinstance(parsed, dict):
-                    previous_receipt = parsed
             receipt = {
                 "schema_version": _registry_mod.RECEIPT_SCHEMA_VERSION,
                 "workspace": str(workspace),
@@ -540,7 +596,17 @@ def sync(
 
     counts = {
         state: sum(item["state"] == state for item in items)
-        for state in ("current", "missing", "changed", "blocked", "excluded", "external", "symlink", "unusable")
+        for state in (
+            "current",
+            "missing",
+            "changed",
+            "edited",
+            "blocked",
+            "excluded",
+            "external",
+            "symlink",
+            "unusable",
+        )
     }
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -569,7 +635,17 @@ def sync(
         print(
             " ".join(
                 f"{state}={counts[state]}"
-                for state in ("current", "missing", "changed", "blocked", "excluded", "external", "symlink", "unusable")
+                for state in (
+                    "current",
+                    "missing",
+                    "changed",
+                    "edited",
+                    "blocked",
+                    "excluded",
+                    "external",
+                    "symlink",
+                    "unusable",
+                )
             )
         )
         for item in items:

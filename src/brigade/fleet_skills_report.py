@@ -23,8 +23,10 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 # A deployed Hub rejects the whole node report for a status it does not know,
 # and nodes upgrade before the Hub, so the report maps them onto the closed set
 # the Hub already accepts: a linked copy is outside Brigade's control
-# (``external``) and an unreadable one is simply ``unknown``.
-_REPORT_STATUS = {"symlink": "external", "unusable": "unknown"}
+# (``external``) and an unreadable one is simply ``unknown``. A hand-edited copy
+# is still behind its source, so it reports ``stale``; the install guard, not
+# the status, keeps the edit from being overwritten.
+_REPORT_STATUS = {"symlink": "external", "unusable": "unknown", "edited": "stale"}
 
 
 def _mapping(value: Any) -> dict[str, Any]:

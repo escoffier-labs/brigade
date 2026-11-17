@@ -494,6 +494,74 @@ def _installed_tree_snapshot(
     return inspection.dirs, inspection.files
 
 
+def _local_edit_state(
+    receipt: dict[str, Any], files: dict[tuple[str, ...], bytes], *, skill_id: str, harness: str
+) -> str:
+    """Compare installed bytes with the receipt: ``current``, ``changed`` or ``unknown``.
+
+    ``unknown`` means the bytes cannot be judged: no SKILL.md on disk, or no
+    receipt satisfying the contract to prove what was installed. Callers that
+    protect hand edits treat only ``current`` as safe to replace.
+    """
+    installed_raw = files.get(("SKILL.md",))
+    if installed_raw is None or not receipt or not _valid_receipt_contract(receipt, skill_id=skill_id, harness=harness):
+        return "unknown"
+    installed = receipt["installed"]
+    return (
+        "current"
+        if installed.get("bundle_fingerprint") == registry._files_fingerprint(files)
+        and installed.get("skill_fingerprint")
+        == registry._text_fingerprint(installed_raw.decode("utf-8", errors="replace"))
+        and installed.get("metadata_fingerprint") == registry._bytes_fingerprint(files.get(("skill.json",)))
+        else "changed"
+    )
+
+
+def _local_edit_diff_command(*, workspace: Path, selector: str, harness: str, against: str) -> str:
+    return shlex.join(
+        ["brigade", "skills", "diff", selector, "--target", str(workspace), "--harness", harness, "--against", against]
+    )
+
+
+def _local_edit_selector(receipt: dict[str, Any], *, skill_id: str, fallback: str) -> tuple[str, str]:
+    """Selector and ``--against`` baseline for the diff and discard commands.
+
+    Derived from the receipt's recorded source so the printed commands name the
+    same source the copy was installed from; ``fallback`` is the caller's own
+    selector when the receipt records none that can be named.
+    """
+    from .adapters import _fleet_source_selector
+
+    selector = _fleet_source_selector(skill_id, receipt) or fallback
+    return selector, "registry" if selector.startswith("registry:") else "bundled"
+
+
+def _local_edit_discard_command(*, workspace: Path, selector: str, harness: str) -> str:
+    """The explicit override: reinstall over the edit; a rollback snapshot is taken first."""
+    return shlex.join(
+        [
+            "brigade",
+            "skills",
+            "install",
+            selector,
+            "--workspace",
+            str(workspace),
+            "--target",
+            harness,
+            "--force",
+            "--discard-local-edits",
+        ]
+    )
+
+
+def _local_edit_reason(*, installed_dir: Path, diff_command: str, discard_command: str) -> str:
+    return (
+        f"installed copy {installed_dir} has local edits and was kept; "
+        f"review with `{diff_command}`, or overwrite with `{discard_command}` "
+        "(a rollback snapshot is taken first)"
+    )
+
+
 def _drift_payload(
     *,
     target: Path,
@@ -548,7 +616,6 @@ def _drift_payload(
     else:
         receipt_source = receipt["source"]
         receipt_render = receipt["render"]
-        receipt_installed = receipt["installed"]
         source_state = (
             "current"
             if receipt_source.get("identity") == current_source.get("identity")
@@ -557,13 +624,7 @@ def _drift_payload(
             else "changed"
         )
         render_state = "current" if receipt_render.get("identity") == current_render.get("identity") else "changed"
-        local_state = (
-            "current"
-            if receipt_installed.get("bundle_fingerprint") == installed_bundle_fingerprint
-            and receipt_installed.get("skill_fingerprint") == installed_skill_fingerprint
-            and receipt_installed.get("metadata_fingerprint") == installed_metadata_fingerprint
-            else "changed"
-        )
+        local_state = _local_edit_state(receipt, snapshot_files, skill_id=skill_id, harness=harness)
         overall = "changed" if "changed" in {source_state, render_state, local_state} else "current"
     return {
         "overall": overall,
@@ -703,6 +764,7 @@ def install(
     skill: str,
     harness: str,
     force: bool = False,
+    discard_local_edits: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
@@ -949,6 +1011,31 @@ def install(
             if recheck_state != dest_state:
                 raise registry.SkillsStatePathError(f"installed copy changed while installing: {dest}; run again")
             previous_receipt = _previous_install_receipt(state_anchor, skill_id=skill_id, harness=install_target)
+            if dest_present and not discard_local_edits:
+                # A hand-edited copy is never replaced by --force alone: the
+                # receipt proves what was installed, so bytes that differ are
+                # an edit. No receipt (legacy copy) cannot prove an edit and
+                # stays replaceable. This runs before any snapshot or removal.
+                edited_files = _inspect_installed_tree(workspace, dest, anchor=state_anchor).files
+                if (
+                    _local_edit_state(previous_receipt, edited_files, skill_id=skill_id, harness=install_target)
+                    == "changed"
+                ):
+                    selector, against = _local_edit_selector(previous_receipt, skill_id=skill_id, fallback=skill)
+                    reason = _local_edit_reason(
+                        installed_dir=dest,
+                        diff_command=_local_edit_diff_command(
+                            workspace=workspace, selector=selector, harness=install_target, against=against
+                        ),
+                        discard_command=_local_edit_discard_command(
+                            workspace=workspace, selector=selector, harness=install_target
+                        ),
+                    )
+                    if harness != "all":
+                        print(f"error: {reason}", file=sys.stderr)
+                        return 2
+                    skipped.append({"target": install_target, "reason": reason, "local_edit": True})
+                    continue
             rollback_snapshot: str | None = None
             rollback_snapshot_fingerprint: str | None = None
             if dest_present:

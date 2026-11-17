@@ -895,7 +895,14 @@ def test_skills_rollback_restores_previous_install(tmp_path, capsys):
     assert skills_cmd.import_skill(target=tmp_path, source=updated, force=True, json_output=True) == 0
     capsys.readouterr()
     assert (
-        skills_cmd.install(workspace=tmp_path, skill="security-review", harness="claude", force=True, json_output=True)
+        skills_cmd.install(
+            workspace=tmp_path,
+            skill="security-review",
+            harness="claude",
+            force=True,
+            discard_local_edits=True,
+            json_output=True,
+        )
         == 0
     )
     capsys.readouterr()
@@ -921,7 +928,14 @@ def test_skills_rollback_restores_transformed_codex_install(tmp_path, capsys):
     assert skills_cmd.import_skill(target=tmp_path, source=updated, force=True, json_output=True) == 0
     capsys.readouterr()
     assert (
-        skills_cmd.install(workspace=tmp_path, skill="security-review", harness="codex", force=True, json_output=True)
+        skills_cmd.install(
+            workspace=tmp_path,
+            skill="security-review",
+            harness="codex",
+            force=True,
+            discard_local_edits=True,
+            json_output=True,
+        )
         == 0
     )
     capsys.readouterr()
@@ -1262,7 +1276,14 @@ def test_skills_diff_classifies_local_source_and_renderer_drift(tmp_path, capsys
     assert local["diff"][1].startswith("+++ brigade://bundled-skills/brigade-work#cursor")
 
     assert (
-        skills_cmd.install(workspace=tmp_path, skill="brigade-work", harness="cursor", force=True, json_output=True)
+        skills_cmd.install(
+            workspace=tmp_path,
+            skill="brigade-work",
+            harness="cursor",
+            force=True,
+            discard_local_edits=True,
+            json_output=True,
+        )
         == 0
     )
     capsys.readouterr()
@@ -2772,10 +2793,10 @@ def test_skills_fleet_status_is_stable_and_emits_one_update_per_stale_copy(tmp_p
         (row["skill_id"], row["harness"]) for row in payload["copies"]
     )
     by_harness = {row["harness"]: row for row in rows}
-    assert by_harness["cursor"]["status"] == "stale"
+    assert by_harness["cursor"]["status"] == "edited"
     assert by_harness["codex"]["status"] == "missing"
     assert by_harness["claude"]["status"] == "unknown"
-    assert by_harness["cursor"]["update_command"].endswith("--target cursor --force")
+    assert by_harness["cursor"]["update_command"] is None
     assert by_harness["codex"]["update_command"].endswith("--target codex --force")
     assert by_harness["claude"]["update_command"] is None
     assert all(row["update_command"] for row in payload["stale"])
@@ -2807,8 +2828,9 @@ def test_skills_fleet_preserves_explicit_registry_provenance(tmp_path, capsys):
     row = next(item for item in payload["copies"] if item["skill_id"] == "brigade-work")
 
     assert row["source"]["kind"] == "registry"
-    assert row["status"] == "stale"
-    assert "registry:brigade-work" in row["update_command"]
+    assert row["status"] == "edited"
+    assert row["update_command"] is None
+    assert "registry:brigade-work" in row["diff_command"]
 
 
 def test_skills_fleet_discovers_explicit_path_installs(tmp_path, capsys):
@@ -2822,8 +2844,9 @@ def test_skills_fleet_discovers_explicit_path_installs(tmp_path, capsys):
     row = next(item for item in payload["copies"] if item["skill_id"] == "path-only")
 
     assert row["source"]["kind"] == "path"
-    assert row["status"] == "stale"
-    assert str(source) in row["update_command"]
+    assert row["status"] == "edited"
+    assert row["update_command"] is None
+    assert str(source) in row["diff_command"]
 
 
 def test_skills_fleet_detects_metadata_only_source_drift(tmp_path, capsys):

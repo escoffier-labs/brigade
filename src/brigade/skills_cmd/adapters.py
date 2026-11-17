@@ -766,7 +766,9 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         elif drift["overall"] == "missing":
             status = "missing"
         elif drift["overall"] == "changed":
-            status = "stale"
+            # A hand-edited copy is never offered a command that would
+            # overwrite it; the operator gets the diff and the explicit override.
+            status = "edited" if drift["local_edit"] == "changed" else "stale"
         elif drift["overall"] == "current":
             status = "current"
         else:
@@ -781,6 +783,17 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
             if status == "unsupported"
             else None
         )
+        diff_command: str | None = None
+        discard_command: str | None = None
+        if status == "edited":
+            edit_selector, against = _install_mod._local_edit_selector(receipt, skill_id=skill_id, fallback=skill_id)
+            if _fleet_source_selector(skill_id, receipt) is not None:
+                diff_command = _install_mod._local_edit_diff_command(
+                    workspace=target, selector=edit_selector, harness=harness, against=against
+                )
+                discard_command = _install_mod._local_edit_discard_command(
+                    workspace=target, selector=edit_selector, harness=harness
+                )
         copies.append(
             {
                 "skill_id": skill_id,
@@ -804,12 +817,24 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
                 "supported": supported_state,
                 "update_command": update_command,
                 "remove_command": remove_command,
+                "diff_command": diff_command,
+                "discard_command": discard_command,
             }
         )
     copies.sort(key=lambda row: (str(row["skill_id"]), str(row["harness"])))
     counts = {
         state: sum(row["status"] == state for row in copies)
-        for state in ("current", "stale", "missing", "unsupported", "unknown", "external", "symlink", "unusable")
+        for state in (
+            "current",
+            "stale",
+            "edited",
+            "missing",
+            "unsupported",
+            "unknown",
+            "external",
+            "symlink",
+            "unusable",
+        )
     }
     return {
         "schema_version": 1,
@@ -817,6 +842,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         "checked_count": len(copies),
         "current_count": counts["current"],
         "stale_count": counts["stale"],
+        "edited_count": counts["edited"],
         "missing_count": counts["missing"],
         "unsupported_count": counts["unsupported"],
         "unknown_count": counts["unknown"],
@@ -837,7 +863,7 @@ def fleet_status(*, target: Path, json_output: bool = False) -> int:
     print(f"skills fleet status: {target}")
     print(
         f"checked={payload['checked_count']} current={payload['current_count']} "
-        f"stale={payload['stale_count']} missing={payload['missing_count']} "
+        f"stale={payload['stale_count']} edited={payload['edited_count']} missing={payload['missing_count']} "
         f"unsupported={payload['unsupported_count']} unknown={payload['unknown_count']} "
         f"external={payload['external_count']} symlink={payload['symlink_count']} "
         f"unusable={payload['unusable_count']}"
@@ -850,6 +876,10 @@ def fleet_status(*, target: Path, json_output: bool = False) -> int:
             print(f"  update: {row['update_command']}")
         elif row.get("remove_command"):
             print(f"  remove: {row['remove_command']}")
+        if row.get("diff_command"):
+            print(f"  diff: {row['diff_command']}")
+        if row.get("discard_command"):
+            print(f"  discard: {row['discard_command']}")
     return 0
 
 

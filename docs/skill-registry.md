@@ -60,6 +60,36 @@ harness copies and the exact update command for each supported copy. If current
 metadata no longer supports an installed harness, it reports an uninstall
 command instead of recommending another install.
 
+### Hand-edited installed copies
+
+An installed copy whose bytes differ from its install receipt
+(`drift.local_edit` is `changed`) carries a hand edit, and nothing overwrites it
+unless you say so:
+
+- `brigade skills fleet status` reports it as `edited`, counted in
+  `edited_count` and left out of `stale`. It prints no `update:` line and sets
+  `update_command` to null, so no command generated from fleet output can
+  clobber the edit. Instead it prints a `diff:` line (`brigade skills diff ...
+  --against registry`) and a `discard:` line, the override below. The Hub node
+  report still sends `stale` for an edited copy, so the closed status set the
+  Hub accepts is unchanged.
+- `brigade skills sync` plans it as `edited` with result `kept` and a reason
+  naming the diff command and the override. `--write` makes no mutation, writes
+  no receipt or history row and takes no snapshot for it. The edit state is
+  checked again against the exact bytes the write would replace, so an edit made
+  after the dry run is still kept. A copy with no valid receipt cannot prove it
+  is pristine, so sync keeps reporting it as `blocked`.
+- `brigade skills install <skill> --target <harness> --force` on an edited copy
+  exits 2 before any snapshot or removal, naming the installed path, the diff
+  command and the override. With `--target all`, the edited harness is recorded
+  in `skipped` and the other harnesses install as before. A legacy copy with no
+  receipt stays replaceable with `--force`, because nothing shows it was edited.
+- `--discard-local-edits` (together with `--force`) is the explicit override. It
+  restores the earlier behavior: a rollback snapshot of the edited copy is taken
+  first, then the copy is replaced.
+
+Every copy that is replaced, edited or not, still gets its rollback snapshot.
+
 Use `brigade skills sync --workspace . --target all --trust workspace` to plan
 the complete registry-to-harness matrix without changing files. Add `--write`
 to install only missing or changed pairs at or above the trust floor. Sync uses

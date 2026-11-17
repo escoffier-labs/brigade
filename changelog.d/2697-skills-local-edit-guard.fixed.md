@@ -1,0 +1,2 @@
+- Stop `brigade skills sync --write` and `brigade skills install --force` from overwriting an installed skill copy with local edits: sync reports the copy as `edited` and keeps it with no mutation, receipt or snapshot, and `install --force` exits 2 until `--discard-local-edits` is passed (#2697, #2590).
+- Report an edited copy as `edited` in `brigade skills fleet status` (new `edited_count`), without an `update_command`, and print `diff:` and `discard:` lines instead.

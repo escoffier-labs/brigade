@@ -80,6 +80,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_install.add_argument("--target", dest="install_target", required=True, help="Harness target or all.")
     p_skills_install.add_argument("--force", action="store_true", help="Overwrite an existing installed skill.")
     p_skills_install.add_argument(
+        "--discard-local-edits",
+        action="store_true",
+        help="With --force, also overwrite an installed copy that has local edits (a rollback snapshot is taken first).",
+    )
+    p_skills_install.add_argument(
         "--expected-binding-json",
         type=_expected_binding,
         default=None,
@@ -305,6 +310,7 @@ def dispatch(args) -> int:
             skill=args.skill,
             harness=args.install_target,
             force=args.force,
+            discard_local_edits=args.discard_local_edits,
             expected_binding=args.expected_binding_json,
             json_output=args.json,
         )
