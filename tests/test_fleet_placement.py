@@ -40,19 +40,29 @@ MACHINE_BY_NODE = {NODE_LINUX: "worker-linux-1", NODE_LINUX_2: "worker-linux-2",
 BOUND = {"worker-linux-1": ENV[NODE_LINUX], "worker-linux-2": ENV[NODE_LINUX_2], "worker-cloud-1": ENV[NODE_CLOUD]}
 
 
-def _save(conn, *, bindings: dict[str, str] | None = None, repo_machines: list[str] | None = None) -> None:
+def _save(
+    conn,
+    *,
+    bindings: dict[str, str] | None = None,
+    repo_machines: list[str] | None = None,
+    repo_record: dict | None = None,
+) -> None:
     document = _document()
     for machine, environment_id in (BOUND if bindings is None else bindings).items():
         document["machines"][machine]["t3_environment_id"] = environment_id
     if repo_machines is not None:
         document["repositories"][REPO] = {"eligible_machines": repo_machines}
+    if repo_record is not None:
+        document["repositories"][REPO] = repo_record
     current = fleet_hub_policy.current_policy(conn)
     fleet_hub_policy.save_policy(
         conn, document, expected_version=current["revision"], actor="operator", reason="placement"
     )
 
 
-def _report(conn, node: str, *, repo: str = REPO, offset: int = 0, ttl: int = 900) -> None:
+def _report(
+    conn, node: str, *, repo: str = REPO, offset: int = 0, ttl: int = 900, project_ids: list[str] | None = None
+) -> None:
     fleet_node_projects.observe_projects(
         conn,
         {
@@ -60,7 +70,7 @@ def _report(conn, node: str, *, repo: str = REPO, offset: int = 0, ttl: int = 90
             "environment_id": ENV[node],
             "observed_at": _iso(_now() + timedelta(seconds=offset)),
             "ttl_seconds": ttl,
-            "projects": [{"project_id": PROJECT[node], "repo_key": repo}],
+            "projects": [{"project_id": pid, "repo_key": repo} for pid in (project_ids or [PROJECT[node]])],
         },
         node,
     )
@@ -462,3 +472,61 @@ def test_cli_prints_one_line_or_json_and_exits_nonzero_when_nothing_is_placed(mo
     assert rc == 1 and out.strip() == "place: none reason=repo-not-placeable (advisory)"
     rc, _ = _cli(monkeypatch, ["--repo", REPO, "--threshold", "2"])
     assert rc != 0
+
+
+def test_every_spelling_of_a_repo_applies_the_same_policy_entry(fleet):
+    # The repo entry patches the implementation role to the cloud-only seat and limits machines.
+    _save(
+        fleet,
+        repo_record={"patches": {"roles": {"impl": "seat-grokbot"}}, "eligible_machines": ["worker-cloud-1"]},
+    )
+    _observe(
+        fleet,
+        NODE_CLOUD,
+        load=0.10,
+        usable_seats=["seat-grok", "seat-grokbot"],
+        observed_at=_iso(_now() + timedelta(seconds=1)),
+    )
+    baseline = _place(fleet)
+    assert baseline["recommended"]["machine"] == "worker-cloud-1"
+    assert [row["machine"] for row in baseline["candidates"]] == ["worker-cloud-1"]
+    for spelling in ("Example.TEST/Org/Repo.git", "example.test/org/repo.git", "EXAMPLE.test/ORG/repo"):
+        variant = _place(fleet, repo=spelling)
+        assert variant["candidates"] == baseline["candidates"], spelling
+        assert variant["recommended"] == baseline["recommended"], spelling
+    # Resolving the entry is also order independent: the helper returns the stored spelling.
+    document = fleet_hub_policy.current_policy(fleet)["document"]
+    assert fleet_hub_placement._policy_repo_key(document, "Example.TEST/Org/Repo.git", REPO) == REPO
+    assert fleet_hub_placement._policy_repo_key(document, "example.test/org/other", "example.test/org/other") == (
+        "example.test/org/other"
+    )
+
+
+@pytest.mark.parametrize("error", [sqlite3.OperationalError("no such table"), RuntimeError("boom")])
+def test_unreadable_sessions_fail_closed_with_a_named_reason(fleet, monkeypatch, error):
+    def broken(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(fleet_hub_placement, "count_live_by_node", broken)
+    result = _place(fleet)
+    assert result["schema"] == "brigade.fleet_placement.v1"
+    assert result["status"] == "none" and result["recommended"] is None
+    assert result["reason"] == "no-eligible-candidate"
+    assert result["candidates"]
+    for row in result["candidates"]:
+        assert "sessions-unknown" in row["reasons"] and row["eligible"] is False and row["effective_load"] is None
+
+
+def test_several_projects_for_one_repo_choose_deterministically_and_say_so(fleet):
+    _report(fleet, NODE_LINUX, offset=1, project_ids=["proj-z-last", "proj-a-first", "proj-m-middle"])
+    result = _place(fleet)
+    chosen = result["recommended"]
+    assert chosen["machine"] == "worker-linux-1" and chosen["project_id"] == "proj-a-first"
+    assert chosen["project_choices"] == 3
+    reasons = {row["machine"]: row for row in result["candidates"]}
+    assert "multiple-projects" in reasons["worker-linux-1"]["reasons"]
+    assert reasons["worker-linux-1"]["eligible"] is True
+    assert "multiple-projects" not in reasons["worker-linux-2"]["reasons"]
+    # A single project still reports a choice count of one.
+    assert _place(fleet, caller=NODE_LINUX_2)["recommended"]["project_choices"] == 1
+    assert _place(fleet) == _place(fleet)

@@ -83,24 +83,31 @@ def _telemetry_expiry(telemetry: Mapping[str, Any] | None, routing: Mapping[str,
     return observed + timedelta(seconds=min(ttl, report_ttl))
 
 
-def _repo_policy_machines(document: Mapping[str, Any], repo: str, key: str) -> list[str]:
+def _policy_repo_key(document: Mapping[str, Any], repo: str, key: str) -> str:
+    """The policy repositories entry for this repo: exact spelling, then the key, then by normalization.
+
+    One answer feeds both ``eligible_machines`` and ``resolve_policy``, so every spelling of a
+    repository applies the same patches, privacy and machine list. With no entry, the normalized key.
+    """
     repositories = document.get("repositories") or {}
-    record = repositories.get(repo)
-    if record is None:
-        for name, candidate in repositories.items():
-            if fleet_node_projects.normalize_repo_key(name) == key:
-                record = candidate
-                break
-    return list((record or {}).get("eligible_machines") or [])
+    for candidate in (repo, key):
+        if candidate in repositories:
+            return candidate
+    for name in sorted(repositories):
+        if fleet_node_projects.normalize_repo_key(name) == key:
+            return str(name)
+    return key
 
 
-def _usable_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """First bound, fresh inventory row per machine (rows arrive ordered by node and project id)."""
-    usable: dict[str, dict[str, Any]] = {}
+def _usable_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Bound, fresh inventory rows per machine, ordered by project id so the first one is a stable choice."""
+    usable: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         machine = row.get("machine")
-        if machine and row["bound"] and not row["stale"] and machine not in usable:
-            usable[machine] = row
+        if machine and row["bound"] and not row["stale"]:
+            usable.setdefault(machine, []).append(row)
+    for choices in usable.values():
+        choices.sort(key=lambda item: str(item["project_id"]))
     return usable
 
 
@@ -201,11 +208,14 @@ def _place(
     usable = _usable_rows(inventory)
     if not usable:
         return denied("repo-not-placeable")
-    repo_machines = _repo_policy_machines(document, repo, key)
+    policy_repo = _policy_repo_key(document, repo, key)
+    repo_machines = list(((document.get("repositories") or {}).get(policy_repo) or {}).get("eligible_machines") or [])
+    live: dict[str, int] | None
     try:
         live = count_live_by_node(conn, now_epoch=now.timestamp())
-    except sqlite3.OperationalError:
-        live = {}
+    except Exception:
+        # Fail closed: unreadable sessions must never read as zero sessions.
+        live = None
 
     loads: dict[str, dict[str, Any]] = {}
 
@@ -224,12 +234,14 @@ def _place(
         expiry = _telemetry_expiry(telemetry, routing)
         cpu = None if telemetry is None else telemetry.get("load")
         capacity = int(machine.get("concurrency") or 0)
-        sessions = int(live.get(str(machine.get("node_id")), 0))
+        sessions = None if live is None else int(live.get(str(machine.get("node_id")), 0))
+        if sessions is None:
+            reasons.append("sessions-unknown")
         # Hub-counted sessions are a floor under the node-reported CPU load. Node memory joins this
         # max in a follow-up once nodes report it.
-        session_ratio = sessions / capacity if capacity > 0 else 1.0
+        session_ratio = None if sessions is None else (sessions / capacity if capacity > 0 else 1.0)
         fresh = expiry is not None and now < expiry
-        effective = max(float(cpu), session_ratio) if fresh and cpu is not None else None
+        effective = max(float(cpu), session_ratio) if fresh and cpu is not None and session_ratio is not None else None
         loads[name] = {
             "effective_load": None if effective is None else round(effective, 4),
             "load_inputs": {"cpu": cpu, "sessions": sessions, "concurrency": capacity},
@@ -248,7 +260,7 @@ def _place(
         routing=routing,
         workload=WORKLOAD,
         requirements=requirements,
-        resolution=fleet_policy.resolve_policy(document, None, repo),
+        resolution=fleet_policy.resolve_policy(document, None, policy_repo),
         now=now,
         quota_read_only=True,
         extra_reasons=machine_reasons,
@@ -261,7 +273,9 @@ def _place(
             "machine": row["machine"],
             "eligible": row["eligible"],
             "effective_load": (loads.get(row["machine"]) or {}).get("effective_load"),
-            "reasons": list(row["reasons"]),
+            # ``multiple-projects`` is informational: it never changes ``eligible``.
+            "reasons": list(row["reasons"])
+            + (["multiple-projects"] if len(usable.get(row["machine"], [])) > 1 else []),
         }
         for row in rows
     ]
@@ -280,7 +294,8 @@ def _place(
             ),
         )
         reason = "peer-ranked"
-    row = usable[chosen]
+    choices = usable[chosen]
+    row = choices[0]
     info = loads[chosen]
     inventory_expires = fleet_hub_routing._parse_stamp(row.get("expires_at"))
     expiries = [stamp for stamp in (info["telemetry_expires_at"], inventory_expires) if stamp is not None]
@@ -289,6 +304,7 @@ def _place(
         "node_id": row["node_id"],
         "environment_id": row["environment_id"],
         "project_id": row["project_id"],
+        "project_choices": len(choices),
         "effective_load": info["effective_load"],
         "load_inputs": info["load_inputs"],
         "telemetry_observed_at": info["telemetry_observed_at"],

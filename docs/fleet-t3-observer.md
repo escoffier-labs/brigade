@@ -173,12 +173,19 @@ Placement reuses the routing candidate evaluator and adds three checks:
   and an expired row is `inventory-stale`. A repository with no usable row
   anywhere is denied as `repo-not-placeable`. A policy
   `repositories.<id>.eligible_machines` list narrows the set further
-  (`repo-machine-not-eligible`).
+  (`repo-machine-not-eligible`). Every spelling of the key (case, trailing
+  `.git`) resolves to the same policy repository entry, so its patches, privacy
+  and machine list apply together. When one machine has several usable projects
+  for the repository, the lowest project id is chosen, the recommendation
+  carries `project_choices`, and that candidate gets the informational reason
+  `multiple-projects` (it never changes `eligible`).
 - Effective load is the higher of the node-reported CPU `load` and the
   Hub-counted live sessions on the node divided by the machine's policy
   `concurrency`. Missing or stale telemetry, or a null `load`, excludes the
   machine (`machine-unknown-telemetry`, `machine-stale-telemetry`,
-  `machine-load-unknown`). Node memory joins this maximum once nodes report it.
+  `machine-load-unknown`). If the Hub cannot read its live session counts, no
+  machine is eligible (`sessions-unknown`) rather than reading as zero. Node memory joins this maximum
+  once nodes report it.
 - A machine at or over the threshold (default 0.70, range 0 to 1) is shed
   (`machine-load-shed`).
 
