@@ -21,6 +21,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from . import localio, memory_recall_log, receipt_schema, run_checkpoint, worker_events
 
@@ -33,6 +35,8 @@ BATCH_RESULT_ENTRY_SCHEMA = "brigade.run_batch_result_entry.v1"
 _DIGEST_RE = re.compile(r"^hmac-sha256:[0-9a-f]{64}$")
 _BATCH_RESULT_RE = re.compile(r"^batch-result-[0-9a-f]{64}\.json$")
 _DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_WIN_ABS_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'`;,)]*")
+_UNC_RE = re.compile(r"\\\\[^\s\"'`;,)]*")
 _ABS_SEGMENT_RE = re.compile(r"/(?:home|Users|root|tmp)(?:/[^\s\"'`;,)]*)?")
 _FILE_URI_RE = re.compile(r"file://[^\s\"']*")
 _SEAT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -311,13 +315,39 @@ def _sanitize_embedded(value: str, ctx: _Context) -> str:
     if home and home in value:
         value = value.replace(home, HOME_TOKEN)
     value = _FILE_URI_RE.sub(EXTERNAL_PATH_TOKEN, value)
+    value = _WIN_ABS_RE.sub(EXTERNAL_PATH_TOKEN, value)
+    value = _UNC_RE.sub(EXTERNAL_PATH_TOKEN, value)
     return _ABS_SEGMENT_RE.sub(EXTERNAL_PATH_TOKEN, value)
 
 
+def _file_uri_candidate(value: str) -> Path | None:
+    parsed = urlparse(value)
+    if parsed.scheme != "file":
+        return None
+    path = unquote(parsed.path)
+    if parsed.netloc and parsed.netloc not in {"", "localhost"}:
+        return Path(f"//{parsed.netloc}{path}")
+    return Path(url2pathname(path))
+
+
+def _relative_path(candidate: Path, root: Path) -> str | None:
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return None
+    return relative.as_posix()
+
+
 def _map_path(value: str, ctx: _Context) -> str:
-    if value.startswith("file://") or _DRIVE_RE.match(value) or value.startswith("\\\\"):
-        return EXTERNAL_PATH_TOKEN
-    if value.startswith("~"):
+    path_like = False
+    candidate: Path | None = None
+    if value.startswith("file://"):
+        candidate = _file_uri_candidate(value)
+        path_like = True
+    elif _DRIVE_RE.match(value) or value.startswith("\\\\"):
+        candidate = Path(value)
+        path_like = True
+    elif value.startswith("~"):
         try:
             expanded = Path(value).expanduser()
         except RuntimeError:
@@ -325,23 +355,21 @@ def _map_path(value: str, ctx: _Context) -> str:
         if str(expanded).startswith("~"):
             return EXTERNAL_PATH_TOKEN
         candidate = expanded
+        path_like = True
     else:
         candidate = Path(value)
-    if not candidate.is_absolute():
-        return _sanitize_embedded(value, ctx)
-    try:
-        relative = candidate.relative_to(ctx.run_dir)
-    except ValueError:
-        pass
-    else:
-        rel = relative.as_posix()
-        return RUN_DIR_TOKEN if rel in {"", "."} else f"{RUN_DIR_TOKEN}/{rel}"
-    try:
-        relative = candidate.relative_to(ctx.workspace)
-    except ValueError:
+        path_like = candidate.is_absolute()
+
+    if candidate is not None:
+        rel = _relative_path(candidate, ctx.run_dir)
+        if rel is not None:
+            return RUN_DIR_TOKEN if rel in {"", "."} else f"{RUN_DIR_TOKEN}/{rel}"
+        rel = _relative_path(candidate, ctx.workspace)
+        if rel is not None:
+            return "." if rel in {"", "."} else rel
+    if path_like:
         return EXTERNAL_PATH_TOKEN
-    rel = relative.as_posix()
-    return "." if rel in {"", "."} else rel
+    return _sanitize_embedded(value, ctx)
 
 
 def _sanitize_string(value: str, ctx: _Context) -> str:
@@ -510,12 +538,13 @@ def project_payload_tree(
 
 def _assert_safe_string(value: str, *, label: str, home: Path) -> None:
     unsafe = (
-        value.startswith(("/", "~", "file://"))
+        value.startswith(("/", "~", "file://", "\\\\"))
         or _DRIVE_RE.match(value) is not None
-        or value.startswith("\\\\")
         or (bool(home) and str(home) in value)
         or _ABS_SEGMENT_RE.search(value) is not None
         or _FILE_URI_RE.search(value) is not None
+        or _WIN_ABS_RE.search(value) is not None
+        or _UNC_RE.search(value) is not None
     )
     if unsafe:
         raise RunExportProjectionError(f"{label} must not contain an absolute path")

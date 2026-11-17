@@ -510,3 +510,19 @@ def test_import_refuses_unknown_batch_result_schema(tmp_path: Path):
     with pytest.raises(WorkRunArchiveError) as excinfo:
         work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
     assert excinfo.value.category == "export-privacy"
+
+
+def test_windows_workspace_path_maps_relative(monkeypatch):
+    import pathlib
+
+    monkeypatch.setattr(run_export_projection, "Path", pathlib.PureWindowsPath)
+    ctx = run_export_projection._Context(
+        workspace=pathlib.PureWindowsPath(r"D:\a\workspace"),
+        run_dir=pathlib.PureWindowsPath(r"D:\a\workspace\.brigade\runs\id"),
+        home=pathlib.PurePosixPath("/home/example"),
+        key=b"k" * 32,
+    )
+    assert run_export_projection._map_path(r"D:\a\workspace\project", ctx) == "project"
+    assert run_export_projection._map_path(r"D:\a\workspace\.brigade\runs\id\logs\x.log", ctx) == "<run-dir>/logs/x.log"
+    assert run_export_projection._map_path(r"D:\other\project", ctx) == "<external-path>"
+    assert run_export_projection._map_path(r"\\server\share\file", ctx) == "<external-path>"
