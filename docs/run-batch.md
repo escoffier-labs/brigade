@@ -153,3 +153,7 @@ Batch runs retain normal drift checkpoints, worker-result artifacts, final
 receipts, artifact collection, and lineage metadata without calling synthesis.
 Synthesis execution exits 2 with `synthesis-not-implemented`. Dry run still shows
 its requested seat. No synthesis model call or budget is created.
+
+See [kinds of delegated work](execution-model.md#kinds-of-delegated-work) for how
+batch tasks compare with ledger tasks, run-lineage children, remote fleet
+requests, and T3 app-owned child tasks.
