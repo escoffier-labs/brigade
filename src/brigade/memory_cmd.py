@@ -269,16 +269,20 @@ def _memory_care_runbooks_dir(target: Path) -> Path:
 
 
 def _write_memory_care_runbooks(target: Path, names: tuple[str, ...] = MEMORY_CARE_RUNBOOK_NAMES) -> int:
-    """Copy pinned mechanical memory-care runbook templates into the target.
+    """Add only the pinned memory-care runbooks missing from the target.
 
-    Templates ship without pins; pins are materialized from the resolved
+    Templates ship without pins. Pins are materialized from the resolved
     ``brigade`` binary at write time so ``brigade runbook run --approved``
     can enforce the binary hash without a separate pin step.
 
-    Validates every requested template in a sibling temp directory first, so a
-    pin-resolution failure writes nothing. Then each file is moved into place on
-    its own. Other files in the runbook directory, including operator-written
-    runbooks, are never removed.
+    Every requested template is validated first in a sibling temp directory, so
+    a pin-resolution failure writes nothing. Each validated file is then moved
+    into place on its own, and any name already present at the destination is
+    left alone. Checked with ``os.path.lexists`` semantics, so files, symlinks
+    and directories all count as existing and are never clobbered. If a move
+    fails partway, the files already published stay in place and a rerun adds
+    the remaining runbooks. Other files in the runbook directory, including
+    operator-written runbooks, are never removed.
     """
     from . import runbook_cmd
 
@@ -318,7 +322,17 @@ def _write_memory_care_runbooks(target: Path, names: tuple[str, ...] = MEMORY_CA
             _write_json(dest, validated)
         dest_dir.mkdir(parents=True, exist_ok=True)
         for name in names:
-            (temp_dir / name).replace(dest_dir / name)
+            dest = dest_dir / name
+            # Preserve anything already at the name, including a broken symlink.
+            # A real directory is an obstruction rather than a runbook, so let
+            # the move below fail and report it with the runbook name.
+            if os.path.lexists(dest) and (not os.path.isdir(dest) or os.path.islink(dest)):
+                continue
+            try:
+                (temp_dir / name).replace(dest)
+            except OSError as exc:
+                print(f"error: could not write memory-care runbook {name}: {exc}", file=sys.stderr)
+                return 2
         return 0
     finally:
         if temp_dir.exists():
