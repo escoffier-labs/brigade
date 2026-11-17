@@ -40,7 +40,12 @@ Claude Code also gets recall at session start. Codex gets memory through its han
   <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-memory.svg" alt="Claude Code, Codex, Cursor, OpenCode, ChatGPT dots and Claude Duet connect to BrigadeStack shared memory, and share memory, check records, MCP servers and skills through it." width="720">
 </p>
 
-Here one checkout drafts a handoff, a reviewer files the card, and a second checkout finds it:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-handoff-flow.svg" alt="Three steps: one session drafts a handoff, a reviewer files it as the card payments-retry-policy.md, and brigade memory search in a second checkout finds that card." width="720">
+</p>
+
+<details>
+<summary>The commands behind that picture</summary>
 
 ```console
 $ cd ~/api
@@ -64,6 +69,8 @@ $ brigade memory search "retry backoff"
 memory search: retry backoff (1 match(es))
 - memory/cards/payments-retry-policy.md  [0.74]  payments-retry-policy
 ```
+
+</details>
 
 ## Then prove it
 
