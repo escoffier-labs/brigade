@@ -419,7 +419,7 @@ def _installed_state_reason(state: str, link_target: str | None, installed_dir: 
 
 @dataclass(frozen=True)
 class InstalledTreeInspection:
-    """Read-only view of one installed copy, never following a link."""
+    """Read-only view of one installed copy; a link at the leaf is reported, not followed."""
 
     state: str
     link_target: str | None
@@ -439,7 +439,8 @@ def _inspect_installed_tree(
     harness directories outside the state root keep the plain descriptor walk.
     A symlinked, dangling, regular-file, or otherwise refused leaf yields an
     empty snapshot and the state that explains it, so read-only callers never
-    raise and never follow the link.
+    raise and never follow a link at the leaf (a symlinked parent directory is
+    still followed outside the state root).
     """
     state, link_target = _installed_path_state(workspace, installed_dir, anchor=anchor)
     if state != "dir":
@@ -503,7 +504,7 @@ def _drift_payload(
     installed_metadata_fingerprint = registry._bytes_fingerprint(snapshot_files.get(("skill.json",)))
     known = _valid_receipt_contract(receipt, skill_id=skill_id, harness=harness)
     if path_state == "symlink":
-        # A linked installed copy is reported, never followed or diffed.
+        # A linked installed copy is reported, never followed or diffed (leaf only).
         overall = "symlink"
         source_state = "unknown"
         render_state = "unknown"
