@@ -385,7 +385,7 @@ def _prune(conn: sqlite3.Connection, now: datetime) -> None:
 
 def maintain(db_path: Path, *, storage_policy: StoragePolicy | None = None) -> None:
     """Delete expired aggregates independently of collection and page reads."""
-    from . import fleet_hub, fleet_hub_messages, fleet_hub_sealed
+    from . import fleet_hub, fleet_hub_messages, fleet_hub_retention, fleet_hub_sealed
 
     conn = fleet_hub.open_db(db_path)
     try:
@@ -397,6 +397,8 @@ def maintain(db_path: Path, *, storage_policy: StoragePolicy | None = None) -> N
                 "DELETE FROM fleet_questions WHERE created_at<?",
                 (fleet_hub_messages._expiry_cutoff(storage_policy),),
             )
+        # The events journal, sessions and leases get one bounded batch each.
+        fleet_hub_retention.sweep_retention(conn)
         while True:
             # Release the writer lock between bounded batches, including at
             # startup. Ciphertext never accumulates in one unbounded list.

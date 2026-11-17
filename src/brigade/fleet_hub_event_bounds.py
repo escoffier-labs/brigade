@@ -54,6 +54,12 @@ WORKLORE_BODY_BYTES = 262144
 # 5 MiB fits a contract-shaped 500-observation batch (about 4.27 MB) and stays
 # under the Hub's 8 MiB global body limit, which the Rust front also enforces.
 WORKLORE_IMPORT_BODY_BYTES = 5242880
+# Retention windows and the per-run delete batch for fleet_hub_retention. The
+# 90-day window matches message retention; a sweep never removes live state.
+EVENTS_RETENTION_DAYS = 90
+INTERACTIVE_SESSIONS_RETENTION_DAYS = 90
+CLOUD_LEASES_RETENTION_DAYS = 90
+RETENTION_SWEEP_BATCH = 1000
 # Consume an unterminated string too, so escaped quotes cannot trigger a
 # quadratic restart at each quote. The JSON decoder still rejects it.
 _JSON_STRINGS = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)', re.DOTALL)

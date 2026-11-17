@@ -388,7 +388,10 @@ phone over Tailscale:
   default 24h) so the 10s refresh does not scan the whole journal; `all=1`
   drops the window and still applies LIMIT plus a `more` link. Start times
   and node cards are derived from those rendered rows. GET never prunes
-  events; operators compact the journal from the Proxmox runbook.
+  events; the existing hourly retention sweep deletes bounded batches of
+  events older than 90 days while keeping the latest event for every
+  `(node_id, run_id)`. Interactive session rows and cloud lease history get
+  the same bounded sweep (see below).
 - Server-rendered, stdlib only, no framework or CDN asset. Tables, sorting,
   and filtering are plain HTML + query params and work with JavaScript off;
   refresh is a `<meta http-equiv="refresh" content="10">`. The inline
@@ -828,8 +831,19 @@ These request bounds leave GET payloads and fleet list clients unchanged.
 Claim fencing failures still return HTTP 503 on read paths, including `/status`.
 Result-set bounds, keyset pagination, and a current-status projection move to
 [the 0.29.0 follow-up](https://github.com/escoffier-labs/brigade/issues/1738).
-Retention, POST throttling, per-node fairness behind a proxy, and the fronting
-proxy runbook also remain deferred to that issue.
+POST throttling, per-node fairness behind a proxy, and the fronting proxy
+runbook also remain deferred to that issue.
+
+### Hub retention sweeps
+
+The hourly retention thread that already maintains admin statistics also runs
+three bounded sweeps with a 90-day window and a 1,000-row batch per table per
+run. The events sweep deletes only rows older than the window that are not the
+latest event for their `(node_id, run_id)`. The session sweep deletes rows whose
+`heartbeat_at` is older than the window. The cloud lease sweep deletes released
+rows older than the window and expired unreleased rows older than the window,
+and never deletes an unreleased, unexpired lease. Each sweep runs in its own
+short transaction, reports the rows it removed, and is safe to run again.
 
 
 ## Adoption statistics collector and Deck page

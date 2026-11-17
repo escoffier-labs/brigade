@@ -1,0 +1,1 @@
+- Fleet Hub now runs bounded 90-day retention sweeps for the event journal, interactive sessions and cloud lease history, keeping the latest event for every run and never deleting an unreleased, unexpired lease.
