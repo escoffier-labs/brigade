@@ -12,7 +12,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__ as BRIGADE_VERSION
-from . import brief_sections, harness_profiles, localio, managed_block, mcp_adapters, mcp_cmd, skills_cmd
+from . import (
+    brief_sections,
+    harness_profiles,
+    localio,
+    managed_block,
+    mcp_adapters,
+    mcp_cmd,
+    mcp_native_auth,
+    skills_cmd,
+)
 from . import cursor_profile_hooks
 from .harness_profile_doctor import (
     _doctor_receipt_item,
@@ -1082,6 +1091,27 @@ def _native_auth_record(profile, live_entry: dict[str, Any], record: Any, server
     return mcp_cmd._native_record(profile.mcp_harness, live_entry, record if isinstance(record, dict) else None, server)
 
 
+def _block_mcp_removal(item: dict[str, Any], profile, name: str) -> dict[str, Any]:
+    """Mark a removal as blocked: native auth would be erased with the entry (see mcp_native_auth)."""
+    item.update(
+        status="blocked",
+        action="preserve",
+        reason=mcp_native_auth.REMOVAL_BLOCKED,
+        detail=mcp_native_auth.removal_block_message(name, profile.mcp_harness),
+    )
+    return item
+
+
+def _late_removal_conflicts(profile, mcp_plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Re-read the live file at write time: an entry that gained native auth since the plan must stay."""
+    path, adapter = mcp_plan["path"], mcp_plan["adapter"]
+    live = adapter.read_file(path.read_text(encoding="utf-8") if path.is_file() else None)
+    return [
+        _block_mcp_removal({"surface": "mcp", "path": str(path), "name": name}, profile, name) | {"status": "conflict"}
+        for name in mcp_native_auth.removal_blockers(profile.mcp_harness, live, mcp_plan["remove"])
+    ]
+
+
 def _mcp_plan(
     profile, state: dict[str, Any], workspace: Path, *, allow_global_stdio: bool, adopt: bool
 ) -> dict[str, Any]:
@@ -1186,6 +1216,7 @@ def _mcp_plan(
     updates: dict[str, dict[str, Any]] = {}
     ownership: dict[str, dict[str, Any]] = {}
     remove: set[str] = set()
+    blocked: list[dict[str, Any]] = []
     for name in sorted(set(desired) | set(state["mcp"])):
         if name not in desired:
             record = state["mcp"].get(name)
@@ -1197,10 +1228,15 @@ def _mcp_plan(
                 item.update(status="unmanaged", action="preserve")
             elif name not in live:
                 item.update(status="absent", action="remove")
-            elif localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
+            elif mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == record.get(
+                "projected_fingerprint"
+            ):
                 if record.get(_LEGACY_MIGRATED):
                     item.update(status="current", action="none")
                     ownership[name] = dict(record)
+                elif mcp_native_auth.has_preserved_native_keys(profile.mcp_harness, live[name]):
+                    blocked.append(_block_mcp_removal(item, profile, name))
+                    ownership[name] = dict(record)  # kept, so a later run can finish the removal
                 else:
                     item.update(status="removed-catalog", action="remove")
                     remove.add(name)
@@ -1229,7 +1265,7 @@ def _mcp_plan(
             conflicts.append(item)
             items.append(item)
             continue
-        fingerprint = localio.stable_hash(provider)
+        fingerprint = mcp_native_auth.entry_fingerprint(profile.mcp_harness, provider)
         record = state["mcp"].get(name, {}) if isinstance(state["mcp"].get(name), dict) else {}
         auth = _native_auth_record(profile, live.get(name, {}), state["mcp"].get(name), server)
         item = {"surface": "mcp", "path": str(path), "name": name}
@@ -1247,15 +1283,20 @@ def _mcp_plan(
                 conflicts.append(item)
             else:
                 item.update(
-                    status="adopted", action="none" if localio.stable_hash(live[name]) == fingerprint else "update"
+                    status="adopted",
+                    action="none"
+                    if mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == fingerprint
+                    else "update",
                 )
                 if item["action"] == "update":
                     updates[name] = provider
                 ownership[name] = {"projected_fingerprint": fingerprint, "managed": False, **auth}
-        elif localio.stable_hash(live[name]) == fingerprint:
+        elif mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == fingerprint:
             item.update(status="current", action="none")
             ownership[name] = {**record, **auth}
-        elif record.get("managed") and localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
+        elif record.get("managed") and mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == record.get(
+            "projected_fingerprint"
+        ):
             item.update(status="stale", action="update")
             updates[name] = provider
             ownership[name] = {"projected_fingerprint": fingerprint, "managed": True, **auth}
@@ -1273,7 +1314,9 @@ def _mcp_plan(
         try:
             final_live = adapter.read_file(adapter.write_file(text, updates, remove))
             for name in ownership:
-                ownership[name]["projected_fingerprint"] = localio.stable_hash(final_live[name])
+                ownership[name]["projected_fingerprint"] = mcp_native_auth.entry_fingerprint(
+                    profile.mcp_harness, final_live[name]
+                )
         except ValueError as exc:
             conflicts.append({"surface": "mcp", "path": str(path), "status": "conflict", "detail": str(exc)})
     return {
@@ -1284,6 +1327,7 @@ def _mcp_plan(
         "text": text,
         "updates": updates,
         "remove": remove,
+        "blocked": blocked,
         "next": ownership,
     }
 
@@ -1305,6 +1349,8 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
         return {"items": [item], "conflicts": [item], "path": path, "adapter": adapter, "text": text, "remove": set()}
     live = adapter.read_file(text)
     remove: set[str] = set()
+    blocked: list[dict[str, Any]] = []
+    keep: dict[str, Any] = {}
     for name, record in sorted(state["mcp"].items()):
         item = {"surface": "mcp", "path": str(path), "name": name}
         if not isinstance(record, dict):
@@ -1314,14 +1360,27 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
             item.update(status="unmanaged", action="preserve")
         elif name not in live:
             item.update(status="absent", action="remove")
-        elif localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
-            item.update(status="managed", action="remove")
-            remove.add(name)
+        elif mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) == record.get("projected_fingerprint"):
+            if mcp_native_auth.has_preserved_native_keys(profile.mcp_harness, live[name]):
+                blocked.append(_block_mcp_removal(item, profile, name))
+                keep[name] = dict(record)  # ownership stays, so a later run can finish the uninstall
+            else:
+                item.update(status="managed", action="remove")
+                remove.add(name)
         else:
             item.update(status="conflict", action="preserve", detail="owned native MCP entry was edited")
             conflicts.append(item)
         items.append(item)
-    return {"items": items, "conflicts": conflicts, "path": path, "adapter": adapter, "text": text, "remove": remove}
+    return {
+        "items": items,
+        "conflicts": conflicts,
+        "path": path,
+        "adapter": adapter,
+        "text": text,
+        "remove": remove,
+        "blocked": blocked,
+        "keep": keep,
+    }
 
 
 def _try_project(
@@ -1396,7 +1455,9 @@ def _verify_mcp(profile, state: dict[str, Any], workspace: Path) -> tuple[dict[s
             )
         ) is None:
             ok = False
-        elif localio.stable_hash(live[name]) != localio.stable_hash(projected):
+        elif mcp_native_auth.entry_fingerprint(profile.mcp_harness, live[name]) != mcp_native_auth.entry_fingerprint(
+            profile.mcp_harness, projected
+        ):
             item.update(status="edited")
             ok = False
         elif not isinstance(record, dict):
@@ -1421,10 +1482,14 @@ def _result(
     receipt_path: Path,
     receipt_state: str,
     migration: str | None = None,
+    blocked: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """``blocked`` holds servers left in place because removal would erase native auth; the rest completed."""
     return {
         "harness": profile.harness,
-        "status": status,
+        "status": "incomplete" if blocked and status != "conflict" else status,
+        "incomplete": bool(blocked),
+        "blocked": blocked or [],
         "ready": ready,
         "instruction_ready": not any(item["surface"] == "instruction" for item in conflicts),
         "skills_ready": not any(item["surface"] == "skill" for item in conflicts),
@@ -1697,6 +1762,19 @@ def _sync_profile(
     files_written: list[str] = []
     files_removed: list[str] = []
     if write and ready:
+        if mcp_plan["remove"] and (late := _late_removal_conflicts(profile, mcp_plan)):
+            return _result(
+                profile,
+                status="conflict",
+                ready=False,
+                items=items,
+                conflicts=late,
+                files_written=[],
+                files_removed=[],
+                mcp={"status": "pending", "items": []},
+                receipt_path=profile.receipt_path,
+                receipt_state="missing",
+            ), False
         mutations: list[projection.MutationSpec] = []
         if instruction.action in {"create", "update"}:
             mutation = _profile_mutation(
@@ -1842,6 +1920,7 @@ def _sync_profile(
             receipt_path=profile.receipt_path,
             receipt_state="applied" if files_written or files_removed else "current",
             migration="legacy-v1" if migrated_from_legacy else None,
+            blocked=mcp_plan.get("blocked"),
         ), bool(files_written or files_removed)
     receipt_state = "present" if profile.receipt_path.exists() else "missing"
     # A conflict-free plan with planned writes is "safe to apply", not
@@ -1859,6 +1938,7 @@ def _sync_profile(
         receipt_path=profile.receipt_path,
         receipt_state=receipt_state,
         migration="legacy-v1" if migrated_from_legacy and ready else None,
+        blocked=mcp_plan.get("blocked"),
     ), False
 
 
@@ -1987,13 +2067,27 @@ def _uninstall_profile(
     proposed["instructions"] = {}
     proposed["skills"] = {}
     proposed["generated"] = {}
-    proposed["mcp"] = {}
-    state_item = _state_item(profile.state_path, before=state, after=proposed, remove=True)
-    receipt_item = _receipt_item(profile.receipt_path, state_action=state_item["action"], remove=True)
+    keep = mcp_plan.get("keep", {})  # blocked servers stay owned, so state and receipt stay for the next run
+    proposed["mcp"] = dict(keep)
+    state_item = _state_item(profile.state_path, before=state, after=proposed, remove=not keep)
+    receipt_item = _receipt_item(profile.receipt_path, state_action=state_item["action"], remove=not keep)
     items.extend([state_item, receipt_item])
     files_removed: list[str] = []
     files_written: list[str] = []
     if write and not conflicts:
+        if mcp_plan["remove"] and (late := _late_removal_conflicts(profile, mcp_plan)):
+            return _result(
+                profile,
+                status="conflict",
+                ready=False,
+                items=items,
+                conflicts=late,
+                files_written=[],
+                files_removed=[],
+                mcp={"status": "pending", "items": []},
+                receipt_path=profile.receipt_path,
+                receipt_state="present" if profile.receipt_path.exists() else "missing",
+            ), False
         mutations: list[projection.MutationSpec] = []
         if plan.action == "update" and remaining and plan.rendered is not None:
             mutation = _profile_mutation(
@@ -2088,11 +2182,19 @@ def _uninstall_profile(
             )
             if mutation is not None:
                 mutations.append(mutation)
-        if profile.state_path.exists():
+        if keep:
+            mutation = _profile_mutation(profile.state_path, _json_bytes(proposed), writer=_write_profile_state_bytes)
+            if mutation is not None:
+                mutations.append(mutation)
+            receipt = _receipt(profile, operation="sync", items=items, state=proposed, applied=True)
+            mutation = _profile_mutation(profile.receipt_path, _json_bytes(receipt))
+            if mutation is not None:
+                mutations.append(mutation)
+        if not keep and profile.state_path.exists():
             mutation = _profile_mutation(profile.state_path, None)
             if mutation is not None:
                 mutations.append(mutation)
-        if profile.receipt_path.exists():
+        if not keep and profile.receipt_path.exists():
             mutation = _profile_mutation(profile.receipt_path, None)
             if mutation is not None:
                 mutations.append(mutation)
@@ -2145,7 +2247,10 @@ def _uninstall_profile(
         files_removed=files_removed,
         mcp={"status": "ready" if not mcp_plan["conflicts"] else "conflict", "items": mcp_plan["items"]},
         receipt_path=profile.receipt_path,
-        receipt_state="removed" if changed else ("present" if profile.receipt_path.exists() else "missing"),
+        receipt_state="removed"
+        if changed and not keep
+        else ("present" if profile.receipt_path.exists() else "missing"),
+        blocked=mcp_plan.get("blocked"),
     ), changed
 
 
@@ -2354,7 +2459,7 @@ def _run(
     payload = {
         "operation": operation,
         "results": results,
-        "ready": all(result["ready"] for result in results),
+        "ready": all(result["ready"] and not result.get("incomplete") for result in results),
         "reload_required": reload_required,
     }
     if json_output:
@@ -2364,6 +2469,8 @@ def _run(
             print(
                 f"{result['harness']}: {result['status']} receipt={result['receipt_path']} ({result['receipt_state']})"
             )
+            for item in result.get("blocked", []):
+                print(f"  incomplete: {item['detail']}")
             for item in result.get("items", []):
                 if item.get("surface") != "instruction":
                     continue
