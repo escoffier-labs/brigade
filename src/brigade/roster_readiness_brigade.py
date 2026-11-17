@@ -80,8 +80,7 @@ def _capacity_or_unknown(
 
 
 def _hub_seat_usage_capacity(
-    seat_name: str,
-    limit: int,
+    limits: list[tuple[str, int]],
     snapshot: Mapping[str, Any] | None,
     *,
     observed_at: float,
@@ -89,8 +88,10 @@ def _hub_seat_usage_capacity(
 ) -> Observation:
     """Turn current Hub seat occupancy into free capacity for this exact snapshot.
 
-    The usage response must carry the same roster revision and policy digest as
-    the admission snapshot; anything else is unknown, never ready.
+    Every selected seat with a positive limit is checked, and the smallest free
+    capacity wins, so one full seat cannot hide behind an idle one. The usage
+    response must carry the same roster revision and policy digest as the
+    admission snapshot; anything else is unknown, never ready.
     """
     from . import fleet_client_policy
 
@@ -104,8 +105,6 @@ def _hub_seat_usage_capacity(
     if not isinstance(usage, Mapping):
         return _unknown("hub seat usage returned a malformed payload")
     seats = usage.get("seats")
-    row = seats.get(seat_name) if isinstance(seats, Mapping) else None
-    occupied = row.get("occupied") if isinstance(row, Mapping) else None
     revision = usage.get("roster_revision")
     digest = usage.get("policy_digest")
     snapshot_revision = snapshot.get("revision") if isinstance(snapshot, Mapping) else None
@@ -113,14 +112,24 @@ def _hub_seat_usage_capacity(
     snapshot_digest = authority.get("digest") if isinstance(authority, Mapping) else None
     if type(revision) is not int or revision != snapshot_revision or digest != snapshot_digest:
         return _unknown("hub seat usage does not match the admission roster revision and policy digest")
-    if type(occupied) is not int or occupied < 0:
-        return _unknown(f"hub seat usage returned malformed occupancy for seat {seat_name!r}")
+    details: list[str] = []
+    capacity: int | None = None
+    for seat_name, limit in limits:
+        row = seats.get(seat_name) if isinstance(seats, Mapping) else None
+        occupied = row.get("occupied") if isinstance(row, Mapping) else None
+        if type(occupied) is not int or occupied < 0:
+            return _unknown(f"hub seat usage returned malformed occupancy for seat {seat_name!r}")
+        free = max(0, limit - occupied)
+        capacity = free if capacity is None else min(capacity, free)
+        details.append(f"seat {seat_name!r} limit {limit}, occupied {occupied}")
+    if capacity is None:
+        return _unknown("hub seat usage had no limited seat to check")
     return Observation(
         "passed",
         observed_at,
         scope,
-        detail=f"hub seat usage: seat {seat_name!r} limit {limit}, occupied {occupied}",
-        capacity=max(0, limit - occupied),
+        detail="hub seat usage: " + "; ".join(details),
+        capacity=capacity,
     )
 
 
@@ -676,7 +685,7 @@ def _hub_capacity(
         if parsed_policy is not None:
             parsed_seats = parsed_policy.get("seats") or {}
             zero_seat: str | None = None
-            positive_seat: tuple[str, int] | None = None
+            positive_seats: list[tuple[str, int]] = []
             for seat_name in workers:
                 seat_cfg = parsed_seats.get(seat_name)
                 concurrency = seat_cfg.get("concurrency") if isinstance(seat_cfg, Mapping) else None
@@ -684,8 +693,8 @@ def _hub_capacity(
                     continue
                 if concurrency == 0:
                     zero_seat = seat_name
-                elif concurrency > 0 and positive_seat is None:
-                    positive_seat = (seat_name, concurrency)
+                elif concurrency > 0:
+                    positive_seats.append((seat_name, concurrency))
             if zero_seat is not None:
                 return Observation(
                     "passed",
@@ -694,8 +703,8 @@ def _hub_capacity(
                     detail=f"fleet policy: seat {zero_seat!r} concurrency is 0",
                     capacity=0,
                 )
-            if positive_seat is not None:
-                return _hub_seat_usage_capacity(*positive_seat, snapshot, observed_at=observed_at, scope=scope)
+            if positive_seats:
+                return _hub_seat_usage_capacity(positive_seats, snapshot, observed_at=observed_at, scope=scope)
         return Observation(
             "unknown",
             observed_at,
@@ -710,7 +719,7 @@ def _hub_capacity(
     }
     zero_limit_seat: str | None = None
     malformed_seat: str | None = None
-    positive_limit_seat: tuple[str, int] | None = None
+    positive_limit_seats: list[tuple[str, int]] = []
     for seat_name in workers:
         row = seat_rows_by_name.get(seat_name)
         if row is None:
@@ -724,8 +733,8 @@ def _hub_capacity(
         elif limit == 0:
             if zero_limit_seat is None:
                 zero_limit_seat = seat_name
-        elif positive_limit_seat is None:
-            positive_limit_seat = (seat_name, limit)
+        else:
+            positive_limit_seats.append((seat_name, limit))
 
     if zero_limit_seat is not None:
         return Observation(
@@ -742,9 +751,8 @@ def _hub_capacity(
             scope,
             detail=f"hub model admission returned malformed limit for seat {malformed_seat!r}",
         )
-    if positive_limit_seat is not None:
-        seat_name, limit = positive_limit_seat
-        return _hub_seat_usage_capacity(seat_name, limit, snapshot, observed_at=observed_at, scope=scope)
+    if positive_limit_seats:
+        return _hub_seat_usage_capacity(positive_limit_seats, snapshot, observed_at=observed_at, scope=scope)
 
     extra_source = (
         "hub repo claim and hub model seat limits (unlimited)" if claim_checked else "hub model seat limits (unlimited)"

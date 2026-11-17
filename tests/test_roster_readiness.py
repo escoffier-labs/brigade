@@ -1442,3 +1442,29 @@ def test_brigade_hub_enrolled_policy_and_repo_identity_errors_stay_unknown(decla
     assert res_policy_err["status"] == "unverified"
     assert res_policy_err["exit_code"] == 3
     assert next(item for item in res_policy_err["evidence"] if item["category"] == "admission")["status"] == "unknown"
+
+
+def test_brigade_hub_seat_usage_uses_the_fullest_limited_seat(monkeypatch):
+    from brigade import fleet_client_policy, roster_readiness_brigade
+
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "read_seat_usage",
+        lambda: {
+            "roster_revision": 7,
+            "policy_digest": ENROLLED_DIGEST,
+            "seats": {"a": {"occupied": 0}, "b": {"occupied": 2}},
+        },
+    )
+    snapshot = {"revision": 7, "fleet_policy": {"digest": ENROLLED_DIGEST}}
+    # Seat a is idle but seat b is full, so the operation has no free capacity.
+    obs = roster_readiness_brigade._hub_seat_usage_capacity(
+        [("a", 2), ("b", 2)], snapshot, observed_at=1.0, scope="scope"
+    )
+    assert obs.status == "passed"
+    assert obs.capacity == 0
+    # A limited seat missing from the usage response is unknown, never ready.
+    missing = roster_readiness_brigade._hub_seat_usage_capacity(
+        [("a", 2), ("c", 2)], snapshot, observed_at=1.0, scope="scope"
+    )
+    assert missing.status == "unknown"

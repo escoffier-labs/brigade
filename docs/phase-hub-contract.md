@@ -83,7 +83,7 @@ Auth column: `none`, `admin`, `node` (node token), `principal` (message
 principal token), `bearer` (admin or node), `browser` (admin bearer, dashboard
 session cookie, or trusted Tailscale identity). Status column: `covered` means
 the drive checks the route, with the scope noted, and `not yet` means a later
-slice. The tables list 98 method and path pairs: 54 JSON API routes, 37 browser
+slice. The tables list 99 method and path pairs: 55 JSON API routes, 37 browser
 routes, and 7 static assets. The drive covers 14, all JSON API routes, and
 for several of them only part of the request space (see the Status column).
 
