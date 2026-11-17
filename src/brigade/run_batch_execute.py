@@ -14,7 +14,7 @@ from typing import Any
 from . import agents, fleet_client, inbox_lock, localio, run_receipts, run_tasks, run_lifecycle, run_journal, runguard
 from .run_batch import BatchError
 from .run_transport import Assignment, WorkerResult
-from .roster import Roster
+from .roster import Roster, read_only_cloud_mutation_error
 
 
 class BatchExecution:
@@ -23,14 +23,25 @@ class BatchExecution:
         self.run_dir = run_dir
         self.workspace = workspace
         self.by_prompt = {f"Batch task_id: {t['task_id']}\n\n{t['text']}": t for t in plan["tasks"]}
+        # Per-task read-only is enforced by the existing worker read-only path,
+        # so a mixed batch keeps one dispatcher and its dependency context.
+        self.read_only = {t["task_id"]: bool(t.get("read_only", False)) for t in plan["tasks"]}
         # Tasks refused at the launch point keep their journal state untouched.
         self.refused: set[str] = set()
+
+    def read_only_for(self, assignment: Assignment) -> bool:
+        return self.read_only[self.by_prompt[assignment.task]["task_id"]]
 
     def assignments(self, roster: Roster) -> list[Assignment]:
         from .aboyeur import artifacts
 
         for task in self.plan["tasks"]:
-            error = artifacts._direct_worker_error(task["seat"], roster, read_only=False)
+            read_only = self.read_only[task["task_id"]]
+            error = artifacts._direct_worker_error(task["seat"], roster, read_only=read_only)
+            agent = roster.agents.get(task["seat"])
+            if error is None and read_only and agent is not None:
+                # The same refusal a read-only run applies to a mutating cloud seat.
+                error = read_only_cloud_mutation_error(agent)
             if error is not None:
                 raise BatchError("invalid-seat", error)
         specs = tuple(
@@ -110,6 +121,7 @@ class BatchExecution:
         kwargs["build_prompt"] = build_prompt
         kwargs["on_result"] = self.observe
         kwargs["allow_reinvocation"] = False
+        kwargs["read_only_for"] = self.read_only_for
         return planning.dispatch(waves, roster, **kwargs)
 
     def resolve_model_policy(self, roster: Roster, **kwargs: Any) -> Any:
@@ -257,6 +269,14 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
         else:
             localio.write_json(marker_path, plan)
             run_journal._fsync_directory(run_dir)
+            if any(task.get("isolation", "shared") == "worktree" for task in plan["tasks"]):
+                # The request is accepted with its pinned base and recorded
+                # isolation, then refused before any launch. Creating the
+                # worktrees lands in a following slice.
+                raise BatchError(
+                    "isolation-worktree-not-implemented",
+                    "batch worktree isolation execution is not implemented yet",
+                )
             argv = [
                 "run",
                 f"Explicit batch {plan['request_id']}",
@@ -268,6 +288,10 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
                 str(run_dir),
                 "--no-route",
             ]
+            # The run-level flag stays the single truth for an all-read-only
+            # batch. A mixed batch relies on the per-task read-only resolver.
+            if all(task.get("read_only", False) for task in plan["tasks"]):
+                argv.append("--read-only")
             if args.roster is not None:
                 argv.extend(["--roster", str(args.roster)])
             normal = cli._build_parser_for(argv).parse_args(argv)

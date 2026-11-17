@@ -558,6 +558,7 @@ def dispatch(
     event_writer: EventWriter,
     cwd: Path | None = None,
     read_only: bool = False,
+    read_only_for: Callable[[Assignment], bool] | None = None,
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     direct: bool = False,
@@ -598,6 +599,10 @@ def dispatch(
 
     ``allow_reinvocation=False`` preserves the first result without retries,
     continuations, or fallback invocations. Explicit batches require this bound.
+
+    ``read_only_for`` overrides the run-level ``read_only`` per assignment, so
+    one dispatcher can enforce a mixed batch where only some tasks declared
+    read-only. ``sandbox_read_only`` still wins when it is set for the run.
 
     ``on_scheduler_resolved`` receives the scheduler that actually ran and the
     fallback reason, so a receipt can distinguish a real DAG dispatch from a
@@ -738,11 +743,13 @@ def dispatch(
         preflight = _cloudflare_preflight_failure(agent, assignment, appserver=appserver)
         if preflight is not None:
             return preflight
+        # A batch task may declare read-only independently of the run-level flag.
+        worker_read_only = read_only if read_only_for is None else bool(read_only_for(assignment))
         prompt = build_prompt(
             agent,
             assignment,
             prior_results=prior_results,
-            read_only=read_only,
+            read_only=worker_read_only,
             direct=direct,
             code_graph=code_graph,
             drift_impact=drift_impact,
@@ -783,7 +790,7 @@ def dispatch(
                 provenance=request.envelope,
             )
         started = time.monotonic()
-        effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
+        effective_read_only = worker_read_only if sandbox_read_only is None else sandbox_read_only
         approval_correlation_marker = secrets.token_urlsafe(32)
         # invoke() and finish() share remote routing facts only for the current attempt.
         remote_disposition: list[dict[str, Any] | None] = [None]
