@@ -1104,9 +1104,8 @@ def _block_mcp_removal(item: dict[str, Any], profile, name: str) -> dict[str, An
 
 
 def _late_removal_conflicts(profile, mcp_plan: dict[str, Any]) -> list[dict[str, Any]]:
-    """Re-read the live file at write time: an entry that gained native auth since the plan must stay."""
-    path, adapter = mcp_plan["path"], mcp_plan["adapter"]
-    live = adapter.read_file(path.read_text(encoding="utf-8") if path.is_file() else None)
+    """Check against the apply snapshot (no second read; a later edit is drift): native auth must stay."""
+    path, live = mcp_plan["path"], mcp_plan["adapter"].read_file(mcp_plan["text"])
     return [
         _block_mcp_removal({"surface": "mcp", "path": str(path), "name": name}, profile, name) | {"status": "conflict"}
         for name in mcp_native_auth.removal_blockers(profile.mcp_harness, live, mcp_plan["remove"])
@@ -1892,7 +1891,7 @@ def _sync_profile(
                 home=home_path,
             )
         except (_ProfileInstructionWriteError, projection.PlanError, projection.DriftError) as exc:
-            conflict = {
+            conflict = mcp_apply_snapshot.mcp_drift_conflict(profile.mcp_harness, mcp_plan, exc) or {
                 "surface": "instruction",
                 "path": str(instruction.path),
                 "status": "conflict",
@@ -2216,7 +2215,7 @@ def _uninstall_profile(
                 home=home_path,
             )
         except (_ProfileInstructionWriteError, projection.PlanError, projection.DriftError) as exc:
-            conflict = {
+            conflict = mcp_apply_snapshot.mcp_drift_conflict(profile.mcp_harness, mcp_plan, exc) or {
                 "surface": "instruction",
                 "path": str(plan.path),
                 "status": "conflict",

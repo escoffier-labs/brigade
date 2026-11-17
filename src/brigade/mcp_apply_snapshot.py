@@ -21,6 +21,7 @@ from typing import Any
 
 from . import mcp_fidelity, mcp_native_auth
 from .mcp_adapters import CanonicalServer
+from .projection.kernel import ProjectionError
 
 LIVE_CHANGED = "live_entry_changed"
 
@@ -73,3 +74,24 @@ def block_moved(item: dict[str, Any], harness: str, server: CanonicalServer, sco
         "server; run the sync again",
     )
     item["_fidelity"] = mcp_fidelity.evaluate(server, harness, scope=scope, error_code=LIVE_CHANGED)
+
+
+def mcp_drift_conflict(harness: str, mcp_plan: dict[str, Any], exc: Exception) -> dict[str, Any] | None:
+    """Name the MCP config when a projection failure was caused by it changing after its snapshot.
+
+    The kernel only says the live state no longer matches. Called on the failure path only: when the
+    plan wrote this file and it now differs from the snapshot, the conflict is the MCP surface (harness
+    and path, never contents) and says to rerun; otherwise ``None`` and the caller reports as before.
+    """
+    if not isinstance(exc, ProjectionError) or not (mcp_plan.get("updates") or mcp_plan.get("remove")):
+        return None
+    path = mcp_plan["path"]
+    if (path.read_bytes() if path.is_file() else None) == mcp_plan.get("snapshot"):
+        return None
+    return {
+        "surface": "mcp",
+        "path": str(path),
+        "status": "conflict",
+        "action": "preserve",
+        "detail": f"the {harness} MCP config changed after it was read; nothing was written; rerun the sync",
+    }
