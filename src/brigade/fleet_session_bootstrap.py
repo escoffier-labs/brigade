@@ -120,8 +120,12 @@ def session_id_for(*, run_key: str, seat: str, attempt: int) -> str:
     return str(uuid5(NAMESPACE_URL, f"brigade:fleet-session:v1:{run_key}:{seat}:{attempt}"))
 
 
-def classify_enrollment(snapshot: Mapping[str, Any] | None) -> str:
-    """Return enrolled, unenrolled, or denied. Errors are never unenrolled."""
+def classify_enrollment(snapshot: Mapping[str, Any] | None, *, lock_timeout: float | None = None) -> str:
+    """Return enrolled, unenrolled, or denied. Errors are never unenrolled.
+
+    ``lock_timeout`` bounds the activation high-water read; a timeout raises
+    instead of reading as unenrolled, and admission callers keep ``None``.
+    """
     from . import fleet_model_admission
 
     if not isinstance(snapshot, Mapping):
@@ -144,12 +148,12 @@ def classify_enrollment(snapshot: Mapping[str, Any] | None) -> str:
     if error is not None:
         return "denied"
     if meta is None:
-        if fleet_model_admission.enrollment_activation_observed():
+        if fleet_model_admission.enrollment_activation_observed(lock_timeout=lock_timeout):
             return "denied"
         return "unenrolled"
     if meta.get("active") is True:
         return "enrolled"
-    if fleet_model_admission.enrollment_activation_observed():
+    if fleet_model_admission.enrollment_activation_observed(lock_timeout=lock_timeout):
         return "denied"
     return "unenrolled"
 

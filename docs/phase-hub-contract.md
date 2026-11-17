@@ -83,7 +83,7 @@ Auth column: `none`, `admin`, `node` (node token), `principal` (message
 principal token), `bearer` (admin or node), `browser` (admin bearer, dashboard
 session cookie, or trusted Tailscale identity). Status column: `covered` means
 the drive checks the route, with the scope noted, and `not yet` means a later
-slice. The tables list 98 method and path pairs: 54 JSON API routes, 37 browser
+slice. The tables list 99 method and path pairs: 55 JSON API routes, 37 browser
 routes, and 7 static assets. The drive covers 14, all JSON API routes, and
 for several of them only part of the request space (see the Status column).
 
@@ -173,6 +173,7 @@ here. The action table lists 19 actions, and the drive covers 16.
 | GET | /cloud | bearer | `?view=capabilities`, `?all=1` | 200 cloud snapshot, or `{schema: "brigade.fleet_cloud.v1"}` for capabilities | not yet |
 | POST | /cloud | node (admin for `policy`) | `{action: admit\|bind\|renew\|release\|policy, ...}` | lease decision | not yet |
 | GET | /models | bearer | none | 200 projected model roster | not yet |
+| GET | /models/usage | bearer | none | 200 per-seat occupancy with roster revision and policy digest | not yet |
 | POST | /models | node | lease `acquire`/`release`, roster `set`/`set-default`/`retire`, `admit` | lease or roster result | not yet |
 | GET | /policy | bearer | `?history=1&limit=` | 200 policy document, bad limit 400 `{error: {code: "invalid-request", message}}` | covered (401 envelope only) |
 | GET | /policy/status | bearer | none | 200 policy status | not yet |
