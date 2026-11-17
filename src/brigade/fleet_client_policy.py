@@ -401,6 +401,12 @@ def observe_telemetry(body: Mapping[str, Any]) -> dict[str, Any]:
     return post_policy(payload, admin=False)
 
 
+def observe_projects(body: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(body)
+    payload["action"] = "projects-observe"
+    return post_policy(payload, admin=False)
+
+
 def ingest_quota(body: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(body)
     payload["action"] = "quota-ingest"
