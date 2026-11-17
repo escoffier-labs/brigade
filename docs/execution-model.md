@@ -75,9 +75,10 @@ Without a hub it derives local candidates only.
 Reflection opens pinned proposals for exact duplicates, near-duplicates and
 broken links. Exact duplicate cards merge and can be Tier 0. Near-duplicate
 supersedes and broken-link repairs are always Tier 2. Reflection also proposes
-block anchoring. The supported fleet policy writer rejects `anchor_blocks` in
-`tier0_op_classes`, so no supported policy can list it. Each anchor proposal is
-withdrawn in the same run, then retried after seven days.
+block anchoring. The seeded workspace policy names `anchor_blocks`, but the
+fleet policy writer rejects it in `tier0_op_classes`, so the hub never admits
+an automatic anchor. Each anchor proposal is withdrawn in the same run, then
+retried after seven days.
 
 A proposal pins card revisions and block hashes. A proposal the run leaves open
 stays `pending` until a reviewer accepts or rejects it with `brigade memory
@@ -100,11 +101,12 @@ The hub rechecks the Tier 0 class, cited evidence, ownership, retrieval
 evaluation, one-card blast cap, 24-hour cooldown, card heads, pins, trust, scans
 and the admin kill switch in one transaction.
 
-On a real scope today, the retrieval evaluation holds every automatic apply. It
-admits only all-`append_evidence` Tier 0 proposals and then requires each target
-card's search projection to stay unchanged. Any applied edit changes it,
-including an evidence append. Tier 0 applies only on the evaluation fixture
-scope.
+On a real scope, the retrieval evaluation holds every automatic reflection
+apply. It admits only all-`append_evidence` Tier 0 proposals and then requires
+each target card's search projection to stay unchanged. Any applied edit
+changes it, including an evidence append, so reflection's Tier 0 applies happen
+only on the evaluation fixture scope. Verifier applies and automatic
+compensations take their own gates instead.
 
 External and handoff-only curation
 policies never pass the ownership gate. Local repository candidates stay
@@ -127,7 +129,8 @@ hours by default. A contradiction or failed verification, or an attributable
 lexical retrieval regression, opens a compensating proposal. Two independent
 verifier signals, or an attributable lexical regression, can allow that
 reversal to apply without a person. Otherwise it waits for review. A watch
-attempt that is not exact or is blocked ends `held`.
+attempt that is not exact or is blocked ends `held`, or `stale` when a target
+no longer matches its pins.
 
 `memory reflect rollback <proposal-id>` also opens a compensating proposal. It
 applies at once only when `auto_apply` is enabled, the kill switch is off, the
