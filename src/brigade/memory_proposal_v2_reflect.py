@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import memory_claim_blocks as claim_blocks
 from . import memory_proposals as legacy
 from . import memory_proposal_v2 as v2
 from . import memory_proposal_v2_ops as delta
@@ -39,7 +38,7 @@ def translation_payload(*, target: Path, candidate_id: str) -> dict[str, Any]:
     translated = sources[:1] if candidate["kind"] == "duplicate" else sources
     for source in translated:
         anchored = delta.anchor_text(source["text"], source["path"])
-        addressable = [b for b in delta.blocks(anchored) if claim_blocks.hub_addressable(anchored, b)]
+        addressable = delta.blocks(anchored)
         if not addressable:
             continue
         block = addressable[0]
