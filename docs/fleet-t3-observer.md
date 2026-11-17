@@ -101,6 +101,39 @@ contents, and native identifiers are never copied to the count report.
 Live inspection does not publish or prove Hub visibility. The integration owner
 must review and explicitly wire publishing into the existing telemetry path.
 
+## Repository inventory for placement
+
+With `--publish`, the observer also reports which repositories this node can
+run as T3 projects, so the Hub can answer which machine has a repository as a T3
+project, with which T3 environment id and project id. The inventory is a
+separate key in the same native read. It never changes the session `projects`
+list that path mapping relies on.
+
+It holds the local T3 environment id from the t3-fleet agent descriptor, and for
+each project that is neither archived nor deleted and has a repository identity,
+the T3 project id and its canonical repository key. It never carries workspace
+roots, titles, paths or remote URLs. If the environment id is unavailable, the
+inventory does not exist for that run, which means unknown and never empty.
+An unavailable or failed inventory never erases a stored one. A result that
+would exceed the 256 KiB bound drops the inventory rather than the sessions.
+
+The report adds `inventory` with `ok`, `error` or `skipped`. It is sent once per
+publish run, after sessions and inside the same deadline, as the node-token
+`projects-observe` policy action. A failure is reported there and never changes
+`ok`, the exit code or session publishing. The Hub keeps each node's latest full
+set (900 second TTL), ignores an older snapshot than the stored one, and raises
+a conflict for two same-instant snapshots that disagree. A node can only write
+its own inventory.
+
+A node token proves the node id, not its T3 environment. The operator binds each
+machine's environment in the policy document with the optional machine field
+`t3_environment_id` (letters, digits and hyphens, unique across machines,
+admin token only). A report whose environment id differs from the machine's
+binding is rejected with `environment-binding-mismatch` and nothing is stored.
+A machine without a binding is stored but read as unbound. Reads recompute the
+binding from the current policy, so a policy change applies without a
+republish, and placement must skip unbound rows.
+
 ## Keeping local Claude Code and Codex sessions open
 
 The optional session heartbeat renews the exact snapshot last published by a

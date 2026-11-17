@@ -12,10 +12,11 @@ import json
 import os
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence, cast
 
-from . import fleet_client, proc
+from . import fleet_client, fleet_client_policy, proc
 from .fleet_openclaw_observer import (
     OBSERVATION_BUDGET_SECONDS,
     PUBLISH_LIMIT,
@@ -35,6 +36,7 @@ from .fleet_openclaw_observer import (
 from .fleet_session_presence import ProviderLinkState
 
 NATIVE_TIMEOUT_SECONDS = 8
+INVENTORY_TTL_SECONDS = 900
 DETAIL_RESERVE_SECONDS = 1.5
 MAX_THREADS = 10_000
 MAX_PROJECTS = 2_000
@@ -132,6 +134,22 @@ try:
     output = json.dumps(result)
     if len(output.encode("utf-8")) > 262144:
         raise ValueError()
+    # Separate repository inventory: never workspace roots, titles, paths or URLs.
+    # Any failure, or a result over the size cap, leaves it out, meaning unknown.
+    try:
+        environment_id = client.descriptor().get("environmentId")
+        inventory_rows = []
+        for row in projects:
+            identity = row.get("repositoryIdentity")
+            key = identity.get("canonicalKey") if isinstance(identity, dict) else None
+            if row.get("archivedAt") is None and row.get("deletedAt") is None and isinstance(row.get("id"), str) and isinstance(key, str):
+                inventory_rows.append({"project_id": row["id"], "repo_key": key})
+        if isinstance(environment_id, str) and environment_id:
+            candidate = json.dumps({**result, "inventory": {"environment_id": environment_id, "projects": inventory_rows}})
+            if len(candidate.encode("utf-8")) <= 262144:
+                output = candidate
+    except Exception:
+        pass
     print(output)
 except Exception:
     print('{"error":"native_metadata_failed"}')
@@ -277,6 +295,54 @@ def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
     return active, total, invalid
 
 
+def _inventory(payload: object) -> tuple[str, list[dict[str, str]]] | None:
+    """The optional repository inventory. Absent or malformed means unknown, never empty."""
+    raw = cast(dict[str, object], payload).get("inventory")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        environment_id = _native_id(raw.get("environment_id"))
+    except ObservationError:
+        return None
+    projects = raw.get("projects")
+    if not isinstance(projects, list) or len(projects) > MAX_PROJECTS:
+        return None
+    rows: list[dict[str, str]] = []
+    for item in projects:
+        try:
+            key = item.get("repo_key") if isinstance(item, dict) else None
+            if not isinstance(key, str) or not key:
+                continue
+            rows.append({"project_id": _native_id(item.get("project_id")), "repo_key": key})
+        except ObservationError:
+            continue
+    return environment_id, rows
+
+
+def _publish_inventory(payload: object, *, deadline: float) -> str:
+    """Send the inventory once. Returns ok, error or skipped, and never raises."""
+    inventory = _inventory(payload)
+    if inventory is None:
+        return "skipped"
+    try:
+        _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
+        node_id = fleet_client.resolve_node_id()
+        if node_id == "unknown":
+            return "error"
+        fleet_client_policy.observe_projects(
+            {
+                "node_id": node_id,
+                "environment_id": inventory[0],
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "ttl_seconds": INVENTORY_TTL_SECONDS,
+                "projects": inventory[1],
+            }
+        )
+    except Exception:
+        return "error"
+    return "ok"
+
+
 def _link_publication_batch(
     batch: _PublicationBatch, payload: object, *, interpreter: str, deadline: float
 ) -> _PublicationBatch:
@@ -334,6 +400,8 @@ def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
         report.update(_publish_recent(recent, harness="t3", deadline=deadline, batch=batch))
         report["skipped"] = cast(int, report["skipped"]) + invalid
         report["ok"] = not (report["truncated"] or invalid or report.get("error"))
+        # After sessions, within the same deadline. Never changes ok or the exit code.
+        report["inventory"] = _publish_inventory(payload, deadline=deadline)
     return report
 
 

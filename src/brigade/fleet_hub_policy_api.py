@@ -38,6 +38,7 @@ NODE_ACTIONS = frozenset(
         "reservation-renew",
         "reservation-release",
         "telemetry-observe",
+        "projects-observe",
         "delegation-create",
         "delegation-show",
     }
@@ -821,6 +822,13 @@ def handle_policy(
                 raise _error("auth-failed", "a node token is required to observe telemetry", status=403)
             observed = {key: value for key, value in body.items() if key != "action"}
             status_payload = (200, fleet_hub_routing.observe_machine(conn, observed, caller_node))
+        elif action == "projects-observe":
+            if caller_node is None:
+                raise _error("auth-failed", "a node token is required to observe projects", status=403)
+            from . import fleet_node_projects
+
+            observed_projects = {key: value for key, value in body.items() if key != "action"}
+            status_payload = (200, fleet_node_projects.observe_projects(conn, observed_projects, caller_node))
         elif action == "quota-ingest":
             status_payload = (200, _ingest_quota(conn, body, caller_node=caller_node, is_admin=is_admin))
         elif action == "inventory-ingest":

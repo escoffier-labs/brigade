@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import asdict
 
 import pytest
 
-from brigade import fleet_client
+from brigade import fleet_client, fleet_client_policy
 from brigade.fleet_session_presence import ProviderLinkState
 from tests._home import set_home
 
@@ -50,6 +51,9 @@ def native_t3(tmp_path, monkeypatch):
         "  detail = next(r for r in shell['threads'] if r['id'] == thread_id)\n"
         "  if os.environ.get('FIXTURE_PROVIDER_MISMATCH'): detail['activeProviderThreadId'] = 'provider-other'\n"
         "  return {'thread': detail}\n"
+        " def descriptor(self):\n"
+        "  if not os.environ.get('FIXTURE_ENV_ID'): raise RuntimeError()\n"
+        "  return {'environmentId': os.environ['FIXTURE_ENV_ID']}\n"
         "class Agent:\n"
         " t3 = Client()\n"
         " @property\n"
@@ -726,3 +730,93 @@ def test_provider_lookup_updates_stored_link_and_visibility(native_t3, monkeypat
         assert fleet_hub_sessions.count_live_by_node(conn, now_epoch=1_700_000_000.0) == {node: 2}
         assert "app-thread" in {s["session_id"] for s in fleet_hub_sessions.list_sessions(conn)}
     conn.close()
+
+
+_PROJECTS = [
+    {
+        "id": "inv-a",
+        "title": "private-project-title",
+        "workspaceRoot": "/private/workspace/a",
+        "repositoryIdentity": {
+            "canonicalKey": "example.test/org/a",
+            "remoteUrl": "https://private.example/org/a.git",
+            "displayName": "private-name",
+        },
+    },
+    {"id": "inv-archived", "archivedAt": "2026-01-01", "repositoryIdentity": {"canonicalKey": "example.test/org/b"}},
+    {"id": "inv-deleted", "deletedAt": "2026-01-01", "repositoryIdentity": {"canonicalKey": "example.test/org/c"}},
+    {"id": "inv-none", "workspaceRoot": "/private/workspace/none", "repositoryIdentity": None},
+    {"id": "inv-bad-key", "repositoryIdentity": {"canonicalKey": 7}},
+]
+
+
+@pytest.fixture
+def inventory_posts(native_t3, monkeypatch):
+    configure, published, _, _ = native_t3
+    configure(projects=_PROJECTS)
+    monkeypatch.setenv("FIXTURE_ENV_ID", "env-local-1")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *a, **k: "11111111-1111-4111-8111-111111111111")
+    posted: list[dict] = []
+    monkeypatch.setattr(fleet_client_policy, "observe_projects", lambda body: posted.append(dict(body)) or {})
+    return configure, published, posted
+
+
+def test_inventory_publishes_identity_only_once_after_sessions(inventory_posts, capsys):
+    from brigade.fleet_t3_observer import main
+
+    _, published, posted = inventory_posts
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["inventory"] == "ok" and report["published"] == 1 and len(published) == 1
+    assert len(posted) == 1
+    body = posted[0]
+    assert body["environment_id"] == "env-local-1" and body["ttl_seconds"] == 900
+    assert body["projects"] == [{"project_id": "inv-a", "repo_key": "example.test/org/a"}]
+    assert set(body) == {"node_id", "environment_id", "observed_at", "ttl_seconds", "projects"}
+    text = json.dumps(body) + json.dumps(report)
+    for forbidden in ("private", "/workspace", "remoteUrl", "title", "https://"):
+        assert forbidden not in text
+
+
+def test_inspect_mode_sends_no_inventory_and_keeps_report_shape(inventory_posts, capsys):
+    from brigade.fleet_t3_observer import main
+
+    _, _, posted = inventory_posts
+    assert main(["--t3-python", sys.executable]) == 0
+    assert "inventory" not in json.loads(capsys.readouterr().out) and not posted
+
+
+def test_missing_environment_id_means_unknown_and_sends_nothing(inventory_posts, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    _, published, posted = inventory_posts
+    monkeypatch.delenv("FIXTURE_ENV_ID")
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["inventory"] == "skipped" and report["published"] == 1 and len(published) == 1 and not posted
+
+
+def test_inventory_failure_never_fails_session_publishing(inventory_posts, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    _, published, _ = inventory_posts
+
+    def refuse(body):
+        raise fleet_client_policy.FleetPolicyClientError("network", "down")
+
+    monkeypatch.setattr(fleet_client_policy, "observe_projects", refuse)
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["inventory"] == "error" and report["ok"] is True and report["published"] == 1 and len(published) == 1
+
+
+def test_session_projects_key_is_unchanged_by_inventory(native_t3, monkeypatch):
+    from brigade import fleet_t3_observer
+
+    configure, _, _, _ = native_t3
+    configure(projects=_PROJECTS)
+    monkeypatch.setenv("FIXTURE_ENV_ID", "env-local-1")
+    payload = fleet_t3_observer._native_metadata(sys.executable, time.monotonic() + 15)
+    assert [row["id"] for row in payload["projects"]] == ["p"] or payload["projects"] == []
+    assert all(set(row) == {"id", "workspaceRoot"} for row in payload["projects"])
+    assert payload["inventory"]["environment_id"] == "env-local-1"

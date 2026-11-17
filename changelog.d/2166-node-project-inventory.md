@@ -1,0 +1,2 @@
+- The T3 observer now reports each node's T3 projects that carry a repository identity (project id and canonical repo key only, no paths, titles or URLs) to the Fleet Hub, which stores the latest set per node for read-only placement queries (#2166).
+- Machines in the fleet policy can bind a `t3_environment_id`, unique across machines. The Hub rejects an inventory report whose environment id differs from the binding, and placement reads treat unbound or mismatched rows as unbound (#2166).
