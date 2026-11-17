@@ -30,7 +30,7 @@ MCP servers and skills follow the same rule. List a server once, and `brigade mc
 Claude Code also gets recall at session start. Codex gets memory through its handoff inbox and an agent-run `memory search`.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-memory.svg" alt="Claude Code, Codex and Cursor feed one block labelled shared memory, MCP servers and skills. A handoff leaves the block for the next session." width="720">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-memory.svg" alt="Claude Code, Codex, Cursor, OpenCode, ChatGPT dots and Claude Duet connect to BrigadeStack shared memory, and share memory, check records, MCP servers and skills through it." width="720">
 </p>
 
 Here one checkout drafts a handoff, a reviewer files the card, and a second checkout finds it:
