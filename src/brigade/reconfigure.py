@@ -36,7 +36,9 @@ def reconfigure(target: Path, new_selection: Selection, prune: bool) -> int:
     removed = old_harnesses - new_harnesses
 
     # Re-run install with force=True to lay down baseline + new-harness files.
-    # install_selection is idempotent: unchanged files re-render identically.
+    # install_selection is idempotent: unchanged files re-render identically. force
+    # never widens to a SKILL.md: an existing one is kept and a differing bundled
+    # template is filed as a skills inbox proposal (#1844).
     rc = install_selection(target, new_selection, force=True)
     if rc != 0:
         return rc

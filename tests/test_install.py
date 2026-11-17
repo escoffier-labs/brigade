@@ -1,5 +1,11 @@
+import hashlib
+import json
+from pathlib import Path
+
 import pytest
+from brigade import __version__ as brigade_version
 from brigade import install as install_mod
+from brigade.templates import template_root
 from brigade.install import resolve_manifests, install_selection
 from brigade.selection import Selection
 
@@ -274,3 +280,169 @@ def test_workspace_depth_keeps_workspace_bootstrap_docs(tmp_path):
     assert "SOUL.md" in (tmp_path / "AGENTS.md").read_text()
     assert "SOUL.md" in (tmp_path / "CLAUDE.md").read_text()
     assert (tmp_path / "SOUL.md").is_file()
+
+
+# --- #1844: init never overwrites a wired SKILL.md -------------------------------
+
+BRIGADE_WORK = Path(".claude/skills/brigade-work/SKILL.md")
+
+
+def _claude_sel() -> Selection:
+    return Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+
+
+def _bundled_text(skill_id: str) -> str:
+    return (template_root() / "skills" / skill_id / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _proposals(target: Path) -> list[dict]:
+    inbox = target / ".brigade" / "skills" / "inbox"
+    return [json.loads(p.read_text()) for p in sorted(inbox.glob("*/proposal.json"))]
+
+
+def _wired(target: Path) -> dict:
+    return json.loads((target / ".brigade" / "skills" / "wired.json").read_text())["skills"]
+
+
+def test_missing_skill_md_is_written_and_recorded(tmp_path):
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    installed = (tmp_path / BRIGADE_WORK).read_bytes()
+    assert installed == _bundled_text("brigade-work").encode("utf-8")
+    record = _wired(tmp_path)[BRIGADE_WORK.as_posix()]
+    digest = hashlib.sha256(installed).hexdigest()
+    assert record == {
+        "harness": "claude",
+        "skill_id": "brigade-work",
+        "sha256": digest,
+        "brigade_version": brigade_version,
+        "template_sha256": digest,
+    }
+    assert _proposals(tmp_path) == []
+
+
+def test_identical_skill_md_is_skipped_without_proposal(tmp_path, capsys):
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    capsys.readouterr()
+    before = (tmp_path / BRIGADE_WORK).stat().st_mtime_ns
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    assert f"kept (identical): {tmp_path / BRIGADE_WORK}" in capsys.readouterr().out
+    assert (tmp_path / BRIGADE_WORK).stat().st_mtime_ns == before
+    assert _proposals(tmp_path) == []
+
+
+def test_edited_skill_md_is_kept_and_proposed_once(tmp_path, capsys):
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    edited = b"# my local skill\n"
+    (tmp_path / BRIGADE_WORK).write_bytes(edited)
+    capsys.readouterr()
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    out = capsys.readouterr().out
+    assert (tmp_path / BRIGADE_WORK).read_bytes() == edited
+    (proposal,) = _proposals(tmp_path)
+    assert f"kept (edited): {tmp_path / BRIGADE_WORK}" in out
+    assert proposal["proposal_id"] in out
+    assert proposal["skill_id"] == "brigade-work"
+    assert proposal["behavioral_contract"] is None
+    assert proposal["contract_status"] == "incomplete"
+    assert proposal["dedupe_key"].startswith("init:brigade-work:")
+    proposed = Path(proposal["skill_path"]) / "SKILL.md"
+    assert proposed.read_text(encoding="utf-8") == _bundled_text("brigade-work")
+
+    # A second init is idempotent: same proposal id, nothing new.
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    assert proposal["proposal_id"] in capsys.readouterr().out
+    assert [p["proposal_id"] for p in _proposals(tmp_path)] == [proposal["proposal_id"]]
+
+
+def test_force_never_overwrites_skill_md_but_still_overwrites_other_files(tmp_path):
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    (tmp_path / BRIGADE_WORK).write_bytes(b"# mine\n")
+    (tmp_path / "AGENTS.md").write_text("# pre-existing\n")
+
+    assert install_selection(tmp_path, _claude_sel(), force=True) == 0
+
+    assert (tmp_path / BRIGADE_WORK).read_bytes() == b"# mine\n"
+    assert "# pre-existing" not in (tmp_path / "AGENTS.md").read_text()
+    assert len(_proposals(tmp_path)) == 1
+
+
+def test_stale_but_unedited_copy_is_labelled_pristine_stale(tmp_path, capsys):
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    # Simulate an older bundled template: the installed copy is what init once wrote.
+    old = b"# older bundled brigade-work\n"
+    (tmp_path / BRIGADE_WORK).write_bytes(old)
+    state = tmp_path / ".brigade" / "skills" / "wired.json"
+    payload = json.loads(state.read_text())
+    payload["skills"][BRIGADE_WORK.as_posix()]["sha256"] = hashlib.sha256(old).hexdigest()
+    state.write_text(json.dumps(payload))
+    capsys.readouterr()
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    assert f"kept (pristine-stale): {tmp_path / BRIGADE_WORK}" in capsys.readouterr().out
+    assert (tmp_path / BRIGADE_WORK).read_bytes() == old
+    assert len(_proposals(tmp_path)) == 1
+
+
+def test_symlinked_skill_md_is_untouched_and_not_proposed(tmp_path, capsys):
+    outside = tmp_path / "elsewhere" / "SKILL.md"
+    outside.parent.mkdir()
+    outside.write_text("# lives elsewhere\n")
+    link = tmp_path / "ws" / BRIGADE_WORK
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside)
+
+    assert install_selection(tmp_path / "ws", _claude_sel(), force=True) == 0
+
+    assert link.is_symlink()
+    assert outside.read_text() == "# lives elsewhere\n"
+    assert f"kept (symlinked): {link}" in capsys.readouterr().out
+    assert _proposals(tmp_path / "ws") == []
+
+
+def test_dangling_symlinked_skill_md_is_not_written_through(tmp_path):
+    missing = tmp_path / "elsewhere" / "SKILL.md"
+    link = tmp_path / "ws" / BRIGADE_WORK
+    link.parent.mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    link.symlink_to(missing)
+
+    assert install_selection(tmp_path / "ws", _claude_sel()) == 0
+
+    assert not missing.exists()
+    assert link.is_symlink()
+
+
+@pytest.mark.parametrize("linked", [".claude/skills", ".claude/skills/brigade-work"])
+def test_symlinked_parent_directory_is_untouched_and_not_proposed(tmp_path, capsys, linked):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    ws = tmp_path / "ws"
+    (ws / linked).parent.mkdir(parents=True)
+    (ws / linked).symlink_to(outside, target_is_directory=True)
+
+    assert install_selection(ws, _claude_sel(), force=True) == 0
+
+    assert list(outside.iterdir()) == []
+    assert "kept (symlinked)" in capsys.readouterr().out
+    assert _proposals(ws) == []
+
+
+def test_missing_template_writes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(install_mod, "DEFAULT_WIRED_SKILLS", ("missing-default-skill",))
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    assert "warning: built-in skill template missing" in capsys.readouterr().err
+    assert not (tmp_path / ".claude" / "skills").exists()
+
+
+def test_failed_wired_record_is_a_warning(tmp_path, monkeypatch, capsys):
+    from brigade.skills_cmd import registry
+
+    def refuse(*_args, **_kwargs):
+        raise registry.SkillsStatePathError("state is not writable")
+
+    monkeypatch.setattr(registry, "_write_state_file", refuse)
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    assert "warning: could not record wired skills" in capsys.readouterr().err
+    assert (tmp_path / BRIGADE_WORK).is_file()

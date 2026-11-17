@@ -29,7 +29,7 @@ Brigade is the hub. Most components wire an optional standalone tool, installed 
 
 Use `brigade profiles list` to see built-in component bundles and `brigade components list` to see which components are selected by the default repo profile before installing any component tools. `brigade components list --json` also shows each managed tool's machine surfaces: doctor JSON, markdown briefs, summary JSON, and verify commands where the tool supports them.
 
-Fresh repo installs use the `repo` profile: core, skills, memory, guard, security, tokens, evidence, and search are selected up front. `brigade init` wires the built-in skills immediately, including `brigade-work` and `ultra-work-scout`, so new Codex users can run the Brigade work loop and broad Scout scoping from the start. External components stay in their own repos and install only when you run `brigade add <component>`.
+Fresh repo installs use the `repo` profile: core, skills, memory, guard, security, tokens, evidence, and search are selected up front. `brigade init` wires the built-in skills immediately, including `brigade-work` and `ultra-work-scout`, so new Codex users can run the Brigade work loop and broad Scout scoping from the start. Init writes a wired `SKILL.md` only when it is missing; `--force` and `brigade reconfigure` never overwrite one, and a differing bundled template is filed as a skills inbox proposal (see `docs/skill-revision-contracts.md`). External components stay in their own repos and install only when you run `brigade add <component>`.
 
 ## The `brigade add` reference
 

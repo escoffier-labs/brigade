@@ -1,0 +1,2 @@
+- Stop `brigade init`, `brigade reconfigure` and `--force` from overwriting an installed `SKILL.md`. Init writes only a missing one. A copy that differs from the bundled template is kept and the new text is filed once as a skills inbox proposal, labelled `edited` or `pristine-stale`. A symlinked `SKILL.md` or parent directory is left alone with no proposal.
+- Add an optional `dedupe_key` to `inbox_add` so a repeated filing returns the existing proposal id instead of a duplicate, and record each `SKILL.md` init writes in `.brigade/skills/wired.json`.

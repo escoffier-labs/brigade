@@ -11,7 +11,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     # init
     p_init = sub.add_parser("init", help="Materialize a selection into a target directory.")
     p_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Where to install.")
-    p_init.add_argument("--force", action="store_true", help="Overwrite existing files.")
+    p_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing template files. A wired SKILL.md is never overwritten; a differing copy is filed as a skills inbox proposal.",
+    )
     p_init.add_argument(
         "--allow-home",
         action="store_true",

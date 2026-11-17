@@ -44,6 +44,42 @@ root metadata and nested metadata file digests. Root metadata formatting and
 managed `imported_at`, `updated_at`, `created_at`, `fingerprint`, and `source`
 fields do not change identity. The source selector is bound separately.
 
+## `brigade init` never overwrites a wired SKILL.md
+
+`brigade init`, `brigade reconfigure` and `--force` write a bundled `SKILL.md`
+(the wired `brigade-work` and `ultra-work-scout` skills in each harness skills
+directory, and the workspace-depth `skills/*/SKILL.md` files) only when the
+destination is missing. `--force`, including the force that reconfigure passes
+implicitly, still replaces other template files but never a `SKILL.md`. For an
+existing destination:
+
+| Destination | Result |
+| --- | --- |
+| Missing | Written, and recorded in `.brigade/skills/wired.json`. |
+| Symlink, or a symlinked parent directory | Kept. Init prints `kept (symlinked): <path>` and writes and proposes nothing. |
+| Byte-identical regular file | Kept. No write and no proposal. |
+| Differing regular file | Kept untouched. Init files one inbox proposal with the bundled text and prints `kept (edited)` or `kept (pristine-stale)` with the proposal id. |
+
+Every path component from the target root down is checked with `lstat` before
+any directory is created or file written, so a skill installed as a link (the
+shape in #2677) is never reached through it.
+
+The proposal is filed with a `dedupe_key` of
+`init:<skill_id>:<sha256 of the proposed files>`. `inbox_add` accepts the key
+on any caller: when a proposal in any status already carries it, the existing
+id is returned with exit code 0 and nothing new is written, so a repeated init
+does not pile up proposals. The proposal carries a behavioral contract only if
+the bundled `skill.json` ships one. Brigade does not infer a failure for it.
+
+`.brigade/skills/wired.json` records, per file init wrote, the harness, skill
+id, `sha256` of the installed bytes, `brigade_version` and `template_sha256`.
+Init uses it only to label a differing copy: a copy whose bytes still match the
+recorded `sha256` is `pristine-stale` (the bundled template moved on), anything
+else is `edited`. Nothing refreshes a file in place from it. A failed record
+write is a warning. `brigade skills install` and `brigade skills sync` keep
+their own semantics and are unchanged. Review a filed proposal with
+`brigade skills inbox diff <id>`.
+
 ## Fleet report and review compatibility
 
 Report schema 2 carries a closed, versioned `binding` object per copy. Schema 1

@@ -40,3 +40,18 @@ def test_reconfigure_no_prune_leaves_orphan(tmp_path):
     assert rc == 0
     # Without --prune, codex inbox dir stays (will be flagged by doctor as orphan).
     assert (tmp_path / ".codex" / "memory-handoffs").is_dir()
+
+
+def test_reconfigure_never_overwrites_a_wired_skill_md(tmp_path):
+    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    install_selection(tmp_path, sel)
+    skill = tmp_path / ".claude" / "skills" / "brigade-work" / "SKILL.md"
+    skill.write_bytes(b"# edited by the operator\n")
+
+    new_sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    assert reconfigure(tmp_path, new_selection=new_sel, prune=False) == 0
+
+    assert skill.read_bytes() == b"# edited by the operator\n"
+    # the newly added harness still gets its missing skill
+    assert (tmp_path / ".codex" / "skills" / "brigade-work" / "SKILL.md").is_file()
+    assert len(list((tmp_path / ".brigade" / "skills" / "inbox").glob("*/proposal.json"))) == 1
