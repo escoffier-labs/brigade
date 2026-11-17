@@ -905,10 +905,13 @@ not infer import acceptance from the artifact filename alone.
 **Privacy guarantee:** exported archives contain no prompt text, generated text
 or absolute paths. Export applies a closed file set and closed receipt shapes,
 replaces prompt and generated text with per-host HMAC-SHA256 digests, and maps
-absolute paths to workspace-relative paths or fixed tokens. Local run files are
-unchanged and keep raw prompts and paths so resume still works. Evidence
-packages (`brigade evidence package`) and remote execution transport are outside
-this guarantee.
+absolute paths to workspace-relative paths or fixed tokens. Only receipt JSON,
+the authenticated lifecycle journal, scrubbed worker streams, and checkpoint
+references are exported. Raw artifacts such as `final.txt`, `summary.md`, logs,
+and `changes.patch` stay local. Local run files are unchanged and keep raw
+prompts and paths so resume still works. Evidence packages
+(`brigade evidence package`) and remote execution transport are outside this
+guarantee.
 
 **Commands:** `brigade runs export`, `brigade runs import`,
 `brigade runs validate-archive`.

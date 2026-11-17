@@ -297,7 +297,7 @@ def validate_manifest(payload: Any, *, allow_legacy: bool = False) -> dict[str, 
     run_summary = payload.get("run")
     normalized_run: dict[str, Any] | None = None
     if run_summary is not None:
-        normalized_run = _validate_run_summary(run_summary)
+        normalized_run = _validate_run_summary(run_summary, schema_version=schema_version)
 
     result: dict[str, Any] = {
         "schema": WORK_RUN_ARCHIVE_SCHEMA,
@@ -314,10 +314,22 @@ def validate_manifest(payload: Any, *, allow_legacy: bool = False) -> dict[str, 
         result["run"] = normalized_run
     source_run_dir = payload.get("source_run_dir")
     if source_run_dir is not None:
-        result["source_run_dir"] = _require_string(source_run_dir, "source_run_dir")
+        source_run_dir = _require_string(source_run_dir, "source_run_dir")
+        if schema_version >= 2 and source_run_dir != run_export_projection.RUN_DIR_TOKEN:
+            raise WorkRunArchiveError(
+                "source_run_dir must be the fixed <run-dir> token",
+                category="export-privacy",
+            )
+        result["source_run_dir"] = source_run_dir
     schema_artifact = payload.get("schema_artifact")
     if schema_artifact is not None:
-        result["schema_artifact"] = _require_string(schema_artifact, "schema_artifact")
+        schema_artifact = _require_string(schema_artifact, "schema_artifact")
+        if schema_version >= 2 and not _is_safe_relative_artifact_path(schema_artifact):
+            raise WorkRunArchiveError(
+                "schema_artifact must be a relative repository path",
+                category="export-privacy",
+            )
+        result["schema_artifact"] = schema_artifact
     return result
 
 
@@ -347,6 +359,10 @@ def validate_archive(archive_dir: Path, *, allow_legacy: bool = False) -> dict[s
         raise WorkRunArchiveError(f"missing payload directory: {WORK_RUN_PAYLOAD_DIR}", category="io")
 
     if not legacy:
+        try:
+            run_export_projection.assert_manifest_privacy(manifest)
+        except run_export_projection.RunExportProjectionError as exc:
+            raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
         _assert_export_privacy_tree(payload_root)
 
     declared = {entry["path"]: entry for entry in manifest["files"]}
@@ -634,7 +650,6 @@ def import_archive(
             raise WorkRunArchiveError(f"destination run already exists: {dest}", category="io")
         if not dest.is_dir():
             raise WorkRunArchiveError(f"destination is not a replaceable directory: {dest}", category="io")
-        shutil.rmtree(dest)
 
     runs_dir.mkdir(parents=True, exist_ok=True)
     staging = runs_dir / f".{run_id}.import-{localio.utc_now().strftime('%H%M%S')}-{os.getpid()}"
@@ -653,6 +668,7 @@ def import_archive(
                     staging,
                     workspace=_workspace_for_run(staging),
                     run_dir=staging,
+                    allow_legacy=True,
                 )
             except run_export_projection.RunExportProjectionError as exc:
                 raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
@@ -666,8 +682,7 @@ def import_archive(
                 raw = path.read_bytes()
                 if hashlib.sha256(raw).hexdigest() != entry["sha256"]:
                     raise WorkRunArchiveError(f"import copy sha256 mismatch for {rel}", category="integrity")
-        _reject_symlink_final_component(dest, label="destination run")
-        os.rename(staging, dest)
+        _promote_export(staging, dest, force=force)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -782,26 +797,39 @@ def _validate_files(value: Any) -> list[dict[str, Any]]:
     return files
 
 
-def _validate_run_summary(value: Any) -> dict[str, Any]:
+def _validate_run_summary(value: Any, *, schema_version: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkRunArchiveError("run summary must be an object")
     allowed = frozenset({"schema", "schema_version", "status", "started_at", "finished_at", "task", "task_digest"})
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise WorkRunArchiveError(f"unknown run summary field: {unknown[0]}")
+    if schema_version >= 2 and "task" in value:
+        raise WorkRunArchiveError(
+            "run.task must not appear in schema_version 2 archives",
+            category="export-privacy",
+        )
     result: dict[str, Any] = {}
     schema = value.get("schema")
     if schema is not None:
         result["schema"] = _require_string(schema, "run.schema")
-    schema_version = value.get("schema_version")
-    if schema_version is not None:
-        if type(schema_version) is not int or schema_version < 1:
+    nested_version = value.get("schema_version")
+    if nested_version is not None:
+        if type(nested_version) is not int or nested_version < 1:
             raise WorkRunArchiveError("run.schema_version must be a positive integer")
-        result["schema_version"] = schema_version
-    for key in ("status", "started_at", "finished_at", "task", "task_digest"):
+        result["schema_version"] = nested_version
+    for key in ("status", "started_at", "finished_at", "task"):
         item = value.get(key)
         if item is not None:
             result[key] = _require_string(item, f"run.{key}")
+    task_digest = value.get("task_digest")
+    if task_digest is not None:
+        if schema_version >= 2 and not run_export_projection.is_valid_digest(task_digest):
+            raise WorkRunArchiveError(
+                "run.task_digest must be a keyed digest",
+                category="export-privacy",
+            )
+        result["task_digest"] = _require_string(task_digest, "run.task_digest")
     return result
 
 
@@ -907,10 +935,7 @@ def _nested_schema_for(rel: str, raw: bytes) -> tuple[str | None, int | None]:
 
 def _workspace_for_run(run_dir: Path) -> Path:
     """Return the workspace that owns a run directory without reading run.json."""
-    resolved = Path(run_dir).expanduser().resolve()
-    if len(resolved.parents) >= 3:
-        return resolved.parents[2]
-    return resolved.parent
+    return run_export_projection.workspace_for_run(run_dir)
 
 
 def _run_summary_from_payload(payload_root: Path) -> dict[str, Any] | None:
@@ -1042,10 +1067,26 @@ def _assert_disjoint_trees(source: Path, destination: Path) -> None:
         ) from exc
 
 
+def _is_safe_relative_artifact_path(value: str) -> bool:
+    if not value or value.startswith(("/", "~", "\\")):
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return False
+    pure = PurePosixPath(value)
+    return not pure.is_absolute() and ".." not in pure.parts and "\\" not in value
+
+
 def _require_relative_payload_path(value: Any, name: str) -> str:
     path = _require_string(value, name)
     pure = PurePosixPath(path)
-    if pure.is_absolute() or "\\" in path or ".." in pure.parts or path.startswith("./"):
+    unsafe = (
+        pure.is_absolute()
+        or "\\" in path
+        or ".." in pure.parts
+        or path.startswith(("./", "~"))
+        or re.match(r"^[A-Za-z]:[\\/]", path) is not None
+    )
+    if unsafe:
         raise WorkRunArchiveError(f"{name} must be a relative payload path")
     if not path or path.endswith("/"):
         raise WorkRunArchiveError(f"{name} must be a relative payload path")

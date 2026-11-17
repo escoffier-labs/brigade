@@ -27,6 +27,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _seed_run(run_dir: Path, *, with_checkpoint_body: bool = False) -> Path:
+    (run_dir.parent.parent / ".brigade").mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
     _write_json(
         run_dir / "run.json",
@@ -103,7 +104,8 @@ def test_export_import_round_trip_and_validate(tmp_path: Path):
     result = work_run_archive.import_archive(archive, runs_dir=imported_runs)
     assert result["run_id"] == RUN_ID
     assert (imported_runs / RUN_ID / "run.json").is_file()
-    assert (imported_runs / RUN_ID / "final.txt").read_text(encoding="utf-8") == "done\n"
+    assert not (archive / "payload" / "final.txt").exists()
+    assert not (imported_runs / RUN_ID / "final.txt").exists()
     # Source tree unchanged.
     assert (run_dir / "run.json").is_file()
 
@@ -181,7 +183,9 @@ def test_validate_archive_detects_digest_mismatch(tmp_path: Path):
     run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
     archive = tmp_path / "archive"
     work_run_archive.export_run(run_dir, archive)
-    (archive / "payload" / "final.txt").write_text("tampered\n", encoding="utf-8")
+    roster = json.loads((archive / "payload" / "roster.json").read_text(encoding="utf-8"))
+    roster["orchestrator"] = "tampered"
+    _write_json(archive / "payload" / "roster.json", roster)
     with pytest.raises(WorkRunArchiveError, match="sha256 mismatch"):
         work_run_archive.validate_archive(archive)
 
@@ -394,7 +398,8 @@ def test_force_archive_replacement_allows_disjoint_sibling_trees(tmp_path: Path)
     runs_dir = tmp_path / "imported"
     work_run_archive.import_archive(archive, runs_dir=runs_dir)
     work_run_archive.import_archive(archive, runs_dir=runs_dir, force=True)
-    assert (runs_dir / RUN_ID / "final.txt").read_text(encoding="utf-8") == "done\n"
+    assert (runs_dir / RUN_ID / "run.json").is_file()
+    assert not (runs_dir / RUN_ID / "final.txt").exists()
     assert (run_dir / "final.txt").read_text(encoding="utf-8") == "done\n"
     work_run_archive.validate_archive(archive)
 
@@ -1197,7 +1202,7 @@ def test_successful_replacement_cleanup_failure_reports_installed_archive(tmp_pa
     assert str(backups[0]) in str(exc.value)
     assert _archive_bytes(backups[0]) == before
     work_run_archive.validate_archive(archive)
-    assert (archive / "payload" / "final.txt").read_text(encoding="utf-8") == "replacement artifact\n"
+    assert not (archive / "payload" / "final.txt").exists()
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink", "dangling"])
@@ -1241,5 +1246,5 @@ def test_forced_replacement_success_and_nonforced_refusal(tmp_path: Path, capsys
     assert cli.main(["runs", "export", str(replacement), "--output", str(archive), "--force", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "exported"
     work_run_archive.validate_archive(archive)
-    assert (archive / "payload" / "final.txt").read_text(encoding="utf-8") == "replacement artifact\n"
+    assert not (archive / "payload" / "final.txt").exists()
     _assert_no_export_temps(archive)

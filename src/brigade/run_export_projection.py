@@ -22,15 +22,20 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from . import localio, memory_recall_log, receipt_schema, run_checkpoint, run_projector, worker_events
+from . import localio, memory_recall_log, receipt_schema, run_checkpoint, worker_events
 
 DIGEST_PREFIX = "hmac-sha256:"
 EXTERNAL_PATH_TOKEN = "<external-path>"
 RUN_DIR_TOKEN = "<run-dir>"
 HOME_TOKEN = "<home>"
+BATCH_RESULT_ENTRY_SCHEMA = "brigade.run_batch_result_entry.v1"
 
 _DIGEST_RE = re.compile(r"^hmac-sha256:[0-9a-f]{64}$")
 _BATCH_RESULT_RE = re.compile(r"^batch-result-[0-9a-f]{64}\.json$")
+_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_ABS_SEGMENT_RE = re.compile(r"/(?:home|Users|root|tmp)(?:/[^\s\"'`;,)]*)?")
+_FILE_URI_RE = re.compile(r"file://[^\s\"']*")
+_SEAT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 _PROMPT_KEYS = frozenset("task text detail final error prompt stdout stderr output result content summary".split())
 _PATH_KEYS = frozenset(
@@ -40,7 +45,12 @@ _PATH_KEYS = frozenset(
 _TOP_LEVEL_JSON = frozenset(
     "run.json roster.json plan.json worker-results.json synthesis.json batch-request.json".split()
 )
-_TOP_LEVEL_FILES = _TOP_LEVEL_JSON | frozenset("final.txt summary.md changes.patch".split())
+_BATCH_RESULT_FIELDS = (
+    "schema schema_version worker task ok detail text failure_phase failure_kind failure "
+    "output_truncated output_bytes output_cap_bytes thread_id status exit_code timed_out "
+    "stdout_log stderr_log duration_seconds transport requested_model effective_model reasoning "
+    "stop_reason protocol_version session_id request_id acpx_version attempts"
+)
 
 
 class RunExportProjectionError(ValueError):
@@ -50,6 +60,8 @@ class RunExportProjectionError(ValueError):
 @dataclass(frozen=True)
 class _Object:
     fields: Mapping[str, "Node"]
+    any_name: "Node | None" = None
+    key_pattern: re.Pattern[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -58,7 +70,7 @@ class _List:
 
 
 @dataclass(frozen=True)
-class _Any:
+class _Scalar:
     pass
 
 
@@ -67,104 +79,145 @@ class _Prompt:
     pass
 
 
-Node = _Object | _List | _Any | _Prompt
+Node = _Object | _List | _Scalar | _Prompt
 
-ANY = _Any()
+SCALAR = _Scalar()
 PROMPT = _Prompt()
-
-
-def _object(keys: frozenset[str] | set[str]) -> _Object:
-    return _Object({key: ANY for key in keys})
+_OMIT = object()
 
 
 def _shape(keys: str, **overrides: Node) -> _Object:
-    fields: dict[str, Node] = {key: ANY for key in keys.split()}
+    fields: dict[str, Node] = {key: SCALAR for key in keys.split()}
     fields.update(overrides)
     return _Object(fields)
 
 
-_WORKER_ENTRY_KEYS = frozenset(
-    "worker task ok detail text failure_phase failure_kind failure transport_warning "
-    "cloud_environment metadata_provenance output_truncated output_bytes output_cap_bytes "
-    "thread_id status exit_code timed_out stdout_log stderr_log duration_seconds transport "
+_STRING_LIST = _List(SCALAR)
+
+
+_FAILURE = _shape(
+    "schema class domain phase retry detected_by cause_code attempt seat message",
+    detail=PROMPT,
+    message=PROMPT,
+)
+_ARTIFACT_COLLECTION = _shape(
+    "status changed tracked_count untracked_count", patch_ref=SCALAR, worktree=SCALAR, failure=_FAILURE
+)
+_GIT = _shape("head branch dirty_files")
+_SCHEDULER = _shape("requested used fallback_reason")
+_ATTEMPT = _shape(
+    "kind worker transport reasoning started_at finished_at exit_code terminal_reason "
+    "failure_phase failure_kind session_id selected model",
+    task=PROMPT,
+    stdout_log=SCALAR,
+    stderr_log=SCALAR,
+    failure=_FAILURE,
+)
+_WORKER_ENTRY = _shape(
+    "worker ok failure_phase failure_kind output_truncated output_bytes output_cap_bytes "
+    "thread_id status exit_code timed_out duration_seconds transport requested_model "
+    "effective_model reasoning stop_reason protocol_version session_id request_id acpx_version",
+    task=PROMPT,
+    detail=PROMPT,
+    text=PROMPT,
+    failure=_FAILURE,
+    stdout_log=SCALAR,
+    stderr_log=SCALAR,
+    attempts=_List(_ATTEMPT),
+)
+_AGENT_RESULT = _shape(
+    "ok failure_phase failure_kind exit_code timed_out duration_seconds transport "
     "requested_model effective_model reasoning stop_reason protocol_version session_id "
-    "request_id acpx_version events env_overrides endpoint_host attempts provenance".split()
+    "request_id acpx_version",
+    detail=PROMPT,
+    text=PROMPT,
+    failure=_FAILURE,
+    stdout_log=SCALAR,
+    stderr_log=SCALAR,
 )
-_ATTEMPT_KEYS = frozenset(
-    "kind worker task transport reasoning started_at finished_at exit_code terminal_reason "
-    "failure_phase failure_kind session_id selected model stdout_log stderr_log failure".split()
+_ROSTER_AGENT = _shape(
+    "cli model reasoning transport transport_version role timeout_seconds "
+    "invalid_final_fallback read_only_capable cloud_safe_mode",
+    command=_STRING_LIST,
+    capabilities=_STRING_LIST,
 )
-_AGENT_RESULT_KEYS = frozenset(
-    "ok detail text failure_phase failure_kind failure transport_warning cloud_environment "
-    "exit_code timed_out stdout_log stderr_log duration_seconds transport requested_model "
-    "effective_model reasoning stop_reason protocol_version session_id request_id "
-    "acpx_version metadata_provenance events".split()
+_PLAN_ASSIGNMENT = _shape(
+    "stage worker domain max_risk_class",
+    task=PROMPT,
+    covers=_STRING_LIST,
+    selected_skill_ids=_STRING_LIST,
+    capabilities=_STRING_LIST,
+    admissible_tool_ids=_STRING_LIST,
 )
-_ROSTER_AGENT_KEYS = frozenset(
-    "cli command model reasoning transport transport_version role timeout_seconds "
-    "invalid_final_fallback read_only_capable cloud_safe_mode env capabilities".split()
+_BATCH_TASK = _shape(
+    "task_id seat isolation read_only",
+    text=PROMPT,
+    depends_on=_STRING_LIST,
 )
-_RUN_KEYS = frozenset(run_projector.OWNED_FIELDS | {"run_id"})
-_PLAN_ASSIGNMENT_KEYS = frozenset(
-    "stage worker task covers selected_skill_ids domain capabilities max_risk_class admissible_tool_ids".split()
-)
-_BATCH_TASK_KEYS = frozenset("task_id text seat depends_on isolation read_only".split())
-
-_WORKER_ENTRY = _Object(
-    {
-        key: (
-            PROMPT
-            if key in _PROMPT_KEYS
-            else _List(_Object({item: ANY for item in _ATTEMPT_KEYS}))
-            if key == "attempts"
-            else ANY
-        )
-        for key in _WORKER_ENTRY_KEYS
-    }
-)
-_AGENT_RESULT = _Object({key: PROMPT if key in _PROMPT_KEYS else ANY for key in _AGENT_RESULT_KEYS})
-
-_ANY_NAME = "@any-name"
-_ROSTER_AGENT = _Object({key: ANY for key in _ROSTER_AGENT_KEYS})
-
-_PLAN_ASSIGNMENT = _Object({key: PROMPT if key == "task" else ANY for key in _PLAN_ASSIGNMENT_KEYS})
-_BATCH_TASK = _Object({key: PROMPT if key == "text" else ANY for key in _BATCH_TASK_KEYS})
+_BATCH_RESULT = _shape(_BATCH_RESULT_FIELDS, task=PROMPT, detail=PROMPT, text=PROMPT, failure=_FAILURE)
 
 _FILE_NODES: dict[str, Node] = {
-    "run.json": _object(_RUN_KEYS),
+    "run.json": _shape(
+        "schema schema_version kind orchestrator worker dry_run read_only codex_transport "
+        "lifecycle_journal_requested run_journal_authority_requested requester_principal "
+        "requester_keyid tree_fingerprint tree_fingerprint_head category started_at "
+        "status_started_at finished_at duration_seconds resumed_at suspected_noop status "
+        "projector_version journal_present journal_last_sequence journal_last_event_digest "
+        "failure_phase failure_kind orphaned_at last_observed_status uncommitted_change_count",
+        task=PROMPT,
+        error=PROMPT,
+        cwd=SCALAR,
+        lock_workspace=SCALAR,
+        artifacts=SCALAR,
+        handoff=SCALAR,
+        handoff_inbox=SCALAR,
+        control_socket=SCALAR,
+        recovery_preserved_artifact=SCALAR,
+        scheduler=_SCHEDULER,
+        artifact_collection=_ARTIFACT_COLLECTION,
+        failure=_FAILURE,
+        git=_GIT,
+    ),
     "roster.json": _shape(
-        "schema schema_version orchestrator max_workers timeout_seconds allow_models sandbox "
-        "resolution model_admission admissions runtime_admissions",
-        agents=_Object({_ANY_NAME: _ROSTER_AGENT}),
+        "schema schema_version orchestrator max_workers timeout_seconds sandbox",
+        allow_models=_STRING_LIST,
+        agents=_Object({}, any_name=_ROSTER_AGENT, key_pattern=_SEAT_NAME_RE),
     ),
-    "plan.json": _shape("schema schema_version causal_receipt", assignments=_List(_PLAN_ASSIGNMENT)),
-    "worker-results.json": _shape(
-        "schema schema_version ground_truth producer_run_id causal_receipt", results=_List(_WORKER_ENTRY)
-    ),
-    "synthesis.json": _shape(
-        "schema schema_version mode worker orchestrator ground_truth causal_receipt", result=_AGENT_RESULT
-    ),
+    "plan.json": _shape("schema schema_version", assignments=_List(_PLAN_ASSIGNMENT)),
+    "worker-results.json": _shape("schema schema_version producer_run_id", results=_List(_WORKER_ENTRY)),
+    "synthesis.json": _shape("schema schema_version mode worker orchestrator", result=_AGENT_RESULT),
     "batch-request.json": _shape(
-        "schema request_id base_sha fingerprint layers",
+        "schema request_id base_sha fingerprint",
+        layers=_List(_List(SCALAR)),
         tasks=_List(_BATCH_TASK),
-        synthesis=_Object({"text": PROMPT, "seat": ANY}),
+        synthesis=_shape("seat", text=PROMPT),
     ),
-    "batch-result.json": _WORKER_ENTRY,
+    "batch-result.json": _BATCH_RESULT,
 }
 
-_SCHEMAS: dict[str, tuple[str, int | None]] = {
-    "run.json": (receipt_schema.RUN_RECEIPT_SCHEMA, receipt_schema.RUN_RECEIPT_SCHEMA_VERSION),
-    "roster.json": (receipt_schema.ROSTER_SNAPSHOT_SCHEMA, receipt_schema.ROSTER_SNAPSHOT_SCHEMA_VERSION),
-    "plan.json": (receipt_schema.RUN_PLAN_SCHEMA, receipt_schema.RUN_PLAN_SCHEMA_VERSION),
-    "worker-results.json": (receipt_schema.WORKER_RESULTS_SCHEMA, receipt_schema.WORKER_RESULTS_SCHEMA_VERSION),
-    "synthesis.json": (receipt_schema.SYNTHESIS_SCHEMA, receipt_schema.SYNTHESIS_SCHEMA_VERSION),
-    "batch-request.json": ("brigade.run_batch.v1", None),
+_SCHEMAS: dict[str, tuple[str, int | None, bool]] = {
+    "run.json": (receipt_schema.RUN_RECEIPT_SCHEMA, receipt_schema.RUN_RECEIPT_SCHEMA_VERSION, False),
+    "roster.json": (receipt_schema.ROSTER_SNAPSHOT_SCHEMA, receipt_schema.ROSTER_SNAPSHOT_SCHEMA_VERSION, False),
+    "plan.json": (receipt_schema.RUN_PLAN_SCHEMA, receipt_schema.RUN_PLAN_SCHEMA_VERSION, False),
+    "worker-results.json": (
+        receipt_schema.WORKER_RESULTS_SCHEMA,
+        receipt_schema.WORKER_RESULTS_SCHEMA_VERSION,
+        False,
+    ),
+    "synthesis.json": (receipt_schema.SYNTHESIS_SCHEMA, receipt_schema.SYNTHESIS_SCHEMA_VERSION, False),
+    "batch-request.json": ("brigade.run_batch.v1", None, False),
+    "batch-result.json": (BATCH_RESULT_ENTRY_SCHEMA, 1, True),
 }
+
+
+def is_valid_digest(value: Any) -> bool:
+    """True for the closed keyed-digest string form."""
+    return isinstance(value, str) and _DIGEST_RE.fullmatch(value) is not None
 
 
 def is_allowed_export_rel(rel: str) -> bool:
     """True when ``rel`` is in the closed export file set."""
-    if rel in _TOP_LEVEL_FILES:
+    if rel in _TOP_LEVEL_JSON:
         return True
     if _BATCH_RESULT_RE.fullmatch(rel):
         return True
@@ -204,11 +257,36 @@ def filter_export_files(payload_root: Path) -> list[str]:
     return dropped
 
 
-def require_digest_key(workspace: Path) -> bytes:
+def workspace_for_run(run_dir: Path) -> Path:
+    """Return the owning workspace without ever returning the filesystem root."""
+    resolved = Path(run_dir).expanduser().resolve()
+    for ancestor in (resolved.parent, *resolved.parent.parents):
+        if ancestor == Path(ancestor.anchor):
+            break
+        if (ancestor / ".brigade").is_dir():
+            return ancestor
+    return resolved if resolved.parent == Path(resolved.anchor) else resolved.parent
+
+
+def digest_key_target(run_dir: Path) -> Path:
+    """Return a writable per-host key target, never the filesystem root."""
+    resolved = Path(run_dir).expanduser().resolve()
+    for ancestor in (resolved.parent, *resolved.parent.parents):
+        if ancestor == Path(ancestor.anchor):
+            break
+        if (ancestor / ".brigade").is_dir():
+            return ancestor
+    home = Path.home()
+    if home != Path(home.anchor):
+        return home
+    raise RunExportProjectionError("no .brigade workspace or user state directory exists for the digest key")
+
+
+def require_digest_key(target: Path) -> bytes:
     """Return the per-host HMAC key, refusing export when it cannot be loaded."""
-    key = memory_recall_log.load_or_create_key(workspace)
+    key = memory_recall_log.load_or_create_key(target)
     if key is None:
-        raise RunExportProjectionError("could not load the per-host export digest key")
+        raise RunExportProjectionError(f"could not load the per-host export digest key from {target}")
     return key
 
 
@@ -228,13 +306,29 @@ class _Context:
     key: bytes
 
 
+def _sanitize_embedded(value: str, ctx: _Context) -> str:
+    home = str(ctx.home)
+    if home and home in value:
+        value = value.replace(home, HOME_TOKEN)
+    value = _FILE_URI_RE.sub(EXTERNAL_PATH_TOKEN, value)
+    return _ABS_SEGMENT_RE.sub(EXTERNAL_PATH_TOKEN, value)
+
+
 def _map_path(value: str, ctx: _Context) -> str:
+    if value.startswith("file://") or _DRIVE_RE.match(value) or value.startswith("\\\\"):
+        return EXTERNAL_PATH_TOKEN
     if value.startswith("~"):
-        candidate = Path(value).expanduser()
+        try:
+            expanded = Path(value).expanduser()
+        except RuntimeError:
+            return EXTERNAL_PATH_TOKEN
+        if str(expanded).startswith("~"):
+            return EXTERNAL_PATH_TOKEN
+        candidate = expanded
     else:
         candidate = Path(value)
     if not candidate.is_absolute():
-        return value
+        return _sanitize_embedded(value, ctx)
     try:
         relative = candidate.relative_to(ctx.run_dir)
     except ValueError:
@@ -251,88 +345,126 @@ def _map_path(value: str, ctx: _Context) -> str:
 
 
 def _sanitize_string(value: str, ctx: _Context) -> str:
-    if value.startswith("/") or value.startswith("~"):
+    if value.startswith(("file://", "/", "~")) or _DRIVE_RE.match(value) or value.startswith("\\\\"):
         return _map_path(value, ctx)
-    home = str(ctx.home)
-    if home and home in value:
-        return value.replace(home, HOME_TOKEN)
-    return value
+    return _sanitize_embedded(value, ctx)
 
 
-def _project_value(key: str, value: Any, node: Node, ctx: _Context) -> Any:
+def _assert_prompt(value: Any, *, label: str, key: str) -> None:
+    if not isinstance(value, Mapping) or set(value) != {"digest", "chars"}:
+        raise RunExportProjectionError(f"{label}.{key} must be a closed prompt digest object")
+    if not is_valid_digest(value.get("digest")):
+        raise RunExportProjectionError(f"{label}.{key}.digest is not a keyed digest")
+    chars = value.get("chars")
+    if isinstance(chars, bool) or not isinstance(chars, int) or chars < 0:
+        raise RunExportProjectionError(f"{label}.{key}.chars must be a non-negative integer")
+
+
+def _child_for(node: _Object, key: str, *, label: str) -> Node | None:
+    child = node.fields.get(key)
+    if child is not None:
+        return child
+    if node.any_name is None:
+        return None
+    if node.key_pattern is not None and node.key_pattern.fullmatch(key) is None:
+        raise RunExportProjectionError(f"{label} has invalid key {key!r}")
+    return node.any_name
+
+
+def _project_prompt(value: Any, ctx: _Context, *, label: str, key: str) -> Any:
+    if value is None:
+        return _OMIT
     if isinstance(value, str):
-        if key in _PROMPT_KEYS:
-            return digest_prompt(ctx.key, value)
-        if key in _PATH_KEYS or key.endswith("_path"):
-            return _map_path(value, ctx)
-        return _sanitize_string(value, ctx)
+        return digest_prompt(ctx.key, value)
+    _assert_prompt(value, label=label, key=key)
+    return dict(value)
+
+
+def _project_string(key: str, value: str, ctx: _Context) -> Any:
+    if key in _PROMPT_KEYS:
+        return digest_prompt(ctx.key, value)
+    if key in _PATH_KEYS or key.endswith("_path"):
+        return _map_path(value, ctx)
+    return _sanitize_string(value, ctx)
+
+
+def _project_node(value: Any, node: Node, ctx: _Context, *, label: str, key: str = "") -> Any:
     if isinstance(node, _Prompt):
-        return _sanitize_any(value, ctx)
-    return _project_node(value, node, ctx)
-
-
-def _sanitize_any(value: Any, ctx: _Context) -> Any:
-    if isinstance(value, str):
-        return _sanitize_string(value, ctx)
-    if isinstance(value, list):
-        return [_sanitize_any(item, ctx) for item in value]
-    if isinstance(value, Mapping):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise RunExportProjectionError("export projection refused a non-string JSON key")
-            result[key] = _project_value(key, item, ANY, ctx)
-        return result
-    return value
-
-
-def _project_node(value: Any, node: Node, ctx: _Context) -> Any:
-    if isinstance(node, _Any):
-        return _sanitize_any(value, ctx)
+        return _project_prompt(value, ctx, label=label, key=key)
+    if value is None:
+        return None
+    if isinstance(node, _Scalar):
+        if isinstance(value, str):
+            return _project_string(key, value, ctx)
+        if isinstance(value, bool) or isinstance(value, int) or isinstance(value, float):
+            return value
+        raise RunExportProjectionError(f"{label}.{key} must be a scalar")
     if isinstance(node, _List):
         if not isinstance(value, list):
-            return _sanitize_any(value, ctx)
-        return [_project_node(item, node.item, ctx) for item in value]
+            raise RunExportProjectionError(f"{label}.{key} must be a list")
+        return [
+            _project_node(item, node.item, ctx, label=f"{label}[{index}]", key=key) for index, item in enumerate(value)
+        ]
     if isinstance(node, _Object):
         if not isinstance(value, Mapping):
-            return _sanitize_any(value, ctx)
+            raise RunExportProjectionError(f"{label}.{key} must be an object")
         result: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise RunExportProjectionError("export projection refused a non-string JSON key")
-            child = node.fields.get(key)
-            if child is None and _ANY_NAME in node.fields:
-                child = node.fields[_ANY_NAME]
+        for item_key, item in value.items():
+            if not isinstance(item_key, str):
+                raise RunExportProjectionError(f"{label} has a non-string JSON key")
+            child = _child_for(node, item_key, label=f"{label}.{item_key}")
             if child is None:
                 continue
-            result[key] = _project_value(key, item, child, ctx)
+            projected = _project_node(item, child, ctx, label=label, key=item_key)
+            if projected is not _OMIT:
+                result[item_key] = projected
         return result
-    return _sanitize_any(value, ctx)
+    raise RunExportProjectionError(f"{label} has an unsupported schema node")
+
+
+def _spec_rel(rel: str) -> str:
+    return "batch-result.json" if _BATCH_RESULT_RE.fullmatch(rel) else rel
 
 
 def _document_node(rel: str) -> Node:
-    if rel in _FILE_NODES:
-        return _FILE_NODES[rel]
-    return _FILE_NODES["batch-result.json"]
+    return _FILE_NODES.get(_spec_rel(rel), _FILE_NODES["batch-result.json"])
 
 
-def _check_schema(rel: str, document: Mapping[str, Any]) -> None:
-    expected = _SCHEMAS.get(rel)
+def _check_schema(rel: str, document: Mapping[str, Any], *, allow_legacy: bool) -> None:
+    expected = _SCHEMAS.get(_spec_rel(rel))
     if expected is None:
         return
-    schema, version = expected
-    if document.get("schema") != schema:
-        raise RunExportProjectionError(f"{rel} has unsupported schema {document.get('schema')!r}")
-    if version is not None and document.get("schema_version") != version:
-        raise RunExportProjectionError(f"{rel} has unsupported schema_version {document.get('schema_version')!r}")
+    schema, version, absent_ok = expected
+    actual_schema = document.get("schema")
+    if actual_schema is None:
+        if not (allow_legacy or absent_ok):
+            raise RunExportProjectionError(f"{rel} is missing schema")
+    elif actual_schema != schema:
+        raise RunExportProjectionError(f"{rel} has unsupported schema {actual_schema!r}")
+    if version is None:
+        return
+    actual_version = document.get("schema_version")
+    if actual_version is None:
+        if not (allow_legacy or absent_ok):
+            raise RunExportProjectionError(f"{rel} is missing schema_version")
+    elif actual_version != version:
+        raise RunExportProjectionError(f"{rel} has unsupported schema_version {actual_version!r}")
 
 
-def project_document(rel: str, document: Any, ctx: _Context) -> Any:
+def project_document(rel: str, document: Any, ctx: _Context, *, allow_legacy: bool = False) -> Any:
     """Return a projected copy of one allowed JSON document."""
     if not isinstance(document, Mapping):
         raise RunExportProjectionError(f"{rel} must contain a JSON object")
-    _check_schema(rel, document)
-    return _project_node(document, _document_node(rel), ctx)
+    _check_schema(rel, document, allow_legacy=allow_legacy)
+    if allow_legacy:
+        expected = _SCHEMAS.get(_spec_rel(rel))
+        if expected is not None:
+            schema, version, _absent_ok = expected
+            document = dict(document)
+            document.setdefault("schema", schema)
+            if version is not None:
+                document.setdefault("schema_version", version)
+    return _project_node(document, _document_node(rel), ctx, label=rel)
 
 
 def iter_receipt_files(payload_root: Path) -> list[str]:
@@ -354,6 +486,7 @@ def project_payload_tree(
     workspace: Path,
     run_dir: Path,
     key: bytes | None = None,
+    allow_legacy: bool = False,
 ) -> int:
     """Project every allowed receipt JSON on the staged copy in place."""
     payload_root = Path(payload_root).resolve()
@@ -361,7 +494,7 @@ def project_payload_tree(
         workspace=Path(workspace).resolve(),
         run_dir=Path(run_dir).resolve(),
         home=Path.home(),
-        key=key if key is not None else require_digest_key(workspace),
+        key=key if key is not None else require_digest_key(digest_key_target(run_dir)),
     )
     projected = 0
     for rel in iter_receipt_files(payload_root):
@@ -370,57 +503,84 @@ def project_payload_tree(
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RunExportProjectionError(f"{rel} is not readable JSON: {exc}") from exc
-        localio.write_json(path, project_document(rel, document, ctx))
+        localio.write_json(path, project_document(rel, document, ctx, allow_legacy=allow_legacy))
         projected += 1
     return projected
 
 
-def _assert_strings(value: Any, *, label: str, home: Path) -> None:
+def _assert_safe_string(value: str, *, label: str, home: Path) -> None:
+    unsafe = (
+        value.startswith(("/", "~", "file://"))
+        or _DRIVE_RE.match(value) is not None
+        or value.startswith("\\\\")
+        or (bool(home) and str(home) in value)
+        or _ABS_SEGMENT_RE.search(value) is not None
+        or _FILE_URI_RE.search(value) is not None
+    )
+    if unsafe:
+        raise RunExportProjectionError(f"{label} must not contain an absolute path")
+
+
+def _assert_value(value: Any, node: Node, *, label: str, home: Path, key: str = "") -> None:
+    if isinstance(node, _Prompt):
+        _assert_prompt(value, label=label, key=key)
+        return
+    if value is None:
+        return
+    if isinstance(node, _Scalar):
+        if isinstance(value, str):
+            _assert_safe_string(value, label=f"{label}.{key}", home=home)
+            return
+        if isinstance(value, bool) or isinstance(value, int) or isinstance(value, float):
+            return
+        raise RunExportProjectionError(f"{label}.{key} must be a scalar")
+    if isinstance(node, _List):
+        if not isinstance(value, list):
+            raise RunExportProjectionError(f"{label}.{key} must be a list")
+        for index, item in enumerate(value):
+            _assert_value(item, node.item, label=f"{label}[{index}]", home=home, key=key)
+        return
+    if isinstance(node, _Object):
+        if not isinstance(value, Mapping):
+            raise RunExportProjectionError(f"{label}.{key} must be an object")
+        for item_key, item in value.items():
+            if not isinstance(item_key, str):
+                raise RunExportProjectionError(f"{label} has a non-string JSON key")
+            child = _child_for(node, item_key, label=f"{label}.{item_key}")
+            if child is None:
+                raise RunExportProjectionError(f"{label} has a key outside its allowlist: {item_key!r}")
+            _assert_value(item, child, label=label, home=home, key=item_key)
+        return
+    raise RunExportProjectionError(f"{label} has an unsupported schema node")
+
+
+def _assert_generic(value: Any, *, label: str, home: Path) -> None:
+    """Walk an already-closed document and refuse unsafe strings and raw prompts."""
     if isinstance(value, str):
-        if value.startswith("/") or value.startswith("~") or (home and str(home) in value):
-            raise RunExportProjectionError(f"{label} must not contain an absolute path")
+        _assert_safe_string(value, label=label, home=home)
         return
     if isinstance(value, list):
-        for item in value:
-            _assert_strings(item, label=label, home=home)
+        for index, item in enumerate(value):
+            _assert_generic(item, label=f"{label}[{index}]", home=home)
         return
     if isinstance(value, Mapping):
         for key, item in value.items():
             if not isinstance(key, str):
                 raise RunExportProjectionError(f"{label} has a non-string JSON key")
-            if key in _PROMPT_KEYS and isinstance(item, str):
-                raise RunExportProjectionError(f"{label} carries raw prompt text in {key!r}")
-            _assert_strings(item, label=label, home=home)
+            if key in _PROMPT_KEYS:
+                _assert_prompt(item, label=label, key=key)
+                continue
+            _assert_generic(item, label=f"{label}.{key}", home=home)
+        return
+    if value is None or isinstance(value, bool) or isinstance(value, int) or isinstance(value, float):
+        return
+    raise RunExportProjectionError(f"{label} has an unsupported JSON value")
 
 
-def _assert_node(value: Any, node: Node, *, label: str, home: Path) -> None:
-    if isinstance(node, _Any):
-        _assert_strings(value, label=label, home=home)
-        return
-    if isinstance(node, _List):
-        if isinstance(value, list):
-            for item in value:
-                _assert_node(item, node.item, label=label, home=home)
-        else:
-            _assert_strings(value, label=label, home=home)
-        return
-    if isinstance(node, _Object):
-        if not isinstance(value, Mapping):
-            _assert_strings(value, label=label, home=home)
-            return
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise RunExportProjectionError(f"{label} has a non-string JSON key")
-            child = node.fields.get(key)
-            if child is None and _ANY_NAME in node.fields:
-                child = node.fields[_ANY_NAME]
-            if child is None:
-                raise RunExportProjectionError(f"{label} has a key outside its allowlist: {key!r}")
-            if key in _PROMPT_KEYS and isinstance(item, str):
-                raise RunExportProjectionError(f"{label} carries raw prompt text in {key!r}")
-            _assert_node(item, child, label=label, home=home)
-        return
-    _assert_strings(value, label=label, home=home)
+def assert_manifest_privacy(manifest: Mapping[str, Any], *, home: Path | None = None) -> None:
+    """Refuse absolute paths or prompt-shaped text anywhere in a v2 manifest."""
+    home = home if home is not None else Path.home()
+    _assert_generic(manifest, label="work-run.json", home=home)
 
 
 def assert_export_file_set(payload_root: Path) -> None:
@@ -443,13 +603,14 @@ def assert_payload_privacy(payload_root: Path, *, home: Path | None = None) -> N
         if path.is_dir() or not path.is_file() or path.suffix != ".json":
             continue
         rel = path.relative_to(payload_root).as_posix()
-        if rel not in _TOP_LEVEL_JSON and not _BATCH_RESULT_RE.fullmatch(rel):
-            continue
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RunExportProjectionError(f"{rel} is not readable JSON: {exc}") from exc
         if not isinstance(document, Mapping):
             raise RunExportProjectionError(f"{rel} must contain a JSON object")
-        _check_schema(rel, document)
-        _assert_node(document, _document_node(rel), label=rel, home=home)
+        if rel in _TOP_LEVEL_JSON or _BATCH_RESULT_RE.fullmatch(rel):
+            _check_schema(rel, document, allow_legacy=False)
+            _assert_value(document, _document_node(rel), label=rel, home=home)
+        else:
+            _assert_generic(document, label=rel, home=home)

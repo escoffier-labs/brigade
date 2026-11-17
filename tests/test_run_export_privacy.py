@@ -18,6 +18,9 @@ WORKER_MARKER = "GENERATED-MARKER-worker"
 SYNTH_MARKER = "GENERATED-MARKER-synthesis"
 BATCH_MARKER = "PROMPT-MARKER-batch"
 RESULT_MARKER = "GENERATED-MARKER-batch-result"
+ABS_HOME = "/" + "home/alice"
+DRIVE_PATH = "C:" + "\\" + "Users\\alice\\repo"
+FILE_URI_PATH = "file://" + ABS_HOME + "/control.sock"
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -309,3 +312,201 @@ def test_resume_still_reads_the_source_run_after_export(tmp_path: Path, capsys):
     assert run_resume.resume(run_dir) == 2
     assert "no resumable workers" in capsys.readouterr().err
     assert json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["task"] == TASK_MARKER
+
+
+def test_generated_text_env_and_artifacts_are_not_exported(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    worker = json.loads((run_dir / "worker-results.json").read_text(encoding="utf-8"))
+    worker["results"][0]["failure"] = {"message": "raw prompt"}
+    worker["results"][0]["env_overrides"] = {"OPENAI_API_KEY": "sk-123"}
+    _write_json(run_dir / "worker-results.json", worker)
+    (run_dir / "summary.md").write_text("raw prompt\n", encoding="utf-8")
+    (run_dir / "changes.patch").write_text("raw prompt\n", encoding="utf-8")
+
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+
+    raw = _archive_bytes(archive)
+    assert b"raw prompt" not in raw
+    assert b"sk-123" not in raw
+    for name in ("final.txt", "summary.md", "changes.patch"):
+        assert not (archive / "payload" / name).exists()
+
+
+def test_export_refuses_prompt_list(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    payload["task"] = ["prompt"]
+    _write_json(run_dir / "run.json", payload)
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.export_run(run_dir, tmp_path / "archive")
+    assert excinfo.value.category == "export-privacy"
+
+
+@pytest.mark.parametrize(
+    "prompt", [TASK_MARKER, ["prompt"], {"digest": "hmac-sha256:" + "a" * 64 + " trailing", "chars": 1}]
+)
+def test_import_refuses_malformed_prompt_digest(tmp_path: Path, prompt):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    payload = json.loads((archive / "payload" / "run.json").read_text(encoding="utf-8"))
+    payload["task"] = prompt
+    _rewrite_payload(archive, "run.json", payload)
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
+    assert excinfo.value.category == "export-privacy"
+
+
+@pytest.mark.parametrize("field", ["task", "source_run_dir", "schema_artifact"])
+def test_manifest_rejects_private_fields(tmp_path: Path, field: str):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    if field == "task":
+        manifest["run"]["task"] = TASK_MARKER
+    elif field == "source_run_dir":
+        manifest["source_run_dir"] = ABS_HOME + "/x"
+    else:
+        manifest["schema_artifact"] = ABS_HOME + "/x"
+    _write_json(archive / "work-run.json", manifest)
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.validate_archive(archive)
+    assert excinfo.value.category == "export-privacy"
+
+
+def test_drive_unc_file_uri_and_embedded_paths_are_mapped(tmp_path: Path):
+    workspace, run_dir = _seed_privacy_run(tmp_path)
+    payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    payload["cwd"] = DRIVE_PATH
+    payload["handoff"] = "\\\\server\\share\\secret"
+    payload["control_socket"] = FILE_URI_PATH
+    payload["artifacts"] = "~other/alice/repo"
+    payload["scheduler"] = {"requested": "waves", "used": None, "fallback_reason": "cwd=" + ABS_HOME + "/proj"}
+    _write_json(run_dir / "run.json", payload)
+
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    exported = json.loads((archive / "payload" / "run.json").read_text(encoding="utf-8"))
+    token = run_export_projection.EXTERNAL_PATH_TOKEN
+    assert exported["cwd"] == token
+    assert exported["handoff"] == token
+    assert exported["control_socket"] == token
+    assert exported["artifacts"] == token
+    assert exported["scheduler"]["fallback_reason"] == f"cwd={token}"
+    raw = _archive_bytes(archive)
+    for needle in (b"alice", b"C:\\\\", b"file://", b"\\\\server"):
+        assert needle not in raw
+
+
+def test_force_import_refusal_preserves_existing_run(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    payload = json.loads((archive / "payload" / "run.json").read_text(encoding="utf-8"))
+    payload["task"] = TASK_MARKER
+    _rewrite_payload(archive, "run.json", payload)
+
+    imported = tmp_path / "imported"
+    dest = imported / RUN_ID
+    dest.mkdir(parents=True)
+    (dest / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _write_json(dest / "run.json", {"schema": "brigade.run.v1", "schema_version": 1, "status": "ok"})
+
+    with pytest.raises(WorkRunArchiveError):
+        work_run_archive.import_archive(archive, runs_dir=imported, force=True)
+    assert (dest / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+    assert json.loads((dest / "run.json").read_text(encoding="utf-8"))["status"] == "ok"
+
+
+def test_shallow_run_path_never_uses_root(tmp_path: Path):
+    shallow = tmp_path / "run"
+    shallow.mkdir()
+    assert run_export_projection.workspace_for_run(shallow) != Path("/")
+    assert run_export_projection.workspace_for_run(shallow).is_dir()
+    (tmp_path / ".brigade").mkdir()
+    assert run_export_projection.workspace_for_run(shallow) == tmp_path
+    assert run_export_projection.digest_key_target(shallow) == tmp_path
+    assert run_export_projection.digest_key_target(shallow) != Path("/")
+
+
+def test_legacy_receipts_without_schema_project(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    for rel in (
+        "run.json",
+        "roster.json",
+        "plan.json",
+        "worker-results.json",
+        "synthesis.json",
+        "batch-request.json",
+    ):
+        payload = json.loads((archive / "payload" / rel).read_text(encoding="utf-8"))
+        payload.pop("schema", None)
+        payload.pop("schema_version", None)
+        _rewrite_payload(archive, rel, payload)
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
+    manifest["compatibility"]["min_reader_schema_version"] = 1
+    manifest["compatibility"]["max_reader_schema_version"] = 1
+    _write_json(archive / "work-run.json", manifest)
+
+    imported = work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
+    installed = json.loads((Path(imported["run_dir"]) / "run.json").read_text(encoding="utf-8"))
+    assert installed["schema"] == "brigade.run.v1"
+    assert installed["task"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+
+
+def test_import_refuses_non_json_artifact(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    extra = archive / "payload" / "final.txt"
+    extra.write_text("generated text\n", encoding="utf-8")
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    manifest["files"].append(
+        {
+            "path": "final.txt",
+            "sha256": hashlib.sha256(extra.read_bytes()).hexdigest(),
+            "byte_size": len(extra.read_bytes()),
+            "role": "artifact",
+        }
+    )
+    manifest["files"].sort(key=lambda entry: entry["path"])
+    _write_json(archive / "work-run.json", manifest)
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
+    assert excinfo.value.category == "export-privacy"
+
+
+def test_roster_agent_name_must_be_a_token(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    roster = json.loads((run_dir / "roster.json").read_text(encoding="utf-8"))
+    roster["agents"]["../evil"] = roster["agents"]["chef"]
+    _write_json(run_dir / "roster.json", roster)
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.export_run(run_dir, tmp_path / "archive")
+    assert excinfo.value.category == "export-privacy"
+
+
+def test_import_refuses_unknown_batch_result_schema(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    batch = next((archive / "payload").glob("batch-result-*.json"))
+    rel = batch.relative_to(archive / "payload").as_posix()
+    payload = json.loads(batch.read_text(encoding="utf-8"))
+    payload["schema"] = "brigade.unknown.v1"
+    payload["schema_version"] = 1
+    _rewrite_payload(archive, rel, payload)
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
+    assert excinfo.value.category == "export-privacy"
