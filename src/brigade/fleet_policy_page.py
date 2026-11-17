@@ -820,6 +820,8 @@ def _revision_document(conn: sqlite3.Connection, revision: int) -> Mapping[str, 
 
 def _rollback_target(submission: Submission) -> int:
     raw = submission.value("to_revision") or ""
+    if blank := fleet_form_fields.missing(ROLLBACK_FORM, {"to_revision": raw}):
+        raise DocumentError(blank[0].error)
     try:
         return int(raw)
     except ValueError as exc:

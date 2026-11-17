@@ -7,6 +7,7 @@ is exactly what the declaration says, then check the validator refuses what it d
 
 from __future__ import annotations
 
+import re
 from html.parser import HTMLParser
 from urllib.parse import urlencode
 
@@ -159,12 +160,20 @@ def test_pr_rule_forms_show_the_declared_marker_and_attribute_on_every_field():
     assert by_name["field.why"].marker == "Optional" and not by_name["field.why"].required
     label_marker = by_name["field.when_label"].marker
     assert label_marker is not None and "A PR has a label" in label_marker and not by_name["field.when_label"].required
+    assert by_name["field.act_kind_0"].marker == "Required for the first action"
+    assert not by_name["field.act_kind_0"].required
+
+
+_SCRIPT_BLOCK = re.compile(r"<script\b.*?</script>", re.DOTALL | re.IGNORECASE)
 
 
 def test_pr_rule_form_works_without_javascript_and_names_the_requirement_in_words():
     page = render_rules(sample_rules())
-    assert "<script" in page  # progressive enhancement only; the markers are plain text in the markup
-    assert page.count("Required for a limit action") >= 3 and "Optional</span>" in page
+    static = _SCRIPT_BLOCK.sub("", page)
+    assert "<script" not in static
+    assert static.count("Required for a limit action") >= 3
+    assert "Required for the first action" in static
+    assert "Optional</span>" in static
 
 
 def _rule_submission(**fields):
@@ -247,6 +256,21 @@ def test_a_blank_rollback_revision_is_refused_with_the_declared_message():
                 ).encode()
             )
         )
+
+
+def test_the_rollback_declaration_decides_the_blank_revision_message(monkeypatch):
+    monkeypatch.setattr(
+        fleet_policy_page,
+        "ROLLBACK_FORM",
+        ff.form(ff.required("to_revision", "rollback needs a revision from the form")),
+    )
+    submission = forms.parse_form(
+        urlencode(
+            {"scope": "rollback", "action": "preview", "expected_version": "1", "field.to_revision": " "}
+        ).encode()
+    )
+    with pytest.raises(forms.DocumentError, match="rollback needs a revision from the form"):
+        fleet_policy_page._rollback_target(submission)
 
 
 def test_every_roster_control_is_optional_and_the_authoritative_forms_use_the_policy_declarations(tmp_path):

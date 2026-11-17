@@ -119,6 +119,7 @@ def _authorized(conn: sqlite3.Connection, action: dict[str, Any]) -> bool:
 
 # The repair form. `family` only narrows the destination list and `model_id` may be blank (destination
 # default), so the destination and the prompt are the required fields. `error` is the refusal code.
+# opaque() enforces target_id; its entry here only drives the HTML marker.
 ACTION_FORM = ff.form(
     ff.optional("family"),
     ff.required("target_id", "invalid-submission"),
