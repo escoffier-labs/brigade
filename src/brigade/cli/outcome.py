@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 
@@ -41,9 +42,21 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_reconcile.add_argument(
         "--apply", action="store_true", help="Write decisions and advance status (default: dry-run)."
     )
+    p_reconcile.add_argument(
+        "--report",
+        action="store_true",
+        help="Also write the advisory .brigade/memory-care/outcome/ratchet-report.json summary.",
+    )
     p_reconcile.add_argument("--target", "-t", type=Path, default=Path("."))
     p_reconcile.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_reconcile.set_defaults(func=_dispatch_reconcile)
+
+    p_ratchet = outcome_sub.add_parser(
+        "ratchet", help="Print the last advisory outcome ratchet report (read-only, no recompute)."
+    )
+    p_ratchet.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_ratchet.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_ratchet.set_defaults(func=_dispatch_ratchet)
 
     p_rank = outcome_sub.add_parser("rank", help="Rank learned skills by verified outcome, most-proven first.")
     p_rank.add_argument("--target", "-t", type=Path, default=Path("."))
@@ -189,7 +202,43 @@ def _dispatch_capture(args) -> int:
 def _dispatch_reconcile(args) -> int:
     from .. import outcome_cmd
 
-    return outcome_cmd.reconcile(target=args.target, apply=args.apply, json_output=args.json)
+    return outcome_cmd.reconcile(target=args.target, apply=args.apply, json_output=args.json, report=args.report)
+
+
+def _dispatch_ratchet(args) -> int:
+    from .. import outcome_ratchet_report
+
+    report = outcome_ratchet_report.load_report(args.target)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    print(f"outcome ratchet: {args.target.expanduser().resolve()}")
+    if not report:
+        print("report: none (run `brigade outcome reconcile --report`)")
+        return 0
+    summary_raw = report.get("summary")
+    summary = summary_raw if isinstance(summary_raw, dict) else {}
+    print(f"generated_at: {report.get('generated_at')} apply={report.get('apply')}")
+    print(
+        "decisions: "
+        f"total={summary.get('decisions')} "
+        f"regression_holds={summary.get('regression_holds')} "
+        f"regression_rollbacks={summary.get('regression_rollbacks')}"
+    )
+    print(f"ineligibility_rate: {report.get('ineligibility_rate')}")
+    if report.get("leading_ineligibility_reason"):
+        print(f"leading_ineligibility_reason: {report['leading_ineligibility_reason']}")
+    regressions_raw = report.get("regressions")
+    regressions = regressions_raw if isinstance(regressions_raw, list) else []
+    for row in regressions:
+        if not isinstance(row, dict):
+            continue
+        print(
+            f"- {row.get('artifact_id')} {row.get('prior_state')} "
+            f"[{row.get('reason_code')}] {row.get('reason')} "
+            f"helped={row.get('helped')} hurt={row.get('hurt')}"
+        )
+    return 0
 
 
 def _dispatch_rank(args) -> int:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from brigade.center_cmd.dashboard import data
@@ -15,10 +16,16 @@ _EMPTY_MESSAGE = (
     "The outcome ranking is empty. The outcome loop is not being fed: "
     "run verification through a registered verifier and capture outcomes."
 )
+_RATCHET_EMPTY_MESSAGE = (
+    "No outcome ratchet report yet. The weekly ratchet writes one with `brigade outcome reconcile --target . --report`."
+)
+_RATCHET_STALE_DAYS = 7
 
 
 def fetch(target: Path) -> dict:
-    return data.run_json(target, ["outcome", "rank"])
+    payload = data.run_json(target, ["outcome", "rank"])
+    payload["ratchet"] = data.run_json(target, ["outcome", "ratchet"])
+    return payload
 
 
 def render(payload: dict, nonce: str) -> str:
@@ -26,6 +33,10 @@ def render(payload: dict, nonce: str) -> str:
     if payload.get("error"):
         return html.error_panel(TITLE, str(payload["error"]))
 
+    return _ranking_panel(payload) + _ratchet_panel(payload.get("ratchet"))
+
+
+def _ranking_panel(payload: dict) -> str:
     ranking = payload.get("ranking")
     if not isinstance(ranking, list):
         ranking = []
@@ -62,6 +73,75 @@ def render(payload: dict, nonce: str) -> str:
     escaped_headers = [html.esc(header) for header in headers]
     strip = _summary_strip(entries)
     return html.panel(html.esc(TITLE), f"<p>{strip}</p>" + html.table(escaped_headers, rows))
+
+
+def _ratchet_panel(raw: object) -> str:
+    """Render the advisory weekly ratchet report, including how old it is."""
+    title = html.esc("Outcome ratchet report")
+    ratchet = raw if isinstance(raw, dict) else {}
+    if ratchet.get("error"):
+        return html.error_panel("Outcome ratchet report", str(ratchet["error"]))
+    if not ratchet:
+        return html.panel(title, f"<p>{html.esc(_RATCHET_EMPTY_MESSAGE)}</p>")
+
+    summary_raw = ratchet.get("summary")
+    summary = summary_raw if isinstance(summary_raw, dict) else {}
+    generated_at = str(ratchet.get("generated_at") or "-")
+    stamp = f"generated_at {generated_at} ({_age_label(ratchet.get('generated_at'))})"
+    strip = (
+        f"{stamp}; decisions {summary.get('decisions', '-')}, "
+        f"regression holds {summary.get('regression_holds', '-')}, "
+        f"regression rollbacks {summary.get('regression_rollbacks', '-')}; "
+        f"ineligibility_rate {_fmt(ratchet.get('ineligibility_rate'))}"
+    )
+    leading = ratchet.get("leading_ineligibility_reason")
+    if leading:
+        strip += f", leading reason {leading}"
+    if ratchet.get("truncated"):
+        strip += f"; {ratchet.get('regressions_omitted', 0)} regression row(s) omitted by the size cap"
+
+    regressions = ratchet.get("regressions")
+    if not isinstance(regressions, list):
+        regressions = []
+    rows = [row for row in regressions if isinstance(row, dict)]
+    if not rows:
+        return html.panel(
+            title, f"<p>{html.esc(strip)}</p><p>{html.esc('No regression holds or rollbacks in the last run.')}</p>"
+        )
+
+    headers = ["Artifact", "Prior state", "Reason code", "Reason", "Helped", "Hurt"]
+    body = [
+        [
+            html.esc(row.get("artifact_id", "-")),
+            html.esc(row.get("prior_state", "-")),
+            html.esc(row.get("reason_code", "-")),
+            html.esc(row.get("reason", "-")),
+            html.esc(_fmt(row.get("helped"))),
+            html.esc(_fmt(row.get("hurt"))),
+        ]
+        for row in rows
+    ]
+    escaped_headers = [html.esc(header) for header in headers]
+    return html.panel(title, f"<p>{html.esc(strip)}</p>" + html.table(escaped_headers, body))
+
+
+def _age_label(generated_at: object) -> str:
+    """Describe report age so a stale weekly run reads as stale, never current."""
+    if not isinstance(generated_at, str):
+        return "age unknown"
+    try:
+        stamp = datetime.fromisoformat(generated_at)
+    except ValueError:
+        return "age unknown"
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    hours = (datetime.now(timezone.utc) - stamp).total_seconds() / 3600
+    if hours < 0:
+        return "age unknown"
+    days = int(hours // 24)
+    if days >= _RATCHET_STALE_DAYS:
+        return f"stale, {days}d old"
+    return f"{days}d ago" if days else f"{int(hours)}h ago"
 
 
 def _summary_strip(entries: list[dict]) -> str:

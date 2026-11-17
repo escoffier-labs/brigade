@@ -35,9 +35,36 @@ brigade outcome explain <skill-or-card-id> --target .
 | `outcome rank` | Order artifacts by current score (Wilson lower bound) |
 | `outcome score` | Recompute and show scores from stored receipts |
 | `outcome reconcile` | Dry-run by default. `--apply` promotes a proven registry skill or rolls a regressed one back across harnesses |
+| `outcome reconcile --report` | Also write the advisory `.brigade/memory-care/outcome/ratchet-report.json` summary of this run |
+| `outcome ratchet` | Print the last written ratchet report, read-only, without ranking or reconciling |
 | `outcome explain` | Print the signal trail behind a score or reconcile decision |
 
 Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
+
+## Weekly ratchet report
+
+`outcome reconcile` prints its decisions and then forgets them. The weekly memory-care ratchet runs it as a dry run, so a skill held for "withheld: verified regression present" left no structured trace. `--report` writes one small file per run:
+
+```bash
+brigade outcome reconcile --target . --report
+brigade outcome ratchet --target . --json
+```
+
+`.brigade/memory-care/outcome/ratchet-report.json` is versioned (`"version": 1`), written atomically, capped at 64 KiB, and written at most once per reconcile call. It holds `generated_at`, the `apply` flag, summary counts (`decisions`, `regression_holds`, `regression_rollbacks`), decision counts by action, a `regressions` list of `{artifact_id, prior_state, reason_code, reason, helped, hurt}`, the receipt ineligibility rate, and the leading ineligibility reason. Only counts, ids and decision reasons are stored: no card body, handoff text or receipt payload. If a run produces more regression rows than the cap allows, trailing rows are dropped and `truncated` plus `regressions_omitted` say how many; the counts still describe the whole run.
+
+`reason_code` comes from the decision itself (`regression_hold` or `regression_rollback`), never from reason prose, so rewording a reason cannot silently recategorize a decision.
+
+The report is advisory:
+
+- `--apply` never reads it. Promotions and rollbacks come from receipts and status, exactly as before.
+- An absent, unreadable, oversized, wrong-version or symlinked file is a normal empty state. The loader refuses a symlinked path rather than following it.
+- Readers never recompute `rank` or `reconcile`, so an old file reads as old instead of being silently refreshed.
+
+Three surfaces read it, all read-only:
+
+- `brigade work brief` prints one bounded line: `outcome_ratchet: generated_at=... regression_holds=4 (a, b, c, d) ineligibility_rate=1.0 leading=unattributed`, or `outcome_ratchet: no report yet`.
+- `brigade outcome ratchet` prints the file, or `report: none` when the ratchet has not run with `--report`.
+- The Center dashboard outcomes view adds a panel below the ranking with the report age, summary counts, ineligibility rate and the regression rows. A report older than seven days is labeled stale.
 
 ## Which receipts are scoreable
 

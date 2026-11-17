@@ -3,18 +3,17 @@ from pathlib import Path
 from brigade.center_cmd.dashboard.views import outcome_rank
 
 
-def test_fetch_uses_outcome_rank_json(monkeypatch, tmp_path):
-    expected = {"ranking": []}
+def test_fetch_uses_outcome_rank_and_ratchet_json(monkeypatch, tmp_path):
     calls: list[tuple[Path, list[str]]] = []
 
     def fake_run_json(target: Path, args: list[str]) -> dict:
         calls.append((target, args))
-        return expected
+        return {"ranking": []} if args == ["outcome", "rank"] else {"version": 1}
 
     monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json", fake_run_json)
 
-    assert outcome_rank.fetch(tmp_path) == expected
-    assert calls == [(tmp_path, ["outcome", "rank"])]
+    assert outcome_rank.fetch(tmp_path) == {"ranking": [], "ratchet": {"version": 1}}
+    assert calls == [(tmp_path, ["outcome", "rank"]), (tmp_path, ["outcome", "ratchet"])]
 
 
 def test_render_displays_ranking_rows_with_cohort_and_recency_columns():
@@ -129,3 +128,108 @@ def test_render_empty_payloads_render_not_being_fed_panel():
         assert "outcome loop is not being fed" in fragment
         assert "<table" not in fragment
         assert "biggest net help" not in fragment
+
+
+def test_render_ratchet_panel_follows_ranking_table():
+    payload = {
+        "ranking": [{"artifact_id": "example-skill", "helped": 3, "hurt": 0}],
+        "ratchet": {
+            "version": 1,
+            "generated_at": "2026-11-17T07:30:00+00:00",
+            "apply": False,
+            "summary": {"decisions": 5, "regression_holds": 2, "regression_rollbacks": 0},
+            "decisions_by_action": {"bump": 1, "hold": 4},
+            "ineligibility_rate": 0.25,
+            "leading_ineligibility_reason": "unattributed",
+            "regressions": [
+                {
+                    "artifact_id": "skill-a",
+                    "prior_state": "candidate",
+                    "reason_code": "regression_hold",
+                    "reason": "withheld: verified regression present",
+                    "helped": 1,
+                    "hurt": 2,
+                },
+                {
+                    "artifact_id": "skill-b",
+                    "prior_state": "promoted",
+                    "reason_code": "regression_rollback",
+                    "reason": "verified regression measured",
+                    "helped": 0,
+                    "hurt": 3,
+                },
+            ],
+        },
+    }
+
+    fragment = outcome_rank.render(payload, "unused")
+
+    assert fragment.index("example-skill</td>") < fragment.index("Outcome ratchet report")
+    assert "generated_at 2026-11-17T07:30:00+00:00" in fragment
+    assert "regression holds 2" in fragment
+    assert "ineligibility_rate 0.250" in fragment
+    assert "leading reason unattributed" in fragment
+    assert "skill-a" in fragment
+    assert "skill-b" in fragment
+    assert "regression_rollback" in fragment
+    assert "verified regression measured" in fragment
+
+
+def test_render_ratchet_panel_marks_a_stale_report():
+    payload = {
+        "ranking": [],
+        "ratchet": {
+            "version": 1,
+            "generated_at": "2020-01-01T00:00:00+00:00",
+            "summary": {"decisions": 1, "regression_holds": 0, "regression_rollbacks": 0},
+            "regressions": [],
+        },
+    }
+
+    fragment = outcome_rank.render(payload, "unused")
+
+    assert "stale," in fragment
+    assert "No regression holds or rollbacks in the last run." in fragment
+
+
+def test_render_ratchet_panel_absent_and_error_states():
+    absent = outcome_rank.render({"ranking": []}, "unused")
+    assert "No outcome ratchet report yet" in absent
+    assert "outcome reconcile --target . --report" in absent
+
+    failed = outcome_rank.render({"ranking": [], "ratchet": {"error": "ratchet boom"}}, "unused")
+    assert "ratchet boom" in failed
+    assert 'class="error"' in failed
+
+    # A broken report must not hide the ranking table.
+    assert "example-skill" in outcome_rank.render(
+        {"ranking": [{"artifact_id": "example-skill"}], "ratchet": {"error": "boom"}}, "unused"
+    )
+
+
+def test_render_escapes_ratchet_values():
+    payload = {
+        "ranking": [],
+        "ratchet": {
+            "version": 1,
+            "generated_at": '<img src=x onerror="alert(1)">',
+            "summary": {"decisions": 1, "regression_holds": 1, "regression_rollbacks": 0},
+            "regressions": [
+                {
+                    "artifact_id": "<script>bad</script>",
+                    "prior_state": "candidate",
+                    "reason_code": "regression_hold",
+                    "reason": "<b>boom</b>",
+                    "helped": 0,
+                    "hurt": 1,
+                }
+            ],
+        },
+    }
+
+    fragment = outcome_rank.render(payload, "unused")
+
+    assert "<script>" not in fragment
+    assert "<b>boom</b>" not in fragment
+    assert "&lt;script&gt;" in fragment
+    assert "&lt;b&gt;boom&lt;/b&gt;" in fragment
