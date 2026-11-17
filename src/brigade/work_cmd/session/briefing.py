@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from ... import dogfood_cmd, localio, memory_care_instructions
+from ... import dogfood_cmd, localio, memory_care_instructions, outcome_ratchet_report
 from ...config import load_config
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
@@ -333,6 +333,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     daily_health = daily_cmd.health(target)
     phase_health = phases_cmd.health(target)
     outcome_health = outcome_cmd.health(target)
+    outcome_ratchet = outcome_ratchet_report.brief_payload(outcome_ratchet_report.load_report(target))
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -566,6 +567,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "issue_count": outcome_health["issue_count"],
             "top_issue": outcome_health["top_issue"],
         },
+        "outcome_ratchet": outcome_ratchet,
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
@@ -658,6 +660,33 @@ def _fleet_routing_for_brief() -> dict[str, Any] | None:
 
 def _print_bootstrap_line(level: str, name: str, detail: object) -> None:
     print(f"[{level}] {name}: {detail}")
+
+
+def _outcome_ratchet_line(ratchet: object) -> str:
+    """Return the one-line session-brief summary of the last advisory ratchet report."""
+    report = ratchet if isinstance(ratchet, dict) else {}
+    if not report.get("present"):
+        return "outcome_ratchet: no report yet"
+    ids = [str(item) for item in report.get("regression_hold_ids") or []]
+    raw_total = report.get("regression_holds")
+    total = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else len(ids)
+    if ids:
+        listed = ", ".join(ids)
+        if total > len(ids):
+            listed += f" +{total - len(ids)} more"
+    elif total > 0:
+        # The id list is bounded and the rows may be capped out; never say "none"
+        # beside a nonzero hold count.
+        listed = f"{total} not listed"
+    else:
+        listed = "none"
+    return (
+        f"outcome_ratchet: generated_at={report.get('generated_at')} "
+        f"mode={report.get('mode') or 'dry-run'} "
+        f"regression_holds={report.get('regression_holds')} ({listed}) "
+        f"ineligibility_rate={report.get('ineligibility_rate')} "
+        f"leading={report.get('leading_reason') or 'none'}"
+    )
 
 
 def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
@@ -786,6 +815,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
         if top_outcome:
             print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")
+    print(_outcome_ratchet_line(payload.get("outcome_ratchet")))
 
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:

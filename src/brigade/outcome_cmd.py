@@ -76,6 +76,7 @@ class _ReconcileItem:
     prior_status: str
     cohorts: core.FingerprintCohorts | None = None
     scorecard: scorecard_mod.SubjectScorecard | None = None
+    artifact_kind: str = "skill"
 
 
 def _records_path(target: Path) -> Path:
@@ -2141,13 +2142,15 @@ def reconcile(
     apply: bool = False,
     config: core.ReconcileConfig | None = None,
     json_output: bool = False,
+    report: bool = False,
 ) -> int:
     """Run the autonomous ratchet over every scored artifact.
 
     Dry-run by default (the canary posture): it reports what it would promote or
     roll back without writing. With ``apply`` it writes a decision receipt per
     transition, advances the persisted status, and performs the physical skill
-    install/rollback. No human approval is consulted.
+    install/rollback. No human approval is consulted. ``report`` additionally
+    writes the advisory ratchet report; it never changes a decision or status.
 
     Skills promote only through the receipt scorecard dual gate (#503); legacy
     ``records.jsonl`` signals never advance skill promotion. Cards still use the
@@ -2167,6 +2170,7 @@ def reconcile(
 
     results: list[_ReconcileItem] = []
     reported: list[_ReconcileItem] = []
+    audited: list[_ReconcileItem] = []
     for artifact_id in _reconcile_artifact_ids(kinds, status_map, scorecards, cohorts_by_artifact):
         entry = status_map.get(artifact_id) or {}
         prior_status = entry.get("status", "candidate")
@@ -2189,7 +2193,9 @@ def reconcile(
             prior_status=prior_status,
             cohorts=cohorts,
             scorecard=card,
+            artifact_kind=artifact_kind,
         )
+        audited.append(item)
         if decision.action != "hold":
             results.append(item)
         elif _surface_hold_decision(decision, prior_status):
@@ -2278,6 +2284,8 @@ def reconcile(
             "reason": decision.reason,
             "execution": executions.get(decision.artifact_id, "dry-run"),
         }
+        if decision.code is not None:
+            payload_item["reason_code"] = decision.code
         if cohorts is not None:
             payload_item["score"] = cohorts.current.score
             payload_item.update(_fingerprint_decision_fields(cohorts))
@@ -2299,6 +2307,10 @@ def reconcile(
         "decisions": decisions_payload,
         "applied": applied,
     }
+    if report:
+        from . import outcome_ratchet_report
+
+        outcome_ratchet_report.write_report(target, audited, apply=apply, generated_at=now)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

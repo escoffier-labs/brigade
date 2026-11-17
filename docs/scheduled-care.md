@@ -459,8 +459,10 @@ Rank verified-learning outcomes, then reconcile skill promotion state. `reconcil
 
 ```bash
 brigade outcome rank --target .
-brigade outcome reconcile --target .
+brigade outcome reconcile --target . --report
 ```
+
+`--report` writes `.brigade/memory-care/outcome/ratchet-report.json`, a versioned summary of that run: decision counts by action, regression holds and rollbacks with their reason codes and helped/hurt counts, the receipt ineligibility rate, and the leading ineligibility reason. It stays a dry run; the flag adds an advisory file, never a status change. `brigade outcome ratchet --target .` prints the last report without ranking or reconciling, `brigade work brief` adds one `outcome_ratchet:` line, and the Center dashboard outcomes view shows the same summary below the ranking and marks a report older than seven days as stale. See [Outcome scoring](outcome-scoring.md#weekly-ratchet-report).
 
 Deliberate promotion or rollback:
 
@@ -475,7 +477,7 @@ Schedule rank first, then reconcile 30 to 60 minutes later so new verify receipt
 ```cron
 PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 7 * * 1 cd "WORKSPACE" && brigade outcome rank --target .
-30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target .
+30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target . --report
 ```
 
 To apply promotions automatically after review:
@@ -523,7 +525,7 @@ Description=Brigade weekly outcome reconcile
 Type=oneshot
 WorkingDirectory=WORKSPACE
 Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=brigade outcome reconcile --target .
+ExecStart=brigade outcome reconcile --target . --report
 ```
 
 `~/.config/systemd/user/brigade-outcome-reconcile.timer`:
@@ -599,7 +601,7 @@ jobs:
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - run: brigade outcome reconcile --target .
+      - run: brigade outcome reconcile --target . --report
 ```
 
 The GitHub Actions recipe runs reconcile immediately after rank in the same workflow (`needs: outcome-rank`), not 30 to 60 minutes later. That is fine for CI: both jobs share the same restored `.brigade` cache and rank only reads receipts already on disk. On a laptop, keep the cron or timer gap so verify runs between rank and reconcile can finish first.
