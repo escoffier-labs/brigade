@@ -3,6 +3,7 @@ status: active
 proof: drive
 surfaces: t3 open
 drive: t3-enrollment
+last-drive: 2026-11-17 ee4ce03b0
 ---
 
 # Native T3 enrollment (`brigade t3 open`)
