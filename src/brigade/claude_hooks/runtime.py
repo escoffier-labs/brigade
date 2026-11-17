@@ -1879,7 +1879,7 @@ def _record_exercised_artifact(state: dict[str, Any], artifact_id: str | None, *
     if not isinstance(artifact_id, str):
         return False
     trimmed = artifact_id.strip()
-    if not trimmed:
+    if not trimmed or trimmed == "auto":  # "auto" is a request, not an artifact (outcome_attribution.AUTO_CAPTURE)
         return False
     current = state.get("exercised_artifact_id")
     if (
@@ -1914,11 +1914,13 @@ def _verify_replacement(
     *,
     capture_artifact_id: str | None = None,
 ) -> str:
-    from .. import outcome_cmd
+    from .. import outcome_attribution
 
-    artifact_id = outcome_cmd.resolve_capture_artifact_id(
-        capture_artifact_id,
-        exercised_artifact_for_fingerprint(target, session_fingerprint),
+    # No explicit or exercised id: let verify resolve skills from this session (veto-only).
+    artifact_id = (
+        capture_artifact_id
+        or exercised_artifact_for_fingerprint(target, session_fingerprint)
+        or outcome_attribution.AUTO_CAPTURE
     )
     return (
         f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} "

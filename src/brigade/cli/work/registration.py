@@ -325,7 +325,8 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--capture",
         default=None,
         metavar="ARTIFACT_ID",
-        help="Capture this run's outcome for ARTIFACT_ID in the same step (closes the loop; no separate capture).",
+        help="Capture this run's outcome for ARTIFACT_ID in the same step (closes the loop; no separate capture). "
+        "Pass 'auto' to capture against every skill this session read (session-observed, veto-only attribution).",
     )
     p_work_verify_run.add_argument(
         "--capture-kind", default="skill", choices=["skill", "card"], help="Artifact kind for --capture."

@@ -74,6 +74,21 @@ same-uid mutations and processes that ignore advisory locks remain residuals
 under [the threat model in #1093](https://github.com/escoffier-labs/brigade/issues/1093).
 Windows directory sharing modes are unchanged.
 
+## Skills read by the session
+
+`brigade work verify run --capture auto` reads the session file for the current
+session (`BRIGADE_CLAUDE_SESSION`, or `BRIGADE_AGENT_SESSION`, matched against
+`session_fingerprint`) and derives skill ids from the ordered `read_files` list
+(any `.../skills/<id>/SKILL.md`). The reader is file-only: it never runs or
+signals the hook. It enumerates the held sessions directory, skips anything that
+is not a regular file, refuses a state file over 1 MiB, scans at most the 512
+most recently modified files, and returns no skills on any read failure. Only
+ids the registry or an installed harness has are kept. The attribution is
+forgeable and veto-only; see
+[attribution sources](outcome-scoring.md#attribution-sources). The `Skill` tool
+is not yet in the PostToolUse matcher, so a skill loaded through it leaves no
+`read_files` entry.
+
 ## Native Windows qualification
 
 `tests/test_claude_hooks_state_containment.py` uses directory junctions on

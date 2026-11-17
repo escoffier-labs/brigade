@@ -52,6 +52,10 @@ NON_PROMOTING_SOURCES = frozenset(
 )
 
 
+CALLER_TYPED = "caller_typed"
+SESSION_OBSERVED = "session_observed"
+
+
 @dataclass(frozen=True)
 class OutcomeRecord:
     """One verified (or neutral) signal for an artifact on a single task.
@@ -100,6 +104,14 @@ class OutcomeRecord:
     pruning instead of living only in the receipts directory (#650). ``None``
     when the capture was not reused, and on rows written before this field.
     """
+    attribution_source: str = CALLER_TYPED
+    """Who named the artifact: ``caller_typed`` (explicit id) or ``session_observed``.
+
+    ``session_observed`` rows come from ``--capture auto`` reading the hook session
+    state. That is forgeable, so they count toward hurt only and can only hold
+    (see ``outcome_attribution``). Rows written before this field read as
+    ``caller_typed``; they are never reclassified.
+    """
 
 
 @dataclass(frozen=True)
@@ -110,6 +122,8 @@ class OutcomeScore:
     neutral: int
     score: float
     last_signal_ts: str | None
+    observed_hurt: int = 0
+    """Hurt rows that came from ``session_observed`` attribution (already inside ``hurt``)."""
 
 
 @dataclass(frozen=True)
@@ -203,7 +217,11 @@ def scored_records(records: list[OutcomeRecord]) -> list[OutcomeRecord]:
     seen: set[tuple] = set()
     deduped: list[OutcomeRecord] = []
     for idx, r in enumerate(records):
-        key: tuple = (r.source, r.evidence_ref, r.task_id) if r.evidence_ref else ("__unkeyed__", idx)
+        # attribution_source is part of the key so a forgeable observed row can
+        # never shadow a caller-typed row for the same receipt.
+        key: tuple = (
+            (r.source, r.evidence_ref, r.task_id, r.attribution_source) if r.evidence_ref else ("__unkeyed__", idx)
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -214,8 +232,10 @@ def scored_records(records: list[OutcomeRecord]) -> list[OutcomeRecord]:
 def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScore:
     """Fold an artifact's records into counts plus a Wilson lower-bound score."""
     deduped = scored_records(records)
-    helped = sum(1 for r in deduped if r.signal_value > 0)
+    # session_observed attribution is forgeable: it may lower a rank, never raise it.
+    helped = sum(1 for r in deduped if r.signal_value > 0 and r.attribution_source != SESSION_OBSERVED)
     hurt = sum(1 for r in deduped if r.signal_value < 0)
+    observed_hurt = sum(1 for r in deduped if r.signal_value < 0 and r.attribution_source == SESSION_OBSERVED)
     neutral = sum(1 for r in deduped if r.signal_value == 0)
     total = helped + hurt
     last_ts = max((r.ts for r in records), default=None)
@@ -226,6 +246,7 @@ def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScor
         neutral=neutral,
         score=wilson_lower_bound(helped, total),
         last_signal_ts=last_ts,
+        observed_hurt=observed_hurt,
     )
 
 
@@ -366,6 +387,8 @@ def recency_weighted_counts(
         if record.signal_value == 0:
             continue
         weight = recency_weight(_record_age_seconds(now, record.ts), half_life_seconds)
+        if record.signal_value > 0 and record.attribution_source == SESSION_OBSERVED:
+            continue  # observed attribution never counts toward helped
         weighted_total += weight
         if record.signal_value > 0:
             weighted_helped += weight

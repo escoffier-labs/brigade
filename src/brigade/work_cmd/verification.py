@@ -22,6 +22,7 @@ from .. import (
     generated_patch_quarantine,
     code_graph_delta,
     localio,
+    outcome_attribution,
     receipt_json,
     receipt_schema,
     receipt_signing,
@@ -2002,6 +2003,11 @@ def verify_run(
         return 2
     planned_display = _planned_commands_display(planned)
     planned_identity = _planned_commands_identity(planned)
+    auto_ids: list[str] = []
+    if capture == outcome_attribution.AUTO_CAPTURE:
+        # Resolve once, before the retry gate; the literal "auto" is never persisted.
+        auto_ids = outcome_attribution.resolve_auto_capture(target)
+        capture, capture_kind = (auto_ids[0] if auto_ids else None), "skill"
     try:
         capture_before_retry = config.resolve_capture_before_retry(target)
     except ValueError as exc:
@@ -2069,8 +2075,6 @@ def verify_run(
         # receive their one neutral capture, including after repeated signals.
         if json_output:
             if capture:
-                from .. import outcome_cmd
-
                 scoreability = _scoreability_notice(target, receipt)
                 if (
                     receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
@@ -2078,12 +2082,12 @@ def verify_run(
                 ):
                     sink = io.StringIO()
                     with redirect_stdout(sink), redirect_stderr(sink):
-                        outcome_cmd.capture(
+                        outcome_attribution.capture_artifacts(
                             target=target,
-                            artifact_id=capture,
+                            artifact_ids=auto_ids or [capture],
                             artifact_kind=capture_kind,
                             run_id=receipt["run_id"],
-                            json_output=False,
+                            observed=bool(auto_ids),
                         )
                     receipt["outcome_scoreability"] = scoreability
                     _attach_miseledger_indexing(receipt, target=target, json_output=True)
@@ -2104,20 +2108,18 @@ def verify_run(
                     )
             verify_runtime._print_verify_console(f"receipt: {Path(str(receipt['path'])) / 'receipt.json'}")
             if capture:
-                from .. import outcome_cmd
-
                 scoreability = _scoreability_notice(target, receipt)
                 if (
                     receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
                     or cancellation.received is None
                 ):
                     with verify_runtime._verify_console_output():
-                        outcome_cmd.capture(
+                        outcome_attribution.capture_artifacts(
                             target=target,
-                            artifact_id=capture,
+                            artifact_ids=auto_ids or [capture],
                             artifact_kind=capture_kind,
                             run_id=receipt["run_id"],
-                            json_output=False,
+                            observed=bool(auto_ids),
                         )
                     receipt["outcome_scoreability"] = scoreability
                     with verify_runtime._verify_console_output():

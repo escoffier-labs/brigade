@@ -26,6 +26,7 @@ from . import (
     causal_receipt,
     localio,
     outcome as core,
+    outcome_attribution,
     outcome_projection,
     receipt_schema,
     scorecard as scorecard_mod,
@@ -699,6 +700,7 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
             reused_evidence_ref=reused_evidence_ref
             if isinstance(reused_evidence_ref, str) and reused_evidence_ref
             else None,
+            attribution_source=outcome_attribution.normalize_attribution_source(payload.get("attribution_source")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -1972,6 +1974,7 @@ def capture(
     run_id: str | None = None,
     run_receipt: str | None = None,
     json_output: bool = False,
+    attribution_source: str = core.CALLER_TYPED,
 ) -> int:
     """Correlate a verified receipt outcome into the digest-chained ledger.
 
@@ -2057,6 +2060,7 @@ def capture(
         route=route,
         route_fingerprint=route_fingerprint(route),
         reused_evidence_ref=reused_evidence_ref,
+        attribution_source=attribution_source,
     )
     companion = _outcome_causal_receipt(record, receipt)
     try:
@@ -2178,15 +2182,20 @@ def reconcile(
         artifact_kind = kinds.get(artifact_id, "skill")
         cohorts = cohorts_by_artifact.get(artifact_id)
         card = scorecards.get(artifact_id)
-        decision = _decide_reconcile_item(
-            artifact_id,
-            artifact_kind,
-            cohorts=cohorts,
-            card=card,
+        decision = outcome_attribution.apply_observed_veto(
+            _decide_reconcile_item(
+                artifact_id,
+                artifact_kind,
+                cohorts=cohorts,
+                card=card,
+                prior_status=prior_status,
+                last_action_ts=last_action_ts,
+                now=now,
+                config=config,
+            ),
+            cohorts,
+            artifact_kind=artifact_kind,
             prior_status=prior_status,
-            last_action_ts=last_action_ts,
-            now=now,
-            config=config,
         )
         item = _ReconcileItem(
             decision=decision,

@@ -864,6 +864,7 @@ transport env path. See `docs/skill-registry.md`.
 | `route` | object | no | Route manifest |
 | `route_fingerprint` | string | no | |
 | `reused_evidence_ref` | string | no | Reused verify receipt path when `evidence_ref` was canonicalized through `reused_from` (#650) |
+| `attribution_source` | string | no | `caller_typed` (explicit id) or `session_observed` (`--capture auto`). Absent on older rows, which read as `caller_typed`. `session_observed` counts toward hurt only and can only hold; see [attribution sources](outcome-scoring.md#attribution-sources) |
 
 ---
 

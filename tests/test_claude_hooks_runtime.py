@@ -295,7 +295,7 @@ def test_pretooluse_denies_raw_verification_with_exact_replacement(tmp_path: Pat
     reason = specific["permissionDecisionReason"]
     assert "brigade work verify run" in reason
     assert f"--target {target.resolve()}" in reason
-    assert "--capture brigade-work" in reason
+    assert "--capture auto" in reason
     assert "python -m pytest -q" in reason
 
 
@@ -2949,17 +2949,17 @@ def test_verify_replacement_uses_session_exercised_artifact(tmp_path: Path):
     )
     reason = result["hookSpecificOutput"]["permissionDecisionReason"]
     assert "--capture taste" in reason
-    assert "--capture brigade-work" not in reason
+    assert "--capture auto" not in reason
 
 
-def test_verify_replacement_falls_back_to_brigade_work(tmp_path: Path):
+def test_verify_replacement_falls_back_to_auto_capture(tmp_path: Path):
     target = _wired_claude(tmp_path)
     result = runtime.handle_payload(
         "PreToolUse",
         _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
     )
     reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "--capture brigade-work" in reason
+    assert "--capture auto" in reason
 
 
 def test_posttooluse_routed_verify_records_capture_artifact(tmp_path: Path):

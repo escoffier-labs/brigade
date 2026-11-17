@@ -182,7 +182,7 @@ def test_task_reset_does_not_inherit_artifact_or_accept_old_snapshot(target):
     assert old == before
     assert runtime.read_session_state(target, SESSION) == current
     result = event(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"})
-    assert "--capture brigade-work" in result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "--capture auto" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 @pytest.mark.parametrize("failure", ["lock", "write"])
