@@ -100,7 +100,11 @@ after the output budget is exhausted. Malformed data or a reflection failure
 returns the fixed `path-scope-unavailable` refusal without buffered output. An
 incomplete assessment never admits a writer.
 
-This guard covers conflict responses. The existing ownership GET read policy
+This guard covers conflict responses. A `GET /work/items/<id>/ownership` that
+presents `X-Worklore-Holder` now claims to be the holder and passes the same node
+and capability check as a holder write, at the current generation. A foreign node,
+a foreign or stale capability, an admin token, or an item with no node holder is
+refused as `holder-mismatch` (403). A read without the header is unchanged and
 still returns stored scope metadata. Rejecting foreign holder capabilities at
 metadata ingestion and addressing previously stored values remain follow-up
 work under #1595.
@@ -108,10 +112,13 @@ work under #1595.
 Resolution codes describe an end state for ownership review. They do not
 instruct callers to release another holder automatically.
 
-These structured details are supported through raw HTTP. The existing Python
-client exposes the refusal's error code and sanitized message, discarding
-`conflicts`, `resolution` and `truncated`. Bounded client propagation remains
-epic work.
+These structured details are supported through raw HTTP. The Python client
+keeps them on `WorkloreClientError.details` for a `path-scope-*` refusal: the
+`resolution` code, at most eight `conflicts` with only the fields above (each
+value capped at 256 characters and stripped of terminal controls), and
+`truncated`. Any other refusal has empty `details`. `brigade fleet work` commands
+print one line per conflict plus the resolution, or the same fields in `--json`
+output. A refusal body past the client's 64 KiB error cap yields no details.
 
 ## Historical observation and limits
 

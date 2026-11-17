@@ -902,6 +902,83 @@ def test_scheduled_compensation_watch_runs_before_proposing(setup, capsys):
     )
 
 
+def _watching(hub, reply):
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    hub.do_status = status
+    watched = []
+
+    def watch(body):
+        watched.append(body["scope"])
+        return reply
+
+    hub.do_compensation_watch = watch
+    return watched
+
+
+def _two_scopes(target, hub, reflect):
+    (target / ".brigade/memory-care.toml").write_text(
+        f'[hub]\nmode="read"\nread_scopes=["fleet", "repo:acme/app"]\n[reflect]\nscopes={reflect}\n'
+    )
+    for ident, anchor in (("c", "c-123abc"), ("d", "c-321cba")):
+        hub._commit(
+            "card.put",
+            "repo:acme/app",
+            ident,
+            f"---\nevidence: []\n---\nOther claim. ^{anchor}\n",
+            "live",
+            hubc.event_id(),
+        )
+
+
+def test_reflect_scopes_limit_the_watch_and_every_proposal(setup, capsys):
+    target, hub, _ = setup
+    _two_scopes(target, hub, '["repo:acme/app"]')
+    watched = _watching(hub, (200, {"results": [], "next_after": None}))
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code == 0, payload
+    assert watched == ["repo:acme/app"]
+    assert payload["reflected_scopes"] == ["repo:acme/app"]
+    proposed = [op["scope"] for c in hub.calls if c["action"] == "propose" for op in c["ops"]]
+    assert proposed and set(proposed) == {"repo:acme/app"}
+
+
+def test_reflect_scopes_default_to_every_read_scope(setup, capsys):
+    target, hub, _ = setup
+    (target / ".brigade/memory-care.toml").write_text('[hub]\nmode="read"\nread_scopes=["fleet", "repo:acme/app"]\n')
+    watched = _watching(hub, (200, {"results": [], "next_after": None}))
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code == 0, payload
+    assert watched == ["fleet", "repo:acme/app"]
+    assert payload["reflected_scopes"] == ["fleet", "repo:acme/app"]
+
+
+def test_missing_reflect_grant_in_a_reflected_scope_still_fails(setup, capsys):
+    target, hub, _ = setup
+    _two_scopes(target, hub, '["repo:acme/app"]')
+    watched = _watching(hub, (403, {"code": "memory_grant_missing", "error": "reflect right required"}))
+    code, _ = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code != 0
+    assert watched == ["repo:acme/app"]
+    assert not any(c["action"] == "propose" for c in hub.calls)
+    assert run(target, capsys, "status")[1]["schedule"]["consecutive_failures"] == 1
+
+
+@pytest.mark.parametrize("value", ['["nope"]', "[]", '"repo:acme/app"', '["repo:acme/app", "repo:acme/app"]', "[1]"])
+def test_reflect_scopes_must_be_distinct_configured_read_scopes(setup, capsys, value):
+    target, hub, _ = setup
+    _two_scopes(target, hub, value)
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code != 0
+    assert payload["code"] == "hub_reflect_config"
+    assert writes(hub) == []
+
+
 def test_compensation_watch_dry_run_does_not_write(setup, capsys):
     target, hub, _ = setup
     run(target, capsys, "run", "--hub", "--scheduled", "--dry-run")

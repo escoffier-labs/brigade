@@ -19,7 +19,8 @@ from typing import Any
 from . import fleet_admin_explorer as explorer
 from . import fleet_command_deck as deck
 from . import fleet_policy_pr_rules as rules_mod
-from .fleet_policy_form import NEW_TARGET, Submission
+from .fleet_form_fields import attr, caption
+from .fleet_policy_form import NEW_TARGET, PR_RULE_FORM, Submission
 from .fleet_policy_page import Plan, _confirm_form, csrf_value
 from .ui_theme import empty_state
 
@@ -36,6 +37,11 @@ CONFIRM_HINT = (
     "the save is refused. Nothing is applied to GitHub."
 )
 _esc = html.escape
+
+
+def _cap(text: str, name: str) -> str:
+    return caption(text, PR_RULE_FORM[name])
+
 
 CSS = """
 .rules-page .access-note { margin:0 0 12px; color:var(--muted); font-size:12px; }
@@ -137,7 +143,7 @@ def _rule_json(rule: Mapping[str, Any]) -> str:
 
 def _preview_row(reason: str = "") -> str:
     return (
-        '<div class="rule-form-actions"><label>Reason (optional)'
+        f'<div class="rule-form-actions"><label>{_cap("Reason", "reason")}'
         f'<input type="text" name="reason" maxlength="240" value="{_esc(reason, quote=True)}"></label>'
         '<button type="submit" name="action" value="preview" class="primary">Preview change</button></div>'
         '<p class="hint">Preview shows what changes. Nothing is saved until you confirm.</p>'
@@ -150,13 +156,15 @@ def _draft_field(draft: Submission | None, target: str, name: str, fallback: str
     return fallback
 
 
-def _select(name: str, options: Sequence[tuple[str, str]], current: str, *, blank: str | None = None) -> str:
+def _select(
+    name: str, options: Sequence[tuple[str, str]], current: str, *, blank: str | None = None, attrs: str = ""
+) -> str:
     rows = [f'<option value="">{_esc(blank)}</option>'] if blank is not None else []
     rows.extend(
         f'<option value="{_esc(value, quote=True)}"{" selected" if value == current else ""}>{_esc(label)}</option>'
         for value, label in options
     )
-    return f'<select name="{_esc(name, quote=True)}">{"".join(rows)}</select>'
+    return f'<select name="{_esc(name, quote=True)}"{attrs}>{"".join(rows)}</select>'
 
 
 def _action_parts(action: str) -> dict[str, str]:
@@ -188,21 +196,21 @@ def _action_rows(rule: Mapping[str, Any] | None, draft: Submission | None, targe
         }
         rows.append(
             f'<div class="rule-action-row" data-kind="{_esc(values["kind"], quote=True)}">'
-            f'<label class="act-kind">Action {index + 1}'
+            f'<label class="act-kind">{_cap(f"Action {index + 1}", "act_kind")}'
             + _select(f"field.act_kind_{index}", kinds, values["kind"], blank="None").replace(
                 "<select ", '<select class="act-kind-select" ', 1
             )
             + "</label>"
-            '<label class="act-part act-reviewer">Reviewer'
+            f'<label class="act-part act-reviewer">{_cap("Reviewer", "act_reviewer")}'
             + _select(f"field.act_reviewer_{index}", reviewers, values["reviewer"], blank="Choose")
             + "</label>"
-            '<label class="act-part act-value">Label or note text'
+            f'<label class="act-part act-value">{_cap("Label or note text", "act_value")}'
             f'<input type="text" name="field.act_value_{index}" maxlength="{rules_mod.MAX_NOTE}" '
             f'value="{_esc(values["value"], quote=True)}"></label>'
-            '<label class="act-part act-count">Limit'
+            f'<label class="act-part act-count">{_cap("Limit", "act_count")}'
             f'<input type="text" inputmode="numeric" name="field.act_count_{index}" maxlength="3" '
             f'value="{_esc(values["count"], quote=True)}"></label>'
-            '<label class="act-part act-period">Per'
+            f'<label class="act-part act-period">{_cap("Per", "act_period")}'
             + _select(f"field.act_period_{index}", periods, values["period"])
             + "</label></div>"
         )
@@ -232,8 +240,8 @@ def _rule_form(
     if draft is not None and draft.scope == "pr_rules" and draft.target == target:
         enabled = "enabled" in draft.fields
     identity = (
-        "<label>Rule id (lowercase letters, digits, dashes)"
-        f'<input type="text" name="field.id" maxlength="64" pattern="[a-z0-9][a-z0-9\\-]*" required '
+        f"<label>{_cap('Rule id (lowercase letters, digits, dashes)', 'id')}"
+        f'<input type="text" name="field.id" maxlength="64" pattern="[a-z0-9][a-z0-9\\-]*"{attr(PR_RULE_FORM["id"])} '
         f'value="{_esc(get("id", ""), quote=True)}"></label>'
         if rule is None
         else ""
@@ -242,28 +250,32 @@ def _rule_form(
         f'<form method="post" action="{FORM_ACTION}" class="rule-form" data-cond="{_esc(get("condition", when["condition"]), quote=True)}">'
         + _hidden(target, revision, csrf)
         + identity
-        + "<label>Title (what a person reads)"
-        f'<input type="text" name="field.title" maxlength="{rules_mod.MAX_TITLE}" required '
+        + f"<label>{_cap('Title (what a person reads)', 'title')}"
+        f'<input type="text" name="field.title" maxlength="{rules_mod.MAX_TITLE}"{attr(PR_RULE_FORM["title"])} '
         f'value="{_esc(get("title", rule["title"] if rule else ""), quote=True)}"></label>'
         "<fieldset><legend>When</legend>"
-        "<label>Condition" + _select("field.condition", conditions, get("condition", when["condition"])) + "</label>"
-        '<label class="cond-param cond-docs_only">Doc paths, space separated (blank uses docs/** and *.md)'
+        f"<label>{_cap('Condition', 'condition')}"
+        + _select(
+            "field.condition", conditions, get("condition", when["condition"]), attrs=attr(PR_RULE_FORM["condition"])
+        )
+        + "</label>"
+        f'<label class="cond-param cond-docs_only">{_cap("Doc paths, space separated (blank uses docs/** and *.md)", "when_paths")}'
         f'<input type="text" name="field.when_paths" maxlength="600" value="{_esc(get("when_paths", when["paths"]), quote=True)}"></label>'
-        '<label class="cond-param cond-review_quota_exhausted">Reviewer that is out of reviews'
+        f'<label class="cond-param cond-review_quota_exhausted">{_cap("Reviewer that is out of reviews", "when_reviewer")}'
         + _select("field.when_reviewer", reviewers, get("when_reviewer", when["reviewer"]), blank="Choose")
         + "</label>"
-        '<label class="cond-param cond-label_present">PR label'
+        f'<label class="cond-param cond-label_present">{_cap("PR label", "when_label")}'
         f'<input type="text" name="field.when_label" maxlength="64" value="{_esc(get("when_label", when["label"]), quote=True)}"></label>'
-        '<label class="cond-param cond-repository">Repositories (owner/name, space separated)'
+        f'<label class="cond-param cond-repository">{_cap("Repositories (owner/name, space separated)", "when_repos")}'
         f'<input type="text" name="field.when_repos" maxlength="2000" value="{_esc(get("when_repos", when["repos"]), quote=True)}"></label>'
         "</fieldset>"
         "<fieldset><legend>Then</legend>" + _action_rows(rule, draft, target) + "</fieldset>"
-        "<label>Only these repositories (blank means every fleet repository)"
+        f"<label>{_cap('Only these repositories (blank means every fleet repository)', 'scope_repos')}"
         f'<input type="text" name="field.scope_repos" maxlength="2000" '
         f'value="{_esc(get("scope_repos", " ".join(rule["scope"]["repos"]) if rule else ""), quote=True)}"></label>'
-        f'<label>Why (optional)<input type="text" name="field.why" maxlength="{rules_mod.MAX_WHY}" '
+        f'<label>{_cap("Why", "why")}<input type="text" name="field.why" maxlength="{rules_mod.MAX_WHY}" '
         f'value="{_esc(get("why", (rule["why"] or "") if rule else ""), quote=True)}"></label>'
-        f'<label class="rule-check"><input type="checkbox" name="field.enabled" value="1"{" checked" if enabled else ""}> Rule is on</label>'
+        f'<label class="rule-check"><input type="checkbox" name="field.enabled" value="1"{" checked" if enabled else ""}> {_cap("Rule is on", "enabled")}</label>'
         + _preview_row(_draft_reason(draft, target))
         + "</form>"
     )

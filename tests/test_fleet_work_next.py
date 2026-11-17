@@ -251,6 +251,35 @@ def test_source_policy_exclusion_is_respected(conn):
     assert result["considered"] == [{"work_id": work_id, "bucket": "source-policy"}]
 
 
+def test_campaign_exclusion_blocks_selection_even_with_an_eligible_source_link(conn):
+    from tests.test_worklore_campaign_take import create, make_members_selectable, members
+
+    create(conn)
+    ids = members(conn)
+    make_members_selectable(conn, list(ids.values()))
+    excluded = ids["acme/excluded"]
+    # The excluded repo's member also carries a live, eligible source link, the way an
+    # issue sitting in a release milestone does. Only the explicit exclusion should hold it.
+    conn.execute(
+        "INSERT INTO work_links (link_id, work_id, link_type, external_key, display_ref, url, external_state, "
+        "external_updated_at, source_policy, source_acceptance_json, synced_at, stale_at, adapter_id, owner_node) "
+        "VALUES (?, ?, 'github', 'acme/excluded#1', NULL, NULL, 'open', '2026-09-05T11:00:00+00:00', 'eligible', "
+        "'[]', '2026-09-05T11:00:00+00:00', NULL, 'github', 'node-a')",
+        (f"lnk-{excluded}", excluded),
+    )
+    conn.execute("UPDATE work_items SET burn_rank=1 WHERE work_id=?", (excluded,))
+    conn.execute("UPDATE work_items SET burn_rank=50 WHERE work_id!=?", (excluded,))
+    conn.commit()
+    result = fleet_hub_routing.work_next(conn, consumer="brigade-run", workload="general")
+    assert result["work_id"] in {ids["acme/one"], ids["acme/two"]}
+    assert {"work_id": excluded, "bucket": "not-eligible"} in result["considered"]
+    assert fleet_hub_routing.evaluate_work_item(fleet_hub_routing._lookup_work(conn, excluded)) == {
+        "ok": False,
+        "reason": "work-held",
+        "detail": "not-eligible",
+    }
+
+
 def test_unreadable_lookup_is_never_eligible(conn):
     _seed(conn, "Only item", rank=1)
     fleet_hub_routing.set_work_item_lookup(lambda _conn, _work_id: None)

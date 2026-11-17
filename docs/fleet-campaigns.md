@@ -102,6 +102,46 @@ terminal control characters. The Hub routes are `POST /work/campaigns` (operator
 201 when created, 200 otherwise), `GET /work/campaigns` and
 `GET /work/campaigns/<key>`. The key in the path may be percent-encoded.
 
+## Complete a member or the campaign
+
+```
+brigade fleet campaign complete KEY [--repo R] [--evidence REF ...] [--json]
+```
+
+Only an operator may complete, through the same authorization check the transition route
+uses (a configured operator node, or the admin token). A node token without operator
+authority is refused as `forbidden`, whether or not it holds the member. Without `--repo`
+the campaign item completes; with `--repo` the member for that canonical repository
+identity completes. `campaign show` and `campaigns --json` include each item's `version`,
+which is the `If-Match` value the CLI sends.
+
+Completion walks the existing lifecycle edges from the item's current status to
+`completed` in one transaction, running the ordinary per-step rule for every edge. A step
+the store refuses rolls the whole operation back and leaves the item unchanged, and a
+wrong `If-Match` is the usual `version-conflict`. The item history records one
+`completion-recorded` event naming the path it took and the bounded `evidence_refs` the
+operator supplied. The item's version advances once per step, as ordinary transitions do.
+An already terminal item is refused.
+
+Completing a member does not release or modify its ownership record. The record is left
+to expire on its own. Completing a campaign never completes its members as a side effect:
+the campaign item is refused with `campaign-incomplete` (409) until every member is
+terminal, and an accepted completion changes only the campaign item. The route is
+`POST /work/items/<id>/completions`, operator only, and requires `If-Match`.
+
+The membership check runs inside the same write transaction as the walk, after `If-Match`
+and the terminal check, so a member added concurrently cannot slip in: re-creating a
+campaign also takes that write lock, so the two writers serialize. A client holding the
+campaign's earlier `version` therefore gets `version-conflict` after a completion, as it
+would after any other transition.
+
+## A closed campaign refuses a re-create
+
+A campaign whose item is `completed`, `canceled` or `archived` accepts no members. A
+re-create of its key is refused with `campaign-closed` (HTTP 409) whether or not it names
+a new repository, and writes nothing. `create --dry-run` reports the same refusal when
+the Hub read finds the stored campaign closed.
+
 ## Buckets
 
 Each member falls in exactly one bucket, checked in this order:
@@ -209,9 +249,8 @@ without a campaign deadline never expire implicitly. Their holders must release 
 
 The deadline fences the Hub ownership protocol. It does not kill a process or replace
 physical checkout locks. Path reservations remain conservative until a release or
-reclaim clears them. No node consumer, process launch, cloud lease, completion gate,
-or automatic selection loop is added by this slice. The request body limit remains
-256 KiB.
+reclaim clears them. The request body limit remains 256 KiB. The node consumer below
+is the only automatic selection loop. Cloud leases and completion gates are not part of it.
 
 ## Campaign execution and attempt writes
 
@@ -241,3 +280,73 @@ Only the admin can observe another node's run. Noncampaign execution and attempt
 behavior is unchanged. Explicit campaign reservation recovery requires the
 acknowledged physical quiescence and audited operator action documented in
 [ownership recovery](worklore-ownership.md#capacity-and-recovery).
+
+## Consume members on a node
+
+```bash
+brigade fleet campaign consume KEY --worker SEAT [--target WORKSPACE] [--watch] [--json]
+```
+
+Run this on a node with the repositories checked out and listed in `.brigade/repos.toml`.
+A pass does this for one member:
+
+1. **Select.** The consumer reads the campaign and keeps members whose repository
+   resolves to a local checkout and whose bucket is `unowned` or `in_flight`. Terminal,
+   `awaiting_gate`, `attempt_limited` and `blocked` members (the Hub bucket, an item
+   status) are never selected, and neither is a member this node holds (below). A held
+   member is retried only when its lease has expired and its last checkpoint is not
+   parked (`await-review`, `await-checks`, `await-merge` or `blocked`, here the
+   ownership `next_action`, which leaves the bucket at `in_flight`). A member reclaimed
+   from an expired holder that had linked a run the Hub never counted is parked as
+   `blocked` without launching.
+2. **Take.** It takes the member through the generation-fenced `take` above, so the offer,
+   the allowed nodes, exclusions, per-node concurrency and the attempt cap all apply as
+   the Hub decides them. A refusal that rules out only that member moves the pass to the
+   next one. `campaign-concurrency-limit` ends the pass.
+3. **Launch.** It reuses one local task per member (campaign spec plus the member
+   override) and runs it through `work dispatch` apply with `--worker SEAT`, limited to
+   that task, so the worktree, intent and circuit breaker are the dispatch ones. The run
+   gets dispatch's wall-clock deadline: the shorter of the offer's `lease_seconds` and the
+   grant's remaining time, less a 15 second margin. It is stopped there and counts as a
+   failed attempt. A member with under 45 seconds of lease is handed back unlaunched, and
+   the message names the offer's `lease_seconds`. The local task is cancelled again unless
+   a run is still using it, so a refused, failed or timed-out pass leaves nothing for a
+   plain `work dispatch` to run outside the fence.
+4. **Record.** It links the run (`execution-linked`) and records `started`. A failed run
+   records `failed`, which counts against the attempt limit, and releases the member.
+   Only a `completed` run is parked; any other end state is a failed attempt. A dispatch
+   that failed before a run existed cannot be counted by the Hub (it counts attempts only
+   against a linked run), so it is recorded in the receipt and the member is held on this
+   node. A successful run records no completion: the consumer checkpoints `await-review` with the
+   run id as a `receipt` evidence ref and the branch in `resume_condition`, and keeps
+   ownership. The member stays open until an operator completes it.
+
+`--watch` repeats passes until no member is eligible. Within one invocation a member is
+taken at most once, so a failing member is not retried in a loop. Running the command
+again is the resume: selection is Hub state, so a terminal member is never dispatched and
+a parked one is left alone.
+
+Every take, launch and attempt leaves a Hub event (`ownership-taken`,
+`execution-linked`, `attempt-started`, `attempt-failed`, `ownership-checkpoint`) and a line
+in `.brigade/campaign-consume/KEY.jsonl`.
+
+Limits of this slice:
+
+- The Hub does not enforce the park. A parked member keeps its item status, so once its
+  lease expires another node can take it through the ownership API above. Only this
+  consumer leaves it alone.
+- There is no renew action. The consumer bounds each run to its lease and refuses leases
+  that are too short. Set `lease_seconds` in the offer well above the longest run you
+  expect. A run that still outlives its grant (for example the child ignored the stop) ends
+  as `lost-grant`: the Hub refuses the late writes, the member is held on this node in
+  `.brigade/campaign-consume/KEY.holds.json`, and the local worktree remains for
+  inspection. Delete the member's entry in that file to clear the hold.
+- The Hub's clock decides expiry. The consumer budgets from the offer's `lease_seconds` and
+  the grant's `expires_at`, whichever is shorter, so node clock skew can only shorten a run.
+- An unexpected error after a take releases the member if nothing ran, or parks it as
+  `blocked` and holds it if a run may have happened. The pass reports `error`.
+- The run must be visible to the Hub as a fleet run for this node, or the Hub cannot count
+  an attempt. The consumer then parks the member as `blocked` and reports `unlinked`.
+- `work dispatch` leaves changes uncommitted and never pushes, so there is no PR to
+  checkpoint yet. The checkpoint records the run id, branch and head revision.
+- Completing a member is a separate operator transition and is not part of the consumer.

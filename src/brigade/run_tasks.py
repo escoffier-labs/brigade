@@ -7,11 +7,12 @@ only their digest enters the lifecycle journal. There is no automatic retry.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from brigade import run_events, run_journal
+from brigade import run_events, run_journal, run_lifecycle
 from brigade import run_task_journal as journal
 from brigade.run_task_journal import TaskJournalError
 
@@ -83,6 +84,30 @@ class TaskLaunchBinding:
 
 
 @dataclass(frozen=True)
+class TaskEnrollment:
+    """Retained custody references for one enrolled native delegation input.
+
+    The asset holds the exact delegation input. This record binds it by
+    relative name and digest and carries no prompt text or native payload.
+    """
+
+    descriptor_version: int
+    asset_path: str
+    asset_digest: str
+    template_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.descriptor_version) is not int
+            or self.descriptor_version != journal.NATIVE_ENROLLMENT_DESCRIPTOR_VERSION
+            or not journal.native_asset_path(self.asset_path)
+            or not journal.digest(self.asset_digest)
+            or not journal.digest(self.template_digest)
+        ):
+            raise TaskJournalError("invalid native enrollment reference")
+
+
+@dataclass(frozen=True)
 class TaskResult:
     handle: TaskHandle
     status: str
@@ -96,6 +121,12 @@ class TaskResult:
     acknowledged: bool = False
     version: str | None = None
     launch_claim: TaskLaunchBinding | None = None
+    enrollment: TaskEnrollment | None = None
+
+    @property
+    def native_enrolled(self) -> bool:
+        """True when the fold saw a ``task.native-enrolled`` fact for this task."""
+        return self.enrollment is not None
 
 
 @dataclass(frozen=True)
@@ -133,6 +164,11 @@ class TaskLaunchDecision:
 
 def _attempt_id(handle: TaskHandle) -> str:
     return _digest({"run_id": handle.run_id, "task_id": handle.spec.task_id, "spec_digest": handle.spec.spec_digest})
+
+
+def planned_attempt_id(handle: TaskHandle) -> str:
+    """The attempt identity ``prepare_attempt`` will mint, known before any journal write."""
+    return _attempt_id(handle)
 
 
 def _result_id(result: TaskResult) -> str:
@@ -310,6 +346,15 @@ def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHisto
             if current.result_id is None or p["result_id"] != current.result_id:
                 raise TaskJournalError("task acknowledgement result mismatch")
             results[task_id] = replace(current, acknowledged=True)
+        elif event.event_type == "task.native-enrolled":
+            if current.enrollment is not None or current.status != "queued" or current.handle.attempt_id is not None:
+                raise TaskJournalError("native enrollment requires pristine queued task history")
+            results[task_id] = replace(
+                current,
+                enrollment=TaskEnrollment(
+                    p["descriptor_version"], p["asset_path"], p["asset_digest"], p["template_digest"]
+                ),
+            )
         prior_types[task_id] = event.event_type
         results[task_id] = replace(results[task_id], version=event.event_digest)
     return _TaskHistory(results, batches)
@@ -430,10 +475,16 @@ def read_task_batch(run_dir: Path, *, request_id: str) -> TaskBatchResult:
         return _batch_result(run_dir.name, request_id, _fold_history(run_dir.name, events))
 
 
-def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str) -> TaskHandle:
-    """Create the first attempt once; never infer a retry from uncertain state."""
+def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str, native_governed: bool = False) -> TaskHandle:
+    """Create the first attempt once; never infer a retry from uncertain state.
+
+    A native-enrolled task is refused unless the caller is the governed native
+    path. Enrollment alone grants no generic launch authority.
+    """
     with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
         current = _find(_fold(run_dir.name, events), task_id)
+        if current.native_enrolled and not native_governed:
+            raise TaskJournalError("native-enrolled task requires the governed launch path")
         if current.handle.attempt_id is not None:
             return current.handle
         handle = replace(current.handle, attempt_id=_attempt_id(current.handle))
@@ -446,6 +497,37 @@ def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str) -> TaskHand
         return handle
 
 
+def record_native_enrollment(
+    run_dir: Path,
+    *,
+    workspace: Path,
+    task_id: str,
+    enrollment: TaskEnrollment,
+) -> TaskResult:
+    """Bind retained delegation input references once, before any attempt.
+
+    Replay of the identical record is idempotent. A different record for the
+    same task refuses, and enrollment never rewrites an existing fact.
+    """
+    if type(enrollment) is not TaskEnrollment:
+        raise TaskJournalError("invalid native enrollment reference")
+    with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
+        current = _find(_fold(run_dir.name, events), task_id)
+        if current.enrollment is not None:
+            if current.enrollment == enrollment:
+                return current
+            raise TaskJournalError("native enrollment identity conflict")
+        if current.status != "queued" or current.handle.attempt_id is not None:
+            raise TaskJournalError("native enrollment requires pristine queued task history")
+        event = journal.append(
+            run_dir,
+            workspace=workspace,
+            event_type="task.native-enrolled",
+            payload={"task_id": task_id, **asdict(enrollment)},
+        )
+        return replace(current, enrollment=enrollment, version=event.event_digest)
+
+
 def claim_task_launch(
     run_dir: Path,
     *,
@@ -454,6 +536,7 @@ def claim_task_launch(
     expected_version: str,
     seat: str,
     dispatch_attempt: int,
+    native_governed: bool = False,
 ) -> TaskLaunchDecision:
     """Consume launch permission once without reserving budget or launching.
 
@@ -461,10 +544,15 @@ def claim_task_launch(
     under the coordinator lock. A bare claim proves neither budget nor admission.
     A lost reply never reconstructs a grant. Durability ambiguity retains history
     and raises TaskJournalError; callers must retain recovery ownership.
+
+    A native-enrolled task is refused unless the caller is the governed native
+    path. Enrollment alone grants no generic launch authority.
     """
     with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
         results = _fold(run_dir.name, events)
         current = _find(results, handle.spec.task_id)
+        if current.native_enrolled and not native_governed:
+            raise TaskJournalError("native-enrolled task requires the governed launch path")
         if handle != current.handle or handle.attempt_id is None:
             raise TaskJournalError("task launch handle mismatch")
         binding = TaskLaunchBinding(seat, dispatch_attempt)
@@ -549,6 +637,29 @@ def read_tasks(run_dir: Path) -> tuple[TaskResult, ...]:
     """Read durable results, including consumed results, with a fresh barrier."""
     with journal.transaction(run_dir) as (run_dir, events):
         return tuple(_fold(run_dir.name, events).values())
+
+
+def batch_accepted(run_dir: Path) -> bool:
+    """True when any journal line records an explicit batch acceptance.
+
+    A raw scan, not a verified fold: resume uses it as a fence that does not
+    depend on the request marker or sentinel, and leaves journal trust checks
+    to its own later diagnostics. Unparseable lines are skipped.
+    """
+    try:
+        raw = run_journal.bound_read_bytes(run_lifecycle._journal_path(run_dir))
+    except (OSError, run_journal.RunJournalError):
+        return False
+    for line in raw.splitlines():
+        if b"task.batch-accepted" not in line:
+            continue
+        try:
+            env = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(env, dict) and env.get("event_type") == "task.batch-accepted":
+            return True
+    return False
 
 
 def acknowledge_result(run_dir: Path, *, workspace: Path, task_id: str, result_id: str) -> TaskResult:

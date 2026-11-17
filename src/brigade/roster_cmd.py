@@ -388,7 +388,9 @@ def ready(
             resolution = roster_mod.resolve_roster(target, roster_path)
             loaded = replace(roster_mod.load_roster(resolution.path), resolution=resolution)
             loaded = run_preference.apply_to_roster(loaded, run_preference.load_cached())
-            request = roster_readiness.ReadinessRequest(workers, concurrency, route, isolation, capability)
+            request = roster_readiness.ReadinessRequest(
+                workers, concurrency, route, isolation, capability, read_only=False
+            )
             try:
                 hub_discovery_possible = bool(fleet_client.load_fleet_settings()["hub_url"])
             except (fleet_client.FleetClientError, OSError, ValueError):
@@ -421,6 +423,8 @@ def ready(
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     else:
         print(f"readiness: {report['status']} (exit {report['exit_code']})")
+        print(f"scope: {report.get('scope')}")
+        print(f"observed_at: {report.get('observed_at')}")
         if "roster" in report:
             source = report["roster"]
             print(f"roster: {source['source']} {source['path']}")
@@ -481,10 +485,11 @@ def doctor(
 
     # Use the common coordinator for the health summary, but leave legacy
     # capability and per-model labels below intact for one compatibility
-    # release.  Doctor never sends model smoke prompts.
-    shared_health = (health_probe or seat_health.SeatHealthProbe(collect_executable_version=False)).probe_roster(
-        loaded, workspace=target, allow_model_smoke=False
-    )
+    # release.  Doctor never sends model smoke prompts, and it renders model
+    # inventory itself below, so it skips a duplicate listing in the probe.
+    shared_health = (
+        health_probe or seat_health.SeatHealthProbe(collect_executable_version=False, collect_model_inventory=False)
+    ).probe_roster(loaded, workspace=target, allow_model_smoke=False)
     for result in shared_health:
         status = _doctor_health_status(result)
         detail = (
@@ -562,6 +567,14 @@ def doctor(
         if agent.reasoning is not None:
             if agents.supports_reasoning(agent.cli):
                 checks.append((doctor_mod.OK, f"agent: {name} reasoning", f"{agent.reasoning} via {agent.cli}"))
+            elif agent.reasoning in _verify_only_efforts(agent.cli):
+                checks.append(
+                    (
+                        doctor_mod.WARN,
+                        f"agent: {name} reasoning",
+                        f"{agent.reasoning} applies only when memory verify runs this seat; brigade run refuses it",
+                    )
+                )
             else:
                 checks.append(
                     (
@@ -597,3 +610,10 @@ def doctor(
 def _model_inventory_check(agent_name: str, result: model_inventory.ModelInventoryResult) -> doctor_mod.CheckResult:
     status = doctor_mod.OK if result.state == "exact" else doctor_mod.WARN
     return (status, f"agent: {agent_name} model inventory", f"{result.state}: {result.detail}")
+
+
+def _verify_only_efforts(cli: str | None) -> frozenset[str]:
+    """Reasoning levels memory verify passes to this adapter, though brigade run takes none."""
+    from .memory_verify_seat import EFFORTS
+
+    return EFFORTS.get(cli or "", frozenset())

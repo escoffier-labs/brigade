@@ -153,6 +153,13 @@ def show_policy() -> dict[str, Any]:
     return _checked(status, payload)
 
 
+def read_seat_usage() -> dict[str, Any]:
+    """Read-only per-seat occupancy, never acquiring, extending, or releasing a lease."""
+    hub, token = _hub_and_token(admin=False)
+    status, payload = _request("GET", "/models/usage", token=token, hub_url=hub)
+    return _checked(status, payload)
+
+
 def show_owners() -> dict[str, Any]:
     hub, token = _hub_and_token(admin=False)
     status, payload = _request("GET", "/owners", token=token, hub_url=hub)
@@ -391,6 +398,12 @@ def release_reservation(*, reservation_id: str, decision_id: str, session_id: st
 def observe_telemetry(body: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(body)
     payload["action"] = "telemetry-observe"
+    return post_policy(payload, admin=False)
+
+
+def observe_projects(body: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(body)
+    payload["action"] = "projects-observe"
     return post_policy(payload, admin=False)
 
 

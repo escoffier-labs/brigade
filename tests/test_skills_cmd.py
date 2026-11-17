@@ -1404,6 +1404,571 @@ def test_install_dir_still_rejects_external_symlink_target(tmp_path):
         skills_cmd._install_dir(workspace, "claude", "example")
 
 
+@pytest.fixture
+def symlink_support(tmp_path):
+    """Skip unless this process can really create a directory symlink.
+
+    ``os.symlink`` exists on Windows but raises without the privilege, so the
+    attribute check alone does not skip there.
+    """
+    probe = tmp_path / "symlink-probe-target"
+    probe.mkdir()
+    link = tmp_path / "symlink-probe-link"
+    try:
+        os.symlink(probe, link, target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("platform cannot create symlinks")
+    link.unlink()
+    probe.rmdir()
+
+
+def _import_and_install_copies(workspace, tmp_path, names):
+    for name in names:
+        assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name=name)) == 0
+        assert (
+            skills_cmd.install(workspace=workspace, skill=f"registry:{name}", harness="claude", json_output=True) == 0
+        )
+
+
+def _replace_install_with_symlink(workspace, skill_id, target_dir):
+    installed = workspace / ".claude" / "skills" / skill_id
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(installed), str(target_dir))
+    installed.symlink_to(target_dir, target_is_directory=True)
+    return installed
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_skills_fleet_status_reports_symlinked_install_and_continues(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_copies(workspace, tmp_path, ("linked-copy", "plain-copy"))
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    installed = _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+
+    assert skills_cmd.fleet_status(target=workspace, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["skill_id"]: row for row in payload["copies"]}
+
+    assert rows["linked-copy"]["status"] == "symlink"
+    assert rows["linked-copy"]["link_target"] == str(target_dir)
+    assert "symlink" in rows["linked-copy"]["status_detail"]
+    assert rows["plain-copy"]["status"] == "current"
+    assert payload["symlink_count"] == 1
+    assert payload["current_count"] == 1
+    assert installed.is_symlink()
+
+    assert skills_cmd.fleet_status(target=workspace) == 0
+    out = capsys.readouterr().out
+    assert "symlink=1" in out
+    assert "linked-copy [claude] symlink ->" in out
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_skills_doctor_reports_symlinked_install_as_warning(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_copies(workspace, tmp_path, ("linked-copy", "plain-copy"))
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+
+    assert skills_cmd.doctor(target=workspace, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["valid"] is True
+    issue = next(item for item in payload["issues"] if item.get("installed_state") == "symlink")
+    assert issue["status"] == "warn"
+    assert issue["skill_id"] == "linked-copy"
+    assert issue["harness"] == "claude"
+    assert issue["link_target"] == str(target_dir)
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_skills_sync_dry_run_reports_symlinked_install_and_continues(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_copies(workspace, tmp_path, ("linked-copy", "plain-copy"))
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+
+    assert skills_cmd.sync(workspace=workspace, harness="claude", trust="workspace", write=False, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {item["skill_id"]: item for item in payload["items"]}
+
+    assert rows["linked-copy"]["state"] == "symlink"
+    assert rows["linked-copy"]["action"] == "none"
+    assert rows["linked-copy"]["result"] == "skipped"
+    assert rows["linked-copy"]["link_target"] == str(target_dir)
+    assert "symlink" in rows["linked-copy"]["reason"]
+    assert rows["plain-copy"]["state"] == "current"
+    assert payload["counts"]["symlink"] == 1
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_skills_sync_write_leaves_symlinked_install_and_target_untouched(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="linked-copy")) == 0
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="plain-copy")) == 0
+    assert (
+        skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    installed = _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+    before = (target_dir / "SKILL.md").read_bytes()
+
+    assert skills_cmd.sync(workspace=workspace, harness="claude", trust="workspace", write=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {item["skill_id"]: item for item in payload["items"]}
+
+    assert rows["linked-copy"]["state"] == "symlink"
+    assert rows["linked-copy"]["result"] == "skipped"
+    assert rows["plain-copy"]["result"] == "installed"
+    assert payload["applied"]["installed"] == 1
+    assert installed.is_symlink()
+    assert installed.resolve() == target_dir.resolve()
+    assert (target_dir / "SKILL.md").read_bytes() == before
+    assert (workspace / ".claude" / "skills" / "plain-copy" / "SKILL.md").is_file()
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_skills_reports_dangling_link_and_regular_file_install(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for name in ("dangling-copy", "file-copy"):
+        assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name=name)) == 0
+    capsys.readouterr()
+    skills_root = workspace / ".claude" / "skills"
+    skills_root.mkdir(parents=True)
+    dangling_target = workspace / "missing-target"
+    (skills_root / "dangling-copy").symlink_to(dangling_target, target_is_directory=True)
+    (skills_root / "file-copy").write_text("not a skill directory\n")
+
+    assert skills_cmd.fleet_status(target=workspace, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["skill_id"]: row for row in payload["copies"]}
+
+    assert rows["dangling-copy"]["status"] == "symlink"
+    assert rows["dangling-copy"]["link_target"] == str(dangling_target)
+    assert rows["file-copy"]["status"] == "unusable"
+    assert payload["symlink_count"] == 1
+    assert payload["unusable_count"] == 1
+
+    assert skills_cmd.doctor(target=workspace, json_output=True) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["valid"] is True
+    states = {issue.get("installed_state") for issue in doctor["issues"]}
+    assert {"symlink", "file"} <= states
+
+    assert skills_cmd.sync(workspace=workspace, harness="claude", trust="workspace", write=False, json_output=True) == 0
+    sync_payload = json.loads(capsys.readouterr().out)
+    sync_rows = {item["skill_id"]: item for item in sync_payload["items"]}
+    assert sync_rows["dangling-copy"]["state"] == "symlink"
+    assert sync_rows["file-copy"]["state"] == "unusable"
+    assert (skills_root / "dangling-copy").is_symlink()
+    assert not dangling_target.exists()
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_skills_install_and_uninstall_skip_symlinked_copy(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="linked-copy")) == 0
+    assert (
+        skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    installed = _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+    before = (target_dir / "SKILL.md").read_bytes()
+
+    assert (
+        skills_cmd.install(
+            workspace=workspace, skill="registry:linked-copy", harness="claude", force=True, json_output=True
+        )
+        == 0
+    )
+    install_payload = json.loads(capsys.readouterr().out)
+    skipped = install_payload["receipt"]["skipped"]
+    assert [item["target"] for item in skipped] == ["claude"]
+    assert "symlink" in skipped[0]["reason"]
+    assert installed.is_symlink()
+    assert (target_dir / "SKILL.md").read_bytes() == before
+
+    assert skills_cmd.uninstall(workspace=workspace, skill="linked-copy", harness="claude", json_output=True) == 0
+    uninstall_payload = json.loads(capsys.readouterr().out)
+    assert uninstall_payload["uninstalled"] == []
+    assert uninstall_payload["skipped"][0]["harness"] == "claude"
+    assert "symlink" in uninstall_payload["skipped"][0]["reason"]
+    assert installed.is_symlink()
+    assert (target_dir / "SKILL.md").read_bytes() == before
+
+
+def _import_and_install_all(workspace, tmp_path, name, *, again=False):
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name=name)) == 0
+    for force in (False, True) if again else (False,):
+        assert (
+            skills_cmd.install(
+                workspace=workspace, skill=f"registry:{name}", harness="all", force=force, json_output=True
+            )
+            == 0
+        )
+
+
+def _install_module():
+    """The ``brigade.skills_cmd.install`` module; the package attribute is the ``install`` function."""
+    import importlib
+
+    return importlib.import_module("brigade.skills_cmd.install")
+
+
+def _swap_for_link_after_first_state_check(monkeypatch, path, link_target):
+    """Plant a symlink at *path* right after the first real classification of it.
+
+    Wraps the real classifier, so every command still runs its real code path;
+    only the timing of the swap (after the check, before the mutation) is forced.
+    """
+    install_mod = _install_module()
+
+    real = install_mod._installed_path_state
+    calls: list[str] = []
+
+    def classify(workspace, installed_dir, anchor=None):
+        result = real(workspace, installed_dir, anchor=anchor)
+        if Path(installed_dir) == path and not calls:
+            calls.append("swapped")
+            if path.is_symlink():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+            path.symlink_to(link_target, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(install_mod, "_installed_path_state", classify)
+    return calls
+
+
+def _rollback_snapshots(workspace, skill_id, harness):
+    root = workspace / ".brigade" / "skills" / "rollback" / skill_id / harness
+    return sorted(item.name for item in root.iterdir()) if root.is_dir() else []
+
+
+def test_installed_path_state_reports_missing_when_state_root_is_absent(tmp_path):
+    install_mod = _install_module()
+
+    installed = tmp_path / ".brigade" / "skills" / "mcp-resources" / "example"
+
+    assert install_mod._installed_path_state(tmp_path, installed) == ("missing", None)
+    assert install_mod._inspect_installed_tree(tmp_path, installed).state == "missing"
+    assert not (tmp_path / ".brigade").exists()
+
+
+def test_diff_on_mcp_adapter_without_state_root_reports_missing_not_unusable(tmp_path, capsys):
+    assert skills_cmd.diff(target=tmp_path, skill="bundled:brigade-work", harness="mcp", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["installed"] is False
+    assert payload["installed_state"] == "missing"
+    assert not (tmp_path / ".brigade").exists()
+
+
+def test_installed_path_state_treats_a_junction_as_non_plain(tmp_path, monkeypatch):
+    install_mod = _install_module()
+    from brigade.skills_cmd import registry
+
+    plain = tmp_path / "ws" / ".claude" / "skills" / "example"
+    plain.mkdir(parents=True)
+    assert install_mod._installed_path_state(tmp_path / "ws", plain) == ("dir", None)
+
+    # A real junction cannot be created off Windows; the classifier's only
+    # input is the shared reparse-point probe, so drive that.
+    monkeypatch.setattr(registry, "_is_reparse_point", lambda path: Path(path) == plain)
+    assert install_mod._installed_path_state(tmp_path / "ws", plain) == ("other", None)
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_skills_diff_and_rollback_report_symlinked_install_without_following_it(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_all(workspace, tmp_path, "linked-copy", again=True)
+    capsys.readouterr()
+    target_dir = workspace / "shared" / "linked-copy"
+    installed = _replace_install_with_symlink(workspace, "linked-copy", target_dir)
+    (target_dir / "SKILL.md").write_text("# Edited through the link\n")
+    before = (target_dir / "SKILL.md").read_bytes()
+    snapshots = _rollback_snapshots(workspace, "linked-copy", "claude")
+    assert snapshots
+
+    assert skills_cmd.diff(target=workspace, skill="registry:linked-copy", harness="claude", json_output=True) == 0
+    diff = json.loads(capsys.readouterr().out)
+    assert diff["installed"] is False
+    assert diff["installed_state"] == "symlink"
+    assert diff["link_target"] == str(target_dir)
+    assert diff["drift"]["overall"] == "symlink"
+
+    assert skills_cmd.rollback(workspace=workspace, skill="linked-copy", harness="claude") == 2
+    err = capsys.readouterr().err
+    assert "skipped: rollback left linked-copy on claude untouched" in err
+    assert "symlink" in err
+    assert installed.is_symlink()
+    assert (target_dir / "SKILL.md").read_bytes() == before
+    assert _rollback_snapshots(workspace, "linked-copy", "claude") == snapshots
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_outside_workspace_link_is_reported_and_skipped_by_every_command(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_all(workspace, tmp_path, "linked-copy", again=True)
+    capsys.readouterr()
+    outside = tmp_path / "outside" / "linked-copy"
+    installed = _replace_install_with_symlink(workspace, "linked-copy", outside)
+    (outside / "SKILL.md").write_text("# Outside content\n")
+    before = (outside / "SKILL.md").read_bytes()
+
+    # Read-only: reported, rest of the report completes.
+    assert skills_cmd.fleet_status(target=workspace, json_output=True) == 0
+    rows = {(row["skill_id"], row["harness"]): row for row in json.loads(capsys.readouterr().out)["copies"]}
+    assert rows[("linked-copy", "claude")]["status"] == "external"
+    assert rows[("linked-copy", "codex")]["status"] == "current"
+    assert skills_cmd.sync(workspace=workspace, harness="claude", trust="workspace", write=True, json_output=True) == 0
+    sync_rows = {item["harness"]: item for item in json.loads(capsys.readouterr().out)["items"]}
+    assert sync_rows["claude"]["result"] == "skipped"
+    assert sync_rows["claude"]["state"] == "external"
+
+    # install: an explicit harness without --force fails cleanly, --harness all skips and goes on.
+    assert skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude") == 2
+    assert "was not replaced" in capsys.readouterr().err
+    assert skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="all", force=True) == 0
+    capsys.readouterr()
+    assert (
+        skills_cmd.install(
+            workspace=workspace, skill="registry:linked-copy", harness="all", force=True, json_output=True
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["installed"] is True
+    assert "claude" in [item["target"] for item in payload["receipt"]["skipped"]]
+    assert "codex" in [item["target"] for item in payload["receipt"]["receipts"]]
+
+    # rollback: a clean refusal, never a traceback.
+    assert skills_cmd.rollback(workspace=workspace, skill="linked-copy", harness="claude") == 2
+    assert "left linked-copy on claude untouched" in capsys.readouterr().err
+
+    # uninstall --harness all: skips the linked harness and still removes the rest.
+    assert skills_cmd.uninstall(workspace=workspace, skill="linked-copy", harness="all", json_output=True) == 0
+    uninstall = json.loads(capsys.readouterr().out)
+    assert [item["harness"] for item in uninstall["skipped"]] == ["claude"]
+    assert "codex" in [item["harness"] for item in uninstall["uninstalled"]]
+    assert not (workspace / ".codex" / "skills" / "linked-copy").exists()
+
+    assert installed.is_symlink()
+    assert (outside / "SKILL.md").read_bytes() == before
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_install_without_a_target_reports_not_installed(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="linked-copy")) == 0
+    assert (
+        skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+    _replace_install_with_symlink(workspace, "linked-copy", workspace / "shared" / "linked-copy")
+
+    assert (
+        skills_cmd.install(
+            workspace=workspace, skill="registry:linked-copy", harness="claude", force=True, json_output=True
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["installed"] is False
+    assert payload["receipt"]["receipts"] == []
+
+    assert skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude", force=True) == 0
+    assert "installed: no" in capsys.readouterr().out
+    assert skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude") == 2
+    assert "was not replaced" in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_state_backed_mcp_install_that_is_not_plain_is_reported_and_skipped(tmp_path, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="mcp-copy")) == 0
+    assert skills_cmd.install(workspace=workspace, skill="registry:mcp-copy", harness="mcp", json_output=True) == 0
+    capsys.readouterr()
+    installed = workspace / ".brigade" / "skills" / "mcp-resources" / "mcp-copy"
+    outside = tmp_path / "outside" / "mcp-copy"
+    outside.parent.mkdir()
+    shutil.move(str(installed), str(outside))
+    installed.symlink_to(outside, target_is_directory=True)
+    before = (outside / "SKILL.md").read_bytes()
+
+    assert skills_cmd.fleet_status(target=workspace, json_output=True) == 0
+    rows = {(row["skill_id"], row["harness"]): row for row in json.loads(capsys.readouterr().out)["copies"]}
+    assert rows[("mcp-copy", "mcp")]["status"] == "symlink"
+    assert rows[("mcp-copy", "mcp")]["link_target"] == str(outside)
+
+    assert skills_cmd.install(workspace=workspace, skill="registry:mcp-copy", harness="mcp") == 2
+    capsys.readouterr()
+    assert skills_cmd.uninstall(workspace=workspace, skill="mcp-copy", harness="mcp", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"][0]["state"] == "symlink"
+    assert installed.is_symlink()
+    assert (outside / "SKILL.md").read_bytes() == before
+
+    # A regular file reports the same state inside and outside the state root.
+    installed.unlink()
+    installed.write_text("not a directory\n")
+    claude = workspace / ".claude" / "skills" / "mcp-copy"
+    claude.parent.mkdir(parents=True)
+    claude.write_text("not a directory\n")
+    install_mod = _install_module()
+
+    assert install_mod._installed_path_state(workspace, installed)[0] == "file"
+    assert install_mod._installed_path_state(workspace, claude)[0] == "file"
+
+    assert skills_cmd.doctor(target=workspace, json_output=True) == 0
+    details = [issue["detail"] for issue in json.loads(capsys.readouterr().out)["issues"] if "installed_state" in issue]
+    assert details
+    assert all(" a other" not in detail and " a unreadable" not in detail for detail in details)
+    assert any("installed copy is a regular file" in detail for detail in details)
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_rollback_refuses_a_link_planted_after_the_state_check(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_all(workspace, tmp_path, "linked-copy", again=True)
+    capsys.readouterr()
+    installed = workspace / ".claude" / "skills" / "linked-copy"
+    shutil.rmtree(installed)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    calls = _swap_for_link_after_first_state_check(monkeypatch, installed, outside)
+
+    assert skills_cmd.rollback(workspace=workspace, skill="linked-copy", harness="claude") == 2
+    assert calls == ["swapped"]
+    assert "left linked-copy on claude untouched" in capsys.readouterr().err
+    assert installed.is_symlink()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_install_refuses_a_link_planted_after_the_check_before_writing_a_snapshot(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="linked-copy")) == 0
+    assert (
+        skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+    installed = workspace / ".claude" / "skills" / "linked-copy"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("# Outside content\n")
+    snapshots = _rollback_snapshots(workspace, "linked-copy", "claude")
+    calls = _swap_for_link_after_first_state_check(monkeypatch, installed, outside)
+
+    assert (
+        skills_cmd.install(
+            workspace=workspace, skill="registry:linked-copy", harness="claude", force=True, json_output=True
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert calls == ["swapped"]
+    assert payload["installed"] is False
+    assert [item["target"] for item in payload["receipt"]["skipped"]] == ["claude"]
+    assert installed.is_symlink()
+    assert (outside / "SKILL.md").read_text() == "# Outside content\n"
+    assert _rollback_snapshots(workspace, "linked-copy", "claude") == snapshots
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_uninstall_refuses_a_link_planted_after_the_check(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="linked-copy")) == 0
+    assert (
+        skills_cmd.install(workspace=workspace, skill="registry:linked-copy", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+    installed = workspace / ".claude" / "skills" / "linked-copy"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("# Outside content\n")
+    calls = _swap_for_link_after_first_state_check(monkeypatch, installed, outside)
+
+    assert skills_cmd.uninstall(workspace=workspace, skill="linked-copy", harness="claude", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert calls == ["swapped"]
+    assert payload["uninstalled"] == []
+    assert payload["skipped"][0]["harness"] == "claude"
+    assert installed.is_symlink()
+    assert (outside / "SKILL.md").read_text() == "# Outside content\n"
+    receipt = workspace / ".brigade" / "skills" / "installs" / "linked-copy-claude.json"
+    assert receipt.is_file()
+
+
+def test_review_binding_refuses_an_installed_directory_the_collector_refuses(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client
+
+    install_mod = _install_module()
+    from brigade.skills_cmd import registry
+
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "11111111-1111-4111-8111-111111111111")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(tmp_path / "sources", name="bound-copy")) == 0
+    assert skills_cmd.install(workspace=workspace, skill="registry:bound-copy", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+
+    binding = install_mod._review_binding(workspace, "bound-copy", "claude", "registry:bound-copy")
+    assert binding is not None
+    assert binding["installed"] != registry._package_identity({})
+
+    installed = workspace / ".claude" / "skills" / "bound-copy"
+    try:
+        os.link(installed / "SKILL.md", tmp_path / "hardlinked-elsewhere")
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("platform cannot create hardlinks")
+    with pytest.raises(registry.SkillsStatePathError):
+        install_mod._review_binding(workspace, "bound-copy", "claude", "registry:bound-copy")
+
+
+@pytest.mark.usefixtures("symlink_support")
+def test_fleet_report_normalizes_link_states_so_the_hub_accepts_it(tmp_path, capsys):
+    from brigade import fleet_skills_report, fleet_skills_review
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _import_and_install_copies(workspace, tmp_path, ("linked-copy", "file-copy", "plain-copy"))
+    capsys.readouterr()
+    _replace_install_with_symlink(workspace, "linked-copy", workspace / "shared" / "linked-copy")
+    file_copy = workspace / ".claude" / "skills" / "file-copy"
+    shutil.rmtree(file_copy)
+    file_copy.write_text("not a skill directory\n")
+
+    local = {row["skill_id"]: row["status"] for row in skills_cmd._fleet_status_payload(workspace)["copies"]}
+    assert local["linked-copy"] == "symlink"
+    assert local["file-copy"] == "unusable"
+
+    report = fleet_skills_report.build_report(workspace)
+    statuses = {row["skill_id"]: row["status"] for row in report["copies"]}
+    assert statuses["linked-copy"] == "external"
+    assert statuses["file-copy"] == "unknown"
+    assert statuses["plain-copy"] == "current"
+    fleet_skills_review.validate_report(report)
+
+
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
 def test_install_refuses_symlinked_brigade_state_root(tmp_path, capsys):
     workspace = tmp_path / "ws"

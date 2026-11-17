@@ -507,6 +507,220 @@
         },
         "sql": "CREATE TABLE fleet_model_inventory_projections (provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id))"
       },
+      "fleet_node_project_snapshots": {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "environment_id",
+          "observed_at",
+          "ttl_seconds",
+          "updated_at"
+        ],
+        "columns": [
+          [
+            "environment_id",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "observed_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "ttl_seconds",
+            "INTEGER",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_node_project_snapshots_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_node_project_snapshots (node_id TEXT NOT NULL PRIMARY KEY, environment_id TEXT NOT NULL, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, updated_at TEXT NOT NULL)"
+      },
+      "fleet_node_projects": {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "environment_id",
+          "project_id",
+          "repo_key",
+          "observed_at",
+          "ttl_seconds",
+          "updated_at",
+          "bound"
+        ],
+        "columns": [
+          [
+            "bound",
+            "INTEGER",
+            1,
+            "0",
+            0,
+            0
+          ],
+          [
+            "environment_id",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "observed_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "project_id",
+            "TEXT",
+            1,
+            null,
+            2,
+            0
+          ],
+          [
+            "repo_key",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "ttl_seconds",
+            "INTEGER",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "fleet_node_projects_repo": {
+            "columns": [
+              [
+                0,
+                "repo_key",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE INDEX fleet_node_projects_repo ON fleet_node_projects (repo_key)",
+            "unique": 0
+          },
+          "sqlite_autoindex_fleet_node_projects_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "project_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_node_projects (node_id TEXT NOT NULL, environment_id TEXT NOT NULL, project_id TEXT NOT NULL, repo_key TEXT NOT NULL, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, updated_at TEXT NOT NULL, bound INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (node_id, project_id))"
+      },
       "fleet_policy_migration": {
         "autoincrement": false,
         "checks": [
@@ -21395,6 +21609,224 @@
           }
         },
         "sql": "CREATE TABLE fleet_model_inventory_projections (provider TEXT NOT NULL, harness TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', observation_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, captured_at TEXT NOT NULL, expires_at TEXT NOT NULL, models_json TEXT NOT NULL, error_reason TEXT, evidence_type TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (provider, harness, account_id))"
+      }
+    ],
+    "fleet_node_project_snapshots": [
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "environment_id",
+          "observed_at",
+          "ttl_seconds",
+          "updated_at"
+        ],
+        "columns": [
+          [
+            "environment_id",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "observed_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "ttl_seconds",
+            "INTEGER",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_node_project_snapshots_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_node_project_snapshots (node_id TEXT NOT NULL PRIMARY KEY, environment_id TEXT NOT NULL, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, updated_at TEXT NOT NULL)"
+      }
+    ],
+    "fleet_node_projects": [
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "environment_id",
+          "project_id",
+          "repo_key",
+          "observed_at",
+          "ttl_seconds",
+          "updated_at",
+          "bound"
+        ],
+        "columns": [
+          [
+            "bound",
+            "INTEGER",
+            1,
+            "0",
+            0,
+            0
+          ],
+          [
+            "environment_id",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "observed_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "project_id",
+            "TEXT",
+            1,
+            null,
+            2,
+            0
+          ],
+          [
+            "repo_key",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "ttl_seconds",
+            "INTEGER",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "fleet_node_projects_repo": {
+            "columns": [
+              [
+                0,
+                "repo_key",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE INDEX fleet_node_projects_repo ON fleet_node_projects (repo_key)",
+            "unique": 0
+          },
+          "sqlite_autoindex_fleet_node_projects_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "project_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_node_projects (node_id TEXT NOT NULL, environment_id TEXT NOT NULL, project_id TEXT NOT NULL, repo_key TEXT NOT NULL, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, updated_at TEXT NOT NULL, bound INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (node_id, project_id))"
       }
     ],
     "fleet_policy_acknowledged": [

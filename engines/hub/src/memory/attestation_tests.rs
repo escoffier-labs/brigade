@@ -1,4 +1,5 @@
 //! Attested proof is resolved by full identity, never by a suffix or a claim.
+use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{proposal_tests::*, tests::*, *};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rusqlite::Connection;
@@ -18,12 +19,12 @@ pub(super) fn policy(h: &Hub) {
         .unwrap();
 }
 pub(super) async fn attach(h: &Hub, token: &str, id: &str) -> Reply {
-    h.call(token, json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a",
+    h.call(token, json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":"a","workspace_id":"workspace-a",
         "evidence_id":id,"artifact_kind":"verification","artifact_sha256":ids::sha256_hex(b"fixture evidence"),
         "observed_at":h.now(),"artifact_base64":STANDARD.encode(b"fixture evidence"),"client_event_id":h.id()})).await
 }
 pub(super) async fn proposal(h: &Hub, revision: i64, evidence: Json) -> Reply {
-    let mut o = op("fleet", "a", revision);
+    let mut o = op(FIXTURE_SCOPE, "a", revision);
     o["type"] = json!("append_evidence");
     o.as_object_mut().unwrap().remove("text");
     o["evidence_ids"] = evidence;
@@ -37,8 +38,8 @@ pub(super) async fn report(h: &Hub, id: &Json) -> Reply {
 async fn attachments_resolve_but_revocation_and_cross_workspace_aliases_do_not_count() {
     let h = Hub::with(clean(), None);
     policy(&h);
-    grant(&h, "fleet", &["read", "reflect"]).await;
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
     for (token, id) in [
         (ADMIN_TOKEN, "hub:admin/workspace-a/one"),
         (ADMIN_TOKEN, "hub:admin/workspace-a/two"),
@@ -82,16 +83,20 @@ pub(super) const REFS: [&str; 3] = [
 pub(super) async fn ready() -> (Hub, Json) {
     let h = Hub::with(clean(), None);
     policy(&h);
-    grant(&h, "fleet", &["read", "reflect"]).await;
-    h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let r=h.call(ADMIN_TOKEN,json!({"action":"grant","principal":"node-1","scope":"fleet","rights":["read","reflect"],"client_event_id":h.id()})).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let r=h.call(ADMIN_TOKEN,json!({"action":"grant","principal":"node-1","scope":FIXTURE_SCOPE,"rights":["read","reflect"],"client_event_id":h.id()})).await;
     assert_eq!(r.status, 200);
     // Explicit human review establishes the trusted starting version.
-    let initial = card(&h, "fleet", "a").await;
+    let initial = card(&h, FIXTURE_SCOPE, "a").await;
     let p = submit(
         &h,
         ADMIN_TOKEN,
-        vec![op("fleet", "a", initial["revision"].as_i64().unwrap())],
+        vec![op(
+            FIXTURE_SCOPE,
+            "a",
+            initial["revision"].as_i64().unwrap(),
+        )],
     )
     .await;
     assert_eq!(
@@ -108,8 +113,8 @@ pub(super) async fn ready() -> (Hub, Json) {
             201
         );
     }
-    let a = card(&h, "fleet", "a").await;
-    let mut o = op("fleet", "a", a["revision"].as_i64().unwrap());
+    let a = card(&h, FIXTURE_SCOPE, "a").await;
+    let mut o = op(FIXTURE_SCOPE, "a", a["revision"].as_i64().unwrap());
     // The reviewed initial edit changed the block, so pin its actual bytes.
     o["expected_block_hash"] = proposal_blocks::pins(a["text"].as_str().unwrap())
         .into_iter()
@@ -150,7 +155,7 @@ async fn auto_apply_after_backpressure(h: &Hub, request: &Json) -> Reply {
 #[tokio::test]
 async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_reversible() {
     let (h, id) = ready().await;
-    let before = card(&h, "fleet", "a").await;
+    let before = card(&h, FIXTURE_SCOPE, "a").await;
     let r = report(&h, &id).await;
     let failures: Vec<_> = r.body["checks"]
         .as_array()
@@ -162,7 +167,7 @@ async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_re
     assert_eq!(failures, vec![json!("retrieval_eval_unbound")]);
     let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
     assert_eq!(r.body["state"], "pending");
-    assert_eq!(before, card(&h, "fleet", "a").await);
+    assert_eq!(before, card(&h, FIXTURE_SCOPE, "a").await);
     let request = auto_request(&h, &id).await;
     super::retrieval_eval_tests::record_current(&h).await;
     let limited = h.call(ADMIN_TOKEN, request.clone()).await;
@@ -173,7 +178,7 @@ async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_re
     h.set_clock(h.now() + 60_001);
     let applied = h.call(ADMIN_TOKEN, request.clone()).await;
     assert_eq!(applied.body["state"], "applied");
-    let after = card(&h, "fleet", "a").await;
+    let after = card(&h, FIXTURE_SCOPE, "a").await;
     assert_eq!(after["trust"], before["trust"]);
     assert_eq!(h.call(ADMIN_TOKEN, request).await, applied);
     // A fresh terminal-state request is admitted only after the rate window.
@@ -205,7 +210,7 @@ async fn retrieval_is_last_hold_and_recorded_path_is_exactly_once_audited_and_re
     assert_eq!(inverse.body["state"], "applied");
     assert_eq!(inverse.body["tier"], 0);
     assert_eq!(h.call(ADMIN_TOKEN, request).await, inverse);
-    assert_eq!(card(&h, "fleet", "a").await["text"], before["text"]);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before["text"]);
 }
 #[tokio::test]
 async fn kill_switch_is_admin_only_and_blocks_the_next_apply() {
@@ -213,10 +218,10 @@ async fn kill_switch_is_admin_only_and_blocks_the_next_apply() {
     let switch = json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()});
     assert_eq!(h.call(AGENT_TOKEN, switch.clone()).await.status, 403);
     assert_eq!(h.call(ADMIN_TOKEN, switch).await.status, 200);
-    let before = card(&h, "fleet", "a").await;
+    let before = card(&h, FIXTURE_SCOPE, "a").await;
     let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
     assert_eq!(r.body["state"], "pending");
-    assert_eq!(before, card(&h, "fleet", "a").await);
+    assert_eq!(before, card(&h, FIXTURE_SCOPE, "a").await);
     assert!(
         r.body["preflight"]["checks"]
             .as_array()
@@ -385,7 +390,7 @@ async fn each_auto_apply_gate_independently_holds_without_card_or_vector_changes
                     &p,
                     ops::NewEvent {
                         kind: "proposal.apply",
-                        scope: Some("fleet"),
+                        scope: Some(FIXTURE_SCOPE),
                         card_id: Some("a"),
                         changes_head: true,
                         base_revision: None,
@@ -399,8 +404,8 @@ async fn each_auto_apply_gate_independently_holds_without_card_or_vector_changes
                 .unwrap();
             }
             "tier1" | "tier2" => {
-                let head = card(&h, "fleet", "a").await;
-                let mut edit = op("fleet", "a", head["revision"].as_i64().unwrap());
+                let head = card(&h, FIXTURE_SCOPE, "a").await;
+                let mut edit = op(FIXTURE_SCOPE, "a", head["revision"].as_i64().unwrap());
                 edit["expected_block_hash"] = proposal_blocks::pins(head["text"].as_str().unwrap())
                     .into_iter()
                     .find(|pin| pin["block_id"] == "c-abcdef")
@@ -460,17 +465,17 @@ async fn imported_trust_is_preserved_and_rollback_pins_the_actual_applied_trust(
     super::retrieval_eval_tests::record_current(&h).await;
     let r = h.call(ADMIN_TOKEN, auto_request(&h, &id).await).await;
     assert_eq!(r.body["state"], "applied");
-    assert_eq!(card(&h, "fleet", "a").await["trust"], "imported");
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["trust"], "imported");
     let inverse=h.call(ADMIN_TOKEN,json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
     assert_eq!(inverse.body["state"], "applied", "{inverse:?}");
     assert_eq!(inverse.body["tier"], 0);
-    assert_eq!(card(&h, "fleet", "a").await["trust"], "imported");
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["trust"], "imported");
 }
 #[tokio::test]
 async fn late_contrary_evidence_is_rechecked_inside_apply_and_decide_recounts_revocations() {
     let (h, id) = ready().await;
     assert_eq!(report(&h, &id).await.body["proof_evidence_count"], 3);
-    let request = json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a",
+    let request = json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":"a","workspace_id":"workspace-a",
         "evidence_id":"agent:dot/workspace-a/negative","artifact_kind":"verification","artifact_sha256":ids::sha256_hex(b"negative result"),
         "observed_at":h.now(),"artifact_base64":STANDARD.encode(b"negative result"),"stance":"negative","client_event_id":h.id()});
     assert_eq!(h.call(AGENT_TOKEN, request).await.status, 201);
@@ -498,15 +503,15 @@ async fn late_contrary_evidence_is_rechecked_inside_apply_and_decide_recounts_re
 #[tokio::test]
 async fn attachment_validates_raw_bytes_namespace_bounds_and_scope_authority() {
     let h = Hub::with(clean(), None);
-    h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let base = json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a",
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let base = json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":"a","workspace_id":"workspace-a",
         "evidence_id":"agent:dot/workspace-a/one","artifact_kind":"verification","artifact_sha256":ids::sha256_hex(b"raw\r\n"),
         "observed_at":h.now(),"artifact_base64":STANDARD.encode(b"raw\r\n"),"client_event_id":h.id()});
     for rights in [&["read"][..], &["reflect"][..]] {
-        grant(&h, "fleet", rights).await;
+        grant(&h, FIXTURE_SCOPE, rights).await;
         assert_eq!(h.call(AGENT_TOKEN, base.clone()).await.status, 403);
     }
-    grant(&h, "fleet", &["read", "reflect"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
     for (key, value) in [
         ("evidence_id", json!("node-1/workspace-a/one")),
         ("workspace_id", json!("workspace-b")),
@@ -607,7 +612,7 @@ async fn revocation_after_preparation_is_seen_by_writer_and_readers_cannot_see_p
 #[tokio::test]
 async fn cross_workspace_records_and_rotated_credentials_never_supply_aliased_proof() {
     let (h, id) = ready().await;
-    let r=h.call(AGENT_TOKEN,json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-b",
+    let r=h.call(AGENT_TOKEN,json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":"a","workspace_id":"workspace-b",
         "evidence_id":"agent:dot/workspace-b/three","artifact_kind":"verification","artifact_sha256":ids::sha256_hex(b"other workspace"),
         "observed_at":h.now(),"artifact_base64":STANDARD.encode(b"other workspace"),"client_event_id":h.id()})).await;
     assert_eq!(r.status, 201);
@@ -640,13 +645,13 @@ async fn cross_workspace_records_and_rotated_credentials_never_supply_aliased_pr
 #[tokio::test]
 async fn attestation_replay_requires_read_even_when_reflect_is_retained() {
     let h = Hub::with(clean(), None);
-    h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    grant(&h, "fleet", &["read", "reflect"]).await;
-    let request = json!({"action":"evidence.attach","scope":"fleet","card_id":"a","workspace_id":"workspace-a",
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
+    let request = json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":"a","workspace_id":"workspace-a",
         "evidence_id":"agent:dot/workspace-a/replay","artifact_kind":"verification","artifact_sha256":ids::sha256_hex(b"replay evidence"),
         "observed_at":h.now(),"artifact_base64":STANDARD.encode(b"replay evidence"),"client_event_id":h.id()});
     assert_eq!(h.call(AGENT_TOKEN, request.clone()).await.status, 201);
-    grant(&h, "fleet", &["reflect"]).await;
+    grant(&h, FIXTURE_SCOPE, &["reflect"]).await;
     assert_eq!(h.call(AGENT_TOKEN, request).await.status, 403);
 }
 #[tokio::test]

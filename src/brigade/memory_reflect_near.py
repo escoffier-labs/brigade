@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import memory_claim_blocks as claim_blocks
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
 
@@ -111,6 +112,26 @@ def settings(target: Path) -> tuple[float, int]:
             f"[reflect] near_duplicate_max_proposals must be an integer from 0 to {MAX_PROPOSALS_LIMIT}"
         )
     return float(value), cap
+
+
+def reflected_scopes(target: Path, read_scopes: tuple[str, ...]) -> tuple[str, ...]:
+    """Read `[reflect] scopes`: the read scopes this workspace proposes, watches and applies in.
+
+    Missing means every read scope. A credential needs the hub's reflect right
+    in each listed scope. Unlisted read scopes are still read, never changed.
+    """
+    value = reflect_table(target).get("scopes")
+    if value is None:
+        return read_scopes
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(name, str) for name in value)
+        or len(set(value)) != len(value)
+        or not set(value) <= set(read_scopes)
+    ):
+        raise ThresholdError("[reflect] scopes must be a non-empty list of distinct configured hub read scopes")
+    return tuple(name for name in read_scopes if name in value)
 
 
 @dataclass
@@ -242,9 +263,26 @@ def _pairs(sets: list[array], limit: float, budget: Budget, skipped: dict[str, i
     return edges
 
 
+def _anchored(head: dict[str, Any]) -> bool:
+    """The keeper needs a claim anchor, not a hub pin.
+
+    A supersede op names the keeper only as `other_card`, with no block, and the
+    hub records whatever pins the keeper has. So inline code in the keeper's
+    anchored paragraph must not skip the cluster.
+    """
+    try:
+        return any(block.block_id for block in delta.blocks(head["text"]))
+    except ValueError:
+        return False
+
+
 def _pin(head: dict[str, Any]) -> delta.Block | None:
     try:
-        return next((block for block in delta.blocks(head["text"]) if block.block_id), None)
+        pins = claim_blocks.hub_pins(head["text"])
+        return next(
+            (block for block in delta.blocks(head["text"]) if claim_blocks.hub_addressable(head["text"], block, pins)),
+            None,
+        )
     except ValueError:
         return None
 
@@ -299,7 +337,7 @@ def ops(
             reason = "near_mixed_trust"
         elif not trusts <= KNOWN_TRUST:
             reason = "near_unknown_trust"
-        elif _pin(keeper) is None:
+        elif not _anchored(keeper):
             reason = "near_missing_pin"
         if reason:
             skipped[reason] = skipped.get(reason, 0) + len(others)

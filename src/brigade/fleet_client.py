@@ -221,6 +221,10 @@ class FleetClientError(RuntimeError):
     """Operator-facing configuration problem (never raised on report paths)."""
 
 
+class FleetSpoolLockTimeout(FleetClientError):
+    """A bounded spool-lock wait expired before the lock was granted."""
+
+
 class _PoisonResponse(Exception):
     """The hub rejected the batch permanently (non-retryable 4xx)."""
 

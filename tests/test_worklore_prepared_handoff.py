@@ -48,8 +48,8 @@ def ledger(tmp_path):
     conn.close()
 
 
-def query(conn, work_id):
-    return importlib.import_module("brigade.worklore_prepared_handoff").get_prepared_handoff(conn, work_id)
+def query(conn, work_id, *, now=None):
+    return importlib.import_module("brigade.worklore_prepared_handoff").get_prepared_handoff(conn, work_id, now=now)
 
 
 def action(conn, work_id, body, revision, *, node="node-a", admin=False):
@@ -263,7 +263,7 @@ def test_retained_checkpoint_report_and_versions_are_explicitly_unbound(ledger):
     action(conn, work_id, {"action": "accept", "generation": 1}, 5, node="node-b")
     append_execution(conn, work_id)
     conn.commit()
-    view = query(conn, work_id)
+    view = query(conn, work_id, now=STAMP)
     assert (view["item"]["version"], view["ownership"]["revision"], view["ownership"]["generation"]) == (2, 6, 2)
     assert view["ownership"]["last_seq"] != view["item"]["version"]
     assert view["ownership"]["owner_node"] == "node-b"
@@ -276,7 +276,7 @@ def test_retained_checkpoint_report_and_versions_are_explicitly_unbound(ledger):
     }
     report = view["last_report"]
     assert set(report) == {"data", "reporter_node", "freshness"}
-    assert report["reporter_node"] == "node-a" and report["freshness"] == "unassessed"
+    assert report["reporter_node"] == "node-a" and report["freshness"] == "recent"
     assert report["data"] == {key: value for key, value in recorded["last_report"].items() if key != "reporter_node"}
     assert report["data"]["sequence"] == 91
     assert report["data"]["observed_at"] == recorded["last_report"]["observed_at"]

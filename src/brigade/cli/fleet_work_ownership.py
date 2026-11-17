@@ -8,7 +8,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from .. import fleet_dot, worklore_client, worklore_ownership as ownership
+from .. import fleet_dot, worklore_client, worklore_liveness as liveness, worklore_ownership as ownership
 from ..worklore_validate import KINDS, TRANSITIONS, WorkloreValidationError, safe_text
 
 _REPORT_FIELDS = frozenset(
@@ -141,7 +141,10 @@ def _projection(work_id: str, item_reply: object, ownership_reply: object) -> di
         "item": item_view,
         "ownership": view,
         "consistency": "separate-reads",
-        "liveness": "unknown",
+        "liveness": _choice(raw.get("liveness", "unknown"), liveness.LIVENESS_VALUES),
+        "liveness_basis": _choice(raw.get("liveness_basis", "none"), liveness.BASIS_VALUES),
+        # An older Hub omits the derived fields; report the same fail-closed word it uses.
+        "liveness_freshness": _choice(raw.get("liveness_freshness", "unknown"), liveness.FRESHNESS_VALUES),
         "conflict_check": _choice(raw.get("conflict_check", "not-performed"), {"not-performed", "path-admission"}),
     }
 
@@ -174,7 +177,8 @@ def _human(payload: Mapping[str, Any]) -> None:
     if report["state"] == "observed":
         print(json.dumps(report, sort_keys=True, ensure_ascii=True))
     print(f"reads completed: item={payload['observations']['item']}; ownership={payload['observations']['ownership']}")
-    print(f"consistency: separate-reads; liveness: unknown; conflict_check: {payload['conflict_check']}")
+    print(f"consistency: separate-reads; liveness: {payload['liveness']}; conflict_check: {payload['conflict_check']}")
+    print(f"liveness basis: {payload['liveness_basis']}; liveness freshness: {payload['liveness_freshness']}")
 
 
 def _show(args: argparse.Namespace) -> int:

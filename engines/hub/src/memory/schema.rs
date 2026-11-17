@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 14;
+pub const USER_VERSION: i64 = 15;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -143,7 +143,7 @@ CREATE TABLE memory_idempotency(
   PRIMARY KEY(principal, client_event_id)
 ) WITHOUT ROWID;
 CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
-{}{}{}{}{}{}{}{}
+{}{}{}{}{}{}{}{}{}
 ",
         super::embedding::DDL,
         super::proposals::DDL,
@@ -152,7 +152,8 @@ CREATE INDEX memory_idempotency_age ON memory_idempotency(created_ms);
         super::read_counts::DDL,
         super::verifier::DDL,
         super::manifest_binding::DDL,
-        super::verify_eval::DDL
+        super::verify_eval::DDL,
+        super::retrieval_history::DDL
     )
 }
 
@@ -172,6 +173,7 @@ pub const TABLES: &[&str] = &[
     "memory_proposals",
     "memory_evidence",
     "memory_retrieval_evals",
+    "memory_retrieval_history",
     "memory_read_days",
     "memory_read_totals",
     "memory_verifiers",
@@ -280,6 +282,18 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
     }
     if version < 14 {
         step(c, super::verify_eval::DDL, 14).map_err(err)?;
+    }
+    if version < 15 {
+        step(
+            c,
+            &format!(
+                "DROP TRIGGER IF EXISTS memory_retrieval_history_no_delete; {} {}",
+                super::retrieval_history::DDL,
+                super::verify_eval::DDL
+            ),
+            15,
+        )
+        .map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

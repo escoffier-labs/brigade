@@ -19,6 +19,12 @@ SCHEMA_VERSION = 2
 MAX_ROWS = 500
 MAX_TEXT = 120
 SHA256 = re.compile(r"[0-9a-f]{64}")
+# Local CLI output keeps the precise copy state (``symlink``, ``unusable``).
+# A deployed Hub rejects the whole node report for a status it does not know,
+# and nodes upgrade before the Hub, so the report maps them onto the closed set
+# the Hub already accepts: a linked copy is outside Brigade's control
+# (``external``) and an unreadable one is simply ``unknown``.
+_REPORT_STATUS = {"symlink": "external", "unusable": "unknown"}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -72,7 +78,7 @@ def build_copies(target: Path) -> list[dict[str, Any]]:
                 "binding": binding,
                 "skill_id": _text(skill_id),
                 "harness": _text(harness),
-                "status": _text(copy["status"]),
+                "status": _text(_REPORT_STATUS.get(str(copy["status"]), copy["status"])),
                 "installed_sha256": _hash(installed.get("skill_fingerprint")),
                 "registry_sha256": _hash(source.get("fingerprint")),
                 "rollback_available": _rollback_available(receipt),

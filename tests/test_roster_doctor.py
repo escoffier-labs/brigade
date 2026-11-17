@@ -293,7 +293,7 @@ def test_ready_uses_cached_preference_without_refresh(tmp_path, monkeypatch, cap
             ]
 
     monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": ""})
-    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda: False)
+    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda **_: False)
     monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", forbidden)
     monkeypatch.setattr(fleet_client, "inspect_claim", forbidden)
     monkeypatch.setattr(fleet_client_policy, "show_policy", forbidden)

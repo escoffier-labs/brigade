@@ -46,6 +46,7 @@ def _plan(
     seat_map: dict[str, str],
     allow_missing_wave: bool = False,
     extra_exclusions: dict[str, str] | None = None,
+    only_tasks: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     resolution = edges.resolve_readiness(ledger)
     tasks = {str(task["id"]): task for task in ledger["tasks"] if isinstance(task, dict) and "id" in task}
@@ -55,6 +56,9 @@ def _plan(
     excluded.update(extra_exclusions or {})
     for item in sorted(resolution.ready, key=claiming.ready_sort_key):
         task_id = item["id"]
+        if only_tasks is not None and task_id not in only_tasks:
+            skipped.append({"task_id": task_id, "reason": "not_selected"})
+            continue
         if task_id in excluded:
             skipped.append({"task_id": task_id, "reason": excluded[task_id]})
             continue
@@ -156,6 +160,7 @@ def dispatch(
     watch: bool = False,
     interval: float = 5,
     drain_wait: bool = False,
+    only_tasks: Sequence[str] | None = None,
 ) -> int:
     try:
         if not math.isfinite(interval) or interval <= 0:
@@ -210,6 +215,7 @@ def dispatch(
         base_sha = _base_sha(target, base)
         if not dry_run and (base_sha is None or roster_path is None):
             raise ValueError("apply requires a committed Git base and a primary roster")
+        selected_tasks = frozenset(only_tasks) if only_tasks is not None else None
         result = 0
         with nullcontext() if dry_run else dispatch_state.dispatch_lock(target):
             engine = Apply(target)
@@ -229,6 +235,7 @@ def dispatch(
                 worker=worker,
                 seat_map=mapping,
                 allow_missing_wave=watch,
+                only_tasks=selected_tasks,
             )
             dispatch_id = f"dispatch-{uuid4().hex}"
             directory = target / ".brigade" / "dispatch" / dispatch_id
@@ -287,6 +294,7 @@ def dispatch(
                             seat_map=mapping,
                             allow_missing_wave=True,
                             extra_exclusions=supervisor.exclusions(),
+                            only_tasks=selected_tasks,
                         )
                         if not tick_plan["dispatch_count"]:
                             return reconciled

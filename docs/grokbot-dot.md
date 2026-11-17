@@ -26,6 +26,41 @@ The shared NT private-file helpers do not provide a descriptor-pinned SQLite
 connection. Windows state support needs that storage contract before the
 listener can safely run there.
 
+## What the dot reports about itself
+
+Checked by asking the dot on 2026-11-17. These are the dot's own answers and
+were not tested, except the line marked "Observed".
+
+- Pre-approval: the dot reports that a standing rule can pre-approve a routine
+  send through a connector by naming the action, recipient, content and timing,
+  and that a scheduled run can then send without a tap only if the connector and
+  workspace also allow that write unattended. It says a standing rule cannot
+  dismiss an Allow prompt that the app or platform enforces, and it does not
+  know whether this connector's send can run unattended. An unattended scheduled
+  run was observed blocking on an approval prompt.
+  [fleet-mcp-events.md](fleet-mcp-events.md) has what happened.
+- Waking: the dot reports that supported Gmail, Slack and GitHub events on
+  connected accounts can trigger work, that a watched URL is normally a periodic
+  check, and that it cannot confirm a native Calendar event trigger or a generic
+  webhook endpoint. See [fleet-mcp-events.md](fleet-mcp-events.md).
+- Codex: the dot reports that it can start a separate Codex cloud task, including
+  one in a saved cloud environment, or start or continue a local Codex task on a
+  connected, online computer. It reports getting back a task reference, status
+  updates and the result or blocker, which can include a diff, test results or
+  files, and that a finished task does not mean anything was pushed or merged.
+- Limits: the dot reports that hourly scheduled runs work and that it does not
+  know its fastest cadence, maximum run time, active-task cap or memory
+  capacity. It reports that saved notes and ChatGPT memory carry across chats
+  but are not a full transcript. On a Pro plan it reports that ordinary conversation
+  does not count toward ChatGPT usage limits, while delegated Work and Codex
+  tasks count toward a shared allowance, and that quota-consuming work may not
+  start once that allowance is used up.
+- Approval: the dot reports that money transfers, Wallet use, irreversible
+  deletion, security-sensitive settings changes, running software from an
+  unrecognized source and granting broad administrative access or disclosing
+  secrets still need approval at the time, and that an app can enforce its own
+  approval.
+
 ## Runtime JSON
 
 The instance stores `runtime_path`, an absolute reference to an owner-only

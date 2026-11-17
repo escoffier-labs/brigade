@@ -33,6 +33,10 @@ def batch(*tasks, **kwargs):
         (batch(task(text=" \n")), "empty-text"),
         (batch(task(text="x" * (run_batch.MAX_TEXT_BYTES + 1))), "text-limit"),
         (batch(task(seat="")), "invalid-seat"),
+        (batch(task(isolation="container")), "invalid-isolation"),
+        (batch(task(isolation=None)), "invalid-isolation"),
+        (batch(task(read_only="yes")), "invalid-read-only"),
+        (batch(task(read_only=1)), "invalid-read-only"),
         (batch(task(depends_on="b")), "invalid-dependencies"),
         (batch(task(depends_on=["b", "b"])), "invalid-dependencies"),
         (batch(task(depends_on=["missing"])), "unknown-dependency"),
@@ -58,7 +62,7 @@ def test_cycle_reports_actual_closed_path():
 
 
 def test_same_text_and_seat_remain_distinct_and_layers_are_stable():
-    payload = batch(task("c", depends_on=["b", "a"]), task("b"), task("a"))
+    payload = batch(task("c", depends_on=["b", "a"]), task("b", read_only=True), task("a"))
     plan = run_batch.plan_batch(payload)
     assert plan["layers"] == [["a", "b"], ["c"]]
     assert [t["task_id"] for t in plan["tasks"]] == ["a", "b", "c"]
@@ -96,15 +100,16 @@ def no_models(monkeypatch):
 
 @pytest.mark.parametrize("as_json", [False, True])
 def test_dry_run_cli(tmp_path, capsys, no_models, as_json):
+    payload = batch(task("b", read_only=True), task("a"))
     path = tmp_path / "batch.json"
-    path.write_text(json.dumps(batch(task("b"), task("a"))))
+    path.write_text(json.dumps(payload))
     args = ["run", "batch", str(path), "--dry-run"] + (["--json"] if as_json else [])
     assert cli.main(args) == 0
     output = capsys.readouterr().out
     if as_json:
         plan = json.loads(output)
         assert plan["layers"] == [["a", "b"]]
-        assert plan["fingerprint"] == run_batch.request_fingerprint(batch(task("b"), task("a")))
+        assert plan["fingerprint"] == run_batch.request_fingerprint(payload)
     else:
         assert "a (coder)" in output
         assert "fingerprint:" in output
@@ -138,7 +143,10 @@ def test_bounds_and_lifecycle_identity():
     from brigade import run_task_journal, run_tasks
 
     payload = batch(
-        *[task(f"task:{i}", text="é" * (run_batch.MAX_TEXT_BYTES // 2)) for i in range(run_batch.MAX_TASKS)]
+        *[
+            task(f"task:{i}", text="é" * (run_batch.MAX_TEXT_BYTES // 2), read_only=True)
+            for i in range(run_batch.MAX_TASKS)
+        ]
     )
     canonical = run_batch.validate_batch(payload)
     assert len(canonical["tasks"]) == run_task_journal.MAX_BATCH_MEMBERS
@@ -151,12 +159,150 @@ def test_bounds_and_lifecycle_identity():
 
 
 def test_canonical_defaults_and_dependencies():
-    payload = batch(task("a"), task("b"), task("c", depends_on=["b", "a"]))
+    payload = batch(task("a"), task("b", read_only=True), task("c", depends_on=["b", "a"]))
     changed = copy.deepcopy(payload)
     changed["synthesis"] = None
     changed["tasks"][0]["depends_on"] = []
     changed["tasks"][2]["depends_on"].reverse()
     assert run_batch.request_fingerprint(payload) == run_batch.request_fingerprint(changed)
+
+
+SHA = "a" * 40
+
+
+def test_plan_records_effective_isolation_and_read_only():
+    plan = run_batch.plan_batch(batch(task("a"), task("b", read_only=True)))
+    assert [(row["isolation"], row["read_only"]) for row in plan["tasks"]] == [
+        ("shared", False),
+        ("shared", True),
+    ]
+    assert plan["base_sha"] is None
+
+
+def test_non_default_isolation_and_read_only_change_the_fingerprint():
+    default = run_batch.request_fingerprint(batch(task("a")))
+    assert run_batch.request_fingerprint(batch(task("a", read_only=True))) != default
+    worktree = batch(task("a", isolation="worktree"))
+    assert run_batch.request_fingerprint(worktree, base_sha=SHA) != default
+
+
+def test_same_layer_shared_writable_tasks_are_refused_with_task_ids():
+    with pytest.raises(run_batch.BatchError) as caught:
+        run_batch.validate_batch(batch(task("b"), task("a")))
+    assert caught.value.code == "shared-writable-concurrency"
+    assert "a, b" in str(caught.value)
+
+
+def test_documented_concurrency_escapes_are_accepted():
+    assert run_batch.validate_batch(batch(task("a")))["tasks"][0]["isolation"] == "shared"
+    layered = run_batch.validate_batch(batch(task("a"), task("b", depends_on=["a"])))
+    assert [row["task_id"] for row in layered["tasks"]] == ["a", "b"]
+    run_batch.validate_batch(batch(task("a"), task("b", read_only=True)))
+    run_batch.plan_batch(batch(task("a", isolation="worktree"), task("b", isolation="worktree")), base_sha=SHA)
+
+
+def test_worktree_plan_requires_a_valid_pinned_base():
+    payload = batch(task("a", isolation="worktree"))
+    with pytest.raises(run_batch.BatchError) as caught:
+        run_batch.plan_batch(payload)
+    assert caught.value.code == "base-unpinned"
+    with pytest.raises(run_batch.BatchError) as caught:
+        run_batch.plan_batch(payload, base_sha="A" * 40)
+    assert caught.value.code == "invalid-base-sha"
+    with pytest.raises(run_batch.BatchError) as caught:
+        run_batch.plan_batch(payload, base_sha=SHA[:-1])
+    assert caught.value.code == "invalid-base-sha"
+    with pytest.raises(run_batch.BatchError) as caught:
+        run_batch.plan_batch(batch(task("a")), base_sha=SHA)
+    assert caught.value.code == "unexpected-base-sha"
+    with pytest.raises(run_batch.BatchError) as caught:
+        run_batch.request_fingerprint(payload)
+    assert caught.value.code == "base-unpinned"
+
+
+def test_retry_against_a_different_head_is_a_conflict():
+    payload = batch(task("a", isolation="worktree"))
+    stored = run_batch.request_fingerprint(payload, base_sha=SHA)
+    assert run_batch.compare_request(stored, payload, base_sha=SHA) == "same"
+    assert run_batch.compare_request(stored, payload, base_sha="b" * 40) == "conflict"
+
+
+def _git_checkout(path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_worktree_dry_run_pins_a_clean_head(tmp_path, capsys, no_models, as_json):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _git_checkout(repo)
+    path = tmp_path / "batch.json"
+    path.write_text(json.dumps(batch(task("a", isolation="worktree"), task("b", read_only=True))))
+    argv = ["run", "batch", str(path), "--dry-run", "--cwd", str(repo)] + (["--json"] if as_json else [])
+    assert cli.main(argv) == 0
+    output = capsys.readouterr().out
+    if as_json:
+        plan = json.loads(output)
+        assert plan["base_sha"] == sha
+        assert [row["isolation"] for row in plan["tasks"]] == ["worktree", "shared"]
+        assert [row["read_only"] for row in plan["tasks"]] == [False, True]
+    else:
+        assert f"base: {sha}" in output
+
+
+def test_worktree_dry_run_refuses_a_dirty_checkout(tmp_path, capsys, no_models):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_checkout(repo)
+    (repo / "uncommitted.txt").write_text("local edit\n")
+    path = tmp_path / "batch.json"
+    path.write_text(json.dumps(batch(task("a", isolation="worktree"))))
+    assert cli.main(["run", "batch", str(path), "--dry-run", "--cwd", str(repo), "--json"]) == 2
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == "base-dirty"
+    assert "uncommitted" in error["message"]
+
+
+def test_worktree_dry_run_refuses_a_checkout_without_a_revision(tmp_path, capsys, no_models):
+    path = tmp_path / "batch.json"
+    path.write_text(json.dumps(batch(task("a", isolation="worktree"))))
+    assert cli.main(["run", "batch", str(path), "--dry-run", "--cwd", str(tmp_path), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "base-unavailable"
+
+
+def test_worktree_execution_is_refused_before_any_launch(tmp_path, capsys, no_models):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sha = _git_checkout(repo)
+    path = tmp_path / "batch.json"
+    path.write_text(json.dumps(batch(task("a", isolation="worktree"))))
+    assert cli.main(["run", "batch", str(path), "--cwd", str(repo), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "isolation-worktree-not-implemented"
+    marker = json.loads((next((repo / ".brigade" / "runs").glob("batch-*")) / "batch-request.json").read_text())
+    assert marker["base_sha"] == sha
+    assert marker["tasks"][0]["isolation"] == "worktree"
 
 
 @pytest.mark.parametrize("raw", [b'{"schema":"x","schema":"y"}', b"[" * 2000])

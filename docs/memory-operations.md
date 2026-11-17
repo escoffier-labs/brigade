@@ -1642,6 +1642,24 @@ passes an absolute workspace target, and invokes `memory reflect run --hub
 which can reverse the policy actor's own unchanged applies. `--hub` refuses
 disabled hub settings.
 
+Every pass and the compensation watch run in the reflected scopes, which
+default to every configured read scope. The watch and `propose` both need the
+hub's `reflect` right in each of them. When the workspace credential reads more
+scopes than it may reflect, list only the reflectable ones:
+
+```toml
+[reflect]
+scopes = ["repo:owner/name"]
+```
+
+Unlisted read scopes are still read, but no candidate is proposed and no
+watch is polled there. Each entry
+must be a distinct configured read scope, or the run fails with
+`hub_reflect_config` before any hub call. A missing grant in a listed scope
+still fails the run, so a revoked right cannot silently stop the watch over
+applies it already made. `--scope` must name a listed scope. The report lists
+the scopes in `reflected_scopes`.
+
 A failure means a non-dry reflect run exits non-zero. For runs that can safely write
 workspace state, `.brigade/memory/reflect/schedule.json` records consecutive
 failures. Three failures pause scheduled reflection. While paused, scheduler
@@ -2439,7 +2457,7 @@ A seat is refused before any prompt is written when:
 | `verify_seat_unconfigured` | `[verify]` is missing either seat |
 | `verify_seat_unknown` | The seat is not in the local roster. Seats the hub synthesizes for other fleet nodes are never used in v1 |
 | `verify_seat_connector` | The seat's audience is `connector`: a `codex-cloud:` seat, a hosted chat session (`oracle`), an endpoint outside loopback, or an Ollama cloud model |
-| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a reasoning pin, its CLI is a script or launcher rather than a native binary, it is an `ollama:` seat (below), or it has no passing probe for its current fingerprint |
+| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a `reasoning` level outside `low`, `medium`, `high`, `xhigh` and `max`, its CLI is a script or launcher rather than a native binary, it is an `ollama:` seat (below), or it has no passing probe for its current fingerprint |
 | `verify_seat_disallowed` | `limits.allow_models` does not allow the seat |
 | `verify_seat_unpinned` | The seat pins no exact model id. A Claude seat needs a full `claude-...` id, not an alias such as `opus` |
 | `verify_seat_same_model` | Both seats resolve to one model, ignoring a bracketed context suffix such as `[1m]` |
@@ -2462,6 +2480,8 @@ reports, never on what the model says. One adapter has a profile in v1:
   event later in the stream refuses the call too. The init event does not list
   loaded instruction files, so the working directory is placed where no
   parent holds any (below).
+
+A claude seat may set `reasoning` to one of those levels. Verify passes it as `--effort` and the seat fingerprint covers it, so changing it needs a fresh probe and gate record. The init event does not report effort, so the probe shows the CLI accepted the flag, not the level it applied. `brigade run` does not pass reasoning to claude and refuses such a seat, and `brigade roster doctor` reports it as a verify-only warning. Use a seat dedicated to verify.
 
 `ollama:<model>` seats are refused with `verify_seat_not_isolated` ("ollama
 tags are mutable, and v1 has no immutable launch"). Ollama names a model only

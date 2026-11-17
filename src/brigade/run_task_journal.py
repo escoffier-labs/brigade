@@ -17,6 +17,7 @@ from brigade import run_checkpoint, run_events, run_journal, run_lifecycle, rung
 
 BATCH_DESCRIPTOR_VERSION = 1
 MAX_BATCH_MEMBERS = 8
+NATIVE_ENROLLMENT_DESCRIPTOR_VERSION = 1
 
 TASK_FIELDS = {event_type: run_events.EVENT_TYPES[event_type] for event_type in run_events._TASK_EVENT_TYPES}
 STATES = frozenset(
@@ -37,6 +38,9 @@ CONTAINMENT = frozenset({"unknown", "active", "quiescent"})
 ARTIFACT_KINDS = frozenset({"commit", "patch", "receipt", "unavailable"})
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*", re.ASCII)
 _PROVIDER_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:%~+/@=-]*", re.ASCII)
+# Run-local delegation input assets are flat names derived from the task ID.
+# The name is reloadable and never carries task text.
+_NATIVE_ASSET_PATH = re.compile(r"native-input-[0-9a-f]{64}\.json", re.ASCII)
 _PROVIDER_FIELDS = frozenset({"provider_task_id", "original_run_id", "provider_result_id"})
 _DIGEST_FIELDS = frozenset({"payload_digest", "spec_digest", "attempt_id", "result_id", "artifact_digest"})
 
@@ -63,6 +67,10 @@ def provider_reference(value: object) -> bool:
 
 def digest(value: object) -> bool:
     return isinstance(value, str) and bool(run_events._HEX64.fullmatch(value))
+
+
+def native_asset_path(value: object) -> bool:
+    return isinstance(value, str) and bool(_NATIVE_ASSET_PATH.fullmatch(value))
 
 
 def batch_membership_digest(*, descriptor_version: int, members: Sequence[Mapping[str, Any]]) -> str:
@@ -119,6 +127,20 @@ def _validate_batch_payload(payload: Mapping[str, Any]) -> None:
         raise run_events.CanonicalizationError("task batch membership digest mismatch")
 
 
+def _validate_native_enrollment_payload(payload: Mapping[str, Any]) -> None:
+    """Closed enrollment shape: references and digests only, no payload text."""
+    version = payload["descriptor_version"]
+    if type(version) is not int or version != NATIVE_ENROLLMENT_DESCRIPTOR_VERSION:
+        raise run_events.CanonicalizationError("unsupported native enrollment descriptor version")
+    if (
+        not task_id(payload["task_id"])
+        or not native_asset_path(payload["asset_path"])
+        or not digest(payload["asset_digest"])
+        or not digest(payload["template_digest"])
+    ):
+        raise run_events.CanonicalizationError("invalid native enrollment reference")
+
+
 def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
     """Validate exact closed task shapes, also used by envelope readers."""
     fields = TASK_FIELDS[event_type]
@@ -126,6 +148,9 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
         raise run_events.CanonicalizationError("task payload fields do not match closed schema")
     if event_type == "task.batch-accepted":
         _validate_batch_payload(payload)
+        return
+    if event_type == "task.native-enrolled":
+        _validate_native_enrollment_payload(payload)
         return
     optional = (
         {"provider_task_id", "original_run_id", "provider_result_id", "result_id", "artifact_kind", "artifact_digest"}

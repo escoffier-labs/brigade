@@ -1,6 +1,7 @@
 """Offline execution through the real guarded orchestrator and dispatcher."""
 
 import json
+import subprocess
 import threading
 from unittest.mock import Mock
 
@@ -47,8 +48,14 @@ def invoke(setup, capsys, tasks, request="req"):
     return rc, json.loads(captured.out), captured.err
 
 
-def task(name, deps=()):
-    return {"task_id": name, "seat": "coder", "text": "Do the same work", "depends_on": list(deps)}
+def task(name, deps=(), *, read_only=True):
+    return {
+        "task_id": name,
+        "seat": "coder",
+        "text": "Do the same work",
+        "depends_on": list(deps),
+        "read_only": read_only,
+    }
 
 
 def test_separate_results_retry_and_conflict(setup, capsys):
@@ -117,11 +124,11 @@ def test_crash_unknown_never_relaunches(setup, capsys, monkeypatch):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(agents, "run_agent", crash)
-    rc, result, err = invoke(setup, capsys, [task("a")])
+    rc, result, err = invoke(setup, capsys, [task("a", read_only=False)])
     assert rc == 1, err
     assert result["tasks"]["a"]["status"] == "unknown"
     assert len(setup[1]) == 1
-    assert invoke(setup, capsys, [task("a")])[:2] == (1, result)
+    assert invoke(setup, capsys, [task("a", read_only=False)])[:2] == (1, result)
     assert len(setup[1]) == 1
     run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
     assert run_tasks.read_task_batch(run_dir, request_id="req").members[0].status == "unknown"
@@ -285,6 +292,116 @@ def test_batch_resolves_hub_only_seat_and_all_admissions(tmp_path):
     assert "reviewer" in execution.resolve_model_policy(roster, worker="coder", snapshot=snapshot).error
 
 
+def test_read_only_is_passed_through_per_task(setup, capsys, monkeypatch):
+    seen = {}
+
+    def model(agent, prompt, **kwargs):
+        name = "b" if "Batch task_id: b" in prompt else "a"
+        seen[name] = (prompt, kwargs.get("read_only"))
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, result, err = invoke(
+        setup,
+        capsys,
+        [task("a", read_only=False), task("b", read_only=True, deps=("a",))],
+    )
+    assert rc == 0, err
+    writable_prompt, writable_flag = seen["a"]
+    read_only_prompt, read_only_flag = seen["b"]
+    assert writable_flag is False and "READ-ONLY MODE" not in writable_prompt
+    assert read_only_flag is True and "READ-ONLY MODE" in read_only_prompt
+
+
+def test_read_only_task_on_incapable_seat_is_refused(setup, capsys):
+    roster = setup[0] / ".brigade" / "roster.toml"
+    with roster.open("a") as stream:
+        stream.write('\n[agents.reviewer]\ncli = "codex"\nrole = "review"\nread_only_capable = false\n')
+    rc, _, err = invoke(
+        setup,
+        capsys,
+        [
+            task("a", read_only=False),
+            {**task("b", read_only=True, deps=("a",)), "seat": "reviewer"},
+        ],
+    )
+    assert rc == 2
+    assert "cannot run in read-only mode" in err
+    assert setup[1] == []
+
+
+def test_read_only_task_on_mutating_cloud_seat_is_refused(setup, capsys):
+    roster = setup[0] / ".brigade" / "roster.toml"
+    with roster.open("a") as stream:
+        stream.write('\n[agents.cloud]\ncli = "codex-cloud:env-123"\nrole = "implement"\n')
+    rc, _, err = invoke(
+        setup,
+        capsys,
+        [
+            task("a", read_only=False),
+            {**task("b", read_only=True, deps=("a",)), "seat": "cloud"},
+        ],
+    )
+    assert rc == 2
+    assert "mutating codex-cloud seat" in err
+    assert setup[1] == []
+
+
+@pytest.mark.parametrize(
+    ("agent_block", "limits"),
+    [
+        ('\n[agents.reviewer]\ncli = "opencode"\nrole = "review"\n', ""),
+        ('\n[agents.reviewer]\ncli = "codex"\nrole = "review"\n', "workspace-write"),
+    ],
+)
+def test_read_only_task_without_hard_enforcement_is_refused(setup, capsys, agent_block, limits):
+    roster = setup[0] / ".brigade" / "roster.toml"
+    text = roster.read_text()
+    if limits:
+        text = text.replace("[limits]\n", f'[limits]\nsandbox = "{limits}"\n')
+    roster.write_text(text + agent_block)
+    # Same layer: the read-only task would otherwise run beside the writer.
+    rc, _, err = invoke(
+        setup,
+        capsys,
+        [task("a", read_only=False), {**task("b", read_only=True), "seat": "reviewer"}],
+    )
+    assert rc == 2
+    assert "enforces read-only as" in err
+    assert setup[1] == []
+
+
+def test_writable_task_under_read_only_sandbox_is_refused(setup, capsys):
+    roster = setup[0] / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text().replace("[limits]\n", '[limits]\nsandbox = "read-only"\n'))
+    rc, _, err = invoke(setup, capsys, [task("a", read_only=False), task("b", read_only=True, deps=("a",))])
+    assert rc == 2
+    assert "roster sandbox is read-only" in err
+    assert setup[1] == []
+
+
+def test_worktree_retry_is_not_blocked_by_its_own_request_marker(setup, capsys):
+    root = setup[0]
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    # .brigade/ is deliberately NOT ignored: the batch marker must not dirty the base.
+    (root / ".git" / "info" / "exclude").write_text("batch.json\n")
+    subprocess.run(["git", "-C", str(root), "add", ".brigade/roster.toml"], check=True)
+    _commit(root, "base")
+    tasks = [{**task("a"), "isolation": "worktree"}]
+    for _ in range(2):
+        rc, result, _ = invoke(setup, capsys, tasks)
+        assert rc == 2
+        assert result["error"]["code"] == "isolation-worktree-not-implemented"
+    assert setup[1] == []
+
+
+def test_all_read_only_batch_records_a_read_only_run(setup, capsys):
+    rc, result, err = invoke(setup, capsys, [task("a"), task("b")])
+    assert rc == 0, err
+    run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
+    assert json.loads((run_dir / "run.json").read_text())["read_only"] is True
+
+
 def test_request_dispatch_lock_refuses_concurrent_retry(setup, capsys):
     from brigade.run_batch_execute import request_lock
 
@@ -296,6 +413,56 @@ def test_request_dispatch_lock_refuses_concurrent_retry(setup, capsys):
     assert rc == 2
     assert result["error"]["code"] == "request-busy"
     assert len(setup[1]) == 1
+
+
+def _commit(repo, message, *, allow_empty=False):
+    argv = [
+        "git",
+        "-C",
+        str(repo),
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    ]
+    if allow_empty:
+        argv.append("--allow-empty")
+    subprocess.run(argv, check=True)
+
+
+def test_worktree_batch_records_pin_and_refuses_before_launch(setup, capsys):
+    root = setup[0]
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".git" / "info" / "exclude").write_text("batch.json\n.brigade/\n")
+    repo = root
+    _commit(repo, "base", allow_empty=True)
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tasks = [{**task("a"), "isolation": "worktree"}, task("b", read_only=True)]
+    rc, result, _ = invoke(setup, capsys, tasks)
+    assert rc == 2
+    assert result["error"]["code"] == "isolation-worktree-not-implemented"
+    assert setup[1] == []
+    run_dir = next((root / ".brigade" / "runs").glob("batch-*"))
+    marker = json.loads((run_dir / "batch-request.json").read_text())
+    assert marker["base_sha"] == sha
+    assert [(t["task_id"], t["isolation"]) for t in marker["tasks"]] == [("a", "worktree"), ("b", "shared")]
+    # A retry after the parent moved HEAD pins a different base and conflicts.
+    (repo / "next.txt").write_text("next\n")
+    subprocess.run(["git", "-C", str(repo), "add", "next.txt"], check=True)
+    _commit(repo, "next")
+    rc, result, _ = invoke(setup, capsys, tasks)
+    assert rc == 2
+    assert result["error"]["code"] == "request-conflict"
+    assert setup[1] == []
 
 
 @pytest.mark.parametrize("explicit_cwd", [False, True])
@@ -325,7 +492,7 @@ def test_retry_from_git_subdirectory_uses_same_fence(setup, capsys, monkeypatch,
 def test_batch_transport_failure_invokes_once(setup, capsys, monkeypatch, failure_kind):
     model = Mock(return_value=agents.AgentResult(text="first failure", ok=False, failure_kind=failure_kind))
     monkeypatch.setattr(agents, "run_agent", model)
-    rc, result, err = invoke(setup, capsys, [task("a")])
+    rc, result, err = invoke(setup, capsys, [task("a", read_only=False)])
     assert rc == 1, err
     assert model.call_count == 1
     assert result["tasks"]["a"]["status"] == "failed"
@@ -376,7 +543,7 @@ def test_interrupted_reservation_only_retries_missing_marker(setup, capsys, mark
 @pytest.mark.parametrize("ok", [True, False])
 def test_batch_final_summary_reports_task_outcomes(setup, capsys, monkeypatch, ok):
     monkeypatch.setattr(agents, "run_agent", Mock(return_value=agents.AgentResult(text="output", ok=ok)))
-    rc, result, err = invoke(setup, capsys, [task("a"), task("b", ["a"])])
+    rc, result, err = invoke(setup, capsys, [task("a", read_only=False), task("b", ["a"], read_only=False)])
     assert rc == (0 if ok else 1), err
     run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
     summary = json.loads((run_dir / "synthesis.json").read_text())["result"]

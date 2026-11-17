@@ -69,7 +69,7 @@ def request_http(address, path, *, data=None, headers=None):
 
 def fields(body):
     result = {name: html.unescape(value) for name, value in re.findall(r'name="([^"]+)" value="([^"]*)"', body)}
-    for name, content in re.findall(r'<select name="([^"]+)">(.*?)</select>', body, re.S):
+    for name, content in re.findall(r'<select name="([^"]+)"[^>]*>(.*?)</select>', body, re.S):
         options = re.findall(r'<option value="([^"]*)"([^>]*)>', content)
         selected = next((value for value, attrs in options if "selected" in attrs), options[0][0] if options else "")
         result[name] = html.unescape(selected)

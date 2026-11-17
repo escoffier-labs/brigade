@@ -145,6 +145,7 @@ def set_work_item_lookup(callback: WorkItemLookup | None) -> None:
 
 def _default_work_lookup(conn: sqlite3.Connection, work_id: str) -> Mapping[str, Any] | None:
     try:
+        from .worklore_campaigns import member_excluded
         from .worklore_store import WorkloreNotFound, _link_summary, _source_policies, get_item
     except Exception:
         return None
@@ -154,6 +155,10 @@ def _default_work_lookup(conn: sqlite3.Connection, work_id: str) -> Mapping[str,
             item["source_policies"] = _source_policies(_link_summary(conn, work_id))
         except Exception:
             item["source_policies"] = ["stale-source"]
+        try:
+            item["campaign_excluded"] = member_excluded(conn, work_id)
+        except Exception:
+            item["campaign_excluded"] = True  # fail closed, like the source-policy read above
         return item
     except WorkloreNotFound:
         return None
@@ -193,7 +198,9 @@ def evaluate_work_item(item: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(source_policies, list):
         return {"ok": False, "reason": "work-held", "detail": "source-policy"}
     try:
-        bucket = exclusion_bucket(item, source_policies, now=_now())
+        bucket = exclusion_bucket(
+            item, source_policies, now=_now(), campaign_excluded=item.get("campaign_excluded") is True
+        )
     except Exception:
         return {"ok": False, "reason": "work-held", "detail": "worklore-unavailable"}
     if bucket is not None:

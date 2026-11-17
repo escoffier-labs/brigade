@@ -197,6 +197,34 @@ def test_worklore_body_byte_boundary(hub, monkeypatch, path, limit):
     assert handled == [{}]
 
 
+def test_worklore_import_accepts_between_one_and_five_mebibytes_and_refuses_above(hub, monkeypatch):
+    assert bounds.WORKLORE_IMPORT_BODY_BYTES == 5 * 1024 * 1024
+    url, token, _db = hub
+    handled = []
+    monkeypatch.setattr(worklore_http, "enabled", lambda: True)
+    monkeypatch.setattr(worklore_http, "handle", lambda conn, request: (handled.append(request.body) or 200, {}))
+    request = urllib.request.Request(
+        url + "/work/imports",
+        data=b"{}".ljust(2 * 1024 * 1024),
+        headers={"Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+    assert handled == [{}]
+    # The 256 KiB limit for the other Worklore routes is unchanged.
+    request = urllib.request.Request(
+        url + "/work/items",
+        data=b"{}".ljust(bounds.WORKLORE_BODY_BYTES + 1),
+        headers={"Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        urllib.request.urlopen(request, timeout=5)
+    assert refused.value.code == 413
+    assert handled == [{}]
+
+
 @pytest.mark.parametrize("framing", ["chunked", "missing-length", "duplicate-length"])
 def test_ambiguous_framing_is_refused_without_reading_body(hub, framing):
     url, token, db = hub

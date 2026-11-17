@@ -142,6 +142,9 @@ td { color: var(--ink); font-size: 13px; }
 footer { margin-top: var(--space-5); color: var(--faint); font-size: 12px; }
 footer a { margin-right: var(--space-3); color: var(--muted); }
 label { color: var(--muted); font-size: 12px; }
+.field-label { min-width: 0; }
+.field-req { margin: 0 var(--space-1); color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.field-req--required { color: var(--ink); font-weight: 700; }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .roster-form label { display: grid; gap: 6px; min-width: 0; color: var(--ink); font-size: 13px; font-weight: 500; }
 .roster-form label > .hint { grid-row: 3; margin-top: 2px; }

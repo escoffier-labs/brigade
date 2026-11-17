@@ -79,6 +79,60 @@ def _capacity_or_unknown(
     return Observation("unknown", observed_at, scope, detail=detail)
 
 
+def _hub_seat_usage_capacity(
+    limits: list[tuple[str, int]],
+    snapshot: Mapping[str, Any] | None,
+    *,
+    observed_at: float,
+    scope: str,
+) -> Observation:
+    """Turn current Hub seat occupancy into free capacity for this exact snapshot.
+
+    Every selected seat with a positive limit is checked, and the smallest free
+    capacity wins, so one full seat cannot hide behind an idle one. The usage
+    response must carry the same roster revision and policy digest as the
+    admission snapshot; anything else is unknown, never ready.
+    """
+    from . import fleet_client_policy
+
+    def _unknown(detail: str) -> Observation:
+        return Observation("unknown", observed_at, scope, detail=detail)
+
+    try:
+        usage = fleet_client_policy.read_seat_usage()
+    except Exception as exc:
+        return _unknown(f"hub seat usage unavailable ({safe_detail(str(exc))})")
+    if not isinstance(usage, Mapping):
+        return _unknown("hub seat usage returned a malformed payload")
+    seats = usage.get("seats")
+    revision = usage.get("roster_revision")
+    digest = usage.get("policy_digest")
+    snapshot_revision = snapshot.get("revision") if isinstance(snapshot, Mapping) else None
+    authority = snapshot.get("fleet_policy") if isinstance(snapshot, Mapping) else None
+    snapshot_digest = authority.get("digest") if isinstance(authority, Mapping) else None
+    if type(revision) is not int or revision != snapshot_revision or digest != snapshot_digest:
+        return _unknown("hub seat usage does not match the admission roster revision and policy digest")
+    details: list[str] = []
+    capacity: int | None = None
+    for seat_name, limit in limits:
+        row = seats.get(seat_name) if isinstance(seats, Mapping) else None
+        occupied = row.get("occupied") if isinstance(row, Mapping) else None
+        if type(occupied) is not int or occupied < 0:
+            return _unknown(f"hub seat usage returned malformed occupancy for seat {seat_name!r}")
+        free = max(0, limit - occupied)
+        capacity = free if capacity is None else min(capacity, free)
+        details.append(f"seat {seat_name!r} limit {limit}, occupied {occupied}")
+    if capacity is None:
+        return _unknown("hub seat usage had no limited seat to check")
+    return Observation(
+        "passed",
+        observed_at,
+        scope,
+        detail="hub seat usage: " + "; ".join(details),
+        capacity=capacity,
+    )
+
+
 def _hub_snapshot_from_roster_payload(payload: Mapping[str, Any], *, source: str) -> dict[str, Any]:
     from . import fleet_client_cloud, fleet_model_roster
 
@@ -242,10 +296,28 @@ def _local_route_observations(
     scope: str,
 ) -> dict[str, Observation]:
     from . import agents as agents_mod
-    from . import fleet_model_admission, fleet_model_roster, route_receipts
+    from . import fleet_client, fleet_model_admission, fleet_model_roster, route_receipts
 
-    # enrollment_activation_observed swallows spool read errors and returns False, matching brigade run.
-    if fleet_model_admission.enrollment_activation_observed():
+    # enrollment_activation_observed swallows ordinary spool read errors and
+    # returns False, matching brigade run. A bounded lock timeout stays distinct
+    # and leaves admission unknown instead of reading as not enrolled.
+    try:
+        activated = fleet_model_admission.enrollment_activation_observed(
+            lock_timeout=fleet_client.CLOUD_TIMEOUT_SECONDS
+        )
+    except fleet_client.FleetSpoolLockTimeout as exc:
+        detail = f"local admission unverified ({safe_detail(str(exc))})"
+        return {
+            "admission": Observation("unknown", observed_at, scope, detail=detail),
+            "capacity": _capacity_or_unknown(
+                lock_state,
+                roster.max_workers,
+                detail,
+                observed_at=observed_at,
+                scope=scope,
+            ),
+        }
+    if activated:
         return {
             "admission": Observation(
                 "denied",
@@ -325,6 +397,7 @@ def _hub_admission(
             allow_lkg=True,
             hub_url=hub_url,
             cache_write=False,
+            lock_timeout=fleet_client.CLOUD_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         resolved_scope = _early_scope()
@@ -429,7 +502,20 @@ def _hub_admission(
         for item in raw_decisions
         if isinstance(item, Mapping) and isinstance(item.get("seat"), str)
     }
-    enrollment = fleet_session_bootstrap.classify_enrollment(snapshot)
+    try:
+        enrollment = fleet_session_bootstrap.classify_enrollment(
+            snapshot, lock_timeout=fleet_client.CLOUD_TIMEOUT_SECONDS
+        )
+    except fleet_client.FleetSpoolLockTimeout as exc:
+        detail = f"{source_label}: enrollment unverified ({safe_detail(str(exc))})"
+        return _HubAdmissionOutcome(
+            effective_roster=effective_roster,
+            scope=resolved_scope,
+            admission=Observation("unknown", observed_at, resolved_scope, detail=detail),
+            snapshot=snapshot,
+            source=source,
+            early_capacity_detail=detail,
+        )
     # An enrolled launch rejects the LKG outright, so a seat denial read from the LKG
     # may be stale and is not the refusal the operator would actually hit.
     stale_lkg = enrollment == "enrolled" and source != "hub"
@@ -598,22 +684,32 @@ def _hub_capacity(
     if enrollment == "enrolled":
         if parsed_policy is not None:
             parsed_seats = parsed_policy.get("seats") or {}
+            zero_seat: str | None = None
+            positive_seats: list[tuple[str, int]] = []
             for seat_name in workers:
                 seat_cfg = parsed_seats.get(seat_name)
                 concurrency = seat_cfg.get("concurrency") if isinstance(seat_cfg, Mapping) else None
-                if type(concurrency) is int and concurrency == 0:
-                    return Observation(
-                        "passed",
-                        observed_at,
-                        scope,
-                        detail=f"fleet policy: seat {seat_name!r} concurrency is 0",
-                        capacity=0,
-                    )
+                if type(concurrency) is not int:
+                    continue
+                if concurrency == 0:
+                    zero_seat = seat_name
+                elif concurrency > 0:
+                    positive_seats.append((seat_name, concurrency))
+            if zero_seat is not None:
+                return Observation(
+                    "passed",
+                    observed_at,
+                    scope,
+                    detail=f"fleet policy: seat {zero_seat!r} concurrency is 0",
+                    capacity=0,
+                )
+            if positive_seats:
+                return _hub_seat_usage_capacity(positive_seats, snapshot, observed_at=observed_at, scope=scope)
         return Observation(
             "unknown",
             observed_at,
             scope,
-            detail="hub capacity unverified: enrolled fleet policy enforces hub seat leases without a read-only usage endpoint",
+            detail="hub capacity unverified: enrolled fleet policy seat limits are unavailable",
         )
 
     seat_rows_by_name = {
@@ -621,9 +717,9 @@ def _hub_capacity(
         for row in (snapshot.get("seats") if snapshot is not None else None) or ()
         if isinstance(row, Mapping) and isinstance(row.get("seat"), str)
     }
-    zero_seat: str | None = None
+    zero_limit_seat: str | None = None
     malformed_seat: str | None = None
-    positive_seat: tuple[str, int] | None = None
+    positive_limit_seats: list[tuple[str, int]] = []
     for seat_name in workers:
         row = seat_rows_by_name.get(seat_name)
         if row is None:
@@ -635,17 +731,17 @@ def _hub_capacity(
             if malformed_seat is None:
                 malformed_seat = seat_name
         elif limit == 0:
-            if zero_seat is None:
-                zero_seat = seat_name
-        elif positive_seat is None:
-            positive_seat = (seat_name, limit)
+            if zero_limit_seat is None:
+                zero_limit_seat = seat_name
+        else:
+            positive_limit_seats.append((seat_name, limit))
 
-    if zero_seat is not None:
+    if zero_limit_seat is not None:
         return Observation(
             "passed",
             observed_at,
             scope,
-            detail=f"hub model admission: seat {zero_seat!r} concurrency limit is 0",
+            detail=f"hub model admission: seat {zero_limit_seat!r} concurrency limit is 0",
             capacity=0,
         )
     if malformed_seat is not None:
@@ -655,17 +751,8 @@ def _hub_capacity(
             scope,
             detail=f"hub model admission returned malformed limit for seat {malformed_seat!r}",
         )
-    if positive_seat is not None:
-        seat_name, limit = positive_seat
-        return Observation(
-            "unknown",
-            observed_at,
-            scope,
-            detail=(
-                f"hub capacity unverified: seat {seat_name!r} enforces concurrency limit {limit} "
-                "without a read-only lease usage endpoint"
-            ),
-        )
+    if positive_limit_seats:
+        return _hub_seat_usage_capacity(positive_limit_seats, snapshot, observed_at=observed_at, scope=scope)
 
     extra_source = (
         "hub repo claim and hub model seat limits (unlimited)" if claim_checked else "hub model seat limits (unlimited)"
@@ -679,6 +766,36 @@ def _hub_capacity(
     )
 
 
+def _worktree_isolation_observation(
+    request: ReadinessRequest,
+    workspace: Path,
+    *,
+    scope: str,
+    observed_at: float,
+) -> Observation | None:
+    """Operation-scoped worktree isolation for the Brigade route.
+
+    Git eligibility is the only fact this read-only producer can establish. It
+    does not create a worktree or claim writable capacity. Shared isolation is
+    already represented by the evaluator's default row.
+    """
+    if request.isolation != "worktree":
+        return None
+    if runguard.is_git_checkout_with_commit(workspace):
+        return Observation(
+            "passed",
+            observed_at,
+            scope,
+            detail="git-eligible: Git checkout with a committed HEAD; worktree creation was not attempted",
+        )
+    return Observation(
+        "failed",
+        observed_at,
+        scope,
+        detail="Worktree isolation requires a Git checkout with a committed HEAD.",
+    )
+
+
 def brigade_route_readiness(
     roster: roster_mod.Roster,
     request: ReadinessRequest,
@@ -687,11 +804,13 @@ def brigade_route_readiness(
     scope: str | None = None,
     now: float | None = None,
 ) -> tuple[roster_mod.Roster, dict[str, Observation]]:
-    """Return the effective roster and read-only ``admission`` and ``capacity`` observations.
+    """Return the effective roster and read-only operation observations.
 
-    When ``scope`` is ``None`` it is computed from the effective (Hub-resolved)
-    roster. A caller that supplies ``scope`` must compute it from that same
-    effective roster, or the observations will not match the evaluated roster.
+    Produces ``admission`` and ``capacity``, plus an ``isolation`` observation
+    for worktree isolation requests. When ``scope`` is ``None`` it is computed
+    from the effective (Hub-resolved) roster. A caller that supplies ``scope``
+    must compute it from that same effective roster, or the observations will
+    not match the evaluated roster.
     """
     from . import fleet_client
 
@@ -706,19 +825,27 @@ def brigade_route_readiness(
     except (fleet_client.FleetClientError, OSError, ValueError) as exc:
         resolved_scope = operation_scope(roster, request, workspace) if scope is None else scope
         detail = f"fleet configuration unavailable ({safe_detail(str(exc))})"
-        return roster, {
+        observations = {
             "admission": Observation("unknown", observed_at, resolved_scope, detail=detail),
             "capacity": _capacity_or_unknown(
                 lock_state, roster.max_workers, detail, observed_at=observed_at, scope=resolved_scope
             ),
         }
+        isolation = _worktree_isolation_observation(request, workspace, scope=resolved_scope, observed_at=observed_at)
+        if isolation is not None:
+            observations["isolation"] = isolation
+        return roster, observations
 
     hub_url = str(settings.get("hub_url") or "").strip() if isinstance(settings, Mapping) else ""
     if not hub_url:
         resolved_scope = operation_scope(roster, request, workspace) if scope is None else scope
-        return roster, _local_route_observations(
+        observations = _local_route_observations(
             roster, workers, lock_state, observed_at=observed_at, scope=resolved_scope
         )
+        isolation = _worktree_isolation_observation(request, workspace, scope=resolved_scope, observed_at=observed_at)
+        if isolation is not None:
+            observations["isolation"] = isolation
+        return roster, observations
 
     hub_admission = _hub_admission(
         roster,
@@ -742,10 +869,14 @@ def brigade_route_readiness(
         parsed_policy=hub_admission.parsed_policy,
         early_capacity_detail=hub_admission.early_capacity_detail,
     )
-    return hub_admission.effective_roster, {
+    observations = {
         "admission": hub_admission.admission,
         "capacity": capacity_obs,
     }
+    isolation = _worktree_isolation_observation(request, workspace, scope=hub_admission.scope, observed_at=observed_at)
+    if isolation is not None:
+        observations["isolation"] = isolation
+    return hub_admission.effective_roster, observations
 
 
 def brigade_route_observations(
@@ -756,8 +887,10 @@ def brigade_route_observations(
     scope: str | None = None,
     now: float | None = None,
 ) -> dict[str, Observation]:
-    """Produce authoritative, strictly read-only ``admission`` and ``capacity``
-    observations for ``route == "brigade"``.
+    """Produce authoritative, strictly read-only operation observations.
+
+    Produces ``admission`` and ``capacity`` for ``route == "brigade"`` and, for
+    worktree isolation requests, an ``isolation`` observation.
 
     Never acquires a lease or claim, never writes LKG/audit caches, never launches
     a task, and never sends model inference.

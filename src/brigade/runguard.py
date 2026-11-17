@@ -35,6 +35,11 @@ RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
 RETENTION_DIAGNOSTICS_LIMIT = 16
 RETENTION_DIAGNOSTIC_CHAR_LIMIT = 256
 
+# A run whose next transition belongs to an external native parent. Between
+# verbs it has no local lock holder by design, so it is neither terminal nor
+# locally reapable, and only that parent advances it.
+EXTERNALLY_CONTROLLED_STATUS = "awaiting-native-parent"
+
 _NONTERMINAL_RUN_STATUSES = frozenset(
     {
         "started",
@@ -45,6 +50,7 @@ _NONTERMINAL_RUN_STATUSES = frozenset(
         "handoff",
         "artifact-collection",
         "running",
+        EXTERNALLY_CONTROLLED_STATUS,
     }
 )
 
@@ -158,6 +164,17 @@ def _git(cwd: Path, *args: str, timeout: float = 30.0) -> proc.Result:
 def is_git_worktree(cwd: Path) -> bool:
     result = _git(cwd, "rev-parse", "--is-inside-work-tree")
     return result.code == 0 and result.stdout.strip() == "true"
+
+
+def is_git_checkout_with_commit(cwd: Path) -> bool:
+    """True when ``cwd`` is a Git checkout with a committed ``HEAD``.
+
+    A freshly initialized repository with an unborn ``HEAD`` cannot create a
+    worktree, so it is not eligible even though it is a Git checkout.
+    """
+    if not is_git_worktree(cwd):
+        return False
+    return _git(cwd, "rev-parse", "--verify", "HEAD").code == 0
 
 
 def git_root(cwd: Path) -> Path:
@@ -568,7 +585,9 @@ def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_p
         status = payload.get("status")
         if isinstance(status, str) and status:
             prior_status = status
-            if status not in _NONTERMINAL_RUN_STATUSES:
+            if status == EXTERNALLY_CONTROLLED_STATUS or status not in _NONTERMINAL_RUN_STATUSES:
+                # An externally controlled run records no local failure. Its
+                # next transition belongs to the parent that advanced it.
                 return "terminal"
     retention_diagnostics = _read_retention_diagnostics(run_json.parent, owner.get("owner_token"))
     recovered_at = datetime.now(timezone.utc).isoformat()

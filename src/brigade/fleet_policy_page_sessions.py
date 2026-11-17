@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+from . import fleet_form_fields
+from .fleet_policy_form import ROLLBACK_FORM
 from .fleet_policy_page import (
     SNAPSHOT_CONTRACT_UNAVAILABLE,
     UNKNOWN_TEXT,
@@ -136,7 +138,11 @@ def history_section(view: PolicyView, *, editable: bool, csrf: str) -> str:
         form = (
             '<form method="post" action="/deck/policy" class="roster-form">'
             + _hidden("rollback", "", view.revision, csrf)
-            + _labelled("roll back to revision", f'<select name="field.to_revision">{options}</select>')
+            + _labelled(
+                "roll back to revision",
+                f'<select name="field.to_revision"{fleet_form_fields.attr(ROLLBACK_FORM["to_revision"])}>{options}</select>',
+                form=ROLLBACK_FORM,
+            )
             + _actions("rollback")
             + "</form>"
         )

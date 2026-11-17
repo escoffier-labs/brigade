@@ -1,4 +1,5 @@
 //! Anchoring keeps original bytes and uses the existing proposal journal.
+use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{proposal_blocks::anchor_blocks, proposal_tests::*, tests::*, *};
 
 #[test]
@@ -105,16 +106,19 @@ fn shared_span_table_and_whitespace_suffixes() {
     }
 }
 
+// Automatic anchoring only applies where a retrieval report can authorize it, the fixture
+// scope. real_scope_anchoring_changes_projection_and_automatic_apply_is_held covers the
+// real-scope hold.
 async fn anchor_ready(token: &str) -> (Hub, Json) {
     if token != AGENT_TOKEN {
         return anchor_ready_origin(token, None).await;
     }
     let h = Hub::with(clean(), None);
     attestation_tests::policy(&h);
-    grant(&h, "fleet", &["read", "reflect"]).await;
-    let grant = h.call(ADMIN_TOKEN, json!({"action":"grant","principal":"node-1","scope":"fleet","rights":["read","reflect"],"client_event_id":h.id()})).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
+    let grant = h.call(ADMIN_TOKEN, json!({"action":"grant","principal":"node-1","scope":FIXTURE_SCOPE,"rights":["read","reflect"],"client_event_id":h.id()})).await;
     assert_eq!(grant.status, 200);
-    let put = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"a","text":format!("{OLD}\n\nClaim.\n"),"client_event_id":h.id()})).await;
+    let put = h.call(ADMIN_TOKEN, json!({"action":"import","scope":FIXTURE_SCOPE,"card_id":"a","text":format!("{OLD}\n\nClaim.\n"),"client_event_id":h.id()})).await;
     assert_eq!(put.status, 201);
     for (i, id) in attestation_tests::REFS.iter().enumerate() {
         assert_eq!(
@@ -148,9 +152,9 @@ async fn anchor_ready(token: &str) -> (Hub, Json) {
         [doc.to_string()],
     )
     .unwrap();
-    let current = card(&h, "fleet", "a").await;
+    let current = card(&h, FIXTURE_SCOPE, "a").await;
     assert_eq!(current["auto_authored"], token == AGENT_TOKEN);
-    let opened = submit(&h, ADMIN_TOKEN, vec![json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":current["revision"]})]).await;
+    let opened = submit(&h, ADMIN_TOKEN, vec![json!({"type":"anchor_blocks","scope":FIXTURE_SCOPE,"card_id":"a","base_revision":current["revision"]})]).await;
     assert_eq!(opened.status, 201, "{opened:?}");
     super::retrieval_eval_tests::record_current(&h).await;
     (h, opened.body["proposal_id"].clone())
@@ -159,7 +163,7 @@ async fn anchor_ready(token: &str) -> (Hub, Json) {
 async fn anchor_ready_origin(token: &str, origin: Option<&str>) -> (Hub, Json) {
     let h = Hub::with(clean(), None);
     attestation_tests::policy(&h);
-    grant(&h, "fleet", &["read", "reflect", "import"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect", "import"]).await;
     let db = rusqlite::Connection::open(&h.hub).unwrap();
     let doc: String = db
         .query_row("SELECT document FROM fleet_policy_revisions", [], |r| {
@@ -173,13 +177,13 @@ async fn anchor_ready_origin(token: &str, origin: Option<&str>) -> (Hub, Json) {
         [doc.to_string()],
     )
     .unwrap();
-    let put = h.call(token, json!({"action":"import","scope":"fleet","card_id":"a","text":"Claim.\n","origin":origin,"client_event_id":h.id()})).await;
+    let put = h.call(token, json!({"action":"import","scope":FIXTURE_SCOPE,"card_id":"a","text":"Claim.\n","origin":origin,"client_event_id":h.id()})).await;
     assert_eq!(put.status, 201, "{put:?}");
     let opened = submit(
         &h,
         ADMIN_TOKEN,
         vec![
-            json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)}),
+            json!({"type":"anchor_blocks","scope":FIXTURE_SCOPE,"card_id":"a","base_revision":rev(&put)}),
         ],
     )
     .await;
@@ -197,6 +201,115 @@ async fn structural_anchoring_applies_with_every_gate_satisfied() {
         .call(ADMIN_TOKEN, attestation_tests::auto_request(&h, &id).await)
         .await;
     assert_eq!(applied.body["state"], "applied", "{applied:?}");
+}
+
+#[tokio::test]
+async fn real_scope_anchoring_changes_projection_and_automatic_apply_is_held() {
+    use crate::writer::worker::Tx;
+    let h = Hub::with(clean(), None);
+    attestation_tests::policy(&h);
+    let hub = rusqlite::Connection::open(&h.hub).unwrap();
+    let raw: String = hub
+        .query_row("SELECT document FROM fleet_policy_revisions", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut policy: Json = serde_json::from_str(&raw).unwrap();
+    policy["memory"]["tier0_op_classes"] = json!(["anchor_blocks"]);
+    hub.execute(
+        "UPDATE fleet_policy_revisions SET document=?1",
+        [policy.to_string()],
+    )
+    .unwrap();
+    let put = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":"a","text":"Claim.\n","client_event_id":h.id()})).await;
+    assert_eq!(put.status, 201, "{put:?}");
+    // Model a persisted automatic head from before this merge. Creating it
+    // through a new real-scope automatic edit would already hit the gate.
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    db.execute(
+        "INSERT INTO memory_events(seq,event_id,client_event_id,kind,principal,scope,card_id,revision,content_hash,trust,payload,created_at) SELECT 900000,'prior-auto','prior-auto','proposal.apply',writer,scope,card_id,900000,content_hash,trust,'{\"decision_mode\":\"automatic\"}',?1 FROM memory_cards WHERE scope='fleet' AND card_id='a'",
+        [ids::isoformat(h.now() - 86_401_000)],
+    )
+    .unwrap();
+    db.execute_batch("INSERT INTO memory_card_revisions SELECT scope,card_id,900000,content_hash,trust,state,writer,900000,NULL,scan_state,created_at FROM memory_card_revisions WHERE scope='fleet' AND card_id='a'; UPDATE memory_cards SET revision=900000 WHERE scope='fleet' AND card_id='a';").unwrap();
+    let before = card(&h, "fleet", "a").await;
+    assert_eq!(before["auto_authored"], true);
+    let opened = submit(&h, ADMIN_TOKEN, vec![json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":before["revision"]})]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    assert_eq!(opened.body["tier"], 0, "{opened:?}");
+    let raw: String = db
+        .query_row(
+            "SELECT body FROM memory_proposals WHERE proposal_id=?1",
+            [opened.body["proposal_id"].as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let body: Json = serde_json::from_str(&raw).unwrap();
+    let projected_before = index::Card {
+        scope: "fleet".into(),
+        card_id: "a".into(),
+        revision: 900000,
+        content_hash: before["content_hash"].as_str().unwrap().into(),
+        trust: before["trust"].as_str().unwrap().into(),
+        text: before["text"].as_str().unwrap().into(),
+        automated: true,
+    };
+    let projected_after = index::Card {
+        text: body["cards"][0]["after_text"].as_str().unwrap().into(),
+        ..projected_before.clone()
+    };
+    // Suffix bytes alone change the digest, even before hash and recency.
+    assert_ne!(
+        index::projection(&projected_before, true).digest,
+        index::projection(&projected_after, true).digest
+    );
+    let mut authority = ops::Authority::with_credentials(&Tx(&hub), &digest(ADMIN_TOKEN)).unwrap();
+    authority.retrieval = Some(retrieval_eval::Live {
+        indexed_seq: h.events(),
+        embedder_id: None,
+        weights: json!({"lexical":1.0,"dense":1.0}),
+    });
+    assert_eq!(
+        retrieval_eval::hold(&Tx(&db), &body, &authority, h.now()).unwrap(),
+        Some("retrieval_eval_projection_changed")
+    );
+    // Test projection rejection independently of the anchor op allowlist.
+    let mut projection_only = body.clone();
+    projection_only["ops"][0]["type"] = json!("append_evidence");
+    assert_eq!(
+        retrieval_eval::hold(&Tx(&db), &projection_only, &authority, h.now()).unwrap(),
+        Some("retrieval_eval_projection_changed")
+    );
+    let report = attestation_tests::report(&h, &opened.body["proposal_id"]).await;
+    let held: Vec<_> = report.body["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["state"] != "satisfied")
+        .map(|c| c["code"].clone())
+        .collect();
+    assert_eq!(
+        held,
+        vec![json!("retrieval_eval_projection_changed")],
+        "{report:?}"
+    );
+    let applied = h
+        .call(
+            ADMIN_TOKEN,
+            attestation_tests::auto_request(&h, &opened.body["proposal_id"]).await,
+        )
+        .await;
+    assert_eq!(applied.status, 200, "{applied:?}");
+    assert_eq!(applied.body["state"], "pending", "{applied:?}");
+    assert_eq!(applied.body["reason"], "auto_apply_held", "{applied:?}");
+    assert!(
+        applied.body["preflight"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "retrieval_eval_projection_changed")
+    );
+    assert_eq!(card(&h, "fleet", "a").await, before);
 }
 
 #[tokio::test]
@@ -234,11 +347,11 @@ async fn human_anchoring_requires_review_and_live_authorship_is_rechecked() {
         "{report:?}"
     );
     let (h, id) = anchor_ready(AGENT_TOKEN).await;
-    let current = card(&h, "fleet", "a").await;
+    let current = card(&h, FIXTURE_SCOPE, "a").await;
     let changed = h
         .put(
             ADMIN_TOKEN,
-            "fleet",
+            FIXTURE_SCOPE,
             "a",
             current["revision"].as_i64(),
             "Human edit.\n",
@@ -280,7 +393,7 @@ async fn anchor_proof_refuses_non_suffix_changes_and_client_fields() {
     );
     for field in ["text", "evidence_ids", "before_text", "after_text"] {
         let mut operation =
-            json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":1});
+            json!({"type":"anchor_blocks","scope":FIXTURE_SCOPE,"card_id":"a","base_revision":1});
         operation[field] = json!("workspace supplied");
         assert!(proposals::op_schema(&operation).is_err());
         let refused = submit(&h, ADMIN_TOKEN, vec![operation]).await;

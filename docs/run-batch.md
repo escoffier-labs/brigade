@@ -27,7 +27,9 @@ but never executed. No synthesis budget, receipt, or launch is created yet.
 Only the documented fields are accepted. Each task requires `task_id`, `text`,
 and `seat`. `depends_on` defaults to an empty list of unique task IDs.
 `depends_on` must be a list when present. `null` is refused, unlike
-`synthesis`. Rows are checked in input order, so when several rows are
+`synthesis`. Each task may also declare `isolation`, either `shared` (the
+default) or `worktree`, and `read_only`, a boolean that defaults to false.
+Rows are checked in input order, so when several rows are
 invalid, the reported code belongs to the first invalid row. A row error names
 the row as `tasks[N]` until its `task_id` is valid, and by `task_id` after that.
 Selecting a task by admitted capability instead of a named seat, which #2047
@@ -48,20 +50,73 @@ seats never merge distinct task IDs. This command does not dispatch ledger
 tasks, create task storage, or use the T3 route.
 
 Canonicalization sorts tasks by ID, dependency lists, and object keys, fills
-optional dependencies and synthesis defaults, and preserves exact text.
+optional dependencies, synthesis, isolation, and read-only defaults, and
+preserves exact text.
 Layers sort ready task IDs lexicographically. The fingerprint hashes compact
 ASCII-escaped canonical JSON, including schema, request ID, texts, seats,
-dependencies, and synthesis. Object key, task, and dependency ordering do not
-change the fingerprint. Text changes do. `compare_request(stored_fingerprint,
-payload)` returns `new` for no stored fingerprint, `same` for a match, and
-`conflict` otherwise. The caller must look up the stored fingerprint under the
-same request ID. A stored value that is not 64 lowercase hex characters is
-refused with `invalid-fingerprint`. This
+dependencies, non-default isolation and read-only values, synthesis, and any
+pinned `base_sha`. Object key, task, and dependency ordering do not
+change the fingerprint. Text changes do. Isolation and read-only at their
+defaults are omitted from the hashed bytes, so a batch written before these
+fields existed keeps its fingerprint. `compare_request(stored_fingerprint,
+payload, base_sha=...)` returns `new` for no stored fingerprint, `same` for a
+match, and `conflict` otherwise. The caller must look up the stored fingerprint
+under the same request ID. A stored value that is not 64 lowercase hex
+characters is refused with `invalid-fingerprint`. This
 helper provides no storage or resume behavior. The fingerprint is defined by
 those exact bytes: Python `json.dumps` with `ensure_ascii=True`, so non-ASCII
 text is written as lowercase `\uXXXX` escapes and characters outside the Basic
 Multilingual Plane as surrogate pairs. A golden vector in
 `tests/test_run_batch.py` pins the bytes and digest for other implementations.
+
+## Isolation and concurrency
+
+A task may be `isolation: "shared"` (the default) or `isolation: "worktree"`.
+An unknown value is refused with `invalid-isolation`, and a non-boolean
+`read_only` with `invalid-read-only`.
+
+Two or more tasks in the same dependency layer that are both shared and
+writable are refused with `shared-writable-concurrency`, which names the task
+IDs. Fix it with `isolation: "worktree"`, `read_only: true`, or a `depends_on`
+edge that separates the tasks into different layers. A single shared writable
+task per layer, and shared writable tasks in different layers, stay allowed.
+This preserves today's sequential writable behavior and never weakens the
+one-writable-owner rule.
+
+A task that declares `read_only: true` is dispatched through the existing
+worker read-only path, so its prompt and CLI invocation carry the same
+read-only rules and capability checks as `brigade run --read-only`. A seat that
+cannot enforce read-only, including a mutating `codex-cloud` seat, is refused as
+an invalid seat, exactly as a read-only run does today. An all-read-only batch
+also launches the run itself with `--read-only`, so its receipt records the mode.
+
+Because a read-only task may share a layer with a writer, a batch is stricter
+than a plain read-only run: the seat must enforce read-only as `hard` under the
+roster sandbox. A soft or prompt-only seat (for example `opencode`, or `codex`
+with `sandbox = "workspace-write"`) is refused as an invalid seat. A writable
+task under a `read-only` roster sandbox is refused too. The base pin ignores
+Brigade's own `.brigade/` state, so the request marker never dirties the base
+for a retry.
+
+## Base revision pin
+
+When any task declares `isolation: "worktree"`, the request pins a base
+revision at acceptance. The workspace must be a clean git checkout whose HEAD
+is a 40-character revision, using the same check the remote T3 transport
+applies. A dirty checkout is refused with `base-dirty`, and an unreadable or
+non-revision checkout with `base-unavailable`, so uncommitted parent edits are
+never implied to reach an isolated child. The dry-run plan and
+`batch-request.json` record `base_sha` alongside each task's isolation, and the
+fingerprint includes `base_sha`. A retry against a different HEAD is therefore a
+`request-conflict`. `plan_batch` and `request_fingerprint` refuse a worktree
+request without a base with `base-unpinned`, and a malformed base with
+`invalid-base-sha`.
+
+Worktree execution is not implemented yet. Validation and `--dry-run` accept
+the field. An execution attempt records the request marker with its pinned base
+and each task's isolation, then is refused before any launch with
+`isolation-worktree-not-implemented`. Creating the worktrees is a following
+slice.
 
 | Code | Refusal |
 | --- | --- |
@@ -74,6 +129,15 @@ Multilingual Plane as surrogate pairs. A golden vector in
 | `empty-text` | Missing, non-string, empty, or whitespace-only text |
 | `text-limit` | Task or synthesis text exceeds its byte bound |
 | `invalid-seat` | Missing or malformed seat token |
+| `invalid-isolation` | Isolation is neither `shared` nor `worktree` |
+| `invalid-read-only` | Read-only is not a boolean |
+| `shared-writable-concurrency` | Multiple shared writable tasks in one layer |
+| `base-unpinned` | Worktree isolation requested without a pinned base revision |
+| `invalid-base-sha` | Base revision is not 40 lowercase hex characters |
+| `unexpected-base-sha` | A base was supplied but no task requests worktree isolation |
+| `base-dirty` | Worktree isolation requested in a checkout with uncommitted content |
+| `base-unavailable` | Worktree isolation requested without a readable 40-character HEAD |
+| `isolation-worktree-not-implemented` | Execution requested for a worktree task |
 | `invalid-dependencies` | Malformed, duplicate, or excessive dependency list |
 | `unknown-dependency` | Reference outside this batch |
 | `self-dependency` | Task depends on itself |
@@ -85,7 +149,7 @@ Multilingual Plane as surrogate pairs. A golden vector in
 | `invalid-fingerprint` | Stored fingerprint passed to `compare_request` is malformed |
 | `synthesis-not-implemented` | Execution requested with synthesis |
 | `request-conflict` | Request ID already reserved with a different fingerprint |
-| `request-unknown` | Request reservation has no readable fingerprint, or the marker is missing while the journal shows a possible launch |
+| `request-unknown` | Request reservation has no readable fingerprint, the marker is missing while the journal shows a possible launch, or an accepted request has lost or cannot read its journal |
 | `request-busy` | Another caller holds this request’s dispatch lock |
 
 
@@ -124,20 +188,65 @@ read on every retry. A missing marker permits a new request while holding the
 request lock only when the journal shows no prepared attempt. If the journal
 shows a possible launch, a missing marker refuses with `request-unknown`. A
 present unreadable or corrupt marker also refuses launch with `request-unknown`.
+Once the batch is accepted into the journal, the run directory also records
+`batch-journal-enrolled.json`. When that file or any batch result file exists,
+the request refuses with `request-unknown` if the journal is absent, unreadable,
+or no longer holds the batch, whether or not the marker survives. A missing
+journal would otherwise read as "nothing launched" and re-enroll every task.
+This holds even if the journal was deleted before any launch. Use a new
+`request_id` to start over. A request that never reached acceptance has none of
+these files and still retries after a preflight refusal. The guarantee assumes
+the journal is append-only: a journal rewound to an earlier valid state that
+still contains the accepted batch cannot be told apart from one where nothing
+launched.
+
+`brigade runs resume` refuses an explicit batch run directory, because resuming
+a provider thread would bypass the per-task launch claim. It recognizes a batch
+from the request marker, the enrollment file, or the journal itself, so removing
+the marker files alone does not make a batch resumable. Rerun the batch request
+instead.
+
+Limit: every fence above lives in the run directory. Deleting several Brigade
+files there by hand (for example the journal and the enrollment file after a
+provider started but before it wrote a result) leaves no record that a launch
+happened, and a rerun of the same `request_id` can launch that task again. This
+is the same outcome as deleting the whole run directory. Do not edit or remove
+files inside a batch run directory. Use a new `request_id` to start over.
 Independently of the marker, each task is checked again at the launch point:
 a task the journal shows as attempted or not queued is never invoked again, and
 its journal state is left as it was.
 
 When Fleet Hub routing sends a batch seat to another machine, Brigade still
-invokes that task once and marks it `unknown` first, so the local fence holds.
+invokes that task once and claims it (`unknown`) first, so the local fence holds.
 At-most-once on the remote side then depends on that transport, which #2048
 covers for T3.
 
-Task launch claims remain deferred: the existing dispatch callback binds budget
-reservations to a seat and attempt, without exposing an exact task candidate to
-`claim_task_launch`. The request reservation prevents replay launches instead.
-A task becomes unknown before its prompt is built, so this state can include a
-launch that was never accepted. It is never retried automatically.
+Each assignment carries its `task_id` and a deterministic `attempt_id`, so the
+dispatcher, the result and the live controls name the exact task instead of
+reading it back from prompt text. Preparing the attempt happens at the launch
+point. The launch claim happens later, inside the run budget reservation for
+that exact seat and attempt: the orchestrator passes the assignment into the
+reservation, and the batch recorder first calls `claim_task_launch`, then
+writes `run.dispatch.requested`. The claim must come first because a binding
+that any `run.dispatch.*` event already used is refused. Batches reserve with
+`reclaim_pending=False`, so a retry never adopts an earlier pending identity.
+Two same-seat tasks in one wave therefore get distinct claims and attempts.
+
+A claim result other than `granted` (`already-claimed`, `terminal`), a binding
+conflict, a stale version or any `TaskJournalError` raises `LaunchRefused`.
+The dispatcher handles it before route resolution, the model lease and the
+provider, records the worker as `refused` (no retry, no fallback seat or route)
+and keeps the task's journal state untouched. The budget reservation stays
+retained, because a claim may already be durable. A crash after the claim and
+before the requested fact leaves the task claimed and unknown, so a retry sees
+`already-claimed` and never relaunches. A task is `unknown` only once its claim
+is durable, which means `unknown` now implies a granted launch permission.
+A prepared attempt with no claim stays `queued` and is still never relaunched.
+
+Transports that expose a documented provider value fill `provider_task_id` on
+the worker result, and the batch records it on the task observation. Today only
+codex-cloud does, through its task ID. Original run and result IDs stay empty
+until a transport documents them.
 
 JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`, and
@@ -153,3 +262,7 @@ Batch runs retain normal drift checkpoints, worker-result artifacts, final
 receipts, artifact collection, and lineage metadata without calling synthesis.
 Synthesis execution exits 2 with `synthesis-not-implemented`. Dry run still shows
 its requested seat. No synthesis model call or budget is created.
+
+See [kinds of delegated work](execution-model.md#kinds-of-delegated-work) for how
+batch tasks compare with ledger tasks, run-lineage children, remote fleet
+requests, and T3 app-owned child tasks.

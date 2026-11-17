@@ -1079,3 +1079,24 @@ def test_the_hook_identity_equals_search_identity(wired, kind):
     found = hub_recall.card_under_roots(memory, card)
     assert found is not None
     assert hub_recall.opened_card_id(*found) == searched["card_id"]
+
+
+def test_private_eval_use_joins_the_wired_search_target(wired, monkeypatch):
+    from brigade.memory_retrieval_eval import live
+    from brigade.memory_hub_sync import publication_card_id
+
+    target, memory = wired
+    card = memory / "memory/cards/comet.md"
+    card.write_text("---\ntopic: architecture/decisions\n---\nbody\n")
+    observed = []
+    monkeypatch.setattr(live, "record_use", lambda *a, **kw: observed.append((a, kw)))
+    payload = {"session_id": "same-session", "session_kind": "interactive", "tool_input": {"file_path": str(card)}}
+    assert hub_recall.observe_read(target, payload)
+    expected = publication_card_id(card.read_text(), "memory/cards/comet.md", "architecture/decisions")
+    assert observed[0][0] == (target, expected, card.read_text())
+    assert observed[0][1]["payload"] == payload
+    assert all(row[0][1] == expected for row in observed)
+    observed.clear()
+    payload.pop("session_kind")
+    assert hub_recall.observe_read(target, payload)
+    assert observed == []

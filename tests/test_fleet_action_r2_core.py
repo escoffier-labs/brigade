@@ -266,7 +266,7 @@ def test_compose_single_post_preserves_selected_destination_and_prompt(tmp_path)
         code, _, body = request_http(address, url, headers={"Cookie": cookie})
         assert code == 200 and "injected draft" not in body and "injected-id" not in body
         forms = re.findall(r"<form.*?</form>", body, re.S)
-        assert len(forms) == 1 and 'method="post"' in forms[0] and '<select name="target_id">' in forms[0]
+        assert len(forms) == 1 and 'method="post"' in forms[0] and '<select name="target_id" required>' in forms[0]
         post = {**fields(body), "target_id": "beta", "model_id": "", "family": "", "prompt": "edited diagnosis"}
         code, headers, _ = request_http(address, "/deck/actions/submit", data=post, headers={"Cookie": cookie})
         assert code == 303

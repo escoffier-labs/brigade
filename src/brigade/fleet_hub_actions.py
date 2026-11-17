@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from . import fleet_action_auth as auth, fleet_action_sources as sources, fleet_action_targets as targets
+from . import fleet_form_fields as ff
 from .fleet_action_auth import ActionError, canonical, digest, opaque, subject
 
 SCHEMA = "brigade.fleet_action.v1"
@@ -116,6 +117,17 @@ def _authorized(conn: sqlite3.Connection, action: dict[str, Any]) -> bool:
     )
 
 
+# The repair form. `family` only narrows the destination list and `model_id` may be blank (destination
+# default), so the destination and the prompt are the required fields. `error` is the refusal code.
+# opaque() enforces target_id; its entry here only drives the HTML marker.
+ACTION_FORM = ff.form(
+    ff.optional("family"),
+    ff.required("target_id", "invalid-submission"),
+    ff.optional("model_id"),
+    ff.required("prompt", "invalid-prompt"),
+)
+
+
 def submit(conn: sqlite3.Connection, grant_id: str, raw: Any) -> dict[str, Any]:
     fields = {"source", "observed_revision", "target_id", "model_id", "intent", "prompt", "client_id"}
     if not isinstance(raw, dict) or set(raw) != fields or raw["intent"] != "repair":
@@ -127,8 +139,10 @@ def submit(conn: sqlite3.Connection, grant_id: str, raw: Any) -> dict[str, Any]:
     if not isinstance(request["model_id"], str) or not isinstance(request["observed_revision"], str):
         raise ActionError("invalid-submission", 400)
     prompt = request["prompt"]
-    if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > 12000 or "\x00" in prompt:
-        raise ActionError("invalid-prompt", 400)
+    if blank := ff.missing(ACTION_FORM, request):
+        raise ActionError(blank[0].error, 400)
+    if not isinstance(prompt, str) or len(prompt.encode("utf-8")) > 12000 or "\x00" in prompt:
+        raise ActionError(ACTION_FORM["prompt"].error, 400)
     request_digest = digest(canonical(request))
     conn.execute("BEGIN IMMEDIATE")
     try:

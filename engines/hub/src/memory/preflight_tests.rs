@@ -92,7 +92,10 @@ async fn preflight_uses_hub_facts_without_writes_or_fabricated_proof() {
         check(&r, "evidence_authority"),
         "evidence_authority_unbound"
     );
-    assert_eq!(check(&r, "retrieval_eval"), "retrieval_eval_unbound");
+    assert_eq!(
+        check(&r, "retrieval_eval"),
+        "retrieval_eval_projection_changed"
+    );
     assert_eq!(before, snapshot(&h));
     assert_eq!(
         r,

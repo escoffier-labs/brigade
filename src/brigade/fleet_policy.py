@@ -46,6 +46,8 @@ MAX_TIMEOUT_SECONDS = 86400
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$")
+# A T3 environment id: letters, digits and hyphens only.
+T3_ENVIRONMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,127}$")
 
 PRIVACY_VALUES = ("public", "private", "unknown")
 COST_CLASS_VALUES = ("paid", "subscription", "free", "unknown")
@@ -217,6 +219,14 @@ def _identity(raw: Any, where: str) -> str:
     assert value is not None
     if not IDENTITY_PATTERN.match(value):
         raise FleetPolicyError(f"fleet policy {where} must match {IDENTITY_PATTERN.pattern}")
+    return value
+
+
+def _t3_environment_id(raw: Any, where: str) -> str:
+    value = _text(raw, where, optional=False)
+    assert value is not None
+    if not T3_ENVIRONMENT_ID_PATTERN.match(value):
+        raise FleetPolicyError(f"fleet policy {where} must match {T3_ENVIRONMENT_ID_PATTERN.pattern}")
     return value
 
 
@@ -449,11 +459,12 @@ def _parse_machine(name: str, raw: Any) -> dict[str, Any]:
             "fallback",
             "allowed_overrides",
             "node_id",
+            "t3_environment_id",
             "notes",
         ),
         where,
     )
-    return {
+    parsed = {
         "os": _enum(body.get("os"), f"{where} field 'os'", OS_VALUES, default="unknown"),
         "capabilities": _name_list(body.get("capabilities"), f"{where} field 'capabilities'"),
         "preferred_workloads": _name_list(body.get("preferred_workloads"), f"{where} field 'preferred_workloads'"),
@@ -472,6 +483,12 @@ def _parse_machine(name: str, raw: Any) -> dict[str, Any]:
         "node_id": None if body.get("node_id") is None else _identity(body.get("node_id"), f"{where} field 'node_id'"),
         "notes": _text(body.get("notes"), f"{where} field 'notes'"),
     }
+    # Present only when bound, so existing documents keep their digests.
+    if body.get("t3_environment_id") is not None:
+        parsed["t3_environment_id"] = _t3_environment_id(
+            body.get("t3_environment_id"), f"{where} field 't3_environment_id'"
+        )
+    return parsed
 
 
 def _is_opencode_contributor_free(provider: str | None, model: str | None) -> bool:
@@ -877,6 +894,19 @@ def parse_document(raw: Any) -> dict[str, Any]:
                 f"fleet policy machine node_id {node_id!r} is mapped to both {previous!r} and {machine_name!r}"
             )
         seen_nodes[str(node_id)] = machine_name
+    seen_environments: dict[str, str] = {}
+    for machine_name, machine in parsed_machines.items():
+        environment_id = machine.get("t3_environment_id")
+        if not environment_id:
+            continue
+        # Environment ids compare case-insensitively, so a case variant is a duplicate.
+        previous = seen_environments.get(str(environment_id).casefold())
+        if previous is not None:
+            raise FleetPolicyError(
+                f"fleet policy machine t3_environment_id {environment_id!r} is mapped to both "
+                f"{previous!r} and {machine_name!r}"
+            )
+        seen_environments[str(environment_id).casefold()] = machine_name
     document: dict[str, Any] = {
         "schema": POLICY_SCHEMA,
         "defaults": parse_settings(body.get("defaults") or {}, "defaults"),

@@ -16,8 +16,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import proc, run_journal, run_reap, runs_cmd, runguard, worker_failure
+from . import proc, run_journal, run_reap, runs_cmd, runs_status, runguard, worker_failure
 from .work_cmd.claiming import claim_record
+
+# An externally controlled run waits on its native parent between verbs.
+_EXTERNALLY_CONTROLLED_STATUS = runs_status.EXTERNALLY_CONTROLLED_STATUS
 
 STATES = frozenset(
     {
@@ -802,7 +805,7 @@ def classify(
             return result("unknown", "missing or invalid run phase or start time")
         if lane.lock_state == "stale" and clock - started > thresholds.older_than:
             return result("dead", "nonterminal run has a stale owner lock")
-    if lane.phase in {"paused", "artifact-collection"} or approval_pending:
+    if lane.phase in {"paused", "artifact-collection", _EXTERNALLY_CONTROLLED_STATUS} or approval_pending:
         return result("waiting", "run is intentionally waiting")
     if lane.run is not None:
         if lane.owner_live is not True:

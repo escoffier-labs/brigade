@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from . import __version__, outcome
+from . import fleet_form_fields as ff
 from .localio import canonical_json_digest
 
 SCHEMA_VERSION = 2
@@ -619,6 +620,11 @@ class DecisionError(ValueError):
     pass
 
 
+# The decision form: one decision is required (the radio group opens on the saved one, default keep);
+# the per-machine override dropdowns may stay on "Same as above".
+DECISION_FORM = ff.form(ff.required("decision", "choose a decision"), ff.optional("ov"))
+
+
 def allowed(skill: Skill, decision: str, copy: Copy | None = None) -> bool:
     if decision not in DECISIONS:
         return False
@@ -660,6 +666,8 @@ def save_decision(
     skill = next((item for item in view.skills if item.skill_id == skill_id), None)
     if skill is None:
         raise DecisionError("unknown skill")
+    if ff.missing(DECISION_FORM, {"decision": decision}):
+        raise DecisionError(DECISION_FORM["decision"].error)
     if not allowed(skill, decision):
         raise DecisionError(f"{DECISION_LABELS.get(decision, decision)} is not available for this skill")
     copies = {copy.key: copy for copy in skill.copies}

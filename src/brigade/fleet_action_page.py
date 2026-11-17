@@ -9,7 +9,9 @@ from typing import Any
 from urllib.parse import urlencode
 
 from . import fleet_command_deck as deck
+from . import fleet_form_fields as ff
 from .fleet_action_auth import canonical
+from .fleet_hub_actions import ACTION_FORM
 from .fleet_investigation import COPY_SCRIPT
 
 DEFAULT_PROMPT = (
@@ -106,7 +108,8 @@ def compose(
         "intent": "repair",
     }.items():
         body += hidden(name, value)
-    body += f'<label>Agent type<select name="family">{family_options}</select></label><label>Destination<select name="target_id">{options}</select></label>'
+    body += f'<label>{ff.caption("Agent type", ACTION_FORM["family"])}<select name="family">{family_options}</select></label>'
+    body += f'<label>{ff.caption("Destination", ACTION_FORM["target_id"])}<select name="target_id"{ff.attr(ACTION_FORM["target_id"])}>{options}</select></label>'
     model_id = values.get("model_id", "")
     if chosen["family"] == "t3" and not model_id and chosen["models"]:
         model_id = chosen["models"][0]["id"]
@@ -123,12 +126,16 @@ def compose(
                 )
                 + "</optgroup>"
             )
-    body += '<label>Model<select name="model_id">' + model_options + "</select></label>"
     body += (
-        '<div class="prompt-label"><label for="repair-prompt">Repair prompt</label>'
+        f'<label>{ff.caption("Model", ACTION_FORM["model_id"])}<select name="model_id">'
+        + model_options
+        + "</select></label>"
+    )
+    body += (
+        f'<div class="prompt-label"><label for="repair-prompt">{ff.caption("Repair prompt", ACTION_FORM["prompt"])}</label>'
         '<button type="button" class="copy-prompt" data-copy-target="repair-prompt" data-copy-prefix="'
         + esc(evidence_text(snapshot))
-        + '">Copy prompt</button></div><textarea id="repair-prompt" name="prompt" required maxlength="12000">'
+        + f'">Copy prompt</button></div><textarea id="repair-prompt" name="prompt"{ff.attr(ACTION_FORM["prompt"])} maxlength="12000">'
         + esc(values.get("prompt", DEFAULT_PROMPT))
         + '</textarea><button type="submit">Submit repair action</button></form>'
     )

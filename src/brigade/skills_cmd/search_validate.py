@@ -396,20 +396,6 @@ def lint(
     return 0 if payload["valid"] else 1
 
 
-def _installed_copy_present(target: Path, installed_dir: Path) -> bool:
-    """Whether an installed copy has SKILL.md, reading state copies via the anchor."""
-    parts = _packs_mod._lexical_state_root_parts(target, installed_dir)
-    if parts is None:
-        return registry._skill_md_path(installed_dir).is_file()
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        return False
-    try:
-        with registry._held_state_root(target, writable=False) as anchor:
-            return registry._read_state_file_bytes(anchor, *parts, "SKILL.md") is not None
-    except registry.SkillsStatePathError:
-        return False
-
-
 def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
     lint_payload = _lint_payload(target, skill)
     metadata = raw_metadata if isinstance((raw_metadata := lint_payload.get("metadata")), dict) else {}
@@ -436,20 +422,34 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
         install_path = adapter.get("install_path")
         installed = False
         installed_path = None
+        installed_state = "unknown"
+        link_target = None
+        inspection = None
         install_refused = False
+        install_refused_reason = "installed copy refused by skills state anchoring"
         if install_path:
             try:
                 installed_dir = _install_mod._install_dir(target, adapter_id, skill_id)
             except registry.SkillsStatePathError:
                 # A refused install copy is reported, never inspected or diffed.
                 install_refused = True
+            except ValueError:
+                # A copy resolving outside the workspace is reported, never
+                # followed or diffed.
+                install_refused = True
+                install_refused_reason = "installed copy resolves outside the workspace; left untouched"
             else:
                 installed_path = str(installed_dir)
-                installed = _installed_copy_present(target, installed_dir)
+                inspection = _install_mod._inspect_installed_tree(target, installed_dir)
+                installed_state = inspection.state
+                link_target = inspection.link_target
+                installed = ("SKILL.md",) in inspection.files
         supported_state = adapter_id in supported or not supported
         blockers: list[str] = []
         if install_refused:
-            blockers.append("installed copy refused by skills state anchoring")
+            blockers.append(install_refused_reason)
+        elif installed_path is not None and installed_state not in {"dir", "missing"}:
+            blockers.append(_install_mod._installed_state_reason(installed_state, link_target, Path(installed_path)))
         if adapter.get("status") == "planned":
             blockers.append("adapter planned")
         if not install_path:
@@ -472,6 +472,7 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
                 lint_payload=lint_payload,
                 rendered=rendered,
                 installed_dir=Path(str(installed_path)),
+                inspection=inspection,
             )
             if rendered is not None and installed_path is not None
             else None
@@ -497,6 +498,9 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
                 "supported": supported_state,
                 "installed": installed,
                 "installed_path": installed_path,
+                "installed_state": installed_state,
+                "link_target": link_target,
+                "install_refused": install_refused,
                 "installed_at": latest_receipt.get("installed_at"),
                 "installed_version": latest_receipt.get("version"),
                 "current_version": current_version,

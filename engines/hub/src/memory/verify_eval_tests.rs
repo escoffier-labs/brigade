@@ -1,3 +1,4 @@
+use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{proposal_tests::*, tests::*, *};
 use rusqlite::Connection;
 
@@ -9,12 +10,12 @@ async fn ready() -> (Hub, Json) {
 
 async fn ready_with_hook(hook: Option<writer::Hook>) -> (Hub, Json) {
     let h = Hub::with(clean(), hook);
-    grant(&h, "fleet", &["read", "reflect"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
     let r = h.call(ADMIN_TOKEN, json!({"action":"verifier","principal":"agent:dot","verifier":true,"client_event_id":h.id()})).await;
     assert_eq!(r.status, 200, "{r:?}");
     set_owner(&h, "hub");
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let opened = submit(&h, AGENT_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    let opened = submit(&h, AGENT_TOKEN, vec![op(FIXTURE_SCOPE, "a", rev(&a))]).await;
     assert_eq!(opened.status, 201, "{opened:?}");
     (h, opened.body["proposal_id"].clone())
 }
@@ -44,6 +45,49 @@ async fn publish(h: &Hub, token: &str, class: &str) -> Reply {
 }
 async fn apply(h: &Hub, id: &Json, types: Json) -> Reply {
     h.call(AGENT_TOKEN, json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,"binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),"expected_op_types":types,"client_event_id":h.id()})).await
+}
+
+async fn fleet_verifier_proposal() -> (Hub, Json, Json) {
+    let h = Hub::with(clean(), None);
+    grant(&h, "fleet", &["read", "reflect"]).await;
+    set_owner(&h, "hub");
+    let r = h.call(ADMIN_TOKEN, json!({"action":"verifier","principal":"agent:dot","verifier":true,"client_event_id":h.id()})).await;
+    assert_eq!(r.status, 200, "{r:?}");
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let before = card(&h, "fleet", "a").await;
+    let opened = submit(&h, AGENT_TOKEN, vec![op("fleet", "a", rev(&a))]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+    (h, opened.body["proposal_id"].clone(), before)
+}
+
+#[tokio::test]
+async fn fleet_verifier_correction_applies_with_current_admission() {
+    let (h, id, before) = fleet_verifier_proposal().await;
+    let applied = apply(&h, &id, json!(["replace_block"])).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let after = card(&h, "fleet", "a").await;
+    assert_ne!(after["text"], before["text"]);
+    assert!(
+        after["text"]
+            .as_str()
+            .unwrap()
+            .contains("Use the scoped gate.")
+    );
+}
+
+#[tokio::test]
+async fn fleet_exact_automatic_compensation_restores_bytes() {
+    let (h, id, before) = fleet_verifier_proposal().await;
+    let applied = apply(&h, &id, json!(["replace_block"])).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    assert_ne!(card(&h, "fleet", "a").await["text"], before["text"]);
+    attestation_tests::change_policy(&h, "reflect_principals", json!(["agent:dot"]));
+    h.set_clock(h.now() + 1);
+    let restored = h.call(AGENT_TOKEN, json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+    assert_eq!(restored.body["state"], "applied", "{restored:?}");
+    assert_eq!(restored.body["decision_mode"], "automatic");
+    assert_eq!(card(&h, "fleet", "a").await["text"], before["text"]);
 }
 
 fn automatic_request(mut request: Json) -> Json {
@@ -180,8 +224,8 @@ async fn verify_auto_rate_limits_pending_proposal_retries() {
 #[tokio::test]
 async fn verify_auto_rate_limits_principal_across_proposals() {
     let (h, id) = ready().await;
-    let b = h.put(ADMIN_TOKEN, "fleet", "b", None, OLD).await;
-    let opened = submit(&h, AGENT_TOKEN, vec![op("fleet", "b", rev(&b))]).await;
+    let b = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "b", None, OLD).await;
+    let opened = submit(&h, AGENT_TOKEN, vec![op(FIXTURE_SCOPE, "b", rev(&b))]).await;
     assert_eq!(opened.status, 201, "{opened:?}");
     assert_eq!(apply(&h, &id, json!(["replace_block"])).await.status, 409);
     let refused = apply(&h, &opened.body["proposal_id"], json!(["replace_block"])).await;
@@ -232,29 +276,29 @@ async fn only_the_exact_proposal_manifest_is_exempt_from_class_admission() {
         "wrong_pin",
     ] {
         let (h, _) = ready().await;
-        let before = card(&h, "fleet", "a").await;
+        let before = card(&h, FIXTURE_SCOPE, "a").await;
         if shape == "wrong_pin" {
             h.put(
                 ADMIN_TOKEN,
-                "fleet",
+                FIXTURE_SCOPE,
                 "a",
                 before["revision"].as_i64(),
                 &format!("{OLD}\n\nOther claim. ^c-fedcba"),
             )
             .await;
         }
-        let before = card(&h, "fleet", "a").await;
+        let before = card(&h, FIXTURE_SCOPE, "a").await;
         let revision = before["revision"].as_i64().unwrap();
         let bytes = json!({"schema":"brigade.memory-verify-manifest.v1",
-            "card":{"scope":"fleet","card_id":"a","base_revision":revision}})
+            "card":{"scope":FIXTURE_SCOPE,"card_id":"a","base_revision":revision}})
         .to_string();
         let evidence = "agent:dot/workspace-a/manifest";
-        let attached = h.call(AGENT_TOKEN, json!({"action":"evidence.attach","scope":"fleet","card_id":"a",
+        let attached = h.call(AGENT_TOKEN, json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":"a",
             "workspace_id":"workspace-a","evidence_id":evidence,"artifact_kind":"memory-verify-manifest",
             "artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(&bytes),
             "observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
         assert_eq!(attached.status, 201, "{attached:?}");
-        let correction = op("fleet", "a", revision);
+        let correction = op(FIXTURE_SCOPE, "a", revision);
         let mut binding = correction.clone();
         binding.as_object_mut().unwrap().remove("text");
         binding["type"] = json!("append_evidence");
@@ -271,7 +315,7 @@ async fn only_the_exact_proposal_manifest_is_exempt_from_class_admission() {
                 // A second authenticated manifest has a real delta and also binds this proposal.
                 // Citing the identical id twice would be refused earlier as a no-delta op.
                 let second = "agent:dot/workspace-a/manifest-two";
-                let attached = h.call(AGENT_TOKEN, json!({"action":"evidence.attach","scope":"fleet","card_id":"a",
+                let attached = h.call(AGENT_TOKEN, json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,"card_id":"a",
                     "workspace_id":"workspace-a","evidence_id":second,"artifact_kind":"memory-verify-manifest",
                     "artifact_sha256":ids::sha256_hex(bytes.as_bytes()),"artifact_base64":STANDARD.encode(&bytes),
                     "observed_at":h.now(),"stance":"contrary","client_event_id":h.id()})).await;
@@ -294,23 +338,23 @@ async fn only_the_exact_proposal_manifest_is_exempt_from_class_admission() {
         let opened = submit(&h, AGENT_TOKEN, ops).await;
         assert_eq!(opened.status, 201, "{shape}: {opened:?}");
         assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
-        let current = card(&h, "fleet", "a").await;
+        let current = card(&h, FIXTURE_SCOPE, "a").await;
         let applied = apply(&h, &opened.body["proposal_id"], json!(types)).await;
         if shape == "binding" {
             assert_eq!(applied.body["state"], "applied", "{applied:?}");
         } else {
             assert_eq!(applied.status, 409, "{shape}: {applied:?}");
-            assert_eq!(card(&h, "fleet", "a").await, current, "{shape}");
+            assert_eq!(card(&h, FIXTURE_SCOPE, "a").await, current, "{shape}");
         }
     }
 }
 #[tokio::test]
 async fn evaluator_authority_and_append_only_admission() {
     let (h, id) = ready().await;
-    let before = card(&h, "fleet", "a").await;
+    let before = card(&h, FIXTURE_SCOPE, "a").await;
     assert_eq!(publish(&h, AGENT_TOKEN, "correct").await.status, 403);
     assert_eq!(apply(&h, &id, json!(["replace_block"])).await.status, 409);
-    assert_eq!(card(&h, "fleet", "a").await, before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await, before);
     h.set_clock(h.now() + 60_001);
     assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
     let status = h.call(AGENT_TOKEN, json!({"action":"status"})).await;
@@ -332,7 +376,10 @@ async fn evaluator_authority_and_append_only_admission() {
     let applied = apply(&h, &id, json!(["replace_block"])).await;
     assert_eq!(applied.body["state"], "applied", "{applied:?}");
     assert_eq!(applied.body["decision_mode"], "automatic");
-    assert_ne!(card(&h, "fleet", "a").await["revision"], before["revision"]);
+    assert_ne!(
+        card(&h, FIXTURE_SCOPE, "a").await["revision"],
+        before["revision"]
+    );
     let shown = h
         .call(
             AGENT_TOKEN,
@@ -386,10 +433,10 @@ async fn owner_kill_policy_class_and_snapshot_rechecked_at_apply() {
                     .unwrap();
             }
             "head" => {
-                let before = card(&h, "fleet", "a").await;
+                let before = card(&h, FIXTURE_SCOPE, "a").await;
                 h.put(
                     ADMIN_TOKEN,
-                    "fleet",
+                    FIXTURE_SCOPE,
                     "a",
                     before["revision"].as_i64(),
                     "Another claim. ^c-abcdef",
@@ -407,7 +454,7 @@ async fn owner_kill_policy_class_and_snapshot_rechecked_at_apply() {
             }
             _ => (),
         }
-        let before = card(&h, "fleet", "a").await;
+        let before = card(&h, FIXTURE_SCOPE, "a").await;
         let applied = apply(
             &h,
             &id,
@@ -419,7 +466,7 @@ async fn owner_kill_policy_class_and_snapshot_rechecked_at_apply() {
         )
         .await;
         assert_ne!(applied.body["state"], "applied", "{change}: {applied:?}");
-        assert_eq!(card(&h, "fleet", "a").await, before, "{change}");
+        assert_eq!(card(&h, FIXTURE_SCOPE, "a").await, before, "{change}");
     }
 }
 
@@ -450,7 +497,7 @@ async fn prepared_request_cannot_race_the_hub_off_switch() {
         )
         .unwrap(),
     );
-    let before = card(&h, "fleet", "a").await;
+    let before = card(&h, FIXTURE_SCOPE, "a").await;
     assert_eq!(
         h.call(
             ADMIN_TOKEN,
@@ -462,20 +509,20 @@ async fn prepared_request_cannot_race_the_hub_off_switch() {
     );
     let result = store.write(prepared).await;
     assert_eq!(result.status, 409, "{result:?}");
-    assert_eq!(card(&h, "fleet", "a").await, before);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await, before);
 }
 
 #[test]
 fn version_thirteen_upgrade_adds_immutable_admission_store() {
     let db = Connection::open_in_memory().unwrap();
     schema::migrate(&db, 1_800_000_000_000).unwrap();
-    db.execute_batch("DROP TABLE memory_verify_evals; PRAGMA user_version=13")
+    db.execute_batch("DROP TABLE memory_verify_evals; DROP TABLE memory_retrieval_history; PRAGMA user_version=13")
         .unwrap();
     schema::migrate(&db, 1_800_000_000_001).unwrap();
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     db.execute(
         "INSERT INTO memory_verify_evals VALUES(1,'agent:test','{}')",
         [],
@@ -515,8 +562,8 @@ async fn verifier_applies_keep_the_card_cooldown() {
         .unwrap()
         .execute(
             "INSERT INTO memory_events(seq,event_id,client_event_id,kind,principal,scope,card_id,revision,payload,created_at) \
-             VALUES(900000,'recent-apply','recent-apply','proposal.apply','reviewer','fleet','a',900000,'{}',?1)",
-            [ids::isoformat(h.now() - 60_000)],
+             VALUES(900000,'recent-apply','recent-apply','proposal.apply','reviewer',?2,'a',900000,'{}',?1)",
+            rusqlite::params![ids::isoformat(h.now() - 60_000), FIXTURE_SCOPE],
         )
         .unwrap();
     let request = json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,
@@ -538,8 +585,8 @@ async fn verifier_applies_respect_compensation_class_holds() {
     Connection::open(h.memory())
         .unwrap()
         .execute(
-            "INSERT INTO memory_meta VALUES('compensation_hold:fleet/replace_block','fixture')",
-            [],
+            "INSERT INTO memory_meta VALUES(?1,'fixture')",
+            [compensation::hold_key(FIXTURE_SCOPE, "replace_block")],
         )
         .unwrap();
     let request = json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,
@@ -551,4 +598,82 @@ async fn verifier_applies_respect_compensation_class_holds() {
         (409, "compensation_class_held"),
         "{refused:?}"
     );
+}
+
+#[test]
+fn version_thirteen_and_fourteen_upgrade_preserve_tables_and_rows() {
+    for version in [13, 14] {
+        let db = Connection::open_in_memory().unwrap();
+        // Use the existing upgrade fixture, excluding both post-v13 additions.
+        schema::migrate(&db, 1_800_000_000_000).unwrap();
+        db.execute_batch("DROP TABLE memory_retrieval_history")
+            .unwrap();
+        if version == 13 {
+            db.execute_batch("DROP TABLE memory_verify_evals").unwrap();
+        } else {
+            db.execute(
+                "INSERT INTO memory_verify_evals VALUES(7,'agent:test','{}')",
+                [],
+            )
+            .unwrap();
+        }
+        db.pragma_update(None, "user_version", version).unwrap();
+        db.execute(
+            "INSERT INTO memory_blobs VALUES('saved',X'616263',3,'before')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO memory_grants VALUES('agent:test','fleet','read','before','admin')",
+            [],
+        )
+        .unwrap();
+        let tables: Vec<String> = db
+            .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let snapshot = || {
+            tables
+                .iter()
+                .map(|table| {
+                    let mut statement = db.prepare(&format!("SELECT * FROM {table}")).unwrap();
+                    let columns = statement.column_count();
+                    let mut rows: Vec<Vec<rusqlite::types::Value>> = statement
+                        .query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+                        .unwrap()
+                        .map(Result::unwrap)
+                        .collect();
+                    rows.sort_by_key(|row| format!("{row:?}"));
+                    rows
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot();
+        schema::migrate(&db, 1_800_000_000_001).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            15
+        );
+        for table in schema::TABLES {
+            assert!(
+                db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                    [table],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap(),
+                "{version}: {table}"
+            );
+        }
+        assert_eq!(snapshot(), before, "version {version}");
+        if version == 14 {
+            assert!(db.execute("DELETE FROM memory_verify_evals", []).is_err());
+        }
+        schema::migrate(&db, 1_800_000_000_002).unwrap();
+        assert_eq!(snapshot(), before, "repeat version {version}");
+    }
 }

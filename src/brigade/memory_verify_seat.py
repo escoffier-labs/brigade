@@ -18,7 +18,7 @@ A seat is refused, before any prompt is written, when:
   nodes are never resolved here (`verify_seat_unknown`).
 - its audience is `connector` (`verify_seat_connector`).
 - its adapter has no isolation profile, it sets a launcher, environment
-  overrides, a reasoning pin or a transport the profile cannot vouch for, or
+  overrides, a transport or a reasoning level the profile cannot vouch for, or
   its executable is a script rather than a native binary
   (`verify_seat_not_isolated`).
 - it pins no exact model (`verify_seat_unpinned`), or both seats resolve to
@@ -134,11 +134,23 @@ QUOTA_ERRORS = frozenset({"rate_limit", "rate_limit_error", "quota_exceeded", "b
 AUTH_ERRORS = frozenset({"authentication_failed", "authentication_error", "oauth_token_expired"})
 # Built-in plugins and agents of the Claude CLI. Plugins are switched off and must be reported
 # absent. Agents cannot be removed, but without the Agent tool none of them can run.
+# Claude CLI releases add built-in plugins, and some load only on part of a rollout. One missing
+# here fails a verify run at random with verify_seat_not_isolated, so list every name the
+# installed CLI ships (2.1.325 ships these 13). The init check still refuses any plugin.
 CLAUDE_BUILTIN_PLUGINS = (
     "cc-plugin-agents-md",
-    "cc-plugin-telemetry",
-    "cc-plugin-privacy",
+    "cc-plugin-claude-test",
+    "cc-plugin-diff",
+    "cc-plugin-easel",
+    "cc-plugin-mermaid",
+    "cc-plugin-mods-guide",
     "cc-plugin-plugin-authoring",
+    "cc-plugin-privacy",
+    "cc-plugin-responsive-mode",
+    "cc-plugin-sec-default",
+    "cc-plugin-telemetry",
+    "cc-plugin-tips",
+    "cc-plugin-you-should-know",
 )
 CLAUDE_BUILTIN_AGENTS = frozenset({"claude", "Explore", "general-purpose", "Plan"})
 CLAUDE_SETTINGS = json.dumps(
@@ -314,6 +326,8 @@ PROFILES: dict[str, tuple[Callable[[str, str], list[str]], tuple[str, ...], dict
         },
     ),
 }
+# Reasoning levels each adapter passes as a CLI flag. A roster `reasoning` outside this set is refused.
+EFFORTS: dict[str, frozenset[str]] = {"claude": frozenset({"low", "medium", "high", "xhigh", "max"})}
 # Flags that would reopen a channel the profile closes. None may appear in a built argv.
 FORBIDDEN_FLAGS = frozenset(
     {
@@ -406,10 +420,15 @@ def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | N
         raise SeatRefused("verify_seat_not_isolated", f"{role}_seat refused: {OLLAMA_REFUSAL}")
     if cli is None or cli not in PROFILES:
         raise SeatRefused("verify_seat_not_isolated", f"{role}_seat has no isolation profile for its adapter")
-    if agent.command is not None or agent.env or agent.transport != "direct" or agent.reasoning is not None:
+    if agent.command is not None or agent.env or agent.transport != "direct":
         raise SeatRefused(
             "verify_seat_not_isolated",
-            f"{role}_seat sets a launcher, environment, transport or reasoning the profile cannot vouch for",
+            f"{role}_seat sets a launcher, environment or transport the profile cannot vouch for",
+        )
+    effort = agent.reasoning
+    if effort is not None and effort not in EFFORTS.get(cli, frozenset()):
+        raise SeatRefused(
+            "verify_seat_not_isolated", f"{role}_seat sets a reasoning level the profile cannot vouch for"
         )
     if not roster_mod.is_cli_allowed(cli, loaded):
         raise SeatRefused("verify_seat_disallowed", f"{role}_seat is not allowed by limits.allow_models")
@@ -423,6 +442,9 @@ def resolve(target: Path, name: str, role: str, *, loaded: roster_mod.Roster | N
     canonical, identity = _bind(cli)
     builder, _, _ = PROFILES[adapter]
     argv = builder(canonical, model)
+    if effort is not None:
+        # The seat fingerprint covers argv, so a changed effort needs a fresh probe and gate record.
+        argv += ["--effort", effort]
     problem = profile_problem(argv, adapter)
     if problem is not None:
         raise SeatRefused("verify_seat_not_isolated", f"{role}_seat refused: {problem}")

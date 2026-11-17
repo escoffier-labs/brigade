@@ -1,5 +1,6 @@
 //! phase-memory-verify slice 4: proposal-bound attestations and the reviewer
 //! hash read (D5).
+use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{proposal_tests::*, tests::*, *};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rusqlite::Connection;
@@ -28,10 +29,10 @@ async fn grant_to(h: &Hub, principal: &str, scope: &str, rights: &[&str]) {
 async fn ready() -> (Hub, i64) {
     let h = Hub::with(clean(), None);
     policy(&h, "sha256:policy-one");
-    grant(&h, "fleet", &["read", "reflect"]).await;
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
     grant(&h, "repo:other", &["read", "reflect"]).await;
-    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    h.put(ADMIN_TOKEN, "fleet", "b", None, OLD).await;
+    let a = h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "b", None, OLD).await;
     h.put(ADMIN_TOKEN, "repo:other", "a", None, OLD).await;
     let flagged = h
         .call(
@@ -110,9 +111,9 @@ fn proposals(h: &Hub) -> i64 {
 /// Whether contrary evidence holds automatic apply on `fleet/a` now: the
 /// preflight of a fresh admin probe proposal for the card.
 async fn held(h: &Hub) -> bool {
-    let current = card(h, "fleet", "a").await;
+    let current = card(h, FIXTURE_SCOPE, "a").await;
     let mut o = cite(
-        "fleet",
+        FIXTURE_SCOPE,
         "a",
         current["revision"].as_i64().unwrap(),
         &[format!(
@@ -144,7 +145,7 @@ async fn held(h: &Hub) -> bool {
 async fn fill(h: &Hub, subject: &str, a: i64) {
     for i in 0..7 {
         let name = format!("{subject}-filler-{i}");
-        assert_eq!(attest(h, &name, "fleet", "a", a).await.status, 201);
+        assert_eq!(attest(h, &name, FIXTURE_SCOPE, "a", a).await.status, 201);
     }
 }
 fn state_opt(h: &Hub, name: &str) -> Option<String> {
@@ -159,7 +160,7 @@ fn state_opt(h: &Hub, name: &str) -> Option<String> {
 }
 async fn at_cap(h: &Hub, a: i64) -> bool {
     let name = format!("extra-{}", PROBE.fetch_add(1, Ordering::Relaxed));
-    let r = attest(h, &name, "fleet", "a", a).await;
+    let r = attest(h, &name, FIXTURE_SCOPE, "a", a).await;
     match r.status {
         201 => false,
         409 => {
@@ -180,12 +181,17 @@ fn assert_refused(r: &Reply) {
 #[tokio::test]
 async fn a_pending_contrary_manifest_never_holds_automatic_apply() {
     let (h, a) = ready().await;
-    let attached = attest(&h, "m1", "fleet", "a", a).await;
+    let attached = attest(&h, "m1", FIXTURE_SCOPE, "a", a).await;
     assert_eq!(attached.status, 201, "{attached:?}");
     assert_eq!(attached.body["state"], "pending_review");
     assert_eq!(state(&h, "m1"), ("pending_review".into(), None));
     assert!(!held(&h).await);
-    let opened = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &[eid("m1")])]).await;
+    let opened = propose(
+        &h,
+        AGENT_TOKEN,
+        vec![cite(FIXTURE_SCOPE, "a", a, &[eid("m1")])],
+    )
+    .await;
     assert_eq!(opened.status, 201, "{opened:?}");
     assert_eq!(
         state(&h, "m1"),
@@ -196,9 +202,16 @@ async fn a_pending_contrary_manifest_never_holds_automatic_apply() {
     );
     assert!(!held(&h).await, "a bound pending manifest holds nothing");
     // Control: the same record from a principal with no flag holds at once.
-    grant_to(&h, "node-1", "fleet", &["read", "reflect"]).await;
-    let bytes = manifest("fleet", "a", a);
-    let mut plain = attach_request(&h, "x", "fleet", "a", &bytes, "memory-verify-manifest");
+    grant_to(&h, "node-1", FIXTURE_SCOPE, &["read", "reflect"]).await;
+    let bytes = manifest(FIXTURE_SCOPE, "a", a);
+    let mut plain = attach_request(
+        &h,
+        "x",
+        FIXTURE_SCOPE,
+        "a",
+        &bytes,
+        "memory-verify-manifest",
+    );
     plain["evidence_id"] = json!(format!("node-1/{WORKSPACE}/plain"));
     assert_eq!(h.call(NODE_TOKEN, plain).await.status, 201);
     assert!(held(&h).await);
@@ -207,8 +220,13 @@ async fn a_pending_contrary_manifest_never_holds_automatic_apply() {
 #[tokio::test]
 async fn accept_activates_the_contrary_hold() {
     let (h, a) = ready().await;
-    assert_eq!(attest(&h, "m1", "fleet", "a", a).await.status, 201);
-    let opened = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &[eid("m1")])]).await;
+    assert_eq!(attest(&h, "m1", FIXTURE_SCOPE, "a", a).await.status, 201);
+    let opened = propose(
+        &h,
+        AGENT_TOKEN,
+        vec![cite(FIXTURE_SCOPE, "a", a, &[eid("m1")])],
+    )
+    .await;
     assert_eq!(opened.status, 201, "{opened:?}");
     assert!(!held(&h).await);
     let accepted = decision(&h, &opened.body["proposal_id"], "accept").await;
@@ -229,10 +247,15 @@ enum End {
 async fn reject_stale_compaction_and_the_unbound_sweep_each_leave_an_inert_record() {
     for end in [End::Reject, End::Stale, End::Compaction, End::Unbound] {
         let (h, a) = ready().await;
-        assert_eq!(attest(&h, "m1", "fleet", "a", a).await.status, 201);
+        assert_eq!(attest(&h, "m1", FIXTURE_SCOPE, "a", a).await.status, 201);
         let mut proposal = None;
         if !matches!(end, End::Unbound) {
-            let opened = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &[eid("m1")])]).await;
+            let opened = propose(
+                &h,
+                AGENT_TOKEN,
+                vec![cite(FIXTURE_SCOPE, "a", a, &[eid("m1")])],
+            )
+            .await;
             assert_eq!(opened.status, 201, "{end:?} {opened:?}");
             proposal = Some(opened.body["proposal_id"].clone());
         } else {
@@ -248,11 +271,11 @@ async fn reject_stale_compaction_and_the_unbound_sweep_each_leave_an_inert_recor
             }
             End::Stale => {
                 // The card moves on under the pending proposal.
-                let current = card(&h, "fleet", "a").await;
+                let current = card(&h, FIXTURE_SCOPE, "a").await;
                 let moved = h
                     .put(
                         ADMIN_TOKEN,
-                        "fleet",
+                        FIXTURE_SCOPE,
                         "a",
                         current["revision"].as_i64(),
                         "Use the newer gate. ^c-abcdef",
@@ -285,7 +308,12 @@ async fn reject_stale_compaction_and_the_unbound_sweep_each_leave_an_inert_recor
                 assert!(compacted >= 1);
             }
             End::Unbound => {
-                let r = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &[eid("m1")])]).await;
+                let r = propose(
+                    &h,
+                    AGENT_TOKEN,
+                    vec![cite(FIXTURE_SCOPE, "a", a, &[eid("m1")])],
+                )
+                .await;
                 assert_refused(&r);
                 let db = Connection::open(h.memory()).unwrap();
                 assert!(writer::sweep(&db, h.now()).unwrap() >= 1);
@@ -313,21 +341,31 @@ async fn reject_stale_compaction_and_the_unbound_sweep_each_leave_an_inert_recor
 #[tokio::test]
 async fn a_record_binds_only_to_its_attesters_first_proposal() {
     let (h, a) = ready().await;
-    assert_eq!(attest(&h, "m1", "fleet", "a", a).await.status, 201);
+    assert_eq!(attest(&h, "m1", FIXTURE_SCOPE, "a", a).await.status, 201);
     let (count, events) = (proposals(&h), h.events());
     // Another principal's proposal, even an admin's.
-    let other = propose(&h, ADMIN_TOKEN, vec![cite("fleet", "a", a, &[eid("m1")])]).await;
+    let other = propose(
+        &h,
+        ADMIN_TOKEN,
+        vec![cite(FIXTURE_SCOPE, "a", a, &[eid("m1")])],
+    )
+    .await;
     assert_refused(&other);
     assert_eq!((proposals(&h), h.events()), (count, events));
     assert_eq!(state(&h, "m1"), ("pending_review".into(), None));
-    let first = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &[eid("m1")])]).await;
+    let first = propose(
+        &h,
+        AGENT_TOKEN,
+        vec![cite(FIXTURE_SCOPE, "a", a, &[eid("m1")])],
+    )
+    .await;
     assert_eq!(first.status, 201, "{first:?}");
     let (count, events) = (proposals(&h), h.events());
     let second = propose(
         &h,
         AGENT_TOKEN,
         vec![cite(
-            "fleet",
+            FIXTURE_SCOPE,
             "a",
             a,
             &[eid("m1"), format!("node-1/{WORKSPACE}/other")],
@@ -345,17 +383,27 @@ async fn a_record_binds_only_to_its_attesters_first_proposal() {
 #[tokio::test]
 async fn a_manifest_for_card_a_never_binds_a_proposal_that_changes_card_b() {
     let (h, a) = ready().await;
-    let b = card(&h, "fleet", "b").await["revision"].as_i64().unwrap();
-    assert_eq!(attest(&h, "m1", "fleet", "a", a).await.status, 201);
+    let b = card(&h, FIXTURE_SCOPE, "b").await["revision"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(attest(&h, "m1", FIXTURE_SCOPE, "a", a).await.status, 201);
     let (count, events) = (proposals(&h), h.events());
     // Cited from an op on card B.
-    let r = propose(&h, AGENT_TOKEN, vec![cite("fleet", "b", b, &[eid("m1")])]).await;
+    let r = propose(
+        &h,
+        AGENT_TOKEN,
+        vec![cite(FIXTURE_SCOPE, "b", b, &[eid("m1")])],
+    )
+    .await;
     assert_refused(&r);
     // Cited from card A while another op changes card B.
     let r = propose(
         &h,
         AGENT_TOKEN,
-        vec![cite("fleet", "a", a, &[eid("m1")]), op("fleet", "b", b)],
+        vec![
+            cite(FIXTURE_SCOPE, "a", a, &[eid("m1")]),
+            op(FIXTURE_SCOPE, "b", b),
+        ],
     )
     .await;
     assert_refused(&r);
@@ -369,8 +417,10 @@ async fn the_same_card_id_or_an_other_card_in_another_scope_is_refused() {
     let other = card(&h, "repo:other", "a").await["revision"]
         .as_i64()
         .unwrap();
-    let b = card(&h, "fleet", "b").await["revision"].as_i64().unwrap();
-    assert_eq!(attest(&h, "m1", "fleet", "a", a).await.status, 201);
+    let b = card(&h, FIXTURE_SCOPE, "b").await["revision"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(attest(&h, "m1", FIXTURE_SCOPE, "a", a).await.status, 201);
     let (count, events) = (proposals(&h), h.events());
     let r = propose(
         &h,
@@ -380,17 +430,17 @@ async fn the_same_card_id_or_an_other_card_in_another_scope_is_refused() {
     .await;
     assert_refused(&r);
     let supersede = |scope: &str, revision: i64| {
-        let mut o = op("fleet", "a", a);
+        let mut o = op(FIXTURE_SCOPE, "a", a);
         o.as_object_mut().unwrap().remove("text");
         o["type"] = json!("supersede_card");
-        o["other_card"] = json!({"scope":scope,"card_id":if scope == "fleet" {"b"} else {"a"},"base_revision":revision});
+        o["other_card"] = json!({"scope":scope,"card_id":if scope == FIXTURE_SCOPE {"b"} else {"a"},"base_revision":revision});
         o
     };
     let r = propose(
         &h,
         AGENT_TOKEN,
         vec![
-            cite("fleet", "a", a, &[eid("m1")]),
+            cite(FIXTURE_SCOPE, "a", a, &[eid("m1")]),
             supersede("repo:other", other),
         ],
     )
@@ -401,7 +451,10 @@ async fn the_same_card_id_or_an_other_card_in_another_scope_is_refused() {
     let r = propose(
         &h,
         AGENT_TOKEN,
-        vec![cite("fleet", "a", a, &[eid("m1")]), supersede("fleet", b)],
+        vec![
+            cite(FIXTURE_SCOPE, "a", a, &[eid("m1")]),
+            supersede(FIXTURE_SCOPE, b),
+        ],
     )
     .await;
     assert_eq!(r.status, 201, "{r:?}");
@@ -411,11 +464,11 @@ async fn the_same_card_id_or_an_other_card_in_another_scope_is_refused() {
 #[tokio::test]
 async fn a_revision_or_card_the_manifest_did_not_check_is_refused() {
     let (h, a) = ready().await;
-    assert_eq!(attest(&h, "m1", "fleet", "a", a).await.status, 201);
+    assert_eq!(attest(&h, "m1", FIXTURE_SCOPE, "a", a).await.status, 201);
     let moved = h
         .put(
             ADMIN_TOKEN,
-            "fleet",
+            FIXTURE_SCOPE,
             "a",
             Some(a),
             "Use the newer gate. ^c-abcdef",
@@ -423,13 +476,13 @@ async fn a_revision_or_card_the_manifest_did_not_check_is_refused() {
         .await;
     let now = rev(&moved);
     assert!(now > a, "{moved:?}");
-    let mut o = cite("fleet", "a", now, &[eid("m1")]);
+    let mut o = cite(FIXTURE_SCOPE, "a", now, &[eid("m1")]);
     o["expected_block_hash"] = json!(ids::sha256_hex(b"Use the newer gate. ^c-abcdef"));
     let (count, events) = (proposals(&h), h.events());
     assert_refused(&propose(&h, AGENT_TOKEN, vec![o]).await);
     assert_eq!((proposals(&h), h.events()), (count, events));
     // At attach, a manifest naming another card or scope is refused.
-    for (scope, card_id) in [("fleet", "b"), ("repo:other", "a")] {
+    for (scope, card_id) in [(FIXTURE_SCOPE, "b"), ("repo:other", "a")] {
         let bytes = manifest(scope, card_id, now);
         let r = h
             .call(
@@ -437,7 +490,7 @@ async fn a_revision_or_card_the_manifest_did_not_check_is_refused() {
                 attach_request(
                     &h,
                     "mismatch",
-                    "fleet",
+                    FIXTURE_SCOPE,
                     "a",
                     &bytes,
                     "memory-verify-manifest",
@@ -456,7 +509,14 @@ async fn a_revision_or_card_the_manifest_did_not_check_is_refused() {
     let r = h
         .call(
             AGENT_TOKEN,
-            attach_request(&h, "plain", "fleet", "a", b"not a manifest", "verification"),
+            attach_request(
+                &h,
+                "plain",
+                FIXTURE_SCOPE,
+                "a",
+                b"not a manifest",
+                "verification",
+            ),
         )
         .await;
     assert_eq!(
@@ -469,17 +529,19 @@ async fn a_revision_or_card_the_manifest_did_not_check_is_refused() {
 #[tokio::test]
 async fn an_accepted_proposal_for_b_never_activates_a_contrary_record_for_a() {
     let (h, a) = ready().await;
-    let b = card(&h, "fleet", "b").await["revision"].as_i64().unwrap();
-    assert_eq!(attest(&h, "ma", "fleet", "a", a).await.status, 201);
+    let b = card(&h, FIXTURE_SCOPE, "b").await["revision"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(attest(&h, "ma", FIXTURE_SCOPE, "a", a).await.status, 201);
     // A manifest for A filed as an attestation of B is refused at attach.
-    let bytes = manifest("fleet", "a", a);
+    let bytes = manifest(FIXTURE_SCOPE, "a", a);
     let r = h
         .call(
             AGENT_TOKEN,
             attach_request(
                 &h,
                 "mb-for-a",
-                "fleet",
+                FIXTURE_SCOPE,
                 "b",
                 &bytes,
                 "memory-verify-manifest",
@@ -488,21 +550,33 @@ async fn an_accepted_proposal_for_b_never_activates_a_contrary_record_for_a() {
         .await;
     assert_eq!(code(&r), "memory_manifest_card_mismatch", "{r:?}");
     // Citing A's record from any proposal touching B is refused.
-    assert_refused(&propose(&h, AGENT_TOKEN, vec![cite("fleet", "b", b, &[eid("ma")])]).await);
+    assert_refused(
+        &propose(
+            &h,
+            AGENT_TOKEN,
+            vec![cite(FIXTURE_SCOPE, "b", b, &[eid("ma")])],
+        )
+        .await,
+    );
     assert_refused(
         &propose(
             &h,
             AGENT_TOKEN,
             vec![
-                cite("fleet", "b", b, &[eid("ma")]),
-                cite("fleet", "a", a, &[eid("ma")]),
+                cite(FIXTURE_SCOPE, "b", b, &[eid("ma")]),
+                cite(FIXTURE_SCOPE, "a", a, &[eid("ma")]),
             ],
         )
         .await,
     );
     // A proposal for B with its own manifest is accepted.
-    assert_eq!(attest(&h, "mb", "fleet", "b", b).await.status, 201);
-    let opened = propose(&h, AGENT_TOKEN, vec![cite("fleet", "b", b, &[eid("mb")])]).await;
+    assert_eq!(attest(&h, "mb", FIXTURE_SCOPE, "b", b).await.status, 201);
+    let opened = propose(
+        &h,
+        AGENT_TOKEN,
+        vec![cite(FIXTURE_SCOPE, "b", b, &[eid("mb")])],
+    )
+    .await;
     assert_eq!(opened.status, 201, "{opened:?}");
     let accepted = decision(&h, &opened.body["proposal_id"], "accept").await;
     assert_eq!(accepted.body["state"], "applied", "{accepted:?}");
@@ -520,7 +594,7 @@ async fn an_accepted_proposal_for_b_never_activates_a_contrary_record_for_a() {
 /// three manifests.
 async fn three_proposals(h: &Hub, a: i64) -> [Json; 3] {
     for name in ["m1", "m2", "m3", "m4"] {
-        assert_eq!(attest(h, name, "fleet", "a", a).await.status, 201);
+        assert_eq!(attest(h, name, FIXTURE_SCOPE, "a", a).await.status, 201);
     }
     let mut ids = Vec::new();
     for refs in [
@@ -528,7 +602,7 @@ async fn three_proposals(h: &Hub, a: i64) -> [Json; 3] {
         vec![eid("m1")],
         vec![eid("m2"), eid("m3"), eid("m4")],
     ] {
-        let r = propose(h, AGENT_TOKEN, vec![cite("fleet", "a", a, &refs)]).await;
+        let r = propose(h, AGENT_TOKEN, vec![cite(FIXTURE_SCOPE, "a", a, &refs)]).await;
         assert_eq!(r.status, 201, "{r:?}");
         ids.push(r.body["proposal_id"].clone());
     }
@@ -539,13 +613,13 @@ async fn three_proposals(h: &Hub, a: i64) -> [Json; 3] {
 async fn proposal_show_returns_manifest_hashes_to_a_reviewer_of_every_target() {
     let (h, a) = ready().await;
     let [zero, one, many] = three_proposals(&h, a).await;
-    grant_to(&h, "node-1", "fleet", &["read", "review"]).await;
+    grant_to(&h, "node-1", FIXTURE_SCOPE, &["read", "review"]).await;
     for token in [ADMIN_TOKEN, NODE_TOKEN] {
         let r = show(&h, token, &zero).await;
         assert_eq!(r.status, 200, "{r:?}");
         assert_eq!(r.body["verifier_manifests"], json!([]));
         let r = show(&h, token, &one).await;
-        let bytes = manifest("fleet", "a", a);
+        let bytes = manifest(FIXTURE_SCOPE, "a", a);
         assert_eq!(
             r.body["verifier_manifests"],
             json!([{"evidence_id":eid("m1"),"artifact_kind":"memory-verify-manifest",
@@ -596,7 +670,7 @@ async fn a_non_reviewer_sees_the_same_shape_for_zero_one_and_many_manifests() {
     let (h, a) = ready().await;
     let ids = three_proposals(&h, a).await;
     // `read` alone on the target scope, then `review` on another scope only.
-    grant_to(&h, "node-1", "fleet", &["read"]).await;
+    grant_to(&h, "node-1", FIXTURE_SCOPE, &["read"]).await;
     for extra in [None, Some("repo:other")] {
         if let Some(scope) = extra {
             grant_to(&h, "node-1", scope, &["read", "review"]).await;
@@ -622,7 +696,7 @@ async fn a_non_reviewer_sees_the_same_shape_for_zero_one_and_many_manifests() {
 async fn the_list_needs_review_on_each_bound_attestations_scope() {
     let (h, a) = ready().await;
     let [_, one, _] = three_proposals(&h, a).await;
-    grant_to(&h, "node-1", "fleet", &["read", "review"]).await;
+    grant_to(&h, "node-1", FIXTURE_SCOPE, &["read", "review"]).await;
     assert!(show(&h, NODE_TOKEN, &one).await.body["verifier_manifests"].is_array());
     // A record from another scope bound to the same proposal, which the
     // binding check never allows, still keeps the list from this reviewer.
@@ -653,8 +727,8 @@ async fn the_list_needs_review_on_each_bound_attestations_scope() {
 async fn non_verifier_attestations_behave_exactly_as_before() {
     let h = Hub::with(clean(), None);
     policy(&h, "sha256:policy-one");
-    grant(&h, "fleet", &["read", "reflect"]).await;
-    let a = rev(&h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await);
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
+    let a = rev(&h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await);
     // Unflagged: any kind and any bytes, no manifest parsing, no binding row.
     let r = h
         .call(
@@ -662,7 +736,7 @@ async fn non_verifier_attestations_behave_exactly_as_before() {
             attach_request(
                 &h,
                 "plain",
-                "fleet",
+                FIXTURE_SCOPE,
                 "a",
                 b"free text",
                 "memory-verify-manifest",
@@ -677,7 +751,7 @@ async fn non_verifier_attestations_behave_exactly_as_before() {
     let opened = propose(
         &h,
         AGENT_TOKEN,
-        vec![cite("fleet", "a", a, &[eid("plain")])],
+        vec![cite(FIXTURE_SCOPE, "a", a, &[eid("plain")])],
     )
     .await;
     assert_eq!(opened.status, 201, "{opened:?}");
@@ -692,7 +766,14 @@ async fn non_verifier_attestations_behave_exactly_as_before() {
         assert_eq!(
             h.call(
                 AGENT_TOKEN,
-                attach_request(&h, &format!("p{i}"), "fleet", "a", b"x", "verification"),
+                attach_request(
+                    &h,
+                    &format!("p{i}"),
+                    FIXTURE_SCOPE,
+                    "a",
+                    b"x",
+                    "verification"
+                ),
             )
             .await
             .status,
@@ -702,7 +783,7 @@ async fn non_verifier_attestations_behave_exactly_as_before() {
     let r = h
         .call(
             AGENT_TOKEN,
-            attach_request(&h, "p8", "fleet", "a", b"x", "verification"),
+            attach_request(&h, "p8", FIXTURE_SCOPE, "a", b"x", "verification"),
         )
         .await;
     assert_eq!(code(&r), "memory_evidence_principal_cap", "{r:?}");
@@ -738,7 +819,7 @@ fn version_eleven_migrates_with_no_binding_rows() {
 
 /// A manifest padded to just under the 64 KiB artifact limit.
 fn large_manifest(a: i64) -> Vec<u8> {
-    let mut m: Json = serde_json::from_slice(&manifest("fleet", "a", a)).unwrap();
+    let mut m: Json = serde_json::from_slice(&manifest(FIXTURE_SCOPE, "a", a)).unwrap();
     let base = m.to_string().len() + r#","pad":"""#.len();
     m["pad"] = json!("x".repeat(65_000 - base));
     let bytes = m.to_string().into_bytes();
@@ -749,7 +830,14 @@ async fn attach_large(h: &Hub, name: &str, a: i64) -> Reply {
     let bytes = large_manifest(a);
     h.call(
         AGENT_TOKEN,
-        attach_request(h, name, "fleet", "a", &bytes, "memory-verify-manifest"),
+        attach_request(
+            h,
+            name,
+            FIXTURE_SCOPE,
+            "a",
+            &bytes,
+            "memory-verify-manifest",
+        ),
     )
     .await
 }
@@ -796,7 +884,7 @@ async fn churn_hits_the_retained_budget_and_the_35_day_purge_frees_it() {
             accepted += 1;
             names.push(eid(&name));
         }
-        let opened = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &names)]).await;
+        let opened = propose(&h, AGENT_TOKEN, vec![cite(FIXTURE_SCOPE, "a", a, &names)]).await;
         assert_eq!(opened.status, 201, "{opened:?}");
         let r = decision(&h, &opened.body["proposal_id"], "reject").await;
         assert_eq!(r.body["state"], "rejected", "{r:?}");
@@ -842,9 +930,9 @@ async fn churn_hits_the_retained_budget_and_the_35_day_purge_frees_it() {
 async fn the_scope_and_record_budgets_count_retained_records_only() {
     let (h, a) = ready().await;
     for name in ["m1", "m2"] {
-        assert_eq!(attest(&h, name, "fleet", "a", a).await.status, 201);
+        assert_eq!(attest(&h, name, FIXTURE_SCOPE, "a", a).await.status, 201);
     }
-    let size = manifest("fleet", "a", a).len() as i64;
+    let size = manifest(FIXTURE_SCOPE, "a", a).len() as i64;
     let check = |budget: manifest_binding::Budget, scope: &str| {
         let db = Connection::open(h.memory()).unwrap();
         let tx = crate::writer::worker::Tx(&db);
@@ -853,13 +941,13 @@ async fn the_scope_and_record_budgets_count_retained_records_only() {
             .map(|r| code(&r).to_string())
     };
     let roomy = manifest_binding::BUDGET;
-    assert_eq!(check(roomy, "fleet"), None);
+    assert_eq!(check(roomy, FIXTURE_SCOPE), None);
     let scope_bytes = manifest_binding::Budget {
         scope_bytes: 3 * size - 1,
         ..roomy
     };
     assert_eq!(
-        check(scope_bytes, "fleet").as_deref(),
+        check(scope_bytes, FIXTURE_SCOPE).as_deref(),
         Some("memory_evidence_retained_scope_quota")
     );
     // Another scope has nothing retained.
@@ -869,7 +957,7 @@ async fn the_scope_and_record_budgets_count_retained_records_only() {
         ..roomy
     };
     assert_eq!(
-        check(records, "fleet").as_deref(),
+        check(records, FIXTURE_SCOPE).as_deref(),
         Some("memory_evidence_retained_principal_quota")
     );
     // An admin purge stops a record counting at once.
@@ -880,14 +968,14 @@ async fn the_scope_and_record_budgets_count_retained_records_only() {
         )
         .await;
     assert_eq!(purge.status, 200, "{purge:?}");
-    assert_eq!(check(records, "fleet"), None);
-    assert_eq!(check(scope_bytes, "fleet"), None);
+    assert_eq!(check(records, FIXTURE_SCOPE), None);
+    assert_eq!(check(scope_bytes, FIXTURE_SCOPE), None);
 }
 
 #[tokio::test]
 async fn purged_bindings_count_toward_the_lifetime_principal_budget() {
     let (h, a) = ready().await;
-    assert_eq!(attest(&h, "old", "fleet", "a", a).await.status, 201);
+    assert_eq!(attest(&h, "old", FIXTURE_SCOPE, "a", a).await.status, 201);
     let purge = h
         .call(
             ADMIN_TOKEN,
@@ -911,13 +999,13 @@ async fn purged_bindings_count_toward_the_lifetime_principal_budget() {
     db.execute(
         "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
          INSERT INTO memory_evidence_bindings(evidence_id,principal,scope,base_revision,retained_bytes,state,proposal_id,created_ms,updated_ms,purged_ms)
-         SELECT 'purged-'||value,'agent:dot','fleet',1,0,'inert',NULL,1,1,1 FROM n",
+         SELECT 'purged-'||value,'agent:dot','repo:brigade/retrieval-eval-fixture',1,0,'inert',NULL,1,1,1 FROM n",
         [manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 2],
     )
     .unwrap();
     drop(db);
 
-    let last = attest(&h, "last", "fleet", "a", a).await;
+    let last = attest(&h, "last", FIXTURE_SCOPE, "a", a).await;
     assert_eq!(last.status, 201, "{last:?}");
     // Even purging the last retained record cannot free lifetime capacity.
     let purge = h
@@ -932,7 +1020,7 @@ async fn purged_bindings_count_toward_the_lifetime_principal_budget() {
         .query_row("SELECT count(*) FROM memory_events", [], |r| r.get(0))
         .unwrap();
     // The same principal cannot escape the budget through a different scope.
-    for scope in ["fleet", "repo:other"] {
+    for scope in [FIXTURE_SCOPE, "repo:other"] {
         let refused = attest(&h, "over", scope, "a", a).await;
         assert_eq!(
             (refused.status, code(&refused)),
@@ -960,7 +1048,7 @@ async fn purged_bindings_count_toward_the_lifetime_principal_budget() {
         manifest_binding::retained_refusal(
             &tx,
             "agent:other",
-            "fleet",
+            FIXTURE_SCOPE,
             1,
             &manifest_binding::BUDGET
         )
@@ -973,13 +1061,18 @@ async fn purged_bindings_count_toward_the_lifetime_principal_budget() {
 async fn retention_purges_only_records_inert_for_35_days() {
     let (h, a) = ready().await;
     for name in ["kept", "dropped"] {
-        assert_eq!(attest(&h, name, "fleet", "a", a).await.status, 201);
+        assert_eq!(attest(&h, name, FIXTURE_SCOPE, "a", a).await.status, 201);
     }
-    let accepted = propose(&h, AGENT_TOKEN, vec![cite("fleet", "a", a, &[eid("kept")])]).await;
+    let accepted = propose(
+        &h,
+        AGENT_TOKEN,
+        vec![cite(FIXTURE_SCOPE, "a", a, &[eid("kept")])],
+    )
+    .await;
     let rejected = propose(
         &h,
         AGENT_TOKEN,
-        vec![cite("fleet", "a", a, &[eid("dropped")])],
+        vec![cite(FIXTURE_SCOPE, "a", a, &[eid("dropped")])],
     )
     .await;
     assert_eq!(
@@ -1055,7 +1148,7 @@ fn version_twelve_gains_the_lifetime_principal_index_on_open() {
 
 async fn fill_lifetime_bindings(state: &str) -> (Hub, i64) {
     let (h, a) = ready().await;
-    assert_eq!(attest(&h, "seed", "fleet", "a", a).await.status, 201);
+    assert_eq!(attest(&h, "seed", FIXTURE_SCOPE, "a", a).await.status, 201);
     let db = Connection::open(h.memory()).unwrap();
     db.execute(
         "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
@@ -1067,7 +1160,7 @@ async fn fill_lifetime_bindings(state: &str) -> (Hub, i64) {
     db.execute(
         "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<?1)
          INSERT INTO memory_evidence_bindings(evidence_id,principal,scope,base_revision,retained_bytes,state,proposal_id,created_ms,updated_ms)
-         SELECT 'lifetime-'||value,'agent:dot','fleet',1,1,?2,'proposal-bound',1,1 FROM n",
+         SELECT 'lifetime-'||value,'agent:dot','repo:brigade/retrieval-eval-fixture',1,1,?2,'proposal-bound',1,1 FROM n",
         rusqlite::params![manifest_binding::LIFETIME_PRINCIPAL_RECORDS - 1, state],
     ).unwrap();
     (h, a)
@@ -1080,7 +1173,7 @@ async fn lifetime_quota_takes_precedence_over_retained_quotas() {
     let retained: i64 = db.query_row("SELECT count(*) FROM memory_evidence_bindings WHERE purged_ms IS NULL AND state!='active'", [], |r| r.get(0)).unwrap();
     assert!(retained >= manifest_binding::BUDGET.principal_records);
     assert!(retained >= manifest_binding::BUDGET.scope_records);
-    let refused = attest(&h, "over", "fleet", "a", a).await;
+    let refused = attest(&h, "over", FIXTURE_SCOPE, "a", a).await;
     assert_eq!(
         (refused.status, code(&refused)),
         (429, "memory_evidence_lifetime_principal_quota")
@@ -1093,7 +1186,7 @@ async fn active_bindings_count_toward_the_lifetime_principal_budget() {
     let db = Connection::open(h.memory()).unwrap();
     let retained: i64 = db.query_row("SELECT count(*) FROM memory_evidence_bindings WHERE purged_ms IS NULL AND state!='active'", [], |r| r.get(0)).unwrap();
     assert_eq!(retained, 1);
-    let refused = attest(&h, "over", "fleet", "a", a).await;
+    let refused = attest(&h, "over", FIXTURE_SCOPE, "a", a).await;
     assert_eq!(
         (refused.status, code(&refused)),
         (429, "memory_evidence_lifetime_principal_quota")

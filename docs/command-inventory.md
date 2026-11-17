@@ -30,7 +30,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 98 command path(s)
+- `brigade fleet`: 100 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -70,6 +70,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills`: 30 command path(s)
 - `brigade stations`: 3 command path(s)
 - `brigade status`: 1 command path(s)
+- `brigade t3`: 1 command path(s)
 - `brigade tokens`: 3 command path(s)
 - `brigade tools`: 48 command path(s)
 - `brigade untrusted` (extras): 2 command path(s)
@@ -208,6 +209,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet actions targets sync`
 - `brigade fleet actions tick`
 - `brigade fleet backup`
+- `brigade fleet campaign complete`
+- `brigade fleet campaign consume`
 - `brigade fleet campaign create`
 - `brigade fleet campaign inspect`
 - `brigade fleet campaign preview`
@@ -775,6 +778,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade stations list`
 - `brigade stations verify`
 - `brigade status`
+- `brigade t3 open`
 - `brigade tokens doctor`
 - `brigade tokens status`
 - `brigade tokens wire plan`
