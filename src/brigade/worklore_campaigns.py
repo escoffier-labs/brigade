@@ -236,6 +236,14 @@ def create_campaign(
             campaign_work_id = str(row[0])
             current = store._loaded_item(conn, campaign_work_id)
             title = current["title"]
+            # A terminal campaign accepts no members, so a re-create is refused whatever
+            # it asks for. Leaving it open would add captured members to a finished
+            # campaign and make "completed with an unfinished member" reachable.
+            if str(current["status"]) in TERMINAL_BUCKETS:
+                raise WorkloreConflict(
+                    f"campaign is {current['status']} and accepts no members",
+                    code="campaign-closed",
+                )
             stored_spec = spec_fingerprint(current["description"], current["acceptance"])
             if stored_spec != requested_spec:
                 raise WorkloreConflict(
@@ -368,6 +376,7 @@ def _members(conn: sqlite3.Connection, key: str, spec: str) -> list[dict[str, An
                 "repo": str(repo),
                 "work_id": str(work_id),
                 "status": item["status"],
+                "version": int(item["version"]),
                 "bucket": member_bucket(item, held),
                 "attempt_count": item["attempt_count"],
                 "drifted": str(stored) != member_fingerprint(spec, str(override)),
@@ -407,6 +416,7 @@ def _campaign(conn: sqlite3.Connection, key: str, *, members: list[dict[str, Any
         "acceptance": item["acceptance"],
         "priority": item["priority"],
         "status": item["status"],
+        "version": int(item["version"]),
         "spec_fingerprint": spec,
         "created_at": str(row[2]),
         "created_by": str(row[3]),
@@ -493,6 +503,12 @@ def member_campaign(conn: sqlite3.Connection, work_id: str) -> dict[str, str] | 
         (work_id,),
     ).fetchone()
     return None if row is None else {"campaign_key": row[0], "work_id": row[1], "repo": row[2]}
+
+
+def campaign_for_work_id(conn: sqlite3.Connection, work_id: str) -> str | None:
+    """The campaign key whose item is ``work_id``, or None for any other item."""
+    row = conn.execute("SELECT campaign_key FROM work_campaigns WHERE work_id = ?", (work_id,)).fetchone()
+    return None if row is None else str(row[0])
 
 
 def member_excluded(conn: sqlite3.Connection, work_id: str) -> bool:
