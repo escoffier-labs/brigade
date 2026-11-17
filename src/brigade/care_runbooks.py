@@ -140,8 +140,14 @@ def _backup(dest: Path, stamp: str) -> Path:
         backup = dest.with_name(f"{dest.name}.bak-{stamp}" + (f"-{attempt}" if attempt else ""))
         try:
             fd = os.open(dest, os.O_RDONLY | nofollow)
-            with os.fdopen(fd, "rb") as source, open(backup, "xb") as copy:
-                shutil.copyfileobj(source, copy)
+            with os.fdopen(fd, "rb") as source:
+                # Windows has no O_NOFOLLOW: require the opened file to be the
+                # regular file the name points at now, not a link's target.
+                opened, named = os.fstat(source.fileno()), os.lstat(dest)
+                if stat.S_ISLNK(named.st_mode) or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                    raise OSError(f"runbook is a link, not a regular file: {dest}")
+                with open(backup, "xb") as copy:
+                    shutil.copyfileobj(source, copy)
         except FileExistsError:
             continue
         return backup

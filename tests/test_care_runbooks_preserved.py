@@ -443,6 +443,21 @@ def test_backup_does_not_follow_a_symlink_at_the_destination(tmp_path):
     assert not list(tmp_path.glob("*.bak-*"))
 
 
+@needs_symlinks
+def test_backup_refuses_a_symlink_where_no_follow_is_unavailable(tmp_path, monkeypatch):
+    # Windows has no O_NOFOLLOW; the post-open identity check must still refuse.
+    real = tmp_path / "real.json"
+    real.write_text("{}\n")
+    link = tmp_path / "runbook.json"
+    link.symlink_to(real)
+    monkeypatch.delattr(care_runbooks.os, "O_NOFOLLOW", raising=False)
+
+    with pytest.raises(OSError):
+        care_runbooks._backup(link, "20260101T000000Z")
+
+    assert not list(tmp_path.glob("*.bak-*"))
+
+
 # 6. brigade care install itself keeps every customized runbook byte for byte
 
 
