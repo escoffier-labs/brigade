@@ -160,10 +160,18 @@ harness:
   adoption, the server is blocked with `native_auth_collision`.
 - **OpenCode.** A canonical header replaces a retained native header of the same name, reported
   as `explicit_canonical_replacement`; other retained native headers are kept.
-- **Claude Code (`headersHelper`).** There is no precedence rule. A catalog entry that
-  emits any header next to a live helper is blocked with `native_auth_source_collision`:
-  nothing is written for that server, and neither `--force` nor `--adopt` overrides it.
-  Remove the catalog headers or the live helper to continue.
+- **Claude Code (`headersHelper`).** The live helper is the auth for the harness. Brigade never
+  wrote it, so it outranks auth that reached the catalog through the Codex-native fields
+  (`bearer_token_env_var`, `http_headers`, `env_http_headers`): the sync leaves those fields out of
+  the Claude entry, keeps the helper, writes the entry and reports it `current`. Each dropped field
+  is reported with `native_auth_helper_precedence` (field name only, not blocking), and a catalog
+  edit can never add or swap a credential on a helper-backed entry. Catalog `headers` are different:
+  they are declared for every harness, so a server whose projection would still carry a `headers`
+  map next to a live helper, including a mixed entry with both `headers` and a Codex-native field,
+  is blocked with `native_auth_source_collision`. Nothing is written for that server, and neither
+  `--force` nor `--adopt` overrides it. Remove the catalog headers or the live helper to continue.
+  Without a live helper nothing changes: every one of those fields is projected into Claude
+  `headers`.
 
 ### Remote-server auth that stays native
 

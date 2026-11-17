@@ -334,14 +334,15 @@ def _project_server(
         return mcp_adapters.opencode_merge_server(
             server, live, location=location, native_keys=_opencode_native_keys(live, record, server)
         )
-    projected = adapter.to_provider(server)
     if mcp_native_auth.preserved_keys(harness):
         if context is None:
             path = mcp_adapters.resolve_path(adapter, target)
             live = adapter.read_file(path.read_text() if path.is_file() else None).get(server.name, {})
         else:
             live = context.live
-        projected = mcp_native_auth.carry_native_keys(harness, projected, live)
+        projected = mcp_native_auth.project_with_native_auth(harness, adapter.to_provider, server, live)
+    else:
+        projected = adapter.to_provider(server)
     if harness != "cursor-user" or server.is_remote or not _is_code_graph_server(server):
         return projected
     args = _without_repo_code_graph_db_pin(target, server.args)

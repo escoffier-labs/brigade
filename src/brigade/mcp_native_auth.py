@@ -18,7 +18,14 @@ Three rules keep that safe:
   credentials somewhere new or writing an entry with no auth.
 * One credential source. When the live entry holds a helper and the projection would
   also carry catalog headers, the projection is blocked
-  (``NativeAuthSourceCollision``) instead of writing both with no signal.
+  (``NativeAuthSourceCollision``) instead of writing both with no signal. The one
+  exception is auth that reached the catalog through the Codex-native carriers
+  (``bearer_token_env_var``, ``http_headers``, ``env_http_headers``): the helper is the
+  operator's own configuration and Brigade never wrote it, so it takes precedence. The
+  projection is computed from a copy of the server with those carriers removed, they are
+  reported as dropped (``native_auth_helper_precedence``), and a catalog change can never
+  inject or swap a credential on a helper-backed entry. What that copy still projects into
+  ``headers`` (canonical catalog headers) is genuinely ambiguous and stays blocked.
 * Fingerprints ignore preserved keys. Ownership fingerprints are computed over the
   entry minus these keys, so a live entry that differs from the projection only by a
   preserved key reads ``current`` and the sidecar carries nothing derived from it.
@@ -39,7 +46,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import replace
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
 from . import localio
@@ -213,6 +220,32 @@ def carry_native_keys(harness: str, projected: dict[str, Any], live: dict[str, A
     if projected.get("headers"):
         raise NativeAuthSourceCollision()
     return {**projected, **kept}
+
+
+def helper_precedence_fields(harness: str, server: CanonicalServer, live: object) -> tuple[str, ...]:
+    """Codex-native carriers on ``server`` that a live helper outranks (names only, never values)."""
+    if not server.is_remote or not has_preserved_native_keys(harness, live):
+        return ()
+    return tuple(key for key in _NATIVE_AUTH_FIELDS if getattr(server, key))
+
+
+def project_with_native_auth(
+    harness: str,
+    to_provider: Callable[[CanonicalServer], dict[str, Any]],
+    server: CanonicalServer,
+    live: dict[str, Any],
+) -> dict[str, Any]:
+    """Project ``server`` for a harness that keeps native auth, with the helper winning over Codex carriers.
+
+    The full projection is computed first so unrepresentable auth is refused exactly as
+    without a helper. When the live entry carries a helper, the projection actually used is
+    computed from a copy of the server with the Codex-native carriers cleared, so nothing is
+    attributed to a carrier by header name.
+    """
+    projected = to_provider(server)
+    if helper_precedence_fields(harness, server, live):
+        projected = to_provider(replace(server, http_headers={}, env_http_headers={}, bearer_token_env_var=None))
+    return carry_native_keys(harness, projected, live)
 
 
 def entry_fingerprint(harness: str, entry: dict[str, Any]) -> str:
