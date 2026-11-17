@@ -160,6 +160,17 @@ def is_git_worktree(cwd: Path) -> bool:
     return result.code == 0 and result.stdout.strip() == "true"
 
 
+def is_git_checkout_with_commit(cwd: Path) -> bool:
+    """True when ``cwd`` is a Git checkout with a committed ``HEAD``.
+
+    A freshly initialized repository with an unborn ``HEAD`` cannot create a
+    worktree, so it is not eligible even though it is a Git checkout.
+    """
+    if not is_git_worktree(cwd):
+        return False
+    return _git(cwd, "rev-parse", "--verify", "HEAD").code == 0
+
+
 def git_root(cwd: Path) -> Path:
     result = _git(cwd, "rev-parse", "--show-toplevel")
     if result.code != 0:

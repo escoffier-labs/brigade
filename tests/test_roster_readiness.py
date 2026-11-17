@@ -1,5 +1,6 @@
 """Operation readiness protects evidence boundaries, not configured seat health alone."""
 
+import time
 from dataclasses import replace
 
 import pytest
@@ -232,6 +233,8 @@ def test_configured_limit_still_constrains_one_seat_pool(declared, tmp_path):
         {"concurrency": 0},
         {"capability": 1},
         {"capability": []},
+        {"read_only": "false"},
+        {"read_only": 1},
         {"workers": None},
         {"workers": "worker"},
         {"workers": (None,)},
@@ -444,6 +447,7 @@ def test_pool_order_and_duplicates_share_scope_preserving_display_and_probe_orde
         "route",
         "isolation",
         "capability",
+        "read_only",
         "workspace",
         "orchestrator",
         "max_workers",
@@ -458,7 +462,7 @@ def test_scope_changes_invalidate_operation_evidence(declared, tmp_path, change)
     request = readiness.ReadinessRequest(("worker",))
     evidence = observed(declared, request, tmp_path)
     original_scope = readiness.operation_scope(declared, request, tmp_path)
-    if change in {"workers", "concurrency", "route", "isolation", "capability"}:
+    if change in {"workers", "concurrency", "route", "isolation", "capability", "read_only"}:
         request = replace(
             request,
             **{
@@ -468,6 +472,7 @@ def test_scope_changes_invalidate_operation_evidence(declared, tmp_path, change)
                     "route": "t3",
                     "isolation": "worktree",
                     "capability": "research.plan",
+                    "read_only": True,
                 }[change]
             },
         )
@@ -656,6 +661,215 @@ def test_brigade_standalone_inspect_readiness_reaches_ready_without_writes(decla
     assert by_category["capacity"]["freshness"] == "fresh"
     assert "local run lock (absent)" in by_category["capacity"]["detail"]
     assert list(clean_ws.iterdir()) == []
+
+
+class _StatusProbe:
+    """Fixture probe that reports fixed checks without providers or inference."""
+
+    def __init__(self, statuses: dict[str, tuple[str, str, str | None]]) -> None:
+        self.statuses = statuses
+
+    def probe_roster(self, selected, **kwargs):
+        rows = []
+        for name, agent in selected.agents.items():
+            checks = tuple(
+                seat_health.SeatHealthCheck(
+                    check,
+                    *self.statuses.get(check, ("passed", "ok", None))[:2],
+                    cause_code=self.statuses.get(check, ("passed", "ok", None))[2],
+                )
+                for check in seat_health.CHECK_NAMES
+            )
+            status = "degraded" if any(item.status == "degraded" for item in checks) else "healthy"
+            rows.append(
+                seat_health.SeatHealthResult(
+                    "test",
+                    name,
+                    seat_health.seat_fingerprint(agent, selected),
+                    status,
+                    {},
+                    checks,
+                    0,
+                    0,
+                    time.time(),
+                    time.time(),
+                )
+            )
+        return rows
+
+
+def test_not_applicable_passive_checks_reach_ready_without_inference(declared, tmp_path, monkeypatch):
+    _stub_standalone_env(monkeypatch)
+    inference = []
+    monkeypatch.setattr(seat_health.agents, "run_agent", lambda *args, **kwargs: inference.append("run_agent"))
+    monkeypatch.setattr(seat_health.acpx_adapter, "run_cursor", lambda *args, **kwargs: inference.append("run_cursor"))
+    probe = _StatusProbe(
+        {
+            "version-gates": ("degraded", "adapter has no reviewed version gate", "no-reviewed-gate"),
+            "isolation-compatibility": (
+                "degraded",
+                "declared read-only enforcement is soft; postflight is deferred",
+                "probe-incomplete",
+            ),
+            "model-reachability": ("passed", "model 'example-model' exactly matches live inventory", None),
+        }
+    )
+    result = readiness.inspect_readiness(
+        declared,
+        readiness.ReadinessRequest(("worker",), read_only=False),
+        workspace=tmp_path,
+        health_probe=probe,
+    )
+
+    assert result["status"] == "ready"
+    assert result["exit_code"] == 0
+    rows = {item["category"]: item for item in result["evidence"] if item.get("seat") == "worker"}
+    for category in ("version-gates", "isolation-compatibility"):
+        assert (rows[category]["status"], rows[category]["reason"]) == ("passed", "not-applicable")
+        assert "not-applicable" in rows[category]["detail"]
+    assert inference == []
+
+
+def test_applicable_but_unverified_check_keeps_operation_unverified(declared, tmp_path, monkeypatch):
+    _stub_standalone_env(monkeypatch)
+    probe = _StatusProbe(
+        {
+            "authentication-entitlement": (
+                "degraded",
+                "adapter has no prompt-free authentication status check",
+                "probe-incomplete",
+            ),
+            "version-gates": ("degraded", "adapter has no reviewed version gate", "no-reviewed-gate"),
+            "isolation-compatibility": (
+                "degraded",
+                "declared read-only enforcement is soft; postflight is deferred",
+                "probe-incomplete",
+            ),
+            "model-reachability": ("passed", "model 'example-model' exactly matches live inventory", None),
+        }
+    )
+    result = readiness.inspect_readiness(
+        declared,
+        readiness.ReadinessRequest(("worker",), read_only=False),
+        workspace=tmp_path,
+        health_probe=probe,
+    )
+
+    assert result["status"] == "unverified"
+    assert result["exit_code"] == 3
+    rows = {item["category"]: item for item in result["evidence"] if item.get("seat") == "worker"}
+    assert (rows["authentication-entitlement"]["status"], rows["authentication-entitlement"]["reason"]) == (
+        "unknown",
+        "probe-incomplete",
+    )
+    assert (rows["version-gates"]["status"], rows["version-gates"]["reason"]) == ("passed", "not-applicable")
+
+
+@pytest.mark.parametrize(
+    "agent_override",
+    [
+        {"cli": "cursor", "transport": "acpx", "transport_version": "0.12.0"},
+        {"cli": "antigravity", "transport": "direct"},
+        {"cli": "codex", "transport": "direct"},
+    ],
+    ids=["acpx", "antigravity", "generic"],
+)
+def test_generic_probe_incomplete_version_gates_never_map_to_not_applicable(declared, tmp_path, agent_override):
+    seat = replace(declared.agents["worker"], **agent_override)
+    declared = replace(declared, agents={**declared.agents, "worker": seat})
+    health = health_for(declared)
+    checks = tuple(
+        replace(
+            check,
+            status="degraded",
+            cause_code="probe-incomplete",
+            detail="adapter has no reviewed version gate",
+        )
+        if check.name == "version-gates"
+        else check
+        for check in health.checks
+    )
+    result = evaluate(
+        declared,
+        readiness.ReadinessRequest(("worker",)),
+        tmp_path,
+        health={"worker": replace(health, checks=checks)},
+    )
+    row = next(item for item in result["evidence"] if item["category"] == "version-gates")
+    assert (row["status"], row["reason"]) == ("unknown", "probe-incomplete")
+
+
+@pytest.mark.parametrize(
+    "read_only,expected",
+    [
+        (None, ("unknown", "probe-incomplete")),
+        (False, ("passed", "not-applicable")),
+        (True, ("unknown", "probe-incomplete")),
+    ],
+    ids=["unspecified", "writable", "read-only"],
+)
+def test_isolation_not_applicable_requires_explicit_writable_operation(declared, tmp_path, read_only, expected):
+    request = readiness.ReadinessRequest(("worker",), read_only=read_only)
+    health = health_for(declared)
+    checks = tuple(
+        replace(check, status="degraded", cause_code="probe-incomplete", detail="postflight is deferred")
+        if check.name == "isolation-compatibility"
+        else check
+        for check in health.checks
+    )
+    result = evaluate(
+        declared,
+        request,
+        tmp_path,
+        health={"worker": replace(health, checks=checks)},
+        observations=observed(declared, request, tmp_path),
+    )
+    row = next(item for item in result["evidence"] if item["category"] == "isolation-compatibility")
+    assert (row["status"], row["reason"]) == expected
+    assert result["status"] == ("ready" if expected[0] == "passed" else "unverified")
+
+
+def _git_checkout(path, *, commit: bool) -> None:
+    import subprocess
+
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    if not commit:
+        return
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.test"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test User"], check=True)
+    (path / "README.md").write_text("example\n")
+    subprocess.run(["git", "-C", str(path), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "initial"], check=True)
+
+
+@pytest.mark.parametrize(
+    "kind,expected",
+    [("commit", "passed"), ("unborn", "failed"), ("plain", "failed")],
+)
+def test_worktree_isolation_requires_git_checkout_with_committed_head(declared, tmp_path, monkeypatch, kind, expected):
+    _stub_standalone_env(monkeypatch)
+    workspace = tmp_path / kind
+    if kind == "plain":
+        workspace.mkdir()
+    else:
+        _git_checkout(workspace, commit=(kind == "commit"))
+    request = readiness.ReadinessRequest(("worker",), isolation="worktree")
+    result = readiness.inspect_readiness(declared, request, workspace=workspace, health_probe=_StatusProbe({}))
+
+    isolation = next(item for item in result["evidence"] if item["category"] == "isolation" and "seat" not in item)
+    assert isolation["status"] == expected
+    if expected == "passed":
+        assert result["status"] == "ready"
+        assert isolation["reason"] == "observed"
+        assert isolation["freshness"] == "fresh"
+        assert "git-eligible" in isolation["detail"]
+        assert isolation["age_seconds"] >= 0
+        assert isolation["observed_at"] <= result["observed_at"]
+        assert result["scope"] == readiness.operation_scope(declared, request, workspace)
+    else:
+        assert result["status"] == "blocked"
+        assert "committed HEAD" in isolation["detail"]
 
 
 @pytest.mark.parametrize(

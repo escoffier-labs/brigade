@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Literal
 
@@ -57,30 +58,43 @@ class ModelInventoryInspector:
         self._results: dict[tuple[str, str, tuple[str, ...] | None], ModelInventoryResult] = {}
 
     def inspect(
-        self, cli_ref: str, requested: str, command: tuple[str, ...] | None = None
+        self,
+        cli_ref: str,
+        requested: str,
+        command: tuple[str, ...] | None = None,
+        timeout_seconds: float | None = None,
     ) -> ModelInventoryResult | None:
         key = (cli_ref, requested, command)
         if key in self._results:
             return self._results[key]
+        budget = _INVENTORY_TIMEOUT_SECONDS if timeout_seconds is None else max(timeout_seconds, 0.0)
+        deadline = time.monotonic() + budget
         if cli_ref in _LIST_COMMANDS:
-            result = self._inspect_listed(cli_ref, requested, command)
+            result = self._inspect_listed(cli_ref, requested, command, budget=budget, deadline=deadline)
         elif cli_ref.startswith("ollama:"):
-            result = self._inspect_ollama(requested)
+            result = self._inspect_ollama(requested, budget=budget, deadline=deadline)
         else:
             return None
         self._results[key] = result
         return result
 
-    def _inspect_listed(self, cli_ref: str, requested: str, command: tuple[str, ...] | None) -> ModelInventoryResult:
-        inventory = self._inventory(cli_ref, command)
+    def _inspect_listed(
+        self,
+        cli_ref: str,
+        requested: str,
+        command: tuple[str, ...] | None,
+        *,
+        budget: float,
+        deadline: float,
+    ) -> ModelInventoryResult:
+        inventory = self._inventory(cli_ref, command, budget=budget, deadline=deadline)
         harness = "Cursor" if cli_ref == "cursor" else "Grok"
         if inventory.timed_out:
             return ModelInventoryResult(
                 "timeout",
                 requested,
                 (),
-                f"live {harness} inventory timed out after {_INVENTORY_TIMEOUT_SECONDS:g}s; "
-                "the hung probe process tree was terminated",
+                f"live {harness} inventory timed out after {budget:g}s; the hung probe process tree was terminated",
             )
         if inventory.error:
             return ModelInventoryResult(
@@ -117,19 +131,27 @@ class ModelInventoryInspector:
             f"model {requested!r} is absent from live {harness} inventory",
         )
 
-    def _inventory(self, cli_ref: str, command: tuple[str, ...] | None = None) -> _HarnessInventory:
+    def _inventory(
+        self,
+        cli_ref: str,
+        command: tuple[str, ...] | None = None,
+        *,
+        budget: float = _INVENTORY_TIMEOUT_SECONDS,
+        deadline: float | None = None,
+    ) -> _HarnessInventory:
         key = f"{cli_ref}\0{command!r}"
         cached = self._inventories.get(key)
         if cached is not None:
             return cached
         if cli_ref == "cursor":
-            result = _run_cursor_inventory([*command, "models"]) if command is not None else _run_cursor_inventory()
+            argv = [*command, "models"] if command is not None else None
+            result = _run_cursor_inventory(argv, timeout=_remaining(deadline, budget))
+        elif cli_ref == "grok" and command is not None:
+            result = proc.run([*command, "models"], timeout=_remaining(deadline, budget))
         else:
-            result = proc.run(_LIST_COMMANDS[cli_ref], timeout=_INVENTORY_TIMEOUT_SECONDS)
+            result = proc.run(_LIST_COMMANDS[cli_ref], timeout=_remaining(deadline, budget))
         if _is_probe_timeout(result):
-            inventory = _HarnessInventory(
-                timed_out=True, error=f"live inventory timed out after {_INVENTORY_TIMEOUT_SECONDS:g}s"
-            )
+            inventory = _HarnessInventory(timed_out=True, error=f"live inventory timed out after {budget:g}s")
         elif result.code != 0:
             diagnostic = result.stderr.strip() or result.stdout.strip() or f"exit {result.code}"
             inventory = _HarnessInventory(error=diagnostic[:160])
@@ -145,15 +167,14 @@ class ModelInventoryInspector:
         self._inventories[key] = inventory
         return inventory
 
-    def _inspect_ollama(self, requested: str) -> ModelInventoryResult:
-        inventory = self._inventory("ollama")
+    def _inspect_ollama(self, requested: str, *, budget: float, deadline: float) -> ModelInventoryResult:
+        inventory = self._inventory("ollama", budget=budget, deadline=deadline)
         if inventory.timed_out:
             return ModelInventoryResult(
                 "timeout",
                 requested,
                 (),
-                f"live Ollama inventory timed out after {_INVENTORY_TIMEOUT_SECONDS:g}s; "
-                "the hung probe process tree was terminated",
+                f"live Ollama inventory timed out after {budget:g}s; the hung probe process tree was terminated",
             )
         if inventory.error:
             return ModelInventoryResult(
@@ -179,13 +200,13 @@ class ModelInventoryInspector:
                 f"model {requested!r} is pulled locally and exactly matches Ollama inventory",
             )
 
-        result = proc.run(["ollama", "show", requested], timeout=15.0)
+        result = proc.run(["ollama", "show", requested], timeout=_remaining(deadline, budget))
         if _is_probe_timeout(result):
             return ModelInventoryResult(
                 "timeout",
                 requested,
                 (),
-                "live Ollama inventory timed out after 15s; the hung probe process tree was terminated",
+                f"live Ollama inventory timed out after {budget:g}s; the hung probe process tree was terminated",
             )
         if result.code == 0:
             return ModelInventoryResult(
@@ -204,7 +225,16 @@ def _is_probe_timeout(result: proc.Result) -> bool:
     return result.code == 124 and "timeout after" in result.stderr
 
 
-def _run_cursor_inventory(command: list[str] | None = None) -> proc.Result:
+def _remaining(deadline: float | None, budget: float) -> float:
+    """Return the subprocess budget left before ``deadline``, never zero."""
+    if deadline is None:
+        return budget
+    return max(deadline - time.monotonic(), 0.001)
+
+
+def _run_cursor_inventory(
+    command: list[str] | None = None, *, timeout: float = _INVENTORY_TIMEOUT_SECONDS
+) -> proc.Result:
     """Capture Cursor inventory through a file because its pipe output truncates at 8 KiB.
 
     The probe runs through :func:`brigade.proc.run_to_file` under an explicit
@@ -217,7 +247,7 @@ def _run_cursor_inventory(command: list[str] | None = None) -> proc.Result:
             completed = proc.run_to_file(
                 command or _LIST_COMMANDS["cursor"],
                 stdout,
-                timeout=_INVENTORY_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except OSError as exc:
             return proc.Result(127 if isinstance(exc, FileNotFoundError) else 126, "", str(exc))

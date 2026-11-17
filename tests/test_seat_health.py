@@ -11,6 +11,7 @@ from brigade import roster
 from brigade import seat_health
 from brigade import proc
 from brigade import agents
+from brigade import model_inventory
 from brigade.seat_health import (
     CHECK_NAMES,
     HEALTHY_CACHE_TTL_SECONDS,
@@ -391,6 +392,92 @@ def test_codex_cloud_model_reachability_skips_provider_smoke(monkeypatch):
     assert liveness.status == "degraded"
     assert liveness.cause_code == "probe-incomplete"
     assert all(item.status == "passed" or item.cause_code == "probe-incomplete" for item in endpoint_result.checks)
+
+
+def test_prompt_free_model_inventory_runs_when_smoke_is_disabled(monkeypatch):
+    seat = roster.Agent("worker", "grok", "work", model="grok-4.5")
+    value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
+    monkeypatch.setattr(
+        seat_health.model_inventory.ModelInventoryInspector,
+        "inspect",
+        lambda self, cli_ref, requested, command=None, **kwargs: seat_health.model_inventory.ModelInventoryResult(
+            "exact", requested, (requested,), f"model {requested!r} exactly matches live Grok inventory"
+        ),
+    )
+    inference = []
+    monkeypatch.setattr(seat_health.agents, "run_agent", lambda *args, **kwargs: inference.append((args, kwargs)))
+
+    result = SeatHealthProbe().probe(seat, value, allow_model_smoke=False)
+
+    check = next(item for item in result.checks if item.name == "model-reachability")
+    assert check.status == "passed"
+    assert "exactly matches live Grok inventory" in check.detail
+    assert inference == []
+
+
+def test_model_reachability_without_prompt_free_inventory_stays_degraded(monkeypatch):
+    seat = roster.Agent("worker", "codex", "work", model="gpt-test")
+    value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
+    monkeypatch.setattr(
+        seat_health.model_inventory.ModelInventoryInspector,
+        "inspect",
+        lambda self, cli_ref, requested, command=None, **kwargs: None,
+    )
+    inference = []
+    monkeypatch.setattr(seat_health.agents, "run_agent", lambda *args, **kwargs: inference.append((args, kwargs)))
+
+    result = SeatHealthProbe().probe(seat, value, allow_model_smoke=False)
+
+    check = next(item for item in result.checks if item.name == "model-reachability")
+    assert check.status == "degraded"
+    assert check.cause_code == "probe-incomplete"
+    assert inference == []
+
+
+def test_ollama_seat_resolves_model_from_cli_suffix(monkeypatch):
+    seat = roster.Agent("worker", "ollama:llama3.2:3b", "work")
+    value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv == ["ollama", "list"]:
+            return proc.Result(
+                0,
+                "NAME                       ID              SIZE      MODIFIED\n"
+                "llama3.2:3b  abcdef123456  2.0 GB  2 days ago\n",
+                "",
+            )
+        return proc.Result(1, "", "unexpected probe")
+
+    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+
+    result = SeatHealthProbe(collect_executable_version=False).probe(seat, value, allow_model_smoke=False)
+
+    check = next(item for item in result.checks if item.name == "model-reachability")
+    assert check.status == "passed"
+    assert "pulled locally" in check.detail
+    assert calls == [["ollama", "list"]]
+
+
+def test_model_inventory_receives_the_per_check_budget(monkeypatch):
+    seat = roster.Agent("worker", "grok", "work", model="grok-4.5")
+    value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
+    seen = []
+
+    def fake_inspect(self, cli_ref, requested, command=None, timeout_seconds=None):
+        seen.append((cli_ref, requested, command, timeout_seconds))
+        return model_inventory.ModelInventoryResult("exact", requested, (requested,), "exact match")
+
+    monkeypatch.setattr(model_inventory.ModelInventoryInspector, "inspect", fake_inspect)
+
+    result = SeatHealthProbe(clock=lambda: 0.0, collect_executable_version=False).probe(
+        seat, value, allow_model_smoke=False
+    )
+
+    check = next(item for item in result.checks if item.name == "model-reachability")
+    assert check.status == "passed"
+    assert seen == [("grok", "grok-4.5", None, seat_health.MODEL_REACHABILITY_TIMEOUT_SECONDS)]
 
 
 @pytest.mark.parametrize("positive_budget", (False, True), ids=("already-expired", "positive-budget"))
