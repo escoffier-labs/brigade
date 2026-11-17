@@ -1,0 +1,1 @@
+- `brigade care install` no longer deletes the memory-care runbook directory when a shipped template is missing, and `brigade memory care init --with-runbooks` now adds only missing runbooks and keeps existing ones. Operator-written and edited runbooks are never overwritten, and `--dry-run` writes no runbooks at all.

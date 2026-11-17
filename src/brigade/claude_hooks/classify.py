@@ -9,6 +9,7 @@ from typing import Any
 
 from .. import localio, work_mode
 from ..config import load_config
+from ..skill_wiring import normalize_newlines
 from ..templates import template_root
 from .install_cmd import status_payload
 from .anchored_io import SessionIntegrityError
@@ -45,7 +46,8 @@ def _skill_current(target: Path) -> tuple[bool, bool]:
     try:
         if not installed.is_file():
             return False, False
-        return True, installed.read_bytes() == expected.read_bytes()
+        # A Windows checkout may hold the template with CRLF; compare as text.
+        return True, normalize_newlines(installed.read_bytes()) == normalize_newlines(expected.read_bytes())
     except OSError:
         return installed.is_file(), False
 
