@@ -1,0 +1,3 @@
+- `brigade runs export` now writes only a closed file set and closed receipt shapes, replacing prompt and generated text with keyed HMAC-SHA256 digests and absolute paths with workspace-relative paths or fixed tokens.
+- `brigade runs import` refuses archives with raw prompt text, unknown receipt keys, or files outside the export set, and projects legacy v1 archives before installing them.
+- The `brigade.work-run` archive manifest moves to schema version 2 with a matching `schemas/work-run.v2.schema.json`.

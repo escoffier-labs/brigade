@@ -74,12 +74,12 @@ def _seed_run(run_dir: Path, *, with_checkpoint_body: bool = False) -> Path:
 
 
 def test_published_schema_artifact_matches_runtime_constants():
-    schema_path = Path(__file__).parents[1] / "schemas" / "work-run.v1.schema.json"
+    schema_path = Path(__file__).parents[1] / "schemas" / "work-run.v2.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    assert schema["$id"].endswith("/work-run.v1.schema.json")
+    assert schema["$id"].endswith("/work-run.v2.schema.json")
     assert schema["properties"]["schema"]["const"] == WORK_RUN_ARCHIVE_SCHEMA
     assert schema["properties"]["schema_version"]["const"] == WORK_RUN_ARCHIVE_SCHEMA_VERSION
-    assert work_run_archive.schema_artifact_relative_path() == "schemas/work-run.v1.schema.json"
+    assert work_run_archive.schema_artifact_relative_path() == "schemas/work-run.v2.schema.json"
 
 
 def test_export_import_round_trip_and_validate(tmp_path: Path):

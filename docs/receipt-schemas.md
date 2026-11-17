@@ -890,17 +890,25 @@ transport env path. See `docs/skill-registry.md`.
 
 ---
 
-## `brigade.work-run`: `schema_version: 1`
+## `brigade.work-run`: `schema_version: 2`
 
 Portable multi-file archive for one Brigade run directory. The archive root is a
 directory containing `work-run.json` (this envelope) and a `payload/` tree with
 the exported run files. Published JSON Schema artifact:
-[`schemas/work-run.v1.schema.json`](../schemas/work-run.v1.schema.json).
+[`schemas/work-run.v2.schema.json`](../schemas/work-run.v2.schema.json).
 
 Following the Agent Client Protocol pattern, the schema **artifact** version
-(the `work-run.v1` filename / `$id`) is separate from archive **wire**
+(the `work-run.v2` filename / `$id`) is separate from archive **wire**
 compatibility (`schema` + `schema_version` on `work-run.json`). Consumers must
 not infer import acceptance from the artifact filename alone.
+
+**Privacy guarantee:** exported archives contain no prompt text, generated text
+or absolute paths. Export applies a closed file set and closed receipt shapes,
+replaces prompt and generated text with per-host HMAC-SHA256 digests, and maps
+absolute paths to workspace-relative paths or fixed tokens. Local run files are
+unchanged and keep raw prompts and paths so resume still works. Evidence
+packages (`brigade evidence package`) and remote execution transport are outside
+this guarantee.
 
 **Commands:** `brigade runs export`, `brigade runs import`,
 `brigade runs validate-archive`.
@@ -925,7 +933,7 @@ not infer import acceptance from the artifact filename alone.
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `schema` | string | yes | Always `brigade.work-run` |
-| `schema_version` | integer | yes | `1` |
+| `schema_version` | integer | yes | `2` |
 | `run_id` | string | yes | `YYYYMMDD-HHMMSS-<8 hex>` |
 | `exported_at` | string | yes | ISO-8601 UTC (`Z`) |
 | `exporter_brigade_version` | string | yes | Brigade version that wrote the archive |
@@ -933,8 +941,8 @@ not infer import acceptance from the artifact filename alone.
 | `payload_dir` | string | yes | Always `payload` |
 | `compatibility` | object | yes | Closed import/export rules (below) |
 | `files` | array | yes | Declared payload entries with digests |
-| `run` | object | no | Compact summary projected from `run.json` |
-| `source_run_dir` | string | no | Absolute source path at export time |
+| `run` | object | no | Compact summary projected from `run.json`. Prompt text is replaced by `task_digest` |
+| `source_run_dir` | string | no | Fixed `<run-dir>` token, never an absolute path |
 | `schema_artifact` | string | no | Repo-relative published schema path |
 
 **`files[]` entry**
@@ -952,11 +960,14 @@ not infer import acceptance from the artifact filename alone.
 
 ### Compatibility rules (import / export)
 
-| Rule | v1 behavior |
+| Rule | v2 behavior |
 | --- | --- |
-| Unsupported `schema` / `schema_version` | **Refuse** hard |
+| Unsupported `schema` / `schema_version` | **Refuse** hard. Import accepts legacy v1 only by projecting it first |
 | Unknown manifest keys | **Refuse** (closed envelope) |
-| Nested receipt unknown keys | **Ignore** (receipt-family additive evolution) |
+| Payload files outside the closed export set | **Drop** on export, **refuse** on import |
+| Receipt keys outside the per-kind allowlist | **Drop** on export, **refuse** on import |
+| Prompt and generated text fields | **Replace** with a keyed `{digest, chars}` object. A raw string fails validation |
+| Absolute paths and home-directory prefixes | **Map** to workspace-relative, `<run-dir>/...`, or `<external-path>` |
 | Symlinks / special files | **Refuse** |
 | Recovery-checkpoint bodies | **Strip** to closed artifact references on export (#636). Validate refuses bodies |
 | Raw worker event streams (`events/**/*.jsonl` except authenticated lifecycle) | **Refuse** as portable public support. Export replaces with scrubbed sidecars (`events/**/<worker>.scrubbed.json`, `privacy_class=redacted`) or fails closed (#592). Nested smuggling paths are rejected |
@@ -964,11 +975,15 @@ not infer import acceptance from the artifact filename alone.
 | Resume after import | **Not supported** in v1 (`resume_supported: false`). Import is inspection/audit oriented |
 | Digest mismatch | **Refuse** |
 
-`compatibility` object fields are closed for v1: reader window pinned to
-`schema_version` 1, `private_checkpoint_bodies` =
+`compatibility` object fields are closed for v2: reader window pinned to
+`schema_version` 2, `private_checkpoint_bodies` =
 `strip_to_artifact_reference`, `unsupported_archive_version` = `refuse`,
 `nested_receipt_unknown_keys` = `ignore`, `symlinks_and_special_files` =
 `refuse`, and `journal_authority` one of `none` / `present` / `authoritative`.
+
+Legacy v1 archives are structurally validated, projected through the same
+closed shapes and privacy assertion, and installed only when the projection is
+compliant. A legacy payload is never installed verbatim.
 
 ---
 

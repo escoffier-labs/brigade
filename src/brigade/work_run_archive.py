@@ -1,9 +1,10 @@
 """Versioned ``brigade.work-run`` archive schema, validator, and import/export.
 
 Publishes archive wire compatibility separately from the checked-in JSON Schema
-artifact (ACP-style): ``schemas/work-run.v1.schema.json`` describes the v1
+artifact (ACP-style): ``schemas/work-run.v2.schema.json`` describes the v2
 document shape for tooling, while ``schema`` + ``schema_version`` on
-``work-run.json`` govern import/export acceptance.
+``work-run.json`` govern import/export acceptance. Import also accepts v1 and
+projects it before installation.
 """
 
 from __future__ import annotations
@@ -18,10 +19,20 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from . import __version__, localio, receipt_schema, run_cassette, run_checkpoint, run_journal, worker_events
+from . import (
+    __version__,
+    localio,
+    receipt_schema,
+    run_cassette,
+    run_checkpoint,
+    run_export_projection,
+    run_journal,
+    worker_events,
+)
 
 WORK_RUN_ARCHIVE_SCHEMA = "brigade.work-run"
-WORK_RUN_ARCHIVE_SCHEMA_VERSION = 1
+WORK_RUN_ARCHIVE_SCHEMA_VERSION = 2
+_LEGACY_ARCHIVE_SCHEMA_VERSIONS = frozenset({1})
 WORK_RUN_MANIFEST_NAME = "work-run.json"
 WORK_RUN_PAYLOAD_DIR = "payload"
 WORK_RUN_FORMAT = "directory"
@@ -195,7 +206,7 @@ def assert_lifecycle_journal_authentic(payload_root: Path) -> None:
 
 
 def _assert_export_privacy_tree(payload_root: Path) -> None:
-    """Run checkpoint, worker-stream, and lifecycle export-privacy gates."""
+    """Run checkpoint, worker-stream, file-set, and receipt-shape privacy gates."""
     run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(payload_root)
     try:
         run_cassette.assert_export_safe(payload_root)
@@ -206,26 +217,32 @@ def _assert_export_privacy_tree(payload_root: Path) -> None:
     except worker_events.WorkerEventError as exc:
         raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
     assert_lifecycle_journal_authentic(payload_root)
+    try:
+        run_export_projection.assert_payload_privacy(payload_root)
+    except run_export_projection.RunExportProjectionError as exc:
+        raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
 
 
 def schema_artifact_relative_path() -> str:
-    """Return the repo-relative path of the published v1 JSON Schema artifact."""
-    return "schemas/work-run.v1.schema.json"
+    """Return the repo-relative path of the published v2 JSON Schema artifact."""
+    return "schemas/work-run.v2.schema.json"
 
 
-def compatibility_defaults(*, journal_authority: str) -> dict[str, Any]:
-    """Return the closed v1 compatibility object written into every manifest."""
+def compatibility_defaults(
+    *, journal_authority: str, schema_version: int = WORK_RUN_ARCHIVE_SCHEMA_VERSION
+) -> dict[str, Any]:
+    """Return the closed compatibility object written into every manifest."""
     if journal_authority not in _JOURNAL_AUTHORITY:
         raise WorkRunArchiveError(f"invalid journal_authority: {journal_authority!r}", category="compatibility")
     return {
         "journal_authority": journal_authority,
-        "max_reader_schema_version": WORK_RUN_ARCHIVE_SCHEMA_VERSION,
-        "min_reader_schema_version": WORK_RUN_ARCHIVE_SCHEMA_VERSION,
+        "max_reader_schema_version": schema_version,
+        "min_reader_schema_version": schema_version,
         "nested_receipt_unknown_keys": "ignore",
         "private_checkpoint_bodies": _PRIVATE_CHECKPOINT_POLICY,
         "resume_supported": False,
         "schema_artifact_note": (
-            "schemas/work-run.v1.schema.json versions the published JSON Schema "
+            "schemas/work-run.v2.schema.json versions the published JSON Schema "
             "artifact; archive wire acceptance uses schema + schema_version"
         ),
         "symlinks_and_special_files": "refuse",
@@ -233,8 +250,13 @@ def compatibility_defaults(*, journal_authority: str) -> dict[str, Any]:
     }
 
 
-def validate_manifest(payload: Any) -> dict[str, Any]:
-    """Validate a ``work-run.json`` object and return a normalized copy."""
+def validate_manifest(payload: Any, *, allow_legacy: bool = False) -> dict[str, Any]:
+    """Validate a ``work-run.json`` object and return a normalized copy.
+
+    ``allow_legacy`` accepts the v1 wire version only on the import path, where
+    the payload is projected before installation. Exports and
+    ``validate-archive`` stay closed to the current version.
+    """
     if not isinstance(payload, dict):
         raise WorkRunArchiveError("work-run manifest must be an object")
     unknown = sorted(set(payload) - _ALLOWED_MANIFEST_KEYS)
@@ -250,7 +272,10 @@ def validate_manifest(payload: Any) -> dict[str, Any]:
             category="compatibility",
         )
     schema_version = payload.get("schema_version")
-    if type(schema_version) is not int or schema_version != WORK_RUN_ARCHIVE_SCHEMA_VERSION:
+    supported = {WORK_RUN_ARCHIVE_SCHEMA_VERSION}
+    if allow_legacy:
+        supported |= _LEGACY_ARCHIVE_SCHEMA_VERSIONS
+    if type(schema_version) is not int or schema_version not in supported:
         raise WorkRunArchiveError(
             f"unsupported archive schema_version {schema_version!r}; "
             f"this Brigade supports {WORK_RUN_ARCHIVE_SCHEMA_VERSION}",
@@ -267,7 +292,7 @@ def validate_manifest(payload: Any) -> dict[str, Any]:
     if payload_dir != WORK_RUN_PAYLOAD_DIR:
         raise WorkRunArchiveError(f"payload_dir must be {WORK_RUN_PAYLOAD_DIR!r}")
 
-    compatibility = _validate_compatibility(payload.get("compatibility"))
+    compatibility = _validate_compatibility(payload.get("compatibility"), schema_version=schema_version)
     files = _validate_files(payload.get("files"))
     run_summary = payload.get("run")
     normalized_run: dict[str, Any] | None = None
@@ -276,7 +301,7 @@ def validate_manifest(payload: Any) -> dict[str, Any]:
 
     result: dict[str, Any] = {
         "schema": WORK_RUN_ARCHIVE_SCHEMA,
-        "schema_version": WORK_RUN_ARCHIVE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "run_id": run_id,
         "exported_at": exported_at,
         "exporter_brigade_version": exporter,
@@ -296,8 +321,13 @@ def validate_manifest(payload: Any) -> dict[str, Any]:
     return result
 
 
-def validate_archive(archive_dir: Path) -> dict[str, Any]:
-    """Validate an on-disk archive (manifest + payload digests + export privacy)."""
+def validate_archive(archive_dir: Path, *, allow_legacy: bool = False) -> dict[str, Any]:
+    """Validate an on-disk archive (manifest + payload digests + export privacy).
+
+    A legacy archive is structurally validated only. Its payload may still hold
+    raw prompts, so import projects it before the privacy assertion and never
+    installs it verbatim.
+    """
     archive_dir = _normalize_user_path(archive_dir)
     if not archive_dir.is_dir():
         raise WorkRunArchiveError(f"archive directory not found: {archive_dir}", category="io")
@@ -309,13 +339,15 @@ def validate_archive(archive_dir: Path) -> dict[str, Any]:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkRunArchiveError(f"{WORK_RUN_MANIFEST_NAME} is not valid JSON: {exc}", category="io") from exc
-    manifest = validate_manifest(raw)
+    manifest = validate_manifest(raw, allow_legacy=allow_legacy)
+    legacy = manifest["schema_version"] != WORK_RUN_ARCHIVE_SCHEMA_VERSION
 
     payload_root = archive_dir / WORK_RUN_PAYLOAD_DIR
     if not payload_root.is_dir() or payload_root.is_symlink():
         raise WorkRunArchiveError(f"missing payload directory: {WORK_RUN_PAYLOAD_DIR}", category="io")
 
-    _assert_export_privacy_tree(payload_root)
+    if not legacy:
+        _assert_export_privacy_tree(payload_root)
 
     declared = {entry["path"]: entry for entry in manifest["files"]}
     on_disk = _collect_payload_files(payload_root)
@@ -528,6 +560,15 @@ def export_run(
             worker_events.project_worker_streams_for_export(payload_root)
         except worker_events.WorkerEventError as exc:
             raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
+        try:
+            dropped = run_export_projection.filter_export_files(payload_root)
+            run_export_projection.project_payload_tree(
+                payload_root,
+                workspace=_workspace_for_run(run_dir),
+                run_dir=run_dir,
+            )
+        except run_export_projection.RunExportProjectionError as exc:
+            raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
         _assert_export_privacy_tree(payload_root)
 
         run_id = run_dir.name
@@ -546,7 +587,7 @@ def export_run(
         manifest = build_manifest_for_payload(
             payload_root,
             run_id=run_id,
-            source_run_dir=str(run_dir),
+            source_run_dir=run_export_projection.RUN_DIR_TOKEN,
         )
         localio.write_json(staging / WORK_RUN_MANIFEST_NAME, manifest)
         validated = validate_archive(staging)
@@ -562,6 +603,7 @@ def export_run(
         "schema": validated["schema"],
         "schema_version": validated["schema_version"],
         "file_count": len(validated["files"]),
+        "dropped_file_count": len(dropped),
         "compatibility": validated["compatibility"],
     }
 
@@ -574,14 +616,15 @@ def import_archive(
 ) -> dict[str, Any]:
     """Validate an archive and copy its payload into ``runs_dir/<run_id>/``.
 
-    v1 import is inspection-oriented: ``compatibility.resume_supported`` is
+    Import is inspection-oriented: ``compatibility.resume_supported`` is
     always false. Journal-authoritative archives remain readable via
     ``brigade runs show`` / ``audit`` after import, but local resume/recover
     that needs private checkpoint bodies is out of scope for this envelope.
     """
     archive_dir = _normalize_user_path(archive_dir)
     runs_dir = runs_dir.expanduser().resolve()
-    manifest = validate_archive(archive_dir)
+    manifest = validate_archive(archive_dir, allow_legacy=True)
+    legacy = manifest["schema_version"] != WORK_RUN_ARCHIVE_SCHEMA_VERSION
     run_id = str(manifest["run_id"])
     dest = runs_dir / run_id
     _reject_symlink_final_component(dest, label="destination run")
@@ -603,14 +646,26 @@ def import_archive(
         )
     try:
         _copy_run_tree_refuse_special(archive_dir / WORK_RUN_PAYLOAD_DIR, staging)
+        if legacy:
+            try:
+                run_export_projection.filter_export_files(staging)
+                run_export_projection.project_payload_tree(
+                    staging,
+                    workspace=_workspace_for_run(staging),
+                    run_dir=staging,
+                )
+            except run_export_projection.RunExportProjectionError as exc:
+                raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
         _assert_export_privacy_tree(staging)
-        # Re-check digests against the validated manifest after the copy.
-        for entry in manifest["files"]:
-            rel = str(entry["path"])
-            path = staging / rel
-            raw = path.read_bytes()
-            if hashlib.sha256(raw).hexdigest() != entry["sha256"]:
-                raise WorkRunArchiveError(f"import copy sha256 mismatch for {rel}", category="integrity")
+        # Re-check digests against the validated manifest after the copy. A
+        # legacy payload was projected, so its bytes intentionally differ.
+        if not legacy:
+            for entry in manifest["files"]:
+                rel = str(entry["path"])
+                path = staging / rel
+                raw = path.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+                    raise WorkRunArchiveError(f"import copy sha256 mismatch for {rel}", category="integrity")
         _reject_symlink_final_component(dest, label="destination run")
         os.rename(staging, dest)
     except BaseException:
@@ -627,10 +682,11 @@ def import_archive(
         "file_count": len(manifest["files"]),
         "compatibility": manifest["compatibility"],
         "resume_supported": False,
+        "projected_legacy_payload": legacy,
     }
 
 
-def _validate_compatibility(value: Any) -> dict[str, Any]:
+def _validate_compatibility(value: Any, *, schema_version: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkRunArchiveError("compatibility must be an object")
     unknown = sorted(set(value) - _ALLOWED_COMPAT_KEYS)
@@ -644,9 +700,9 @@ def _validate_compatibility(value: Any) -> dict[str, Any]:
     max_v = value.get("max_reader_schema_version")
     if type(min_v) is not int or type(max_v) is not int:
         raise WorkRunArchiveError("compatibility reader schema versions must be integers")
-    if min_v != WORK_RUN_ARCHIVE_SCHEMA_VERSION or max_v != WORK_RUN_ARCHIVE_SCHEMA_VERSION:
+    if min_v != schema_version or max_v != schema_version:
         raise WorkRunArchiveError(
-            "compatibility reader window must equal supported archive schema_version",
+            "compatibility reader window must equal the archive schema_version",
             category="compatibility",
         )
     journal_authority = value.get("journal_authority")
@@ -729,7 +785,7 @@ def _validate_files(value: Any) -> list[dict[str, Any]]:
 def _validate_run_summary(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkRunArchiveError("run summary must be an object")
-    allowed = frozenset({"schema", "schema_version", "status", "started_at", "finished_at", "task"})
+    allowed = frozenset({"schema", "schema_version", "status", "started_at", "finished_at", "task", "task_digest"})
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise WorkRunArchiveError(f"unknown run summary field: {unknown[0]}")
@@ -742,7 +798,7 @@ def _validate_run_summary(value: Any) -> dict[str, Any]:
         if type(schema_version) is not int or schema_version < 1:
             raise WorkRunArchiveError("run.schema_version must be a positive integer")
         result["schema_version"] = schema_version
-    for key in ("status", "started_at", "finished_at", "task"):
+    for key in ("status", "started_at", "finished_at", "task", "task_digest"):
         item = value.get(key)
         if item is not None:
             result[key] = _require_string(item, f"run.{key}")
@@ -849,6 +905,14 @@ def _nested_schema_for(rel: str, raw: bytes) -> tuple[str | None, int | None]:
     return None, None
 
 
+def _workspace_for_run(run_dir: Path) -> Path:
+    """Return the workspace that owns a run directory without reading run.json."""
+    resolved = Path(run_dir).expanduser().resolve()
+    if len(resolved.parents) >= 3:
+        return resolved.parents[2]
+    return resolved.parent
+
+
 def _run_summary_from_payload(payload_root: Path) -> dict[str, Any] | None:
     meta = localio.read_json_dict(payload_root / "run.json")
     if meta is None:
@@ -860,10 +924,15 @@ def _run_summary_from_payload(payload_root: Path) -> dict[str, Any] | None:
     version = meta.get("schema_version")
     if type(version) is int and version >= 1:
         summary["schema_version"] = version
-    for key in ("status", "started_at", "finished_at", "task"):
+    for key in ("status", "started_at", "finished_at"):
         value = meta.get(key)
         if isinstance(value, str) and value:
             summary[key] = value
+    task = meta.get("task")
+    if isinstance(task, dict):
+        digest = task.get("digest")
+        if isinstance(digest, str) and digest:
+            summary["task_digest"] = digest
     return summary or None
 
 
