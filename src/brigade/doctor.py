@@ -845,23 +845,11 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
             f"{detail}; {legacy_count} legacy hook handler(s) in .claude/settings.json - "
             f"run `brigade work hooks install --target {target}` to reconcile"
         )
-    if "stale skill" in (payload.get("issues") or []) and _has_init_skill_proposal(target):
-        detail = (
-            f"{detail}; the bundled brigade-work skill differs from the kept copy, "
-            f"review it with `brigade skills inbox list --target {target}`"
-        )
+    if "stale skill" in (payload.get("issues") or []):
+        from .skills_cmd.inbox import stale_skill_hint
+
+        detail += stale_skill_hint(target, ".claude/skills/brigade-work/SKILL.md")
     return (status, "claude work loop", detail)
-
-
-def _has_init_skill_proposal(target: Path) -> bool:
-    """True when init filed an inbox proposal for the installed brigade-work SKILL.md."""
-    from .skills_cmd.inbox import _anchored_proposals
-
-    prefix = "init:brigade-work:.claude/skills/brigade-work/SKILL.md:"
-    try:
-        return any(str(meta.get("dedupe_key") or "").startswith(prefix) for _name, meta in _anchored_proposals(target))
-    except OSError:
-        return False
 
 
 def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:

@@ -558,3 +558,21 @@ def inbox_reject(*, target: Path, proposal_id: str, reason: str, json_output: bo
     print("status: rejected")
     print(f"reason: {reason}")
     return 0
+
+
+def stale_skill_hint(target: Path, rel: str) -> str:
+    """Doctor suffix pointing at the inbox when init filed a proposal for *rel*.
+
+    Lives here, not in doctor.py, to keep doctor under its size cap.
+    """
+    prefix = f"init:brigade-work:{rel}:"
+    try:
+        filed = any(str(meta.get("dedupe_key") or "").startswith(prefix) for _name, meta in _anchored_proposals(target))
+    except OSError:
+        return ""
+    if not filed:
+        return ""
+    return (
+        "; the bundled brigade-work skill differs from the kept copy, "
+        f"review it with `brigade skills inbox list --target {target}`"
+    )
