@@ -460,11 +460,16 @@ def _reflect(
     try:
         near_limit, near_cap = near.settings(target)
         link_cap = links.settings(target)
+        reflected = near.reflected_scopes(target, settings.read_scopes)
     except near.ThresholdError as exc:
         raise ReflectConfigError(str(exc)) from None
     with store.locked(target):
         _check_replica_files(target, scope=scope, dry_run=dry_run)
     configured_scopes = settings.read_scopes
+    if scope:
+        if scope not in reflected:
+            raise ReflectError("hub_reflect_scope_invalid", "--scope must be listed in [reflect] scopes")
+        reflected = (scope,)
     settings = replace(
         settings,
         read_scopes=(scope,) if scope else configured_scopes,
@@ -521,11 +526,12 @@ def _reflect(
         heads = read_heads()
         check_bounds()
     watched = []
-    unwatched: list[str] = []
     if watch and not dry_run:
         from . import memory_compensation_watch
 
-        watched = memory_compensation_watch.run(client, settings.read_scopes, report["log_epoch"], unwatched=unwatched)
+        # Only reflected scopes can hold this principal's automatic applies. A
+        # missing grant in one of them still fails the run, so revocation stays visible.
+        watched = memory_compensation_watch.run(client, reflected, report["log_epoch"])
         if watched:
             # Rollbacks invalidate the inputs for proposing. Pull their committed heads first.
             report = sync.pull(target, client, settings)
@@ -542,7 +548,7 @@ def _reflect(
     budget = near.Budget()
     link_stats = {"links": 0, "broken": 0, "repairs": 0}
     link_index = links.Index(heads)
-    for name in settings.read_scopes:
+    for name in reflected:
         scoped = [head for head in heads if head["scope"] == name]
         scope_ops, scope_skips = _ops(scoped)
         exact.extend([op] for op in scope_ops)
@@ -641,7 +647,7 @@ def _reflect(
     if first == LINK_LANE:
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
-    pending_anchors = unremembered(anchors.ops(heads))
+    pending_anchors = unremembered(anchors.ops([head for head in heads if head["scope"] in reflected]))
     remaining = unremembered(exact) + alternating + pending_anchors[: anchors.MAX_PROPOSALS]
     # Retry budget is separate so held proposals cannot consume new-work slots.
     # Retries reuse an opened proposal and never submit, so they run first and a
@@ -773,7 +779,7 @@ def _reflect(
         "refused_ops": refused,
         "seq": report["seq"],
         "compensation_watch": watched,
-        "compensation_watch_unreflectable_scopes": unwatched,
+        "reflected_scopes": list(reflected),
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
         "link_repair": {"max_proposals": link_cap, **link_stats},
         "anchoring": {"max_proposals": anchors.MAX_PROPOSALS, **anchors.coverage(heads)},
