@@ -230,7 +230,8 @@ def enable_timers(
             continue
         try:
             wants.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(Path("..") / name)
+            # systemd reads a POSIX relative target; Path would emit a backslash on Windows.
+            link.symlink_to(f"../{name}")
         except OSError as exc:
             record.update(action=ACTION_SKIP, status=STATUS_SKIPPED, detail=f"failed to create link: {exc}")
             continue

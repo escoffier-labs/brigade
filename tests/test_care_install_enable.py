@@ -523,7 +523,7 @@ def test_uninstall_clears_a_dangling_link_left_by_an_earlier_uninstall(care_home
     name = _timer_name(target, "care-scan")
     wants = _wants_dir(home)
     wants.mkdir(parents=True)
-    (wants / name).symlink_to(Path("..") / name)
+    (wants / name).symlink_to(f"../{name}")
     assert not _unit_path(home, target, "care-scan", ".timer").exists()
 
     assert (
@@ -613,7 +613,7 @@ def test_uninstall_does_not_follow_a_symlinked_wants_dir(care_home, tmp_path, ca
     name = _timer_name(target, "care-scan")
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / name).symlink_to(Path("..") / name)
+    (outside / name).symlink_to(f"../{name}")
     _wants_dir(home).symlink_to(outside, target_is_directory=True)
     capsys.readouterr()
 
