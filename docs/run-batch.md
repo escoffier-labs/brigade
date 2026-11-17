@@ -201,8 +201,17 @@ still contains the accepted batch cannot be told apart from one where nothing
 launched.
 
 `brigade runs resume` refuses an explicit batch run directory, because resuming
-a provider thread would bypass the per-task launch claim. Rerun the batch request
+a provider thread would bypass the per-task launch claim. It recognizes a batch
+from the request marker, the enrollment file, or the journal itself, so removing
+the marker files alone does not make a batch resumable. Rerun the batch request
 instead.
+
+Limit: every fence above lives in the run directory. Deleting several Brigade
+files there by hand (for example the journal and the enrollment file after a
+provider started but before it wrote a result) leaves no record that a launch
+happened, and a rerun of the same `request_id` can launch that task again. This
+is the same outcome as deleting the whole run directory. Do not edit or remove
+files inside a batch run directory. Use a new `request_id` to start over.
 Independently of the marker, each task is checked again at the launch point:
 a task the journal shows as attempted or not queued is never invoked again, and
 its journal state is left as it was.

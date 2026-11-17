@@ -274,3 +274,15 @@ def test_batch_run_cannot_be_resumed(setup, capsys):
     assert rc == 0, err
     assert run_resume.resume(_batch_run_dir(setup[0])) == 2
     assert "cannot be resumed" in capsys.readouterr().err
+
+
+def test_batch_run_with_marker_and_sentinel_removed_still_cannot_be_resumed(setup, capsys):
+    from brigade import run_resume
+
+    rc, _, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    run_dir = _batch_run_dir(setup[0])
+    (run_dir / "batch-request.json").unlink()
+    (run_dir / "batch-journal-enrolled.json").unlink()
+    assert run_resume.resume(run_dir) == 2
+    assert "cannot be resumed" in capsys.readouterr().err
