@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade Stack by Escoffier Labs" width="640">
+  <img src="docs/assets/brigade-wordmark.svg" alt="BrigadeStack by Escoffier Labs" width="640">
 </p>
 
 <p align="center">
   <strong>Coordinate your agents. Keep the tools you use.</strong>
 </p>
 
-Brigade Stack is an open-source coordination layer for AI coding agents. It sits beside Codex, Claude Code, Cursor, OpenCode, T3 Code, and the rest, and gives them shared tasks, shared memory, and verification records any agent can check.
+BrigadeStack is an open-source coordination layer for AI coding agents. It sits beside Codex, Claude Code, Cursor, OpenCode, T3 Code, and the rest, and gives them shared tasks, shared memory, and verification records any agent can check.
 
 <p align="center">
   <a href="https://brigade.tools">Website</a> ·
@@ -28,11 +28,11 @@ Brigade Stack is an open-source coordination layer for AI coding agents. It sits
 
 **Stable:** v0.31.0 is on PyPI as `brigade-cli`, on npm as `@escoffier-labs/brigade`, and through the `brigadestack` bridge. **Beta:** main is the 0.32 preview line. [Channels](docs/update-channels.md)
 
-## Why Brigade Stack
+## Why BrigadeStack
 
 You run several agents at once. Sol in Codex takes one task, Opus manages another, and Argon takes a third here and there, whether they share one window in a multi-harness tool like T3 Code or each run in its own app. Your Grok Bot runs the rest of your life, and your Dots spin up work of their own. Every agent starts from its own conversation. None of them knows who owns which task, what the others already tried, or whether a fix was actually checked.
 
-Brigade Stack holds that state outside any one tool. Agents read the same brief, claim the same tasks, and leave handoffs and evidence the next agent can inspect.
+BrigadeStack holds that state outside any one tool. Agents read the same brief, claim the same tasks, and leave handoffs and evidence the next agent can inspect.
 
 - **Keep your tools.** Works alongside the agents you already use. Start with one tool in one repository and add more when you need them.
 - **Work agents can pick up.** Tasks, dependencies, claims, and handoffs make the next action discoverable without replaying a conversation.
@@ -125,4 +125,4 @@ The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffi
 
 </details>
 
-Brigade Stack by Escoffier Labs. Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigadestack`](https://pypi.org/project/brigadestack/), npm [`brigadestack`](https://www.npmjs.com/package/brigadestack), command `brigadestack`. The `brigade-cli` and `@escoffier-labs/brigade` packages and `brigade` command remain supported.
+BrigadeStack by Escoffier Labs. Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigadestack`](https://pypi.org/project/brigadestack/), npm [`brigadestack`](https://www.npmjs.com/package/brigadestack), command `brigadestack`. The `brigade-cli` and `@escoffier-labs/brigade` packages and `brigade` command remain supported.

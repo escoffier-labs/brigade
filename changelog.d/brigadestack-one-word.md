@@ -1,0 +1,1 @@
+- Write the product name as BrigadeStack, one word, in the README, guides, CLI help, generated roster comments, packaged skills, and bridge package descriptions. The `brigade` command, import names, and released changelog entries are unchanged.

@@ -19,7 +19,7 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
     title = root.find(f"{SVG_NS}title[@id='title']")
     description = root.find(f"{SVG_NS}desc[@id='desc']")
     assert title is not None
-    assert title.text == "Brigade Stack by Escoffier Labs"
+    assert title.text == "BrigadeStack by Escoffier Labs"
     assert description is not None and description.text
 
     panel = root.find(f"{SVG_NS}rect")
@@ -38,7 +38,7 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
     assert lettering.attrib["fill"] == "#ffffff"
     assert lettering.attrib["text-anchor"] == "middle"
     labels = lettering.findall(f"{SVG_NS}text")
-    assert [label.text for label in labels] == ["Brigade Stack", "by Escoffier Labs"]
+    assert [label.text for label in labels] == ["BrigadeStack", "by Escoffier Labs"]
     for label in labels:
         assert 0 < float(label.attrib["x"]) < 920
         assert 0 < float(label.attrib["y"]) < 280

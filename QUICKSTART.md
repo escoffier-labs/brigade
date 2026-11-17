@@ -1,6 +1,6 @@
-# Brigade Stack Quickstart
+# BrigadeStack Quickstart
 
-Install stable 0.31.0, then configure one repository and record a check. Brigade Stack is built by Escoffier Labs. The command reference and generated files retain the compatible `brigade` name.
+Install stable 0.31.0, then configure one repository and record a check. BrigadeStack is built by Escoffier Labs. The command reference and generated files retain the compatible `brigade` name.
 
 ## 1. Install
 

@@ -1,4 +1,4 @@
-# Brigade Stack
+# BrigadeStack
 
 `brigadestack@0.31.0` installs stable `@escoffier-labs/brigade@0.31.0` and adds
 the `brigadestack` command. Existing packages and the `brigade` command remain

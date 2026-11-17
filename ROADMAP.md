@@ -1,6 +1,6 @@
-# Brigade Stack Roadmap
+# BrigadeStack Roadmap
 
-Brigade Stack lets agents work autonomously within scopes the operator controls. Receipts and run journals show what happened, while evidence packages and handoffs give the next agent a checkable starting point. The same records connect local work to fleet workers and cloud seats.
+BrigadeStack lets agents work autonomously within scopes the operator controls. Receipts and run journals show what happened, while evidence packages and handoffs give the next agent a checkable starting point. The same records connect local work to fleet workers and cloud seats.
 
 Reconciled **2026-11-10** against current source and linked project records. This file describes direction and acceptance boundaries. Issues and PRs own implementation detail. Historical completion records remain in the [roadmap archive](docs/roadmap-archive.md), and the parser-derived CLI surface lives in the [command inventory](docs/command-inventory.md).
 
@@ -15,13 +15,13 @@ Reconciled **2026-11-10** against current source and linked project records. Thi
 - **engine**: Brigade Code Graph or Brigade Evidence, shipped inside Brigade under `engines/` and exposed through `brigade code` or `brigade evidence`.
 - **station**: an optional sidecar Brigade installs and health-checks across a process boundary. Pantry is a station. Code Graph and Evidence are engines.
 
-The settled public name is **Brigade Stack**, with install slug **`brigadestack`**. Existing `brigade` commands, `.brigade` workspaces, Python imports, stored fields and historical evidence remain compatible. Public wording changes do not migrate data or rewrite receipt identities. The GitHub repository and organization have not been renamed.
+The settled public name is **BrigadeStack**, with install slug **`brigadestack`**. Existing `brigade` commands, `.brigade` workspaces, Python imports, stored fields and historical evidence remain compatible. Public wording changes do not migrate data or rewrite receipt identities. The GitHub repository and organization have not been renamed.
 
 Execution remains explicit: the operator sets policy and starts commands or services, agents carry out authorized work, and external schedulers can trigger care runbooks. See the [execution model](docs/execution-model.md).
 
 ## Where things stand
 
-**v0.32.x on main** is development after stable **v0.31.0**. The [latest stable release](https://github.com/escoffier-labs/brigade/releases/tag/v0.31.0) was published on 2026-11-14. `brigade-cli` 0.31.0 is on PyPI, and the npm package and the `brigadestack` bridges are at 0.31.0 too. “Brigade Stack v2” names the coordinated refresh milestone. It does not promise a v2.0 release or date.
+**v0.32.x on main** is development after stable **v0.31.0**. The [latest stable release](https://github.com/escoffier-labs/brigade/releases/tag/v0.31.0) was published on 2026-11-14. `brigade-cli` 0.31.0 is on PyPI, and the npm package and the `brigadestack` bridges are at 0.31.0 too. “BrigadeStack v2” names the coordinated refresh milestone. It does not promise a v2.0 release or date.
 
 | State | Verified scope | Boundary |
 | --- | --- | --- |
@@ -66,7 +66,7 @@ Harness adoption follows actual usage with fresh catalog/load/pin acceptance and
 
 ### Prepare the public site and release acceptance
 
-The functional Brigade Stack site/docs refresh is a held draft. Its draft status does not establish merge, deployment or domain readiness. Keep a functional site live while reviewing the concise homepage, docs, benefits and official marks.
+The functional BrigadeStack site/docs refresh is a held draft. Its draft status does not establish merge, deployment or domain readiness. Keep a functional site live while reviewing the concise homepage, docs, benefits and official marks.
 
 The approved direction is `brigadestack.com` as primary, with `brigadestack.dev` and `brigade.tools` redirecting to matching pages. Domain purchase does not establish DNS or redirect configuration. Release acceptance must verify actual package versions/pins and fresh installs, canonical URLs, path/query redirects and analytics continuity before announcement. Further registry publication, site merge/deployment, DNS changes and announcement remain held pending their explicit release decisions. Repository/organization renaming remains future coordination. The separate organization-site hub design is adjacent work outside refresh launch acceptance.
 
