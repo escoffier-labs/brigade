@@ -15,15 +15,24 @@ from brigade import (
     cli,
     native_t3_enrollment as enrollment,
     proc,
+    run_batch,
+    run_batch_execute,
     run_journal,
     run_lane_state,
     run_reap,
+    run_resume,
     run_tasks,
+    runs_status,
+    runguard,
 )
 from brigade.native_t3_contract import NativeIntentTemplate
 
 TASK_TEXT = "retained-input-marker"
 ATTEMPT = "a" * 64
+POSIX_ONLY = pytest.mark.skipif(
+    os.name == "nt", reason="native T3 enrollment refuses Windows for lack of owner-only DACLs"
+)
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows policy refusal")
 
 
 def _git(repo: Path, *args: str):
@@ -106,6 +115,7 @@ def _open(batch: Path, workspace: Path) -> int:
     return cli.main(["t3", "open", str(batch), "--target", str(workspace)])
 
 
+@POSIX_ONLY
 def test_open_enrolls_two_tasks_on_one_seat(tmp_path, capsys):
     workspace = _workspace(tmp_path)
     assert _open(_batch(tmp_path), workspace) == 0
@@ -120,8 +130,7 @@ def test_open_enrolls_two_tasks_on_one_seat(tmp_path, capsys):
         assert entry["target"] == {"provider_instance": "codex-test", "model": "launch-model"}
 
     run_dir = _run_dir(workspace, report["run_id"])
-    if os.name == "posix":
-        assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
     results = run_tasks.read_tasks(run_dir)
     assert [result.handle.spec.task_id for result in results] == ["one", "two"]
     assert all(result.status == "queued" and result.enrollment is not None for result in results)
@@ -129,8 +138,7 @@ def test_open_enrolls_two_tasks_on_one_seat(tmp_path, capsys):
     assert len(assets) == 2
     for name in assets:
         asset = run_dir / name
-        if os.name == "posix":
-            assert stat.S_IMODE(asset.stat().st_mode) == 0o600
+        assert stat.S_IMODE(asset.stat().st_mode) == 0o600
         assert TASK_TEXT.encode("utf-8") in asset.read_bytes()
 
     journal_path = run_dir / "events" / "lifecycle.jsonl"
@@ -156,6 +164,7 @@ def test_open_enrolls_two_tasks_on_one_seat(tmp_path, capsys):
         ({}, "coder", True, "source-dirty"),
     ],
 )
+@POSIX_ONLY
 def test_refusals_are_bounded_and_write_nothing(tmp_path, capsys, roster_kwargs, seat, dirty, code):
     workspace = _workspace(tmp_path, **roster_kwargs)
     if dirty:
@@ -175,6 +184,7 @@ def test_refusals_are_bounded_and_write_nothing(tmp_path, capsys, roster_kwargs,
         ({"synthesis": {"text": "combine", "seat": "coder"}}, "synthesis-unsupported"),
     ],
 )
+@POSIX_ONLY
 def test_batch_shape_refusals_write_nothing(tmp_path, capsys, batch_kwargs, code):
     workspace = _workspace(tmp_path)
     assert _open(_batch(tmp_path, **batch_kwargs), workspace) == 2
@@ -183,14 +193,14 @@ def test_batch_shape_refusals_write_nothing(tmp_path, capsys, batch_kwargs, code
     assert not (workspace / ".brigade" / "runs").exists()
 
 
+@POSIX_ONLY
 def test_asset_is_owner_only_append_only_and_digest_checked(tmp_path):
     workspace = _workspace(tmp_path)
     report = enrollment.enroll(batch_path=_batch(tmp_path), target=workspace)
     run_dir = _run_dir(workspace, report["run_id"])
     asset = _asset(run_dir, "one")
     original = asset.read_bytes()
-    if os.name == "posix":
-        assert stat.S_IMODE(asset.stat().st_mode) == 0o600
+    assert stat.S_IMODE(asset.stat().st_mode) == 0o600
 
     retained = enrollment.read_delegation_input(run_dir, task_id="one")
     assert retained.text == f"{TASK_TEXT} one"
@@ -207,6 +217,7 @@ def test_asset_is_owner_only_append_only_and_digest_checked(tmp_path):
     assert tampered.value.code == "asset-digest"
 
 
+@POSIX_ONLY
 def test_custody_refuses_a_planted_symlink(tmp_path):
     workspace = _workspace(tmp_path)
     batch = _batch(tmp_path)
@@ -231,6 +242,7 @@ def test_custody_refuses_a_planted_symlink(tmp_path):
     assert journal_path.read_bytes() == before
 
 
+@POSIX_ONLY
 def test_custody_refuses_a_hardlinked_asset(tmp_path):
     workspace = _workspace(tmp_path)
     batch = _batch(tmp_path)
@@ -249,7 +261,7 @@ def test_custody_refuses_a_hardlinked_asset(tmp_path):
     assert replay.value.code == "asset-custody"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are the custody contract here")
+@POSIX_ONLY
 def test_custody_refuses_a_widened_mode(tmp_path):
     workspace = _workspace(tmp_path)
     batch = _batch(tmp_path)
@@ -264,6 +276,7 @@ def test_custody_refuses_a_widened_mode(tmp_path):
     assert replay.value.code == "asset-custody"
 
 
+@POSIX_ONLY
 def test_enrolled_run_reports_non_terminal_and_is_not_reaped(tmp_path, capsys):
     workspace = _workspace(tmp_path)
     report = enrollment.enroll(batch_path=_batch(tmp_path), target=workspace)
@@ -285,15 +298,15 @@ def test_enrolled_run_reports_non_terminal_and_is_not_reaped(tmp_path, capsys):
     # so it can never be terminalized locally. The full reap transaction is run
     # where the existing reaper suite is verified (POSIX).
     assert enrollment.AWAITING_NATIVE_PARENT not in run_reap._REAPABLE_STATUSES
-    assert run_reap._revalidate_metadata(meta, older_than=timedelta(seconds=1), now=clock) == ("externally-controlled")
-    if os.name == "posix":
-        assert run_reap.reap(cwd=workspace, runs_dir=None, older_than="1s", json_output=True) == 0
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["reaped"] == []
-        assert payload["skipped"] == [{"run_id": report["run_id"], "reason": "externally-controlled"}]
+    assert run_reap._revalidate_metadata(meta, older_than=timedelta(seconds=1), now=clock) == "externally-controlled"
+    assert run_reap.reap(cwd=workspace, runs_dir=None, older_than="1s", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reaped"] == []
+    assert payload["skipped"] == [{"run_id": report["run_id"], "reason": "externally-controlled"}]
     assert run_json.read_bytes() == before
 
 
+@POSIX_ONLY
 def test_second_open_is_idempotent_and_changed_input_conflicts(tmp_path):
     workspace = _workspace(tmp_path)
     batch = _batch(tmp_path)
@@ -308,6 +321,7 @@ def test_second_open_is_idempotent_and_changed_input_conflicts(tmp_path):
     assert journal_path.read_bytes() == before
 
 
+@POSIX_ONLY
 def test_enrolled_run_is_not_resumable(tmp_path, capsys):
     workspace = _workspace(tmp_path)
     report = enrollment.enroll(batch_path=_batch(tmp_path), target=workspace)
@@ -337,6 +351,7 @@ def test_request_key_is_deterministic_and_domain_separated():
         enrollment.request_key("run-1", "task-1", "not-a-digest")
 
 
+@POSIX_ONLY
 def test_intent_template_is_immutable_and_binds_enrollment_values(tmp_path):
     workspace = _workspace(tmp_path)
     report = enrollment.enroll(batch_path=_batch(tmp_path, ids=("one",)), target=workspace)
@@ -358,3 +373,66 @@ def test_intent_template_is_immutable_and_binds_enrollment_values(tmp_path):
     assert replace(template, payload_digest="b" * 64).template_digest != template.template_digest
     with pytest.raises(ValueError):
         replace(template, source_revision="b" * 40)
+
+
+@POSIX_ONLY
+def test_native_enrolled_task_refuses_generic_launch(tmp_path):
+    workspace = _workspace(tmp_path)
+    report = enrollment.enroll(batch_path=_batch(tmp_path, ids=("one",)), target=workspace)
+    run_dir = _run_dir(workspace, report["run_id"])
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        with pytest.raises(run_tasks.TaskJournalError):
+            run_tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+        handle = run_tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one", native_governed=True)
+        version = next(item.version for item in run_tasks.read_tasks(run_dir) if item.handle.spec.task_id == "one")
+        with pytest.raises(run_tasks.TaskJournalError):
+            run_tasks.claim_task_launch(
+                run_dir,
+                workspace=workspace,
+                handle=handle,
+                expected_version=version,
+                seat="coder",
+                dispatch_attempt=1,
+            )
+        decision = run_tasks.claim_task_launch(
+            run_dir,
+            workspace=workspace,
+            handle=handle,
+            expected_version=version,
+            seat="coder",
+            dispatch_attempt=1,
+            native_governed=True,
+        )
+        assert decision.outcome == "granted"
+
+
+@POSIX_ONLY
+def test_generic_launch_paths_refuse_an_enrolled_run(tmp_path, capsys):
+    workspace = _workspace(tmp_path)
+    report = enrollment.enroll(batch_path=_batch(tmp_path, ids=("one",)), target=workspace)
+    run_dir = _run_dir(workspace, report["run_id"])
+    meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert runs_status.refuse_launch(meta)
+    assert "cannot be launched" in capsys.readouterr().err
+    with pytest.raises(run_batch.BatchError) as refused:
+        run_batch_execute._refuse_externally_controlled(run_dir)
+    assert refused.value.code == "native-enrolled-run"
+    assert run_resume.resume(run_dir) == 2
+    assert "cannot be resumed" in capsys.readouterr().err
+
+
+@WINDOWS_ONLY
+def test_windows_open_refuses_before_writing(tmp_path, capsys):
+    target = tmp_path / "workspace"
+    target.mkdir()
+    assert _open(_batch(tmp_path), target) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "[unsupported-platform]" in captured.err
+    assert not (target / ".brigade").exists()
+
+
+@WINDOWS_ONLY
+def test_windows_readback_refuses(tmp_path):
+    with pytest.raises(enrollment.EnrollmentError) as refused:
+        enrollment.read_delegation_input(tmp_path / "missing-run", task_id="one")
+    assert refused.value.code == "unsupported-platform"

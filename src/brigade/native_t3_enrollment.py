@@ -6,13 +6,12 @@ module validates a whole batch, binds each task's seat to a declared native
 target, retains the exact delegation input as a digest-addressed asset, and
 publishes reference-only enrollment facts.
 
-Custody is descriptor-bound on every platform that supplies a no-follow
-directory primitive: the run directory is bound before any asset read, each
-asset is created with exclusive no-follow creation in owner-only mode, and
-publish replay plus readback require a single-link regular file. On POSIX the
-mode must be exactly 0600. Windows cannot express that mode, so its owner-only
-guarantee comes from the creation handle and inherited ACL while the regular,
-single-link and no-follow checks still apply.
+Custody is descriptor-bound. The run directory is bound before any asset read,
+each asset is created with exclusive no-follow creation in owner-only mode, and
+publish replay plus readback require a single-link regular file with mode 0600.
+Windows is refused with a bounded ``unsupported-platform`` error because the
+asset would inherit the parent directory ACL instead of an owner-only DACL.
+Owner-only DACLs are not implemented in this slice.
 """
 
 from __future__ import annotations
@@ -343,13 +342,18 @@ def _create_run_dir(run_dir: Path) -> None:
     run_journal._fsync_directory(run_dir.parent)
 
 
+def _require_supported_platform() -> None:
+    """Owner-only asset custody is POSIX-only in this slice."""
+    if os.name == "nt":
+        raise EnrollmentError(
+            "unsupported-platform",
+            "native T3 enrollment needs owner-only file custody that Windows does not provide yet",
+        )
+
+
 def _private_asset(info: os.stat_result) -> bool:
     """Owner-only single-link regular file: the custody shape we can trust."""
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        return False
-    # Windows cannot express POSIX mode bits through S_IMODE. Its owner-only
-    # guarantee comes from the creation handle and inherited ACL.
-    return os.name != "posix" or stat.S_IMODE(info.st_mode) == 0o600
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
 
 
 def _require_private_asset(info: os.stat_result) -> None:
@@ -392,6 +396,7 @@ def _create_asset(bound: run_dirfd.BoundRunDir, name: str, content: bytes) -> No
 
 def write_delegation_asset(run_dir: Path, name: str, content: bytes) -> None:
     """Publish one owner-only asset atomically, refusing to replace a file."""
+    _require_supported_platform()
     if not journal.native_asset_path(name):
         raise EnrollmentError("asset-name", "delegation input asset name is invalid")
     try:
@@ -471,6 +476,7 @@ def report(plan: EnrollmentPlan) -> dict[str, Any]:
 
 def enroll(*, batch_path: Path, target: Path, roster_path: Path | None = None) -> dict[str, Any]:
     """Enroll one validated batch; a replay of the same request is idempotent."""
+    _require_supported_platform()
     workspace = target.expanduser().resolve()
     plan = plan_enrollment(workspace=workspace, batch_path=batch_path, roster_path=roster_path)
     try:
@@ -491,6 +497,7 @@ def enroll(*, batch_path: Path, target: Path, roster_path: Path | None = None) -
 
 def read_delegation_input(run_dir: Path, *, task_id: str) -> DelegationInput:
     """Read one retained asset back, refusing any digest or custody mismatch."""
+    _require_supported_platform()
     result = next(
         (item for item in run_tasks.read_tasks(run_dir) if item.handle.spec.task_id == task_id),
         None,

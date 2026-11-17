@@ -63,10 +63,9 @@ workspace refuses.
   text and the selected target. Each asset is created with exclusive no-follow
   creation in owner-only mode (`0600` on POSIX), and the write never replaces
   an existing file. Publish replay and readback bind the run directory
-  descriptor-relative and require a single-link regular file with the expected
-  mode before any bytes are trusted. Windows cannot express the POSIX mode, so
-  its custody guarantee comes from the creation handle and inherited ACL while
-  the regular, single-link and no-follow checks still apply.
+  descriptor-relative and require a single-link regular file with mode `0600`
+  before any bytes are trusted. Windows is refused because its asset would
+  inherit the parent directory ACL instead of an owner-only DACL.
 - One task batch acceptance.
 - One `task.native-enrolled` fact per task carrying only the task ID, the asset
   relative name, the asset SHA-256 digest, the template digest and the
@@ -105,11 +104,16 @@ only `task_id`, `seat`, `state` and the target summary (`provider_instance`,
 stderr and exit non-zero. Refusal codes include `source-dirty`,
 `roster-missing`, `unknown-seat`, `seat-unbound`, `invalid-target`,
 `target-isolation`, `isolation-required`, `synthesis-unsupported`, `run-busy`,
-`request-conflict`, `asset-conflict`, `asset-custody`, `asset-digest` and
-`journal-refused`.
+`request-conflict`, `asset-conflict`, `asset-custody`, `asset-digest`,
+`unsupported-platform` and `journal-refused`.
 
 ## Limits
 
+- Windows is refused for now. `brigade t3 open` exits with
+  `unsupported-platform` before any state is written, and asset readback
+  refuses too, because an asset there would inherit the parent directory ACL
+  instead of an owner-only DACL. An owner-only DACL is not implemented or
+  verified in this slice.
 - Parent-supplied native JSON is caller-supplied evidence, not authenticated
   acceptance. Brigade cannot prove that T3 accepted a delegate request from a
   returned payload alone.
@@ -118,6 +122,9 @@ stderr and exit non-zero. Refusal codes include `source-dirty`,
 - Missing or conflicting recovery evidence leaves the obligation held. Later
   slices refuse resubmission, key rotation and fallback transport.
 - Direct native calls outside the Brigade path are not governed by these verbs.
+- An enrolled task refuses `prepare_attempt` and `claim_task_launch` unless the
+  caller is the governed native path. No caller in this slice passes that flag,
+  so enrollment cannot be turned into a generic launch grant.
 - Enrollment is custody, not admission. Target containment, provider start and
   result acceptance remain separate qualifications.
 

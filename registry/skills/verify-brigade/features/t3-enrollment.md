@@ -65,7 +65,11 @@ task text absent from the lifecycle journal, and the replay returning the same
 - Only `worktree` task isolation is accepted, and synthesis refuses. Both
   refusals happen before the run lock is taken.
 - Custody reads refuse a symlink, a hardlink, or a widened POSIX mode at the
-  asset name. On Windows the mode check does not apply because POSIX mode bits
-  do not exist there, while the regular, single-link and no-follow checks do.
+  asset name. `brigade t3 open` refuses on Windows with
+  `unsupported-platform` until an owner-only DACL exists, so this drive is
+  POSIX-only.
 - `brigade runs resume` and `brigade runs recover` refuse this run. Its next
   transition belongs to the parent session.
+- Enrolled tasks refuse the generic `prepare_attempt` and `claim_task_launch`
+  path. Only a caller that passes `native_governed=True`, which no caller in
+  this slice does, can prepare or claim one.

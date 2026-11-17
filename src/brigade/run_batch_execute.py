@@ -36,6 +36,15 @@ def _read_only_enforcement_error(task_id: str, agent: Any, roster: Roster, *, re
     return None
 
 
+def _refuse_externally_controlled(run_dir: Path) -> None:
+    """A native T3 enrollment run has no generic launch authority."""
+    from . import localio, runs_status
+
+    meta = localio.read_json_dict(run_dir / "run.json")
+    if meta is not None and runs_status.is_externally_controlled(meta):
+        raise BatchError("native-enrolled-run", "run is externally controlled by a native T3 parent")
+
+
 class BatchExecution:
     def __init__(self, plan: dict[str, Any], run_dir: Path, workspace: Path):
         self.plan = plan
@@ -109,6 +118,8 @@ class BatchExecution:
 
     def dispatch(self, assignments: list[Assignment], roster: Roster, **kwargs: Any) -> list[WorkerResult]:
         from .aboyeur import planning
+
+        _refuse_externally_controlled(self.run_dir)
 
         # Reuse the wave scheduler and its fail-fast behavior. No wave exceeds
         # the effective roster limit, even before transport admission is applied.
@@ -264,6 +275,7 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
         / "runs"
         / ("batch-" + hashlib.sha256(plan["request_id"].encode()).hexdigest())
     )
+    _refuse_externally_controlled(run_dir)
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
         run_journal._fsync_directory(run_dir.parent)

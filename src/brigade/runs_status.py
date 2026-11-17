@@ -69,3 +69,18 @@ def refuse_recovery(meta: Mapping[str, Any]) -> bool:
         file=sys.stderr,
     )
     return True
+
+
+def refuse_launch(meta: Mapping[str, Any]) -> bool:
+    """Print the launch refusal and return True for an externally controlled run.
+
+    A generic run, batch or script launch must never take over a run whose next
+    transition belongs to its native parent.
+    """
+    if not is_externally_controlled(meta):
+        return False
+    print(
+        "error: run is externally controlled by a native T3 parent and cannot be launched",
+        file=sys.stderr,
+    )
+    return True

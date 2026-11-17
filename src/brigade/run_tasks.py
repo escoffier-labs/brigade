@@ -122,6 +122,11 @@ class TaskResult:
     launch_claim: TaskLaunchBinding | None = None
     enrollment: TaskEnrollment | None = None
 
+    @property
+    def native_enrolled(self) -> bool:
+        """True when the fold saw a ``task.native-enrolled`` fact for this task."""
+        return self.enrollment is not None
+
 
 @dataclass(frozen=True)
 class TaskBatchResult:
@@ -464,10 +469,16 @@ def read_task_batch(run_dir: Path, *, request_id: str) -> TaskBatchResult:
         return _batch_result(run_dir.name, request_id, _fold_history(run_dir.name, events))
 
 
-def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str) -> TaskHandle:
-    """Create the first attempt once; never infer a retry from uncertain state."""
+def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str, native_governed: bool = False) -> TaskHandle:
+    """Create the first attempt once; never infer a retry from uncertain state.
+
+    A native-enrolled task is refused unless the caller is the governed native
+    path. Enrollment alone grants no generic launch authority.
+    """
     with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
         current = _find(_fold(run_dir.name, events), task_id)
+        if current.native_enrolled and not native_governed:
+            raise TaskJournalError("native-enrolled task requires the governed launch path")
         if current.handle.attempt_id is not None:
             return current.handle
         handle = replace(current.handle, attempt_id=_attempt_id(current.handle))
@@ -519,6 +530,7 @@ def claim_task_launch(
     expected_version: str,
     seat: str,
     dispatch_attempt: int,
+    native_governed: bool = False,
 ) -> TaskLaunchDecision:
     """Consume launch permission once without reserving budget or launching.
 
@@ -526,10 +538,15 @@ def claim_task_launch(
     under the coordinator lock. A bare claim proves neither budget nor admission.
     A lost reply never reconstructs a grant. Durability ambiguity retains history
     and raises TaskJournalError; callers must retain recovery ownership.
+
+    A native-enrolled task is refused unless the caller is the governed native
+    path. Enrollment alone grants no generic launch authority.
     """
     with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
         results = _fold(run_dir.name, events)
         current = _find(results, handle.spec.task_id)
+        if current.native_enrolled and not native_governed:
+            raise TaskJournalError("native-enrolled task requires the governed launch path")
         if handle != current.handle or handle.attempt_id is None:
             raise TaskJournalError("task launch handle mismatch")
         binding = TaskLaunchBinding(seat, dispatch_attempt)
