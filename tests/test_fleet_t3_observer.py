@@ -874,10 +874,32 @@ def test_native_row_predicate_equals_the_hub_predicate(native_t3, monkeypatch):
     from brigade import fleet_node_projects, fleet_t3_observer
 
     configure, _, _, _ = native_t3
-    long_id = "p" * 513
+    long_id = "p" * 129
     projects = [{"id": f"k{i}", "repositoryIdentity": {"canonicalKey": key}} for i, key in enumerate(_KEY_SAMPLES)] + [
         {"id": long_id, "repositoryIdentity": {"canonicalKey": "example.test/org/long-id"}},
         {"id": "has space", "repositoryIdentity": {"canonicalKey": "example.test/org/space-id"}},
+        *[
+            {"id": bad, "repositoryIdentity": {"canonicalKey": f"example.test/org/bad-id-{index}"}}
+            for index, bad in enumerate(
+                [
+                    "/srv/projects/client",
+                    "https://example.test/x",
+                    "token=x",
+                    "a/b",
+                    "a\\b",
+                    "a?b",
+                    "a#b",
+                    "a@b",
+                    "a%2Fb",
+                    "a..b",
+                ]
+            )
+        ],
+        {"id": "ef1966c4-3b2a-4c1e-9d3f-0123456789ab", "repositoryIdentity": {"canonicalKey": "example.test/org/uuid"}},
+        {
+            "id": "mcp:ef1966c4-3b2a-4c1e-9d3f-0123456789ab",
+            "repositoryIdentity": {"canonicalKey": "example.test/org/mcp"},
+        },
         {"id": "dup", "repositoryIdentity": {"canonicalKey": "example.test/org/dup-a"}},
         {"id": "dup", "repositoryIdentity": {"canonicalKey": "example.test/org/dup-b"}},
         {"id": "no-identity"},
@@ -939,16 +961,16 @@ def test_all_rows_invalid_means_unknown_not_empty(native_t3, monkeypatch, capsys
 _CAP = 262144
 
 
+_KEY_PREFIX = "example.test/org/"
+
+
 def _padded_projects(count: int, lengths: list[int]) -> list[dict]:
+    """Project ids stay short opaque tokens, so the size is padded through the repo key."""
     rows = []
     for index in range(count):
         size = lengths[index] if index < len(lengths) else 500
-        rows.append(
-            {
-                "id": f"{index:04d}" + "x" * (size - 4),
-                "repositoryIdentity": {"canonicalKey": f"example.test/org/r{index}"},
-            }
-        )
+        key = _KEY_PREFIX + f"{index:04d}" + "x" * (size - len(_KEY_PREFIX) - 4)
+        rows.append({"id": f"k{index:04d}", "repositoryIdentity": {"canonicalKey": key}})
     return rows
 
 
@@ -967,16 +989,16 @@ def test_inventory_size_cap_is_strictly_below_the_printed_limit(native_t3, monke
     def size(payload: dict) -> int:
         return len(json.dumps(payload).encode("utf-8"))
 
-    first, second = size(run(400, [4, 4, 4])), size(run(401, [4, 4, 4]))
+    first, second = size(run(400, [21, 21, 21])), size(run(401, [21, 21, 21]))
     each = second - first
     count = 400 + (_CAP - first - 400) // each
-    base = size(run(count, [4, 4, 4]))
+    base = size(run(count, [21, 21, 21]))
     assert base < _CAP
 
     def tuned(target: int) -> list[int]:
-        remaining, lengths = target - base, [4, 4, 4]
+        remaining, lengths = target - base, [21, 21, 21]
         for index in (2, 1, 0):
-            add = min(remaining, 508)
+            add = min(remaining, 491)
             lengths[index] += add
             remaining -= add
         assert remaining == 0

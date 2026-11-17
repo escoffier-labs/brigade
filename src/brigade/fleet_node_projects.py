@@ -24,8 +24,13 @@ from .fleet_hub import FleetHubConflict, FleetHubError, FleetHubForbidden
 from .fleet_hub_routing import MAX_FUTURE_SECONDS, _bounded, _machine_for_node, _parse_stamp
 
 MAX_PROJECTS = 2_000
-# project_id and repo_key share the 512 identity limit on the Hub and in the observer.
+# repo_key has the 512 identity limit on the Hub and in the observer.
 MAX_ID_CHARS = 512
+# A project id is an opaque token, such as a UUID with an optional "mcp:" style prefix. It cannot
+# carry a path, URL, query, userinfo, credential assignment, escape or whitespace.
+MAX_PROJECT_ID_CHARS = 128
+PROJECT_ID_PATTERN = r"(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}"
+_PROJECT_ID = re.compile(PROJECT_ID_PATTERN)
 MAX_ENVIRONMENT_ID_CHARS = 256
 # host.tld/segment/segment...: lowercase, a dotted host, at least two path segments,
 # and no scheme, userinfo, leading slash or tilde, backslash, whitespace or "..".
@@ -75,6 +80,13 @@ def clean_id(raw: object, limit: int) -> str | None:
     return None
 
 
+def clean_project_id(raw: object) -> str | None:
+    """An opaque project id token, or None."""
+    if isinstance(raw, str) and len(raw) <= MAX_PROJECT_ID_CHARS and _PROJECT_ID.fullmatch(raw) is not None:
+        return raw
+    return None
+
+
 def normalize_repo_key(raw: object) -> str | None:
     """Casefold, strip one trailing ``.git``, and require the canonical key shape."""
     if not isinstance(raw, str) or len(raw) > MAX_ID_CHARS:
@@ -91,7 +103,7 @@ def project_row(item: object) -> tuple[str, str] | None:
     """The one per-row predicate. The Hub rejects a whole body on None, the observer drops the row."""
     if not isinstance(item, Mapping):
         return None
-    project_id = clean_id(item.get("project_id"), MAX_ID_CHARS)
+    project_id = clean_project_id(item.get("project_id"))
     key = normalize_repo_key(item.get("repo_key"))
     if project_id is None or key is None:
         return None
@@ -122,7 +134,13 @@ def _validated_projects(raw: Any) -> list[tuple[str, str]]:
 
 
 def observe_projects(conn: sqlite3.Connection, body: Any, caller_node: str) -> dict[str, Any]:
-    """Replace one node's inventory. Older snapshots are ignored, same-instant disagreements conflict."""
+    """Replace one node's inventory. Older snapshots are ignored, same-instant disagreements conflict.
+
+    Precondition: the caller must not hold uncommitted writes of its own. A current binding
+    mismatch commits the clear before raising, which would commit them too. The Hub HTTP path
+    satisfies this: each request has its own connection, and the policy handler has written
+    nothing before this action.
+    """
     payload = body if isinstance(body, Mapping) else None
     if payload is None:
         raise FleetHubError("node projects report must be a JSON object")
@@ -170,7 +188,8 @@ def observe_projects(conn: sqlite3.Connection, body: Any, caller_node: str) -> d
         bound_id = (document.get("machines", {}).get(machine) or {}).get("t3_environment_id")
         ensure_schema(conn)
         existing = conn.execute(
-            "SELECT observed_at, environment_id FROM fleet_node_project_snapshots WHERE node_id=?", (node_id,)
+            "SELECT observed_at, environment_id, ttl_seconds FROM fleet_node_project_snapshots WHERE node_id=?",
+            (node_id,),
         ).fetchone()
         previous = _parse_stamp(existing[0]) if existing is not None else None
         if bound_id and bound_id.casefold() != environment_id:
@@ -196,7 +215,7 @@ def observe_projects(conn: sqlite3.Connection, body: Any, caller_node: str) -> d
                     "SELECT project_id, repo_key FROM fleet_node_projects WHERE node_id=? ORDER BY project_id",
                     (node_id,),
                 ).fetchall()
-                if [tuple(row) for row in stored] != rows or existing[1] != environment_id:
+                if [tuple(row) for row in stored] != rows or existing[1] != environment_id or existing[2] != ttl:
                     raise FleetHubConflict("projects-conflict: same-instant snapshots for this node disagree")
         updated = _now().isoformat()
         conn.execute("DELETE FROM fleet_node_projects WHERE node_id=?", (node_id,))

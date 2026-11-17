@@ -344,7 +344,19 @@ def test_nodes_do_not_touch_each_others_rows(conn):
         {"projects": [{"project_id": "p", "repo_key": "example.test/org/repo\n"}]},
         {"projects": [{"project_id": "p", "repo_key": "example.test/org/repo/"}]},
         {"projects": [{"project_id": "p", "repo_key": 7}]},
-        {"projects": [{"project_id": "p" * 513, "repo_key": REPO}]},
+        {"projects": [{"project_id": "p" * 129, "repo_key": REPO}]},
+        {"projects": [{"project_id": "/srv/projects/client", "repo_key": REPO}]},
+        {"projects": [{"project_id": "https://example.test/x", "repo_key": REPO}]},
+        {"projects": [{"project_id": "token=x", "repo_key": REPO}]},
+        {"projects": [{"project_id": "a/b", "repo_key": REPO}]},
+        {"projects": [{"project_id": "a\\b", "repo_key": REPO}]},
+        {"projects": [{"project_id": "a?b", "repo_key": REPO}]},
+        {"projects": [{"project_id": "a#b", "repo_key": REPO}]},
+        {"projects": [{"project_id": "a@b", "repo_key": REPO}]},
+        {"projects": [{"project_id": "a%2Fb", "repo_key": REPO}]},
+        {"projects": [{"project_id": "a..b", "repo_key": REPO}]},
+        {"projects": [{"project_id": ":lead", "repo_key": REPO}]},
+        {"projects": [{"project_id": 7, "repo_key": REPO}]},
         {"projects": [{"project_id": "has space", "repo_key": REPO}]},
         {"projects": [{"project_id": "p", "repo_key": "example.test/" + "a" * 513}]},
         {"projects": [{"project_id": "p", "repo_key": REPO}, {"project_id": "p", "repo_key": REPO}]},
@@ -377,13 +389,32 @@ def test_canonical_repo_keys_normalize(raw, expected):
     assert fleet_node_projects.normalize_repo_key(raw) == expected
 
 
-def test_project_id_and_repo_key_share_the_512_limit(conn):
-    assert fleet_node_projects.MAX_ID_CHARS == 512
+def test_project_id_is_capped_at_128_and_repo_key_at_512(conn):
+    assert (fleet_node_projects.MAX_PROJECT_ID_CHARS, fleet_node_projects.MAX_ID_CHARS) == (128, 512)
     key = "example.test/org/" + "a" * (512 - len("example.test/org/"))
     result = fleet_node_projects.observe_projects(
-        conn, _body(projects=[{"project_id": "p" * 512, "repo_key": key}]), NODE_LINUX
+        conn, _body(projects=[{"project_id": "p" * 128, "repo_key": key}]), NODE_LINUX
     )
     assert result["projects"] == 1
+
+
+@pytest.mark.parametrize(
+    "project_id",
+    ["ef1966c4-3b2a-4c1e-9d3f-0123456789ab", "mcp:ef1966c4-3b2a-4c1e-9d3f-0123456789ab", "inv_a.1", "P1"],
+)
+def test_opaque_project_ids_are_accepted(conn, project_id):
+    fleet_node_projects.observe_projects(
+        conn, _body(projects=[{"project_id": project_id, "repo_key": REPO}]), NODE_LINUX
+    )
+    assert [row[2] for row in _stored(conn)] == [project_id]
+
+
+def test_same_instant_report_with_a_different_ttl_conflicts(conn):
+    instant = _stamp(-5)
+    fleet_node_projects.observe_projects(conn, _body(observed_at=instant), NODE_LINUX)
+    with pytest.raises(FleetHubConflict, match="projects-conflict"):
+        fleet_node_projects.observe_projects(conn, {**_body(observed_at=instant), "ttl_seconds": 60}, NODE_LINUX)
+    assert conn.execute("SELECT ttl_seconds FROM fleet_node_project_snapshots").fetchall() == [(900,)]
 
 
 def test_projects_at_the_cap_are_accepted(conn):

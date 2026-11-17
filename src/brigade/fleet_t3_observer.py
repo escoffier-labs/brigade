@@ -157,6 +157,8 @@ try:
             if isinstance(value, str) and 0 < len(value) <= limit and all(not c.isspace() and c.isprintable() for c in value):
                 return value
             return None
+        def project_id_ok(value):
+            return isinstance(value, str) and len(value) <= MAX_PROJECT_ID_CHARS and re.fullmatch(PROJECT_ID_PATTERN, value) is not None
         def normal_key(value):
             if not isinstance(value, str) or len(value) > MAX_ID_CHARS:
                 return None
@@ -173,8 +175,8 @@ try:
                 raw_key = identity.get("canonicalKey") if isinstance(identity, dict) else None
                 if raw_key is None or row.get("archivedAt") is not None or row.get("deletedAt") is not None:
                     continue
-                project_id, key = clean_id(row.get("id"), MAX_ID_CHARS), normal_key(raw_key)
-                if project_id is None or key is None or project_id in seen_ids:
+                project_id, key = row.get("id"), normal_key(raw_key)
+                if not project_id_ok(project_id) or key is None or project_id in seen_ids:
                     dropped += 1
                     continue
                 seen_ids.add(project_id)
@@ -212,6 +214,8 @@ def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: li
         f"PUBLISH_LIMIT = {PUBLISH_LIMIT!r}\nDETAIL_THREAD_IDS = {detail_thread_ids!r}\n"
         f"REPO_KEY_PATTERN = {inventory_rules.REPO_KEY_PATTERN!r}\nMAX_ID_CHARS = {inventory_rules.MAX_ID_CHARS!r}\n"
         f"MAX_ENVIRONMENT_ID_CHARS = {inventory_rules.MAX_ENVIRONMENT_ID_CHARS!r}\n"
+        f"PROJECT_ID_PATTERN = {inventory_rules.PROJECT_ID_PATTERN!r}\n"
+        f"MAX_PROJECT_ID_CHARS = {inventory_rules.MAX_PROJECT_ID_CHARS!r}\n"
         f"MAX_INVENTORY_PROJECTS = {inventory_rules.MAX_PROJECTS!r}\n" + _NATIVE_PROGRAM
     )
     result = proc.run(

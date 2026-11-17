@@ -116,7 +116,10 @@ roots, titles, paths or remote URLs. A canonical key is lowercase
 `host.tld/segment/segment...` with at least two segments after a dotted host,
 segments of `a-z`, `0-9`, `.`, `_` and `-`, and no scheme, userinfo, leading
 slash or tilde, backslash, whitespace or `..`. A trailing `.git` is stripped.
-The observer applies the Hub's exact row predicate and 512-character limits,
+A project id must be an opaque token of at most 128 characters
+(`[A-Za-z0-9][A-Za-z0-9:_.-]*`, no `..`), such as a UUID with an optional `mcp:`
+style prefix, so a path, URL or credential cannot reach the Hub. The observer
+applies the Hub's exact row predicate and limits (512 for the repo key),
 drops invalid or repeated rows individually, and reports the count as
 `inventory_dropped`. If every row is invalid the set is unknown, not empty.
 The Hub itself stays strict and rejects a whole body that contains a bad row.
