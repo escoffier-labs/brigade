@@ -88,7 +88,8 @@ def _hub_configured() -> bool:
 
 
 def _require_private_lease_storage() -> None:
-    # Current Windows helpers cannot establish an owner-only ACL boundary.
+    # Lease storage does not go through work_cmd/nt_private.py yet, so on Windows it
+    # would inherit the parent ACL. Refuse until it does.
     if sys.platform == "win32":
         raise OSError("secure-owner-store-unavailable")
 

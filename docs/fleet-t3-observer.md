@@ -101,6 +101,56 @@ contents, and native identifiers are never copied to the count report.
 Live inspection does not publish or prove Hub visibility. The integration owner
 must review and explicitly wire publishing into the existing telemetry path.
 
+## Repository inventory for placement
+
+With `--publish`, the observer also reports which repositories this node can
+run as T3 projects, so the Hub can answer which machine has a repository as a T3
+project, with which T3 environment id and project id. The inventory is a
+separate key in the same native read. It never changes the session `projects`
+list that path mapping relies on.
+
+It holds the local T3 environment id from the t3-fleet agent descriptor, and for
+each project that is neither archived nor deleted and has a repository identity,
+the T3 project id and its canonical repository key. It never carries workspace
+roots, titles, paths or remote URLs. A canonical key is lowercase
+`host.tld/segment/segment...` with at least two segments after a dotted host,
+segments of `a-z`, `0-9`, `.`, `_` and `-`, and no scheme, userinfo, leading
+slash or tilde, backslash, whitespace or `..`. A trailing `.git` is stripped.
+A project id must be an opaque token of at most 128 characters
+(`[A-Za-z0-9][A-Za-z0-9:_.-]*`, no `..`), such as a UUID with an optional `mcp:`
+style prefix, so a path, URL or credential cannot reach the Hub. The observer
+applies the Hub's exact row predicate and limits (512 for the repo key),
+drops invalid or repeated rows individually, and reports the count as
+`inventory_dropped`. If every row is invalid the set is unknown, not empty.
+The Hub itself stays strict and rejects a whole body that contains a bad row.
+The environment id is read first, from a worker bounded to about one second,
+and is skipped in the second-pass detail read, so a stalled descriptor cannot
+cost session publishing. If the environment id is unavailable, the
+inventory does not exist for that run, which means unknown and never empty.
+An unavailable or failed inventory never erases a stored one. A result that
+would exceed the 256 KiB bound drops the inventory rather than the sessions.
+
+The report adds `inventory` with `ok`, `error` or `skipped`. It is sent once per
+publish run, after sessions and inside the same deadline, as the node-token
+`projects-observe` policy action. A failure is reported there and never changes
+`ok`, the exit code or session publishing. The Hub keeps each node's latest full
+set (900 second TTL), ignores an older snapshot than the stored one, and raises
+a conflict for two same-instant snapshots that disagree. A node can only write
+its own inventory.
+
+A node token proves the node id, not its T3 environment. The operator binds each
+machine's environment in the policy document with the optional machine field
+`t3_environment_id` (letters, digits and hyphens, unique across machines,
+admin token only). The environment id is compared case-insensitively, in the
+uniqueness check, the binding check and the stored value. A report whose
+environment id differs from the machine's binding is rejected with `environment-binding-mismatch`, and in the same
+transaction that node's stored project rows and snapshot are deleted, so
+placement stops using a stale environment at once. A node can only clear its own
+rows. A mismatched report older than the stored snapshot changes nothing.
+A machine without a binding is stored but read as unbound. Reads recompute the
+binding from the current policy, so a policy change applies without a
+republish, and placement must skip unbound rows.
+
 ## Keeping local Claude Code and Codex sessions open
 
 The optional session heartbeat renews the exact snapshot last published by a

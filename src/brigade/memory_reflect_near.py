@@ -263,6 +263,19 @@ def _pairs(sets: list[array], limit: float, budget: Budget, skipped: dict[str, i
     return edges
 
 
+def _anchored(head: dict[str, Any]) -> bool:
+    """The keeper needs a claim anchor, not a hub pin.
+
+    A supersede op names the keeper only as `other_card`, with no block, and the
+    hub records whatever pins the keeper has. So inline code in the keeper's
+    anchored paragraph must not skip the cluster.
+    """
+    try:
+        return any(block.block_id for block in delta.blocks(head["text"]))
+    except ValueError:
+        return False
+
+
 def _pin(head: dict[str, Any]) -> delta.Block | None:
     try:
         pins = claim_blocks.hub_pins(head["text"])
@@ -324,7 +337,7 @@ def ops(
             reason = "near_mixed_trust"
         elif not trusts <= KNOWN_TRUST:
             reason = "near_unknown_trust"
-        elif _pin(keeper) is None:
+        elif not _anchored(keeper):
             reason = "near_missing_pin"
         if reason:
             skipped[reason] = skipped.get(reason, 0) + len(others)

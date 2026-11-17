@@ -34,6 +34,25 @@ def _drain_orphan_claim_releases(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def systemctl_calls(monkeypatch):
+    """Never reach the real user manager: record each ``systemctl --user`` call and succeed.
+
+    ``brigade care install`` and ``uninstall`` start and stop timers through
+    ``care_enable.run_systemctl``. Tests that need a failure replace it again.
+    """
+    from brigade import care_enable
+
+    calls: list[list[str]] = []
+
+    def fake(args):
+        calls.append(list(args))
+        return True, ""
+
+    monkeypatch.setattr(care_enable, "run_systemctl", fake)
+    return calls
+
+
+@pytest.fixture(autouse=True)
 def _reset_engine_deprecation_notices(monkeypatch):
     """Give every test a fresh once-per-process deprecation notice state.
 

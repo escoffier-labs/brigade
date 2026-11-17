@@ -23,9 +23,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import component_manifest, localio, mcp_adapters, mcp_fidelity, mcp_runtime, projection
+from . import component_manifest, localio, mcp_adapters, mcp_fidelity, mcp_native_auth, mcp_runtime, projection
 from .component_bins import canonical_command
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
+from .mcp_import import import_servers  # noqa: F401  (re-export; split out for the size ceiling)
 from .render import emit as _emit
 
 CANONICAL_REL = ".brigade/mcp.json"
@@ -295,15 +296,7 @@ class ProjectionContext:
     opencode_location: str | None = None
 
 
-class NativeAuthConflict(ValueError):
-    """A later generic credential cannot silently shadow retained native auth."""
-
-    def __init__(self, headers: set[str]):
-        super().__init__(
-            "generic headers collide with retained native authentication; live config unchanged; "
-            "use explicit native canonical auth to resolve the collision"
-        )
-        self.fields: dict[str, Any] = {"reason": "native_auth_collision", "headers": sorted(headers)}
+NativeAuthConflict = mcp_native_auth.NativeAuthConflict  # moved; kept importable from here
 
 
 def _project_server(
@@ -342,6 +335,13 @@ def _project_server(
             server, live, location=location, native_keys=_opencode_native_keys(live, record, server)
         )
     projected = adapter.to_provider(server)
+    if mcp_native_auth.preserved_keys(harness):
+        if context is None:
+            path = mcp_adapters.resolve_path(adapter, target)
+            live = adapter.read_file(path.read_text() if path.is_file() else None).get(server.name, {})
+        else:
+            live = context.live
+        projected = mcp_native_auth.carry_native_keys(harness, projected, live)
     if harness != "cursor-user" or server.is_remote or not _is_code_graph_server(server):
         return projected
     args = _without_repo_code_graph_db_pin(target, server.args)
@@ -671,7 +671,7 @@ def _plan_from_inputs(
             # example an OpenCode name colliding with a settings container).
             adapter.write_file(text, {name: provider_dict}, set())
         except NativeAuthConflict as exc:
-            assessments[name] = mcp_fidelity.evaluate(server, harness, error_code="native_auth_collision", **context)
+            assessments[name] = mcp_fidelity.evaluate(server, harness, error_code=exc.fields["reason"], **context)
             items.append(
                 {
                     **_item(harness, rel, name, "conflicted", "conflict", None, None, detail=f"{name}: {exc}"),
@@ -695,7 +695,7 @@ def _plan_from_inputs(
                 )
             )
             continue
-        desired_fp = localio.stable_hash(provider_dict)
+        desired_fp = mcp_native_auth.entry_fingerprint(harness, provider_dict)
         canon_fp = localio.stable_hash(mcp_adapters.server_to_dict(server))
         record = owned.get(name)
         if name not in live:
@@ -703,7 +703,7 @@ def _plan_from_inputs(
             if source != name:
                 items[-1]["_source"] = source
             continue
-        live_fp = localio.stable_hash(live[name])
+        live_fp = mcp_native_auth.entry_fingerprint(harness, live[name])
         if record is None:
             if live_fp == desired_fp:
                 items.append(_item(harness, rel, name, "current", "skip", canon_fp, desired_fp, reconciled=True))
@@ -755,7 +755,7 @@ def _plan_from_inputs(
             continue  # purely foreign, not ours - never touch
         if name not in live:
             continue  # already gone; ownership cleaned on write
-        live_fp = localio.stable_hash(live[name])
+        live_fp = mcp_native_auth.entry_fingerprint(harness, live[name])
         if live_fp != record.get("projected_fingerprint"):
             items.append(
                 _item(
@@ -770,7 +770,11 @@ def _plan_from_inputs(
                 )
             )
         elif prune or name in prune_names:
-            items.append(_item(harness, rel, name, "orphan", "remove", None, None))
+            item = _item(harness, rel, name, "orphan", "remove", None, None)
+            # A rename source hands its native auth to the replacement, so only it may go.
+            if name not in sources.values() and mcp_native_auth.has_preserved_native_keys(harness, live[name]):
+                _block_removal(item, harness, scope)
+            items.append(item)
         else:
             items.append(
                 _item(
@@ -785,6 +789,17 @@ def _plan_from_inputs(
         server = servers.get(item["server"])
         item["transport"] = server.transport if server is not None else None
     return items
+
+
+def _block_removal(item: dict[str, Any], harness: str, scope: str) -> None:
+    """Turn a planned removal into a per-server conflict: native auth would be erased with the entry."""
+    reason = mcp_native_auth.REMOVAL_BLOCKED
+    message = mcp_native_auth.removal_block_message(item["server"], harness)
+    item.update(status="conflicted", action="conflict", detail=message, reason=reason)
+    item["_fidelity"] = {
+        **mcp_fidelity.evaluate(None, harness, scope=scope, error_code=reason),
+        "server": item["server"],
+    }
 
 
 def _rename_sources(
@@ -1299,6 +1314,19 @@ def _recovery_records(target: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _project_or_block(
+    item: dict[str, Any], target: Path, harness: str, server: CanonicalServer, context: ProjectionContext, scope: str
+) -> dict[str, Any] | None:
+    """Re-project at write time; a native-auth block (the live file may have moved) is a per-server conflict."""
+    try:
+        return _project_server(target, harness, server, context)
+    except NativeAuthConflict as exc:
+        reason = exc.fields["reason"]
+        item.update(status="conflicted", action="conflict", detail=f"{server.name}: {exc}", reason=reason)
+        item["_fidelity"] = mcp_fidelity.evaluate(server, harness, scope=scope, error_code=reason)
+        return None
+
+
 def build_sync_plan(
     *,
     target: Path,
@@ -1479,6 +1507,7 @@ def build_sync_plan(
         planned_owned = state.get("ownership", {}).get(h, {}).get(adapter.path, {})
         to_write: dict[str, dict[str, Any]] = {}
         to_remove: set[str] = set()
+        renamed_sources: set[str] = set()
         changed = False
         for item in items:
             server_name = item["server"]
@@ -1489,16 +1518,21 @@ def build_sync_plan(
                 source = item.get("_source")
                 source_live = live.get(source or server_name, {})
                 source_record = planned_owned.get(source) if source else owner_map.get(server_name)
-                to_write[server_name] = _project_server(
+                projected = _project_or_block(
+                    item,
                     target,
                     h,
                     servers[server_name],
-                    ProjectionContext(
-                        source_live,
-                        source_record,
-                        _opencode_location(h, existing, server_name),
-                    ),
+                    ProjectionContext(source_live, source_record, _opencode_location(h, existing, server_name)),
+                    "user" if adapter.user_scope else "project",
                 )
+                if projected is None:
+                    if source:  # a rename pairs a create with a legacy removal; neither may half-apply
+                        plan_errors.append(item["detail"])
+                    continue
+                to_write[server_name] = projected
+                if source:
+                    renamed_sources.add(source)
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
@@ -1506,6 +1540,12 @@ def build_sync_plan(
                 }
                 changed = True
             elif action == "remove":
+                # Re-checked at write time: the live entry may have gained native auth since the plan.
+                if server_name not in renamed_sources and mcp_native_auth.has_preserved_native_keys(
+                    h, live.get(server_name)
+                ):
+                    _block_removal(item, h, "user" if adapter.user_scope else "project")
+                    continue
                 to_remove.add(server_name)
                 if owner_map is not None:
                     owner_map.pop(server_name, None)
@@ -1513,7 +1553,8 @@ def build_sync_plan(
             elif status == "current":
                 if owner_map is None:
                     owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
-                to_write[server_name] = _project_server(
+                projected = _project_or_block(
+                    item,
                     target,
                     h,
                     servers[server_name],
@@ -1522,7 +1563,11 @@ def build_sync_plan(
                         owner_map.get(server_name),
                         _opencode_location(h, existing, server_name),
                     ),
+                    "user" if adapter.user_scope else "project",
                 )
+                if projected is None:
+                    continue
+                to_write[server_name] = projected
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
@@ -1535,7 +1580,9 @@ def build_sync_plan(
                 final_live = adapter.read_file(new_text)
                 if owner_map is not None:
                     for server_name in to_write:
-                        owner_map[server_name]["projected_fingerprint"] = localio.stable_hash(final_live[server_name])
+                        owner_map[server_name]["projected_fingerprint"] = mcp_native_auth.entry_fingerprint(
+                            h, final_live[server_name]
+                        )
             except ValueError as exc:
                 code = mcp_fidelity.projection_error_code(exc)
                 plan_errors.append(f"{path}: {mcp_fidelity.projection_error_message(exc)}")
@@ -1908,89 +1955,3 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         lines.append(f"no MCP adapter for configured harness(es): {', '.join(unsupported)}")
     rc = 0 if payload["valid"] else 1
     return _emit_fidelity(payload, json_output, lines, rc)
-
-
-def import_servers(
-    *,
-    target: Path,
-    harness: str,
-    merge: bool = False,
-    user_scope: bool = False,
-    keep_secrets: bool = False,
-    json_output: bool = False,
-) -> int:
-    target = target.expanduser().resolve()
-    harness = _scoped_harness(harness, user_scope=user_scope)
-    adapter = ADAPTERS.get(harness)
-    if adapter is None:
-        return _emit(
-            {"errors": [f"unknown MCP target {harness!r}"]}, json_output, [f"error: unknown target {harness!r}"], 2
-        )
-    if adapter.user_scope and not user_scope:
-        return _emit(
-            {"errors": [f"{harness} is user-scoped; pass --user-scope"]},
-            json_output,
-            [f"error: {harness} is user-scoped; pass --user-scope"],
-            2,
-        )
-    path = mcp_adapters.resolve_path(adapter, target)
-    if not path.is_file():
-        return _emit({"errors": [f"{path}: not found"]}, json_output, [f"error: {path} not found"], 2)
-    warnings: list[str] = []
-    layout_conflicts: list[dict[str, Any]] = []
-    try:
-        text = path.read_text()
-        live = adapter.read_file(text)
-        if harness in ("opencode", "opencode-user"):
-            view = mcp_adapters.inspect_opencode_config(text)
-            warnings = list(view.warnings)
-            layout_conflicts = [{"server": n, "locations": ["flat", "nested"]} for n in view.duplicates]
-    except mcp_adapters.OpenCodeLayoutError as exc:
-        return _emit({"errors": [str(exc)], **exc.fields}, json_output, [f"error: {exc}"], 2)
-    existing, errors, _ = load_canonical(target)
-    if errors and merge:
-        return _emit({"errors": errors}, json_output, [f"error: {e}" for e in errors], 2)
-    discovered: list[str] = []
-    secrets_demoted: list[str] = []
-    secrets_dropped: list[str] = []
-    skipped_existing: list[str] = []
-    to_add: dict[str, CanonicalServer] = {}
-    for srv_name, raw in sorted(live.items()):
-        try:
-            server, demoted = adapter.from_provider(srv_name, raw, keep_secrets=keep_secrets)
-        except ValueError as exc:
-            return _emit({"errors": [f"{srv_name}: {exc}"]}, json_output, [f"error: {srv_name}: {exc}"], 2)
-        discovered.append(srv_name)
-        for field_name in demoted:
-            destination = (
-                secrets_dropped
-                if harness in ("opencode", "opencode-user") and field_name not in (server.headers | server.env)
-                else secrets_demoted
-            )
-            destination.append(f"{srv_name}.{field_name}")
-        if srv_name in existing:
-            skipped_existing.append(srv_name)
-            continue
-        to_add[srv_name] = server
-    if merge:
-        existing.update(to_add)
-        _write_canonical(target, existing)
-    payload = {
-        "harness": harness,
-        "merged": merge,
-        "discovered": discovered,
-        "added": sorted(to_add),
-        "skipped_existing": skipped_existing,
-        "secrets_demoted": secrets_demoted,
-        "secrets_dropped": secrets_dropped,
-        "warnings": warnings,
-        "layout_conflicts": layout_conflicts,
-    }
-    lines = [f"brigade mcp import {harness}: {len(discovered)} discovered, {len(to_add)} new"]
-    lines += [f"warning: {warning}" for warning in warnings]
-    lines += [f"+ {n}" for n in sorted(to_add)]
-    lines += [f"secret demoted to ref: {s}" for s in secrets_demoted]
-    lines += [f"field dropped from canonical: {s}" for s in secrets_dropped]
-    if not merge:
-        lines.append("(preview only; pass --merge to write into .brigade/mcp.json)")
-    return _emit(payload, json_output, lines, 0)
