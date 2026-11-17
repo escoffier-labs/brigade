@@ -12,9 +12,9 @@ verification, schemas and state handling but none of Dot's identity, inbox,
 state or Access application.
 
 Brigade has no inbound task API into Duet. A claude.ai custom MCP connector is
-how Brigade reaches Duet, and every Duet session on the account inherits it.
-The connector is not Duet's only integration. Duet reports other connectors,
-scheduled routines and cloud coding threads of its own, listed in
+how Duet reaches Brigade's tools, and every Duet session on the account inherits
+it. Duet reports that this is not its only integration: it lists other
+connectors, scheduled routines and cloud coding threads of its own, in
 [What Duet reports about itself](#what-duet-reports-about-itself).
 
 The default bind is `127.0.0.1:8780`. The registry `public_route` is empty.
@@ -100,11 +100,10 @@ and were not tested, except the lines marked "Observed".
 
 - Connectors: Duet reports mail, calendar and document connectors, hosting and
   payment connectors, web search and a cloud shell, plus a custom connector like
-  this one. Through the Brigade
-  connector it reports reading fleet status, work, inbox and memory, and sending
+  this one. Through the Brigade connector it reports reading fleet status, work, inbox and memory, and sending
   messages.
-- Schedules: Duet reports that routines on a cron (a morning brief, check-ins,
-  an inbox summary) and one-off messages at a set time run without anyone
+- Schedules: Duet reports that routines on a cron (for example a daily brief,
+  recurring check-ins and an inbox summary) and one-off messages at a set time run without anyone
   messaging it first. Observed: the Tasks panel has Active, Up next, Scheduled
   and Resolved tabs.
 - Waking: Duet reports that new mail or a Slack message does not wake it, so a
@@ -113,8 +112,8 @@ and were not tested, except the lines marked "Observed".
   CI results and other events for one pull request, to one Claude session at a
   time. Its "URL watch" is an inbound webhook address that only Claude's
   artifact service can post to. Duet says that watch does not fetch or compare
-  any web page, has no check interval, and ends with the session. Watching a
-  real page takes a scheduled routine that fetches it.
+  any web page, has no check interval, and ends with the session. Duet says
+  watching a real page therefore takes a scheduled routine that fetches it.
 - Approval: Duet reports that it reads, searches and drafts without asking, and
   that sending or replying as the user, paying, booking, deleting, cancelling,
   sharing files, inviting people, sign-in codes and accepting terms always need
@@ -123,10 +122,10 @@ and were not tested, except the lines marked "Observed".
 - Coding agents: Duet reports that it starts cloud Claude Code threads that
   clone repositories and open pull requests, and that it can see the user's own
   Claude Code sessions, where messaging one needs approval on a card.
-- Limits: Duet reports a thread brief of about 8 KB, memory of 16 KB, check-ins
-  every 3 hours between 9 AM and 10 PM, files outside the shared folder lost,
-  and everything stopping when the plan usage limit is hit. Observed: a
-  check-in that morning did not finish because it hit the plan usage limit.
+- Limits: Duet reports a thread brief of about 8 KB, memory of 16 KB, a check-in
+  cadence of a few times a day inside a daytime window, files outside the shared
+  folder lost, and everything stopping when the plan usage limit is hit.
+  Observed: one scheduled check-in stopped at the plan usage limit.
 
 Nothing in this connector wakes Duet. It reads its inbox when a session or a
 routine calls `inbox_list`.

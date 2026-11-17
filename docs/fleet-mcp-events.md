@@ -140,7 +140,7 @@ network position, and the principal credentials.
   call when they add it to the allowlist. TLS trust is the system store. Delivery
   is at least once; receivers must tolerate duplicates and reordering.
 
-## What dots allows on event-triggered tasks
+## What dots allow on scheduled and event-triggered tasks
 
 What the repo can verify: the dot pack (`docs/grokbot-dot.md`,
 `src/brigade/dot/events.py`) already implements the same three methods and treats
@@ -159,7 +159,7 @@ pages on `learn.chatgpt.com`:
 * In workspaces, administrators control which apps and actions are available and
   which need approval.
 
-Observed on 2026-11-17 on a Pro account: a scheduled task ran unattended and
+Observed on 2026-11-17 on an individual paid plan: a scheduled task ran unattended and
 called a write tool (send a message) on a custom MCP server. The app raised an
 approval prompt offering Allow once, Allow this tool for this conversation and
 Deny. Nobody answered, the prompt ended ("This request has ended"), the send did
@@ -175,8 +175,8 @@ What the dot reports about itself, asked on the same day and not tested:
   platform enforces. The dot does not know whether the fleet connector's send can
   run unattended.
 * Supported Gmail, Slack and GitHub events can trigger work on eligible,
-  connected accounts. A watched URL is normally a periodic check on a timer. It
-  cannot confirm a native Calendar event trigger or a generic webhook endpoint,
+  connected accounts. A watched URL is normally a periodic check on a timer. The
+  dot cannot confirm a native Calendar event trigger or a generic webhook endpoint,
   and a connector that exposes a webhook does not automatically become a
   supported wake source.
 
@@ -199,7 +199,7 @@ Claude's artifact service can post to, which does not fetch any page and ends
 with the session. Duet reads its inbox when a session or a routine calls
 `inbox_list`.
 
-Until that is checked, keep the fleet side to notify, send and reply. The
+Until the approval path is checked, keep the fleet side to notify, send and reply. The
 operator decision of 2026-10-20 on the issue allows a remote connector to carry
 event delivery plus message send and reply with no command execution. This slice
 adds none of that exposure: no tunnel, no public route, no new tool that runs

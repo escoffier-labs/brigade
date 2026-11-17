@@ -36,10 +36,9 @@ were not tested, except the line marked "Observed".
   and that a scheduled run can then send without a tap only if the connector and
   workspace also allow that write unattended. It says a standing rule cannot
   dismiss an Allow prompt that the app or platform enforces, and it does not
-  know whether this connector's send can run unattended. Observed: an unattended
-  scheduled run that called a write tool on a custom MCP server raised an
-  approval prompt with Allow once, Allow this tool for this conversation and
-  Deny. Nobody answered, the prompt ended and the send did not happen.
+  know whether this connector's send can run unattended. An unattended scheduled
+  run was observed blocking on an approval prompt; see
+  [fleet-mcp-events.md](fleet-mcp-events.md) for what happened.
 - Waking: the dot reports that supported Gmail, Slack and GitHub events on
   connected accounts can trigger work, that a watched URL is normally a periodic
   check, and that it cannot confirm a native Calendar event trigger or a generic
@@ -52,7 +51,7 @@ were not tested, except the line marked "Observed".
 - Limits: the dot reports that hourly scheduled runs work and that it does not
   know its fastest cadence, maximum run time, active-task cap or memory
   capacity. It reports that saved notes and ChatGPT memory carry across chats
-  but are not a full transcript. On Pro it reports that ordinary conversation
+  but are not a full transcript. On a Pro plan it reports that ordinary conversation
   does not count toward ChatGPT usage limits, while delegated Work and Codex
   tasks count toward a shared allowance, and that quota-consuming work may not
   start once that allowance is used up.
