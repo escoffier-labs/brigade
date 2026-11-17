@@ -134,7 +134,8 @@ def test_skill_current_treats_crlf_as_current_and_edits_as_stale(tmp_path: Path)
 
     target = _wired(tmp_path)
     installed = target / ".claude" / "skills" / "brigade-work" / "SKILL.md"
-    bundled = (template_root() / "skills" / "brigade-work" / "SKILL.md").read_bytes()
+    # A Windows checkout may already hold CRLF; fold to LF before converting.
+    bundled = (template_root() / "skills" / "brigade-work" / "SKILL.md").read_bytes().replace(b"\r\n", b"\n")
 
     installed.write_bytes(bundled.replace(b"\n", b"\r\n"))
     assert _skill_current(target) == (True, True)
@@ -460,7 +461,8 @@ def test_doctor_treats_a_crlf_template_checkout_as_current(tmp_path: Path, monke
     crlf_root = tmp_path / "crlf-templates"
     skill = crlf_root / "skills" / "brigade-work" / "SKILL.md"
     skill.parent.mkdir(parents=True)
-    skill.write_bytes((template_root() / "skills" / "brigade-work" / "SKILL.md").read_bytes().replace(b"\n", b"\r\n"))
+    lf = (template_root() / "skills" / "brigade-work" / "SKILL.md").read_bytes().replace(b"\r\n", b"\n")
+    skill.write_bytes(lf.replace(b"\n", b"\r\n"))
     monkeypatch.setattr(classify, "template_root", lambda: crlf_root)
 
     assert classify._skill_current(target) == (True, True)
