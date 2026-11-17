@@ -24,6 +24,7 @@ _ERROR_REASONS = {
     "native_auth_transport_changed",
     "auth_interpolation_unsupported",
     "native_auth_unrepresentable",
+    "live_entry_changed",
     "native_timeout_flat_unsupported",
     "native_config_malformed",
     "native_layout_duplicate",
@@ -376,6 +377,18 @@ def evaluate(
     row["fields"] = sorted(fields, key=lambda f: (f["field"], f["reason"]))
     if evaluated:
         row["faithful"] = not any(f["status"] == "unsupported" for f in fields)
+    return row
+
+
+def settle_precedence(row: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """Keep the helper-precedence rows only for an item that is written or current and not blocked.
+
+    A row for an unowned or otherwise blocked item would read as if Brigade removed
+    something from the user's file; nothing is projected for it.
+    """
+    written = item["action"] in ("create", "update") or (item["action"] == "skip" and item["status"] == "current")
+    if not written or any(f["blocking"] for f in row["fields"]):
+        row["fields"] = [f for f in row["fields"] if f["reason"] != "native_auth_helper_precedence"]
     return row
 
 

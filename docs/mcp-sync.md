@@ -172,6 +172,9 @@ harness:
   `--force` nor `--adopt` overrides it. Remove the catalog headers or the live helper to continue.
   Without a live helper nothing changes: every one of those fields is projected into Claude
   `headers`.
+  The row is shown only for a server that is written or already current. A sync reads each config
+  file once and checks the write against those same bytes, so a helper added by hand mid-run is drift
+  (nothing is written for that file), never overwritten.
 
 ### Remote-server auth that stays native
 

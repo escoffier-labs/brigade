@@ -23,7 +23,16 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import component_manifest, localio, mcp_adapters, mcp_fidelity, mcp_native_auth, mcp_runtime, projection
+from . import (
+    component_manifest,
+    localio,
+    mcp_adapters,
+    mcp_apply_snapshot,
+    mcp_fidelity,
+    mcp_native_auth,
+    mcp_runtime,
+    projection,
+)
 from .component_bins import canonical_command
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
 from .mcp_import import import_servers  # noqa: F401  (re-export; split out for the size ceiling)
@@ -786,7 +795,7 @@ def _plan_from_inputs(
     for item in items:
         item["scope"] = adapter_scope
         if item["server"] in assessments:
-            item["_fidelity"] = assessments[item["server"]]
+            item["_fidelity"] = mcp_fidelity.settle_precedence(assessments[item["server"]], item)
         server = servers.get(item["server"])
         item["transport"] = server.transport if server is not None else None
     return items
@@ -1500,7 +1509,7 @@ def build_sync_plan(
             continue
         adapter = ADAPTERS[h]
         path = mcp_adapters.resolve_path(adapter, target)
-        existing = path.read_text() if path.is_file() else None
+        snapshot, existing = mcp_apply_snapshot.read_snapshot(path)  # the one read of this file
         live = adapter.read_file(existing)
         owner_map = desired_state.get("ownership", {}).get(h, {}).get(adapter.path)
         # Records as planned: a renamed entry reads its legacy source's record even
@@ -1519,13 +1528,15 @@ def build_sync_plan(
                 source = item.get("_source")
                 source_live = live.get(source or server_name, {})
                 source_record = planned_owned.get(source) if source else owner_map.get(server_name)
+                location = _opencode_location(h, existing, server_name)
+                scope = "user" if adapter.user_scope else "project"
                 projected = _project_or_block(
                     item,
                     target,
                     h,
                     servers[server_name],
-                    ProjectionContext(source_live, source_record, _opencode_location(h, existing, server_name)),
-                    "user" if adapter.user_scope else "project",
+                    ProjectionContext(source_live, source_record, location),
+                    scope,
                 )
                 if projected is None:
                     if source:  # a rename pairs a create with a legacy removal; neither may half-apply
@@ -1534,10 +1545,22 @@ def build_sync_plan(
                 to_write[server_name] = projected
                 if source:
                     renamed_sources.add(source)
+                native_record = _native_record(h, source_live, source_record, servers[server_name])
+                if mcp_apply_snapshot.projection_moved(h, projected, item):  # live moved since the plan
+                    mcp_apply_snapshot.refresh_fidelity(
+                        item,
+                        h,
+                        servers[server_name],
+                        projected,
+                        source_live,
+                        native_record,
+                        scope=scope,
+                        location=location,
+                    )
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
-                    **_native_record(h, source_live, source_record, servers[server_name]),
+                    **native_record,
                 }
                 changed = True
             elif action == "remove":
@@ -1554,6 +1577,7 @@ def build_sync_plan(
             elif status == "current":
                 if owner_map is None:
                     owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
+                scope = "user" if adapter.user_scope else "project"
                 projected = _project_or_block(
                     item,
                     target,
@@ -1564,9 +1588,13 @@ def build_sync_plan(
                         owner_map.get(server_name),
                         _opencode_location(h, existing, server_name),
                     ),
-                    "user" if adapter.user_scope else "project",
+                    scope,
                 )
                 if projected is None:
+                    continue
+                if mcp_apply_snapshot.projection_moved(h, projected, item):
+                    # Planned as current, but the live entry moved: not planned for a write, so none happens.
+                    mcp_apply_snapshot.block_moved(item, h, servers[server_name], scope)
                     continue
                 to_write[server_name] = projected
                 owner_map[server_name] = {
@@ -1575,7 +1603,6 @@ def build_sync_plan(
                     **_native_record(h, live.get(server_name, {}), owner_map.get(server_name), servers[server_name]),
                 }
         if changed or any(i.get("_reconciled") for i in items):
-            existing = path.read_text() if path.is_file() else None
             try:
                 new_text = adapter.write_file(existing, to_write, to_remove)
                 final_live = adapter.read_file(new_text)
@@ -1599,7 +1626,7 @@ def build_sync_plan(
             mutation = _mutation_for_path(
                 dest=path,
                 display_path=adapter.path,
-                before=_file_bytes(path),
+                before=snapshot,
                 after=new_text.encode("utf-8"),
             )
             if mutation is not None:
@@ -1633,17 +1660,21 @@ def build_sync_plan(
         )
         if catalog_mutation is not None:
             mutations.append(catalog_mutation)
-    projection_plan = (
-        projection.build_plan(
-            operation_id=f"mcp-{uuid.uuid4().hex}",
-            projector="mcp",
-            source_fingerprint=source_digest,
-            mutations=mutations,
-            target=target,
-        )
-        if mutations
-        else None
-    )
+    projection_plan = None
+    if mutations:
+        try:
+            projection_plan = projection.build_plan(
+                operation_id=f"mcp-{uuid.uuid4().hex}",
+                projector="mcp",
+                source_fingerprint=source_digest,
+                mutations=mutations,
+                target=target,
+            )
+        except projection.PlanError as exc:
+            # A file edited after its single snapshot is drift: nothing is written for it.
+            if str(exc) != "live state does not match expected before-state":
+                raise
+            plan_errors.append(f"{exc}; run the sync again")
     return McpSyncPlan(
         target=target,
         harnesses=harnesses,
