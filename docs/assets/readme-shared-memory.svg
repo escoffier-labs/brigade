@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="360" viewBox="0 0 720 360" role="img" aria-labelledby="title desc">
+  <title id="title">Three agent tools feed one shared memory block</title>
+  <desc id="desc">Claude Code, Codex and Cursor each send an arrow into one block labelled shared memory, MCP servers and skills. A handoff arrow leaves the block for the next session.</desc>
+  <rect width="720" height="360" rx="20" fill="#14171c"/>
+  <rect x="1" y="1" width="718" height="358" rx="19" fill="none" stroke="#2c323b" stroke-width="2"/>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#e0873a"/>
+    </marker>
+  </defs>
+  <g font-family="Arial, Helvetica, sans-serif" text-anchor="middle">
+    <g fill="#1f242b" stroke="#3a414c" stroke-width="2">
+      <rect x="28" y="52" width="170" height="64" rx="12"/>
+      <rect x="28" y="148" width="170" height="64" rx="12"/>
+      <rect x="28" y="244" width="170" height="64" rx="12"/>
+    </g>
+    <g fill="#f4f4f1" font-size="24" font-weight="600">
+      <text x="113" y="93">Claude Code</text>
+      <text x="113" y="189">Codex</text>
+      <text x="113" y="285">Cursor</text>
+    </g>
+    <g stroke="#e0873a" stroke-width="3" fill="none" marker-end="url(#head)">
+      <path d="M200 84 L246 142"/>
+      <path d="M200 180 L244 180"/>
+      <path d="M200 276 L246 218"/>
+    </g>
+    <rect x="250" y="92" width="236" height="176" rx="16" fill="#e0873a"/>
+    <g fill="#14171c">
+      <text x="368" y="148" font-size="28" font-weight="700">Shared memory</text>
+      <text x="368" y="186" font-size="24" font-weight="600">MCP servers</text>
+      <text x="368" y="222" font-size="24" font-weight="600">and skills</text>
+    </g>
+    <path d="M488 180 L590 180" stroke="#e0873a" stroke-width="3" fill="none" marker-end="url(#head)"/>
+    <text x="539" y="160" fill="#9aa3ad" font-size="22">handoff</text>
+    <rect x="594" y="148" width="104" height="64" rx="12" fill="#1f242b" stroke="#3a414c" stroke-width="2"/>
+    <text x="646" y="177" fill="#f4f4f1" font-size="22" font-weight="600">next</text>
+    <text x="646" y="201" fill="#f4f4f1" font-size="22" font-weight="600">session</text>
+  </g>
+</svg>

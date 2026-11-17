@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="360" viewBox="0 0 720 360" role="img" aria-labelledby="title desc">
+  <title id="title">A check record</title>
+  <desc id="desc">A check record lists the command python -m pytest -q, exit code 0, two log files, and the fingerprint of the tree that was tested, d16d2fee98f0, taken from baseline commit f1199ad.</desc>
+  <rect width="720" height="360" rx="20" fill="#14171c"/>
+  <rect x="1" y="1" width="718" height="358" rx="19" fill="none" stroke="#2c323b" stroke-width="2"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="36" y="56" fill="#e0873a" font-size="24" font-weight="700">check record</text>
+    <text x="684" y="56" fill="#9aa3ad" font-size="22" text-anchor="end">brigade work verify run</text>
+    <path d="M36 76 H684" stroke="#2c323b" stroke-width="2"/>
+    <g fill="#9aa3ad" font-size="22">
+      <text x="36" y="124">command</text>
+      <text x="36" y="180">exit code</text>
+      <text x="36" y="236">logs</text>
+      <text x="36" y="292">tree fingerprint</text>
+    </g>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="24" fill="#f4f4f1">
+      <text x="236" y="124">python -m pytest -q</text>
+      <text x="236" y="180" fill="#6fb26a" font-weight="700">0</text>
+      <text x="236" y="224">command-1-stdout.log</text>
+      <text x="236" y="254">command-1-stderr.log</text>
+      <text x="236" y="292">d16d2fee98f0&#8230;</text>
+    </g>
+    <text x="236" y="326" fill="#9aa3ad" font-size="22">baseline commit f1199ad plus the patch</text>
+  </g>
+</svg>
