@@ -159,13 +159,45 @@ pages on `learn.chatgpt.com`:
 * In workspaces, administrators control which apps and actions are available and
   which need approval.
 
-What this repo cannot verify: whether an event-triggered task may call a given
-tool without a person approving it, how approval prompts behave when no one is
-watching, and how a workspace's settings change either. Those depend on the
-platform and on each workspace's configuration, and the platform documents them
-only in general terms. Do not treat anything here as a statement about dots'
-behavior beyond the points above, and test the actual approval path in the target
-workspace before relying on an unattended action.
+Observed on 2026-11-17 on a Pro account: a scheduled task ran unattended and
+called a write tool (send a message) on a custom MCP server. The app raised an
+approval prompt offering Allow once, Allow this tool for this conversation and
+Deny. Nobody answered, the prompt ended ("This request has ended"), the send did
+not happen, and the dot reported that it did not resend, to avoid a duplicate. So
+an unattended run can block on a tap for a custom MCP write.
+
+What the dot reports about itself, asked on the same day and not tested:
+
+* A standing rule can pre-approve a routine send by naming the connector action,
+  the recipient, what may be shared and when, and a scheduled run can then send
+  without a tap only if the connector and workspace also allow that write
+  unattended. A standing rule cannot dismiss an Allow prompt that the app or
+  platform enforces. The dot does not know whether the fleet connector's send can
+  run unattended.
+* Supported Gmail, Slack and GitHub events can trigger work on eligible,
+  connected accounts. A watched URL is normally a periodic check on a timer. It
+  cannot confirm a native Calendar event trigger or a generic webhook endpoint,
+  and a connector that exposes a webhook does not automatically become a
+  supported wake source.
+
+What this repo still cannot verify: whether a standing rule or a workspace
+setting lets a scheduled or event-triggered task call the fleet connector's tools
+without a person approving them, and how a workspace's settings change that. Those
+depend on the platform and on each workspace's configuration, and the platform
+documents them only in general terms. Do not treat anything here as a statement
+about dots' behavior beyond the points above, and test the actual approval path
+in the target workspace before relying on an unattended action.
+
+### Duet
+
+The events path above is built for the dot pack. The duet pack rejects
+`events_enabled` and `callback_hosts` (see [duet-connector.md](duet-connector.md)).
+Duet reports, from the same day and untested, that new mail and Slack messages do
+not wake it, that a GitHub pull request subscription wakes one Claude session per
+pull request, and that its "URL watch" is an inbound webhook address that only
+Claude's artifact service can post to, which does not fetch any page and ends
+with the session. Duet reads its inbox when a session or a routine calls
+`inbox_list`.
 
 Until that is checked, keep the fleet side to notify, send and reply. The
 operator decision of 2026-10-20 on the issue allows a remote connector to carry
