@@ -4,11 +4,24 @@ Outcome capture classifies runs when it reads stored receipts and persists the r
 ([capture and ranking](../src/brigade/outcome_cmd.py), [scorecard projection](../src/brigade/scorecard.py)).
 
 This is outcome-based skill scoring, promotion, and rollback from verification evidence.
-Scheduled memory reflection separately attempts automatic Tier 0 hub changes
-for opted-in workspaces, including new installs. Every automatic change must
-pass the hub authority gates. Unsupported retrieval scopes and local repository
-authority gaps remain proposal-only. See [Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
-for the `auto_apply` policy field and `memory reflect auto-apply off` switch.
+Scheduled memory work runs separately from this scoring loop.
+
+Scheduled reflection opens pinned proposals for duplicate, stale and contradicted
+cards. Of the reflection lanes, only evidence appends and exact duplicate merges
+can apply without a person under the supported policy writer, and only when
+workspace and fleet policies enable it and every hub gate passes. Near-duplicate
+supersedes, broken-link repairs and other claim edits are Tier 2, so they wait
+for a reviewer. Local repository candidates stay proposal-only. The
+`[reflect] scopes` setting limits where the job proposes, applies and watches.
+Unlisted read scopes are still read, never changed.
+
+The verify pass uses two seats and opens correction proposals. Per-class go or
+no-go records gate `verify_auto_apply`. The 2026-11-16 decision was no-go for
+all five classes, so it applies nothing today. Scheduled reflection also polls
+the compensation watch over its own automatic applies. It can reverse an exact
+automatic apply without a person, and otherwise opens a compensating proposal
+for review. See [Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
+for the `auto_apply` policy field, the switch and rollback.
 
 ## Workflow
 
