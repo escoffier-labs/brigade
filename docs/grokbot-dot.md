@@ -37,8 +37,8 @@ were not tested, except the line marked "Observed".
   workspace also allow that write unattended. It says a standing rule cannot
   dismiss an Allow prompt that the app or platform enforces, and it does not
   know whether this connector's send can run unattended. An unattended scheduled
-  run was observed blocking on an approval prompt; see
-  [fleet-mcp-events.md](fleet-mcp-events.md) for what happened.
+  run was observed blocking on an approval prompt.
+  [fleet-mcp-events.md](fleet-mcp-events.md) has what happened.
 - Waking: the dot reports that supported Gmail, Slack and GitHub events on
   connected accounts can trigger work, that a watched URL is normally a periodic
   check, and that it cannot confirm a native Calendar event trigger or a generic
