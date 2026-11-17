@@ -75,12 +75,12 @@ def _seed_run(run_dir: Path, *, with_checkpoint_body: bool = False) -> Path:
 
 
 def test_published_schema_artifact_matches_runtime_constants():
-    schema_path = Path(__file__).parents[1] / "schemas" / "work-run.v2.schema.json"
+    schema_path = Path(__file__).parents[1] / "schemas" / "work-run.v3.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    assert schema["$id"].endswith("/work-run.v2.schema.json")
+    assert schema["$id"].endswith("/work-run.v3.schema.json")
     assert schema["properties"]["schema"]["const"] == WORK_RUN_ARCHIVE_SCHEMA
     assert schema["properties"]["schema_version"]["const"] == WORK_RUN_ARCHIVE_SCHEMA_VERSION
-    assert work_run_archive.schema_artifact_relative_path() == "schemas/work-run.v2.schema.json"
+    assert work_run_archive.schema_artifact_relative_path() == "schemas/work-run.v3.schema.json"
 
 
 def test_export_import_round_trip_and_validate(tmp_path: Path):
@@ -938,7 +938,9 @@ def test_import_archive_refuses_lifecycle_jsonl_worker_envelope_smuggling(tmp_pa
     assert not (tmp_path / "imported-runs" / RUN_ID).exists()
 
 
-def test_validate_and_import_accept_authentic_lifecycle_journal(tmp_path: Path):
+def test_export_withholds_authentic_lifecycle_journal(tmp_path: Path):
+    from brigade import run_audit
+
     run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
     life = run_dir / "events" / "lifecycle.jsonl"
     life.parent.mkdir(parents=True, exist_ok=True)
@@ -946,23 +948,19 @@ def test_validate_and_import_accept_authentic_lifecycle_journal(tmp_path: Path):
 
     archive = tmp_path / "archive"
     work_run_archive.export_run(run_dir, archive)
-    entry = next(
-        item
-        for item in json.loads((archive / "work-run.json").read_text(encoding="utf-8"))["files"]
-        if item["path"] == "events/lifecycle.jsonl"
-    )
-    assert entry["role"] == "journal"
-    assert entry["privacy_class"] == "public"
-    assert entry["nested_schema"] == "brigade.run_event.v1"
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    assert not (archive / "payload" / "events" / "lifecycle.jsonl").exists()
+    assert manifest["compatibility"]["journal_authority"] == "withheld"
+    assert manifest["journal_withheld"]["event_count"] == 1
+    assert manifest["journal_withheld"]["chain_head"] is not None
 
-    manifest = work_run_archive.validate_archive(archive)
-    assert any(item["path"] == "events/lifecycle.jsonl" for item in manifest["files"])
+    validated = work_run_archive.validate_archive(archive)
+    assert all(item["path"] != "events/lifecycle.jsonl" for item in validated["files"])
 
     imported = work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported-runs")
     imported_life = Path(imported["run_dir"]) / "events" / "lifecycle.jsonl"
-    assert imported_life.is_file()
-    assert b'"schema":"brigade.run_event.v1"' in imported_life.read_bytes()
-    assert b"Bearer " not in imported_life.read_bytes()
+    assert not imported_life.exists()
+    assert run_audit.audit_run(Path(imported["run_dir"])).result == run_audit.RESULT_JOURNAL_WITHHELD
 
 
 def test_export_refuses_source_lifecycle_worker_envelope(tmp_path: Path):

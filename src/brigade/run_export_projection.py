@@ -413,6 +413,7 @@ _FILE_NODES: dict[str, Node] = {
             "artifact_collection": _ARTIFACT_COLLECTION,
             "failure": _FAILURE,
             "git": _GIT,
+            "journal_withheld": _Object({"chain_head": _pat(_SHA_OR_HEX), "event_count": INT}),
         }
     ),
     "roster.json": _Object(
@@ -495,8 +496,6 @@ def is_allowed_export_rel(rel: str) -> bool:
     pure = PurePosixPath(rel)
     if pure.is_absolute() or ".." in pure.parts or "\\" in rel:
         return False
-    if rel == "events/lifecycle.jsonl":
-        return True
     if rel.startswith(f"events/{run_checkpoint.CHECKPOINT_DIR_NAME}/") and rel.endswith(".json"):
         return len(pure.parts) == 3
     return worker_events.is_scrubbed_worker_event_stream_rel(rel)

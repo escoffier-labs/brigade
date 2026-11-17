@@ -1,10 +1,10 @@
 """Versioned ``brigade.work-run`` archive schema, validator, and import/export.
 
 Publishes archive wire compatibility separately from the checked-in JSON Schema
-artifact (ACP-style): ``schemas/work-run.v2.schema.json`` describes the v2
+artifact (ACP-style): ``schemas/work-run.v3.schema.json`` describes the v3
 document shape for tooling, while ``schema`` + ``schema_version`` on
 ``work-run.json`` govern import/export acceptance. Import also accepts v1 and
-projects it before installation.
+v2 and projects them before installation.
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ from . import (
 )
 
 WORK_RUN_ARCHIVE_SCHEMA = "brigade.work-run"
-WORK_RUN_ARCHIVE_SCHEMA_VERSION = 2
-_LEGACY_ARCHIVE_SCHEMA_VERSIONS = frozenset({1})
+WORK_RUN_ARCHIVE_SCHEMA_VERSION = 3
+_LEGACY_ARCHIVE_SCHEMA_VERSIONS = frozenset({1, 2})
 WORK_RUN_MANIFEST_NAME = "work-run.json"
 WORK_RUN_PAYLOAD_DIR = "payload"
 WORK_RUN_FORMAT = "directory"
@@ -65,7 +65,7 @@ _FILE_ROLES = frozenset(
     }
 )
 _PRIVACY_CLASSES = frozenset({"public", "private", "redacted"})
-_JOURNAL_AUTHORITY = frozenset({"none", "present", "authoritative"})
+_JOURNAL_AUTHORITY = frozenset({"none", "present", "authoritative", "withheld"})
 _PRIVATE_CHECKPOINT_POLICY = "strip_to_artifact_reference"
 _RESUME_POLICY = "not_supported_v1"
 
@@ -82,7 +82,7 @@ _REQUIRED_MANIFEST_KEYS = frozenset(
         "files",
     }
 )
-_OPTIONAL_MANIFEST_KEYS = frozenset({"run", "source_run_dir", "schema_artifact"})
+_OPTIONAL_MANIFEST_KEYS = frozenset({"run", "source_run_dir", "schema_artifact", "journal_withheld"})
 _ALLOWED_MANIFEST_KEYS = _REQUIRED_MANIFEST_KEYS | _OPTIONAL_MANIFEST_KEYS
 
 _REQUIRED_FILE_KEYS = frozenset({"path", "sha256", "byte_size", "role"})
@@ -224,8 +224,8 @@ def _assert_export_privacy_tree(payload_root: Path) -> None:
 
 
 def schema_artifact_relative_path() -> str:
-    """Return the repo-relative path of the published v2 JSON Schema artifact."""
-    return "schemas/work-run.v2.schema.json"
+    """Return the repo-relative path of the published v3 JSON Schema artifact."""
+    return "schemas/work-run.v3.schema.json"
 
 
 def compatibility_defaults(
@@ -242,7 +242,7 @@ def compatibility_defaults(
         "private_checkpoint_bodies": _PRIVATE_CHECKPOINT_POLICY,
         "resume_supported": False,
         "schema_artifact_note": (
-            "schemas/work-run.v2.schema.json versions the published JSON Schema "
+            "schemas/work-run.v3.schema.json versions the published JSON Schema "
             "artifact; archive wire acceptance uses schema + schema_version"
         ),
         "symlinks_and_special_files": "refuse",
@@ -298,6 +298,10 @@ def validate_manifest(payload: Any, *, allow_legacy: bool = False) -> dict[str, 
     normalized_run: dict[str, Any] | None = None
     if run_summary is not None:
         normalized_run = _validate_run_summary(run_summary, schema_version=schema_version)
+    journal_withheld = payload.get("journal_withheld")
+    normalized_withheld: dict[str, Any] | None = None
+    if journal_withheld is not None:
+        normalized_withheld = _validate_journal_withheld(journal_withheld)
 
     result: dict[str, Any] = {
         "schema": WORK_RUN_ARCHIVE_SCHEMA,
@@ -312,6 +316,15 @@ def validate_manifest(payload: Any, *, allow_legacy: bool = False) -> dict[str, 
     }
     if normalized_run is not None:
         result["run"] = normalized_run
+    if schema_version >= 3:
+        withheld = compatibility["journal_authority"] == "withheld"
+        if withheld != (normalized_withheld is not None):
+            raise WorkRunArchiveError(
+                "schema_version 3 journal_authority withheld must match journal_withheld",
+                category="compatibility",
+            )
+    if normalized_withheld is not None:
+        result["journal_withheld"] = normalized_withheld
     source_run_dir = payload.get("source_run_dir")
     if source_run_dir is not None:
         source_run_dir = _require_string(source_run_dir, "source_run_dir")
@@ -437,6 +450,7 @@ def build_manifest_for_payload(
     exported_at: str | None = None,
     source_run_dir: str | None = None,
     exporter_brigade_version: str | None = None,
+    journal_withheld: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a validated manifest for an already privacy-normalized payload tree."""
     payload_root = payload_root.expanduser().resolve()
@@ -451,7 +465,15 @@ def build_manifest_for_payload(
         files.append(_file_entry_for_bytes(rel, raw))
 
     run_summary = _run_summary_from_payload(payload_root)
-    journal_authority = _journal_authority_from_payload(payload_root, run_summary)
+    if journal_withheld is None:
+        existing = localio.read_json_dict(payload_root / "run.json") or {}
+        candidate = existing.get("journal_withheld")
+        if isinstance(candidate, dict):
+            journal_withheld = candidate
+    if journal_withheld is not None:
+        journal_authority = "withheld"
+    else:
+        journal_authority = _journal_authority_from_payload(payload_root, run_summary)
     manifest: dict[str, Any] = {
         "schema": WORK_RUN_ARCHIVE_SCHEMA,
         "schema_version": WORK_RUN_ARCHIVE_SCHEMA_VERSION,
@@ -466,6 +488,8 @@ def build_manifest_for_payload(
     }
     if run_summary is not None:
         manifest["run"] = run_summary
+    if journal_withheld is not None:
+        manifest["journal_withheld"] = _validate_journal_withheld(journal_withheld)
     if source_run_dir is not None:
         manifest["source_run_dir"] = source_run_dir
     return validate_manifest(manifest)
@@ -565,6 +589,7 @@ def export_run(
     try:
         payload_root = staging / WORK_RUN_PAYLOAD_DIR
         _copy_run_tree_refuse_special(run_dir, payload_root)
+        journal_withheld = _journal_summary_from_payload(payload_root)
         # Crashed checkpoint temps cannot become truthful refs; the strip
         # helper removes them unread (#646).
         run_checkpoint.strip_checkpoint_bodies_for_export(payload_root)
@@ -604,6 +629,7 @@ def export_run(
             payload_root,
             run_id=run_id,
             source_run_dir=run_export_projection.RUN_DIR_TOKEN,
+            journal_withheld=journal_withheld,
         )
         localio.write_json(staging / WORK_RUN_MANIFEST_NAME, manifest)
         validated = validate_archive(staging)
@@ -661,6 +687,7 @@ def import_archive(
         )
     try:
         _copy_run_tree_refuse_special(archive_dir / WORK_RUN_PAYLOAD_DIR, staging)
+        legacy_journal = _journal_summary_from_payload(staging) if legacy else None
         if legacy:
             try:
                 run_export_projection.filter_export_files(staging)
@@ -682,6 +709,10 @@ def import_archive(
                 raw = path.read_bytes()
                 if hashlib.sha256(raw).hexdigest() != entry["sha256"]:
                     raise WorkRunArchiveError(f"import copy sha256 mismatch for {rel}", category="integrity")
+        withheld = manifest.get("journal_withheld") or legacy_journal
+        if withheld is not None:
+            _install_journal_withheld(staging, withheld)
+            _assert_export_privacy_tree(staging)
         _promote_export(staging, dest, force=force)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
@@ -795,6 +826,27 @@ def _validate_files(value: Any) -> list[dict[str, Any]]:
     if "run.json" not in seen:
         raise WorkRunArchiveError("files must declare run.json")
     return files
+
+
+def _validate_journal_withheld(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise WorkRunArchiveError("journal_withheld must be an object")
+    unknown = sorted(set(value) - {"chain_head", "event_count"})
+    if unknown:
+        raise WorkRunArchiveError(f"unknown journal_withheld field: {unknown[0]}")
+    missing = sorted({"chain_head", "event_count"} - set(value))
+    if missing:
+        raise WorkRunArchiveError(f"missing journal_withheld field: {missing[0]}")
+    event_count = value.get("event_count")
+    if isinstance(event_count, bool) or not isinstance(event_count, int) or event_count < 0:
+        raise WorkRunArchiveError("journal_withheld.event_count must be a non-negative integer")
+    chain_head = value.get("chain_head")
+    if chain_head is None:
+        if event_count != 0:
+            raise WorkRunArchiveError("journal_withheld.chain_head is required when events exist")
+    elif not isinstance(chain_head, str) or not _HEX64.fullmatch(chain_head):
+        raise WorkRunArchiveError("journal_withheld.chain_head must be 64 lowercase hex")
+    return {"chain_head": chain_head, "event_count": event_count}
 
 
 def _validate_run_summary(value: Any, *, schema_version: int) -> dict[str, Any]:
@@ -936,6 +988,42 @@ def _nested_schema_for(rel: str, raw: bytes) -> tuple[str | None, int | None]:
 def _workspace_for_run(run_dir: Path) -> Path:
     """Return the workspace that owns a run directory without reading run.json."""
     return run_export_projection.workspace_for_run(run_dir)
+
+
+def _install_journal_withheld(payload_root: Path, withheld: Mapping[str, Any]) -> None:
+    path = Path(payload_root) / "run.json"
+    run_meta = localio.read_json_dict(path)
+    if run_meta is None:
+        raise WorkRunArchiveError("payload must include run.json", category="schema")
+    run_meta["journal_withheld"] = _validate_journal_withheld(dict(withheld))
+    localio.write_json(path, run_meta)
+
+
+def _journal_summary_from_payload(payload_root: Path) -> dict[str, Any] | None:
+    """Return the safe chain-head summary for a journal that export withholds."""
+    path = Path(payload_root) / "events" / "lifecycle.jsonl"
+    if not path.is_file():
+        return None
+    try:
+        report = run_journal.read_journal_bounded(path)
+    except run_journal.RunJournalError as exc:
+        raise WorkRunArchiveError(
+            _bound_privacy(f"events/lifecycle.jsonl cannot be summarized: {exc}"),
+            category="export-privacy",
+        ) from exc
+    if report.chain_errors:
+        raise WorkRunArchiveError(
+            _bound_privacy("events/lifecycle.jsonl cannot be summarized: " + report.chain_errors[0]),
+            category="export-privacy",
+        )
+    if report.partial_tail is not None:
+        raise WorkRunArchiveError(
+            "events/lifecycle.jsonl has a partial trailing record",
+            category="export-privacy",
+        )
+    if not report.events:
+        return {"chain_head": None, "event_count": 0}
+    return {"chain_head": report.events[-1].event_digest, "event_count": len(report.events)}
 
 
 def _run_summary_from_payload(payload_root: Path) -> dict[str, Any] | None:

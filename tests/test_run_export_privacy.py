@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import memory_recall_log, run_export_projection, run_resume, work_run_archive
+from brigade import memory_recall_log, run_audit, run_export_projection, run_resume, work_run_archive
 from brigade.work_run_archive import WorkRunArchiveError
 
 RUN_ID = "20260809-120000-abcdef12"
@@ -585,3 +585,57 @@ def test_search_log_key_rejects_symlink(tmp_path: Path):
     real.chmod(0o600)
     path.symlink_to(real)
     assert memory_recall_log.load_or_create_key(target) is None
+
+
+def test_journal_is_withheld_and_audit_reports_it(tmp_path: Path, monkeypatch):
+    from tests import test_run_redaction
+
+    monkeypatch.setattr(test_run_redaction, "RUN_ID", RUN_ID)
+    run, _, events = test_run_redaction._authority_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run, archive)
+    assert not (archive / "payload" / "events" / "lifecycle.jsonl").exists()
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    assert manifest["journal_withheld"] == {
+        "chain_head": events[-1].event_digest,
+        "event_count": len(events),
+    }
+    assert manifest["compatibility"]["journal_authority"] == "withheld"
+
+    imported = work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
+    audit = run_audit.audit_run(Path(imported["run_dir"]))
+    assert audit.result == run_audit.RESULT_JOURNAL_WITHHELD
+    assert "withheld" in audit.not_auditable_reason
+    assert "legacy run without lifecycle journal" not in audit.not_auditable_reason
+
+
+def test_import_refuses_injected_lifecycle_journal(tmp_path: Path, monkeypatch):
+    from tests import test_run_redaction
+
+    monkeypatch.setattr(test_run_redaction, "RUN_ID", RUN_ID)
+    run, _, _ = test_run_redaction._authority_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run, archive)
+    injected = archive / "payload" / "events" / "lifecycle.jsonl"
+    injected.parent.mkdir(parents=True, exist_ok=True)
+    injected.write_bytes((run / "events" / "lifecycle.jsonl").read_bytes())
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
+    assert excinfo.value.category == "export-privacy"
+
+
+def test_v2_archive_without_journal_still_imports(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    manifest["schema_version"] = 2
+    manifest["compatibility"]["min_reader_schema_version"] = 2
+    manifest["compatibility"]["max_reader_schema_version"] = 2
+    manifest.pop("journal_withheld", None)
+    manifest["compatibility"]["journal_authority"] = "none"
+    _write_json(archive / "work-run.json", manifest)
+
+    imported = work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
+    assert imported["schema_version"] == 2
