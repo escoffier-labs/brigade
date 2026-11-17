@@ -75,17 +75,18 @@ Without a hub it derives local candidates only.
 Reflection opens pinned proposals for exact duplicates, near-duplicates and
 broken links. Exact duplicate cards merge and can be Tier 0. Near-duplicate
 supersedes and broken-link repairs are always Tier 2. Reflection also proposes
-block anchoring, which is Tier 0 only when the card head came from an automatic
-apply. A run withdraws any anchor proposal it could not apply, then retries it
-after seven days.
+block anchoring. The supported fleet policy writer rejects `anchor_blocks` in
+`tier0_op_classes`, so no supported policy can list it. Each anchor proposal is
+withdrawn in the same run, then retried after seven days.
 
 A proposal pins card revisions and block hashes. A proposal the run leaves open
 stays `pending` until a reviewer accepts or rejects it with `brigade memory
 proposals decide`.
 
 Tier 1 covers a replacement that only changes ASCII spaces. Tier 2 covers claim
-edits, supersedes, link repairs, retirements and non-exact compensations. Every
-Tier 1 and Tier 2 proposal waits for a person.
+edits, supersedes, link repairs, retirements and non-exact compensations. Tier 1
+and Tier 2 proposals wait for a person, except verify classes admitted by an
+admin `go` record.
 
 ### What applies without a person
 
@@ -100,9 +101,10 @@ evaluation, one-card blast cap, 24-hour cooldown, card heads, pins, trust, scans
 and the admin kill switch in one transaction.
 
 On a real scope today, the retrieval evaluation holds every automatic apply. It
-requires each target card's search projection to stay unchanged, and any applied
-edit changes it. Tier 0 applies only on the evaluation fixture scope until that
-gate is reworked, which epic #2591 tracks.
+admits only all-`append_evidence` Tier 0 proposals and then requires each target
+card's search projection to stay unchanged. Any applied edit changes it,
+including an evidence append. Tier 0 applies only on the evaluation fixture
+scope.
 
 External and handoff-only curation
 policies never pass the ownership gate. Local repository candidates stay
@@ -122,21 +124,27 @@ configured read scope, and the credential needs `reflect` in it.
 A scheduled hub run polls the compensation watch in its reflected scopes. The
 watch covers only the polling credential's own automatic applies, within 24
 hours by default. A contradiction or failed verification, or an attributable
-retrieval regression, opens a compensating proposal. Two independent verifiers
-can allow that reversal to apply without a person.
+lexical retrieval regression, opens a compensating proposal. Two independent
+verifier signals, or an attributable lexical regression, can allow that
+reversal to apply without a person. Otherwise it waits for review. A watch
+attempt that is not exact or is blocked ends `held`.
 
 `memory reflect rollback <proposal-id>` also opens a compensating proposal. It
-applies at once only when the original apply was automatic, the same policy
-actor asks, the inverse is exact and the window has not expired. Otherwise it
-waits for a reviewer.
+applies at once only when `auto_apply` is enabled, the kill switch is off, the
+original apply was automatic, the same policy actor asks, the inverse is exact
+and the window has not expired. An automatic in-window attempt that is not
+exact, or that hits a blocker, ends `rejected` or `held` with
+`compensation_result: failed`. A non-automatic, different-actor or expired
+rollback waits for a reviewer.
 
 ### Verification pass
 
 The verify pass checks cards against cited evidence with two seats, one
 proposing and one confirming. It opens pinned correction proposals. Per-class go
 or no-go records decide whether `verify_auto_apply` may apply a class without a
-person. The recorded decision on 2026-11-16 was no-go for all five classes, so
-the pass applies nothing today.
+person. Without a current admin `go` record on the hub, `verify_auto_apply`
+applies nothing. A scheduled run still opens correction proposals, because only
+their application is gated.
 
 See [memory care](memory-care.md#automatic-tier-0-reflection) for the boundaries
 and the separate care-install step that activates OS timers.
