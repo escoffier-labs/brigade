@@ -48,6 +48,10 @@ def test_readme_header_matches_brigade_tools_brand() -> None:
     # PyPI points at `brigadestack`, the package the install line uses. `brigade-cli` is the engine underneath.
     shield_urls = (
         "https://shieldcn.dev/pypi/v/brigadestack.svg?label=pypi&size=xs",
+        "https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json.svg?size=xs",
+        "https://shieldcn.dev/badge/python-3.11+-blue.svg?logo=python&logoColor=white&size=xs",
+        "https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs",
+        "https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs",
         "https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs",
     )
     assert readme.count("https://shieldcn.dev/") == len(shield_urls)
