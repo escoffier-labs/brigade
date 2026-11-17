@@ -29,6 +29,7 @@ ACTIVE = {
     "guard-parity.md",
     "hub-contract.md",
     "storage-parity.md",
+    "t3-enrollment.md",
 }
 PAUSED = {"handoff-lint.md", "run-dry-run.md"}
 

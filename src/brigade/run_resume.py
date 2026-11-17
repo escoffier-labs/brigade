@@ -26,6 +26,7 @@ from . import (
     run_lifecycle,
     run_tasks,
     runguard,
+    runs_status,
     seat_health,
     verification_contract,
     worker_events,
@@ -714,6 +715,8 @@ def resume(run_dir: Path) -> int:
             f"error: missing run artifacts in {run_dir} (need run.json, roster.json, worker-results.json)",
             file=sys.stderr,
         )
+        return 2
+    if runs_status.refuse_resume(run_meta):
         return 2
     workspace = runguard.resolve_run_lock_workspace(run_meta, run_dir)
     if workspace is None:
