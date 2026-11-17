@@ -9,7 +9,9 @@ databases without changing stored events or the item-scoped event primary key.
 
 Ownership grants authority to mutate this Hub metadata. It does not establish
 filesystem exclusivity, prove that a process stopped, authenticate a verification
-result, or complete an item. Every projection reports `liveness: "unknown"`.
+result, or complete an item. Every ownership read derives a liveness state from
+existing Hub facts at read time; the Hub stores no liveness value. See
+[owner liveness](#owner-liveness).
 New checkpoints record `conflict_check: "path-admission"`, a historical check of
 declared repository paths at that ownership revision. Older unchecked snapshots
 retain `not-performed`. See [checkpoint path admission](phase-worklore-path-scope-admission.md)
@@ -39,7 +41,8 @@ Person attribution and historical human attribution are `unrecorded`.
 This route adds no project isolation or person identity records.
 
 Checkpoint conflict admission is historical. Evidence stays reported and
-unverified, liveness is unknown, and report freshness is unassessed.
+unverified, liveness is derived on read, and report freshness is `recent`,
+`stale`, `future`, or `unknown` rather than `unassessed`.
 Checkpoint binding to the current item version and execution binding to the
 ownership generation are unavailable. Item edits and accepted handoffs may
 retain older checkpoint/report data. Report timestamps and session sequences
@@ -106,6 +109,47 @@ item status, item version, attempt count, or burn eligibility. For noncampaign
 items, attempt budget is operator-authenticated handoff metadata.
 Campaign node execution and attempt writes also enforce the current campaign grant
 and its budget. Existing attempt and burn rules remain authoritative.
+
+## Owner liveness
+
+The ownership read derives `liveness`, `liveness_basis`, and `liveness_freshness`
+from facts the Hub already stores. Derivation is read-only: no table, index,
+column, or fleet event, nothing stored, and no row written. The prepared handoff
+carries the same derived `liveness` value.
+
+The facts are a bounded set of parameterized reads: an unexpired active
+`interactive_sessions` row for the owner node, an ended session row, an
+unexpired `claims` row for the owner node, the snapshot's explicit campaign
+lease deadline, and whether the newest `events` row for the newest
+`execution-linked` run is terminal. A missing sessions or claims table, a NULL,
+or a malformed timestamp yields no fact and never raises.
+
+| State | Rule | Basis |
+| --- | --- | --- |
+| `live-owner` | A live session or live claim exists (after the terminal-execution rule) | `session` or `claim` |
+| `idle-owner` | A session ended and the item is not terminal | `session` |
+| `expired-observation` | The lease deadline lapsed and no session-end marker exists | `lease` |
+| `terminal-execution` | The newest linked run is terminal with no live session and no live claim | `run` |
+| `unknown` | No owner, a terminal item, or no fact at all; also the fallback | `none` |
+
+Precedence, first match wins: no `owner_node`, a terminal item, or no fact at
+all is `unknown` (`none`); a terminal newest linked run with no live session or
+claim is `terminal-execution` (`run`); a live session or claim is `live-owner`
+(`session`, then `claim`); a lapsed lease with no session-end marker is
+`expired-observation` (`lease`); an ended session on a non-terminal item is
+`idle-owner` (`session`); anything else is `unknown` (`none`).
+
+`liveness_freshness` applies the deck's 1,800 second rule to the newest fact
+timestamp (session heartbeat or end, claim renewal, newest run event): `recent`,
+`stale`, `future`, or `unknown`.
+
+The read is public within the fleet. The three fields reveal only the state,
+basis, and freshness words; a claim target, session id, process id, path, or
+another node's capability is never returned.
+
+Prepared handoff report freshness uses the same four words. An older reader
+accepts only `liveness: "unknown"` and freshness `"unassessed"` and refuses the
+new values, so it fails closed with an invalid-response refusal.
 
 ## Nonce and replay
 

@@ -103,6 +103,42 @@ def test_show_keeps_states_and_unobserved_metadata_distinct(hub, capsys, state):
     assert payload["ownership"]["report"] == {"state": "unobserved"}
 
 
+def test_projection_prints_hub_liveness_and_defaults_to_unknown(capsys):
+    from brigade.cli import fleet_work_ownership as module
+
+    item = {"item": {"work_id": WORK_ID, "title": "Fixture", "kind": "repo", "status": "running", "version": 7}}
+    raw = {
+        "state": "owned",
+        "revision": 1,
+        "generation": 1,
+        "owner_node": "node-a",
+        "offered_to": None,
+        "last_seq": None,
+        "updated_at": STAMP,
+        "liveness": "live-owner",
+        "liveness_basis": "session",
+        "liveness_freshness": "recent",
+    }
+    payload = module._projection(WORK_ID, item, {"ownership": raw})
+    payload["observations"] = {"item": STAMP, "ownership": STAMP}
+    assert (payload["liveness"], payload["liveness_basis"], payload["liveness_freshness"]) == (
+        "live-owner",
+        "session",
+        "recent",
+    )
+    module._human(payload)
+    assert "liveness: live-owner" in capsys.readouterr().out
+    raw.pop("liveness")
+    raw.pop("liveness_basis")
+    raw.pop("liveness_freshness")
+    payload = module._projection(WORK_ID, item, {"ownership": raw})
+    assert (payload["liveness"], payload["liveness_basis"], payload["liveness_freshness"]) == (
+        "unknown",
+        "none",
+        "unknown",
+    )
+
+
 def test_report_is_an_observation_without_freshness_or_liveness_claim(hub, capsys):
     hub[0][1]["ownership"]["last_report"] = {
         "version": 1,
@@ -136,13 +172,27 @@ def test_report_is_an_observation_without_freshness_or_liveness_claim(hub, capsy
         ("item", "title", "x" * 241),
         ("item", "title", "Bearer ghp_" + "x" * 30),
         ("ownership", "state", "invented"),
+        ("ownership", "liveness", "invented"),
         ("ownership", "revision", -1),
         ("ownership", "write_scope", ["x"] * 33),
         ("ownership", "source_revision", "bad"),
         ("ownership", "last_report", {"provider": "dot", "sequence": -1}),
         ("ownership", "updated_at", "bad"),
     ],
-    ids=["bool", "identity", "terminal", "length", "secret", "state", "counter", "scope", "sha", "report", "time"],
+    ids=[
+        "bool",
+        "identity",
+        "terminal",
+        "length",
+        "secret",
+        "state",
+        "liveness",
+        "counter",
+        "scope",
+        "sha",
+        "report",
+        "time",
+    ],
 )
 def test_malformed_recognized_values_refuse_without_reflecting_data(hub, capsys, part, key, value):
     hub[0][0 if part == "item" else 1][part][key] = value

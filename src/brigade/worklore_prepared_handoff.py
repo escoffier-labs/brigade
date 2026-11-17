@@ -1,7 +1,8 @@
 """Bounded, read-only reported context from one Worklore database snapshot.
 
-Text validation is not semantic secret or instruction classification. No liveness,
-conflict, evidence, item-version or ownership-generation binding is inferred.
+Text validation is not semantic secret or instruction classification. No conflict,
+evidence, item-version or ownership-generation binding is inferred. Owner liveness
+and report freshness are derived from stored Hub facts on every read.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Mapping
 
-from . import fleet_dot, worklore_ownership as ownership, worklore_store as store
+from . import fleet_dot, worklore_liveness as liveness, worklore_ownership as ownership, worklore_store as store
 from .worklore_validate import BLOCKER_MAX, KINDS, TIMESTAMP_MAX, TITLE_MAX, TRANSITIONS, safe_text
 
 _LABELS = {
@@ -114,7 +115,7 @@ def validate_prepared_handoff(raw: object, work_id: str) -> dict[str, Any]:
         "offered_to": None if current["offered_to"] is None else ownership._node(current["offered_to"]),
         "last_seq": None if current["last_seq"] is None else ownership._integer(current["last_seq"]),
         "updated_at": None if current["updated_at"] is None else _timestamp(current["updated_at"]),
-        "liveness": _choice(current["liveness"], {"unknown"}),
+        "liveness": _choice(current["liveness"], liveness.LIVENESS_VALUES),
     }
     if view["checkpoint"] is not None:
         checkpoint = ownership._object(
@@ -138,7 +139,7 @@ def validate_prepared_handoff(raw: object, work_id: str) -> dict[str, Any]:
         view["last_report"] = {
             "data": _report_data(report["data"]),
             "reporter_node": ownership._node(report["reporter_node"]),
-            "freshness": _choice(report["freshness"], {"unassessed"}),
+            "freshness": _choice(report["freshness"], liveness.FRESHNESS_VALUES),
         }
     refs = ownership._object(view["run_refs"], {"items", "truncated"} | set(_RUN_LABELS))
     _labels(refs, _RUN_LABELS)
@@ -181,7 +182,7 @@ def _current_ownership(conn: sqlite3.Connection, work_id: str) -> dict[str, Any]
     return ownership._public(snapshot)
 
 
-def get_prepared_handoff(conn: sqlite3.Connection, work_id: str) -> dict[str, Any]:
+def get_prepared_handoff(conn: sqlite3.Connection, work_id: str, *, now: str | None = None) -> dict[str, Any]:
     """Own one deferred read transaction, refusing an active caller untouched."""
     if conn.in_transaction:
         raise sqlite3.ProgrammingError("prepared handoff requires an idle connection")
@@ -190,7 +191,11 @@ def get_prepared_handoff(conn: sqlite3.Connection, work_id: str) -> dict[str, An
         item = store.get_item(conn, work_id)
         # BEGIN is deferred. Only the first SELECT establishes the snapshot.
         observed_at = store._utc_now()
+        reference_now = observed_at if now is None else now
         current = _current_ownership(conn, work_id)
+        facts = liveness.owner_facts(conn, current, work_id, now=reference_now)
+        ownership_view = {key: current[key] for key in _OWNERSHIP_FIELDS}
+        ownership_view["liveness"] = liveness.derive_owner_liveness(facts)
         checkpoint = None
         if current["repo_identity"] is not None:
             checkpoint = {
@@ -206,7 +211,7 @@ def get_prepared_handoff(conn: sqlite3.Connection, work_id: str) -> dict[str, An
             report = {
                 "data": _report_data({key: value for key, value in saved.items() if key not in _REPORT_STORAGE_FIELDS}),
                 "reporter_node": ownership._node(saved.get("reporter_node")),
-                "freshness": "unassessed",
+                "freshness": liveness.freshness_for(saved.get("observed_at"), now=reference_now),
             }
         rows = conn.execute(
             "SELECT node_id, run_id, seq FROM work_events WHERE work_id=? "
@@ -226,7 +231,7 @@ def get_prepared_handoff(conn: sqlite3.Connection, work_id: str) -> dict[str, An
                 **_LABELS,
                 "observed_at": observed_at,
                 "item": {key: item[key] for key in _ITEM_FIELDS},
-                "ownership": {key: current[key] for key in _OWNERSHIP_FIELDS},
+                "ownership": ownership_view,
                 "checkpoint": checkpoint,
                 "last_report": report,
                 "run_refs": {"items": refs, "truncated": len(rows) > _RUN_LIMIT, **_RUN_LABELS},

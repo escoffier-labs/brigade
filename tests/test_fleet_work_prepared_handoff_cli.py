@@ -73,7 +73,7 @@ def hub(monkeypatch):
                 "provider_lifecycle": "unobserved",
             },
             "reporter_node": "node-a",
-            "freshness": "unassessed",
+            "freshness": "recent",
         },
         "run_refs": {
             "items": [{"node_id": "node-a", "run_id": "run-a"}],
@@ -132,7 +132,7 @@ def test_human_output_states_context_and_evidence_limits(hub, capsys):
         "person attribution: unrecorded",
         "historical human attribution: unrecorded",
         "reported/unverified",
-        "report freshness: unassessed",
+        "report freshness: recent",
         "liveness: unknown",
         "historical-checkpoint-admission",
         "unavailable",

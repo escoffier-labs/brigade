@@ -1,0 +1,3 @@
+- Distinguish a live owner, an idle owner with unfinished work, an expired observation, and a confirmed terminal execution in Worklore ownership reads, with the derived liveness state computed on read and never stored.
+- Add `liveness_basis` and `liveness_freshness` to the ownership read, using only fixed state, basis, and freshness words and never a claim target, session id, process id, path, or another node's capability.
+- Derive prepared handoff report freshness as `recent`, `stale`, `future`, or `unknown`. An older reader that accepts only `unknown` and `unassessed` refuses the new values and fails closed.

@@ -17,6 +17,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any, Mapping
 
+from . import worklore_liveness as liveness
 from . import worklore_scope as scope
 from . import worklore_store as store
 from .worklore_validate import WorkloreValidationError, safe_text
@@ -323,6 +324,7 @@ def get_ownership(
     actor_id: str = "",
     is_admin: bool = False,
     holder_nonce: object = None,
+    now: str | None = None,
 ) -> dict[str, Any]:
     """Read an ownership projection only for an existing Worklore item.
 
@@ -334,6 +336,7 @@ def get_ownership(
     """
     store.get_item(conn, work_id)
     current = _current(conn, work_id)
+    observed_at = store._utc_now() if now is None else now
     if holder_nonce is not None:
         _authorize(
             "checkpoint",
@@ -344,9 +347,14 @@ def get_ownership(
             generation=current["generation"],
             digest=nonce_hash(holder_nonce),
         )
-        if expired(current, store._utc_now()):
+        if expired(current, observed_at):
             raise store.WorkloreConflict("campaign ownership lease expired", code="stale-generation")
-    return _public(current)
+    facts = liveness.owner_facts(conn, current, work_id, now=observed_at)
+    projection = _public(current)
+    projection["liveness"] = liveness.derive_owner_liveness(facts)
+    projection["liveness_basis"] = liveness.derive_owner_liveness_basis(facts)
+    projection["liveness_freshness"] = liveness.freshness_for(facts.newest_fact_at, now=observed_at)
+    return projection
 
 
 def _enrolled(conn: sqlite3.Connection, node: str) -> None:

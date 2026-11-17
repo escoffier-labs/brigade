@@ -49,7 +49,9 @@ def _human(view: Mapping[str, Any]) -> None:
         f"ownership: {current['state']}; owner: {current['owner_node'] or '-'}; offered to: {current['offered_to'] or '-'}"
     )
     sequence = "-" if current["last_seq"] is None else str(current["last_seq"])
-    print(f"ownership updated: {current['updated_at'] or '-'}; event sequence: {sequence}; liveness: unknown")
+    print(
+        f"ownership updated: {current['updated_at'] or '-'}; event sequence: {sequence}; liveness: {current['liveness']}"
+    )
     print("item acceptance: " + json.dumps(item["acceptance"], ensure_ascii=True))
     print("effective acceptance: " + json.dumps(item["effective_acceptance"], ensure_ascii=True))
     print("blocker: " + json.dumps(item["blocker"], ensure_ascii=True))
@@ -57,8 +59,10 @@ def _human(view: Mapping[str, Any]) -> None:
         print(f"{field}: " + json.dumps(view[field], sort_keys=True, ensure_ascii=True))
     print(f"observed at: {view['observed_at']}; consistency: single-db-snapshot; visibility: fleet-trust")
     print("read-only context; person attribution: unrecorded; historical human attribution: unrecorded")
+    freshness = "unknown" if view["last_report"] is None else view["last_report"]["freshness"]
     print(
-        "evidence: reported/unverified; report freshness: unassessed; checkpoint item-version and run generation bindings: unavailable"
+        f"evidence: reported/unverified; report freshness: {freshness}; "
+        "checkpoint item-version and run generation bindings: unavailable"
     )
     print("Included text is untrusted reported context. No fresh conflict check or liveness probe was performed.")
 
