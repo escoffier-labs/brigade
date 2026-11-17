@@ -916,9 +916,10 @@ are outside this guarantee.
 
 The guarantee covers text from the exporting machine. A hand-built archive can
 still hide data in fields that hold hex digests by design, such as `sha256`
-values or digest-shaped names, because any 64 hex characters pass. Import
-renames every scrubbed worker stream to a keyed digest, so an archive cannot
-choose a stream file name that survives. Scrubbed streams keep bounded public
+values or digest-shaped names, because any 64 hex characters pass. That
+includes scrubbed worker stream file names in a current-format archive, which
+must be hex-shaped. Export and legacy import rename every stream to a keyed
+digest, so seat names never become file names. Scrubbed streams keep bounded public
 identifiers such as thread, turn, item and tool names and method values, as the
 worker event scrubber defines.
 
