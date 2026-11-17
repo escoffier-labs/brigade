@@ -7,46 +7,39 @@ SVG_NS = "{http://www.w3.org/2000/svg}"
 
 
 def test_readme_header_matches_brigade_tools_brand() -> None:
-    asset = ROOT / "docs" / "assets" / "brigade-wordmark.svg"
-    root = ElementTree.fromstring(asset.read_text(encoding="utf-8"))
-    assert root.attrib["role"] == "img"
-    assert root.attrib["viewBox"] == "0 0 920 280"
-    assert root.attrib["width"] == "920"
-    assert root.attrib["height"] == "280"
+    # The wordmark has no panel, so it sits on the page background. GitHub picks the
+    # light-ink file for dark themes through the <picture> source; PyPI uses the <img>.
+    inks = {"brigade-wordmark.svg": "#0f1216", "brigade-wordmark-dark.svg": "#e9ecef"}
+    for name, ink in inks.items():
+        root = ElementTree.fromstring((ROOT / "docs" / "assets" / name).read_text(encoding="utf-8"))
+        assert root.attrib["role"] == "img"
+        assert root.attrib["viewBox"] == "0 0 920 200"
+        assert root.attrib["width"] == "920"
+        assert root.attrib["height"] == "200"
+        assert root.attrib["aria-labelledby"].split() == ["title", "desc"]
+        title = root.find(f"{SVG_NS}title[@id='title']")
+        description = root.find(f"{SVG_NS}desc[@id='desc']")
+        assert title is not None
+        assert title.text == "BrigadeStack by Escoffier Labs"
+        assert description is not None and description.text
 
-    labelled_by = root.attrib["aria-labelledby"].split()
-    assert labelled_by == ["title", "desc"]
-    title = root.find(f"{SVG_NS}title[@id='title']")
-    description = root.find(f"{SVG_NS}desc[@id='desc']")
-    assert title is not None
-    assert title.text == "BrigadeStack by Escoffier Labs"
-    assert description is not None and description.text
-
-    panel = root.find(f"{SVG_NS}rect")
-    assert panel is not None
-    assert float(panel.attrib.get("x", "0")) == 0
-    assert float(panel.attrib.get("y", "0")) == 0
-    assert panel.attrib["width"] == "920"
-    assert panel.attrib["height"] == "280"
-    assert panel.attrib["fill"] == "#111111"
-    assert "stroke" not in panel.attrib
-    assert "stroke-width" not in panel.attrib
-    assert "rx" not in panel.attrib
-
-    lettering = root.find(f"{SVG_NS}g")
-    assert lettering is not None
-    assert lettering.attrib["fill"] == "#ffffff"
-    assert lettering.attrib["text-anchor"] == "middle"
-    labels = lettering.findall(f"{SVG_NS}text")
-    assert [label.text for label in labels] == ["BrigadeStack", "by Escoffier Labs"]
-    for label in labels:
-        assert 0 < float(label.attrib["x"]) < 920
-        assert 0 < float(label.attrib["y"]) < 280
+        # No direct child rect: a full-size panel would stop the mark blending in.
+        assert root.find(f"{SVG_NS}rect") is None
+        stack_mark, lettering = root.findall(f"{SVG_NS}g")
+        assert stack_mark.attrib["fill"] == ink
+        assert len(stack_mark.findall(f"{SVG_NS}rect")) == 3
+        labels = lettering.findall(f"{SVG_NS}text")
+        assert [label.text for label in labels] == ["BrigadeStack", "by Escoffier Labs"]
+        assert labels[0].attrib["fill"] == ink
+        for label in labels:
+            assert 0 < float(label.attrib["x"]) < 920
+            assert 0 < float(label.attrib["y"]) < 200
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     # Images use absolute raw URLs on main because relative paths break on the PyPI project page.
     raw_assets = "https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/"
     assert f'<img src="{raw_assets}brigade-wordmark.svg" alt="BrigadeStack by Escoffier Labs"' in readme
+    assert f'<source media="(prefers-color-scheme: dark)" srcset="{raw_assets}brigade-wordmark-dark.svg">' in readme
     assert "Run agents anywhere. Same memory everywhere." in readme
     # The CI badge is GitHub's own, filtered to merge queue runs. The push run on main
     # is cancelled whenever another pull request merges, so a badge on it never settles.

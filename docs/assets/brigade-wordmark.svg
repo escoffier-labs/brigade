@@ -1,9 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="920" height="280" viewBox="0 0 920 280" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="200" viewBox="0 0 920 200" role="img" aria-labelledby="title desc">
   <title id="title">BrigadeStack by Escoffier Labs</title>
-  <desc id="desc">BrigadeStack in white type on a black background, with the Escoffier Labs attribution below.</desc>
-  <rect width="920" height="280" fill="#111111"/>
-  <g fill="#ffffff" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">
-    <text x="460" y="146" font-size="88" font-weight="700">BrigadeStack</text>
-    <text x="460" y="216" font-size="28">by Escoffier Labs</text>
+  <desc id="desc">The BrigadeStack stack mark and name in dark type on a transparent background, with the Escoffier Labs attribution below.</desc>
+  <g fill="#0f1216">
+    <rect x="158" y="44" width="65" height="20" rx="7.5"/>
+    <rect x="175.500" y="74" width="65" height="20" rx="7.5" opacity="0.7"/>
+    <rect x="193" y="104" width="65" height="20" rx="7.5" opacity="0.4"/>
+  </g>
+  <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="284" y="116" font-size="92" font-weight="600" fill="#0f1216" textLength="478" lengthAdjust="spacingAndGlyphs">BrigadeStack</text>
+    <text x="460" y="174" font-size="24" fill="#5a6068" text-anchor="middle">by Escoffier Labs</text>
   </g>
 </svg>
