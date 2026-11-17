@@ -664,7 +664,7 @@ def _ensure_memory_care_runbooks(target: Path) -> int:
     missing = [name for name in memory_cmd.MEMORY_CARE_RUNBOOK_NAMES if not (runbook_dir / name).is_file()]
     if not missing:
         return 0
-    return memory_cmd._write_memory_care_runbooks(target)
+    return memory_cmd._write_memory_care_runbooks(target, only_missing=True)
 
 
 def _write_daily_observability_runbook(target: Path) -> int:

@@ -268,7 +268,7 @@ def _memory_care_runbooks_dir(target: Path) -> Path:
     return target / MEMORY_CARE_RUNBOOKS_REL
 
 
-def _write_memory_care_runbooks(target: Path) -> int:
+def _write_memory_care_runbooks(target: Path, *, only_missing: bool = False) -> int:
     """Copy pinned mechanical memory-care runbook templates into the target.
 
     Templates ship without pins; pins are materialized from the resolved
@@ -276,7 +276,9 @@ def _write_memory_care_runbooks(target: Path) -> int:
     can enforce the binary hash without a separate pin step.
 
     Writes into a sibling temp directory first so pin-resolution failures do
-    not leave a partial runbook tree behind.
+    not leave a partial runbook tree behind. Only the shipped names are
+    published, one file at a time: other runbooks in the directory are never
+    touched, and *only_missing* also keeps every shipped file already present.
     """
     from . import runbook_cmd
 
@@ -314,11 +316,12 @@ def _write_memory_care_runbooks(target: Path) -> int:
                 return 2
             validated["pins"] = pins
             _write_json(dest, validated)
-        # Narrow crash window: after rmtree the old tree is gone; if replace fails
-        # before publishing temp_dir, neither directory remains at dest_dir.
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir)
-        temp_dir.replace(dest_dir)
+        # Never replace the whole directory: operators keep their own runbooks
+        # (and customized shipped ones) beside the templates.
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for name in MEMORY_CARE_RUNBOOK_NAMES:
+            if not (only_missing and (dest_dir / name).exists()):
+                (temp_dir / name).replace(dest_dir / name)
         return 0
     finally:
         if temp_dir.exists():
