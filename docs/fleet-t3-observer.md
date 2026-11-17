@@ -197,6 +197,17 @@ then by lower effective load (`peer-ranked`). Machine preference stays in the
 existing policy fields, so a low-weight machine is configured with
 `discouraged_workloads`, `priority` or `os`, not a placement setting.
 
+Inventory privacy: for every candidate other than the caller's own machine, the
+inventory reasons (`repo-not-placeable`, `inventory-unbound`, `inventory-stale`,
+`inventory-invalid`) collapse into one opaque `not-placeable`. The caller's own
+machine keeps the detailed reason, and the top-level `repo-not-placeable`
+denial stays explicit. Any enrolled node can still learn whether some bound
+machine has a repository, and which one is recommended, with that machine's
+environment and project id. That is accepted: the query needs a node token, so
+only enrolled fleet nodes can ask. A machine with no usable load (missing,
+stale or null telemetry) is never placeable, and `place` returns the named error
+`placement-unavailable: <class>` for a storage failure, never row data.
+
 The response schema is `brigade.fleet_placement.v1`. Only the recommended
 machine carries its `environment_id` and `project_id`; every candidate carries
 its eligibility, effective load and reasons only. `expires_at` is the earliest

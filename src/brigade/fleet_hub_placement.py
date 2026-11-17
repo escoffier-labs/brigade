@@ -21,6 +21,7 @@ from typing import Any, Iterator, Mapping
 
 from . import fleet_hub_policy, fleet_hub_routing, fleet_node_projects, fleet_policy
 from .fleet_hub import FleetHubError
+from .fleet_hub_claims import ClaimFenceError
 from .fleet_hub_sessions import count_live_by_node
 
 PLACEMENT_SCHEMA = "brigade.fleet_placement.v1"
@@ -32,6 +33,8 @@ TRUST = "node-reported telemetry and inventory; advisory only, never admission"
 WORKLOAD = "general"
 _REQUEST_FIELDS = frozenset({"action", "repo", "threshold"})
 _REQUIRED_TABLES = ("fleet_machine_telemetry", "fleet_reservations")
+# Per-machine reasons that reveal what another machine's inventory holds.
+_INVENTORY_REASONS = frozenset({"inventory-unbound", "inventory-stale", "inventory-invalid", "repo-not-placeable"})
 
 
 @contextmanager
@@ -171,7 +174,11 @@ def place(
     assert caller is not None
     moment = now or fleet_hub_routing._now()
     with _read_snapshot(conn):
-        return _place(conn, repo=repo, key=key, threshold=threshold, caller=caller, now=moment)
+        try:
+            return _place(conn, repo=repo, key=key, threshold=threshold, caller=caller, now=moment)
+        except (ClaimFenceError, sqlite3.Error, ValueError) as exc:
+            # A named, data-free error instead of a generic failure. The class name is all that leaves.
+            raise FleetHubError(f"placement-unavailable: {type(exc).__name__}") from exc
 
 
 def _place(
@@ -256,9 +263,12 @@ def _place(
             "telemetry_observed_at": None if telemetry is None else telemetry.get("observed_at"),
             "telemetry_expires_at": expiry,
         }
-        if telemetry is not None and cpu is None:
-            reasons.append("machine-load-unknown")
-        elif effective is not None and effective >= threshold:
+        if effective is None:
+            # Fail closed on our own evidence: a machine with no usable load is never placeable, even if
+            # the routing evaluator's reasons change. ``sessions-unknown`` already names the session case.
+            if "sessions-unknown" not in reasons:
+                reasons.append("machine-load-unknown")
+        elif effective >= threshold:
             reasons.append("machine-load-shed")
         return reasons
 
@@ -276,25 +286,37 @@ def _place(
     if denial == "unknown-role":
         return denied("unknown-role")
     rows = _fold(pairs)
-    candidates = [
-        {
-            "machine": row["machine"],
-            "eligible": row["eligible"],
-            "effective_load": (loads.get(row["machine"]) or {}).get("effective_load"),
-            # ``multiple-projects`` is informational: it never changes ``eligible``.
-            "reasons": list(row["reasons"])
-            + (["multiple-projects"] if len(usable.get(row["machine"], [])) > 1 else []),
-        }
-        for row in rows
-    ]
     eligible = [row["machine"] for row in rows if row["eligible"]]
-    if not eligible:
-        return denied("no-eligible-candidate", candidates=candidates)
-    if origin in eligible:
+    # Only machines with a usable load can be ranked or kept local.
+    placeable = [name for name in eligible if loads[name]["effective_load"] is not None]
+
+    def candidate_rows(chosen: str | None) -> list[dict[str, Any]]:
+        result = []
+        for row in rows:
+            name = row["machine"]
+            reasons = list(row["reasons"])
+            if name != origin:
+                # Inventory detail about another machine is opaque: the caller learns only that it is not placeable.
+                reasons = list(dict.fromkeys("not-placeable" if r in _INVENTORY_REASONS else r for r in reasons))
+            if len(usable.get(name, [])) > 1 and name in (origin, chosen):
+                reasons.append("multiple-projects")  # informational: never changes ``eligible``
+            result.append(
+                {
+                    "machine": name,
+                    "eligible": row["eligible"],
+                    "effective_load": (loads.get(name) or {}).get("effective_load"),
+                    "reasons": reasons,
+                }
+            )
+        return result
+
+    if not placeable:
+        return denied("no-eligible-candidate", candidates=candidate_rows(None))
+    if origin in placeable:
         chosen, reason = str(origin), "local-under-threshold"
     else:
         chosen = min(
-            eligible,
+            placeable,
             key=lambda name: (
                 fleet_hub_routing._rank(document, name, WORKLOAD),
                 loads[name]["effective_load"],
@@ -302,6 +324,7 @@ def _place(
             ),
         )
         reason = "peer-ranked"
+    candidates = candidate_rows(chosen)
     choices = usable[chosen]
     row = choices[0]
     info = loads[chosen]

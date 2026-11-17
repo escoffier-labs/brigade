@@ -21,6 +21,8 @@ from brigade import (
     fleet_node_projects,
     fleet_quota,
 )
+from brigade.fleet_hub import FleetHubError
+from brigade.fleet_hub_claims import ClaimFenceError
 from tests.test_fleet_node_projects import REPO
 from tests.test_fleet_routing import (
     CONTROLLER,
@@ -223,7 +225,9 @@ def test_unbound_and_stale_inventory_are_excluded_with_named_reasons(conn):
         _observe(conn, node, load=0.10)
     result = _place(conn, caller=NODE_LINUX_2)
     assert "inventory-unbound" in _reasons(result, "worker-linux-2")
-    assert "inventory-stale" in _reasons(result, "worker-cloud-1")
+    # Another machine's inventory detail is opaque to the caller; its own detail is kept.
+    assert _reasons(result, "worker-cloud-1") == ["not-placeable"]
+    assert "inventory-stale" in _reasons(_place(conn, caller=NODE_CLOUD), "worker-cloud-1")
     assert result["recommended"]["machine"] == "worker-linux-1"
     assert result["origin_machine"] == "worker-linux-2" and result["reason"] == "peer-ranked"
 
@@ -540,3 +544,74 @@ def test_a_stored_row_with_an_id_the_shared_predicates_refuse_is_never_recommend
     assert result["recommended"]["machine"] == "worker-linux-2"
     assert "inventory-invalid" in _reasons(result, "worker-linux-1")
     assert "proj bad id" not in json.dumps(result)
+
+
+def test_stale_telemetry_stays_ineligible_even_if_the_routing_reasons_go_quiet(conn, monkeypatch):
+    monkeypatch.setattr(fleet_hub_routing, "_machine_wide_reasons", lambda *args, **kwargs: [])
+    for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD):
+        _report(conn, node)
+    _observe(conn, NODE_LINUX, load=0.10, observed_at=_iso(_now() - timedelta(seconds=1000)))
+    _observe(conn, NODE_LINUX_2, load=0.10)
+    _observe(conn, NODE_CLOUD, load=0.10)
+    result = _place(conn)
+    assert "machine-load-unknown" in _reasons(result, "worker-linux-1")
+    assert result["recommended"]["machine"] != "worker-linux-1"
+    assert result["recommended"]["effective_load"] is not None
+    # Later, every machine's telemetry has expired: nothing is recommended, the origin included.
+    later = fleet_hub_placement.place(conn, {"repo": REPO}, NODE_LINUX, now=_now() + timedelta(seconds=400))
+    assert later["status"] == "none" and later["recommended"] is None
+    assert all(row["effective_load"] is None and not row["eligible"] for row in later["candidates"])
+
+
+def test_other_machines_inventory_detail_collapses_to_one_opaque_reason(conn):
+    _save(conn, bindings={"worker-linux-1": ENV[NODE_LINUX]})
+    _report(conn, NODE_LINUX)
+    _report(conn, NODE_LINUX_2)  # unbound: no binding for worker-linux-2
+    # worker-cloud-1 never reports the repository at all.
+    for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD):
+        _observe(conn, node, load=0.10)
+    caller = _place(conn, caller=NODE_LINUX_2)
+    assert caller["recommended"]["machine"] == "worker-linux-1"
+    assert "inventory-unbound" in _reasons(caller, "worker-linux-2")  # its own machine keeps the detail
+    assert _reasons(caller, "worker-cloud-1") == ["not-placeable"]
+    outsider = _place(conn, caller=CONTROLLER)
+    for machine in ("worker-linux-2", "worker-cloud-1"):
+        assert _reasons(outsider, machine) == ["not-placeable"]
+    detail = {"inventory-unbound", "inventory-stale", "inventory-invalid", "repo-not-placeable"}
+    assert not detail & {r for row in outsider["candidates"] for r in row["reasons"]}
+    # The caller still gets the recommended peer's ids, which is the feature.
+    assert outsider["recommended"]["environment_id"] == ENV[NODE_LINUX]
+    # The top-level denial for a repository nobody has stays explicit.
+    assert _place(conn, repo="example.test/org/never-seen")["reason"] == "repo-not-placeable"
+
+
+def test_an_exception_inside_place_restores_the_connection(fleet, monkeypatch):
+    fleet.commit()
+
+    def boom(*_args, **_kwargs):
+        raise sqlite3.OperationalError("disk I/O error with row data")
+
+    monkeypatch.setattr(fleet_hub_routing, "_collect_candidates", boom)
+    with pytest.raises(FleetHubError, match="placement-unavailable: OperationalError") as raised:
+        _place(fleet)
+    assert "row data" not in str(raised.value)
+    assert fleet.execute("PRAGMA query_only").fetchone()[0] == 0
+    assert fleet.in_transaction is False
+    fleet.execute("CREATE TABLE IF NOT EXISTS scratch_after_error (x)")
+    fleet.commit()
+
+
+@pytest.mark.parametrize(
+    "error", [ClaimFenceError("claim generation fence storage is missing or corrupt"), ValueError("bad row 1234")]
+)
+def test_known_failures_map_to_a_named_error_through_the_node_action(fleet, monkeypatch, error):
+    def boom(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(fleet_hub_routing, "_collect_candidates", boom)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError) as raised:
+        fleet_hub_policy_api.handle_policy(
+            fleet, {"action": "place", "repo": REPO}, caller_node=NODE_LINUX, is_admin=False
+        )
+    assert f"placement-unavailable: {type(error).__name__}" in str(raised.value)
+    assert "1234" not in str(raised.value) and "fence storage" not in str(raised.value)
