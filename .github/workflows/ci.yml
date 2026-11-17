@@ -1156,6 +1156,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+      # README.md is documentation, so a README-only diff skips every test
+      # suite. These tests assert the top-level README header and the wordmark
+      # asset, so they run here, where documentation-only diffs still reach
+      # Python. Keep the list limited to README content assertions.
+      - name: README content tests
+        run: |
+          python -m pytest \
+            tests/test_readme_brand_header.py \
+            tests/test_retired_connector_review.py::test_current_setup_references \
+            -q
       - name: Command Inventory
         run: |
           set +e
