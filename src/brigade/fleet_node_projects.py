@@ -147,6 +147,9 @@ def observe_projects(conn: sqlite3.Connection, body: Any, caller_node: str) -> d
     if type(ttl) is not int or not 1 <= ttl <= fleet_policy.MAX_TIMEOUT_SECONDS:
         raise FleetHubError("node projects field 'ttl_seconds' must be an integer in 1..86400")
     environment_id = clean_id(payload.get("environment_id"), MAX_ENVIRONMENT_ID_CHARS)
+    if environment_id is not None:
+        # Compared and stored casefolded, so a case change cannot split or spoof a binding.
+        environment_id = environment_id.casefold()
     if environment_id is None:
         raise FleetHubError(
             f"node projects field 'environment_id' must be a printable token of at most {MAX_ENVIRONMENT_ID_CHARS} characters"
@@ -166,21 +169,24 @@ def observe_projects(conn: sqlite3.Connection, body: Any, caller_node: str) -> d
             raise FleetHubError(f"projects node_id {node_id!r} is not a configured machine")
         bound_id = (document.get("machines", {}).get(machine) or {}).get("t3_environment_id")
         ensure_schema(conn)
-        if bound_id and bound_id != environment_id:
-            # Stop placement using a stale environment now. Commit before raising,
-            # because the policy handler rolls back the transaction on any error.
-            conn.execute("DELETE FROM fleet_node_projects WHERE node_id=?", (node_id,))
-            conn.execute("DELETE FROM fleet_node_project_snapshots WHERE node_id=?", (node_id,))
-            conn.commit()
+        existing = conn.execute(
+            "SELECT observed_at, environment_id FROM fleet_node_project_snapshots WHERE node_id=?", (node_id,)
+        ).fetchone()
+        previous = _parse_stamp(existing[0]) if existing is not None else None
+        if bound_id and bound_id.casefold() != environment_id:
+            # A report older than the stored snapshot changes nothing, like any stale report.
+            if previous is None or stamp >= previous:
+                # Stop placement using a stale environment now.
+                conn.execute("DELETE FROM fleet_node_projects WHERE node_id=?", (node_id,))
+                conn.execute("DELETE FROM fleet_node_project_snapshots WHERE node_id=?", (node_id,))
+                # Commit before raising: handle_policy rolls back on any error, which would undo the
+                # clear, and it has written nothing else by this point.
+                conn.commit()
             raise FleetHubForbidden(
                 "environment-binding-mismatch: the reported T3 environment is not bound to this machine"
             )
         bound = 1 if bound_id else 0
-        existing = conn.execute(
-            "SELECT observed_at, environment_id FROM fleet_node_project_snapshots WHERE node_id=?", (node_id,)
-        ).fetchone()
         if existing is not None:
-            previous = _parse_stamp(existing[0])
             if previous is not None and stamp < previous:
                 if opened:
                     conn.rollback()
@@ -258,7 +264,7 @@ def projects_for_repo(conn: sqlite3.Connection, repo_key: str, now: datetime | N
                 "observed_at": observed_at,
                 "expires_at": expires.isoformat() if expires is not None else None,
                 "stale": expires is None or expires <= moment,
-                "bound": bool(bound_id) and bound_id == environment_id,
+                "bound": bool(bound_id) and str(bound_id).casefold() == str(environment_id).casefold(),
             }
         )
     return result

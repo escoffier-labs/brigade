@@ -138,11 +138,12 @@ its own inventory.
 A node token proves the node id, not its T3 environment. The operator binds each
 machine's environment in the policy document with the optional machine field
 `t3_environment_id` (letters, digits and hyphens, unique across machines,
-admin token only). A report whose environment id differs from the machine's
-binding is rejected with `environment-binding-mismatch`, and in the same
+admin token only). The environment id is compared case-insensitively, in the
+uniqueness check, the binding check and the stored value. A report whose
+environment id differs from the machine's binding is rejected with `environment-binding-mismatch`, and in the same
 transaction that node's stored project rows and snapshot are deleted, so
 placement stops using a stale environment at once. A node can only clear its own
-rows.
+rows. A mismatched report older than the stored snapshot changes nothing.
 A machine without a binding is stored but read as unbound. Reads recompute the
 binding from the current policy, so a policy change applies without a
 republish, and placement must skip unbound rows.

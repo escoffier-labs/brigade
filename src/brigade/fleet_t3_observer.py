@@ -142,7 +142,8 @@ try:
         "archived_count": len(archived),
     }
     output = json.dumps(result)
-    if len(output.encode("utf-8")) > 262144:
+    # print() adds a newline, and the parent's cap counts it, so stay strictly under.
+    if len(output.encode("utf-8")) >= 262144:
         raise ValueError()
     # Separate repository inventory: never workspace roots, titles, paths or URLs. The row
     # predicate is the Hub's, injected above. Any failure, or a result over the size cap,
@@ -175,7 +176,7 @@ try:
                 seen_ids.add(project_id)
                 inventory_rows.append({"project_id": project_id, "repo_key": key})
             candidate = json.dumps({**result, "inventory": {"environment_id": environment_id, "projects": inventory_rows[:MAX_INVENTORY_PROJECTS], "dropped": dropped}})
-            if len(candidate.encode("utf-8")) <= 262144:
+            if len(candidate.encode("utf-8")) < 262144:
                 output = candidate
     except Exception:
         pass

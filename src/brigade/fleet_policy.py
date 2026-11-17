@@ -899,13 +899,14 @@ def parse_document(raw: Any) -> dict[str, Any]:
         environment_id = machine.get("t3_environment_id")
         if not environment_id:
             continue
-        previous = seen_environments.get(str(environment_id))
+        # Environment ids compare case-insensitively, so a case variant is a duplicate.
+        previous = seen_environments.get(str(environment_id).casefold())
         if previous is not None:
             raise FleetPolicyError(
                 f"fleet policy machine t3_environment_id {environment_id!r} is mapped to both "
                 f"{previous!r} and {machine_name!r}"
             )
-        seen_environments[str(environment_id)] = machine_name
+        seen_environments[str(environment_id).casefold()] = machine_name
     document: dict[str, Any] = {
         "schema": POLICY_SCHEMA,
         "defaults": parse_settings(body.get("defaults") or {}, "defaults"),

@@ -111,7 +111,7 @@ def test_unmapped_node_is_rejected(conn):
         )
 
 
-def test_environment_binding_mismatch_is_forbidden_and_stores_nothing(conn):
+def test_environment_binding_mismatch_is_forbidden_and_leaves_no_rows(conn):
     _bind(conn, worker_linux_1=ENV_ONE)
     with pytest.raises(FleetHubForbidden, match="environment-binding-mismatch"):
         fleet_node_projects.observe_projects(conn, _body(environment_id=ENV_TWO), NODE_LINUX)
@@ -134,10 +134,63 @@ def test_binding_mismatch_clears_only_that_nodes_stored_rows_and_persists(conn):
     assert not conn.in_transaction
 
 
-def test_binding_mismatch_clear_survives_the_policy_handlers_rollback(conn):
+def test_older_mismatched_report_changes_nothing_but_a_current_one_clears(conn):
+    _bind(conn, worker_linux_1=ENV_ONE)
+    t5, t3 = _stamp(-10), _stamp(-20)
+    fleet_node_projects.observe_projects(conn, _body(observed_at=t5), NODE_LINUX)
+    before = (_stored(conn), conn.execute("SELECT * FROM fleet_node_project_snapshots").fetchall())
+    with pytest.raises(FleetHubForbidden, match="environment-binding-mismatch"):
+        fleet_node_projects.observe_projects(conn, _body(environment_id=ENV_TWO, observed_at=t3), NODE_LINUX)
+    assert (_stored(conn), conn.execute("SELECT * FROM fleet_node_project_snapshots").fetchall()) == before
+    assert [r["bound"] for r in fleet_node_projects.projects_for_repo(conn, REPO)] == [True]
+    # Through the handler too: the stale mismatch is a 403 and writes nothing.
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError) as raised:
+        fleet_hub_policy_api.handle_policy(
+            conn,
+            {"action": "projects-observe", **_body(environment_id=ENV_TWO, observed_at=t3)},
+            caller_node=NODE_LINUX,
+            is_admin=False,
+        )
+    assert raised.value.status == 403
+    assert (_stored(conn), conn.execute("SELECT * FROM fleet_node_project_snapshots").fetchall()) == before
+    # A mismatch at the same instant as the stored snapshot is not older, so it clears.
+    with pytest.raises(FleetHubForbidden):
+        fleet_node_projects.observe_projects(conn, _body(environment_id=ENV_TWO, observed_at=t5), NODE_LINUX)
+    assert _stored(conn) == [] and _snapshots(conn) == []
+
+
+def test_environment_ids_compare_case_insensitively(conn):
+    _bind(conn, worker_linux_1="Env-AAAA-1111")
+    fleet_node_projects.observe_projects(conn, _body(environment_id="ENV-aaaa-1111"), NODE_LINUX)
+    assert _snapshots(conn) == [(NODE_LINUX, "env-aaaa-1111")]
+    assert [r["bound"] for r in fleet_node_projects.projects_for_repo(conn, REPO)] == [True]
+    with pytest.raises(FleetHubForbidden, match="environment-binding-mismatch"):
+        fleet_node_projects.observe_projects(
+            conn, _body(environment_id="env-aaaa-1112", observed_at=_stamp(5)), NODE_LINUX
+        )
+
+
+def test_case_variant_environment_ids_are_duplicates_at_policy_save():
+    document = _document()
+    document["machines"]["worker-linux-1"]["t3_environment_id"] = "Env-One"
+    document["machines"]["worker-linux-2"]["t3_environment_id"] = "env-one"
+    with pytest.raises(fleet_policy.FleetPolicyError, match="t3_environment_id"):
+        fleet_policy.parse_document(document)
+
+
+def test_binding_mismatch_clear_survives_the_policy_handlers_rollback(conn, monkeypatch):
     fleet_node_projects.observe_projects(conn, _body(), NODE_LINUX)
     conn.commit()
     _bind(conn, worker_linux_1=ENV_TWO)
+    # The early commit is only safe while handle_policy has written nothing before this action.
+    before = conn.total_changes
+    real = fleet_node_projects.observe_projects
+
+    def spy(connection, body, caller):
+        assert connection.total_changes == before and connection.in_transaction
+        return real(connection, body, caller)
+
+    monkeypatch.setattr(fleet_node_projects, "observe_projects", spy)
     with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError) as raised:
         fleet_hub_policy_api.handle_policy(
             conn,

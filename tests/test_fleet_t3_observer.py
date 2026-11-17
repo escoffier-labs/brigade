@@ -934,3 +934,55 @@ def test_all_rows_invalid_means_unknown_not_empty(native_t3, monkeypatch, capsys
     assert main(["--t3-python", sys.executable, "--publish"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["inventory"] == "skipped" and report["inventory_dropped"] == 1 and not posted
+
+
+_CAP = 262144
+
+
+def _padded_projects(count: int, lengths: list[int]) -> list[dict]:
+    rows = []
+    for index in range(count):
+        size = lengths[index] if index < len(lengths) else 500
+        rows.append(
+            {
+                "id": f"{index:04d}" + "x" * (size - 4),
+                "repositoryIdentity": {"canonicalKey": f"example.test/org/r{index}"},
+            }
+        )
+    return rows
+
+
+def test_inventory_size_cap_is_strictly_below_the_printed_limit(native_t3, monkeypatch):
+    """print() adds a newline, so a 262144 byte result must drop the inventory, 262143 keeps it."""
+    from brigade import fleet_t3_observer
+
+    configure, _, _, _ = native_t3
+    monkeypatch.setenv("FIXTURE_ENV_ID", "env-local-1")
+
+    def run(count: int, tune: list[int]) -> dict:
+        lengths = [500] * (count - len(tune)) + tune
+        configure(projects=_padded_projects(count, lengths))
+        return fleet_t3_observer._native_metadata(sys.executable, time.monotonic() + 15)
+
+    def size(payload: dict) -> int:
+        return len(json.dumps(payload).encode("utf-8"))
+
+    first, second = size(run(400, [4, 4, 4])), size(run(401, [4, 4, 4]))
+    each = second - first
+    count = 400 + (_CAP - 1 - first - 400) // each
+    base = size(run(count, [4, 4, 4]))
+    assert base < _CAP
+
+    def tuned(target: int) -> list[int]:
+        remaining, lengths = target - base, [4, 4, 4]
+        for index in (2, 1, 0):
+            add = min(remaining, 508)
+            lengths[index] += add
+            remaining -= add
+        assert remaining == 0
+        return lengths
+
+    kept = run(count, tuned(_CAP - 1))
+    assert size(kept) == _CAP - 1 and kept["inventory"]["projects"]
+    dropped = run(count, tuned(_CAP))
+    assert "inventory" not in dropped and dropped["schemaVersion"] == 2
