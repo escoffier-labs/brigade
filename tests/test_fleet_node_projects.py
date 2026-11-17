@@ -55,6 +55,10 @@ def _tables(conn) -> set[str]:
     return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
+def _snapshots(conn):
+    return conn.execute("SELECT node_id, environment_id FROM fleet_node_project_snapshots").fetchall()
+
+
 def _stored(conn):
     return conn.execute(
         "SELECT node_id, environment_id, project_id, repo_key, bound FROM fleet_node_projects ORDER BY project_id"
@@ -111,18 +115,51 @@ def test_environment_binding_mismatch_is_forbidden_and_stores_nothing(conn):
     _bind(conn, worker_linux_1=ENV_ONE)
     with pytest.raises(FleetHubForbidden, match="environment-binding-mismatch"):
         fleet_node_projects.observe_projects(conn, _body(environment_id=ENV_TWO), NODE_LINUX)
-    assert "fleet_node_projects" not in _tables(conn)
+    assert _stored(conn) == [] and _snapshots(conn) == []
     # A matching report after the rejected one stores normally.
     fleet_node_projects.observe_projects(conn, _body(), NODE_LINUX)
     assert [row[4] for row in _stored(conn)] == [1]
-    # A later mismatch leaves the stored set untouched.
+
+
+def test_binding_mismatch_clears_only_that_nodes_stored_rows_and_persists(conn):
+    fleet_node_projects.observe_projects(conn, _body(), NODE_LINUX)
+    fleet_node_projects.observe_projects(conn, _body(NODE_LINUX_2, environment_id=ENV_TWO), NODE_LINUX_2)
+    _bind(conn, worker_linux_1=ENV_TWO, worker_linux_2=ENV_TWO.replace("bbbb", "cccc"))
+    # Rebinding after the report makes the next honest report a mismatch for the first node.
     with pytest.raises(FleetHubForbidden, match="environment-binding-mismatch"):
-        fleet_node_projects.observe_projects(
+        fleet_node_projects.observe_projects(conn, _body(environment_id=ENV_ONE, observed_at=_stamp(5)), NODE_LINUX)
+    assert [row[0] for row in _stored(conn)] == [NODE_LINUX_2]
+    assert [row[0] for row in _snapshots(conn)] == [NODE_LINUX_2]
+    assert [r["node_id"] for r in fleet_node_projects.projects_for_repo(conn, REPO)] == [NODE_LINUX_2]
+    assert not conn.in_transaction
+
+
+def test_binding_mismatch_clear_survives_the_policy_handlers_rollback(conn):
+    fleet_node_projects.observe_projects(conn, _body(), NODE_LINUX)
+    conn.commit()
+    _bind(conn, worker_linux_1=ENV_TWO)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError) as raised:
+        fleet_hub_policy_api.handle_policy(
             conn,
-            _body(environment_id=ENV_TWO, observed_at=_stamp(5), projects=[{"project_id": "x", "repo_key": "a/b/c"}]),
-            NODE_LINUX,
+            {"action": "projects-observe", **_body(environment_id=ENV_ONE, observed_at=_stamp(5))},
+            caller_node=NODE_LINUX,
+            is_admin=False,
         )
-    assert [(row[2], row[1]) for row in _stored(conn)] == [("p1", ENV_ONE)]
+    assert raised.value.status == 403 and "environment-binding-mismatch" in str(raised.value)
+    assert _stored(conn) == [] and _snapshots(conn) == []
+
+
+def test_binding_check_runs_inside_the_write_transaction(conn, monkeypatch):
+    seen = []
+    real = fleet_hub_policy.current_policy
+
+    def spy(connection):
+        seen.append(connection.in_transaction)
+        return real(connection)
+
+    monkeypatch.setattr(fleet_hub_policy, "current_policy", spy)
+    fleet_node_projects.observe_projects(conn, _body(), NODE_LINUX)
+    assert seen == [True]
 
 
 def test_unbound_machine_is_stored_but_read_as_unbound(conn):
@@ -171,7 +208,9 @@ def test_older_snapshot_never_overwrites_a_fresher_one(conn):
     older = _stamp(-60)
     fleet_node_projects.observe_projects(conn, _body(observed_at=newer), NODE_LINUX)
     ignored = fleet_node_projects.observe_projects(
-        conn, _body(observed_at=older, projects=[{"project_id": "other", "repo_key": "a/b/c"}]), NODE_LINUX
+        conn,
+        _body(observed_at=older, projects=[{"project_id": "other", "repo_key": "example.test/org/other"}]),
+        NODE_LINUX,
     )
     assert ignored["ignored"] is True and ignored["observed_at"] == newer
     assert [row[2] for row in _stored(conn)] == ["p1"]
@@ -200,7 +239,10 @@ def test_newer_snapshot_replaces_the_whole_set(conn):
         conn,
         _body(
             observed_at=_stamp(-30),
-            projects=[{"project_id": "p1", "repo_key": REPO}, {"project_id": "p2", "repo_key": "a/b/c"}],
+            projects=[
+                {"project_id": "p1", "repo_key": REPO},
+                {"project_id": "p2", "repo_key": "example.test/org/other"},
+            ],
         ),
         NODE_LINUX,
     )
@@ -232,11 +274,33 @@ def test_nodes_do_not_touch_each_others_rows(conn):
         {"environment_id": "bad\nid"},
         {"projects": "nope"},
         {"projects": [{"project_id": "", "repo_key": REPO}]},
-        {"projects": [{"project_id": "p" * 257, "repo_key": REPO}]},
         {"projects": [{"project_id": "p", "repo_key": "https://token@example.test/org/repo"}]},
         {"projects": [{"project_id": "p", "repo_key": "bad\nkey"}]},
         {"projects": [{"project_id": "p", "repo_key": ".git"}]},
-        {"projects": [{"project_id": "p", "repo_key": REPO}, {"project_id": "p", "repo_key": "a/b/c"}]},
+        {"projects": [{"project_id": "p", "repo_key": "/srv/projects/client"}]},
+        {"projects": [{"project_id": "p", "repo_key": "My board"}]},
+        {"projects": [{"project_id": "p", "repo_key": "~/work/client"}]},
+        {"projects": [{"project_id": "p", "repo_key": "example.test\\org\\repo"}]},
+        {"projects": [{"project_id": "p", "repo_key": "example.test/org/../repo"}]},
+        {"projects": [{"project_id": "p", "repo_key": "example.test/org/./repo"}]},
+        {"projects": [{"project_id": "p", "repo_key": "example.test/repo"}]},
+        {"projects": [{"project_id": "p", "repo_key": "intranet/org/repo"}]},
+        {"projects": [{"project_id": "p", "repo_key": "deploy@host.invalid/org/repo"}]},
+        {"projects": [{"project_id": "p", "repo_key": "ssh://example.test/org/repo"}]},
+        {"projects": [{"project_id": "p", "repo_key": "example.test/org/re po"}]},
+        {"projects": [{"project_id": "p", "repo_key": "example.test/org/repo\n"}]},
+        {"projects": [{"project_id": "p", "repo_key": "example.test/org/repo/"}]},
+        {"projects": [{"project_id": "p", "repo_key": 7}]},
+        {"projects": [{"project_id": "p" * 513, "repo_key": REPO}]},
+        {"projects": [{"project_id": "has space", "repo_key": REPO}]},
+        {"projects": [{"project_id": "p", "repo_key": "example.test/" + "a" * 513}]},
+        {"projects": [{"project_id": "p", "repo_key": REPO}, {"project_id": "p", "repo_key": REPO}]},
+        {
+            "projects": [
+                {"project_id": "p", "repo_key": REPO},
+                {"project_id": "p", "repo_key": "example.test/org/other"},
+            ]
+        },
         {"projects": [{"project_id": f"p{i}", "repo_key": REPO} for i in range(fleet_node_projects.MAX_PROJECTS + 1)]},
     ],
 )
@@ -244,6 +308,29 @@ def test_invalid_reports_are_rejected_and_store_nothing(conn, patch):
     with pytest.raises(FleetHubError):
         fleet_node_projects.observe_projects(conn, {**_body(), **patch}, NODE_LINUX)
     assert "fleet_node_projects" not in _tables(conn)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Example.TEST/Org/Repo.git", "example.test/org/repo"),
+        ("example.test/org/repo", "example.test/org/repo"),
+        ("git.example.test/group/sub/repo.name_1", "git.example.test/group/sub/repo.name_1"),
+        ("example.test/org/.github", "example.test/org/.github"),
+        ("example.test/org/repo.git.git", "example.test/org/repo.git"),
+    ],
+)
+def test_canonical_repo_keys_normalize(raw, expected):
+    assert fleet_node_projects.normalize_repo_key(raw) == expected
+
+
+def test_project_id_and_repo_key_share_the_512_limit(conn):
+    assert fleet_node_projects.MAX_ID_CHARS == 512
+    key = "example.test/org/" + "a" * (512 - len("example.test/org/"))
+    result = fleet_node_projects.observe_projects(
+        conn, _body(projects=[{"project_id": "p" * 512, "repo_key": key}]), NODE_LINUX
+    )
+    assert result["projects"] == 1
 
 
 def test_projects_at_the_cap_are_accepted(conn):
@@ -275,7 +362,7 @@ def test_projects_for_repo_performs_no_writes(conn):
     before_changes = conn.total_changes
     before_rows = _stored(conn)
     before_tables = _tables(conn)
-    for key in (REPO, "missing/repo/x", "", "bad\nkey"):
+    for key in (REPO, "example.test/missing/x", "", "bad\nkey"):
         fleet_node_projects.projects_for_repo(conn, key)
     assert conn.total_changes == before_changes
     assert _stored(conn) == before_rows and _tables(conn) == before_tables
@@ -295,4 +382,4 @@ def test_inventory_columns_hold_no_paths_titles_or_urls(conn):
         "updated_at",
         "bound",
     ]
-    assert "/home" not in json.dumps(_stored(conn))
+    assert "/srv" not in json.dumps(_stored(conn))

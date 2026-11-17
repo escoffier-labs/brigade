@@ -49,12 +49,17 @@ _TERMINAL = frozenset({"completed", "interrupted", "failed", "cancelled", "rolle
 # target store or raw shell data are serialized here. Native auth may issue its
 # own local grant; no grant values are exposed by this helper.
 _NATIVE_PROGRAM = r"""
-import json, os, time
+import json, os, re, time
 from concurrent.futures import ThreadPoolExecutor, wait
 STARTED = time.monotonic()
 try:
     from t3_fleet.agent import _build_agent
     client = _build_agent(os.environ).t3
+    # The optional environment id starts first and gets at most about a second, so a
+    # stalled descriptor cannot use the budget. A detail pass never asks for it.
+    descriptor_future = None
+    if DETAIL_THREAD_IDS is None:
+        descriptor_future = ThreadPoolExecutor(max_workers=1).submit(lambda: client.descriptor().get("environmentId"))
     shell = client.shell_snapshot()
     if not isinstance(shell, dict) or type(shell.get("schemaVersion")) is not int or shell["schemaVersion"] != 2:
         raise ValueError()
@@ -112,6 +117,11 @@ try:
         except Exception:
             return UNKNOWN  # Failed lookups cannot invalidate cached enrichment.
         return None
+    environment_id = None
+    if descriptor_future is not None:
+        descriptor_done, _ = wait([descriptor_future], timeout=max(0.0, min(1.0, BUDGET_SECONDS - RESERVE_SECONDS - (time.monotonic() - STARTED))))
+        if descriptor_done and descriptor_future.exception() is None:
+            environment_id = descriptor_future.result()
     # Optional links get at most 4s, and never the slack reserved to print the snapshot.
     detail_wait = min(4.0, BUDGET_SECONDS - RESERVE_SECONDS - (time.monotonic() - STARTED))
     pool = ThreadPoolExecutor(max_workers=8)
@@ -134,18 +144,37 @@ try:
     output = json.dumps(result)
     if len(output.encode("utf-8")) > 262144:
         raise ValueError()
-    # Separate repository inventory: never workspace roots, titles, paths or URLs.
-    # Any failure, or a result over the size cap, leaves it out, meaning unknown.
+    # Separate repository inventory: never workspace roots, titles, paths or URLs. The row
+    # predicate is the Hub's, injected above. Any failure, or a result over the size cap,
+    # leaves the inventory out, meaning unknown.
     try:
-        environment_id = client.descriptor().get("environmentId")
-        inventory_rows = []
-        for row in projects:
-            identity = row.get("repositoryIdentity")
-            key = identity.get("canonicalKey") if isinstance(identity, dict) else None
-            if row.get("archivedAt") is None and row.get("deletedAt") is None and isinstance(row.get("id"), str) and isinstance(key, str):
-                inventory_rows.append({"project_id": row["id"], "repo_key": key})
-        if isinstance(environment_id, str) and environment_id:
-            candidate = json.dumps({**result, "inventory": {"environment_id": environment_id, "projects": inventory_rows}})
+        def clean_id(value, limit):
+            if isinstance(value, str) and 0 < len(value) <= limit and all(not c.isspace() and c.isprintable() for c in value):
+                return value
+            return None
+        def normal_key(value):
+            if not isinstance(value, str) or len(value) > MAX_ID_CHARS:
+                return None
+            key = value.casefold()
+            if key.endswith(".git"):
+                key = key[:-4]
+            if len(key) > MAX_ID_CHARS or re.fullmatch(REPO_KEY_PATTERN, key) is None:
+                return None
+            return key
+        if clean_id(environment_id, MAX_ENVIRONMENT_ID_CHARS) is not None:
+            inventory_rows, seen_ids, dropped = [], set(), 0
+            for row in projects:
+                identity = row.get("repositoryIdentity")
+                raw_key = identity.get("canonicalKey") if isinstance(identity, dict) else None
+                if raw_key is None or row.get("archivedAt") is not None or row.get("deletedAt") is not None:
+                    continue
+                project_id, key = clean_id(row.get("id"), MAX_ID_CHARS), normal_key(raw_key)
+                if project_id is None or key is None or project_id in seen_ids:
+                    dropped += 1
+                    continue
+                seen_ids.add(project_id)
+                inventory_rows.append({"project_id": project_id, "repo_key": key})
+            candidate = json.dumps({**result, "inventory": {"environment_id": environment_id, "projects": inventory_rows[:MAX_INVENTORY_PROJECTS], "dropped": dropped}})
             if len(candidate.encode("utf-8")) <= 262144:
                 output = candidate
     except Exception:
@@ -172,9 +201,14 @@ def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: li
     # A failed optional phase must leave time to publish the metadata batch.
     reserve = fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS if detail_thread_ids is not None else 0
     timeout = _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
+    from . import fleet_node_projects as inventory_rules
+
     program = (
         f"BUDGET_SECONDS = {float(timeout)!r}\nRESERVE_SECONDS = {DETAIL_RESERVE_SECONDS!r}\n"
-        f"PUBLISH_LIMIT = {PUBLISH_LIMIT!r}\nDETAIL_THREAD_IDS = {detail_thread_ids!r}\n" + _NATIVE_PROGRAM
+        f"PUBLISH_LIMIT = {PUBLISH_LIMIT!r}\nDETAIL_THREAD_IDS = {detail_thread_ids!r}\n"
+        f"REPO_KEY_PATTERN = {inventory_rules.REPO_KEY_PATTERN!r}\nMAX_ID_CHARS = {inventory_rules.MAX_ID_CHARS!r}\n"
+        f"MAX_ENVIRONMENT_ID_CHARS = {inventory_rules.MAX_ENVIRONMENT_ID_CHARS!r}\n"
+        f"MAX_INVENTORY_PROJECTS = {inventory_rules.MAX_PROJECTS!r}\n" + _NATIVE_PROGRAM
     )
     result = proc.run(
         [str(path), "-c", program],
@@ -295,40 +329,53 @@ def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
     return active, total, invalid
 
 
-def _inventory(payload: object) -> tuple[str, list[dict[str, str]]] | None:
-    """The optional repository inventory. Absent or malformed means unknown, never empty."""
+def _inventory(payload: object) -> tuple[str, list[dict[str, str]], int] | None:
+    """The optional repository inventory with its dropped-row count. Absent means unknown, never empty."""
+    from . import fleet_node_projects as rules
+
     raw = cast(dict[str, object], payload).get("inventory")
     if not isinstance(raw, dict):
         return None
-    try:
-        environment_id = _native_id(raw.get("environment_id"))
-    except ObservationError:
-        return None
+    environment_id = rules.clean_id(raw.get("environment_id"), rules.MAX_ENVIRONMENT_ID_CHARS)
     projects = raw.get("projects")
-    if not isinstance(projects, list) or len(projects) > MAX_PROJECTS:
+    native_dropped = raw.get("dropped", 0)
+    if (
+        environment_id is None
+        or not isinstance(projects, list)
+        or len(projects) > rules.MAX_PROJECTS
+        or type(native_dropped) is not int
+        or native_dropped < 0
+    ):
         return None
     rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    dropped = native_dropped
     for item in projects:
-        try:
-            key = item.get("repo_key") if isinstance(item, dict) else None
-            if not isinstance(key, str) or not key:
-                continue
-            rows.append({"project_id": _native_id(item.get("project_id")), "repo_key": key})
-        except ObservationError:
+        row = rules.project_row(item)
+        if row is None or row[0] in seen:
+            dropped += 1
             continue
-    return environment_id, rows
+        seen.add(row[0])
+        rows.append({"project_id": row[0], "repo_key": row[1]})
+    return environment_id, rows, dropped
 
 
-def _publish_inventory(payload: object, *, deadline: float) -> str:
-    """Send the inventory once. Returns ok, error or skipped, and never raises."""
-    inventory = _inventory(payload)
+def _publish_inventory(payload: object, *, deadline: float) -> tuple[str, int]:
+    """Send the inventory once. Returns (ok|error|skipped, dropped rows) and never raises."""
+    try:
+        inventory = _inventory(payload)
+    except Exception:
+        return "skipped", 0
     if inventory is None:
-        return "skipped"
+        return "skipped", 0
+    if not inventory[1] and inventory[2]:
+        # Every reported row was invalid, so the set is unknown rather than empty.
+        return "skipped", inventory[2]
     try:
         _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
         node_id = fleet_client.resolve_node_id()
         if node_id == "unknown":
-            return "error"
+            return "error", inventory[2]
         fleet_client_policy.observe_projects(
             {
                 "node_id": node_id,
@@ -339,8 +386,8 @@ def _publish_inventory(payload: object, *, deadline: float) -> str:
             }
         )
     except Exception:
-        return "error"
-    return "ok"
+        return "error", inventory[2]
+    return "ok", inventory[2]
 
 
 def _link_publication_batch(
@@ -401,7 +448,7 @@ def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
         report["skipped"] = cast(int, report["skipped"]) + invalid
         report["ok"] = not (report["truncated"] or invalid or report.get("error"))
         # After sessions, within the same deadline. Never changes ok or the exit code.
-        report["inventory"] = _publish_inventory(payload, deadline=deadline)
+        report["inventory"], report["inventory_dropped"] = _publish_inventory(payload, deadline=deadline)
     return report
 
 

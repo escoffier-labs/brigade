@@ -52,6 +52,8 @@ def native_t3(tmp_path, monkeypatch):
         "  if os.environ.get('FIXTURE_PROVIDER_MISMATCH'): detail['activeProviderThreadId'] = 'provider-other'\n"
         "  return {'thread': detail}\n"
         " def descriptor(self):\n"
+        "  Path(os.environ['FIXTURE_CALLS_PATH'] + '.descriptor').write_text('called')\n"
+        "  time.sleep(float(os.environ.get('FIXTURE_DESCRIPTOR_DELAY', '0')))\n"
         "  if not os.environ.get('FIXTURE_ENV_ID'): raise RuntimeError()\n"
         "  return {'environmentId': os.environ['FIXTURE_ENV_ID']}\n"
         "class Agent:\n"
@@ -820,3 +822,115 @@ def test_session_projects_key_is_unchanged_by_inventory(native_t3, monkeypatch):
     assert [row["id"] for row in payload["projects"]] == ["p"] or payload["projects"] == []
     assert all(set(row) == {"id", "workspaceRoot"} for row in payload["projects"])
     assert payload["inventory"]["environment_id"] == "env-local-1"
+
+
+def test_stalled_descriptor_cannot_cost_session_publishing(inventory_posts, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    _, published, posted = inventory_posts
+    monkeypatch.setenv("FIXTURE_DESCRIPTOR_DELAY", "30")
+    started = time.monotonic()
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert time.monotonic() - started < 12
+    assert report["published"] == 1 and len(published) == 1 and report["ok"] is True
+    assert report["inventory"] == "skipped" and not posted
+
+
+def test_detail_pass_never_asks_for_the_descriptor(native_t3, monkeypatch, tmp_path):
+    from brigade import fleet_t3_observer
+
+    configure, _, _, _ = native_t3
+    configure(projects=_PROJECTS)
+    monkeypatch.setenv("FIXTURE_ENV_ID", "env-local-1")
+    payload = fleet_t3_observer._native_metadata(
+        sys.executable, time.monotonic() + 15, detail_thread_ids=["ordinary-user-thread"]
+    )
+    assert "inventory" not in payload
+    assert not (tmp_path / "calls.jsonl.descriptor").exists()
+
+
+_KEY_SAMPLES = [
+    "example.test/org/repo",
+    "Example.TEST/Org/Repo.git",
+    "/srv/projects/client",
+    "My board",
+    "~/work/client",
+    "example.test\\org\\repo",
+    "example.test/org/../repo",
+    "example.test/org/./repo",
+    "example.test/repo",
+    "intranet/org/repo",
+    "deploy@host.invalid/org/repo",
+    "ssh://example.test/org/repo",
+    "example.test/org/re po",
+    "example.test/org/repo/",
+    "example.test/" + "a" * 600,
+    7,
+]
+
+
+def test_native_row_predicate_equals_the_hub_predicate(native_t3, monkeypatch):
+    from brigade import fleet_node_projects, fleet_t3_observer
+
+    configure, _, _, _ = native_t3
+    long_id = "p" * 513
+    projects = [{"id": f"k{i}", "repositoryIdentity": {"canonicalKey": key}} for i, key in enumerate(_KEY_SAMPLES)] + [
+        {"id": long_id, "repositoryIdentity": {"canonicalKey": "example.test/org/long-id"}},
+        {"id": "has space", "repositoryIdentity": {"canonicalKey": "example.test/org/space-id"}},
+        {"id": "dup", "repositoryIdentity": {"canonicalKey": "example.test/org/dup-a"}},
+        {"id": "dup", "repositoryIdentity": {"canonicalKey": "example.test/org/dup-b"}},
+        {"id": "no-identity"},
+        {"id": "null-key", "repositoryIdentity": {"canonicalKey": None}},
+    ]
+    configure(projects=projects)
+    monkeypatch.setenv("FIXTURE_ENV_ID", "env-local-1")
+    inventory = fleet_t3_observer._native_metadata(sys.executable, time.monotonic() + 15)["inventory"]
+    expected = []
+    for row in projects:
+        identity = row.get("repositoryIdentity") or {}
+        if identity.get("canonicalKey") is None:
+            continue
+        hub = fleet_node_projects.project_row({"project_id": row["id"], "repo_key": identity["canonicalKey"]})
+        if hub is not None and hub[0] not in [item[0] for item in expected]:
+            expected.append(hub)
+    assert [(r["project_id"], r["repo_key"]) for r in inventory["projects"]] == expected
+    assert inventory["dropped"] == len(
+        [r for r in projects if (r.get("repositoryIdentity") or {}).get("canonicalKey") is not None]
+    ) - len(expected)
+    assert 0 < len(expected) < len(projects)
+
+
+def test_bad_rows_are_dropped_individually_and_counted(native_t3, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure(
+        projects=[
+            {"id": "ok", "repositoryIdentity": {"canonicalKey": "example.test/org/ok"}},
+            {"id": "path", "repositoryIdentity": {"canonicalKey": "/srv/projects/client"}},
+            {"id": "title", "repositoryIdentity": {"canonicalKey": "My board"}},
+            {"id": "ok", "repositoryIdentity": {"canonicalKey": "example.test/org/again"}},
+        ]
+    )
+    monkeypatch.setenv("FIXTURE_ENV_ID", "env-local-1")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *a, **k: "11111111-1111-4111-8111-111111111111")
+    posted: list[dict] = []
+    monkeypatch.setattr(fleet_client_policy, "observe_projects", lambda body: posted.append(dict(body)) or {})
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["inventory"] == "ok" and report["inventory_dropped"] == 3 and len(published) == 1
+    assert posted[0]["projects"] == [{"project_id": "ok", "repo_key": "example.test/org/ok"}]
+
+
+def test_all_rows_invalid_means_unknown_not_empty(native_t3, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    configure, _, _, _ = native_t3
+    configure(projects=[{"id": "path", "repositoryIdentity": {"canonicalKey": "/srv/projects/client"}}])
+    monkeypatch.setenv("FIXTURE_ENV_ID", "env-local-1")
+    posted: list[dict] = []
+    monkeypatch.setattr(fleet_client_policy, "observe_projects", lambda body: posted.append(dict(body)) or {})
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["inventory"] == "skipped" and report["inventory_dropped"] == 1 and not posted

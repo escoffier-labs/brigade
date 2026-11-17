@@ -112,7 +112,17 @@ list that path mapping relies on.
 It holds the local T3 environment id from the t3-fleet agent descriptor, and for
 each project that is neither archived nor deleted and has a repository identity,
 the T3 project id and its canonical repository key. It never carries workspace
-roots, titles, paths or remote URLs. If the environment id is unavailable, the
+roots, titles, paths or remote URLs. A canonical key is lowercase
+`host.tld/segment/segment...` with at least two segments after a dotted host,
+segments of `a-z`, `0-9`, `.`, `_` and `-`, and no scheme, userinfo, leading
+slash or tilde, backslash, whitespace or `..`. A trailing `.git` is stripped.
+The observer applies the Hub's exact row predicate and 512-character limits,
+drops invalid or repeated rows individually, and reports the count as
+`inventory_dropped`. If every row is invalid the set is unknown, not empty.
+The Hub itself stays strict and rejects a whole body that contains a bad row.
+The environment id is read first, from a worker bounded to about one second,
+and is skipped in the second-pass detail read, so a stalled descriptor cannot
+cost session publishing. If the environment id is unavailable, the
 inventory does not exist for that run, which means unknown and never empty.
 An unavailable or failed inventory never erases a stored one. A result that
 would exceed the 256 KiB bound drops the inventory rather than the sessions.
@@ -129,7 +139,10 @@ A node token proves the node id, not its T3 environment. The operator binds each
 machine's environment in the policy document with the optional machine field
 `t3_environment_id` (letters, digits and hyphens, unique across machines,
 admin token only). A report whose environment id differs from the machine's
-binding is rejected with `environment-binding-mismatch` and nothing is stored.
+binding is rejected with `environment-binding-mismatch`, and in the same
+transaction that node's stored project rows and snapshot are deleted, so
+placement stops using a stale environment at once. A node can only clear its own
+rows.
 A machine without a binding is stored but read as unbound. Reads recompute the
 binding from the current policy, so a policy change applies without a
 republish, and placement must skip unbound rows.
