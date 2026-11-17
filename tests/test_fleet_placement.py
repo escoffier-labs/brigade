@@ -370,6 +370,9 @@ def test_node_action_dispatch_is_read_only_and_needs_a_node_token(fleet):
     [
         {"repo": ""},
         {"repo": "https://user:secret@example.test/org/repo"},
+        {"repo": "repo/public"},
+        {"repo": "example.test/org"},
+        {"repo": "example.test/org/../repo"},
         {"repo": REPO, "threshold": 1.5},
         {"repo": REPO, "threshold": -0.1},
         {"repo": REPO, "threshold": True},
@@ -384,6 +387,16 @@ def test_invalid_requests_are_refused_without_writing(fleet, body):
         fleet_hub_policy_api.handle_policy(fleet, {"action": "place", **body}, caller_node=NODE_LINUX, is_admin=False)
     assert refused.value.code == "invalid-request"
     assert _row_counts(fleet) == before
+
+
+def test_non_canonical_repo_key_is_rejected_with_a_clear_reason(fleet):
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="canonical repository key"):
+        fleet_hub_policy_api.handle_policy(
+            fleet, {"action": "place", "repo": "repo/public"}, caller_node=NODE_LINUX, is_admin=False
+        )
+    # Case and a trailing .git are normalized the same way the inventory stores them.
+    shouted = _place(fleet, repo="Example.TEST/Org/Repo.git")
+    assert shouted["repo_key"] == REPO and shouted["status"] == "recommended"
 
 
 def test_routing_disabled_is_a_named_denial(conn):

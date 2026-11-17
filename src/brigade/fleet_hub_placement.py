@@ -62,7 +62,7 @@ def _parse(body: Any) -> tuple[str, str, float]:
     assert repo is not None
     key = fleet_node_projects.normalize_repo_key(repo)
     if key is None:
-        raise FleetHubError("place field 'repo' must be a credential-free canonical repository id")
+        raise FleetHubError("place field 'repo' must be a canonical repository key such as host.tld/owner/name")
     threshold = fleet_hub_routing._number(body.get("threshold"), "threshold")
     if threshold is None:
         threshold = DEFAULT_THRESHOLD
