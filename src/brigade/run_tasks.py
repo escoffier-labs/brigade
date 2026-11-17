@@ -83,6 +83,30 @@ class TaskLaunchBinding:
 
 
 @dataclass(frozen=True)
+class TaskEnrollment:
+    """Retained custody references for one enrolled native delegation input.
+
+    The asset holds the exact delegation input. This record binds it by
+    relative name and digest and carries no prompt text or native payload.
+    """
+
+    descriptor_version: int
+    asset_path: str
+    asset_digest: str
+    template_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.descriptor_version) is not int
+            or self.descriptor_version != journal.NATIVE_ENROLLMENT_DESCRIPTOR_VERSION
+            or not journal.native_asset_path(self.asset_path)
+            or not journal.digest(self.asset_digest)
+            or not journal.digest(self.template_digest)
+        ):
+            raise TaskJournalError("invalid native enrollment reference")
+
+
+@dataclass(frozen=True)
 class TaskResult:
     handle: TaskHandle
     status: str
@@ -96,6 +120,7 @@ class TaskResult:
     acknowledged: bool = False
     version: str | None = None
     launch_claim: TaskLaunchBinding | None = None
+    enrollment: TaskEnrollment | None = None
 
 
 @dataclass(frozen=True)
@@ -310,6 +335,15 @@ def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHisto
             if current.result_id is None or p["result_id"] != current.result_id:
                 raise TaskJournalError("task acknowledgement result mismatch")
             results[task_id] = replace(current, acknowledged=True)
+        elif event.event_type == "task.native-enrolled":
+            if current.enrollment is not None or current.status != "queued" or current.handle.attempt_id is not None:
+                raise TaskJournalError("native enrollment requires pristine queued task history")
+            results[task_id] = replace(
+                current,
+                enrollment=TaskEnrollment(
+                    p["descriptor_version"], p["asset_path"], p["asset_digest"], p["template_digest"]
+                ),
+            )
         prior_types[task_id] = event.event_type
         results[task_id] = replace(results[task_id], version=event.event_digest)
     return _TaskHistory(results, batches)
@@ -444,6 +478,37 @@ def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str) -> TaskHand
             payload={"task_id": task_id, "attempt_id": handle.attempt_id},
         )
         return handle
+
+
+def record_native_enrollment(
+    run_dir: Path,
+    *,
+    workspace: Path,
+    task_id: str,
+    enrollment: TaskEnrollment,
+) -> TaskResult:
+    """Bind retained delegation input references once, before any attempt.
+
+    Replay of the identical record is idempotent. A different record for the
+    same task refuses, and enrollment never rewrites an existing fact.
+    """
+    if type(enrollment) is not TaskEnrollment:
+        raise TaskJournalError("invalid native enrollment reference")
+    with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
+        current = _find(_fold(run_dir.name, events), task_id)
+        if current.enrollment is not None:
+            if current.enrollment == enrollment:
+                return current
+            raise TaskJournalError("native enrollment identity conflict")
+        if current.status != "queued" or current.handle.attempt_id is not None:
+            raise TaskJournalError("native enrollment requires pristine queued task history")
+        event = journal.append(
+            run_dir,
+            workspace=workspace,
+            event_type="task.native-enrolled",
+            payload={"task_id": task_id, **asdict(enrollment)},
+        )
+        return replace(current, enrollment=enrollment, version=event.event_digest)
 
 
 def claim_task_launch(

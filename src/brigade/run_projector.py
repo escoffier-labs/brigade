@@ -184,6 +184,7 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "task.launch-claimed",
         "task.observed",
         "task.acknowledged",
+        "task.native-enrolled",
         "control.requested",
         "control.observed",
         "control.failed",

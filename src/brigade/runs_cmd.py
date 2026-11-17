@@ -1247,13 +1247,22 @@ def _finalize_redeemed_approval(
 
 def resume(run_dir: Path) -> int:
     """Resume a durable child, a legacy run, or an approval-paused continuation."""
-    from . import run_lifecycle, run_resume, runguard
+    from . import native_t3_enrollment, run_lifecycle, run_resume, runguard
 
     run_dir = run_dir.expanduser().resolve()
     try:
         meta = _read_json(run_dir / "run.json")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if meta is not None and native_t3_enrollment.awaiting_native_parent(meta):
+        # Enrollment runs have no live lock holder between verbs by design.
+        # Their next transition belongs to the external native parent, so
+        # resume must never reconstruct one here.
+        print(
+            "error: run is externally controlled by a native T3 parent and cannot be resumed",
+            file=sys.stderr,
+        )
         return 2
     if meta is not None and _durable_child_lineage(meta) is not None:
         return _resume_durable_child(run_dir, meta)
