@@ -113,6 +113,26 @@ def settings(target: Path) -> tuple[float, int]:
     return float(value), cap
 
 
+def reflected_scopes(target: Path, read_scopes: tuple[str, ...]) -> tuple[str, ...]:
+    """Read `[reflect] scopes`: the read scopes this workspace proposes, watches and applies in.
+
+    Missing means every read scope. A credential needs the hub's reflect right
+    in each listed scope. Unlisted read scopes are still read, never changed.
+    """
+    value = reflect_table(target).get("scopes")
+    if value is None:
+        return read_scopes
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(name, str) for name in value)
+        or len(set(value)) != len(value)
+        or not set(value) <= set(read_scopes)
+    ):
+        raise ThresholdError("[reflect] scopes must be a non-empty list of distinct configured hub read scopes")
+    return tuple(name for name in read_scopes if name in value)
+
+
 @dataclass
 class Budget:
     """Run-wide work counters, shared by every scope's pass."""

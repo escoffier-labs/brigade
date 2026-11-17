@@ -1642,6 +1642,24 @@ passes an absolute workspace target, and invokes `memory reflect run --hub
 which can reverse the policy actor's own unchanged applies. `--hub` refuses
 disabled hub settings.
 
+Every pass and the compensation watch run in the reflected scopes, which
+default to every configured read scope. The watch and `propose` both need the
+hub's `reflect` right in each of them. When the workspace credential reads more
+scopes than it may reflect, list only the reflectable ones:
+
+```toml
+[reflect]
+scopes = ["repo:owner/name"]
+```
+
+Unlisted read scopes are still read, but no candidate is proposed and no
+watch is polled there. Each entry
+must be a distinct configured read scope, or the run fails with
+`hub_reflect_config` before any hub call. A missing grant in a listed scope
+still fails the run, so a revoked right cannot silently stop the watch over
+applies it already made. `--scope` must name a listed scope. The report lists
+the scopes in `reflected_scopes`.
+
 A failure means a non-dry reflect run exits non-zero. For runs that can safely write
 workspace state, `.brigade/memory/reflect/schedule.json` records consecutive
 failures. Three failures pause scheduled reflection. While paused, scheduler
