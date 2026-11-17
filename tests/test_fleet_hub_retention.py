@@ -155,6 +155,18 @@ def test_events_newest_seat_row_survives_when_a_later_event_drops_it(conn):
     assert _runs(conn) == {("worker-run", 1), ("worker-run", 2), ("worker-run", 4)}
 
 
+def test_events_keep_the_real_seat_when_a_later_row_holds_a_padded_dash(conn):
+    # /status treats " - " as a seat and the Deck does not, so both newest rows stay.
+    _event(conn, "padded-run", 1, OLD)
+    _event(conn, "padded-run", 2, OLD, seat="claude-a")
+    _event(conn, "padded-run", 3, OLD, seat=" - ")
+    _event(conn, "padded-run", 4, OLD)
+    _event(conn, "padded-run", 5, OLD)
+
+    assert retention.sweep_events(conn, now=NOW) == 1
+    assert _runs(conn) == {("padded-run", 1), ("padded-run", 2), ("padded-run", 3), ("padded-run", 5)}
+
+
 def test_events_sweep_keeps_rows_the_readers_project(conn):
     from datetime import timezone
 

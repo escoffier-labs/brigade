@@ -39,6 +39,8 @@ _MAX_DELETE_KEYS = 900
 # the latest nor the first, and it is not the newest row with a non-empty seat
 # or harness. Those four rows per (node_id, run_id) always stay. The non-empty
 # test matches the readers: not null, not blank after trim(), not a lone dash.
+# /status compares the seat to '-' untrimmed and the Deck trims first, so the
+# newest seat row under each rule is kept.
 _EVENTS_LIVENESS_SQL = """
     received_at < ?
     AND EXISTS (
@@ -58,6 +60,17 @@ _EVENTS_LIVENESS_SQL = """
             WHERE newer_seat.node_id = events.node_id AND newer_seat.run_id = events.run_id
               AND newer_seat.seat IS NOT NULL AND trim(newer_seat.seat) != '' AND newer_seat.seat != '-'
               AND (newer_seat.sequence, newer_seat.received_at, newer_seat.digest)
+                  > (events.sequence, events.received_at, events.digest)
+        )
+    )
+    AND (
+        NOT (seat IS NOT NULL AND trim(seat) != '' AND trim(seat) != '-')
+        OR EXISTS (
+            SELECT 1 FROM events AS newer_deck_seat
+            WHERE newer_deck_seat.node_id = events.node_id AND newer_deck_seat.run_id = events.run_id
+              AND newer_deck_seat.seat IS NOT NULL AND trim(newer_deck_seat.seat) != ''
+              AND trim(newer_deck_seat.seat) != '-'
+              AND (newer_deck_seat.sequence, newer_deck_seat.received_at, newer_deck_seat.digest)
                   > (events.sequence, events.received_at, events.digest)
         )
     )
