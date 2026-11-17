@@ -1,5 +1,6 @@
 """Operation readiness protects evidence boundaries, not configured seat health alone."""
 
+import time
 from dataclasses import replace
 
 import pytest
@@ -656,6 +657,134 @@ def test_brigade_standalone_inspect_readiness_reaches_ready_without_writes(decla
     assert by_category["capacity"]["freshness"] == "fresh"
     assert "local run lock (absent)" in by_category["capacity"]["detail"]
     assert list(clean_ws.iterdir()) == []
+
+
+class _StatusProbe:
+    """Fixture probe that reports fixed checks without providers or inference."""
+
+    def __init__(self, statuses: dict[str, tuple[str, str, str | None]]) -> None:
+        self.statuses = statuses
+
+    def probe_roster(self, selected, **kwargs):
+        rows = []
+        for name, agent in selected.agents.items():
+            checks = tuple(
+                seat_health.SeatHealthCheck(
+                    check,
+                    *self.statuses.get(check, ("passed", "ok", None))[:2],
+                    cause_code=self.statuses.get(check, ("passed", "ok", None))[2],
+                )
+                for check in seat_health.CHECK_NAMES
+            )
+            status = "degraded" if any(item.status == "degraded" for item in checks) else "healthy"
+            rows.append(
+                seat_health.SeatHealthResult(
+                    "test",
+                    name,
+                    seat_health.seat_fingerprint(agent, selected),
+                    status,
+                    {},
+                    checks,
+                    0,
+                    0,
+                    time.time(),
+                    time.time(),
+                )
+            )
+        return rows
+
+
+def test_not_applicable_passive_checks_reach_ready_without_inference(declared, tmp_path, monkeypatch):
+    _stub_standalone_env(monkeypatch)
+    inference = []
+    monkeypatch.setattr(seat_health.agents, "run_agent", lambda *args, **kwargs: inference.append("run_agent"))
+    monkeypatch.setattr(seat_health.acpx_adapter, "run_cursor", lambda *args, **kwargs: inference.append("run_cursor"))
+    probe = _StatusProbe(
+        {
+            "version-gates": ("degraded", "adapter has no reviewed version gate", "probe-incomplete"),
+            "isolation-compatibility": (
+                "degraded",
+                "declared read-only enforcement is soft; postflight is deferred",
+                "probe-incomplete",
+            ),
+            "model-reachability": ("passed", "model 'example-model' exactly matches live inventory", None),
+        }
+    )
+    result = readiness.inspect_readiness(
+        declared,
+        readiness.ReadinessRequest(("worker",)),
+        workspace=tmp_path,
+        health_probe=probe,
+    )
+
+    assert result["status"] == "ready"
+    assert result["exit_code"] == 0
+    rows = {item["category"]: item for item in result["evidence"] if item.get("seat") == "worker"}
+    for category in ("version-gates", "isolation-compatibility"):
+        assert (rows[category]["status"], rows[category]["reason"]) == ("passed", "not-applicable")
+        assert "not-applicable" in rows[category]["detail"]
+    assert inference == []
+
+
+def test_applicable_but_unverified_check_keeps_operation_unverified(declared, tmp_path, monkeypatch):
+    _stub_standalone_env(monkeypatch)
+    probe = _StatusProbe(
+        {
+            "authentication-entitlement": (
+                "degraded",
+                "adapter has no prompt-free authentication status check",
+                "probe-incomplete",
+            ),
+            "version-gates": ("degraded", "adapter has no reviewed version gate", "probe-incomplete"),
+            "isolation-compatibility": (
+                "degraded",
+                "declared read-only enforcement is soft; postflight is deferred",
+                "probe-incomplete",
+            ),
+            "model-reachability": ("passed", "model 'example-model' exactly matches live inventory", None),
+        }
+    )
+    result = readiness.inspect_readiness(
+        declared,
+        readiness.ReadinessRequest(("worker",)),
+        workspace=tmp_path,
+        health_probe=probe,
+    )
+
+    assert result["status"] == "unverified"
+    assert result["exit_code"] == 3
+    rows = {item["category"]: item for item in result["evidence"] if item.get("seat") == "worker"}
+    assert (rows["authentication-entitlement"]["status"], rows["authentication-entitlement"]["reason"]) == (
+        "unknown",
+        "probe-incomplete",
+    )
+    assert (rows["version-gates"]["status"], rows["version-gates"]["reason"]) == ("passed", "not-applicable")
+
+
+def test_worktree_isolation_is_passed_for_git_checkout(declared, tmp_path, monkeypatch):
+    from brigade import runguard
+
+    _stub_standalone_env(monkeypatch)
+    monkeypatch.setattr(runguard, "is_git_worktree", lambda path: True)
+    monkeypatch.setattr(runguard, "inspect_run_lock_reconcile", lambda workspace: "absent")
+    result = readiness.inspect_readiness(
+        declared,
+        readiness.ReadinessRequest(("worker",), isolation="worktree"),
+        workspace=tmp_path,
+        health_probe=_StatusProbe({}),
+    )
+
+    assert result["status"] == "ready"
+    isolation = next(item for item in result["evidence"] if item["category"] == "isolation" and "seat" not in item)
+    assert isolation["status"] == "passed"
+    assert isolation["reason"] == "observed"
+    assert isolation["freshness"] == "fresh"
+    assert result["scope"] == readiness.operation_scope(
+        declared, readiness.ReadinessRequest(("worker",), isolation="worktree"), tmp_path
+    )
+    assert isolation["age_seconds"] >= 0
+    assert isolation["observed_at"] <= result["observed_at"]
+    assert "Git checkout" in isolation["detail"]
 
 
 @pytest.mark.parametrize(

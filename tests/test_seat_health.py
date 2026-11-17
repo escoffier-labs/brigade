@@ -393,6 +393,46 @@ def test_codex_cloud_model_reachability_skips_provider_smoke(monkeypatch):
     assert all(item.status == "passed" or item.cause_code == "probe-incomplete" for item in endpoint_result.checks)
 
 
+def test_prompt_free_model_inventory_runs_when_smoke_is_disabled(monkeypatch):
+    seat = roster.Agent("worker", "grok", "work", model="grok-4.5")
+    value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
+    monkeypatch.setattr(
+        seat_health.model_inventory.ModelInventoryInspector,
+        "inspect",
+        lambda self, cli_ref, requested, command=None: seat_health.model_inventory.ModelInventoryResult(
+            "exact", requested, (requested,), f"model {requested!r} exactly matches live Grok inventory"
+        ),
+    )
+    inference = []
+    monkeypatch.setattr(seat_health.agents, "run_agent", lambda *args, **kwargs: inference.append((args, kwargs)))
+
+    result = SeatHealthProbe().probe(seat, value, allow_model_smoke=False)
+
+    check = next(item for item in result.checks if item.name == "model-reachability")
+    assert check.status == "passed"
+    assert "exactly matches live Grok inventory" in check.detail
+    assert inference == []
+
+
+def test_model_reachability_without_prompt_free_inventory_stays_degraded(monkeypatch):
+    seat = roster.Agent("worker", "codex", "work", model="gpt-test")
+    value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
+    monkeypatch.setattr(
+        seat_health.model_inventory.ModelInventoryInspector,
+        "inspect",
+        lambda self, cli_ref, requested, command=None: None,
+    )
+    inference = []
+    monkeypatch.setattr(seat_health.agents, "run_agent", lambda *args, **kwargs: inference.append((args, kwargs)))
+
+    result = SeatHealthProbe().probe(seat, value, allow_model_smoke=False)
+
+    check = next(item for item in result.checks if item.name == "model-reachability")
+    assert check.status == "degraded"
+    assert check.cause_code == "probe-incomplete"
+    assert inference == []
+
+
 @pytest.mark.parametrize("positive_budget", (False, True), ids=("already-expired", "positive-budget"))
 def test_overall_deadline_returns_timeout_results_without_serial_wait(monkeypatch, positive_budget):
     if positive_budget:

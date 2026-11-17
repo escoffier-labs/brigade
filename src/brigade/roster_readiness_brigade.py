@@ -766,6 +766,31 @@ def _hub_capacity(
     )
 
 
+def _worktree_isolation_observation(
+    request: ReadinessRequest,
+    workspace: Path,
+    *,
+    scope: str,
+    observed_at: float,
+) -> Observation | None:
+    """Operation-scoped worktree isolation for the Brigade route.
+
+    Git eligibility is the only fact this read-only producer can establish. It
+    does not create a worktree or claim writable capacity. Shared isolation is
+    already represented by the evaluator's default row.
+    """
+    if request.isolation != "worktree":
+        return None
+    if runguard.is_git_worktree(workspace):
+        return Observation(
+            "passed",
+            observed_at,
+            scope,
+            detail="workspace is a Git checkout; worktree isolation is available",
+        )
+    return Observation("failed", observed_at, scope, detail="Worktree isolation requires a Git checkout.")
+
+
 def brigade_route_readiness(
     roster: roster_mod.Roster,
     request: ReadinessRequest,
@@ -793,19 +818,27 @@ def brigade_route_readiness(
     except (fleet_client.FleetClientError, OSError, ValueError) as exc:
         resolved_scope = operation_scope(roster, request, workspace) if scope is None else scope
         detail = f"fleet configuration unavailable ({safe_detail(str(exc))})"
-        return roster, {
+        observations = {
             "admission": Observation("unknown", observed_at, resolved_scope, detail=detail),
             "capacity": _capacity_or_unknown(
                 lock_state, roster.max_workers, detail, observed_at=observed_at, scope=resolved_scope
             ),
         }
+        isolation = _worktree_isolation_observation(request, workspace, scope=resolved_scope, observed_at=observed_at)
+        if isolation is not None:
+            observations["isolation"] = isolation
+        return roster, observations
 
     hub_url = str(settings.get("hub_url") or "").strip() if isinstance(settings, Mapping) else ""
     if not hub_url:
         resolved_scope = operation_scope(roster, request, workspace) if scope is None else scope
-        return roster, _local_route_observations(
+        observations = _local_route_observations(
             roster, workers, lock_state, observed_at=observed_at, scope=resolved_scope
         )
+        isolation = _worktree_isolation_observation(request, workspace, scope=resolved_scope, observed_at=observed_at)
+        if isolation is not None:
+            observations["isolation"] = isolation
+        return roster, observations
 
     hub_admission = _hub_admission(
         roster,
@@ -829,10 +862,14 @@ def brigade_route_readiness(
         parsed_policy=hub_admission.parsed_policy,
         early_capacity_detail=hub_admission.early_capacity_detail,
     )
-    return hub_admission.effective_roster, {
+    observations = {
         "admission": hub_admission.admission,
         "capacity": capacity_obs,
     }
+    isolation = _worktree_isolation_observation(request, workspace, scope=hub_admission.scope, observed_at=observed_at)
+    if isolation is not None:
+        observations["isolation"] = isolation
+    return hub_admission.effective_roster, observations
 
 
 def brigade_route_observations(

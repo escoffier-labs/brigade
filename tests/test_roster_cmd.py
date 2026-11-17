@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -1126,6 +1127,55 @@ def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, monke
     assert report["status"] == "blocked"
     assert report["selected_seats"][0]["selection_role"] == "orchestrator"
     assert any(item["reason"] == "orchestrator-selected" for item in report["evidence"])
+
+
+def test_roster_ready_text_includes_scope_and_observed_at(tmp_target, monkeypatch, capsys):
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission, seat_health
+
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        "[agents.chef]\n"
+        'cli = "codex"\n'
+        'role = "plan"\n'
+        "[agents.worker]\n"
+        'cli = "codex"\n'
+        'model = "example-model"\n'
+        'role = "implement"\n',
+    )
+
+    class HealthyProbe:
+        def probe_roster(self, selected, **kwargs):
+            return [
+                seat_health.SeatHealthResult(
+                    "test",
+                    name,
+                    seat_health.seat_fingerprint(agent, selected),
+                    "healthy",
+                    {},
+                    tuple(seat_health.SeatHealthCheck(check, "passed") for check in seat_health.CHECK_NAMES),
+                    0,
+                    0,
+                    time.time(),
+                    time.time(),
+                )
+                for name, agent in selected.agents.items()
+            ]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("readiness attempted a network call")
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": ""})
+    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda **_: False)
+    monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", forbidden)
+    monkeypatch.setattr(fleet_client, "inspect_claim", forbidden)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", forbidden)
+
+    assert roster_cmd.ready(tmp_target, workers=("worker",), health_probe=HealthyProbe()) == 0
+    out = capsys.readouterr().out
+    assert "readiness: ready (exit 0)" in out
+    assert "scope: sha256:" in out
+    assert "observed_at: " in out
 
 
 @pytest.mark.parametrize(

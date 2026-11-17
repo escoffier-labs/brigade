@@ -106,6 +106,29 @@ def operation_scope(roster: roster_mod.Roster, request: ReadinessRequest, worksp
     return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
+# A fresh degraded health check is not always "unknown". Two checks have no
+# subject for some adapters or operations, so readiness counts them as passed
+# for this operation while keeping the original detail:
+# - version-gates: an adapter with no reviewed gate has no gate to satisfy.
+#   Only adapters with a declared gate (acpx transport version, antigravity)
+#   can produce a real failure here.
+# - isolation-compatibility: the health check tests read-only enforcement. A
+#   writable operation does not depend on it, and writable ACPX plus shared
+#   isolation is blocked separately per seat. A read-only roster sandbox still
+#   keeps this check applicable.
+# Everything else that could apply but was not verified, including missing
+# authentication evidence and an adapter without prompt-free model inventory,
+# stays unknown. A failed check never becomes passed.
+def _not_applicable_reason(check: seat_health.SeatHealthCheck, roster: roster_mod.Roster) -> str | None:
+    if check.status != "degraded" or check.cause_code != "probe-incomplete":
+        return None
+    if check.name == "version-gates":
+        return "adapter declares no reviewed version gate"
+    if check.name == "isolation-compatibility" and roster.sandbox != "read-only":
+        return "health check tests read-only enforcement; this operation is writable"
+    return None
+
+
 def _request_error(request: ReadinessRequest) -> str | None:
     if (
         not isinstance(request.workers, (tuple, list))
@@ -292,15 +315,20 @@ def evaluate_readiness(
         # shared/worktree isolation. Do not confuse the two contracts.
         for check_name in seat_health.CHECK_NAMES:
             check = by_name.get(check_name)
-            status = (
-                "unknown"
-                if not fresh or check is None
-                else {"passed": "passed", "failed": "failed"}.get(check.status, "unknown")
-            )
+            not_applicable = _not_applicable_reason(check, roster) if fresh and check is not None else None
+            if not fresh or check is None:
+                status, reason, detail = "unknown", "health-unobserved", ""
+            elif not_applicable is not None:
+                status, reason = "passed", "not-applicable"
+                detail = safe_detail(f"not-applicable: {not_applicable}; {check.detail}")[:240]
+            else:
+                status = {"passed": "passed", "failed": "failed"}.get(check.status, "unknown")
+                reason = check.cause_code or check.status
+                detail = safe_detail(check.detail)[:240]
             add(
                 check_name,
                 status,
-                check.cause_code or check.status if fresh and check else "health-unobserved",
+                reason,
                 "Refresh selected-seat health evidence."
                 if status == "unknown"
                 else "Inspect the selected seat health failure."
@@ -311,7 +339,7 @@ def evaluate_readiness(
                 age_seconds=age if age is not None and math.isfinite(age) else None,
                 ttl_seconds=ttl,
                 observed_at=observed_at,
-                detail=safe_detail(check.detail)[:240] if check else "",
+                detail=detail,
             )
 
     scope = operation_scope(roster, request, workspace)

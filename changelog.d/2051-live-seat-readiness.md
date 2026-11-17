@@ -1,0 +1,4 @@
+- `brigade roster ready` runs prompt-free model inventory when model smoke is disabled, so direct Cursor, Grok, Ollama, and Antigravity seats can pass model reachability without an inference request.
+- Passive health checks that do not apply to an adapter or a writable operation now count as passed with reason `not-applicable`; checks that could apply but were not verified remain unverified.
+- Worktree isolation reports a fresh operation-scoped `isolation` observation when the Brigade route runs in a Git checkout.
+- Plain-text `brigade roster ready` output now includes the operation scope and observation time.
