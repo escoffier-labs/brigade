@@ -357,7 +357,9 @@ def test_profile_helper_appearing_between_plan_and_write_blocks_the_removal(pbox
     rc, payload = _profile(capsys, getattr(harness_profile_cmd, operation), repo, home, write=True, **kw)
     assert calls and rc == 1
     result = payload["results"][0]
-    assert result["status"] == "conflict" and [c["reason"] for c in result["conflicts"]] == [REASON]
+    # The apply snapshot is not re-read: the helper added after it is drift on the MCP config, not a late removal block.
+    assert result["status"] == "conflict" and [c["surface"] for c in result["conflicts"]] == ["mcp"]
+    assert "rerun" in result["conflicts"][0]["detail"]
     assert _live(home)["docs"]["headersHelper"] == HELPER and "plain" in _live(home)
     assert set(_state_mcp(home)) == {"docs", "plain"}
 

@@ -18,6 +18,7 @@ from . import (
     localio,
     managed_block,
     mcp_adapters,
+    mcp_apply_snapshot,
     mcp_cmd,
     mcp_native_auth,
     skills_cmd,
@@ -1103,9 +1104,8 @@ def _block_mcp_removal(item: dict[str, Any], profile, name: str) -> dict[str, An
 
 
 def _late_removal_conflicts(profile, mcp_plan: dict[str, Any]) -> list[dict[str, Any]]:
-    """Re-read the live file at write time: an entry that gained native auth since the plan must stay."""
-    path, adapter = mcp_plan["path"], mcp_plan["adapter"]
-    live = adapter.read_file(path.read_text(encoding="utf-8") if path.is_file() else None)
+    """Check against the apply snapshot (no second read; a later edit is drift): native auth must stay."""
+    path, live = mcp_plan["path"], mcp_plan["adapter"].read_file(mcp_plan["text"])
     return [
         _block_mcp_removal({"surface": "mcp", "path": str(path), "name": name}, profile, name) | {"status": "conflict"}
         for name in mcp_native_auth.removal_blockers(profile.mcp_harness, live, mcp_plan["remove"])
@@ -1117,7 +1117,7 @@ def _mcp_plan(
 ) -> dict[str, Any]:
     adapter = mcp_adapters.ADAPTERS[profile.mcp_harness]
     path = profile.mcp_path or mcp_adapters.resolve_path(adapter, workspace)
-    text = path.read_text(encoding="utf-8") if path.is_file() else None
+    snapshot, text = mcp_apply_snapshot.read_snapshot(path)  # the one read; the write checks these same bytes
     malformed = _malformed_native_config(adapter, text)
     if malformed:
         item = {"surface": "mcp", "path": str(path), "status": "malformed", "action": "preserve", "detail": malformed}
@@ -1325,6 +1325,7 @@ def _mcp_plan(
         "path": path,
         "adapter": adapter,
         "text": text,
+        "snapshot": snapshot,
         "updates": updates,
         "remove": remove,
         "blocked": blocked,
@@ -1338,7 +1339,7 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
     items: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
     try:
-        text = path.read_text(encoding="utf-8") if path.is_file() else None
+        snapshot, text = mcp_apply_snapshot.read_snapshot(path)
     except (OSError, UnicodeDecodeError) as exc:
         item = {"surface": "mcp", "path": str(path), "status": "conflict", "action": "preserve", "detail": str(exc)}
         return {"items": [item], "conflicts": [item], "path": path, "adapter": adapter, "text": None, "remove": set()}
@@ -1377,6 +1378,7 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
         "path": path,
         "adapter": adapter,
         "text": text,
+        "snapshot": snapshot,
         "remove": remove,
         "blocked": blocked,
         "keep": keep,
@@ -1556,9 +1558,13 @@ def _profile_mutation(
     mode: int | None = None,
     writer: Callable[[Path, bytes], None] | None = None,
     remover: Callable[[Path], None] | None = None,
+    snapshot: tuple[bytes | None] | None = None,
 ) -> projection.MutationSpec | None:
-    """Translate one already-preflighted profile surface into a kernel mutation."""
-    before = path.read_bytes() if path.exists() else None
+    """Translate one already-preflighted profile surface into a kernel mutation.
+
+    ``snapshot`` is the bytes the plan was decoded from, so a later edit is drift (see mcp_apply_snapshot).
+    """
+    before = snapshot[0] if snapshot is not None else path.read_bytes() if path.exists() else None
     if desired is None:
         if before is None:
             return None
@@ -1862,6 +1868,7 @@ def _sync_profile(
                 mcp_plan["adapter"]
                 .write_file(mcp_plan["text"], mcp_plan["updates"], mcp_plan["remove"])
                 .encode("utf-8"),
+                snapshot=(mcp_plan["snapshot"],),
             )
             if mutation is not None:
                 mutations.append(mutation)
@@ -1884,7 +1891,7 @@ def _sync_profile(
                 home=home_path,
             )
         except (_ProfileInstructionWriteError, projection.PlanError, projection.DriftError) as exc:
-            conflict = {
+            conflict = mcp_apply_snapshot.mcp_drift_conflict(profile.mcp_harness, mcp_plan, exc) or {
                 "surface": "instruction",
                 "path": str(instruction.path),
                 "status": "conflict",
@@ -2179,6 +2186,7 @@ def _uninstall_profile(
             mutation = _profile_mutation(
                 mcp_plan["path"],
                 mcp_plan["adapter"].write_file(mcp_plan["text"], {}, mcp_plan["remove"]).encode("utf-8"),
+                snapshot=(mcp_plan["snapshot"],),
             )
             if mutation is not None:
                 mutations.append(mutation)
@@ -2207,7 +2215,7 @@ def _uninstall_profile(
                 home=home_path,
             )
         except (_ProfileInstructionWriteError, projection.PlanError, projection.DriftError) as exc:
-            conflict = {
+            conflict = mcp_apply_snapshot.mcp_drift_conflict(profile.mcp_harness, mcp_plan, exc) or {
                 "surface": "instruction",
                 "path": str(plan.path),
                 "status": "conflict",

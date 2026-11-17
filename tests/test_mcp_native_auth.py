@@ -383,9 +383,8 @@ def test_origin_change_is_blocked_whatever_the_flags_and_ownership(box, capsys, 
 COLLISIONS = [
     {"headers": {"X-Team": {"literal": "blue"}}},
     {"headers": {"Authorization": {"ref": "SOME_TOKEN_VAR"}}},
-    {"env_http_headers": {"X-Env": "SOME_ENV_VAR"}},
-    {"http_headers": {"X-Static": "fake-value"}},
-    {"bearer_token_env_var": "SOME_TOKEN_VAR"},
+    # Codex-native carriers no longer collide: the helper outranks them (test_mcp_native_auth_precedence.py).
+    {"headers": {"X-Team": {"literal": "blue"}}, "bearer_token_env_var": "SOME_TOKEN_VAR"},
 ]
 
 
