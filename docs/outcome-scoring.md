@@ -4,11 +4,33 @@ Outcome capture classifies runs when it reads stored receipts and persists the r
 ([capture and ranking](../src/brigade/outcome_cmd.py), [scorecard projection](../src/brigade/scorecard.py)).
 
 This is outcome-based skill scoring, promotion, and rollback from verification evidence.
-Scheduled memory reflection separately attempts automatic Tier 0 hub changes
-for opted-in workspaces, including new installs. Every automatic change must
-pass the hub authority gates. Unsupported retrieval scopes and local repository
-authority gaps remain proposal-only. See [Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
-for the `auto_apply` policy field and `memory reflect auto-apply off` switch.
+Scheduled memory work runs separately from this scoring loop.
+
+Hub reflection opens pinned proposals for exact duplicate merges, near-duplicate
+supersedes, broken-link repairs and anchors. Stale-newer-evidence and
+opposite-polarity candidates are local only, and a contradicted card is a verify
+verdict. Of the reflection lanes, only evidence appends and exact duplicate
+merges are eligible for automatic apply under the supported policy writer, and
+only when workspace and fleet policies enable it and every hub gate passes. On a
+real scope the retrieval evaluation holds every automatic reflection apply,
+including all-`append_evidence` Tier 0 proposals and exact merges, so
+reflection applies nothing automatically outside the fixture scope
+`repo:brigade/retrieval-eval-fixture`. Verifier applies and automatic
+compensations take their own gates. Near-duplicate supersedes and broken-link repairs are Tier 2, so they
+wait for a reviewer. Local repository candidates stay proposal-only. The
+`[reflect] scopes` setting limits where the job proposes, applies and watches.
+Unlisted read scopes are still read, never changed.
+
+The verify pass uses two seats and opens correction proposals. Per-class go or
+no-go records gate `verify_auto_apply`, and without a current admin `go` record
+on the hub it applies nothing. A scheduled run still opens correction proposals
+because only their application is gated. Scheduled reflection also polls the
+compensation watch over its own automatic applies. Automatic reversal needs two
+independent verifier signals, or an attributable lexical regression. A watch
+attempt that is not exact or is blocked ends `held`, or `stale` when a target
+no longer matches its pins. See
+[Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
+for the `auto_apply` policy field, the switch and rollback.
 
 ## Workflow
 
