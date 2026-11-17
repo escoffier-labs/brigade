@@ -166,6 +166,7 @@ def test_render_ratchet_panel_follows_ranking_table():
 
     assert fragment.index("example-skill</td>") < fragment.index("Outcome ratchet report")
     assert "generated_at 2026-11-17T07:30:00+00:00" in fragment
+    assert "mode=dry-run" in fragment
     assert "regression holds 2" in fragment
     assert "ineligibility_rate 0.250" in fragment
     assert "leading reason unattributed" in fragment
@@ -173,6 +174,24 @@ def test_render_ratchet_panel_follows_ranking_table():
     assert "skill-b" in fragment
     assert "regression_rollback" in fragment
     assert "verified regression measured" in fragment
+
+
+def test_render_ratchet_panel_marks_an_applied_run():
+    payload = {
+        "ranking": [],
+        "ratchet": {
+            "version": 1,
+            "generated_at": "2026-11-17T07:30:00+00:00",
+            "apply": True,
+            "summary": {"decisions": 1, "regression_holds": 0, "regression_rollbacks": 1},
+            "regressions": [],
+        },
+    }
+
+    fragment = outcome_rank.render(payload, "unused")
+
+    assert "mode=applied" in fragment
+    assert "mode=dry-run" not in fragment
 
 
 def test_render_ratchet_panel_marks_a_stale_report():

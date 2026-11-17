@@ -666,9 +666,21 @@ def _outcome_ratchet_line(ratchet: object) -> str:
     if not report.get("present"):
         return "outcome_ratchet: no report yet"
     ids = [str(item) for item in report.get("regression_hold_ids") or []]
-    listed = ", ".join(ids) if ids else "none"
+    raw_total = report.get("regression_holds")
+    total = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else len(ids)
+    if ids:
+        listed = ", ".join(ids)
+        if total > len(ids):
+            listed += f" +{total - len(ids)} more"
+    elif total > 0:
+        # The id list is bounded and the rows may be capped out; never say "none"
+        # beside a nonzero hold count.
+        listed = f"{total} not listed"
+    else:
+        listed = "none"
     return (
         f"outcome_ratchet: generated_at={report.get('generated_at')} "
+        f"mode={report.get('mode') or 'dry-run'} "
         f"regression_holds={report.get('regression_holds')} ({listed}) "
         f"ineligibility_rate={report.get('ineligibility_rate')} "
         f"leading={report.get('leading_reason') or 'none'}"

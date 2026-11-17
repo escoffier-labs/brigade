@@ -50,21 +50,21 @@ brigade outcome reconcile --target . --report
 brigade outcome ratchet --target . --json
 ```
 
-`.brigade/memory-care/outcome/ratchet-report.json` is versioned (`"version": 1`), written atomically, capped at 64 KiB, and written at most once per reconcile call. It holds `generated_at`, the `apply` flag, summary counts (`decisions`, `regression_holds`, `regression_rollbacks`), decision counts by action, a `regressions` list of `{artifact_id, prior_state, reason_code, reason, helped, hurt}`, the receipt ineligibility rate, and the leading ineligibility reason. Only counts, ids and decision reasons are stored: no card body, handoff text or receipt payload. If a run produces more regression rows than the cap allows, trailing rows are dropped and `truncated` plus `regressions_omitted` say how many; the counts still describe the whole run.
+`.brigade/memory-care/outcome/ratchet-report.json` is versioned (`"version": 1`), written atomically, capped at 64 KiB, and written at most once per reconcile call. It holds `generated_at`, the `apply` flag, summary counts (`decisions`, `regression_holds`, `regression_rollbacks`, plus the first `regression_hold_ids`), decision counts by action, a `regressions` list of `{artifact_id, prior_state, reason_code, reason, helped, hurt}`, the receipt ineligibility rate, and the leading ineligibility reason. Only counts, ids and decision reasons are stored: no card body, handoff text or receipt payload. If a run produces more regression rows than the cap allows, trailing rows are dropped and `truncated` plus `regressions_omitted` say how many; the counts and the hold ids still describe the whole run. A `helped`/`hurt` pair in a row is the one the decision used: a skill reports its scorecard effectiveness counts, a card its fingerprint cohorts.
 
 `reason_code` comes from the decision itself (`regression_hold` or `regression_rollback`), never from reason prose, so rewording a reason cannot silently recategorize a decision.
 
 The report is advisory:
 
-- `--apply` never reads it. Promotions and rollbacks come from receipts and status, exactly as before.
-- An absent, unreadable, oversized, wrong-version or symlinked file is a normal empty state. The loader refuses a symlinked path rather than following it.
+- `--apply` never reads it. Promotions and rollbacks come from receipts and status, exactly as before. A report path that cannot be written (read-only directory, full disk, a directory in place of the file) warns once on stderr and leaves the reconcile run's own exit code and output alone.
+- An absent, unreadable, oversized, wrong-version or symlinked file is a normal empty state. The loader refuses a symlinked path rather than following it, including between its check and its open.
 - Readers never recompute `rank` or `reconcile`, so an old file reads as old instead of being silently refreshed.
 
 Three surfaces read it, all read-only:
 
-- `brigade work brief` prints one bounded line: `outcome_ratchet: generated_at=... regression_holds=4 (a, b, c, d) ineligibility_rate=1.0 leading=unattributed`, or `outcome_ratchet: no report yet`.
-- `brigade outcome ratchet` prints the file, or `report: none` when the ratchet has not run with `--report`.
-- The Center dashboard outcomes view adds a panel below the ranking with the report age, summary counts, ineligibility rate and the regression rows. A report older than seven days is labeled stale.
+- `brigade work brief` prints one bounded line: `outcome_ratchet: generated_at=... mode=dry-run regression_holds=4 (a, b, c, d) ineligibility_rate=1.0 leading=unattributed`, or `outcome_ratchet: no report yet`. The mode comes from the report's `apply` flag, so a dry-run rollback row never reads as a completed rollback. When the hold count exceeds the listed ids the line ends `+N more`.
+- `brigade outcome ratchet` prints the file with the same `mode=` stamp and row counts, or `report: none` when the ratchet has not run with `--report`.
+- The Center dashboard outcomes view adds a panel below the ranking with the report age, mode, summary counts, ineligibility rate and the regression rows. A report older than seven days is labeled stale.
 
 ## Which receipts are scoreable
 

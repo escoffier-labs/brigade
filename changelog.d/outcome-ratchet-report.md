@@ -1,3 +1,3 @@
-- `brigade outcome reconcile --report` now writes `.brigade/memory-care/outcome/ratchet-report.json`, a versioned advisory summary of the run's decisions, regression holds, rollbacks and ineligibility rate, and the weekly memory-care ratchet runbook passes it.
-- `brigade outcome ratchet` prints that report without ranking or reconciling, and `brigade work brief` adds one `outcome_ratchet:` line.
-- The Center dashboard outcomes view shows the report's regression holds and rollbacks with its age, and marks a report older than a week as stale.
+- `brigade outcome reconcile --report` now writes `.brigade/memory-care/outcome/ratchet-report.json`, a versioned advisory summary of the run's decisions, regression holds, rollbacks and ineligibility rate, and the weekly memory-care ratchet runbook passes it. A report path that cannot be written warns on stderr and leaves the reconcile exit code alone.
+- `brigade outcome ratchet` prints that report without ranking or reconciling, and `brigade work brief` adds one `outcome_ratchet:` line. The brief names holds even when the size cap drops their rows, and both surfaces show `mode=dry-run` or `mode=applied`.
+- The Center dashboard outcomes view shows the report's regression holds and rollbacks with its age and mode, and marks a report older than a week as stale.

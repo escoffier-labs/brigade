@@ -76,6 +76,7 @@ class _ReconcileItem:
     prior_status: str
     cohorts: core.FingerprintCohorts | None = None
     scorecard: scorecard_mod.SubjectScorecard | None = None
+    artifact_kind: str = "skill"
 
 
 def _records_path(target: Path) -> Path:
@@ -2192,6 +2193,7 @@ def reconcile(
             prior_status=prior_status,
             cohorts=cohorts,
             scorecard=card,
+            artifact_kind=artifact_kind,
         )
         audited.append(item)
         if decision.action != "hold":

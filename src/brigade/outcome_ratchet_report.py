@@ -18,6 +18,8 @@ a stale file reads as stale rather than being refreshed by a reader.
 from __future__ import annotations
 
 import json
+import os
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -57,13 +59,29 @@ def write_report(
     """Write the advisory report once and return its path, or None if skipped.
 
     ``items`` are reconcile decision items: each carries ``decision``,
-    ``prior_status`` and either fingerprint ``cohorts`` or a ``scorecard``. Only
-    the fields below are read from them.
+    ``prior_status``, ``artifact_kind`` and either fingerprint ``cohorts`` or a
+    ``scorecard``. Only the fields below are read from them.
 
     A symlinked report path is refused, and a payload that cannot fit the byte
     cap even without regression rows is skipped, so a broken report can never
-    fail or grow the ratchet run that produced it.
+    fail or grow the ratchet run that produced it. An unwritable path (read-only
+    directory, full disk, a directory in place of the file) is the same: the run
+    warns once on stderr and keeps its own exit code and output.
     """
+    try:
+        return _write_report(target, items, apply=apply, generated_at=generated_at)
+    except OSError as exc:
+        print(f"warning: outcome ratchet report not written: {exc}", file=sys.stderr)
+        return None
+
+
+def _write_report(
+    target: Path,
+    items: Sequence[Any],
+    *,
+    apply: bool,
+    generated_at: datetime,
+) -> Path | None:
     path = report_path(target)
     if _has_symlinked_component(path, path.parents[len(REPORT_RELATIVE_PATH.parts) - 1]):
         return None
@@ -104,6 +122,7 @@ def build_report(
             }
         )
     audit = _receipt_audit(target)
+    hold_ids = [row["artifact_id"] for row in regressions if row["reason_code"] == outcome.REGRESSION_HOLD]
     report: dict[str, Any] = {
         "version": REPORT_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -112,6 +131,9 @@ def build_report(
             "decisions": len(items),
             "regression_holds": sum(1 for row in regressions if row["reason_code"] == outcome.REGRESSION_HOLD),
             "regression_rollbacks": sum(1 for row in regressions if row["reason_code"] == outcome.REGRESSION_ROLLBACK),
+            # Computed before ``_fit`` can drop trailing rows, so the brief names
+            # holds the size cap removed from the list itself.
+            "regression_hold_ids": hold_ids[:_BRIEF_MAX_IDS],
         },
         "decisions_by_action": dict(sorted(counts.items())),
         "regressions": regressions,
@@ -119,6 +141,11 @@ def build_report(
         "leading_ineligibility_reason": audit["leading_ineligibility_reason"],
     }
     return _fit(report)
+
+
+def mode_label(apply: object) -> str:
+    """Return ``applied`` or ``dry-run`` for a report's ``apply`` flag."""
+    return "applied" if apply is True else "dry-run"
 
 
 def load_report(target: Path) -> dict[str, Any]:
@@ -134,7 +161,9 @@ def load_report(target: Path) -> dict[str, Any]:
             return {}
         if not path.is_file():
             return {}
-        with path.open("rb") as handle:
+        # O_NOFOLLOW closes the gap between the symlink check above and the open.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(path, flags), "rb") as handle:
             raw = handle.read(REPORT_MAX_BYTES + 1)
     except OSError:
         return {}
@@ -150,40 +179,58 @@ def load_report(target: Path) -> dict[str, Any]:
 
 
 def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
-    """Reduce a loaded report to the bounded fields the session brief prints."""
+    """Reduce a loaded report to the bounded fields the session brief prints.
+
+    Hold ids come from ``summary.regression_hold_ids``, which the writer computes
+    before the size cap can drop regression rows, so a capped report still names
+    holds instead of reading ``(none)`` beside a nonzero hold count.
+    """
     if not report:
         return {"present": False}
     raw_summary = report.get("summary")
     summary = raw_summary if isinstance(raw_summary, dict) else {}
     raw_regressions = report.get("regressions")
     regressions = raw_regressions if isinstance(raw_regressions, list) else []
-    hold_ids = [
+    derived_ids = [
         str(row.get("artifact_id"))
         for row in regressions
         if isinstance(row, dict) and row.get("reason_code") == outcome.REGRESSION_HOLD
     ]
+    raw_ids = summary.get("regression_hold_ids")
+    ids = [str(item) for item in raw_ids] if isinstance(raw_ids, list) else derived_ids
+    raw_count = summary.get("regression_holds")
+    count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) else len(ids)
     return {
         "present": True,
         "generated_at": report.get("generated_at"),
-        "regression_holds": summary.get("regression_holds", len(hold_ids)),
-        "regression_hold_ids": hold_ids[:_BRIEF_MAX_IDS],
+        "mode": mode_label(report.get("apply")),
+        "regression_holds": count,
+        "regression_hold_ids": ids[:_BRIEF_MAX_IDS],
         "ineligibility_rate": report.get("ineligibility_rate"),
         "leading_reason": report.get("leading_ineligibility_reason"),
     }
 
 
 def _decision_counts(item: Any) -> tuple[int, int]:
-    """Return helped/hurt for a decision item, from cohorts or a scorecard."""
+    """Return helped/hurt for a decision item, from the scorer that decided it.
+
+    Skills are decided by ``scorecard.decide_scorecard`` alone, so a skill that
+    also carries legacy fingerprint cohorts must report the scorecard's
+    effectiveness counts. Reading cohorts first could show ``helped=2 hurt=0``
+    beside a regression hold. Cards, and artifacts with no scorecard, keep the
+    cohort counts that decided them.
+    """
+    card = getattr(item, "scorecard", None)
+    if str(getattr(item, "artifact_kind", "") or "") != "card" and card is not None:
+        dimensions = getattr(card, "dimensions", None)
+        effectiveness = dimensions.get("effectiveness") if isinstance(dimensions, dict) else None
+        if not isinstance(effectiveness, dict):
+            return 0, 0
+        return int(effectiveness.get("helped", 0) or 0), int(effectiveness.get("hurt", 0) or 0)
     cohorts = getattr(item, "cohorts", None)
     current = getattr(cohorts, "current", None)
     if current is not None:
         return int(getattr(current, "helped", 0) or 0), int(getattr(current, "hurt", 0) or 0)
-    card = getattr(item, "scorecard", None)
-    dimensions = getattr(card, "dimensions", None)
-    if isinstance(dimensions, dict):
-        effectiveness = dimensions.get("effectiveness")
-        if isinstance(effectiveness, dict):
-            return int(effectiveness.get("helped", 0) or 0), int(effectiveness.get("hurt", 0) or 0)
     return 0, 0
 
 

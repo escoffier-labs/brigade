@@ -11,6 +11,7 @@ from typing import Any
 from brigade import cli, outcome, outcome_cmd
 from brigade import outcome_ratchet_report as report_mod
 from brigade import scorecard as scorecard_mod
+from brigade.work_cmd.session import briefing
 
 NOW = datetime(2026, 11, 17, 7, 30, tzinfo=timezone.utc)
 
@@ -21,6 +22,7 @@ class _Item:
     prior_status: str
     cohorts: Any = None
     scorecard: Any = None
+    artifact_kind: str = "skill"
 
 
 @dataclass
@@ -85,7 +87,12 @@ def test_write_and_load_round_trip(tmp_path):
     assert loaded["version"] == report_mod.REPORT_VERSION
     assert loaded["apply"] is False
     assert loaded["generated_at"] == NOW.isoformat()
-    assert loaded["summary"] == {"decisions": 3, "regression_holds": 1, "regression_rollbacks": 1}
+    assert loaded["summary"] == {
+        "decisions": 3,
+        "regression_holds": 1,
+        "regression_rollbacks": 1,
+        "regression_hold_ids": ["skill-a"],
+    }
     assert loaded["decisions_by_action"] == {"hold": 1, "install": 1, "rollback": 1}
     assert [(row["artifact_id"], row["reason_code"]) for row in loaded["regressions"]] == [
         ("skill-a", "regression_hold"),
@@ -160,9 +167,22 @@ def test_loader_and_writer_refuse_a_symlinked_parent(tmp_path):
     assert not (outside / "outcome").exists()
 
 
+def _snapshot(root: Path) -> dict[str, bytes]:
+    files = (path for path in sorted(root.rglob("*")) if path.is_file())
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in files}
+
+
 def test_reconcile_dry_run_without_report_writes_nothing(tmp_path, capsys):
+    outcome_cmd.append_records(
+        tmp_path,
+        [outcome.OutcomeRecord("skill-a", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")],
+    )
+    before = _snapshot(tmp_path)
+    assert before
     assert outcome_cmd.reconcile(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
+
+    assert _snapshot(tmp_path) == before
     assert not report_mod.report_path(tmp_path).exists()
 
 
@@ -186,7 +206,12 @@ def test_reconcile_report_flag_writes_report_and_keeps_dry_run(tmp_path, monkeyp
     capsys.readouterr()
     report = report_mod.load_report(tmp_path)
     assert report["apply"] is False
-    assert report["summary"] == {"decisions": 1, "regression_holds": 1, "regression_rollbacks": 0}
+    assert report["summary"] == {
+        "decisions": 1,
+        "regression_holds": 1,
+        "regression_rollbacks": 0,
+        "regression_hold_ids": ["skill-regressed"],
+    }
     assert report["regressions"][0]["artifact_id"] == "skill-regressed"
     assert not (tmp_path / ".brigade" / "memory" / "outcome" / "status.json").exists()
 
@@ -254,11 +279,120 @@ def test_brief_payload_is_bounded(tmp_path):
     assert report_mod.brief_payload({}) == {"present": False}
 
 
+def test_skill_regression_row_counts_come_from_the_scorecard(tmp_path):
+    # Reconcile decides a skill from its scorecard only. Legacy cohorts still
+    # present on the same item must never make a regression hold read as helped.
+    item = _hold()
+    item.cohorts = _Cohorts(current=_Current(helped=2, hurt=0))
+    assert _write(tmp_path, [item]) is not None
+
+    row = report_mod.load_report(tmp_path)["regressions"][0]
+    assert (row["helped"], row["hurt"]) == (1, 2)
+
+
+def test_card_regression_row_counts_come_from_cohorts(tmp_path):
+    # Cards are decided by the legacy scorer, so their cohorts win even when a
+    # scorecard is also present.
+    item = _Item(
+        decision=outcome.Decision(
+            "card-a",
+            "rollback",
+            "demoted",
+            "verified regression measured",
+            code=outcome.REGRESSION_ROLLBACK,
+        ),
+        prior_status="promoted",
+        cohorts=_Cohorts(current=_Current(helped=2, hurt=1)),
+        scorecard=_card("card-a", helped=0, hurt=5),
+        artifact_kind="card",
+    )
+    assert _write(tmp_path, [item]) is not None
+
+    row = report_mod.load_report(tmp_path)["regressions"][0]
+    assert (row["helped"], row["hurt"]) == (2, 1)
+
+
+def test_reconcile_report_write_failure_warns_and_keeps_apply_committed(tmp_path, monkeypatch, capsys):
+    card = _card("skill-regressed", helped=0, hurt=2)
+    monkeypatch.setattr(outcome_cmd, "_scorecards_by_artifact", lambda target: {"skill-regressed": card})
+    status_path = tmp_path / "memory" / "outcome" / "status.json"
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(json.dumps({"version": 1, "artifacts": {"skill-regressed": {"status": "promoted"}}}))
+
+    # A directory in place of the report file makes the advisory write raise
+    # IsADirectoryError after the run has already committed state.
+    report_mod.report_path(tmp_path).mkdir(parents=True)
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, report=True) == 0
+    captured = capsys.readouterr()
+    assert "outcome reconcile:" in captured.out
+    assert "skill-regressed" in captured.out
+    assert "warning:" in captured.err
+    assert "outcome ratchet report not written" in captured.err
+    committed = json.loads(status_path.read_text())["artifacts"]["skill-regressed"]["status"]
+    assert committed == "demoted"
+
+
+def test_loader_refuses_a_symlink_the_pre_check_could_miss(tmp_path, monkeypatch):
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"version": report_mod.REPORT_VERSION, "generated_at": "planted"}))
+    path = report_mod.report_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.symlink_to(outside)
+
+    # Bypass the lexical symlink walk: the no-follow open must still refuse.
+    monkeypatch.setattr(report_mod, "_has_symlinked_component", lambda path, boundary: False)
+    assert report_mod.load_report(tmp_path) == {}
+
+
+def test_brief_names_holds_the_size_cap_dropped(tmp_path):
+    # Rollback rows are long and come first; the cap then drops the trailing
+    # holds, so a brief built from the kept rows would print "(none)" beside a
+    # nonzero hold count.
+    items = [
+        _Item(
+            decision=outcome.Decision(
+                f"rollback-{index:04d}",
+                "rollback",
+                "demoted",
+                "verified regression measured " + ("x" * 120),
+                code=outcome.REGRESSION_ROLLBACK,
+            ),
+            prior_status="promoted",
+            cohorts=_Cohorts(current=_Current(helped=0, hurt=3)),
+            artifact_kind="card",
+        )
+        for index in range(1500)
+    ]
+    items += [_hold(f"hold-{index:02d}") for index in range(20)]
+    assert _write(tmp_path, items) is not None
+
+    loaded = report_mod.load_report(tmp_path)
+    assert loaded["truncated"] is True
+    assert loaded["summary"]["regression_holds"] == 20
+    brief = report_mod.brief_payload(loaded)
+    assert brief["regression_holds"] == 20
+    assert brief["regression_hold_ids"] == [f"hold-{index:02d}" for index in range(report_mod._BRIEF_MAX_IDS)]
+
+    line = briefing._outcome_ratchet_line(brief)
+    assert "regression_holds=20" in line
+    assert "hold-00" in line
+    assert f"+{20 - report_mod._BRIEF_MAX_IDS} more" in line
+    assert "(none)" not in line
+
+
 def test_cli_ratchet_prints_the_file_only(tmp_path, capsys):
+    outcome_cmd.append_records(
+        tmp_path,
+        [outcome.OutcomeRecord("ranked-skill", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")],
+    )
+    before = _snapshot(tmp_path)
+
     assert cli.main(["outcome", "ratchet", "--target", str(tmp_path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {}
 
     _write(tmp_path, [_hold()])
+    after_write = _snapshot(tmp_path)
     assert cli.main(["outcome", "ratchet", "--target", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["summary"]["regression_holds"] == 1
@@ -269,6 +403,13 @@ def test_cli_ratchet_prints_the_file_only(tmp_path, capsys):
     assert "outcome ratchet:" in text
     assert "regression_holds=1" in text
     assert "skill-a" in text
+    assert "mode=dry-run" in text
+    # The report is printed as stored: no rank rows, and nothing was written.
+    assert "outcome rank:" not in text
+    assert " score=" not in text
+    assert "ranked-skill score=" not in text
+    assert _snapshot(tmp_path) == after_write
+    assert set(after_write) - set(before) == {".brigade/memory-care/outcome/ratchet-report.json"}
 
 
 def test_cli_ratchet_reports_absent_file_in_text(tmp_path, capsys):
@@ -282,4 +423,9 @@ def test_cli_reconcile_report_flag_writes_advisory_file(tmp_path, capsys):
     assert payload["apply"] is False
     report = report_mod.load_report(tmp_path)
     assert report["apply"] is False
-    assert report["summary"] == {"decisions": 0, "regression_holds": 0, "regression_rollbacks": 0}
+    assert report["summary"] == {
+        "decisions": 0,
+        "regression_holds": 0,
+        "regression_rollbacks": 0,
+        "regression_hold_ids": [],
+    }

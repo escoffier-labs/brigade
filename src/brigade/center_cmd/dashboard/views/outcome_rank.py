@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from brigade import outcome_ratchet_report
 from brigade.center_cmd.dashboard import data
 from brigade.center_cmd.dashboard import render as html
 
@@ -88,8 +89,9 @@ def _ratchet_panel(raw: object) -> str:
     summary = summary_raw if isinstance(summary_raw, dict) else {}
     generated_at = str(ratchet.get("generated_at") or "-")
     stamp = f"generated_at {generated_at} ({_age_label(ratchet.get('generated_at'))})"
+    mode = outcome_ratchet_report.mode_label(ratchet.get("apply"))
     strip = (
-        f"{stamp}; decisions {summary.get('decisions', '-')}, "
+        f"{stamp}; mode={mode}; decisions {summary.get('decisions', '-')}, "
         f"regression holds {summary.get('regression_holds', '-')}, "
         f"regression rollbacks {summary.get('regression_rollbacks', '-')}; "
         f"ineligibility_rate {_fmt(ratchet.get('ineligibility_rate'))}"

@@ -218,7 +218,8 @@ def _dispatch_ratchet(args) -> int:
         return 0
     summary_raw = report.get("summary")
     summary = summary_raw if isinstance(summary_raw, dict) else {}
-    print(f"generated_at: {report.get('generated_at')} apply={report.get('apply')}")
+    mode = outcome_ratchet_report.mode_label(report.get("apply"))
+    print(f"generated_at: {report.get('generated_at')} mode={mode}")
     print(
         "decisions: "
         f"total={summary.get('decisions')} "

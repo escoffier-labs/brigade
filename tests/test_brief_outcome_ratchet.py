@@ -33,6 +33,7 @@ def test_line_lists_holds_and_leading_reason():
     payload = {
         "present": True,
         "generated_at": NOW.isoformat(),
+        "mode": "dry-run",
         "regression_holds": 2,
         "regression_hold_ids": ["skill-a", "skill-b"],
         "ineligibility_rate": 1.0,
@@ -40,13 +41,49 @@ def test_line_lists_holds_and_leading_reason():
     }
     assert briefing._outcome_ratchet_line(payload) == (
         "outcome_ratchet: generated_at=2026-11-17T07:30:00+00:00 "
-        "regression_holds=2 (skill-a, skill-b) "
+        "mode=dry-run regression_holds=2 (skill-a, skill-b) "
         "ineligibility_rate=1.0 leading=unattributed"
     )
 
 
+def test_line_marks_an_applied_run():
+    payload = {
+        "present": True,
+        "generated_at": NOW.isoformat(),
+        "mode": "applied",
+        "regression_holds": 0,
+        "regression_hold_ids": [],
+    }
+    assert "mode=applied" in briefing._outcome_ratchet_line(payload)
+
+
+def test_line_counts_holds_beyond_the_listed_ids():
+    payload = {
+        "present": True,
+        "generated_at": NOW.isoformat(),
+        "mode": "dry-run",
+        "regression_holds": 20,
+        "regression_hold_ids": ["skill-a", "skill-b"],
+    }
+    line = briefing._outcome_ratchet_line(payload)
+    assert "regression_holds=20 (skill-a, skill-b +18 more)" in line
+
+
+def test_line_never_says_none_beside_a_nonzero_hold_count():
+    payload = {
+        "present": True,
+        "generated_at": NOW.isoformat(),
+        "mode": "dry-run",
+        "regression_holds": 3,
+        "regression_hold_ids": [],
+    }
+    line = briefing._outcome_ratchet_line(payload)
+    assert "(none)" not in line
+    assert "regression_holds=3 (3 not listed)" in line
+
+
 def test_line_handles_empty_hold_list():
-    payload = {"present": True, "generated_at": NOW.isoformat(), "regression_holds": 0}
+    payload = {"present": True, "generated_at": NOW.isoformat(), "mode": "dry-run", "regression_holds": 0}
     line = briefing._outcome_ratchet_line(payload)
     assert "regression_holds=0 (none)" in line
     assert "leading=none" in line
@@ -66,6 +103,7 @@ def test_brief_payload_carries_one_bounded_summary(tmp_path):
     ratchet = payload["outcome_ratchet"]
     assert ratchet["present"] is True
     assert ratchet["generated_at"] == NOW.isoformat()
+    assert ratchet["mode"] == "dry-run"
     assert ratchet["regression_holds"] == 2
     assert ratchet["regression_hold_ids"] == ["skill-a", "skill-b"]
     assert "regressions" not in ratchet
