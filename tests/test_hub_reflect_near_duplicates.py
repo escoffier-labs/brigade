@@ -177,6 +177,18 @@ def test_pin_skipped_when_only_anchored_block_is_hub_opaque():
     assert near.ops([keeper, newer], limit=0.9, budget=near.Budget()) == ([], {"near_missing_pin": 1})
 
 
+def test_keeper_with_only_a_hub_opaque_anchor_still_opens_the_supersede():
+    # The op pins only the newer card. The keeper travels as other_card with no
+    # block, so its inline code must not skip the cluster.
+    lead = " ".join(f"w{i}" for i in range(40))
+    keeper = head("k", card_text(f"{lead} `inline` example", "c-000001"), 0)
+    newer = head("n", card_text(f"{lead} inline example", "c-000002"), 1)
+    [submission], skipped = near.ops([keeper, newer], limit=0.9, budget=near.Budget())
+    assert skipped == {}
+    [op] = submission
+    assert (op["card_id"], op["block_id"], op["other_card"]["card_id"]) == ("n", "c-000002", "k")
+
+
 def test_ambiguous_member_metadata_skips_only_that_op():
     keeper = head("k", card_text(words(40, "k"), "c-00000f"), 0)
     good = head("a", card_text(words(40, "a"), anchor(1)), 1)
