@@ -933,8 +933,7 @@ missing-journal message.
     run.json
     roster.json
     ...
-    events/<worker>.scrubbed.json            # scrubbed worker streams (#592)
-    events/**/<worker>.scrubbed.json         # nested worker streams also scrubbed
+    events/<hmac-sha256>.scrubbed.json       # scrubbed worker streams, keyed names (#592)
     events/recovery-checkpoints/<sha256>.json   # artifact references only
 ```
 

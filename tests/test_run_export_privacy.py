@@ -256,7 +256,12 @@ def test_legacy_archive_is_projected_before_install(tmp_path: Path):
     installed = json.loads((Path(imported["run_dir"]) / "run.json").read_text(encoding="utf-8"))
     assert installed["task"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
     assert "unexpected" not in installed
-    assert installed["cwd"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    # A home path outside the inferred workspace maps to the external token. Inside it,
+    # the relative path is digested. Either form is private.
+    cwd = installed["cwd"]
+    assert cwd == run_export_projection.EXTERNAL_PATH_TOKEN or cwd["digest"].startswith(
+        run_export_projection.DIGEST_PREFIX
+    )
     assert str(Path.home()) not in json.dumps(installed)
 
 
@@ -730,3 +735,36 @@ def test_export_warns_when_key_is_refused(tmp_path: Path, capsys):
     err = capsys.readouterr().err
     assert str(path) in err
     assert "chmod 600" in err
+
+
+@pytest.mark.parametrize("field", ["nested_schema", "path", "schema_artifact"])
+def test_manifest_word_fields_refuse_free_text(tmp_path: Path, field: str):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    if field == "schema_artifact":
+        manifest["schema_artifact"] = "api-key-secretvalue"
+    else:
+        entry = next(item for item in manifest["files"] if item["path"] == "run.json")
+        entry[field] = "api-key-secretvalue"
+    _write_json(archive / "work-run.json", manifest)
+
+    with pytest.raises(WorkRunArchiveError):
+        work_run_archive.validate_archive(archive)
+
+
+def test_worker_stream_names_become_keyed_digests(tmp_path: Path):
+    payload = tmp_path / "payload"
+    stream = payload / "events" / "workers" / "api-key-secretvalue.scrubbed.json"
+    stream.parent.mkdir(parents=True)
+    stream.write_text("{}", encoding="utf-8")
+    assert not run_export_projection.is_allowed_export_rel("events/workers/api-key-secretvalue.scrubbed.json")
+
+    assert run_export_projection.rename_worker_streams(payload, b"k" * 32) == 1
+
+    names = [path.relative_to(payload).as_posix() for path in payload.rglob("*") if path.is_file()]
+    assert len(names) == 1
+    assert "api-key-secretvalue" not in names[0]
+    assert run_export_projection.is_allowed_export_rel(names[0])
+    assert not (payload / "events" / "workers").exists()

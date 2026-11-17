@@ -1,6 +1,6 @@
 - `brigade runs export` now writes only a closed file set and closed receipt shapes. Only enums, ISO timestamps, hex digests, run ids, numeric versions, numbers, booleans, and fixed path tokens stay readable. Every other string becomes a keyed HMAC-SHA256 digest.
 - `brigade runs import` refuses archives with raw free text, malformed prompt digests, unknown receipt keys, or files outside the export set, and projects legacy v1 and v2 archives before installing them.
 - A per-host recall key with unsafe ownership or mode now prints one bounded warning naming the file and the `chmod 600` fix before failing closed.
-- Raw run artifacts such as `final.txt`, `summary.md`, and `changes.patch` are no longer exported.
+- Raw run artifacts such as `final.txt`, `summary.md`, and `changes.patch` are no longer exported. Scrubbed worker streams use keyed digest names instead of seat names.
 - Exported archives omit `events/lifecycle.jsonl` because its exception text cannot be scrubbed without breaking the hash chain. The manifest records the chain head and event count, and imported runs report `journal-withheld` instead of a lifecycle audit match.
-- The `brigade.work-run` archive manifest moves to schema version 3 with a matching `schemas/work-run.v3.schema.json`.
+- The `brigade.work-run` archive manifest moves to schema version 3 with a matching `schemas/work-run.v3.schema.json`. Manifest paths, nested schema names, and schema artifact paths are closed and typed.

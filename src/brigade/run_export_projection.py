@@ -132,8 +132,15 @@ _HEX = r"^[0-9a-f]{7,64}$"
 _SHA_OR_HEX = r"^(?:[0-9a-f]{40,64}|sha256:[0-9a-f]{64})$"
 _RUN_ID = r"^\d{8}-\d{6}-[0-9a-f]{8}$"
 _VERSION = r"^\d+(?:\.\d+){0,3}$"
-_MANIFEST_PATH = r"^[A-Za-z0-9._/-]{1,1024}$"
-_SCHEMA_NAME = r"^[a-z][a-z0-9_.-]{0,127}$"
+_STREAM_EXPORT_RE = re.compile(r"^events/[0-9a-f]{64}\.scrubbed\.json$")
+_CHECKPOINT_EXPORT_RE = re.compile(r"^events/recovery-checkpoints/[0-9a-f]{64}\.json$")
+# Every exported payload path is a fixed name or hex-named; no path segment carries free text.
+_MANIFEST_PATH = (
+    r"^(?:run|roster|plan|worker-results|synthesis|batch-request)\.json"
+    r"|batch-result-[0-9a-f]{64}\.json"
+    r"|events/recovery-checkpoints/[0-9a-f]{64}\.json"
+    r"|events/[0-9a-f]{64}\.scrubbed\.json$"
+)
 _FIXED_PATH_TOKENS = frozenset({".", RUN_DIR_TOKEN, EXTERNAL_PATH_TOKEN, HOME_TOKEN})
 _STRICT = "\x00"
 _MEDIA_TYPES = (
@@ -521,7 +528,19 @@ _MANIFEST_FILE = _Object(
         "byte_size": INT,
         "role": _enum("receipt", "journal", "checkpoint-reference", "artifact", "support", "other", fallback=_STRICT),
         "media_type": _enum(*_MEDIA_TYPES, fallback=_STRICT),
-        "nested_schema": _pat(_SCHEMA_NAME, digest_ok=False),
+        "nested_schema": _enum(
+            receipt_schema.RUN_RECEIPT_SCHEMA,
+            receipt_schema.ROSTER_SNAPSHOT_SCHEMA,
+            receipt_schema.RUN_PLAN_SCHEMA,
+            receipt_schema.WORKER_RESULTS_SCHEMA,
+            receipt_schema.SYNTHESIS_SCHEMA,
+            receipt_schema.RUN_EVENT_SCHEMA,
+            "brigade.run_batch.v1",
+            BATCH_RESULT_ENTRY_SCHEMA,
+            worker_events.SCHEMA,
+            worker_events.STREAM_SCHEMA,
+            fallback=_STRICT,
+        ),
         "nested_schema_version": INT,
         "privacy_class": _enum("public", "private", "redacted", fallback=_STRICT),
     }
@@ -540,7 +559,7 @@ _MANIFEST_NODE = _Object(
         "run": _MANIFEST_RUN,
         "journal_withheld": _Object({"chain_head": _pat(_SHA_OR_HEX, digest_ok=False), "event_count": INT}),
         "source_run_dir": _enum(RUN_DIR_TOKEN, fallback=_STRICT),
-        "schema_artifact": _pat(_MANIFEST_PATH, digest_ok=False),
+        "schema_artifact": _enum("schemas/work-run.v3.schema.json", fallback=_STRICT),
     }
 )
 
@@ -551,7 +570,14 @@ def is_valid_digest(value: Any) -> bool:
 
 
 def is_allowed_export_rel(rel: str) -> bool:
-    """True when ``rel`` is in the closed export file set."""
+    """True when ``rel`` is in the closed export file set, after stream renaming."""
+    if rel in _TOP_LEVEL_JSON or _BATCH_RESULT_RE.fullmatch(rel):
+        return True
+    return bool(_CHECKPOINT_EXPORT_RE.fullmatch(rel) or _STREAM_EXPORT_RE.fullmatch(rel))
+
+
+def _is_source_exportable_rel(rel: str) -> bool:
+    """True for a staged run file that may enter the export before stream renaming."""
     if rel in _TOP_LEVEL_JSON:
         return True
     if _BATCH_RESULT_RE.fullmatch(rel):
@@ -578,7 +604,7 @@ def filter_export_files(payload_root: Path) -> list[str]:
         if not path.is_file():
             raise RunExportProjectionError(f"export projection refused special file: {path.name}")
         rel = path.relative_to(payload_root).as_posix()
-        if is_allowed_export_rel(rel):
+        if _is_source_exportable_rel(rel):
             continue
         path.unlink()
         dropped.append(rel)
@@ -855,6 +881,28 @@ def iter_receipt_files(payload_root: Path) -> list[str]:
     return rels
 
 
+def rename_worker_streams(payload_root: Path, key: bytes) -> int:
+    """Give each scrubbed worker stream a keyed-digest name; seat names never become paths."""
+    payload_root = Path(payload_root)
+    renamed = 0
+    for path in sorted(payload_root.rglob("*.scrubbed.json")):
+        rel = path.relative_to(payload_root).as_posix()
+        if _STREAM_EXPORT_RE.fullmatch(rel) or not worker_events.is_scrubbed_worker_event_stream_rel(rel):
+            continue
+        digest = hmac.new(key, rel.encode("utf-8"), hashlib.sha256).hexdigest()
+        target = payload_root / "events" / f"{digest}.scrubbed.json"
+        if target.exists():
+            raise RunExportProjectionError("worker stream name collision during export projection")
+        path.rename(target)
+        renamed += 1
+    for directory in sorted((d for d in (payload_root / "events").rglob("*") if d.is_dir()), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return renamed
+
+
 def project_payload_tree(
     payload_root: Path,
     *,
@@ -871,6 +919,8 @@ def project_payload_tree(
         home=Path.home(),
         key=key if key is not None else require_digest_key(digest_key_target(run_dir)),
     )
+    if (payload_root / "events").is_dir():
+        rename_worker_streams(payload_root, ctx.key)
     projected = 0
     for rel in iter_receipt_files(payload_root):
         path = payload_root / rel
