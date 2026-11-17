@@ -49,9 +49,13 @@ _TERMINAL = frozenset({"completed", "interrupted", "failed", "cancelled", "rolle
 # target store or raw shell data are serialized here. Native auth may issue its
 # own local grant; no grant values are exposed by this helper.
 _NATIVE_PROGRAM = r"""
-import json, os, re, time
+import json, os, re, sys, time
 from concurrent.futures import ThreadPoolExecutor, wait
 STARTED = time.monotonic()
+def emit(text):
+    # Raw bytes with no trailing newline: Windows text mode would write CRLF and grow the output.
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.buffer.flush()
 try:
     from t3_fleet.agent import _build_agent
     client = _build_agent(os.environ).t3
@@ -142,8 +146,8 @@ try:
         "archived_count": len(archived),
     }
     output = json.dumps(result)
-    # print() adds a newline, and the parent's cap counts it, so stay strictly under.
-    if len(output.encode("utf-8")) >= 262144:
+    # The exact bytes are written below with no newline, so this cap is the parent's byte cap.
+    if len(output.encode("utf-8")) > 262144:
         raise ValueError()
     # Separate repository inventory: never workspace roots, titles, paths or URLs. The row
     # predicate is the Hub's, injected above. Any failure, or a result over the size cap,
@@ -176,16 +180,15 @@ try:
                 seen_ids.add(project_id)
                 inventory_rows.append({"project_id": project_id, "repo_key": key})
             candidate = json.dumps({**result, "inventory": {"environment_id": environment_id, "projects": inventory_rows[:MAX_INVENTORY_PROJECTS], "dropped": dropped}})
-            if len(candidate.encode("utf-8")) < 262144:
+            if len(candidate.encode("utf-8")) <= 262144:
                 output = candidate
     except Exception:
         pass
-    print(output)
+    emit(output)
 except Exception:
-    print('{"error":"native_metadata_failed"}')
+    emit('{"error":"native_metadata_failed"}')
 # Exit without joining detail workers: a stalled optional lookup must not
 # hold the subprocess past its budget after the snapshot is printed.
-import sys
 sys.stdout.flush()
 os._exit(0)
 """

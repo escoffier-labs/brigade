@@ -953,7 +953,7 @@ def _padded_projects(count: int, lengths: list[int]) -> list[dict]:
 
 
 def test_inventory_size_cap_is_strictly_below_the_printed_limit(native_t3, monkeypatch):
-    """print() adds a newline, so a 262144 byte result must drop the inventory, 262143 keeps it."""
+    """The native output is raw bytes with no newline: 262144 keeps the inventory, 262145 drops it."""
     from brigade import fleet_t3_observer
 
     configure, _, _, _ = native_t3
@@ -969,7 +969,7 @@ def test_inventory_size_cap_is_strictly_below_the_printed_limit(native_t3, monke
 
     first, second = size(run(400, [4, 4, 4])), size(run(401, [4, 4, 4]))
     each = second - first
-    count = 400 + (_CAP - 1 - first - 400) // each
+    count = 400 + (_CAP - first - 400) // each
     base = size(run(count, [4, 4, 4]))
     assert base < _CAP
 
@@ -982,7 +982,7 @@ def test_inventory_size_cap_is_strictly_below_the_printed_limit(native_t3, monke
         assert remaining == 0
         return lengths
 
-    kept = run(count, tuned(_CAP - 1))
-    assert size(kept) == _CAP - 1 and kept["inventory"]["projects"]
-    dropped = run(count, tuned(_CAP))
+    kept = run(count, tuned(_CAP))
+    assert size(kept) == _CAP and kept["inventory"]["projects"]
+    dropped = run(count, tuned(_CAP + 1))
     assert "inventory" not in dropped and dropped["schemaVersion"] == 2
