@@ -389,9 +389,9 @@ phone over Tailscale:
   drops the window and still applies LIMIT plus a `more` link. Start times
   and node cards are derived from those rendered rows. GET never prunes
   events; the existing hourly retention sweep deletes bounded batches of
-  events older than 90 days while keeping the latest event for every
-  `(node_id, run_id)`. Interactive session rows and cloud lease history get
-  the same bounded sweep (see below).
+  events older than 90 days while keeping the four rows each reader needs per
+  `(node_id, run_id)` (see below). Interactive session rows and cloud lease
+  history get the same bounded sweep.
 - Server-rendered, stdlib only, no framework or CDN asset. Tables, sorting,
   and filtering are plain HTML + query params and work with JavaScript off;
   refresh is a `<meta http-equiv="refresh" content="10">`. The inline
@@ -837,13 +837,35 @@ runbook also remain deferred to that issue.
 ### Hub retention sweeps
 
 The hourly retention thread that already maintains admin statistics also runs
-three bounded sweeps with a 90-day window and a 1,000-row batch per table per
-run. The events sweep deletes only rows older than the window that are not the
-latest event for their `(node_id, run_id)`. The session sweep deletes rows whose
-`heartbeat_at` is older than the window. The cloud lease sweep deletes released
-rows older than the window and expired unreleased rows older than the window,
-and never deletes an unreleased, unexpired lease. Each sweep runs in its own
-short transaction, reports the rows it removed, and is safe to run again.
+three bounded sweeps with a 90-day window. One tick drains up to 20 batches of
+1,000 rows per table, and each batch selects candidates in a plain read and
+deletes only those keys under its own short transaction, so the writer lock is
+released between batches and a backlog is worked off without blocking ingest.
+
+The events sweep deletes only rows older than the window that no reader still
+needs. For every `(node_id, run_id)` it always keeps four rows, however old:
+
+- the latest event, which the latest-state projection and the board read;
+- the first event, which supplies `started_at` on `/status` and the boards;
+- the newest event with a non-empty `seat`, which `last_known_seat` and the
+  Deck seat backfill read when a terminal event drops the field;
+- the newest event with a non-empty `harness`, which the Deck harness backfill
+  reads for a `brigade run --worker` run.
+
+"Latest", "first" and "newest" use the same `(sequence, received_at, digest)`
+order the readers use, and the non-empty test is the readers' own: not null,
+not blank after `trim()`, and not a lone `-`. Every other event older than the
+window may be deleted. Ingest uses `INSERT OR IGNORE` on the event primary key,
+so a node that re-sends its journal can re-insert a swept event; the new row is
+kept for another 90 days.
+
+The session sweep deletes rows whose `heartbeat_at` is older than the window.
+The cloud lease sweep deletes released rows older than the window and expired
+unreleased rows older than the window, and never deletes an unreleased,
+unexpired lease. Each sweep reports the rows it removed, is safe to run again,
+and isolates its own failure: a locked or unavailable table is logged and
+retried next tick without skipping the other sweeps or the sealed-content
+purge.
 
 
 ## Adoption statistics collector and Deck page

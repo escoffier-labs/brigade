@@ -60,6 +60,9 @@ EVENTS_RETENTION_DAYS = 90
 INTERACTIVE_SESSIONS_RETENTION_DAYS = 90
 CLOUD_LEASES_RETENTION_DAYS = 90
 RETENTION_SWEEP_BATCH = 1000
+# A tick drains at most this many batches per table, releasing the writer lock
+# between them, so one call can work off a backlog without starving ingest.
+RETENTION_SWEEP_MAX_BATCHES = 20
 # Consume an unterminated string too, so escaped quotes cannot trigger a
 # quadratic restart at each quote. The JSON decoder still rejects it.
 _JSON_STRINGS = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)', re.DOTALL)

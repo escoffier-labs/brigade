@@ -397,16 +397,19 @@ def maintain(db_path: Path, *, storage_policy: StoragePolicy | None = None) -> N
                 "DELETE FROM fleet_questions WHERE created_at<?",
                 (fleet_hub_messages._expiry_cutoff(storage_policy),),
             )
-        # The events journal, sessions and leases get one bounded batch each.
-        fleet_hub_retention.sweep_retention(conn)
+        # Reclaim sealed ciphertext before the retention sweeps so a failing
+        # sweep can never skip it. Release the writer lock between bounded
+        # batches, including at startup; ciphertext never accumulates in one
+        # unbounded list.
         while True:
-            # Release the writer lock between bounded batches, including at
-            # startup. Ciphertext never accumulates in one unbounded list.
             with conn:
                 conn.execute("BEGIN IMMEDIATE")
                 purged = fleet_hub_sealed.purge_content(conn)
             if purged < fleet_hub_sealed.PURGE_BATCH_SIZE:
                 break
+        # The events journal, sessions and leases get one bounded pass; each
+        # sweep isolates its own failure.
+        fleet_hub_retention.sweep_retention(conn)
     finally:
         conn.close()
 
