@@ -17,6 +17,18 @@ write and no proposal, so a skill that lives elsewhere is never reached through
 the link. Any race (a component vanishing or changing type mid-walk) resolves to
 a kept outcome and never to a write.
 
+A new SKILL.md is published whole or not at all: the text is written and
+fsynced to a temporary sibling under the same held directory, then moved to its
+name with a no-replace publish (`dirfd.replace_children(replace=False)`, a
+link-then-unlink on POSIX and a no-replace rename on Windows, so it never
+overwrites). A write that fails or is interrupted leaves no SKILL.md behind, only
+a temp file that is removed, so the next run writes the bundled text instead of
+keeping a truncated copy as "edited".
+
+An OSError that is not a race (permission denied, a read-only or full disk, an
+I/O error) is a kept outcome too: it is reported with the path and errno, the
+skill is not recorded, and the remaining skills and the rest of init carry on.
+
 Newlines: bundled text is written as LF (the same policy as the template copy
 loop in `install.py`), and a comparison treats CRLF and LF as the same text so a
 Windows checkout, or a copy an older release wrote with CRLF, is not "edited".
@@ -32,6 +44,7 @@ import os
 import stat
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -116,7 +129,15 @@ class SkillWirer:
         rel = "/".join(rel_parts)
         data = text.encode("utf-8")
         dst = self.target.joinpath(*rel_parts)
-        state, existing = self._walk(rel_parts, data)
+        try:
+            state, existing = self._walk(rel_parts, data)
+        except OSError as exc:
+            # Not a race (those are classified inside the walk): the destination could
+            # not be read, created or published. Keep what is there, say why, move on.
+            code = f"errno {exc.errno}" if exc.errno is not None else type(exc).__name__
+            print(f"warning: could not place {dst}: {exc.strerror or exc} ({code})", file=sys.stderr)
+            print(f"brigade: kept ({BLOCKED}): {dst}")
+            return BLOCKED
         if state == WRITTEN:
             self._written[rel] = {
                 "harness": harness,
@@ -244,13 +265,27 @@ class SkillWirer:
             finally:
                 os.close(fd)
             return "existing", b"".join(chunks)
+        return self._publish(parent, name, data)
+
+    def _publish(self, parent: int, name: str, data: bytes) -> tuple[str, bytes | None]:
+        """Write ``data`` to a temp sibling, then publish it under ``name`` without replacing anything."""
+        temporary = f".{name}.{uuid.uuid4().hex}.tmp"
         try:
-            fd = dirfd.open_child_file(parent, name, _CREATE_FLAGS, 0o666)
+            fd = dirfd.open_child_file(parent, temporary, _CREATE_FLAGS, 0o666)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            dirfd.replace_children(parent, temporary, name, replace=False)
         except _RACE_ERRORS as exc:
-            # Lost a race with another writer; that file is theirs to keep.
+            # Lost a race with another writer (the name now exists); that file is theirs to keep.
             return _refusal(parent, name, exc), None
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
+        finally:
+            # The temp file is gone after a successful publish; after any failure it must not linger.
+            with contextlib.suppress(OSError):
+                dirfd.unlink_child(parent, temporary)
+        with contextlib.suppress(OSError):
+            dirfd.fsync_directory(parent)
         return WRITTEN, None
 
     def _file_proposal(self, template_dir: Path, data: bytes, *, skill_id: str, label: str, rel: str) -> str | None:

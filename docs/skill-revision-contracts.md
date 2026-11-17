@@ -71,6 +71,24 @@ guarantee covers SKILL.md wiring only; the other template files keep their own
 write path. Line endings do not count as an edit: bundled text is written as LF
 and a CRLF copy compares equal to it.
 
+A new `SKILL.md` is published whole or not at all. The text is written and
+fsynced to a temporary sibling (`.SKILL.md.<random>.tmp`) under the same held
+directory, then moved to its name with `dirfd.replace_children(replace=False)`,
+the module's portable no-replace publish (a hard link then unlink on POSIX, a
+rename with replacement disabled on Windows; `dirfd.link_child` is POSIX-only,
+so it is not used). It never replaces an existing name: a name taken during the
+publish is the lost-race kept outcome. A failed or interrupted write (a full
+disk, an I/O error, Ctrl-C, a killed process) leaves no `SKILL.md`, and the temp
+file is removed, so the next run writes the bundled text instead of treating a
+truncated file as `edited`.
+
+An error that is not a race (permission denied, a read-only or full disk while
+creating a directory or the temp file, an I/O error while reading) does not
+abort init. That skill is a `kept (not-a-regular-file)` outcome with a warning
+naming the path and errno, it is not recorded, and the remaining skills, the
+`wired.json` write and the rest of init still run. `wired.json` is written in a
+`finally`, so files already placed are recorded even when a later step fails.
+
 The proposal is filed with a `dedupe_key` of
 `init:<skill_id>:<destination path>:<sha256 of the proposed files>`. `inbox_add`
 accepts the key on any caller: when a proposal in any status already carries it,
@@ -92,7 +110,10 @@ other's records, and an unreadable file is copied to
 `wired.json.corrupt-<digest>` before it is replaced. A failed record write is a
 warning. `brigade skills install` and `brigade skills sync` keep their own
 semantics and are unchanged. Review a filed proposal with
-`brigade skills inbox diff <id>`.
+`brigade skills inbox diff <id>`. When the installed `brigade-work` copy is kept
+and `brigade doctor` reports `stale skill`, doctor adds a pointer to
+`brigade skills inbox list` if init filed a proposal for that file. The
+classification itself is unchanged.
 
 `brigade reconfigure --prune` still removes a pruned harness directory whole.
 Before it does, it prints a warning naming each `SKILL.md` under it that differs

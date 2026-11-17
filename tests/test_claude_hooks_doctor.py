@@ -91,6 +91,58 @@ def test_doctor_reports_partial_for_stale_skill(tmp_path: Path, capsys):
     assert "stale skill" in check["detail"]
 
 
+def test_doctor_points_a_kept_stale_skill_at_the_inbox_proposal(tmp_path: Path, capsys):
+    target = _wired(tmp_path)
+    skill = target / ".claude" / "skills" / "brigade-work" / "SKILL.md"
+    skill.write_text("my own edits\n")
+    assert (
+        install_selection(target, Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])) == 0
+    )  # init keeps the copy and files the bundled text as a proposal
+
+    check = _loop_check(target, capsys)
+
+    assert "stale skill" in check["detail"]
+    assert "brigade skills inbox list" in check["detail"]
+
+
+def test_doctor_gives_no_inbox_pointer_without_an_init_proposal(tmp_path: Path, capsys):
+    target = _wired(tmp_path)
+    (target / ".claude" / "skills" / "brigade-work" / "SKILL.md").write_text("stale\n")
+    check = _loop_check(target, capsys)
+    assert "stale skill" in check["detail"]
+    assert "brigade skills inbox" not in check["detail"]
+
+
+def test_doctor_reads_a_crlf_installed_skill_as_current(tmp_path: Path, capsys):
+    from brigade.templates import template_root
+
+    target = _wired(tmp_path)
+    bundled = (template_root() / "skills" / "brigade-work" / "SKILL.md").read_bytes()
+    (target / ".claude" / "skills" / "brigade-work" / "SKILL.md").write_bytes(
+        bundled.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    )
+
+    check = _loop_check(target, capsys)
+
+    assert check["status"] == "OK"
+    assert "stale skill" not in check["detail"]
+
+
+def test_skill_current_treats_crlf_as_current_and_edits_as_stale(tmp_path: Path):
+    from brigade.claude_hooks.classify import _skill_current
+    from brigade.templates import template_root
+
+    target = _wired(tmp_path)
+    installed = target / ".claude" / "skills" / "brigade-work" / "SKILL.md"
+    bundled = (template_root() / "skills" / "brigade-work" / "SKILL.md").read_bytes()
+
+    installed.write_bytes(bundled.replace(b"\n", b"\r\n"))
+    assert _skill_current(target) == (True, True)
+
+    installed.write_bytes(bundled.replace(b"\n", b"\r\n") + b"extra\r\n")
+    assert _skill_current(target) == (True, False)
+
+
 def test_doctor_reports_partial_for_missing_instruction_import(tmp_path: Path, capsys):
     target = _wired(tmp_path)
     claude_md = target / "CLAUDE.md"

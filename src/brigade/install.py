@@ -469,34 +469,37 @@ def install_selection(
     # Skipped with --no-wire.
     wired_skills: list[tuple[str, str]] = []
     wirer = SkillWirer(target)
-    for rel_parts, src, text in skill_md_entries:
-        wirer.place(rel_parts, src.parent, text, skill_id=rel_parts[-2], harness="workspace")
-    if wire_skills:
-        from .skills_cmd import HARNESS_ADAPTERS
+    # finish() always runs, so the records of files already written survive a failure partway through.
+    try:
+        for rel_parts, src, text in skill_md_entries:
+            wirer.place(rel_parts, src.parent, text, skill_id=rel_parts[-2], harness="workspace")
+        if wire_skills:
+            from .skills_cmd import HARNESS_ADAPTERS
 
-        for skill_id in DEFAULT_WIRED_SKILLS:
-            skill_src = root / "skills" / skill_id / "SKILL.md"
-            if not skill_src.is_file():
-                print(f"warning: built-in skill template missing: {skill_src}", file=sys.stderr)
-                continue
-            for h in selection.harnesses:
-                adapter = HARNESS_ADAPTERS.get(h)
-                if not adapter:
+            for skill_id in DEFAULT_WIRED_SKILLS:
+                skill_src = root / "skills" / skill_id / "SKILL.md"
+                if not skill_src.is_file():
+                    print(f"warning: built-in skill template missing: {skill_src}", file=sys.stderr)
                     continue
-                rel = str(adapter.get("install_path", "")).format(skill_id=skill_id)
-                if not rel.startswith("."):
-                    # user-scoped/absolute adapters (e.g. hermes): use `brigade skills install`.
-                    continue
-                status = wirer.place(
-                    (*Path(rel).parts, "SKILL.md"),
-                    skill_src.parent,
-                    skill_src.read_text(encoding="utf-8"),
-                    skill_id=skill_id,
-                    harness=h,
-                )
-                if status not in (SYMLINKED, BLOCKED):
-                    wired_skills.append((h, skill_id))
-    wirer.finish()
+                for h in selection.harnesses:
+                    adapter = HARNESS_ADAPTERS.get(h)
+                    if not adapter:
+                        continue
+                    rel = str(adapter.get("install_path", "")).format(skill_id=skill_id)
+                    if not rel.startswith("."):
+                        # user-scoped/absolute adapters (e.g. hermes): use `brigade skills install`.
+                        continue
+                    status = wirer.place(
+                        (*Path(rel).parts, "SKILL.md"),
+                        skill_src.parent,
+                        skill_src.read_text(encoding="utf-8"),
+                        skill_id=skill_id,
+                        harness=h,
+                    )
+                    if status not in (SYMLINKED, BLOCKED):
+                        wired_skills.append((h, skill_id))
+    finally:
+        wirer.finish()
 
     # Claude Code project hooks enforce the same work loop described by the
     # managed skill. The merge helper owns only Brigade handlers and preserves

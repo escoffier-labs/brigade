@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -502,7 +503,7 @@ def _swap_parent_when_skill_is_created(monkeypatch, parent: Path, outside: Path)
     swapped: list[bool] = []
 
     def racing_open(path, flags, *args, **kwargs):
-        if flags & os.O_EXCL and str(path).endswith("SKILL.md") and not swapped:
+        if flags & os.O_EXCL and "SKILL.md" in str(path) and not swapped:
             swapped.append(True)
             parent.rename(parent.with_name(parent.name + ".moved"))
             parent.symlink_to(outside, target_is_directory=True)
@@ -629,11 +630,20 @@ def test_the_same_edit_in_two_harnesses_files_two_proposals(tmp_path, capsys):
     from brigade import skills_cmd
 
     victim = next(p for p in proposals if ".claude/" in p["dedupe_key"])
+    keeper = next(p for p in proposals if ".codex/" in p["dedupe_key"])
     assert skills_cmd.inbox_reject(target=tmp_path, proposal_id=victim["proposal_id"], reason="no") == 0
     capsys.readouterr()
-    codex.write_bytes(b"# mine in codex, again\n")
+
+    # The codex destination loses its proposal entirely, so a refiling is observable.
+    shutil.rmtree(tmp_path / ".brigade" / "skills" / "inbox" / keeper["proposal_id"])
+    assert [p["proposal_id"] for p in _proposals(tmp_path)] == [victim["proposal_id"]]
+
     assert install_selection(tmp_path, sel) == 0
-    assert len(_proposals(tmp_path)) == 2
+
+    after = {p["dedupe_key"]: p["proposal_id"] for p in _proposals(tmp_path)}
+    assert keeper["dedupe_key"] in after, "the rejected claude proposal muted the codex destination"
+    assert after[victim["dedupe_key"]] == victim["proposal_id"]  # the rejected one stays rejected, not refiled
+    assert len(after) == 2
 
 
 def test_a_proposal_records_stable_provenance_not_the_staging_dir(tmp_path):
@@ -646,7 +656,7 @@ def test_a_proposal_records_stable_provenance_not_the_staging_dir(tmp_path):
 
     from brigade import skills_cmd
 
-    assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal["proposal_id"], force=True) in (0, 2)
+    assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal["proposal_id"], force=True) == 0
     accepted = _proposals(tmp_path)[0]
     assert "brigade-init-skill-" not in json.dumps(accepted)
 
@@ -665,7 +675,7 @@ def test_a_corrupt_wired_json_is_backed_up_not_silently_dropped(tmp_path, capsys
     assert BRIGADE_WORK.as_posix() in _wired(tmp_path)
 
 
-def test_concurrent_wirers_keep_each_others_records(tmp_path):
+def test_a_second_wirer_re_reads_wired_json_in_finish_and_keeps_the_first_records(tmp_path):
     from brigade.skill_wiring import SkillWirer
 
     (tmp_path / ".brigade").mkdir()
@@ -683,3 +693,248 @@ def test_concurrent_wirers_keep_each_others_records(tmp_path):
     second.finish()
 
     assert set(_wired(tmp_path)) == {".claude/skills/brigade-work/SKILL.md", ".codex/skills/brigade-work/SKILL.md"}
+
+
+# --- #1844 fix round 2: atomic publish and non-race errors ---------------------------------
+
+
+def test_a_failed_write_leaves_no_skill_md_and_the_next_install_writes_the_bundled_text(tmp_path, monkeypatch, capsys):
+    import errno
+
+    from brigade import skill_wiring
+
+    real_fdopen = os.fdopen
+    bundled = _bundled_text("brigade-work").encode("utf-8")
+
+    class FullDisk:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+        def write(self, data):
+            if data != bundled:  # fdopen is process-wide: fail only the SKILL.md write
+                return self._handle.write(data)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(skill_wiring.os, "fdopen", lambda fd, *a, **k: FullDisk(real_fdopen(fd, *a, **k)))
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    err = capsys.readouterr().err
+    assert "could not place" in err and str(tmp_path / BRIGADE_WORK) in err and f"errno {errno.ENOSPC}" in err
+    assert list((tmp_path / ".claude" / "skills" / "brigade-work").iterdir()) == [], (
+        "a truncated SKILL.md or temp file was left"
+    )
+    wired_json = tmp_path / ".brigade" / "skills" / "wired.json"
+    assert not wired_json.exists() or BRIGADE_WORK.as_posix() not in _wired(tmp_path)
+
+    monkeypatch.undo()
+    capsys.readouterr()
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    assert (tmp_path / BRIGADE_WORK).read_bytes() == _bundled_text("brigade-work").encode("utf-8")
+    assert "kept (edited)" not in capsys.readouterr().out
+    assert _proposals(tmp_path) == []
+
+
+def test_an_interrupt_mid_write_leaves_no_skill_md(tmp_path, monkeypatch):
+    from brigade import skill_wiring
+
+    real_fdopen = os.fdopen
+    bundled = _bundled_text("brigade-work").encode("utf-8")
+
+    class Interrupted:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+        def write(self, data):
+            if data != bundled:  # fdopen is process-wide: interrupt only the SKILL.md write
+                return self._handle.write(data)
+            self._handle.write(data[:10])  # a partial write reaches the temp file, then Ctrl-C
+            self._handle.flush()
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(skill_wiring.os, "fdopen", lambda fd, *a, **k: Interrupted(real_fdopen(fd, *a, **k)))
+
+    with pytest.raises(KeyboardInterrupt):
+        install_selection(tmp_path, _claude_sel())
+
+    assert list((tmp_path / ".claude" / "skills" / "brigade-work").iterdir()) == []
+
+
+@POSIX_ONLY
+def test_a_name_taken_during_the_publish_is_kept_and_not_overwritten(tmp_path, monkeypatch, capsys):
+    from brigade import dirfd
+
+    real_replace = dirfd.replace_children
+    theirs = b"# written by another process\n"
+
+    def lose_the_race(parent, source, destination, **kwargs):
+        if destination == "SKILL.md":
+            fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=parent)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(theirs)
+        return real_replace(parent, source, destination, **kwargs)
+
+    monkeypatch.setattr(dirfd, "replace_children", lose_the_race)
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    assert (tmp_path / BRIGADE_WORK).read_bytes() == theirs
+    leftovers = [p.name for p in (tmp_path / ".claude" / "skills" / "brigade-work").iterdir()]
+    assert leftovers == ["SKILL.md"], "the temp sibling was left behind"
+    assert "kept (not-a-regular-file)" in capsys.readouterr().out
+
+
+def _assert_init_went_on(tmp_path: Path, captured, *, denied: Path, written: list[Path]) -> None:
+    import errno
+
+    assert "could not place" in captured.err and f"errno {errno.EACCES}" in captured.err
+    assert str(denied) in captured.err
+    assert not denied.exists()
+    wired = _wired(tmp_path)
+    for path in written:
+        assert path.read_bytes() == _bundled_text(path.parent.name).encode("utf-8")
+        assert path.relative_to(tmp_path).as_posix() in wired  # finish() still recorded it
+    assert denied.relative_to(tmp_path).as_posix() not in wired
+    assert (tmp_path / ".brigade" / "config.json").is_file()  # the rest of init ran
+
+
+def test_a_permission_error_creating_a_directory_keeps_going(tmp_path, monkeypatch, capsys):
+    import errno
+
+    from brigade import dirfd
+
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    real = dirfd.mkdir_child
+
+    seen: list[str] = []
+
+    def deny_second_brigade_work(parent, name, *args, **kwargs):
+        if name == "brigade-work":
+            seen.append(name)
+            if len(seen) == 2:  # claude's directory is made; codex's is denied
+                raise PermissionError(errno.EACCES, "Permission denied")
+        return real(parent, name, *args, **kwargs)
+
+    monkeypatch.setattr(dirfd, "mkdir_child", deny_second_brigade_work)
+
+    assert install_selection(tmp_path, sel) == 0
+
+    skills = tmp_path / ".claude" / "skills"
+    _assert_init_went_on(
+        tmp_path,
+        capsys.readouterr(),
+        denied=tmp_path / ".codex" / "skills" / "brigade-work" / "SKILL.md",
+        written=[
+            skills / "brigade-work" / "SKILL.md",
+            skills / "ultra-work-scout" / "SKILL.md",
+            tmp_path / ".codex" / "skills" / "ultra-work-scout" / "SKILL.md",
+        ],
+    )
+
+
+def test_a_permission_error_creating_the_file_keeps_going(tmp_path, monkeypatch, capsys):
+    import errno
+
+    from brigade import dirfd
+
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    real = dirfd.open_child_file
+    creates: list[str] = []
+
+    def deny_second_create(parent, name, *args, **kwargs):
+        if ".SKILL.md." in name:
+            creates.append(name)
+            if len(creates) == 2:  # claude brigade-work passes; codex brigade-work is denied
+                raise PermissionError(errno.EACCES, "Permission denied")
+        return real(parent, name, *args, **kwargs)
+
+    monkeypatch.setattr(dirfd, "open_child_file", deny_second_create)
+
+    assert install_selection(tmp_path, sel) == 0
+
+    assert len(creates) == 4, "later skills were skipped after the error"
+    _assert_init_went_on(
+        tmp_path,
+        capsys.readouterr(),
+        denied=tmp_path / ".codex" / "skills" / "brigade-work" / "SKILL.md",
+        written=[
+            tmp_path / ".claude" / "skills" / "brigade-work" / "SKILL.md",
+            tmp_path / ".codex" / "skills" / "ultra-work-scout" / "SKILL.md",
+        ],
+    )
+
+
+def test_an_io_error_while_reading_an_existing_skill_is_kept_not_fatal(tmp_path, monkeypatch, capsys):
+    import errno
+
+    from brigade import skill_wiring
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+    capsys.readouterr()
+
+    def eio(_fd, _size):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(skill_wiring.os, "read", eio)
+
+    assert install_selection(tmp_path, _claude_sel()) == 0
+
+    captured = capsys.readouterr()
+    assert f"errno {errno.EIO}" in captured.err
+    assert "kept (not-a-regular-file)" in captured.out
+    assert (tmp_path / BRIGADE_WORK).read_bytes() == _bundled_text("brigade-work").encode("utf-8")
+
+
+def test_two_wirers_in_threads_never_lose_a_record(tmp_path):
+    import threading
+
+    from brigade.skill_wiring import SkillWirer
+
+    (tmp_path / ".brigade").mkdir()
+    template_dir = template_root() / "skills" / "brigade-work"
+    text = _bundled_text("brigade-work")
+    harnesses = [".claude", ".codex", ".cursor", ".gemini", ".opencode", ".pi"]
+    barrier = threading.Barrier(len(harnesses))
+    errors: list[BaseException] = []
+
+    def run(prefix: str) -> None:
+        try:
+            wirer = SkillWirer(tmp_path)
+            wirer.place(
+                (prefix, "skills", "brigade-work", "SKILL.md"),
+                template_dir,
+                text,
+                skill_id="brigade-work",
+                harness=prefix.lstrip("."),
+            )
+            barrier.wait(timeout=10)
+            wirer.finish()
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(h,)) for h in harnesses]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert errors == []
+    assert set(_wired(tmp_path)) == {f"{h}/skills/brigade-work/SKILL.md" for h in harnesses}
