@@ -128,6 +128,28 @@ def test_report_has_no_paths_contents_or_source_identities(monkeypatch, tmp_path
     review.validate_report(report)  # the node's own output passes the Hub's validation
 
 
+def test_report_maps_link_states_onto_statuses_a_deployed_hub_accepts(monkeypatch, tmp_path):
+    from brigade import skills_cmd
+
+    rows = [
+        {"skill_id": "linked-skill", "harness": "claude", "status": "symlink"},
+        {"skill_id": "broken-skill", "harness": "claude", "status": "unusable"},
+        {"skill_id": "plain-skill", "harness": "claude", "status": "current"},
+    ]
+    monkeypatch.setattr(skills_cmd, "_fleet_status_payload", lambda target: _fake_status(rows))
+    monkeypatch.setattr(skills_cmd, "_fleet_receipts", lambda target: {})
+    monkeypatch.setattr(fleet_skills_report, "build_scores", lambda target, now: [])
+    report = fleet_skills_report.build_report(tmp_path, now=NOW)
+
+    assert {row["skill_id"]: row["status"] for row in report["copies"]} == {
+        "linked-skill": "external",
+        "broken-skill": "unknown",
+        "plain-skill": "current",
+    }
+    assert set(review.STATUSES) == {"current", "stale", "missing", "unsupported", "unknown", "external"}
+    review.validate_report(report)
+
+
 def test_report_is_bounded_and_marks_truncation(monkeypatch, tmp_path):
     from brigade import skills_cmd
 

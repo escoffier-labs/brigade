@@ -967,7 +967,11 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
             installed_state = str(adapter.get("installed_state") or "")
             if installed_state in {"symlink", "file", "other", "unreadable"}:
                 link_target = adapter.get("link_target")
-                linked = f" to {link_target}" if isinstance(link_target, str) and link_target else ""
+                reason = _install_mod._installed_state_reason(
+                    installed_state,
+                    link_target if isinstance(link_target, str) else None,
+                    Path(str(adapter.get("installed_path") or "")),
+                )
                 issues.append(
                     {
                         "status": _registry_mod.WARN,
@@ -977,10 +981,7 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
                         "harness": adapter_id,
                         "installed_state": installed_state,
                         "link_target": link_target,
-                        "detail": (
-                            f"{adapter_id} installed copy is a {installed_state}{linked}; "
-                            "Brigade leaves it untouched instead of following it"
-                        ),
+                        "detail": f"{adapter_id}: {reason}",
                         "fingerprint": lint_payload.get("fingerprint"),
                     }
                 )

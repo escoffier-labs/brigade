@@ -1442,7 +1442,7 @@ def _read_state_file_bytes(anchor: _StateRootAnchor, *relative: str) -> bytes | 
 
 
 def _state_entry_kind(anchor: _StateRootAnchor, *relative: str) -> str:
-    """Classify one path under the anchored state root as ``missing``, ``dir``, or ``other``.
+    """Classify one path under the anchored state root as ``missing``, ``dir``, ``file``, or ``other``.
 
     A symlinked component anywhere along the path is refused instead of followed.
     """
@@ -1464,7 +1464,9 @@ def _state_entry_kind(anchor: _StateRootAnchor, *relative: str) -> str:
             raise SkillsStatePathError(
                 f"skills state path must not be a symlink: {(anchor.workspace / '.brigade').joinpath(*relative)}"
             )
-        return "dir" if stat_module.S_ISDIR(st.st_mode) else "other"
+        if stat_module.S_ISDIR(st.st_mode):
+            return "dir"
+        return "file" if stat_module.S_ISREG(st.st_mode) else "other"
     finally:
         for fd in reversed(opened):
             os.close(fd)

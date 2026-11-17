@@ -617,7 +617,7 @@ def uninstall(
         for install_target in targets:
             state_anchor.revalidate()
             try:
-                dest = _install_mod._install_dir(workspace, install_target, skill_id)
+                dest = _install_mod._install_dir(workspace, install_target, skill_id, leaf_link_is_local=True)
             except ValueError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
@@ -653,7 +653,15 @@ def uninstall(
                 if under_state_root:
                     _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 else:
-                    shutil.rmtree(dest)
+                    try:
+                        _install_mod._remove_plain_install_dir(dest)
+                    except _registry_mod.SkillsStatePathError as exc:
+                        # Swapped to a link after the classification: left
+                        # alone, its receipt stays authoritative.
+                        skipped.append(
+                            {"harness": install_target, "path": str(dest), "state": "symlink", "reason": str(exc)}
+                        )
+                        continue
             if has_receipt:
                 _registry_mod._unlink_in_anchor(state_anchor, "skills", "installs", receipt_name)
             _registry_mod._append_state_line(
@@ -762,8 +770,8 @@ def rollback(
             if _registry_mod._state_entry_kind(state_anchor, *snapshot_rel) != "dir":
                 print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
                 return 1
-            dest = _install_mod._install_dir(workspace, harness, skill_id)
-            dest_state, dest_link_target = _install_mod._installed_path_state(workspace, dest)
+            dest = _install_mod._install_dir(workspace, harness, skill_id, leaf_link_is_local=True)
+            dest_state, dest_link_target = _install_mod._installed_path_state(workspace, dest, anchor=state_anchor)
             if dest_state not in {"dir", "missing"}:
                 # A symlinked, dangling, or otherwise non-plain install is left
                 # untouched; the rollback snapshot stays recorded for later.
@@ -831,9 +839,24 @@ def rollback(
                 _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 _registry_mod._write_collected_tree_into_anchor(dirs, files, state_anchor, *state_parts)
             else:
+                # Classify again right before writing: the first check is
+                # old by now (snapshot read, lint, binding re-checks). A link
+                # planted since is refused here, and the leaf is created with
+                # a plain mkdir (no exist_ok), so it is never followed.
+                recheck_state, recheck_link_target = _install_mod._installed_path_state(
+                    workspace, dest, anchor=state_anchor
+                )
+                if recheck_state != dest_state:
+                    print(
+                        f"skipped: rollback left {skill_id} on {harness} untouched: installed copy changed to "
+                        + _install_mod._installed_state_reason(recheck_state, recheck_link_target, dest),
+                        file=sys.stderr,
+                    )
+                    return 2
                 if dest_state == "dir":
-                    shutil.rmtree(dest)
-                dest.mkdir(parents=True, exist_ok=True)
+                    _install_mod._remove_plain_install_dir(dest)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.mkdir(dest)
                 for parts in dirs:
                     (dest.joinpath(*parts)).mkdir(parents=True, exist_ok=True)
                 for parts, data in files.items():
@@ -848,7 +871,7 @@ def rollback(
                 state_anchor, "skills", "installs", rollback_receipt_name, data=_registry_mod._json_bytes(payload)
             )
             _registry_mod._remove_tree_in_anchor(state_anchor, *snapshot_rel)
-    except _registry_mod.SkillsStatePathError as exc:
+    except (_registry_mod.SkillsStatePathError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     payload["receipt_path"] = str(rollback_receipt_path)
@@ -921,7 +944,7 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
         source_text = _registry_mod._skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
     rendered = _registry_mod._render_skill_text_for_harness(source_text, metadata, skill_id, harness)
     try:
-        installed_dir = _install_mod._install_dir(target, harness, skill_id)
+        installed_dir = _install_mod._install_dir(target, harness, skill_id, leaf_link_is_local=True)
     except ValueError as exc:
         # A linked install resolving outside the workspace is reported, never
         # followed into an outside diff.
@@ -930,7 +953,8 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
     # The installed side is inspected through one anchored snapshot; a
     # symlinked SKILL.md in a state-backed install target contributes
     # absence, never outside file content.
-    _snapshot_dirs, snapshot_files = _install_mod._installed_tree_snapshot(target, installed_dir)
+    inspection = _install_mod._inspect_installed_tree(target, installed_dir)
+    snapshot_files = inspection.files
     installed_raw = snapshot_files.get(("SKILL.md",))
     installed_present = installed_raw is not None
     installed_text = installed_raw.decode("utf-8", errors="replace") if installed_raw is not None else ""
@@ -952,6 +976,7 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
         lint_payload=lint_payload,
         rendered=rendered,
         installed_dir=installed_dir,
+        inspection=inspection,
     )
     payload = {
         "target": str(target),
