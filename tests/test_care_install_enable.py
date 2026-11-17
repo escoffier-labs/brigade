@@ -40,6 +40,12 @@ def care_home(tmp_path, monkeypatch):
     monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
     monkeypatch.setattr(care_schedules, "effective_systemd_calendar", lambda timer_name: (None, None))
     monkeypatch.setattr(extras, "enabled", lambda: True)
+    # Callers that pass no home (doctor, work brief) must still inspect the tmp home.
+    monkeypatch.setattr(care_cmd, "_systemd_user_dir", lambda h=None: _unit_dir(home if h is None else h))
+    monkeypatch.setattr(
+        care_cmd, "_launchd_dir", lambda h=None: (home if h is None else h) / "Library" / "LaunchAgents"
+    )
+    monkeypatch.setattr(care_receipts, "_crontab_spool_text", lambda: None)
     return home, target
 
 
@@ -65,6 +71,7 @@ def test_systemd_install_links_each_timer_by_default(care_home, capsys):
     assert payload["enable"]["enabled"] is True
     assert payload["enable"]["conflicts"] == []
     assert [command for command in payload["next_commands"] if "enable --now" in command] == []
+    assert all(item["started"] is True and item["start_error"] is None for item in payload["enable"]["timers"])
 
 
 def test_systemd_reinstall_is_idempotent(care_home, capsys):
@@ -294,8 +301,6 @@ def test_work_brief_prints_schedule_health_warning(care_home, monkeypatch, capsy
     _install(home, target, entry_ids=["care-scan"])
     name = _timer_name(target, "care-scan")
     (_wants_dir(home) / name).unlink()
-    unit_dir = _unit_dir(home)
-    monkeypatch.setattr(care_cmd, "_systemd_user_dir", lambda home=None: unit_dir)
 
     capsys.readouterr()
     assert work_cmd.brief(target=target, json_output=True) == 0
@@ -309,18 +314,435 @@ def test_work_brief_prints_schedule_health_warning(care_home, monkeypatch, capsy
     assert f"enable --now {name}" in out
 
 
-def test_doctor_reports_schedule_health_as_warn(care_home, monkeypatch):
+def test_doctor_reports_schedule_health_as_warn(care_home):
     home, target = care_home
     _install(home, target, entry_ids=["care-scan"])
     name = _timer_name(target, "care-scan")
-    unit_dir = _unit_dir(home)
 
     clean = doctor._check_care_schedule_health(target)
-    assert clean == [(doctor.OK, "care: schedule health", "installed timers are enabled and reporting")]
+    assert clean == [
+        (doctor.OK, "care: schedule health", "1 installed schedule(s) enabled and reporting (crontab not inspected)")
+    ]
 
     (_wants_dir(home) / name).unlink()
-    monkeypatch.setattr(care_cmd, "_systemd_user_dir", lambda home=None: unit_dir)
     level, check_name, detail = doctor._check_care_schedule_health(target)[0]
     assert level == doctor.WARN
     assert check_name == "care: schedule health (care-scan)"
     assert f"systemctl --user enable --now {name}" in detail
+
+
+def test_doctor_is_neutral_when_no_care_is_installed(care_home):
+    _, target = care_home
+
+    [(level, check_name, detail)] = doctor._check_care_schedule_health(target)
+
+    assert level == doctor.INFO
+    assert check_name == "care: schedule health"
+    assert detail == "no installed care schedule found (crontab not inspected)"
+    assert "enabled and reporting" not in detail
+
+
+# --- Activation: a new wants link needs daemon-reload and start (finding 1) ---
+
+
+def test_install_reloads_then_starts_each_newly_linked_timer(care_home, systemctl_calls, capsys):
+    home, target = care_home
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    names = [item["name"] for item in payload["enable"]["timers"]]
+    assert systemctl_calls == [["daemon-reload"], *[["start", name] for name in names]]
+    assert payload["enable"]["daemon_reload"] == {"ok": True, "error": None}
+    assert payload["enable"]["started"] == names
+    assert payload["enable"]["start_failed"] == []
+    assert not any("daemon-reload" in command or "start" in command for command in payload["next_commands"])
+
+
+def test_install_keeps_the_link_and_prints_commands_when_systemctl_is_missing(care_home, monkeypatch, capsys):
+    home, target = care_home
+    monkeypatch.setattr(care_enable, "run_systemctl", lambda args: (False, "systemctl command not found"))
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    name = _timer_name(target, "daily-care")
+    assert (_wants_dir(home) / name).is_symlink()
+    record = next(item for item in payload["enable"]["timers"] if item["name"] == name)
+    assert record["enabled"] is True
+    assert record["started"] is False
+    assert "daemon-reload failed" in record["start_error"]
+    assert payload["enable"]["daemon_reload"] == {"ok": False, "error": "systemctl command not found"}
+    assert payload["next_commands"][0] == "systemctl --user daemon-reload"
+    assert f"systemctl --user start {name}" in payload["next_commands"]
+
+    capsys.readouterr()
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    assert "could not be started now" in capsys.readouterr().out
+
+
+def test_install_reports_a_failed_start_per_timer(care_home, monkeypatch, capsys):
+    home, target = care_home
+    bad = _timer_name(target, "nightly-ops")
+
+    def fake(args):
+        if args[0] == "start" and args[1] == bad:
+            return False, "Unit not found."
+        return True, ""
+
+    monkeypatch.setattr(care_enable, "run_systemctl", fake)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    by_name = {item["name"]: item for item in payload["enable"]["timers"]}
+    assert by_name[bad]["started"] is False
+    assert by_name[bad]["start_error"] == "Unit not found."
+    assert payload["enable"]["start_failed"] == [bad]
+    assert by_name[_timer_name(target, "daily-care")]["started"] is True
+    assert f"systemctl --user start {bad}" in payload["next_commands"]
+    assert "systemctl --user daemon-reload" not in payload["next_commands"]
+
+
+def test_dry_run_no_enable_and_reinstall_never_call_systemctl(care_home, systemctl_calls):
+    home, target = care_home
+    assert care_cmd.install(target=target, backend="systemd", home=home, dry_run=True) == 0
+    assert care_cmd.install(target=target, backend="systemd", home=home, enable=False) == 0
+    assert systemctl_calls == []
+
+    _install(home, target, entry_ids=["care-scan"])
+    systemctl_calls.clear()
+    _install(home, target, entry_ids=["care-scan"])
+    assert systemctl_calls == []
+
+
+def test_systemctl_runner_spawns_user_systemctl_and_reports_failures(monkeypatch):
+    seen: list[list[str]] = []
+
+    class Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def run(argv, **kwargs):
+        seen.append(argv)
+        return Done()
+
+    monkeypatch.setattr(care_enable.subprocess, "run", run)
+    assert care_enable._systemctl_subprocess(["start", "x.timer"]) == (True, "")
+    assert seen == [["systemctl", "--user", "start", "x.timer"]]
+
+    Done.returncode = 5
+    Done.stderr = "Unit x.timer not found.\n"
+    assert care_enable._systemctl_subprocess(["start", "x.timer"]) == (False, "Unit x.timer not found.")
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(care_enable.subprocess, "run", missing)
+    assert care_enable._systemctl_subprocess(["daemon-reload"]) == (False, "systemctl command not found")
+
+
+# --- Uninstall removes the link it created and stops the timer (finding 2) ---
+
+
+def test_uninstall_removes_the_wants_link_and_stops_the_timer(care_home, systemctl_calls, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"])
+    name = _timer_name(target, "care-scan")
+    link = _wants_dir(home) / name
+    assert link.is_symlink()
+    systemctl_calls.clear()
+    capsys.readouterr()
+
+    assert (
+        care_cmd.uninstall(target=target, backend="systemd", home=home, entry_ids=["care-scan"], json_output=True) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert not link.is_symlink()
+    assert payload["enable_links"]["removed"] == [name]
+    assert payload["enable_links"]["stopped"] == [name]
+    assert ["stop", name] in systemctl_calls
+
+    # A later --no-enable install must not silently re-enable the timer.
+    _install(home, target, entry_ids=["care-scan"], enable=False)
+    assert not link.is_symlink()
+
+
+def test_uninstall_dry_run_reports_the_link_and_changes_nothing(care_home, systemctl_calls, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"])
+    name = _timer_name(target, "care-scan")
+    systemctl_calls.clear()
+    capsys.readouterr()
+
+    assert (
+        care_cmd.uninstall(
+            target=target, backend="systemd", home=home, entry_ids=["care-scan"], dry_run=True, json_output=True
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["enable_links"]["removed"] == [name]
+    assert payload["enable_links"]["stopped"] == []
+    assert (_wants_dir(home) / name).is_symlink()
+    assert _unit_path(home, target, "care-scan", ".timer").is_file()
+    assert systemctl_calls == []
+
+
+def test_uninstall_never_removes_foreign_wants_entries(care_home, tmp_path, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"], enable=False)
+    wants = _wants_dir(home)
+    wants.mkdir(parents=True)
+    scan = wants / _timer_name(target, "care-scan")
+    other = tmp_path / "elsewhere.timer"
+    other.write_text("[Timer]\n", encoding="utf-8")
+    scan.symlink_to(other)
+    capsys.readouterr()
+
+    assert (
+        care_cmd.uninstall(target=target, backend="systemd", home=home, entry_ids=["care-scan"], json_output=True) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert scan.is_symlink() and scan.resolve() == other.resolve()
+    assert payload["enable_links"]["kept"] == [scan.name]
+    assert payload["enable_links"]["removed"] == []
+
+    scan.unlink()
+    scan.write_text("foreign file\n", encoding="utf-8")
+    _install(home, target, entry_ids=["care-scan"], enable=False)
+    assert care_cmd.uninstall(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
+    assert scan.read_text(encoding="utf-8") == "foreign file\n"
+
+
+def test_uninstall_clears_a_dangling_link_left_by_an_earlier_uninstall(care_home, capsys):
+    home, target = care_home
+    name = _timer_name(target, "care-scan")
+    wants = _wants_dir(home)
+    wants.mkdir(parents=True)
+    (wants / name).symlink_to(Path("..") / name)
+    assert not _unit_path(home, target, "care-scan", ".timer").exists()
+
+    assert (
+        care_cmd.uninstall(target=target, backend="systemd", home=home, entry_ids=["care-scan"], json_output=True) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert not (wants / name).is_symlink()
+    assert payload["enable_links"]["removed"] == [name]
+
+
+# --- Already-linked timers are reported as enabled in every branch (finding 3) ---
+
+
+def test_no_enable_reinstall_reports_an_existing_link_as_enabled(care_home, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"])
+    name = _timer_name(target, "care-scan")
+    capsys.readouterr()
+
+    assert (
+        care_cmd.install(
+            target=target, backend="systemd", home=home, entry_ids=["care-scan"], enable=False, json_output=True
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    record = next(item for item in payload["enable"]["timers"] if item["name"] == name)
+    assert record["status"] == "already"
+    assert record["enabled"] is True
+    assert "--no-enable did not remove" in record["detail"]
+    assert (_wants_dir(home) / name).is_symlink()
+    assert not any("enable --now" in command for command in payload["next_commands"])
+
+    capsys.readouterr()
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"], enable=False) == 0
+    assert "remain disabled" not in capsys.readouterr().out
+
+
+def test_blocked_and_adopted_installs_still_report_an_existing_link_as_enabled(care_home, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"])
+    scan = _timer_name(target, "care-scan")
+    capsys.readouterr()
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    adopted = next(item for item in json.loads(capsys.readouterr().out)["enable"]["timers"] if item["name"] == scan)
+    assert adopted["status"] == "already"
+    assert adopted["enabled"] is True
+    assert "adopted" in adopted["detail"]
+
+    timer = _unit_path(home, target, "care-scan", ".timer")
+    timer.write_text(
+        timer.read_text(encoding="utf-8").replace("memory care scan timer", "hand-edited"), encoding="utf-8"
+    )
+    capsys.readouterr()
+    assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"], json_output=True) == 1
+    blocked = next(item for item in json.loads(capsys.readouterr().out)["enable"]["timers"] if item["name"] == scan)
+    assert blocked["enabled"] is True
+    assert "blocked" in blocked["detail"]
+
+
+# --- A symlinked timers.target.wants is never written through (finding 4) ---
+
+
+def test_symlinked_wants_dir_is_a_conflict_and_nothing_is_written(care_home, tmp_path, capsys):
+    home, target = care_home
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _unit_dir(home).mkdir(parents=True)
+    _wants_dir(home).symlink_to(outside, target_is_directory=True)
+
+    assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert list(outside.iterdir()) == []
+    assert payload["enable"]["enabled"] is False
+    assert len(payload["enable"]["conflicts"]) == len(payload["enable"]["timers"])
+    assert all("symlink" in item["detail"] for item in payload["enable"]["timers"])
+    assert payload["enable"]["started"] == []
+
+
+def test_uninstall_does_not_follow_a_symlinked_wants_dir(care_home, tmp_path, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"], enable=False)
+    name = _timer_name(target, "care-scan")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / name).symlink_to(Path("..") / name)
+    _wants_dir(home).symlink_to(outside, target_is_directory=True)
+    capsys.readouterr()
+
+    assert (
+        care_cmd.uninstall(target=target, backend="systemd", home=home, entry_ids=["care-scan"], json_output=True) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert (outside / name).is_symlink()
+    assert "symlink" in payload["enable_links"]["conflict"]
+    assert payload["enable_links"]["removed"] == []
+
+
+# --- care status reports the schedule warnings (finding 5) ---
+
+
+def test_care_status_json_and_text_report_schedule_warnings(care_home, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"])
+    name = _timer_name(target, "care-scan")
+    (_wants_dir(home) / name).unlink()
+    capsys.readouterr()
+
+    assert care_cmd.status(target=target, backend="systemd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schedule_health"]["count"] == 1
+    assert payload["schedule_health"]["warnings"][0]["code"] == care_receipts.SCHEDULE_WARNING_TIMER_DISABLED
+
+    assert care_cmd.status(target=target, backend="systemd", home=home) == 0
+    out = capsys.readouterr().out
+    assert f"schedule_warning: care-scan timer-disabled: timer {name} is installed but not enabled" in out
+    assert f"run `systemctl --user enable --now {name}`" in out
+
+
+def test_care_status_has_no_warnings_for_a_healthy_install(care_home, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"])
+    capsys.readouterr()
+
+    assert care_cmd.status(target=target, backend="systemd", home=home, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["schedule_health"]["warnings"] == []
+
+
+# --- Crontab and launchd workspaces get schedule warnings (finding 6) ---
+
+
+def test_crontab_workspace_is_inspected_from_the_spool_file(care_home, monkeypatch):
+    home, target = care_home
+    block = care_cmd.render_crontab_block(workspace=target, home=home)
+    monkeypatch.setattr(care_receipts, "_crontab_spool_text", lambda: block)
+
+    health = care_receipts.schedule_health(target, home=home, extras_on=False)
+
+    assert health["not_inspected"] == []
+    assert health["installed"] >= 1
+    assert health["warnings"]
+    assert {warning["code"] for warning in health["warnings"]} == {care_receipts.SCHEDULE_WARNING_EXTRAS_OFF}
+    assert care_receipts.schedule_health(target, home=home, extras_on=True)["warnings"] == []
+
+
+def test_unreadable_crontab_is_reported_as_not_inspected(care_home):
+    home, target = care_home
+
+    health = care_receipts.schedule_health(target, home=home, extras_on=False)
+
+    assert health["not_inspected"] == ["crontab"]
+    assert health["installed"] == 0
+    assert health["warnings"] == []
+
+
+def test_launchd_workspace_warns_from_installed_plists(care_home):
+    home, target = care_home
+    assert care_cmd.install(target=target, backend="launchd", home=home, entry_ids=["daily-care"]) == 0
+    identity = care_cmd._target_identity(target)
+    plist = home / "Library" / "LaunchAgents" / f"dev.brigade.care.{identity}.daily-care.plist"
+    assert plist.is_file()
+
+    off = care_receipts.schedule_health(target, home=home, extras_on=False)
+    assert [warning["code"] for warning in off["warnings"]] == [care_receipts.SCHEDULE_WARNING_EXTRAS_OFF]
+    assert off["installed"] == 1
+
+    stamp = time.time()
+    old = stamp - 30 * 24 * 60 * 60
+    os.utime(plist, (old, old))
+    health = care_receipts.schedule_health(target, home=home, extras_on=True, now=stamp)
+    assert [warning["code"] for warning in health["warnings"]] == [care_receipts.SCHEDULE_WARNING_NEVER_RAN]
+    assert health["warnings"][0]["fix_command"] == f"launchctl load -w {plist}"
+
+
+def test_care_status_launchd_reports_schedule_health(care_home, capsys):
+    home, target = care_home
+    assert care_cmd.install(target=target, backend="launchd", home=home, entry_ids=["daily-care"]) == 0
+    capsys.readouterr()
+
+    assert care_cmd.status(target=target, backend="launchd", home=home, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schedule_health"]["installed"] == 1
+
+
+# --- Warning text (finding 8) ---
+
+
+def test_never_ran_detail_formats_sub_day_ages_in_hours(care_home):
+    home, target = care_home
+    _install(home, target, entry_ids=["ingest-sweep"])
+    timer = _unit_path(home, target, "ingest-sweep", ".timer")
+    stamp = time.time()
+    old = stamp - 7 * 60 * 60
+    os.utime(timer, (old, old))
+
+    health = care_receipts.schedule_health(target, home=home, extras_on=True, now=stamp)
+
+    [warning] = health["warnings"]
+    assert warning["code"] == care_receipts.SCHEDULE_WARNING_NEVER_RAN
+    assert "7 hours ago" in warning["detail"]
+    assert "0 days" not in warning["detail"]
+
+
+def test_never_ran_is_only_emitted_for_an_enabled_timer_with_extras_on(care_home):
+    home, target = care_home
+    _install(home, target, entry_ids=["daily-care"])
+    timer = _unit_path(home, target, "daily-care", ".timer")
+    stamp = time.time()
+    old = stamp - 30 * 24 * 60 * 60
+    os.utime(timer, (old, old))
+
+    extras_off = care_receipts.schedule_health(target, home=home, extras_on=False, now=stamp)
+    assert [warning["code"] for warning in extras_off["warnings"]] == [care_receipts.SCHEDULE_WARNING_EXTRAS_OFF]
+
+    (_wants_dir(home) / timer.name).unlink()
+    disabled = care_receipts.schedule_health(target, home=home, extras_on=True, now=stamp)
+    assert [warning["code"] for warning in disabled["warnings"]] == [care_receipts.SCHEDULE_WARNING_TIMER_DISABLED]

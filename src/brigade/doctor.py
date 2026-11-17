@@ -1566,12 +1566,17 @@ def _check_memory_care_producer_collision(target: Path) -> List[CheckResult]:
 def _check_care_schedule_health(target: Path) -> List[CheckResult]:
     from . import care_receipts
 
-    warnings = care_receipts.schedule_health(target)["warnings"]
-    if not warnings:
-        return [(OK, "care: schedule health", "installed timers are enabled and reporting")]
+    health = care_receipts.schedule_health(target)
+    if health["warnings"]:
+        return [
+            (WARN, f"care: schedule health ({item['entry']})", f"{item['detail']}; run `{item['fix_command']}`")
+            for item in health["warnings"]
+        ]
+    skipped = f" ({', '.join(health['not_inspected'])} not inspected)" if health["not_inspected"] else ""
+    if not health["installed"]:
+        return [(INFO, "care: schedule health", f"no installed care schedule found{skipped}")]
     return [
-        (WARN, f"care: schedule health ({item['entry']})", f"{item['detail']}; run `{item['fix_command']}`")
-        for item in warnings
+        (OK, "care: schedule health", f"{health['installed']} installed schedule(s) enabled and reporting{skipped}")
     ]
 
 

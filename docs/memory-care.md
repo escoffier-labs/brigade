@@ -31,7 +31,8 @@ installation leaves a missing reflect policy off and preserves an existing one.
 The explicit `--reflect-auto-apply` install flag enables the workspace policy.
 Installing OS timers remains an explicit care-install action, and on systemd
 install also enables each timer it writes by linking it into
-`timers.target.wants`; `--no-enable` keeps the unit-file-only behavior.
+`timers.target.wants` and starting it; `--no-enable` keeps the unit-file-only
+behavior.
 
 The entry runs `memory reflect run --scheduled` and checks workspace intent
 before automatic application. On a configured hub,

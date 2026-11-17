@@ -22,10 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import care_enable, care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
+from . import care_enable, care_patrol, care_receipts, care_schedules, managed_block, memory_cmd, runbook_cmd
 from .care_launchers import entry_argv, explicit_workspace, install_refusal, persisted_scope
 from .care_launchers import hub_job_status as hub_job_status
 from .care_launchers import runbook_argv, scoped_entries, verify_entry
+from .care_render import print_payload as _print_payload
 from .care_windows import create_command as _windows_create_command, task_run as _schtasks_task_run
 from .care_receipts import (
     _latest_runbook_receipt as _latest_runbook_receipt,
@@ -813,77 +814,14 @@ def _windows_uninstall(
     return 3
 
 
-def _print_payload(payload: dict[str, Any], *, json_output: bool) -> None:
+def _print_status(payload: dict[str, Any], *, target: Path, home: Path | None, json_output: bool) -> None:
+    """Print a backend status payload with its schedule-health warnings (#2589)."""
+    health = care_receipts.status_schedule_health(payload, target=target, home=home)
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return
-    for key, value in payload.items():
-        if key == "repeated_failures" and isinstance(value, list):
-            print(f"repeated_failures: {len(value)}")
-            for rec in value:
-                if not isinstance(rec, dict):
-                    continue
-                print(f"  - {rec.get('id')}: {rec.get('consecutive_failures')} consecutive failed receipts")
-            continue
-        if key == "adopted" and isinstance(value, list):
-            print(f"adopted: {len(value)}")
-            for rec in value:
-                if not isinstance(rec, dict):
-                    continue
-                print(
-                    f"  - {rec.get('requested')} -> {rec.get('using')} "
-                    f"(runbook {rec.get('runbook_id') or rec.get('runbook')})"
-                )
-            continue
-        if key == "entries" and isinstance(value, list):
-            print(f"entries: {len(value)}")
-            for entry in value:
-                if not isinstance(entry, dict):
-                    continue
-                receipt = entry.get("last_receipt")
-                receipt_bit = "none"
-                if isinstance(receipt, dict):
-                    receipt_bit = f"{receipt.get('status')}@{receipt.get('started_at')}"
-                present = entry.get("runbook_present")
-                present_bit = ""
-                if present is False:
-                    present_bit = " runbook=missing"
-                elif present is True:
-                    present_bit = " runbook=present"
-                fail_bit = ""
-                consecutive = entry.get("consecutive_failures")
-                if isinstance(consecutive, int) and consecutive >= REPEATED_FAILURE_THRESHOLD:
-                    fail_bit = f" repeated_failure={consecutive}"
-                print(
-                    f"  - {entry.get('id')}: schedule={entry.get('schedule')} "
-                    f"last_receipt={receipt_bit}{present_bit}{fail_bit}"
-                    + (" paused=true" if entry.get("paused") else "")
-                )
-            continue
-        if key == "units" and isinstance(value, list):
-            print(f"units: {len(value)}")
-            for unit in value:
-                if isinstance(unit, dict):
-                    print(f"  - {unit.get('name')}: {unit.get('path')} ({unit.get('status')})")
-            continue
-        if key == "tasks" and isinstance(value, list):
-            print(f"tasks: {len(value)}")
-            for task in value:
-                if not isinstance(task, dict):
-                    continue
-                if "exists" in task:
-                    last_run = task.get("last_run") or "none"
-                    print(
-                        f"  - {task.get('id')}: exists={task.get('exists')} "
-                        f"last_run={last_run} schedule={task.get('schedule')}"
-                    )
-                    continue
-                print(f"  - {task.get('id')}: {task.get('command')}")
-            continue
-        if isinstance(value, (dict, list)):
-            print(f"{key}: {json.dumps(value, sort_keys=True)}")
-        else:
-            print(f"{key}: {value}")
+        payload["schedule_health"] = health
+    _print_payload(payload, json_output=json_output)
+    if not json_output and health["warnings"]:
+        print("\n".join(care_receipts.schedule_warning_lines(health)))
 
 
 def _launchd_dir(home: Path | None = None) -> Path:
@@ -994,7 +932,7 @@ def _launchd_status(
     elif any(item["status"] == "missing" for item in states):
         state = "missing"
     entry_payloads = [_entry_status(target, entry) for entry in entries]
-    _print_payload(
+    _print_status(
         {
             "target": str(target),
             "backend": "launchd",
@@ -1003,6 +941,8 @@ def _launchd_status(
             "entries": entry_payloads,
             "repeated_failures": _repeated_failure_records(entry_payloads),
         },
+        target=target,
+        home=home,
         json_output=json_output,
     )
     return 1 if state == "tampered" else 0
@@ -1825,7 +1765,7 @@ def status(
             "repeated_failures": _repeated_failure_records(entry_payloads),
         }
         public_status = str(crontab_payload.get("status"))
-        _print_payload(crontab_payload, json_output=json_output)
+        _print_status(crontab_payload, target=target, home=home, json_output=json_output)
         return 0 if public_status in {"current", managed_block.STATUS_MISSING} else 1
 
     if not entry_ids:
@@ -1839,7 +1779,7 @@ def status(
         "repeated_failures": _repeated_failure_records(entry_payloads),
     }
     worst = str(payload.get("status"))
-    _print_payload(payload, json_output=json_output)
+    _print_status(payload, target=target, home=home, json_output=json_output)
     return 0 if worst in {"current", managed_block.STATUS_MISSING} else 1
 
 
@@ -1974,6 +1914,7 @@ def uninstall(
             if path.exists() and not managed_block.read_text_nofollow(path).strip():
                 path.unlink()
             removed.append(name)
+    links = care_enable.finish_uninstall(unit_dir=unit_dir, removed=removed, skipped=skipped, dry_run=dry_run)
     payload = {
         "target": str(target),
         "backend": "systemd",
@@ -1981,10 +1922,11 @@ def uninstall(
         "removed": removed,
         "skipped": skipped,
         "refused": refused,
-        "next_commands": ["systemctl --user daemon-reload"],
+        "enable_links": links,
+        "next_commands": [care_enable.DAEMON_RELOAD_COMMAND],
     }
     _print_payload(payload, json_output=json_output)
-    if not removed and not refused:
+    if not removed and not refused and not links["removed"]:
         print(f"no scheduler registration found for target: {target}")
     if blocked:
         print(
