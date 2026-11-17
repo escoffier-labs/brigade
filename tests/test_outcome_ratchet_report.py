@@ -351,6 +351,19 @@ def test_loader_refuses_a_symlink_the_pre_check_could_miss(tmp_path, monkeypatch
     assert report_mod.load_report(tmp_path) == {}
 
 
+def test_loader_refuses_a_symlink_where_no_follow_is_unavailable(tmp_path, monkeypatch):
+    # Windows has no O_NOFOLLOW: the post-open identity check must still refuse.
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"version": report_mod.REPORT_VERSION, "generated_at": "planted"}))
+    path = report_mod.report_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.symlink_to(outside)
+
+    monkeypatch.setattr(report_mod, "_has_symlinked_component", lambda path, boundary: False)
+    monkeypatch.delattr(report_mod.os, "O_NOFOLLOW", raising=False)
+    assert report_mod.load_report(tmp_path) == {}
+
+
 def test_brief_names_holds_the_size_cap_dropped(tmp_path):
     # Rollback rows are long and come first; the cap then drops the trailing
     # holds, so a brief built from the kept rows would print "(none)" beside a

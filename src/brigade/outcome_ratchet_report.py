@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from collections import Counter
 from datetime import datetime
@@ -154,6 +155,14 @@ def mode_label(apply: object) -> str:
     return "applied" if apply is True else "dry-run"
 
 
+def _opened_the_path_itself(fd: int, path: Path) -> bool:
+    opened = os.fstat(fd)
+    named = os.lstat(path)
+    if stat.S_ISLNK(named.st_mode) or not stat.S_ISREG(opened.st_mode):
+        return False
+    return (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
+
+
 def load_report(target: Path) -> dict[str, Any]:
     """Load the report, returning an empty mapping on any path, size or parse error.
 
@@ -168,8 +177,12 @@ def load_report(target: Path) -> dict[str, Any]:
         if not path.is_file():
             return {}
         # O_NOFOLLOW closes the gap between the symlink check above and the open.
+        # Windows has no O_NOFOLLOW, so also require that the opened file is the
+        # same regular file the path names right now, not a link's target.
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         with os.fdopen(os.open(path, flags), "rb") as handle:
+            if not _opened_the_path_itself(handle.fileno(), path):
+                return {}
             raw = handle.read(REPORT_MAX_BYTES + 1)
     except OSError:
         return {}
