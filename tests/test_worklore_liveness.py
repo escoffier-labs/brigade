@@ -295,6 +295,26 @@ def test_claim_for_this_repository_counts(ledger):
     assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("live-owner", "claim")
 
 
+def test_a_later_ended_session_never_hides_a_live_one(ledger):
+    """Two sessions on one repository: the auxiliary one ending must not make the owner takeable."""
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    session(conn, session_id="s-live", stamp=BEFORE, expires=_epoch(NOW) + 900)
+    session(conn, state="ended", stamp=NOW, ended=NOW, session_id="s-aux")
+    finish_run(conn, work_id)
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("live-owner", "session")
+
+
+def test_terminal_run_before_the_first_checkpoint_reads_unknown(ledger):
+    """No repository means no session or claim was checked, so a terminal run proves nothing."""
+    conn, work_id = ledger
+    owned(conn, work_id)
+    finish_run(conn, work_id)
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
+
+
 def test_newer_crashed_session_hides_an_older_ended_session(ledger):
     conn, work_id = ledger
     checkpointed(conn, work_id)

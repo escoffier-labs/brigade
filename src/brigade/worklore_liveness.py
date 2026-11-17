@@ -55,6 +55,15 @@ _SESSIONS_SQL = (
     "ORDER BY coalesce(ended_at, heartbeat_at) DESC, heartbeat_at DESC, started_at DESC, harness, session_id "
     "LIMIT 1"
 )
+# Any live session for the repository, whatever the newest row is. A second
+# session that ended later must never hide one that is still live.
+_LIVE_SESSION_SQL = (
+    "SELECT MAX(heartbeat_at) FROM interactive_sessions "
+    "WHERE node_id = ? AND brigade_casefold(repo_identity) = ? AND state = 'active' AND expires_at > ? "
+    "AND NOT (coalesce(json_extract(cloud_context_json, '$.version'), 0) = 2 "
+    "AND coalesce(json_extract(cloud_context_json, '$.reported_state'), '') "
+    "IN ('completed', 'failed', 'cancelled'))"
+)
 _CLAIMS_SQL = (
     "SELECT target, expires_at, renewed_at, acquired_at FROM claims "
     "WHERE owner_node = ? AND expires_at > ? ORDER BY expires_at DESC, target LIMIT ?"
@@ -156,8 +165,14 @@ def _item_terminal(conn: sqlite3.Connection, work_id: str) -> bool:
 
 
 def _repo_identity(snapshot: Mapping[str, Any]) -> str | None:
-    raw = snapshot.get("repo_identity") if isinstance(snapshot, Mapping) else None
-    return raw if isinstance(raw, str) and raw else None
+    """The checkpointed repository, or the campaign member's repository before the first checkpoint."""
+    if not isinstance(snapshot, Mapping):
+        return None
+    for key in ("repo_identity", "campaign_repo"):
+        raw = snapshot.get(key)
+        if isinstance(raw, str) and raw:
+            return raw
+    return None
 
 
 def _names_repo(target: object, repo: str) -> bool:
@@ -186,20 +201,23 @@ def _session_facts(
     now_epoch: float,
     ownership_updated: object,
 ) -> tuple[bool, bool, tuple[object, ...]]:
-    """Live and counted-end facts from the node's newest session for this repository.
+    """Live and counted-end facts from the node's sessions for this repository.
 
-    Older rows never count: a crashed session that is newer than an ended one
-    hides the end, and an ended session that is newer hides nothing else.
+    Any live session makes the owner live. Only when none is live does the
+    newest row decide a counted end, so a crashed session that is newer than an
+    ended one hides the end.
     """
     _register_casefold(conn)
+    alive = _read(conn, _LIVE_SESSION_SQL, (owner_node, repo.casefold(), now_epoch))
+    if alive is not None and alive[0] is not None:
+        return True, False, (alive[0],)
     row = _read(conn, _SESSIONS_SQL, (owner_node, repo.casefold()))
     if row is None:
         return False, False, ()
-    state, expires_at, heartbeat_at, ended_at, finished_cloud = row
-    live = state == "active" and isinstance(expires_at, (int, float)) and expires_at > now_epoch and not finished_cloud
+    state, _expires_at, heartbeat_at, ended_at, _finished_cloud = row
     ended = state == "ended" and _ended_after(ended_at, ownership_updated)
     stamps: tuple[object, ...] = (heartbeat_at, ended_at) if ended else (heartbeat_at,)
-    return bool(live), bool(ended), stamps
+    return False, bool(ended), stamps
 
 
 def _claim_facts(
@@ -267,7 +285,11 @@ def owner_facts(
         has_live_claim, claim_stamps = _claim_facts(conn, owner_node, repo, now_epoch=now_epoch)
         stamps.extend(session_stamps)
         stamps.extend(claim_stamps)
-    run_terminal, run_stamp = _linked_run(conn, work_id, owner_node, generation_start)
+    # Without a repository no session or claim was checked, so a terminal run
+    # cannot prove the owner is gone. Withhold it and read unknown.
+    run_terminal, run_stamp = False, None
+    if repo is not None:
+        run_terminal, run_stamp = _linked_run(conn, work_id, owner_node, generation_start)
     if run_stamp is not None:
         stamps.append(run_stamp)
 
