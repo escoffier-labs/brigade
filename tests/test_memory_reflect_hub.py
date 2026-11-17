@@ -902,6 +902,24 @@ def test_scheduled_compensation_watch_runs_before_proposing(setup, capsys):
     )
 
 
+def test_scheduled_run_survives_a_scope_without_the_reflect_grant(setup, capsys):
+    target, hub, _ = setup
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    hub.do_status = status
+    hub.do_compensation_watch = lambda body: (403, {"code": "memory_grant_missing", "error": "reflect right required"})
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code == 0
+    assert payload["compensation_watch"] == []
+    assert payload["compensation_watch_unreflectable_scopes"] == ["fleet"]
+    assert any(c["action"] == "propose" for c in hub.calls)
+
+
 def test_compensation_watch_dry_run_does_not_write(setup, capsys):
     target, hub, _ = setup
     run(target, capsys, "run", "--hub", "--scheduled", "--dry-run")

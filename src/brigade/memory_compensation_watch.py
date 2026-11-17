@@ -16,11 +16,23 @@ from . import memory_hub_client as hubc
 CAPABILITY = "automatic_compensation"
 
 
+# A per-scope grant refusal. A 401 or any other 403 still ends the run.
+GRANT_MISSING = "memory_grant_missing"
+
+
 def run(
     client: hubc.MemoryHubClient,
     scopes: tuple[str, ...],
     epoch: str,
+    *,
+    unwatched: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    """Poll each scope. Scopes this credential cannot reflect are appended to `unwatched`.
+
+    A principal without the reflect right in a scope cannot have auto-applied
+    there, so it has nothing to compensate in that scope. Another principal that
+    holds the right watches its own applies.
+    """
     status = client.call("status")
     if CAPABILITY not in status.get("capabilities", []):
         return []
@@ -29,7 +41,14 @@ def run(
         fields: dict[str, Any] = {"scope": scope, "base_epoch": epoch}
         seen = set()
         for _ in range(32):
-            response = client.call("compensation_watch", client_event_id=hubc.event_id(), **fields)
+            try:
+                response = client.call("compensation_watch", client_event_id=hubc.event_id(), **fields)
+            except hubc.HubRefusal as exc:
+                if exc.status != 403 or exc.code != GRANT_MISSING:
+                    raise
+                if unwatched is not None:
+                    unwatched.append(scope)
+                break
             results.extend(response["results"])
             after = response.get("next_after")
             if after is None:

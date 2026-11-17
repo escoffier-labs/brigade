@@ -100,3 +100,40 @@ def test_watch_budget_is_success_and_next_run_continues():
     assert watch.run(client, ("repo",), "epoch") == []
     assert client.page == 32
     assert watch.run(client, ("repo",), "epoch") == [{"result": "applied"}]
+
+
+def _refusing(status, code, denied):
+    calls = []
+
+    class Client:
+        def call(self, action, **fields):
+            if action == "status":
+                return {"capabilities": [watch.CAPABILITY]}
+            calls.append(fields["scope"])
+            if fields["scope"] == denied:
+                raise watch.hubc.HubRefusal(status, {"code": code, "error": "refused"})
+            return {"results": [{"result": "review_required"}], "next_after": None}
+
+    return Client(), calls
+
+
+def test_watch_skips_scopes_without_the_reflect_grant():
+    client, calls = _refusing(403, watch.GRANT_MISSING, "fleet")
+    unwatched = []
+    result = watch.run(client, ("fleet", "repo"), "epoch", unwatched=unwatched)
+    assert calls == ["fleet", "repo"]
+    assert result == [{"result": "review_required"}]
+    assert unwatched == ["fleet"]
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(401, "memory_auth_invalid"), (403, "memory_principal_revoked"), (409, watch.GRANT_MISSING)],
+)
+def test_watch_raises_every_other_refusal(status, code):
+    client, calls = _refusing(status, code, "fleet")
+    unwatched = []
+    with pytest.raises(watch.hubc.HubRefusal):
+        watch.run(client, ("fleet", "repo"), "epoch", unwatched=unwatched)
+    assert calls == ["fleet"]
+    assert unwatched == []

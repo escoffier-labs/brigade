@@ -1,0 +1,1 @@
+- Scheduled hub reflection no longer fails when its credential lacks the reflect right in one of its read scopes. The compensation watch skips that scope, lists it in the report, and still polls the others.

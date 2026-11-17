@@ -521,10 +521,11 @@ def _reflect(
         heads = read_heads()
         check_bounds()
     watched = []
+    unwatched: list[str] = []
     if watch and not dry_run:
         from . import memory_compensation_watch
 
-        watched = memory_compensation_watch.run(client, settings.read_scopes, report["log_epoch"])
+        watched = memory_compensation_watch.run(client, settings.read_scopes, report["log_epoch"], unwatched=unwatched)
         if watched:
             # Rollbacks invalidate the inputs for proposing. Pull their committed heads first.
             report = sync.pull(target, client, settings)
@@ -772,6 +773,7 @@ def _reflect(
         "refused_ops": refused,
         "seq": report["seq"],
         "compensation_watch": watched,
+        "compensation_watch_unreflectable_scopes": unwatched,
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
         "link_repair": {"max_proposals": link_cap, **link_stats},
         "anchoring": {"max_proposals": anchors.MAX_PROPOSALS, **anchors.coverage(heads)},
