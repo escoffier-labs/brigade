@@ -149,7 +149,7 @@ slice.
 | `invalid-fingerprint` | Stored fingerprint passed to `compare_request` is malformed |
 | `synthesis-not-implemented` | Execution requested with synthesis |
 | `request-conflict` | Request ID already reserved with a different fingerprint |
-| `request-unknown` | Request reservation has no readable fingerprint, or the marker is missing while the journal shows a possible launch |
+| `request-unknown` | Request reservation has no readable fingerprint, the marker is missing while the journal shows a possible launch, or an accepted request has lost or cannot read its journal |
 | `request-busy` | Another caller holds this request’s dispatch lock |
 
 
@@ -188,20 +188,48 @@ read on every retry. A missing marker permits a new request while holding the
 request lock only when the journal shows no prepared attempt. If the journal
 shows a possible launch, a missing marker refuses with `request-unknown`. A
 present unreadable or corrupt marker also refuses launch with `request-unknown`.
+Once the batch is accepted into the journal, the run directory also records
+`batch-journal-enrolled.json`. A request with that file and a marker refuses
+with `request-unknown` when the journal is absent or unreadable, because a
+missing journal would otherwise read as "nothing launched" and re-enroll every
+task. This holds even if the journal was deleted before any launch; use a new
+`request_id` to start over. A request that never reached acceptance has no such
+file and still retries after a preflight refusal.
 Independently of the marker, each task is checked again at the launch point:
 a task the journal shows as attempted or not queued is never invoked again, and
 its journal state is left as it was.
 
 When Fleet Hub routing sends a batch seat to another machine, Brigade still
-invokes that task once and marks it `unknown` first, so the local fence holds.
+invokes that task once and claims it (`unknown`) first, so the local fence holds.
 At-most-once on the remote side then depends on that transport, which #2048
 covers for T3.
 
-Task launch claims remain deferred: the existing dispatch callback binds budget
-reservations to a seat and attempt, without exposing an exact task candidate to
-`claim_task_launch`. The request reservation prevents replay launches instead.
-A task becomes unknown before its prompt is built, so this state can include a
-launch that was never accepted. It is never retried automatically.
+Each assignment carries its `task_id` and a deterministic `attempt_id`, so the
+dispatcher, the result and the live controls name the exact task instead of
+reading it back from prompt text. Preparing the attempt happens at the launch
+point. The launch claim happens later, inside the run budget reservation for
+that exact seat and attempt: the orchestrator passes the assignment into the
+reservation, and the batch recorder first calls `claim_task_launch`, then
+writes `run.dispatch.requested`. The claim must come first because a binding
+that any `run.dispatch.*` event already used is refused. Batches reserve with
+`reclaim_pending=False`, so a retry never adopts an earlier pending identity.
+Two same-seat tasks in one wave therefore get distinct claims and attempts.
+
+A claim result other than `granted` (`already-claimed`, `terminal`), a binding
+conflict, a stale version or any `TaskJournalError` raises `LaunchRefused`.
+The dispatcher handles it before route resolution, the model lease and the
+provider, records the worker as `refused` (no retry, no fallback seat or route)
+and keeps the task's journal state untouched. The budget reservation stays
+retained, because a claim may already be durable. A crash after the claim and
+before the requested fact leaves the task claimed and unknown, so a retry sees
+`already-claimed` and never relaunches. A task is `unknown` only once its claim
+is durable, which means `unknown` now implies a granted launch permission.
+A prepared attempt with no claim stays `queued` and is still never relaunched.
+
+Transports that expose a documented provider value fill `provider_task_id` on
+the worker result, and the batch records it on the task observation. Today only
+codex-cloud does, through its task ID. Original run and result IDs stay empty
+until a transport documents them.
 
 JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`, and

@@ -1,0 +1,3 @@
+- Explicit batches now claim launch permission per task inside the run budget reservation: each assignment carries its `task_id` and `attempt_id`, the claim precedes the requested fact, and a refused claim stops the worker before routing, the model lease and the provider (#2049, #2631).
+- Refuse a batch request with `request-unknown` when its lifecycle journal was deleted or is unreadable after acceptance, so removing the journal can no longer re-enroll tasks. A request that never reached acceptance still retries after a preflight refusal (#2631).
+- Register batch turns under their exact task so `brigade runs interrupt --task-id` reaches one of two same-seat tasks, and record the codex-cloud task ID as the provider task correlation on the task journal (#2049).

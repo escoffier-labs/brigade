@@ -33,7 +33,7 @@ from .. import message_envelope
 from .. import proc, receipt_schema, runguard
 from .. import run_control
 from .. import run_checkpoint
-from .. import run_budget
+from .. import run_batch_launch, run_budget
 from .. import run_events
 from .. import run_journal
 from .. import run_lifecycle
@@ -1481,18 +1481,17 @@ def run(
         recorded_attempt = event.payload.get("attempt")
         return recorded_attempt if isinstance(recorded_attempt, int) else None
 
-    def dispatch_requested(agent: Agent) -> int | None:
+    def dispatch_requested(agent: Agent, assignment: Any = None) -> int | None:
         check_cancellation()
-        # Enforce wall-clock / worker-dispatch ceilings before new work starts (#593).
-        # Attempt allocation and reservation share one lock; retries reclaim an
-        # open pending identity while concurrent same-seat callers mint anew.
+        # Enforce ceilings (#593); a batch task claims its launch inside the reservation (docs/run-batch.md).
         if budget_coordinator is None or output_dir is None:
-            return dispatch_fact("run.dispatch.requested", agent)
+            return run_batch_launch.unbudgeted(batch_execution, agent, assignment, dispatch_fact)
         try:
             return budget_coordinator.reserve_and_record_dispatch(
                 seat=agent.name,
                 allocate_attempt=lambda: run_lifecycle.allocate_next_dispatch_attempt(output_dir, agent.name),
-                record_requested=lambda attempt: dispatch_fact("run.dispatch.requested", agent, attempt),
+                record_requested=run_batch_launch.recorder_for(batch_execution, agent, assignment, dispatch_fact),
+                reclaim_pending=batch_execution is None,
             )
         except run_budget.BudgetPolicyError as exc:
             runguard.raise_if_retained_run_lock(exc)

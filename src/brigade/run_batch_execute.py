@@ -11,10 +11,31 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import agents, fleet_client, inbox_lock, localio, run_receipts, run_tasks, run_lifecycle, run_journal, runguard
+from . import (
+    agents,
+    fleet_client,
+    inbox_lock,
+    localio,
+    run_batch_launch,
+    run_journal,
+    run_lifecycle,
+    run_receipts,
+    run_task_journal,
+    run_tasks,
+    runguard,
+)
 from .run_batch import BatchError
 from .run_transport import Assignment, WorkerResult
 from .roster import Roster, read_only_cloud_mutation_error
+
+
+# Written once the batch is accepted into the lifecycle journal, so a deleted journal is detectable.
+JOURNAL_SENTINEL = "batch-journal-enrolled.json"
+
+
+def _reference(value: str | None) -> str | None:
+    """Drop a provider value the journal would refuse, rather than lose the whole observation."""
+    return value if run_task_journal.provider_reference(value) else None
 
 
 def _read_only_enforcement_error(task_id: str, agent: Any, roster: Roster, *, read_only: bool) -> str | None:
@@ -41,7 +62,9 @@ class BatchExecution:
         self.plan = plan
         self.run_dir = run_dir
         self.workspace = workspace
-        self.by_prompt = {f"Batch task_id: {t['task_id']}\n\n{t['text']}": t for t in plan["tasks"]}
+        self.tasks = {t["task_id"]: t for t in plan["tasks"]}
+        # The prepared handle and its journal version, captured at the launch point.
+        self.prepared: dict[str, tuple[run_tasks.TaskHandle, str]] = {}
         # Per-task read-only is enforced by the existing worker read-only path,
         # so a mixed batch keeps one dispatcher and its dependency context.
         self.read_only = {t["task_id"]: bool(t.get("read_only", False)) for t in plan["tasks"]}
@@ -49,7 +72,29 @@ class BatchExecution:
         self.refused: set[str] = set()
 
     def read_only_for(self, assignment: Assignment) -> bool:
-        return self.read_only[self.by_prompt[assignment.task]["task_id"]]
+        return self.read_only[str(assignment.task_id)]
+
+    def current(self, task_id: str) -> run_tasks.TaskResult:
+        found = next((r for r in run_tasks.read_tasks(self.run_dir) if r.handle.spec.task_id == task_id), None)
+        if found is None:
+            raise BatchError("launch-refused", f"task {task_id} is missing from the lifecycle journal")
+        return found
+
+    def launch_recorder(self, agent: Any, assignment: Assignment | None, record_requested: Any) -> Any:
+        """The claim-then-requested recorder the orchestrator runs inside the budget reservation."""
+        task_id = assignment.task_id if assignment is not None else None
+        return run_batch_launch.launch_recorder(
+            run_dir=self.run_dir,
+            workspace=self.workspace,
+            assignment=assignment,
+            seat=agent.name,
+            prepared=self.prepared.get(task_id) if task_id is not None else None,
+            record_requested=lambda attempt: record_requested("run.dispatch.requested", agent, attempt),
+            on_refused=self.refused.add,
+        )
+
+    def refuse_unbudgeted(self, assignment: Assignment | None) -> Any:
+        return run_batch_launch.refuse_unbudgeted(assignment, self.refused.add)
 
     def assignments(self, roster: Roster) -> list[Assignment]:
         from .aboyeur import artifacts
@@ -69,28 +114,37 @@ class BatchExecution:
             run_tasks.TaskSpec(t["task_id"], t["seat"], hashlib.sha256(t["text"].encode("utf-8")).hexdigest())
             for t in self.plan["tasks"]
         )
-        run_tasks.accept_task_batch(
+        accepted = run_tasks.accept_task_batch(
             self.run_dir, workspace=self.workspace, request_id=self.plan["request_id"], specs=specs
         )
+        # Records that the journal existed, so deleting it later cannot re-enroll the request.
+        localio.write_json(self.run_dir / JOURNAL_SENTINEL, {"request_id": self.plan["request_id"]})
+        run_journal._fsync_directory(self.run_dir)
+        attempts = {m.handle.spec.task_id: run_tasks.planned_attempt_id(m.handle) for m in accepted.members}
         layers = {task_id: index for index, layer in enumerate(self.plan["layers"]) for task_id in layer}
         # Batch assignments intentionally omit run-level selected_skill_ids; the caller supplies each task.
         return [
-            Assignment(worker=t["seat"], task=prompt, stage=layers[t["task_id"]])
-            for prompt, t in self.by_prompt.items()
+            Assignment(
+                worker=t["seat"],
+                task=f"Batch task_id: {t['task_id']}\n\n{t['text']}",
+                stage=layers[t["task_id"]],
+                task_id=t["task_id"],
+                attempt_id=attempts[t["task_id"]],
+            )
+            for t in self.plan["tasks"]
         ]
 
     def observe(self, result: WorkerResult) -> None:
-        task = self.by_prompt[result.task]
-        if task["task_id"] in self.refused:
+        task_id = str(result.task_id)
+        if task_id in self.refused or result.status == "refused":
             return
-        current = next(r for r in run_tasks.read_tasks(self.run_dir) if r.handle.spec.task_id == task["task_id"])
-        if current.result_id is not None:
+        if self.current(task_id).result_id is not None:
             return
         # Skipped tasks retain queued state. They were never launched.
         if result.status == "skipped":
             return
-        handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task["task_id"])
-        path = self.run_dir / f"batch-result-{hashlib.sha256(task['task_id'].encode()).hexdigest()}.json"
+        handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
+        path = self.run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
         # Persist the sanitized receipt projection, never raw captures or diagnostics.
         localio.write_json(path, run_receipts.worker_payload_one(result))
         run_journal._fsync_directory(self.run_dir)
@@ -104,6 +158,9 @@ class BatchExecution:
                 artifact_kind="receipt",
                 artifact_digest=digest,
                 containment="quiescent",
+                provider_task_id=_reference(result.provider_task_id),
+                original_run_id=_reference(result.original_run_id),
+                provider_result_id=_reference(result.provider_result_id),
             ),
         )
 
@@ -122,21 +179,23 @@ class BatchExecution:
         original_prompt = kwargs["build_prompt"]
 
         def build_prompt(agent, assignment, **prompt_kwargs):
-            task_id = self.by_prompt[assignment.task]["task_id"]
+            task_id = str(assignment.task_id)
             # Launch-point fence, independent of the request marker: a task the
             # journal shows as attempted is never invoked again. The request and
             # run locks serialize dispatchers, so this read cannot race a launch.
-            current = next(r for r in run_tasks.read_tasks(self.run_dir) if r.handle.spec.task_id == task_id)
-            if current.handle.attempt_id is not None or current.status != "queued":
+            try:
+                current = self.current(task_id)
+                if current.handle.attempt_id is not None or current.status != "queued":
+                    raise BatchError(
+                        "launch-refused", f"task {task_id} already has a recorded attempt; refusing relaunch"
+                    )
+                # Only the attempt is prepared here. The launch claim that follows in the budget
+                # reservation needs this as the last task event and moves the task to unknown.
+                handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
+                self.prepared[task_id] = (handle, self.current(task_id).version or "")
+            except (BatchError, run_tasks.TaskJournalError):
                 self.refused.add(task_id)
-                raise BatchError("launch-refused", f"task {task_id} already has a recorded attempt; refusing relaunch")
-            handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
-            run_tasks.observe_task(
-                self.run_dir,
-                workspace=self.workspace,
-                handle=handle,
-                observation=run_tasks.TaskObservation(status="unknown"),
-            )
+                raise
             return original_prompt(agent, assignment, **prompt_kwargs)
 
         kwargs["build_prompt"] = build_prompt
@@ -193,9 +252,7 @@ class BatchExecution:
         # Use the planned-run finish path with no synthesis invocation. It
         # records incomplete workers and retains every result and artifact.
         return agents.AgentResult(
-            text="\n".join(
-                f"{self.by_prompt[r.task]['task_id']}: {'completed' if r.ok else r.status or 'failed'}" for r in results
-            ),
+            text="\n".join(f"{r.task_id}: {'completed' if r.ok else r.status or 'failed'}" for r in results),
             ok=all(r.ok for r in results),
         )
 
@@ -243,6 +300,22 @@ def retryable_before_launch(run_dir: Path) -> bool:
         return False
 
 
+def journal_lost(run_dir: Path) -> bool:
+    """True when a request that was accepted has lost its lifecycle journal.
+
+    Without a journal ``retryable_before_launch`` reads as "nothing launched", so
+    deleting it would re-enroll every task. A request that never reached
+    acceptance has no sentinel and keeps its preflight retry.
+    """
+    if not run_lifecycle._journal_path(run_dir).exists():
+        return (run_dir / JOURNAL_SENTINEL).exists()
+    try:
+        run_tasks.read_tasks(run_dir)
+    except run_tasks.TaskJournalError:
+        return True
+    return False
+
+
 @contextlib.contextmanager
 def request_lock(run_dir: Path):
     try:
@@ -281,6 +354,11 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
             raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
         if marker is not None and marker.get("fingerprint") != plan["fingerprint"]:
             raise BatchError("request-conflict", "request_id already belongs to a different batch")
+        if marker is not None and journal_lost(run_dir):
+            raise BatchError(
+                "request-unknown",
+                "request journal is missing or unreadable; refusing launch. Use a new request_id",
+            )
         # The journal, not the marker, records launches. Read it even when the
         # marker is missing, so a removed marker cannot authorize a relaunch.
         if not retryable_before_launch(run_dir):

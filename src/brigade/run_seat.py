@@ -40,6 +40,8 @@ def _unsupported_appserver(
     sandbox: str | None,
     registry: run_control.LiveTurnRegistry | None,
     on_event: object = None,
+    task_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> agents.AgentResult:
     raise RuntimeError("single-seat research uses direct transport")
 

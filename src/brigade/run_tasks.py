@@ -135,6 +135,11 @@ def _attempt_id(handle: TaskHandle) -> str:
     return _digest({"run_id": handle.run_id, "task_id": handle.spec.task_id, "spec_digest": handle.spec.spec_digest})
 
 
+def planned_attempt_id(handle: TaskHandle) -> str:
+    """The attempt identity ``prepare_attempt`` will mint, known before any journal write."""
+    return _attempt_id(handle)
+
+
 def _result_id(result: TaskResult) -> str:
     return _digest(
         {
