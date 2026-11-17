@@ -4,7 +4,9 @@ The index is built in memory on every call and then dropped. There is no cache
 and no persistent index: a full build over about 1,900 cards takes a fraction
 of a second, which is cheaper than keeping a derived file in sync.
 
-Each card is one field: title, tags, summary, and the full card text, joined.
+Each card is one field: title, tags, summary, and the card text, joined. The
+card text leaves out the ``evidence`` front-matter line and anchor suffixes,
+which are stored and shown but never searched (``ranking_text``).
 Query terms are deduplicated. Scores are rounded to ``SCORE_DIGITS`` decimals
 so near-identical cards still tie and callers can break ties by path.
 """
@@ -18,6 +20,8 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .memory_claim_blocks import hub_spans, hub_suffix_id
+
 K1 = 1.2
 B = 0.75
 SCORE_DIGITS = 4
@@ -30,10 +34,43 @@ def tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+def _without_evidence(text: str) -> str:
+    """Drop the front-matter lines the hub writer treats as the ``evidence`` field."""
+    if not text.startswith("---\n"):
+        return text
+    meta, sep, body = text[4:].partition("\n---\n")
+    if not sep:
+        return text
+    lines = meta.split("\n")
+    kept = [line for line in lines if not (":" in line and line.partition(":")[0] == "evidence")]
+    if len(kept) == len(lines):
+        return text
+    # A front matter left with no lines goes too, so a card that gains its first evidence field reads the same.
+    return "---\n" + "\n".join(kept) + "\n---\n" + body if kept else body
+
+
+def ranking_text(text: str) -> str:
+    """The card as search sees it, the mirror of the hub's ``text::ranking_text``.
+
+    The evidence line goes first, because a reference holding ``<`` would
+    otherwise make the whole card opaque to the anchor span parser.
+    """
+    text = _without_evidence(text)
+    data = text.encode("utf-8")
+    for start, end in sorted(hub_spans(text), reverse=True):
+        block = data[start:end].decode("utf-8")
+        if hub_suffix_id(block) is not None:
+            trimmed_end = start + len(block.rstrip(" \t").encode("utf-8"))
+            # The suffix is exactly " ^c-xxxxxx", ten ASCII bytes.
+            data = data[: trimmed_end - 10] + data[trimmed_end:]
+    return data.decode("utf-8")
+
+
 def card_text(fields: dict[str, Any]) -> str:
     """The single BM25 field for one ``_card_search_fields`` record."""
     tags = " ".join(str(tag) for tag in fields.get("tags") or [])
-    return f"{fields.get('title') or ''}\n{tags}\n{fields.get('summary') or ''}\n{fields.get('body') or ''}"
+    body = ranking_text(str(fields.get("body") or ""))
+    return f"{fields.get('title') or ''}\n{tags}\n{fields.get('summary') or ''}\n{body}"
 
 
 @dataclass(frozen=True)

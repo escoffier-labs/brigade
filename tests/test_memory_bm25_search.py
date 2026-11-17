@@ -314,3 +314,35 @@ def test_search_log_append_fails_open_while_another_writer_holds_the_lock(tmp_pa
     assert not log.exists()
     memory_cmd._append_search_log_entry(tmp_path, entry)
     assert [row["query"] for row in _search_log(tmp_path)] == ["comet"]
+
+
+# --- ranking text: evidence refs and anchor suffixes are stored but not searched ---
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Claim. ^c-abcdef\n", "Claim.\n"),
+        ('---\ntitle: T\nevidence: ["ns/a/b"]\n---\nOne. ^c-abcdef\n', "---\ntitle: T\n---\nOne.\n"),
+        # A front matter left empty goes too, so a card's first evidence line changes nothing.
+        ('---\nevidence: ["ns/a/<"]\n---\nClaim. ^c-abcdef\n', "Claim.\n"),
+        ("x < y ^c-abcdef\n", "x < y ^c-abcdef\n"),
+        ('---\n evidence: ["a/b/c"]\n---\nClaim.\n', '---\n evidence: ["a/b/c"]\n---\nClaim.\n'),
+        ("Claim. ^c-abcdef  \t\n", "Claim.  \t\n"),
+        ("Claim. ^c-ABCDEF\n", "Claim. ^c-ABCDEF\n"),
+    ],
+)
+def test_ranking_text(text, expected):
+    assert memory_bm25.ranking_text(text) == expected
+
+
+def test_adding_evidence_or_anchors_does_not_change_search():
+    plain = "---\ntitle: Alpha\n---\nShared claim.\n"
+    marked = '---\ntitle: Alpha\nevidence: ["ns/keyword-keyword/shared"]\n---\nShared claim. ^c-abcdef\n'
+    other = "---\ntitle: Beta\n---\nKeyword here.\n"
+    for query in ("shared", "keyword", "abcdef", "^c-abcdef", "ns/keyword", "/", "^"):
+        answers = []
+        for body in (plain, marked):
+            fields = [{"title": t, "tags": [], "summary": "", "body": b} for t, b in (("Alpha", body), ("Beta", other))]
+            answers.append(memory_bm25.rank([memory_bm25.card_text(f) for f in fields], query))
+        assert answers[0] == answers[1], query

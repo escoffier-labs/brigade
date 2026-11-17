@@ -63,6 +63,18 @@ fn search_fields_match_python() {
 }
 
 #[test]
+fn ranking_text_matches_python() {
+    for case in golden()["ranking"].as_array().unwrap() {
+        assert_eq!(
+            text::ranking_text(s(&case["text"])),
+            s(&case["ranking_text"]),
+            "{}",
+            s(&case["card_id"])
+        );
+    }
+}
+
+#[test]
 fn rounding_matches_python_round() {
     for pair in golden()["round"].as_array().unwrap() {
         let (x, want) = (pair[0].as_f64().unwrap(), pair[1].as_f64().unwrap());

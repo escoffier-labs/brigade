@@ -78,6 +78,32 @@ fn front_json(value: &Json) -> String {
     }
     out
 }
+/// The one key rule shared by the writer and by search. A front-matter line
+/// belongs to `key` only when the text before its first colon is exactly `key`.
+fn is_key(line: &str, key: &str) -> bool {
+    line.split_once(':').is_some_and(|(k, _)| k == key)
+}
+/// The card without any front-matter line that [`set`] would treat as `key`.
+/// Search uses it to leave out `evidence`, so the drop is never looser than
+/// the writer's parser and every other byte stays as stored. A front matter
+/// left with no lines goes too, so a card that gains its first `evidence`
+/// field reads the same as before.
+pub fn without_key(text: &str, key: &str) -> String {
+    let Some((meta, body)) = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+    else {
+        return text.to_string();
+    };
+    if !meta.split('\n').any(|line| is_key(line, key)) {
+        return text.to_string();
+    }
+    let kept: Vec<&str> = meta.split('\n').filter(|l| !is_key(l, key)).collect();
+    if kept.is_empty() {
+        return body.to_string();
+    }
+    format!("---\n{}\n---\n{body}", kept.join("\n"))
+}
 pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str> {
     let (meta, body) = front(text)?;
     for (key, _) in updates {
@@ -85,10 +111,7 @@ pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str>
     }
     let mut lines = Vec::new();
     for line in meta {
-        if !updates
-            .iter()
-            .any(|(key, _)| line.split_once(':').is_some_and(|(k, _)| k == *key))
-        {
+        if !updates.iter().any(|(key, _)| is_key(line, key)) {
             lines.push(line.to_string());
         }
     }

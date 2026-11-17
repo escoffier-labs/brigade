@@ -1,6 +1,115 @@
 {
  "b": 0.75,
  "corpora": {
+  "evidence-anchors": {
+   "cards": [
+    {
+     "card_id": "plain",
+     "scope": "fleet",
+     "state": "live",
+     "text": "---\ntitle: Plain\n---\nShared claim here.\n"
+    },
+    {
+     "card_id": "marked",
+     "scope": "fleet",
+     "state": "live",
+     "text": "---\ntitle: Plain\nevidence: [\"ns/shared/claim\", \"ns/other/ref\"]\n---\nShared claim here. ^c-abcdef\n"
+    },
+    {
+     "card_id": "stuffed",
+     "scope": "fleet",
+     "state": "live",
+     "text": "---\ntitle: Stuffed\nevidence: [\"ns/keyword-keyword/keyword\"]\n---\nOther words.\n"
+    }
+   ],
+   "queries": [
+    {
+     "expected": [
+      [
+       "fleet",
+       "marked",
+       0.9179
+      ],
+      [
+       "fleet",
+       "plain",
+       0.9179
+      ]
+     ],
+     "query": "shared claim",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "keyword",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "evidence",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "abcdef",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "c abcdef",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "^",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "/",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "marked",
+       0.459
+      ],
+      [
+       "fleet",
+       "plain",
+       0.459
+      ]
+     ],
+     "query": "ns/shared",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "^c-abcdef",
+     "readable": [
+      "fleet"
+     ]
+    }
+   ]
+  },
   "front-matter": {
    "cards": [
     {
@@ -983,6 +1092,78 @@
   }
  ],
  "k1": 1.2,
+ "ranking": [
+  {
+   "card_id": "plain",
+   "ranking_text": "Claim.\n",
+   "text": "Claim. ^c-abcdef\n"
+  },
+  {
+   "card_id": "evidence",
+   "ranking_text": "---\ntitle: T\n---\nClaim one.\n\n- Claim two.\n",
+   "text": "---\ntitle: T\nevidence: [\"ns/a/b\", \"ns/c/d\"]\n---\nClaim one. ^c-abcdef\n\n- Claim two. ^c-123456\n"
+  },
+  {
+   "card_id": "evidence-angle",
+   "ranking_text": "Claim.\n",
+   "text": "---\nevidence: [\"ns/a/<\"]\n---\nClaim. ^c-abcdef\n"
+  },
+  {
+   "card_id": "angle-in-body",
+   "ranking_text": "---\ntitle: T\n---\nx < y ^c-abcdef\n\nClaim. ^c-123456\n",
+   "text": "---\ntitle: T\n---\nx < y ^c-abcdef\n\nClaim. ^c-123456\n"
+  },
+  {
+   "card_id": "duplicate-evidence",
+   "ranking_text": "---\ntitle: T\n---\nClaim.\n",
+   "text": "---\nevidence: [\"a/b/c\"]\ntitle: T\nevidence: [\"d/e/f\"]\n---\nClaim. ^c-abcdef\n"
+  },
+  {
+   "card_id": "evidence-key-spacing",
+   "ranking_text": "---\n evidence: [\"a/b/c\"]\nevidence : [\"d/e/f\"]\n---\nClaim.\n",
+   "text": "---\n evidence: [\"a/b/c\"]\nevidence : [\"d/e/f\"]\nevidence:[\"g/h/i\"]\n---\nClaim.\n"
+  },
+  {
+   "card_id": "evidence-line-separator",
+   "ranking_text": "Claim.\n",
+   "text": "---\nevidence: [\"a/b/c\"]\u2028title: Sneaky\n---\nClaim. ^c-abcdef\n"
+  },
+  {
+   "card_id": "not-front-matter",
+   "ranking_text": "Claim.\n---\nevidence: [\"a/b/c\"]\n---\nMore. ^c-abcdef\n",
+   "text": "Claim.\n---\nevidence: [\"a/b/c\"]\n---\nMore. ^c-abcdef\n"
+  },
+  {
+   "card_id": "unterminated",
+   "ranking_text": "---\nevidence: [\"a/b/c\"]\nClaim. ^c-abcdef\n",
+   "text": "---\nevidence: [\"a/b/c\"]\nClaim. ^c-abcdef\n"
+  },
+  {
+   "card_id": "trailing-space-anchor",
+   "ranking_text": "Claim.  \t\n\nCaf\u00e9.\t\n",
+   "text": "Claim. ^c-abcdef  \t\n\nCaf\u00e9. ^c-123456\t\n"
+  },
+  {
+   "card_id": "bad-anchors",
+   "ranking_text": "Claim. ^c-abcde\n\nClaim. ^c-ABCDEF\n\nClaim.^c-abcdef\n\nClaim. ^c-abcdefg\n",
+   "text": "Claim. ^c-abcde\n\nClaim. ^c-ABCDEF\n\nClaim.^c-abcdef\n\nClaim. ^c-abcdefg\n"
+  },
+  {
+   "card_id": "fenced",
+   "ranking_text": "```\ncode ^c-abcdef\n```\n\nProse.\n",
+   "text": "```\ncode ^c-abcdef\n```\n\nProse. ^c-123456\n"
+  },
+  {
+   "card_id": "first-evidence",
+   "ranking_text": "Claim.\n",
+   "text": "---\nevidence: [\"a/b/c\"]\n---\nClaim. ^c-abcdef\n"
+  },
+  {
+   "card_id": "only-evidence",
+   "ranking_text": "",
+   "text": "---\nevidence: []\n---\n"
+  }
+ ],
  "round": [
   [
    0.03125,

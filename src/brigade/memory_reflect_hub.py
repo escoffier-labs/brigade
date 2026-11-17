@@ -79,6 +79,7 @@ LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
     "attempted_ms": lambda value: type(value) is int and value >= 0,
     "anchor_review_only": lambda value: type(value) is int and value >= 0,
+    "lineage_review": lambda value: value is True,
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -122,7 +123,9 @@ def schedule_status(target: Path) -> dict[str, Any]:
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
         if not all(
-            valid_submission(digest, pending, frozenset({"pins", "attempted_ms", "anchor_review_only"}))
+            valid_submission(
+                digest, pending, frozenset({"pins", "attempted_ms", "anchor_review_only", "lineage_review"})
+            )
             for digest, pending in submissions.items()
         ):
             raise ValueError(STATE_ERROR)
@@ -183,6 +186,17 @@ def _save(target: Path, state: dict[str, Any]) -> None:
                 os.unlink(temporary.name, dir_fd=parent)
             except FileNotFoundError:
                 pass
+
+
+# Hub holds that leave a proposal open for a human, because applying it could change lineage order.
+LINEAGE_REVIEW_CODES = frozenset({"lineage_requires_review", "retrieval_eval_lineage_exposed"})
+
+
+def _awaits_lineage_review(automatic: object) -> bool:
+    checks = automatic.get("checks") if isinstance(automatic, dict) else None
+    return isinstance(checks, list) and any(
+        isinstance(check, dict) and check.get("code") in LINEAGE_REVIEW_CODES for check in checks
+    )
 
 
 # A withdrawn anchoring proposal waits this long before reflection proposes the same anchor again.
@@ -578,7 +592,10 @@ def _reflect(
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
             withdrawn_ms = remembered.get("anchor_review_only")
-            if type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
+            if remembered.get("lineage_review"):
+                # The hub kept it open for review. A retry would be held the same way.
+                skipped["lineage_review"] = skipped.get("lineage_review", 0) + 1
+            elif type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
                 # A future timestamp counts as expired, so local state cannot stretch the window.
                 if 0 <= _now_ms() - withdrawn_ms < ANCHOR_WITHDRAWN_RETRY_MS:
                     skipped["anchor_review_only"] = skipped.get("anchor_review_only", 0) + 1
@@ -746,8 +763,14 @@ def _reflect(
                     proposal["automatic"] = attempt(
                         target, client, sent.proposal_id, ops, report["log_epoch"], pacer=pacer
                     )
+                review = _awaits_lineage_review(proposal.get("automatic"))
+                if review and sent.proposal_id is not None:
+                    # A lineage target needs a human decision, so the proposal stays open and is not retried.
+                    previous[digest]["lineage_review"] = True
+                    _save(target, state)
                 if (
                     anchoring
+                    and not review
                     and sent.proposal_id is not None
                     and proposal.get("automatic", {}).get("state") != "applied"
                 ):

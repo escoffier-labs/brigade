@@ -605,6 +605,7 @@ fn prepare_auto(
             .pragma_query_value(None, "data_version", |r| r.get::<_, i64>(0))?;
         let mut a = Authority::read(&worker::Tx(&hub.db))?;
         a.retrieval = Some(super::retrieval_eval::Live {
+            applier: who.class(),
             indexed_seq: config.index.as_ref().map_or(0, |i| i.current().indexed_seq),
             embedder_id: config.dense.as_ref().and_then(|d| d.active_id()),
             weights: config.eval_weights.read().unwrap().clone(),
@@ -909,6 +910,7 @@ pub(crate) fn run(
                                 .index
                                 .as_ref()
                                 .map(|index| super::retrieval_eval::Live {
+                                    applier: p.command.credential.class(),
                                     indexed_seq: index.current().indexed_seq,
                                     embedder_id: config.dense.as_ref().and_then(|d| d.active_id()),
                                     weights: config.eval_weights.read().unwrap().clone(),

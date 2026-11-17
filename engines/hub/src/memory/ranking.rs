@@ -3,7 +3,7 @@ use super::{index::Snapshot, text};
 use serde_json::{Value as Json, json};
 use std::collections::{HashMap, HashSet};
 
-pub const SCORER_VERSION: &str = "bm25-1.2-0.75-rrf60-lineage-source-v3";
+pub const SCORER_VERSION: &str = "bm25-1.2-0.75-rrf60-lineage-source-v4";
 
 #[derive(Clone, Copy, Debug)]
 pub struct Weights {

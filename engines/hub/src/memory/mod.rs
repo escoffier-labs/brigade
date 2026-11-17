@@ -1071,6 +1071,7 @@ impl Store {
             Err(_) => return error(503, "memory_action_unavailable", "policy read unavailable"),
         };
         authority.retrieval = Some(retrieval_eval::Live {
+            applier: credential.class(),
             indexed_seq: self.index.current().indexed_seq,
             embedder_id: self.dense.active_id(),
             weights: self.rrf.json(),
@@ -2362,3 +2363,5 @@ fn reads<T: ReadTx + ?Sized>(
 
 #[cfg(test)]
 mod anchor_tests;
+#[cfg(test)]
+mod ranking_gate_tests;

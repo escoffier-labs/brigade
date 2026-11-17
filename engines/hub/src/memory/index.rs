@@ -50,7 +50,10 @@ pub const B: f64 = 0.75;
 /// Lexical candidates kept before the page is cut (pipeline step 3).
 pub const TOP: usize = 200;
 /// Index format, recorded beside scorer goldens and eval records.
-pub const FORMAT_VERSION: &str = "1";
+///
+/// "2": the `evidence` front-matter line and anchor suffixes left the indexed
+/// text. A hub restart rebuilds the index, and older eval records stop binding.
+pub const FORMAT_VERSION: &str = "2";
 /// Delta documents below this never start a rebuild, so a small index is not
 /// rebuilt on every write.
 pub const REBUILD_FLOOR: usize = 256;
@@ -441,25 +444,39 @@ pub struct Projection {
     pub tokens: Vec<String>,
     pub links: super::ranking::Links,
     pub digest: String,
+    /// Everything ranking reads and nothing it does not: no raw text,
+    /// revision, head sequence or content hash. Lineage recency is the one
+    /// ranking input this leaves out, so a gate must exclude lineage targets.
+    pub ranking_digest: String,
 }
 pub fn projection(card: &Card, live: bool) -> Projection {
     let fields = text::fields(&card.text, &card.card_id);
     let indexed = text::card_text(&fields, &card.text);
     let tokens = text::tokenize(&indexed);
     let links = super::ranking::Links::parse(&card.text, &card.scope);
-    let body = serde_json::json!({
+    let digest_of =
+        |body: serde_json::Value| super::ids::sha256_hex(super::ids::canonical(&body).as_bytes());
+    let ranking_digest = digest_of(serde_json::json!({
+        "scope":card.scope,"card_id":card.card_id,"live":live,
+        "tokens":tokens,"literal":text::py_lower(&indexed),
+        "title":fields.title,"summary":fields.summary,"tags":fields.tags,
+        "trust":card.trust,"automated":card.automated,
+        "successor":links.successor,"predecessors":links.predecessors
+    }));
+    let digest = digest_of(serde_json::json!({
         "scope":card.scope,"card_id":card.card_id,"live":live,
         "indexed_text":indexed,"text":card.text,"tokens":tokens,
         "title":fields.title,"summary":fields.summary,"tags":fields.tags,
         "trust":card.trust,"revision":card.revision,"head_seq":card.revision,
         "content_hash":card.content_hash,"automated":card.automated,
         "successor":links.successor,"predecessors":links.predecessors
-    });
+    }));
     Projection {
         fields,
         tokens,
         links,
-        digest: super::ids::sha256_hex(super::ids::canonical(&body).as_bytes()),
+        digest,
+        ranking_digest,
     }
 }
 
@@ -662,7 +679,16 @@ impl Builder {
     }
 }
 
-pub(super) const AUTOMATED_SQL: &str = "(c.writer_class='principal' OR COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0))";
+macro_rules! origin_automated {
+    () => {
+        "COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0)"
+    };
+}
+/// The latest put or import came from a scheduled or worker origin. An apply
+/// writes neither event kind, so it never changes this.
+pub(super) const ORIGIN_AUTOMATED_SQL: &str = origin_automated!();
+pub(super) const AUTOMATED_SQL: &str =
+    concat!("(c.writer_class='principal' OR ", origin_automated!(), ")");
 
 fn card_row(r: &rusqlite::Row) -> rusqlite::Result<Card> {
     let bytes: Vec<u8> = r.get(5)?;
@@ -1179,6 +1205,43 @@ mod projection_tests {
             assert_ne!(projection(&changed, true).digest, digest, "{field}");
         }
         assert_ne!(projection(&before, false).digest, digest, "live status");
+    }
+    #[test]
+    fn ranking_digest_ignores_only_what_search_never_reads() {
+        let before = card();
+        let digest = projection(&before, true).ranking_digest;
+        for (what, text) in [
+            ("anchor suffix", "needle ^c-abcdef\n"),
+            ("evidence line", "---\nevidence: [\"a/b/c\"]\n---\nneedle\n"),
+        ] {
+            let mut same = before.clone();
+            same.text = text.into();
+            assert_eq!(projection(&same, true).ranking_digest, digest, "{what}");
+        }
+        let mut same = before.clone();
+        same.revision += 1;
+        same.content_hash = "different".into();
+        assert_eq!(projection(&same, true).ranking_digest, digest, "stored");
+        for (field, text) in [
+            ("body", "another token\n"),
+            ("title", "---\ntitle: two\n---\nneedle\n"),
+            ("link", "---\nsuperseded_by: two\n---\nneedle\n"),
+        ] {
+            let mut changed = before.clone();
+            changed.text = text.into();
+            assert_ne!(projection(&changed, true).ranking_digest, digest, "{field}");
+        }
+        let mut changed = before.clone();
+        changed.automated = true;
+        assert_ne!(
+            projection(&changed, true).ranking_digest,
+            digest,
+            "automated"
+        );
+        changed = before.clone();
+        changed.trust = "flagged".into();
+        assert_ne!(projection(&changed, true).ranking_digest, digest, "trust");
+        assert_ne!(projection(&before, false).ranking_digest, digest, "live");
     }
     #[test]
     fn projection_invariant_index_replay_is_byte_equal() {
