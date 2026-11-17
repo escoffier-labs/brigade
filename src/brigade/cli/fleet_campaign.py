@@ -156,6 +156,21 @@ def _register_hub_commands(commands: argparse._SubParsersAction, fleet_sub: argp
     show.add_argument("campaign_key", help="Campaign key.")
     show.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     show.set_defaults(func=_show)
+    consume = commands.add_parser(
+        "consume",
+        help="Take the next eligible member on this node and work it through work dispatch.",
+        description=(
+            "Take one eligible member of a campaign through its generation-fenced ownership, run a local task for "
+            "that repository through work dispatch apply, then record the attempt and checkpoint the run. "
+            "A successful run never completes the member. --watch repeats until no member is eligible."
+        ),
+    )
+    consume.add_argument("campaign_key", help="Campaign key.")
+    consume.add_argument("--target", type=Path, default=Path.cwd(), help="Workspace containing .brigade/repos.toml.")
+    consume.add_argument("--worker", required=True, help="Roster seat that works each member.")
+    consume.add_argument("--watch", action="store_true", help="Repeat until no member is eligible.")
+    consume.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    consume.set_defaults(func=_consume)
     listing = fleet_sub.add_parser("campaigns", help="List campaigns on the Hub with rollup counts.")
     listing.add_argument("--limit", type=int, default=None, help="Campaigns to show (1-50, default 20).")
     listing.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
@@ -507,3 +522,69 @@ def _show(args: argparse.Namespace) -> int:
             f"  {'drifted' if member.get('drifted') else 'in-spec'}"
         )
     return 0
+
+
+def _local_repos(target: Path) -> dict[str, Path]:
+    """Canonical identity to checkout for every repos.toml entry this node can resolve."""
+    entries, errors, loaded = _select_sweep_entries(target, repo_ids=None)
+    if not loaded or errors:
+        raise campaign.PreviewError("repository_selection_refused")
+    repos: dict[str, Path] = {}
+    for entry in entries:
+        try:
+            repos.setdefault(_identity(entry), entry.path)
+        except campaign.PreviewError:
+            continue
+    return repos
+
+
+def _consume(args: argparse.Namespace) -> int:
+    from functools import partial
+
+    from .. import fleet_client, worklore_client
+    from .. import fleet_campaign_consume as consumer
+
+    target = args.target.expanduser().resolve()
+    try:
+        key = campaign.opaque_key(args.campaign_key)
+        repos = _local_repos(target)
+    except campaign.PreviewError as exc:
+        return _refuse(args, str(exc))
+    except (OSError, ValueError, TypeError, IndexError, RecursionError, RuntimeError):
+        return _refuse(args, "input_refused")
+    if not repos:
+        return _refuse(args, "no_local_repositories")
+    try:
+        passes = consumer.consume(
+            worklore_client,
+            watch=args.watch,
+            campaign_key=key,
+            node_id=fleet_client.resolve_node_id(target),
+            repos=repos,
+            launcher=partial(consumer.launch_local, worker=args.worker),
+            emit=consumer.receipt_writer(target, key),
+            holds=consumer.Holds(consumer.holds_path(target, key)),
+        )
+    except worklore_client.FleetClientError as exc:
+        return _hub_failure(args, exc)
+    except consumer.HoldsUnreadable:
+        return _refuse(args, "campaign_holds_unreadable")
+    rows = [
+        {
+            "outcome": p.outcome,
+            "repo": p.repo,
+            "work_id": p.work_id,
+            "generation": p.generation,
+            "run_id": p.run_id,
+            "detail": p.detail,
+        }
+        for p in passes
+    ]
+    code = 1 if any(p.outcome in consumer.FAILING for p in passes) else 0
+    if args.json:
+        print(json.dumps({"passes": rows}, sort_keys=True, indent=2))
+        return code
+    for row in rows:
+        line = f"{_text(row['outcome'])}  {_text(row['repo'])}  generation {_text(row['generation'])}  run {_text(row['run_id'])}"
+        print(f"{line}  {_text(row['detail'])}" if row["detail"] else line)
+    return code
