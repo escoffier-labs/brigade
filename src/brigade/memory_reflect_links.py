@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import memory_claim_blocks as claim_blocks
 from . import memory_hub_client as hub_client
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
@@ -371,7 +372,7 @@ def ops(
                 if index.valid(head["scope"], name):
                     continue
                 stats["broken"] += 1
-                if reason or not block.block_id:
+                if reason or not block.block_id or not claim_blocks.hub_addressable(head["text"], block):
                     _bump(skipped, reason or "link_missing_pin")
                     continue
                 target, why = index.resolve(head["scope"], raw, head.get("trust"))

@@ -155,12 +155,18 @@ def test_cross_scope_targets_are_skipped_and_never_repointed():
 
 
 def test_alias_heading_prefix_and_extension_are_preserved():
-    claim = "A [[old#Part One|shown]], [[old|text]], [[old#Head]], [[cards/old.md]], [[ old ]] and [[old#a|b#c]]."
-    [[op]], skipped, _ = unit(successor_pair(claim))
-    assert op["text"] == (
-        "A [[new#Part One|shown]], [[new|text]], [[new#Head]], [[cards/new.md]], [[ new ]] and [[new#a|b#c]]."
+    # A pipe makes a paragraph opaque to the hub, so pipe-bearing aliases cannot
+    # be pinned. The heading, folder and space forms in a plain paragraph still
+    # keep their original spelling when repointed.
+    heads = successor_pair()
+    heads[0]["text"] = (
+        "---\nevidence: []\n---\n"
+        "A [[old#Head]], [[cards/old.md]] and [[ old ]]. ^c-aaaaaa\n\n"
+        "Also [[old#Part One|shown]], [[old|text]] and [[old#a|b#c]]. ^c-bbbbbb\n"
     )
-    assert skipped == {}
+    [ops], skipped, _ = unit(heads)
+    assert [op["text"] for op in ops] == ["A [[new#Head]], [[cards/new.md]] and [[ new ]]."]
+    assert skipped == {"link_missing_pin": 3}
 
 
 def test_one_op_per_block_even_with_several_links():
@@ -174,8 +180,10 @@ def test_code_spans_embeds_escapes_and_heading_only_links_are_untouched():
     claim = "Use `[[old]]` and ``a ` [[old]]`` but not ![[old]] or \\[[old]] or [[#Heading]] or [[|x]]."
     submissions, skipped, stats = unit(successor_pair(claim))
     assert submissions == [] and skipped == {} and stats["links"] == 0
-    [[op]], _, _ = unit(successor_pair("Use `[[old]]` here but [[old]] there."))
-    assert op["text"] == "Use `[[old]]` here but [[new]] there."
+    # Inline code makes the whole block opaque to the hub, so even a real link
+    # outside the code span cannot be pinned and the repair is skipped.
+    submissions, skipped, _ = unit(successor_pair("Use `[[old]]` here but [[old]] there."))
+    assert submissions == [] and skipped == {"link_missing_pin": 1}
 
 
 @pytest.mark.parametrize(

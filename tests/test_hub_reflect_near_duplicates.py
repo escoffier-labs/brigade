@@ -22,6 +22,10 @@ def card_text(claim, anchor, meta="evidence: []"):
     return f"---\n{meta}\n---\n{claim}. ^{anchor}\n"
 
 
+def two_para_card(first, second, first_anchor, second_anchor, meta="evidence: []"):
+    return f"---\n{meta}\n---\n{first} ^{first_anchor}\n\n{second} ^{second_anchor}\n"
+
+
 def put(hub, card_id, claim, anchor, meta="evidence: []", scope=SCOPE):
     hub._commit("card.put", scope, card_id, card_text(claim, anchor, meta), "live", hubc.event_id())
 
@@ -146,6 +150,31 @@ def test_unanchored_keeper_skips_cluster_and_unanchored_member_skips_its_op():
     unanchored = head("u", f"---\nevidence: []\n---\n{words(40, 'u')}.\n", 3)
     [ops], skipped = near.ops([keeper, *members, unanchored], limit=0.9, budget=near.Budget())
     assert [op["card_id"] for op in ops] == ["a", "b"] and skipped == {"near_missing_pin": 1}
+
+
+def test_pin_skips_hub_opaque_inline_code_for_plain_anchored_block():
+    # Backticks are invisible to the word shingler but opaque to the hub's span
+    # classifier, so the two claims stay near duplicates while only the second
+    # anchored paragraph of the newer card can actually be pinned.
+    lead = " ".join(f"w{i}" for i in range(40))
+    tail = " ".join(f"v{i}" for i in range(8))
+    plain = f"{lead} inline example"
+    coded = f"{lead} `inline` example"
+    keeper = head("k", two_para_card(plain, tail, "c-000001", "c-000002"), 0)
+    newer = head("n", two_para_card(coded, tail, "c-000003", "c-000004"), 1)
+    [submission], skipped = near.ops([keeper, newer], limit=0.9, budget=near.Budget())
+    assert skipped == {}
+    [op] = submission
+    assert op["card_id"] == "n" and op["block_id"] == "c-000004"
+
+
+def test_pin_skipped_when_only_anchored_block_is_hub_opaque():
+    lead = " ".join(f"w{i}" for i in range(40))
+    plain = f"{lead} inline example"
+    coded = f"{lead} `inline` example"
+    keeper = head("k", card_text(plain, "c-000001"), 0)
+    newer = head("n", card_text(coded, "c-000002"), 1)
+    assert near.ops([keeper, newer], limit=0.9, budget=near.Budget()) == ([], {"near_missing_pin": 1})
 
 
 def test_ambiguous_member_metadata_skips_only_that_op():

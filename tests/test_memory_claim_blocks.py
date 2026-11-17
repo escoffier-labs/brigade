@@ -6,7 +6,7 @@ import hashlib
 
 import pytest
 
-from brigade import memory_proposal_v2_ops as delta, memory_proposals as legacy
+from brigade import memory_claim_blocks as claim_blocks, memory_proposal_v2_ops as delta, memory_proposals as legacy
 
 
 @pytest.fixture(params=[("\n", False), ("\n", True), ("\r\n", False), ("\r\n", True)])
@@ -347,3 +347,45 @@ def test_list_comment_closer_after_blank_keeps_suffix_opaque(markdown, nested):
     anchored = delta.anchor_text(body, "memory/cards/example.md")
     assert delta.claim_body(anchored) == body
     assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
+
+
+# Expected spans are byte ranges hand-derived from engines/hub/src/memory/proposal_blocks.rs.
+HUB_SPAN_PARITY = [
+    # line 74: a backtick in the line makes the whole paragraph opaque
+    ("Claim `code` here.\n", set()),
+    # line 74: a pipe in the line makes the whole paragraph opaque
+    ("a | b\n", set()),
+    # line 74: '>' inside the text, not at its start, is still opaque
+    ("Claim > here.\n", set()),
+    # line 72: a heading marker at the start of the trimmed line is opaque
+    ("# Heading\n", set()),
+    # line 71: a line starting with whitespace is opaque
+    ("    indented claim\n", set()),
+    # line 73: a claim starting with "previously" is opaque
+    ("previously old wording\n", set()),
+    # line 77: a line of only thematic-break characters is opaque
+    ("***\n", set()),
+    # lines 48-54 and 63-64: fenced code is skipped, never a span
+    ("```\ncode\n```\n", set()),
+    # lines 28 and 37-43: front matter is skipped and the claim after it is bytes 21..27
+    ("---\ntitle: Notes\n---\nClaim.\n", {(21, 27)}),
+    # line 22: a '<' anywhere makes the entire card unaddressable
+    ("Claim <tag> here.\n", set()),
+    # lines 65-79: a plain paragraph is one byte span excluding its newline
+    ("Plain claim.\n", {(0, 12)}),
+    # lines 65-79: byte offsets, not str indices, for non-ASCII text (Café is 5 bytes)
+    ("Café naïve claim.\n", {(0, 19)}),
+]
+
+
+@pytest.mark.parametrize("text,expected", HUB_SPAN_PARITY)
+def test_hub_spans_match_rust_rules(text, expected):
+    assert claim_blocks.hub_spans(text) == expected
+
+
+def test_hub_addressable_needs_span_and_suffix():
+    text = "---\nevidence: []\n---\nCafé claim `code`. ^c-aaaaaa\n\nPlain claim. ^c-bbbbbb\n"
+    opaque, plain = delta.blocks(text)
+    assert (opaque.block_id, plain.block_id) == ("c-aaaaaa", "c-bbbbbb")
+    assert not claim_blocks.hub_addressable(text, opaque)
+    assert claim_blocks.hub_addressable(text, plain)

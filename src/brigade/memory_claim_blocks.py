@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .memory_proposal_v2_ops import Block
 
 ANCHOR_SUFFIX = re.compile(r" \^(c-[0-9a-f]{6})(?=[ \t]*\Z)")
 
@@ -251,3 +255,104 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
         index += 1
     finish()
     return result
+
+
+# Rust `char::is_whitespace` is the Unicode White_Space property. Python's
+# default str.strip() also removes U+001C..U+001F, which the hub reads as prose,
+# so the port uses the exact set on both trims and whitespace-prefix checks.
+_RUST_WHITESPACE = "".join(
+    ["\t\n\v\f\r ", "\u0085\u00a0\u1680", *(chr(c) for c in range(0x2000, 0x200B)), "\u2028\u2029\u202f\u205f\u3000"]
+)
+
+
+def _hub_lines(text: str) -> list[str]:
+    """Rust `split_inclusive('\\n')`: keep the newline on every non-final line."""
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def hub_spans(text: str) -> set[tuple[int, int]]:
+    """Port of the hub's `proposal_blocks::spans()` as byte ranges.
+
+    The hub classifier counts UTF-8 bytes, not Python str indices. Returned
+    (start, end) pairs exclude the final newline. Convert a client str offset i
+    with len(text[:i].encode("utf-8")) before comparing against these ranges.
+    """
+    if "<" in text:
+        return set()
+    result: set[tuple[int, int]] = set()
+    offset = 0
+    front = text.startswith("---\n") or text.startswith("---\r\n")
+    fence: tuple[str, int] | None = None
+    start: int | None = None
+    end = 0
+    opaque = False
+    for line in _hub_lines(text):
+        raw = line[:-1] if line.endswith("\n") else line
+        if raw.endswith("\r"):
+            raw = raw[:-1]
+        size = len(line.encode("utf-8"))
+        trimmed = raw.lstrip(_RUST_WHITESPACE)
+        if front:
+            if offset > 0 and raw == "---":
+                front = False
+            offset += size
+            continue
+        marker = trimmed[0] if trimmed[:1] in ("`", "~") else None
+        width = len(trimmed) - len(trimmed.lstrip(marker)) if marker else 0
+        if fence is not None:
+            fence_char, fence_width = fence
+            if marker == fence_char and width >= fence_width and not trimmed[width:].strip(_RUST_WHITESPACE):
+                fence = None
+            offset += size
+            continue
+        if not raw or raw.startswith(("- ", "+ ", "* ")) or width >= 3:
+            if start is not None:
+                if not opaque:
+                    result.add((start, end))
+                start = None
+            opaque = False
+        if width >= 3 and marker is not None:
+            fence = (marker, width)
+        elif raw:
+            if start is None:
+                start = offset
+            opaque |= (
+                raw[0] in _RUST_WHITESPACE
+                or trimmed.startswith(("#", ">", "<", "["))
+                or trimmed.startswith("previously")
+                or any(char in raw for char in "|`<>")
+                or all(char in "-=*_ " for char in raw)
+            )
+            end = offset + len(raw.encode("utf-8"))
+        offset += size
+    if start is not None and not opaque:
+        result.add((start, end))
+    return result
+
+
+def hub_suffix_id(block: str) -> str | None:
+    """Port of the hub's `suffix()`: a trailing ` ^c-xxxxxx` anchor, if present."""
+    trimmed = block.rstrip(" \t")
+    prefix, sep, ident = trimmed.rpartition(" ^")
+    if not sep or len(ident) != 8 or not ident.startswith("c-"):
+        return None
+    return ident if all(char in "0123456789abcdef" for char in ident[2:]) else None
+
+
+def hub_addressable(card_text: str, block: Block) -> bool:
+    """True only when the hub can pin this client block by its anchor id.
+
+    The client parser is more lenient than the hub's, so a block can look
+    addressable here yet be opaque to the hub. Require the exact byte span and
+    a hub-parsable suffix that resolves to the block's own id.
+    """
+    if not block.block_id:
+        return False
+    spans = hub_spans(card_text)
+    start = len(card_text[: block.start].encode("utf-8"))
+    stop = len(card_text[: block.end].encode("utf-8"))
+    return (start, stop) in spans and hub_suffix_id(block.text) == block.block_id

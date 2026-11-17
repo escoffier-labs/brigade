@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from . import memory_claim_blocks as claim_blocks
 from . import memory_fairness as fairness
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
@@ -273,7 +274,7 @@ def _ops(heads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, i
         reason = "missing_pin"
         try:
             blocks = delta.blocks(keeper["text"])
-            block = next((b for b in blocks if b.block_id), None)
+            block = next((b for b in blocks if b.block_id and claim_blocks.hub_addressable(keeper["text"], b)), None)
             if block is None:
                 raise ValueError("duplicate keeper has no pinned block")
             reason = "invalid_metadata"
