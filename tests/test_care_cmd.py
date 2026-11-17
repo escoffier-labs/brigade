@@ -38,7 +38,7 @@ def test_care_systemd_uninstall_only_invoking_target(tmp_path, monkeypatch, caps
     first.mkdir()
     second.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=first, backend="systemd", home=home) == 0
     assert care_cmd.install(target=second, backend="systemd", home=home) == 0
@@ -58,7 +58,7 @@ def test_care_launchd_registrations_are_target_namespaced(tmp_path, monkeypatch,
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=first, backend="launchd", home=home) == 0
     assert care_cmd.install(target=second, backend="launchd", home=home) == 0
@@ -154,7 +154,7 @@ def test_care_status_payload_reports_crontab_and_systemd_enabled(tmp_path, monke
 
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
     monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
     target = tmp_path / "ws"
@@ -197,7 +197,7 @@ def test_care_status_payload_discovers_per_entry_memory_jobs(tmp_path, monkeypat
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
 
     assert (
@@ -237,7 +237,7 @@ def test_care_crontab_install_status_uninstall_round_trip(tmp_path, monkeypatch)
 
     monkeypatch.setattr(care_cmd, "_read_crontab", fake_read)
     monkeypatch.setattr(care_cmd, "_write_crontab", fake_write)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
     target = tmp_path / "ws"
@@ -286,7 +286,7 @@ def test_care_status_reports_tampered_block_without_clobber(tmp_path, monkeypatc
         "_write_crontab",
         lambda text: (_ for _ in ()).throw(AssertionError("must not write")),
     )
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
     assert care_cmd.status(target=tmp_path, backend="crontab", json_output=True) == 1
@@ -375,7 +375,7 @@ def test_care_crontab_install_refuses_malformed_markers_without_write(tmp_path, 
         "_write_crontab",
         lambda text: (_ for _ in ()).throw(AssertionError("must not write")),
     )
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
     assert care_cmd.install(target=tmp_path, backend="crontab", json_output=True) == 1
@@ -391,7 +391,7 @@ def test_care_crontab_percent_in_path_is_escaped(tmp_path, monkeypatch):
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
     monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: None)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda t: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
 
     assert care_cmd.install(target=target, backend="crontab", json_output=True) == 0
@@ -406,7 +406,7 @@ def test_care_crontab_percent_in_path_is_escaped(tmp_path, monkeypatch):
 def test_care_systemd_install_refuses_malformed_unit_without_write(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -662,7 +662,7 @@ def test_care_explicit_backends_generate_plans_on_win32(tmp_path, monkeypatch, c
     # Pinning uses native shutil.which, which cannot run with a simulated win32.
     monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", lambda *args: ({}, None))
     monkeypatch.setattr(care_cmd.sys, "platform", "win32")
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     home = tmp_path / "home"
     target = tmp_path / "ws"
     target.mkdir()
@@ -771,7 +771,7 @@ def test_care_cli_dispatch(monkeypatch, tmp_path):
 def test_care_systemd_install_writes_hash_stamped_units(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -798,7 +798,7 @@ def test_care_systemd_install_writes_hash_stamped_units(tmp_path, monkeypatch):
 def test_care_systemd_unit_quotes_workspace_paths_with_spaces(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     target = tmp_path / "my workspace"
     target.mkdir()
 
@@ -828,7 +828,7 @@ def test_care_systemd_unit_quotes_workspace_paths_with_spaces(tmp_path, monkeypa
 def test_care_systemd_environment_path_quotes_home_with_spaces(tmp_path, monkeypatch):
     home = tmp_path / "my home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -848,7 +848,7 @@ def test_care_systemd_environment_path_quotes_home_with_spaces(tmp_path, monkeyp
 def test_care_systemd_percent_in_path_is_escaped(tmp_path, monkeypatch):
     home = tmp_path / "pct%home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -867,7 +867,7 @@ def test_care_systemd_percent_in_path_is_escaped(tmp_path, monkeypatch):
 def test_care_systemd_uninstall_refuses_tampered_unit(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -904,7 +904,7 @@ def test_care_status_payload_different_workspace_does_not_enable_jobs(tmp_path, 
 
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
     monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda t: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
     assert memory_cmd._write_memory_care_runbooks(other) == 0
     assert care_cmd.install(target=other, backend="crontab", home=home, json_output=True) == 0
@@ -923,7 +923,7 @@ def test_care_status_payload_same_workspace_stale_remains_visible(tmp_path, monk
 
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
     monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda t: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
     assert memory_cmd._write_memory_care_runbooks(target) == 0
     assert care_cmd.install(target=target, backend="crontab", home=home, json_output=True) == 0
@@ -941,7 +941,7 @@ def test_care_systemd_aggregate_status_malformed_beats_missing(tmp_path, monkeyp
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda t: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, json_output=True) == 0
@@ -1092,7 +1092,7 @@ def test_care_crontab_percent_path_passes_crontab_syntax_check(tmp_path):
 def test_care_systemd_status_reports_broken_symlink_as_malformed(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -1111,7 +1111,7 @@ def test_care_systemd_status_reports_broken_symlink_as_malformed(tmp_path, monke
 def test_care_systemd_uninstall_skips_symlink_swap(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -1184,7 +1184,7 @@ def test_care_install_one_entry_does_not_touch_sibling_or_other_target(tmp_path,
     first.mkdir()
     second.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=first, backend="systemd", home=home, entry_ids=["handoff-ingest"]) == 0
     assert care_cmd.install(target=first, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
@@ -1205,7 +1205,7 @@ def test_care_uninstall_one_entry_does_not_touch_sibling_or_other_target(tmp_pat
     first.mkdir()
     second.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=first, backend="systemd", home=home, entry_ids=["handoff-ingest"]) == 0
     assert care_cmd.install(target=first, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
@@ -1229,7 +1229,7 @@ def test_care_status_reports_named_entry_without_requiring_atomic_set(tmp_path, 
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
     capsys.readouterr()
@@ -1252,7 +1252,7 @@ def test_care_bare_status_enumerates_per_entry_registrations_and_systemd_enablem
     target.mkdir()
     entry_ids = ["handoff-ingest", "care-scan", "memory-closeout"]
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.status(target=target, backend=backend, home=home, json_output=True) == 0
     missing = json.loads(capsys.readouterr().out)
@@ -1290,7 +1290,7 @@ def test_care_install_without_entry_still_writes_atomic_default_set(tmp_path, mo
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=target, backend="systemd", home=home) == 0
     for entry_id in ("daily-care", "ingest-sweep", "weekly-outcome-ratchet", "daily-observability", "nightly-ops"):
@@ -1304,7 +1304,7 @@ def test_care_install_memory_refresh_without_runbook_refuses(tmp_path, monkeypat
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["memory-refresh"]) == 2
     err = capsys.readouterr().err
@@ -1321,7 +1321,7 @@ def test_care_install_memory_refresh_with_operator_runbook(tmp_path, monkeypatch
     target.mkdir()
     _write_operator_runbook(target, "memory-refresh.json", "memory-refresh")
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["memory-refresh"]) == 0
     service = _unit_path(home, target, "memory-refresh", ".service")
@@ -1336,7 +1336,7 @@ def test_care_unknown_entry_is_error(tmp_path, monkeypatch, capsys):
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["not-a-job"]) == 2
     assert "unknown care entry" in capsys.readouterr().err
@@ -1349,7 +1349,7 @@ def test_care_launchd_uninstall_one_entry_preserves_sibling_and_other_target(tmp
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=first, backend="launchd", home=home, entry_ids=["handoff-ingest"]) == 0
     assert care_cmd.install(target=first, backend="launchd", home=home, entry_ids=["care-scan"]) == 0
@@ -1447,7 +1447,7 @@ def test_care_systemd_custom_schedule_is_installed(tmp_path, monkeypatch):
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert (
         care_cmd.install(
@@ -1468,7 +1468,7 @@ def test_care_systemd_install_preserves_local_schedule_on_upgrade(tmp_path, monk
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert (
         care_cmd.install(
@@ -1490,7 +1490,7 @@ def test_care_systemd_install_preserves_multiple_calendars_as_separate_directive
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
     timer = _unit_path(home, target, "care-scan", ".timer")
@@ -1526,7 +1526,7 @@ def test_care_systemd_status_reports_drop_in_calendar_divergence(tmp_path, monke
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(
         care_schedules,
         "effective_systemd_calendar",
@@ -1593,7 +1593,7 @@ def test_care_systemd_status_warns_on_known_miseledger_schedule_collision(tmp_pa
     target.mkdir()
     _write_operator_runbook(target, "evidence-crawl.json", "evidence-crawl")
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     def fake_systemctl(args, **kwargs):
         timer_name = args[3]
@@ -1642,7 +1642,7 @@ def test_care_systemd_status_keeps_default_managed_calendar(tmp_path, monkeypatc
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(
         care_schedules,
         "effective_systemd_calendar",
@@ -1690,7 +1690,7 @@ def test_care_systemd_status_keeps_calendar_inspection_failure(tmp_path, monkeyp
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_schedules, "effective_systemd_calendar", lambda timer_name: (None, "no user bus"))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
@@ -1732,7 +1732,7 @@ def test_care_bare_install_adopts_predecessor_ids_instead_of_stacking(tmp_path, 
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert (
         care_cmd.install(
@@ -1776,7 +1776,7 @@ def test_care_bare_install_adopts_launchd_predecessors(tmp_path, monkeypatch, ca
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=target, backend="launchd", home=home, entry_ids=["care-scan"]) == 0
     capsys.readouterr()
@@ -1795,7 +1795,7 @@ def test_care_explicit_entry_still_installs_requested_id_beside_predecessor(tmp_
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["care-scan"]) == 0
     assert care_cmd.install(target=target, backend="systemd", home=home, entry_ids=["daily-care"]) == 0

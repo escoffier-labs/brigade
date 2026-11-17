@@ -664,28 +664,50 @@ def _ensure_memory_care_runbooks(target: Path) -> int:
     return rc if specs is None else care_runbooks.ensure(target, specs)
 
 
-def _write_daily_observability_runbook(target: Path) -> int:
-    return care_patrol.write_runbook(
-        target, MEMORY_CARE_RUNBOOK_REL["daily-observability"], DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD
+def _daily_observability_spec() -> care_runbooks.RunbookSpec:
+    return care_runbooks.RunbookSpec(
+        MEMORY_CARE_RUNBOOK_REL["daily-observability"], DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD
     )
+
+
+def _memory_closeout_spec() -> care_runbooks.RunbookSpec:
+    return care_runbooks.RunbookSpec(
+        f"{memory_cmd.MEMORY_CARE_RUNBOOKS_REL}/{MEMORY_CLOSEOUT_RUNBOOK_NAME}", MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD
+    )
+
+
+def _write_daily_observability_runbook(target: Path) -> int:
+    return care_runbooks.ensure(target, [_daily_observability_spec()])
 
 
 def _write_memory_closeout_runbook(target: Path) -> int:
     """Materialize the shipped memory-closeout runbook when missing."""
-    return care_patrol.write_runbook(
-        target, f"{memory_cmd.MEMORY_CARE_RUNBOOKS_REL}/{MEMORY_CLOSEOUT_RUNBOOK_NAME}", MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD
-    )
+    return care_runbooks.ensure(target, [_memory_closeout_spec()])
 
 
-def _ensure_care_runbooks(target: Path) -> int:
-    """Publish the missing shipped runbooks and daily-observability as one validated batch."""
+def _install_shipped_specs() -> tuple[list[care_runbooks.RunbookSpec] | None, int]:
+    """The shipped memory-care runbooks plus daily-observability, as publishable specs."""
     specs, rc = memory_cmd.memory_care_runbook_specs()
     if specs is None:
-        return rc
-    daily = care_runbooks.RunbookSpec(
-        MEMORY_CARE_RUNBOOK_REL["daily-observability"], DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD
-    )
-    return care_runbooks.ensure(target, [*specs, daily])
+        return None, rc
+    return [*specs, _daily_observability_spec()], 0
+
+
+def _install_runbook_specs(
+    entries: tuple[CareEntry, ...], *, shipped: bool
+) -> tuple[list[care_runbooks.RunbookSpec] | None, int]:
+    """Every runbook this install may publish, so they can be checked and published as one batch."""
+    specs: list[care_runbooks.RunbookSpec] = []
+    if shipped:
+        shipped_specs, rc = _install_shipped_specs()
+        if shipped_specs is None:
+            return None, rc
+        specs = shipped_specs
+    extra = care_patrol.selected_specs(entries)
+    if shipped and any(entry.entry_id == "memory-closeout" for entry in entries):
+        extra.append(_memory_closeout_spec())
+    known = {spec.rel for spec in specs}
+    return [*specs, *(spec for spec in extra if spec.rel not in known)], 0
 
 
 def _windows_plan_tasks(*, workspace: Path, entries: tuple[CareEntry, ...]) -> list[dict[str, Any]]:
@@ -1048,20 +1070,17 @@ def install(
 
         set_enabled(target, True)
 
-    if _uses_schtasks(backend):
-        if not dry_run:
-            rc = care_patrol.ensure_selected(target, entries)
-            if rc != 0:
-                return rc
-        return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
-
-    rc = _ensure_care_runbooks(target) or care_patrol.ensure_selected(target, entries)
+    specs, rc = _install_runbook_specs(entries, shipped=not _uses_schtasks(backend))
+    if specs is None:
+        return rc
+    # One batch: every destination is checked before the first file is published,
+    # and a dry run writes nothing but reports what it would write.
+    rc = care_runbooks.ensure(target, specs, dry_run=dry_run, quiet=json_output)
     if rc != 0:
         return rc
-    if any(entry.entry_id == "memory-closeout" for entry in entries):
-        rc = _write_memory_closeout_runbook(target)
-        if rc != 0:
-            return rc
+
+    if _uses_schtasks(backend):
+        return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
     if backend == "launchd":
         return _launchd_install(

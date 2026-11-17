@@ -422,3 +422,43 @@ def test_skill_lock_refuses_symlink_without_touching_victim(tmp_path):
     (tmp_path / ".brigade/skills.mutation.lock").symlink_to(victim)
     assert skills_cmd.import_skill(target=tmp_path, source=source) == 2
     assert victim.read_bytes() == b"preserve"
+
+
+def test_inbox_add_dedupe_key_is_idempotent_across_statuses(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    key = "init:security-review:" + "a" * 64
+
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["dedupe_key"] == key
+
+    # Pending: the same key returns the existing proposal and writes nothing new.
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["proposal_id"] == first["proposal_id"]
+
+    # Rejected proposals still count, so a repeat run does not re-file them.
+    assert skills_cmd.inbox_reject(target=tmp_path, proposal_id=first["proposal_id"], reason="not wanted") == 0
+    capsys.readouterr()
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key) == 0
+    assert f"skill_proposal: {first['proposal_id']}" in capsys.readouterr().out
+    assert len(list((tmp_path / ".brigade" / "skills" / "inbox").glob("*/proposal.json"))) == 1
+
+    # A different key (or none) still files a new proposal.
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key + "b", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["proposal_id"] != first["proposal_id"]
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, json_output=True) == 0
+    assert "dedupe_key" not in json.loads(capsys.readouterr().out)
+
+
+def test_inbox_add_dedupe_return_keeps_the_exit_code_of_a_failed_lint(tmp_path, capsys):
+    source = tmp_path / "source" / "bad-skill"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("   \n")  # lint error: SKILL.md is empty
+    key = "init:bad-skill:x:" + "b" * 64
+
+    first = skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True)
+    capsys.readouterr()
+    again = skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True)
+
+    assert first == 1, "the fixture must fail lint for this test to mean anything"
+    assert again == first

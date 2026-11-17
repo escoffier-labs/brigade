@@ -40,10 +40,11 @@ def select(
     return entries
 
 
-def ensure_selected(target: Path, entries: tuple[CareEntry, ...]) -> int:
+def selected_specs(entries: tuple[CareEntry, ...]) -> list[care_runbooks.RunbookSpec]:
+    """The patrol runbook spec when run-patrol is among the entries, else nothing."""
     if any(item.entry_id == "run-patrol" for item in entries):
-        return write_runbook(target, RUNBOOK_REL, RUNBOOK_PAYLOAD)
-    return 0
+        return [care_runbooks.RunbookSpec(RUNBOOK_REL, RUNBOOK_PAYLOAD)]
+    return []
 
 
 def write_runbook(target: Path, relative: str, payload: dict[str, Any]) -> int:

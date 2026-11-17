@@ -273,7 +273,7 @@ def memory_care_runbook_specs() -> tuple[list[care_runbooks.RunbookSpec] | None,
     )
 
 
-def _write_memory_care_runbooks(target: Path, *, only_missing: bool = False) -> int:
+def _write_memory_care_runbooks(target: Path, *, refresh: bool = False) -> int:
     """Publish the pinned mechanical memory-care runbook templates into the target.
 
     Pins are materialized from the resolved ``brigade`` binary at write time so
@@ -281,15 +281,15 @@ def _write_memory_care_runbooks(target: Path, *, only_missing: bool = False) -> 
     separate pin step. Only the shipped names are ever touched; other runbooks
     in the directory are never deleted (see ``care_runbooks`` for the rules).
 
-    With *only_missing* (``brigade care install``) every shipped file already
-    present is kept as is. Without it (``memory care init --with-runbooks``)
-    shipped files are refreshed from the templates: each replaced file is
+    By default only missing shipped files are written and every existing file is
+    kept as is. ``memory care init --force --with-runbooks`` passes *refresh*:
+    shipped files that differ from the templates are then replaced, each one
     printed and first copied to ``<name>.bak-<UTC timestamp>``.
     """
     specs, rc = memory_care_runbook_specs()
     if specs is None:
         return rc
-    return care_runbooks.ensure(target, specs, refresh=not only_missing)
+    return care_runbooks.ensure(target, specs, refresh=refresh)
 
 
 def init(
@@ -308,7 +308,7 @@ def init(
         print(f"error: memory-care config already exists: {path}", file=sys.stderr)
         return 1
     if with_runbooks:
-        rc = _write_memory_care_runbooks(target)
+        rc = _write_memory_care_runbooks(target, refresh=force)
         if rc != 0:
             return rc
     path.parent.mkdir(parents=True, exist_ok=True)

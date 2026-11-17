@@ -11,14 +11,22 @@ Every writer behind ``brigade care install`` and ``brigade memory care init
 * Every payload is validated and pinned in a private staging directory, and
   every destination is checked, before the first file is published, so a
   validation, pin or destination problem leaves nothing half-written.
-* Publication is per file. Absent files are linked into place and cannot
-  clobber a file that appeared meanwhile. An OS failure in the middle of the
+* Publication is per file. An absent file is hard-linked into place, which
+  cannot clobber a file that appeared meanwhile. Only when the filesystem
+  refuses hard links does the writer re-check that the name is still absent and
+  fall back to ``os.replace``, which leaves a small window in which a file
+  created at that moment would be replaced. An OS failure in the middle of the
   publish loop returns 2, names the failing file and lists the files already
   published (those stay published: the loop has no rollback).
+* ``dry_run=True`` checks every destination exactly like a real run, then prints
+  what would be written and touches nothing.
 
 ``refresh=True`` is for the explicit ``memory care init --force
---with-runbooks``: it replaces shipped files that differ from the template, but
-copies each replaced file to ``<name>.bak-<UTC timestamp>`` first and prints it.
+--with-runbooks`` only. A shipped file whose content differs from the template
+is copied to ``<name>.bak-<UTC timestamp>`` and then replaced. A file that
+differs only in its ``pins`` block (for example after a ``brigade`` upgrade
+changed the pinned binary hash) is rewritten with fresh pins and no backup.
+Both cases are printed.
 """
 
 from __future__ import annotations
@@ -110,11 +118,29 @@ def _stage(target: Path, spec: RunbookSpec, stage_dir: Path) -> Path | int:
     return staged
 
 
+def _canonical(payload: Any) -> str | None:
+    """Compact sorted JSON of a runbook without its top-level pins, or None when it is not an object."""
+    if not isinstance(payload, dict):
+        return None
+    return json.dumps({k: v for k, v in payload.items() if k != "pins"}, sort_keys=True, separators=(",", ":"))
+
+
+def _same_without_pins(existing: bytes, wanted: bytes | dict[str, Any]) -> bool:
+    try:
+        left = _canonical(json.loads(existing))
+        right = _canonical(wanted if isinstance(wanted, dict) else json.loads(wanted))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return left is not None and left == right
+
+
 def _backup(dest: Path, stamp: str) -> Path:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     for attempt in range(1000):
         backup = dest.with_name(f"{dest.name}.bak-{stamp}" + (f"-{attempt}" if attempt else ""))
         try:
-            with open(dest, "rb") as source, open(backup, "xb") as copy:
+            fd = os.open(dest, os.O_RDONLY | nofollow)
+            with os.fdopen(fd, "rb") as source, open(backup, "xb") as copy:
                 shutil.copyfileobj(source, copy)
         except FileExistsError:
             continue
@@ -136,23 +162,56 @@ def _publish(staged: Path, dest: Path, *, replace: bool, stamp: str) -> str | No
         return f"wrote runbook: {dest}"
     if _is_regular_file(dest) is not True:
         raise OSError(f"runbook is no longer a regular file: {dest}")
-    if dest.read_bytes() == staged.read_bytes():
+    current, wanted = dest.read_bytes(), staged.read_bytes()
+    if current == wanted:
         return None
+    if _same_without_pins(current, wanted):
+        os.replace(staged, dest)  # only the pins moved: refresh them, keep no backup
+        return f"re-pinned runbook: {dest}"
     backup = _backup(dest, stamp)
     os.replace(staged, dest)
     return f"replaced shipped runbook: {dest} (backup: {backup})"
 
 
-def ensure(target: Path, specs: Iterable[RunbookSpec], *, refresh: bool = False) -> int:
-    """Publish the specs under target. Returns 0, or 2 after an error naming the path."""
+def _report_plan(work: list[tuple[RunbookSpec, Path, bool]], *, quiet: bool) -> int:
+    """Print what a real run would do for each destination; writes nothing."""
+    if quiet:
+        return 0
+    for spec, dest, exists in work:
+        if not exists:
+            print(f"would write runbook: {dest}")
+            continue
+        try:
+            current = dest.read_bytes()
+        except OSError as exc:
+            print(f"error: cannot read runbook {dest}: {exc}", file=sys.stderr)
+            return 2
+        if not _same_without_pins(current, spec.payload):
+            print(f"would replace shipped runbook: {dest} (backup first)")
+    return 0
+
+
+def ensure(
+    target: Path,
+    specs: Iterable[RunbookSpec],
+    *,
+    refresh: bool = False,
+    dry_run: bool = False,
+    quiet: bool = False,
+) -> int:
+    """Publish the specs under target as one batch. Returns 0, or 2 after an error naming the path.
+
+    Every destination is checked before the first file is published. With
+    *dry_run* nothing is written; the plan is printed unless *quiet* is set.
+    """
     try:
-        return _ensure(target, list(specs), refresh=refresh)
+        return _ensure(target, list(specs), refresh=refresh, dry_run=dry_run, quiet=quiet)
     except OSError as exc:
         print(f"error: cannot write care runbooks: {exc}", file=sys.stderr)
         return 2
 
 
-def _ensure(target: Path, specs: list[RunbookSpec], *, refresh: bool) -> int:
+def _ensure(target: Path, specs: list[RunbookSpec], *, refresh: bool, dry_run: bool, quiet: bool) -> int:
     work: list[tuple[RunbookSpec, Path, bool]] = []  # (spec, dest, destination exists)
     for spec in specs:
         dest = target / spec.rel
@@ -169,6 +228,8 @@ def _ensure(target: Path, specs: list[RunbookSpec], *, refresh: bool) -> int:
             return 2
         if regular is None or refresh:
             work.append((spec, dest, regular is True))
+    if dry_run:
+        return _report_plan(work, quiet=quiet)
     if not work:
         return 0
 

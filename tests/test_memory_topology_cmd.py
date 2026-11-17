@@ -761,7 +761,7 @@ def test_memory_topology_care_enabled_via_crontab_status_helper(tmp_path, capsys
 
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: (store["text"], None))
     monkeypatch.setattr(care_cmd, "_write_crontab", lambda text: store.__setitem__("text", text) or None)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
     monkeypatch.setattr(care_cmd, "_systemd_user_dir", lambda home=None: tmp_path / "no-systemd")
 
@@ -793,7 +793,7 @@ def test_memory_topology_care_enabled_via_systemd_status_helper(tmp_path, capsys
     (tmp_path / ".claude" / "memory-handoffs").mkdir(parents=True)
     home = tmp_path / "home"
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
 
     assert care_cmd.install(target=tmp_path, backend="systemd", home=home, json_output=True) == 0
