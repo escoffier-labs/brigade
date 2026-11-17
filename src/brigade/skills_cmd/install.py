@@ -329,10 +329,24 @@ def _anchor_subtree_is_plain(anchor: registry._StateRootAnchor, *relative: str) 
             os.close(held)
 
 
+def _plain_link_target(target: str) -> str:
+    r"""Drop the Windows extended-length prefix so a target reads the same everywhere.
+
+    ``os.readlink`` returns ``\\?\D:\x`` for an absolute Windows link and
+    ``\\?\UNC\srv\share`` for a network one; report ``D:\x`` and ``\\srv\share``.
+    The result is display text only: nothing opens, resolves, or compares it.
+    """
+    if target[:8].upper() == "\\\\?\\UNC\\":
+        return "\\\\" + target[8:]
+    if target.startswith("\\\\?\\"):
+        return target[4:]
+    return target
+
+
 def _link_target(installed_dir: Path) -> str | None:
     """Read one symlink's target string without following the link."""
     try:
-        return os.readlink(installed_dir)
+        return _plain_link_target(os.readlink(installed_dir))
     except OSError:
         return None
 
@@ -360,17 +374,19 @@ def _installed_path_state(
                 with registry._held_state_root(workspace, writable=False) as held:
                     kind = registry._state_entry_kind(held, *parts)
         except registry.SkillsStatePathError as exc:
-            if installed_dir.is_symlink():
-                # A redirected leaf is never followed; it is the non-plain
-                # entry it is.
-                return "symlink", _link_target(installed_dir)
             if isinstance(exc.__context__, FileNotFoundError):
                 # No state root yet, so nothing is installed there (same
-                # distinction _install_dir makes).
+                # distinction _install_dir makes); nothing to look up by path.
                 return "missing", None
+            if installed_dir.is_symlink():
+                # The anchored walk refused: a redirected leaf is never
+                # followed, it is the non-plain entry it is. This runs only
+                # after that refusal, to report the link and where it points.
+                return "symlink", _link_target(installed_dir)
             return "unreadable", None
-        if kind == "dir" and registry._is_reparse_point(installed_dir):
-            return "other", None
+        # No pathname probe here: the anchored lookup already reports a link or
+        # reparse point at the leaf as a refusal (handled above), and a lookup
+        # by path under the state root is what the containment tests forbid.
         return kind if kind in {"missing", "dir", "file"} else "other", None
     try:
         info = os.lstat(installed_dir)
