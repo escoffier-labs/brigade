@@ -914,6 +914,14 @@ run files are unchanged and keep raw prompts and paths so resume still works.
 Evidence packages (`brigade evidence package`) and remote execution transport
 are outside this guarantee.
 
+The guarantee covers text from the exporting machine. A hand-built archive can
+still hide data in fields that hold hex digests by design, such as `sha256`
+values or digest-shaped names, because any 64 hex characters pass. Import
+renames every scrubbed worker stream to a keyed digest, so an archive cannot
+choose a stream file name that survives. Scrubbed streams keep bounded public
+identifiers such as thread, turn, item and tool names and method values, as the
+worker event scrubber defines.
+
 The lifecycle journal is deliberately omitted. Its `detail` fields carry
 exception text, and the hash chain cannot be scrubbed in place. Export records
 the journal chain head and event count in `journal_withheld`. An imported run

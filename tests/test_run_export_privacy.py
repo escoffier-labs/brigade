@@ -768,3 +768,17 @@ def test_worker_stream_names_become_keyed_digests(tmp_path: Path):
     assert "api-key-secretvalue" not in names[0]
     assert run_export_projection.is_allowed_export_rel(names[0])
     assert not (payload / "events" / "workers").exists()
+
+
+def test_hex_named_stream_is_renamed_too(tmp_path: Path):
+    payload = tmp_path / "payload"
+    chosen = "a" * 64
+    stream = payload / "events" / f"{chosen}.scrubbed.json"
+    stream.parent.mkdir(parents=True)
+    stream.write_text("{}", encoding="utf-8")
+
+    assert run_export_projection.rename_worker_streams(payload, b"k" * 32) == 1
+
+    names = [path.name for path in (payload / "events").iterdir()]
+    assert names != [f"{chosen}.scrubbed.json"]
+    assert run_export_projection.is_allowed_export_rel(f"events/{names[0]}")

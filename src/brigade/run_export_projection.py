@@ -887,7 +887,9 @@ def rename_worker_streams(payload_root: Path, key: bytes) -> int:
     renamed = 0
     for path in sorted(payload_root.rglob("*.scrubbed.json")):
         rel = path.relative_to(payload_root).as_posix()
-        if _STREAM_EXPORT_RE.fullmatch(rel) or not worker_events.is_scrubbed_worker_event_stream_rel(rel):
+        # Rename every stream, including one already hex-named: a legacy archive must not
+        # choose a name that survives import.
+        if not worker_events.is_scrubbed_worker_event_stream_rel(rel):
             continue
         digest = hmac.new(key, rel.encode("utf-8"), hashlib.sha256).hexdigest()
         target = payload_root / "events" / f"{digest}.scrubbed.json"
