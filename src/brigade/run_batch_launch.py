@@ -30,7 +30,9 @@ def launch_recorder(
     task_id = assignment.task_id if assignment is not None else None
 
     def refuse(reason: str) -> LaunchRefused:
-        assert task_id is not None
+        # An explicit check, not an assert: it must hold under python -O too.
+        if task_id is None:
+            return LaunchRefused(f"batch launch refused: no task identity ({reason})")
         on_refused(task_id)
         return LaunchRefused(f"task {task_id} launch refused: {reason}")
 

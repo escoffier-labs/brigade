@@ -189,12 +189,20 @@ request lock only when the journal shows no prepared attempt. If the journal
 shows a possible launch, a missing marker refuses with `request-unknown`. A
 present unreadable or corrupt marker also refuses launch with `request-unknown`.
 Once the batch is accepted into the journal, the run directory also records
-`batch-journal-enrolled.json`. A request with that file and a marker refuses
-with `request-unknown` when the journal is absent or unreadable, because a
-missing journal would otherwise read as "nothing launched" and re-enroll every
-task. This holds even if the journal was deleted before any launch; use a new
-`request_id` to start over. A request that never reached acceptance has no such
-file and still retries after a preflight refusal.
+`batch-journal-enrolled.json`. When that file or any batch result file exists,
+the request refuses with `request-unknown` if the journal is absent, unreadable,
+or no longer holds the batch, whether or not the marker survives. A missing
+journal would otherwise read as "nothing launched" and re-enroll every task.
+This holds even if the journal was deleted before any launch; use a new
+`request_id` to start over. A request that never reached acceptance has none of
+these files and still retries after a preflight refusal. The guarantee assumes
+the journal is append-only: a journal rewound to an earlier valid state that
+still contains the accepted batch cannot be told apart from one where nothing
+launched.
+
+`brigade runs resume` refuses an explicit batch run directory, because resuming
+a provider thread would bypass the per-task launch claim. Rerun the batch request
+instead.
 Independently of the marker, each task is checked again at the launch point:
 a task the journal shows as attempted or not queued is never invoked again, and
 its journal state is left as it was.

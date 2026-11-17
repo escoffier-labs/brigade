@@ -62,7 +62,6 @@ class BatchExecution:
         self.plan = plan
         self.run_dir = run_dir
         self.workspace = workspace
-        self.tasks = {t["task_id"]: t for t in plan["tasks"]}
         # The prepared handle and its journal version, captured at the launch point.
         self.prepared: dict[str, tuple[run_tasks.TaskHandle, str]] = {}
         # Per-task read-only is enforced by the existing worker read-only path,
@@ -301,19 +300,24 @@ def retryable_before_launch(run_dir: Path) -> bool:
 
 
 def journal_lost(run_dir: Path) -> bool:
-    """True when a request that was accepted has lost its lifecycle journal.
+    """True when a request that was accepted has lost or rewound its journal.
 
     Without a journal ``retryable_before_launch`` reads as "nothing launched", so
-    deleting it would re-enroll every task. A request that never reached
-    acceptance has no sentinel and keeps its preflight retry.
+    deleting it would re-enroll every task. Acceptance leaves durable evidence
+    outside the journal (the sentinel, and batch results once a worker returns),
+    and any of it means the journal must still hold the accepted batch. A request
+    that never reached acceptance has none of it and keeps its preflight retry.
+    A journal rewound to a valid prefix that still contains the accepted batch
+    is not detectable here: at-most-once assumes the journal is append-only.
     """
+    accepted = (run_dir / JOURNAL_SENTINEL).exists() or any(run_dir.glob("batch-result-*.json"))
     if not run_lifecycle._journal_path(run_dir).exists():
-        return (run_dir / JOURNAL_SENTINEL).exists()
+        return accepted
     try:
-        run_tasks.read_tasks(run_dir)
+        tasks = run_tasks.read_tasks(run_dir)
     except run_tasks.TaskJournalError:
         return True
-    return False
+    return accepted and not tasks
 
 
 @contextlib.contextmanager
@@ -354,7 +358,9 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
             raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
         if marker is not None and marker.get("fingerprint") != plan["fingerprint"]:
             raise BatchError("request-conflict", "request_id already belongs to a different batch")
-        if marker is not None and journal_lost(run_dir):
+        # Checked whatever the marker says: deleting the marker too must not
+        # turn a lost journal back into a fresh request.
+        if journal_lost(run_dir):
             raise BatchError(
                 "request-unknown",
                 "request journal is missing or unreadable; refusing launch. Use a new request_id",

@@ -252,3 +252,25 @@ def test_lost_journal_refuses_the_request(setup, capsys, monkeypatch, stage):
     assert len(setup[1]) == launched
     # A new request id is the supported way forward and still proceeds.
     assert invoke(setup, capsys, [task("a")], request="other")[0] == 0
+
+
+@pytest.mark.parametrize("also_remove", ["batch-request.json", "batch-journal-enrolled.json"])
+def test_lost_journal_with_another_file_removed_still_refuses(setup, capsys, also_remove):
+    rc, _, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    run_dir = _batch_run_dir(setup[0])
+    (run_dir / "events" / "lifecycle.jsonl").unlink()
+    (run_dir / also_remove).unlink()
+    launched = len(setup[1])
+    rc, refused, _ = invoke(setup, capsys, [task("a")])
+    assert (rc, refused["error"]["code"]) == (2, "request-unknown")
+    assert len(setup[1]) == launched
+
+
+def test_batch_run_cannot_be_resumed(setup, capsys):
+    from brigade import run_resume
+
+    rc, _, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    assert run_resume.resume(_batch_run_dir(setup[0])) == 2
+    assert "cannot be resumed" in capsys.readouterr().err
