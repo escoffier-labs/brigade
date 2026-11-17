@@ -176,19 +176,30 @@ def target_binding(document: Mapping[str, Any], seat: str) -> dict[str, Any] | N
     return fleet_model_roster.adapter_plan_binding(CONSUMER, bindings, adapter=ADAPTER)
 
 
-def immutable_source_revision(
+class SourceRevisionError(RuntimeError):
+    """A checkout that cannot supply an immutable, reproducible source revision."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+def clean_source_revision(
     cwd: Path,
     *,
     runner: Callable[..., Any] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    ignore_prefixes: tuple[str, ...] = (),
 ) -> str:
-    """Return a clean 40-character HEAD, or refuse with ``remote-context-unavailable``.
+    """Return a clean 40-character HEAD, or raise ``SourceRevisionError``.
 
-    Dirty tracked content or relevant untracked content means the approved work
-    context cannot be reproduced on the target. HEAD is never silently
-    substituted, and the machine policy is never violated by falling back to a
-    local run. Ignored paths (local credentials, build output) are excluded by
-    ``git status --porcelain`` and are never transferred.
+    Dirty tracked content or relevant untracked content means the source
+    context cannot be reproduced from a revision. HEAD is never silently
+    substituted. Ignored paths (local credentials, build output) are excluded by
+    ``git status --porcelain`` and are never implied to travel with the
+    revision. Callers own their own refusal codes for the two cases:
+    ``source-dirty`` for a non-clean checkout and ``source-unavailable`` for
+    unreadable or non-revision state.
     """
     runner = runner or (
         subprocess.run
@@ -206,13 +217,13 @@ def immutable_source_revision(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         proc.check_cancellation(process_registry)
-        raise TransportDenial("remote-context-unavailable", f"source revision is unreadable: {exc}") from exc
+        raise SourceRevisionError("source-unavailable", f"source revision is unreadable: {exc}") from exc
     proc.check_cancellation(process_registry)
     if getattr(head, "returncode", 1) != 0:
-        raise TransportDenial("remote-context-unavailable", "source checkout has no resolvable HEAD revision")
+        raise SourceRevisionError("source-unavailable", "source checkout has no resolvable HEAD revision")
     revision = _one_line(getattr(head, "stdout", ""), 64)
     if SHA_RE.match(revision) is None:
-        raise TransportDenial("remote-context-unavailable", "source HEAD is not an immutable 40-character revision")
+        raise SourceRevisionError("source-unavailable", "source HEAD is not an immutable 40-character revision")
     proc.check_cancellation(process_registry)
     try:
         status = runner(
@@ -224,16 +235,43 @@ def immutable_source_revision(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         proc.check_cancellation(process_registry)
-        raise TransportDenial("remote-context-unavailable", f"source cleanliness is unreadable: {exc}") from exc
+        raise SourceRevisionError("source-unavailable", f"source cleanliness is unreadable: {exc}") from exc
     proc.check_cancellation(process_registry)
     if getattr(status, "returncode", 1) != 0:
-        raise TransportDenial("remote-context-unavailable", "source checkout cleanliness is unverifiable")
-    if str(getattr(status, "stdout", "") or "").strip():
-        raise TransportDenial(
-            "remote-context-unavailable",
+        raise SourceRevisionError("source-unavailable", "source checkout cleanliness is unverifiable")
+    # Porcelain v1 lines are "XY path". Callers may exclude their own state
+    # directories (for example .brigade/) the same way require_clean_worktree does.
+    dirty = [
+        line
+        for line in str(getattr(status, "stdout", "") or "").splitlines()
+        if line.strip() and not line[3:].startswith(ignore_prefixes)
+    ]
+    if dirty:
+        raise SourceRevisionError(
+            "source-dirty",
             "source checkout has uncommitted tracked or untracked content; the approved revision is not reproducible",
         )
     return revision
+
+
+def immutable_source_revision(
+    cwd: Path,
+    *,
+    runner: Callable[..., Any] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> str:
+    """Return a clean 40-character HEAD, or refuse with ``remote-context-unavailable``.
+
+    Dirty tracked content or relevant untracked content means the approved work
+    context cannot be reproduced on the target. HEAD is never silently
+    substituted, and the machine policy is never violated by falling back to a
+    local run. Ignored paths (local credentials, build output) are excluded by
+    ``git status --porcelain`` and are never transferred.
+    """
+    try:
+        return clean_source_revision(cwd, runner=runner, process_registry=process_registry)
+    except SourceRevisionError as exc:
+        raise TransportDenial("remote-context-unavailable", str(exc)) from exc
 
 
 def resolve_route(
