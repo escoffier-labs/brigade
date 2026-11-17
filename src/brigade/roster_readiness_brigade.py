@@ -781,14 +781,19 @@ def _worktree_isolation_observation(
     """
     if request.isolation != "worktree":
         return None
-    if runguard.is_git_worktree(workspace):
+    if runguard.is_git_checkout_with_commit(workspace):
         return Observation(
             "passed",
             observed_at,
             scope,
-            detail="workspace is a Git checkout; worktree isolation is available",
+            detail="git-eligible: Git checkout with a committed HEAD; worktree creation was not attempted",
         )
-    return Observation("failed", observed_at, scope, detail="Worktree isolation requires a Git checkout.")
+    return Observation(
+        "failed",
+        observed_at,
+        scope,
+        detail="Worktree isolation requires a Git checkout with a committed HEAD.",
+    )
 
 
 def brigade_route_readiness(
@@ -799,11 +804,13 @@ def brigade_route_readiness(
     scope: str | None = None,
     now: float | None = None,
 ) -> tuple[roster_mod.Roster, dict[str, Observation]]:
-    """Return the effective roster and read-only ``admission`` and ``capacity`` observations.
+    """Return the effective roster and read-only operation observations.
 
-    When ``scope`` is ``None`` it is computed from the effective (Hub-resolved)
-    roster. A caller that supplies ``scope`` must compute it from that same
-    effective roster, or the observations will not match the evaluated roster.
+    Produces ``admission`` and ``capacity``, plus an ``isolation`` observation
+    for worktree isolation requests. When ``scope`` is ``None`` it is computed
+    from the effective (Hub-resolved) roster. A caller that supplies ``scope``
+    must compute it from that same effective roster, or the observations will
+    not match the evaluated roster.
     """
     from . import fleet_client
 
@@ -880,8 +887,10 @@ def brigade_route_observations(
     scope: str | None = None,
     now: float | None = None,
 ) -> dict[str, Observation]:
-    """Produce authoritative, strictly read-only ``admission`` and ``capacity``
-    observations for ``route == "brigade"``.
+    """Produce authoritative, strictly read-only operation observations.
+
+    Produces ``admission`` and ``capacity`` for ``route == "brigade"`` and, for
+    worktree isolation requests, an ``isolation`` observation.
 
     Never acquires a lease or claim, never writes LKG/audit caches, never launches
     a task, and never sends model inference.

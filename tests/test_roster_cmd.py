@@ -586,7 +586,7 @@ def test_roster_doctor_reuses_inventory_for_repeated_harness_seats(monkeypatch, 
     monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
     calls = []
 
-    def fake_run():
+    def fake_run(*args, **kwargs):
         calls.append(["cursor-agent", "models"])
         return agents.proc.Result(
             0,
@@ -1176,6 +1176,12 @@ def test_roster_ready_text_includes_scope_and_observed_at(tmp_target, monkeypatc
     assert "readiness: ready (exit 0)" in out
     assert "scope: sha256:" in out
     assert "observed_at: " in out
+
+    # The CLI can only express writable operations, so it declares read_only
+    # explicitly rather than leaving the isolation check unverified.
+    assert roster_cmd.ready(tmp_target, workers=("worker",), health_probe=HealthyProbe(), json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["request"]["read_only"] is False
 
 
 @pytest.mark.parametrize(

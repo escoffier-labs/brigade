@@ -483,7 +483,7 @@ class SeatHealthProbe:
             if seat.cli == "antigravity":
                 return self._antigravity_version_check(seat, timeout_seconds)
             return SeatHealthCheck(
-                name, "degraded", "adapter has no reviewed version gate", cause_code="probe-incomplete"
+                name, "degraded", "adapter has no reviewed version gate", cause_code="no-reviewed-gate"
             )
         if name == "model-reachability":
             return self._model_check(seat, roster, workspace, timeout_seconds, allow_model_smoke)
@@ -555,14 +555,23 @@ class SeatHealthProbe:
                 "degraded",
                 "cloud seats validate via `brigade run cloud canary`; model smoke is not provider-safe",
             )
-        if seat.model is None:
+        requested = seat.model
+        if requested is None and isinstance(seat.cli, str) and seat.cli.startswith("ollama:"):
+            # Ollama names its model in the cli ref, the same way `roster
+            # doctor` reads it. Resolve that before treating a missing `model`
+            # as unknown.
+            requested = seat.cli[len("ollama:") :]
+        if requested is None:
             return SeatHealthCheck("model-reachability", "degraded", "seat has no exact model declaration")
         # Prompt-free inventory is safe in every mode.  Roster doctor retains
         # its established rendering below; readiness relies on this listing
         # when model smoke is disabled so it never sends an inference request.
         if self._collect_model_inventory and seat.transport == "direct" and seat.cli is not None:
             inspected = model_inventory.ModelInventoryInspector().inspect(
-                seat.cli, seat.model, getattr(seat, "command", None)
+                seat.cli,
+                requested,
+                getattr(seat, "command", None),
+                timeout_seconds=timeout_seconds,
             )
             if inspected is not None:
                 if inspected.state == "exact":
@@ -572,6 +581,8 @@ class SeatHealthProbe:
                         "model-reachability", "failed", inspected.detail, cause_code="model-unavailable"
                     )
                 return SeatHealthCheck("model-reachability", "degraded", inspected.detail, cause_code=inspected.state)
+        if seat.model is None:
+            return SeatHealthCheck("model-reachability", "degraded", "seat has no exact model declaration")
         if not allow_model_smoke:
             return SeatHealthCheck(
                 "model-reachability",

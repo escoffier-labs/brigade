@@ -388,7 +388,9 @@ def ready(
             resolution = roster_mod.resolve_roster(target, roster_path)
             loaded = replace(roster_mod.load_roster(resolution.path), resolution=resolution)
             loaded = run_preference.apply_to_roster(loaded, run_preference.load_cached())
-            request = roster_readiness.ReadinessRequest(workers, concurrency, route, isolation, capability)
+            request = roster_readiness.ReadinessRequest(
+                workers, concurrency, route, isolation, capability, read_only=False
+            )
             try:
                 hub_discovery_possible = bool(fleet_client.load_fleet_settings()["hub_url"])
             except (fleet_client.FleetClientError, OSError, ValueError):
