@@ -100,11 +100,17 @@ def _policy_repo_key(document: Mapping[str, Any], repo: str, key: str) -> str:
 
 
 def _usable_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Bound, fresh inventory rows per machine, ordered by project id so the first one is a stable choice."""
+    """Bound, fresh, well-formed inventory rows per machine, ordered by project id so the first is a stable choice."""
     usable: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         machine = row.get("machine")
-        if machine and row["bound"] and not row["stale"]:
+        # Rows stored under older, looser rules must not leak an id the shared predicates now refuse.
+        valid = (
+            fleet_node_projects.clean_project_id(row["project_id"]) is not None
+            and fleet_node_projects.clean_id(row["environment_id"], fleet_node_projects.MAX_ENVIRONMENT_ID_CHARS)
+            is not None
+        )
+        if machine and valid and row["bound"] and not row["stale"]:
             usable.setdefault(machine, []).append(row)
     for choices in usable.values():
         choices.sort(key=lambda item: str(item["project_id"]))
@@ -223,7 +229,9 @@ def _place(
         reasons: list[str] = []
         rows = by_machine.get(name) or []
         if name not in usable:
-            if any(r["bound"] for r in rows):
+            if any(r["bound"] and not r["stale"] for r in rows):
+                reasons.append("inventory-invalid")
+            elif any(r["bound"] for r in rows):
                 reasons.append("inventory-stale")
             elif rows:
                 reasons.append("inventory-unbound")

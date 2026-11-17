@@ -170,7 +170,8 @@ Placement reuses the routing candidate evaluator and adds three checks:
 
 - The repository must be a bound, fresh T3 project on the machine. A machine
   with no row is `repo-not-placeable`, an unbound row is `inventory-unbound`,
-  and an expired row is `inventory-stale`. A repository with no usable row
+  an expired row is `inventory-stale`, and a stored row whose ids fail the shared
+  project and environment id rules is `inventory-invalid`. A repository with no usable row
   anywhere is denied as `repo-not-placeable`. A policy
   `repositories.<id>.eligible_machines` list narrows the set further
   (`repo-machine-not-eligible`). Every spelling of the key (case, trailing

@@ -530,3 +530,13 @@ def test_several_projects_for_one_repo_choose_deterministically_and_say_so(fleet
     # A single project still reports a choice count of one.
     assert _place(fleet, caller=NODE_LINUX_2)["recommended"]["project_choices"] == 1
     assert _place(fleet) == _place(fleet)
+
+
+def test_a_stored_row_with_an_id_the_shared_predicates_refuse_is_never_recommended(fleet):
+    # A row written before the stricter project id rule: it carries whitespace.
+    fleet.execute("UPDATE fleet_node_projects SET project_id=? WHERE node_id=?", ("proj bad id", NODE_LINUX))
+    fleet.commit()
+    result = _place(fleet)
+    assert result["recommended"]["machine"] == "worker-linux-2"
+    assert "inventory-invalid" in _reasons(result, "worker-linux-1")
+    assert "proj bad id" not in json.dumps(result)
