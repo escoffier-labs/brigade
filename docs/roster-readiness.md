@@ -131,22 +131,33 @@ reports `failed` (`blocked`) and tells the operator to enroll the node, matching
 (`unverified`), even though `brigade run` proceeds on the local run lock. When
 unenrolled, Hub seat-limit checks scan every selected worker seat before
 deciding capacity: any `limit = 0` reports `admitted_capacity = 0` (`blocked`),
-otherwise any malformed limit reports `unknown` (`unverified`), and otherwise
-any positive limit reports `unknown` (`unverified`), independent of `--worker`
-order. Because no Hub endpoint exposes live per-seat lease usage without
-acquiring a lease, Hub-enforced positive concurrency limits and enrolled fleet
-policy lease usage report `capacity` as `unknown` (`unverified`) instead of
-guessing. LKG fallback also leaves live Hub capacity `unknown` (`unverified`),
-and `limit = 0` or a held lock or claim reports `admitted_capacity = 0`
+and only a malformed limit reports `unknown` (`unverified`), independent of
+`--worker` order.
+
+A positive seat limit reads live occupancy from the read-only
+`GET /models/usage` route. It requires the same admin or node bearer as
+`GET /models` and `GET /policy`, refuses unauthenticated callers with the same
+401, and acquires, extends, or releases nothing. Under active fleet policy
+authority the Hub counts active reservations and deduplicated leases;
+otherwise it counts unexpired, unreleased `model_leases`. The response carries
+the roster revision and policy digest it was computed against, and readiness
+requires both to match its admission snapshot exactly. Capacity becomes
+`max(0, limit - occupied)`: positive capacity is `passed`, a full seat reports
+`admitted_capacity = 0` (`blocked`), and a revision or digest mismatch is
+`unknown` (`unverified`), never ready. Enrolled fleet policy seats use the same
+read. LKG fallback leaves live Hub capacity `unknown` (`unverified`), and
+`limit = 0` or a held lock or claim reports `admitted_capacity = 0`
 (`blocked`).
 
 Network calls use the existing 2.5-second client timeouts. Reading the roster
 high-water mark and LKG cache takes `_spool_lock`, which also runs on the
 no-Hub path through `enrollment_activation_observed`. `_spool_lock` can create
 `<BRIGADE_HOME>/fleet-spool/`, `chmod` that directory to `0700`, and create
-empty `.lock` files. No cache content is written. The spool-lock wait is
-currently unbounded (`timeout=None`), so `brigade roster ready` can block behind
-a concurrent writer. Bounding that wait is deferred to a follow-up PR.
+empty `.lock` files. No cache content is written. The readiness producer bounds
+both waits with the same 2.5-second client timeout and turns a spool-lock
+timeout into an `unknown` admission or capacity observation, so a timeout never
+reads as "not enrolled". `brigade run` admission keeps its blocking acquisition
+and its existing empty-record fallback.
 
 T3 capability and governance observation production remains unimplemented, so
 T3 requests still skip local provider probes and remain unverified (or blocked

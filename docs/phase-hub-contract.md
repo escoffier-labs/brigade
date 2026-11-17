@@ -173,6 +173,7 @@ here. The action table lists 19 actions, and the drive covers 16.
 | GET | /cloud | bearer | `?view=capabilities`, `?all=1` | 200 cloud snapshot, or `{schema: "brigade.fleet_cloud.v1"}` for capabilities | not yet |
 | POST | /cloud | node (admin for `policy`) | `{action: admit\|bind\|renew\|release\|policy, ...}` | lease decision | not yet |
 | GET | /models | bearer | none | 200 projected model roster | not yet |
+| GET | /models/usage | bearer | none | 200 per-seat occupancy with roster revision and policy digest | not yet |
 | POST | /models | node | lease `acquire`/`release`, roster `set`/`set-default`/`retire`, `admit` | lease or roster result | not yet |
 | GET | /policy | bearer | `?history=1&limit=` | 200 policy document, bad limit 400 `{error: {code: "invalid-request", message}}` | covered (401 envelope only) |
 | GET | /policy/status | bearer | none | 200 policy status | not yet |

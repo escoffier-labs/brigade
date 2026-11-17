@@ -83,6 +83,7 @@ def test_hub_route_inventory_is_unchanged():
         "/health",
         "/mesh/identity",
         "/models",
+        "/models/usage",
         "/nodes",
         "/owners",
         "/policy",

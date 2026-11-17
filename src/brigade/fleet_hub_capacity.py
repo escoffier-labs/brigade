@@ -80,6 +80,18 @@ def _add_reason(reasons: list[str], code: str) -> None:
         reasons.append(code)
 
 
+def lease_usage(conn: sqlite3.Connection, *, now: datetime) -> dict[str, int]:
+    """Count unexpired, unreleased legacy ``model_leases`` per seat."""
+    current = _aware(now)
+    counts: dict[str, int] = {}
+    rows = conn.execute("SELECT seat, expires_at, released_at FROM model_leases").fetchall()
+    for seat, expires_at, released_at in rows:
+        if _lease_occupies({"released_at": released_at, "expires_at": expires_at}, now=current):
+            key = str(seat)
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def capacity_usage(
     conn: sqlite3.Connection,
     *,

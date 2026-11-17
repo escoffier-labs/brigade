@@ -153,6 +153,13 @@ def show_policy() -> dict[str, Any]:
     return _checked(status, payload)
 
 
+def read_seat_usage() -> dict[str, Any]:
+    """Read-only per-seat occupancy, never acquiring, extending, or releasing a lease."""
+    hub, token = _hub_and_token(admin=False)
+    status, payload = _request("GET", "/models/usage", token=token, hub_url=hub)
+    return _checked(status, payload)
+
+
 def show_owners() -> dict[str, Any]:
     hub, token = _hub_and_token(admin=False)
     status, payload = _request("GET", "/owners", token=token, hub_url=hub)
