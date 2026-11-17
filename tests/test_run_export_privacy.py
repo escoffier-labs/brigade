@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 
-from brigade import run_export_projection, run_resume, work_run_archive
+from brigade import memory_recall_log, run_export_projection, run_resume, work_run_archive
 from brigade.work_run_archive import WorkRunArchiveError
 
 RUN_ID = "20260809-120000-abcdef12"
@@ -397,7 +398,7 @@ def test_drive_unc_file_uri_and_embedded_paths_are_mapped(tmp_path: Path):
     assert exported["handoff"] == token
     assert exported["control_socket"] == token
     assert exported["artifacts"] == token
-    assert exported["scheduler"]["fallback_reason"] == f"cwd={token}"
+    assert exported["scheduler"]["fallback_reason"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
     raw = _archive_bytes(archive)
     for needle in (b"alice", b"C:\\\\", b"file://", b"\\\\server"):
         assert needle not in raw
@@ -526,3 +527,61 @@ def test_windows_workspace_path_maps_relative(monkeypatch):
     assert run_export_projection._map_path(r"D:\a\workspace\.brigade\runs\id\logs\x.log", ctx) == "<run-dir>/logs/x.log"
     assert run_export_projection._map_path(r"D:\other\project", ctx) == "<external-path>"
     assert run_export_projection._map_path(r"\\server\share\file", ctx) == "<external-path>"
+
+
+def test_unknown_enum_status_is_tokenized_and_import_refuses(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    payload["status"] = "api-key=<secret>"
+    _write_json(run_dir / "run.json", payload)
+
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    exported = json.loads((archive / "payload" / "run.json").read_text(encoding="utf-8"))
+    assert exported["status"] == "<other>"
+    assert b"api-key=<secret>" not in _archive_bytes(archive)
+
+    clean = tmp_path / "clean"
+    clean_run = _seed_privacy_run(tmp_path / "clean-src")[1]
+    work_run_archive.export_run(clean_run, clean)
+    tampered = json.loads((clean / "payload" / "run.json").read_text(encoding="utf-8"))
+    tampered["status"] = "api-key=<secret>"
+    _rewrite_payload(clean, "run.json", tampered)
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.import_archive(clean, runs_dir=tmp_path / "imported")
+    assert excinfo.value.category == "export-privacy"
+
+
+def test_free_text_role_label_becomes_digest(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    roster = json.loads((run_dir / "roster.json").read_text(encoding="utf-8"))
+    roster["agents"]["chef"]["role"] = "free text label"
+    _write_json(run_dir / "roster.json", roster)
+
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    exported = json.loads((archive / "payload" / "roster.json").read_text(encoding="utf-8"))
+    assert exported["agents"]["chef"]["role"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    assert b"free text label" not in _archive_bytes(archive)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode checks")
+def test_search_log_key_rejects_loose_mode(tmp_path: Path):
+    target = tmp_path / "target"
+    path = memory_recall_log.key_path(target)
+    path.parent.mkdir(parents=True)
+    path.write_text("a" * 64 + "\n", encoding="ascii")
+    path.chmod(0o644)
+    assert memory_recall_log.load_or_create_key(target) is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink semantics")
+def test_search_log_key_rejects_symlink(tmp_path: Path):
+    target = tmp_path / "target"
+    path = memory_recall_log.key_path(target)
+    path.parent.mkdir(parents=True)
+    real = tmp_path / "real-key"
+    real.write_text("b" * 64 + "\n", encoding="ascii")
+    real.chmod(0o600)
+    path.symlink_to(real)
+    assert memory_recall_log.load_or_create_key(target) is None

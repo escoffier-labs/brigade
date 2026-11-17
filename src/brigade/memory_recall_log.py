@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,26 @@ def key_path(target: Path) -> Path:
 
 
 def _read_key(path: Path) -> bytes:
-    key = bytes.fromhex(path.read_text(encoding="ascii").strip())
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"search-log key cannot be inspected: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("search-log key must be a regular file")
+    uid = getattr(os, "getuid", None)
+    if uid is not None and metadata.st_uid != uid():
+        raise ValueError("search-log key must be owned by the current user")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise ValueError("search-log key must have mode 0600")
+    try:
+        text = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        raise
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"search-log key cannot be read: {exc}") from exc
+    key = bytes.fromhex(text)
     if len(key) != _KEY_BYTES:
         raise ValueError(f"search-log key must be {_KEY_BYTES} bytes")
     return key
