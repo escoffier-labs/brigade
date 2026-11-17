@@ -18,6 +18,7 @@ import hmac
 import os
 import secrets
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +28,18 @@ KEY_REL = ".brigade/memory/search-log-key"
 _KEY_BYTES = 32
 
 
+class KeyRefusedError(ValueError):
+    """An existing per-host key failed its ownership, mode, or format checks."""
+
+
 def key_path(target: Path) -> Path:
     return target.expanduser().resolve() / KEY_REL
+
+
+def _warn_refused(path: Path, exc: Exception) -> None:
+    detail = str(exc)[:200]
+    message = f"warning: search-log key refused at {path}: {detail}. Run chmod 600 {path} or remove it."
+    print(message[:500], file=sys.stderr)
 
 
 def _read_key(path: Path) -> bytes:
@@ -37,23 +48,26 @@ def _read_key(path: Path) -> bytes:
     except FileNotFoundError:
         raise
     except OSError as exc:
-        raise ValueError(f"search-log key cannot be inspected: {exc}") from exc
+        raise KeyRefusedError(f"search-log key cannot be inspected: {exc}") from exc
     if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("search-log key must be a regular file")
+        raise KeyRefusedError("search-log key must be a regular file")
     uid = getattr(os, "getuid", None)
     if uid is not None and metadata.st_uid != uid():
-        raise ValueError("search-log key must be owned by the current user")
+        raise KeyRefusedError("search-log key must be owned by the current user")
     if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise ValueError("search-log key must have mode 0600")
+        raise KeyRefusedError("search-log key must have mode 0600")
     try:
         text = path.read_text(encoding="ascii").strip()
     except FileNotFoundError:
         raise
     except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"search-log key cannot be read: {exc}") from exc
-    key = bytes.fromhex(text)
+        raise KeyRefusedError(f"search-log key cannot be read: {exc}") from exc
+    try:
+        key = bytes.fromhex(text)
+    except ValueError as exc:
+        raise KeyRefusedError("search-log key is not valid hex") from exc
     if len(key) != _KEY_BYTES:
-        raise ValueError(f"search-log key must be {_KEY_BYTES} bytes")
+        raise KeyRefusedError(f"search-log key must be {_KEY_BYTES} bytes")
     return key
 
 
@@ -77,6 +91,9 @@ def load_or_create_key(target: Path) -> bytes | None:
         return _read_key(path)
     except FileNotFoundError:
         pass
+    except KeyRefusedError as exc:
+        _warn_refused(path, exc)
+        return None
     except (OSError, ValueError):
         return None
     try:
@@ -101,6 +118,9 @@ def load_or_create_key(target: Path) -> bytes | None:
         finally:
             tmp.unlink(missing_ok=True)
         return _read_key(path)
+    except KeyRefusedError as exc:
+        _warn_refused(path, exc)
+        return None
     except (OSError, ValueError):
         return None
 

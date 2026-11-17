@@ -39,7 +39,6 @@ _WIN_ABS_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'`;,)]*")
 _UNC_RE = re.compile(r"\\\\[^\s\"'`;,)]*")
 _ABS_SEGMENT_RE = re.compile(r"/(?:home|Users|root|tmp)(?:/[^\s\"'`;,)]*)?")
 _FILE_URI_RE = re.compile(r"file://[^\s\"']*")
-_SEAT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 _PROMPT_KEYS = frozenset("task text detail final error prompt stdout stderr output result content summary".split())
 _TOP_LEVEL_JSON = frozenset(
@@ -55,7 +54,7 @@ class RunExportProjectionError(ValueError):
 class _Object:
     fields: Mapping[str, "Node"]
     any_name: "Node | None" = None
-    key_pattern: re.Pattern[str] | None = None
+    digest_keys: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,6 +67,7 @@ class _CheckedString:
     values: frozenset[str] | None = None
     pattern: re.Pattern[str] | None = None
     fallback: str = "<other>"
+    digest_ok: bool = True
 
     def matches(self, value: str) -> bool:
         if value == self.fallback:
@@ -100,40 +100,50 @@ class _Path:
 
 
 @dataclass(frozen=True)
-class _Prompt:
+class _DigestValue:
     pass
 
 
-Node = _Object | _List | _CheckedString | _Int | _Number | _Bool | _Path | _Prompt
+Node = _Object | _List | _CheckedString | _Int | _Number | _Bool | _Path | _DigestValue
 
 INT = _Int()
 NUMBER = _Number()
 BOOL = _Bool()
 PATH = _Path()
-PROMPT = _Prompt()
+PROMPT = _DigestValue()
+DIGEST = _DigestValue()
 _OMIT = object()
 
 
-def _enum(*values: str) -> _CheckedString:
-    return _CheckedString(values=frozenset(values))
+def _enum(*values: str, fallback: str = "<other>") -> _CheckedString:
+    return _CheckedString(values=frozenset(values), fallback=fallback, digest_ok=False)
 
 
-def _pat(pattern: str) -> _CheckedString:
-    return _CheckedString(pattern=re.compile(pattern))
+def _pat(pattern: str, *, digest_ok: bool = True) -> _CheckedString:
+    return _CheckedString(pattern=re.compile(pattern), digest_ok=digest_ok)
 
 
-def _tags(pattern: str = r"^[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}$") -> _List:
-    return _List(_pat(pattern))
+def _tags() -> _List:
+    return _List(DIGEST)
 
 
-_TOKEN = r"^[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}$"
-_LABEL = r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,255}$"
 _ISO = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 _HEX = r"^[0-9a-f]{7,64}$"
 _SHA_OR_HEX = r"^(?:[0-9a-f]{40,64}|sha256:[0-9a-f]{64})$"
 _RUN_ID = r"^\d{8}-\d{6}-[0-9a-f]{8}$"
-_VERSION = r"^\d+(?:\.\d+){0,3}(?:[-+][A-Za-z0-9.-]+)?$"
-_SAFE_PATH = r"^(?:\.|<run-dir>|<external-path>|<home>|[A-Za-z0-9._@+ -]{1,255})(?:/[A-Za-z0-9._@+ -]{1,255})*$"
+_VERSION = r"^\d+(?:\.\d+){0,3}$"
+_MANIFEST_PATH = r"^[A-Za-z0-9._/-]{1,1024}$"
+_SCHEMA_NAME = r"^[a-z][a-z0-9_.-]{0,127}$"
+_FIXED_PATH_TOKENS = frozenset({".", RUN_DIR_TOKEN, EXTERNAL_PATH_TOKEN, HOME_TOKEN})
+_STRICT = "\x00"
+_MEDIA_TYPES = (
+    "application/json",
+    "application/x-ndjson",
+    "text/plain",
+    "text/x-diff",
+    "application/octet-stream",
+    "application/vnd.brigade.worker-events.appserver.scrubbed+jsonl",
+)
 _RUN_STATUSES = (
     "started",
     "planning",
@@ -184,15 +194,15 @@ _SANDBOXES = ("none", "read-only", "workspace-write", "danger-full-access", "iso
 _FAILURE = _Object(
     {
         "schema": _enum("brigade.worker_failure.v1"),
-        "class": _pat(_TOKEN),
+        "class": DIGEST,
         "domain": _enum("infrastructure", "model-output"),
         "phase": _enum(*_FAILURE_PHASES),
         "retry": _enum("never", "after-remediation", "fallback", "same-seat-once"),
-        "detected_by": _pat(_TOKEN),
-        "cause_code": _pat(_TOKEN),
+        "detected_by": DIGEST,
+        "cause_code": DIGEST,
         "attempt": INT,
-        "seat": _pat(_TOKEN),
-        "kind": _pat(_TOKEN),
+        "seat": DIGEST,
+        "kind": DIGEST,
         "detail": PROMPT,
         "message": PROMPT,
     }
@@ -208,7 +218,7 @@ _ARTIFACT_COLLECTION = _Object(
         "failure": _FAILURE,
     }
 )
-_GIT = _Object({"head": _pat(_HEX), "branch": _pat(_LABEL), "dirty_files": INT})
+_GIT = _Object({"head": _pat(_HEX), "branch": DIGEST, "dirty_files": INT})
 _SCHEDULER = _Object(
     {
         "requested": _enum("waves", "dag", "single-node", "auto"),
@@ -219,19 +229,19 @@ _SCHEDULER = _Object(
 _ATTEMPT = _Object(
     {
         "kind": _enum(*_ATTEMPT_KINDS),
-        "worker": _pat(_TOKEN),
+        "worker": DIGEST,
         "task": PROMPT,
         "transport": _enum(*_TRANSPORTS),
-        "reasoning": _pat(_TOKEN),
+        "reasoning": DIGEST,
         "started_at": _pat(_ISO),
         "finished_at": _pat(_ISO),
         "exit_code": INT,
-        "terminal_reason": _pat(_TOKEN),
+        "terminal_reason": DIGEST,
         "failure_phase": _enum(*_FAILURE_PHASES),
-        "failure_kind": _pat(_TOKEN),
-        "session_id": _pat(_TOKEN),
+        "failure_kind": DIGEST,
+        "session_id": DIGEST,
         "selected": BOOL,
-        "model": _pat(_LABEL),
+        "model": DIGEST,
         "stdout_log": PATH,
         "stderr_log": PATH,
         "failure": _FAILURE,
@@ -239,18 +249,18 @@ _ATTEMPT = _Object(
 )
 _WORKER_ENTRY = _Object(
     {
-        "worker": _pat(_TOKEN),
+        "worker": DIGEST,
         "task": PROMPT,
         "ok": BOOL,
         "detail": PROMPT,
         "text": PROMPT,
         "failure_phase": _enum(*_FAILURE_PHASES),
-        "failure_kind": _pat(_TOKEN),
+        "failure_kind": DIGEST,
         "failure": _FAILURE,
         "output_truncated": BOOL,
         "output_bytes": INT,
         "output_cap_bytes": INT,
-        "thread_id": _pat(_TOKEN),
+        "thread_id": DIGEST,
         "status": _enum(*_WORKER_STATUSES),
         "exit_code": INT,
         "timed_out": BOOL,
@@ -258,13 +268,13 @@ _WORKER_ENTRY = _Object(
         "stderr_log": PATH,
         "duration_seconds": NUMBER,
         "transport": _enum(*_TRANSPORTS),
-        "requested_model": _pat(_LABEL),
-        "effective_model": _pat(_LABEL),
-        "reasoning": _pat(_TOKEN),
-        "stop_reason": _pat(_TOKEN),
+        "requested_model": DIGEST,
+        "effective_model": DIGEST,
+        "reasoning": DIGEST,
+        "stop_reason": DIGEST,
         "protocol_version": _pat(_VERSION),
-        "session_id": _pat(_TOKEN),
-        "request_id": _pat(_TOKEN),
+        "session_id": DIGEST,
+        "request_id": DIGEST,
         "acpx_version": _pat(_VERSION),
         "attempts": _List(_ATTEMPT),
     }
@@ -275,7 +285,7 @@ _AGENT_RESULT = _Object(
         "detail": PROMPT,
         "text": PROMPT,
         "failure_phase": _enum(*_FAILURE_PHASES),
-        "failure_kind": _pat(_TOKEN),
+        "failure_kind": DIGEST,
         "failure": _FAILURE,
         "exit_code": INT,
         "timed_out": BOOL,
@@ -283,26 +293,26 @@ _AGENT_RESULT = _Object(
         "stderr_log": PATH,
         "duration_seconds": NUMBER,
         "transport": _enum(*_TRANSPORTS),
-        "requested_model": _pat(_LABEL),
-        "effective_model": _pat(_LABEL),
-        "reasoning": _pat(_TOKEN),
-        "stop_reason": _pat(_TOKEN),
+        "requested_model": DIGEST,
+        "effective_model": DIGEST,
+        "reasoning": DIGEST,
+        "stop_reason": DIGEST,
         "protocol_version": _pat(_VERSION),
-        "session_id": _pat(_TOKEN),
-        "request_id": _pat(_TOKEN),
+        "session_id": DIGEST,
+        "request_id": DIGEST,
         "acpx_version": _pat(_VERSION),
     }
 )
 _ROSTER_AGENT = _Object(
     {
-        "cli": _pat(_LABEL),
-        "model": _pat(_LABEL),
-        "reasoning": _pat(_TOKEN),
+        "cli": DIGEST,
+        "model": DIGEST,
+        "reasoning": DIGEST,
         "transport": _enum(*_TRANSPORTS),
         "transport_version": _pat(_VERSION),
         "role": PROMPT,
         "timeout_seconds": NUMBER,
-        "invalid_final_fallback": _pat(_TOKEN),
+        "invalid_final_fallback": DIGEST,
         "read_only_capable": BOOL,
         "cloud_safe_mode": BOOL,
         "capabilities": _tags(),
@@ -311,21 +321,21 @@ _ROSTER_AGENT = _Object(
 _PLAN_ASSIGNMENT = _Object(
     {
         "stage": INT,
-        "worker": _pat(_TOKEN),
+        "worker": DIGEST,
         "task": PROMPT,
         "covers": _tags(),
         "selected_skill_ids": _tags(),
-        "domain": _pat(_TOKEN),
+        "domain": DIGEST,
         "capabilities": _tags(),
-        "max_risk_class": _pat(_TOKEN),
+        "max_risk_class": DIGEST,
         "admissible_tool_ids": _tags(),
     }
 )
 _BATCH_TASK = _Object(
     {
-        "task_id": _pat(_TOKEN),
+        "task_id": DIGEST,
         "text": PROMPT,
-        "seat": _pat(_TOKEN),
+        "seat": DIGEST,
         "depends_on": _tags(),
         "isolation": _enum("shared", "worktree"),
         "read_only": BOOL,
@@ -335,18 +345,18 @@ _BATCH_RESULT = _Object(
     {
         "schema": _enum(BATCH_RESULT_ENTRY_SCHEMA),
         "schema_version": INT,
-        "worker": _pat(_TOKEN),
+        "worker": DIGEST,
         "task": PROMPT,
         "ok": BOOL,
         "detail": PROMPT,
         "text": PROMPT,
         "failure_phase": _enum(*_FAILURE_PHASES),
-        "failure_kind": _pat(_TOKEN),
+        "failure_kind": DIGEST,
         "failure": _FAILURE,
         "output_truncated": BOOL,
         "output_bytes": INT,
         "output_cap_bytes": INT,
-        "thread_id": _pat(_TOKEN),
+        "thread_id": DIGEST,
         "status": _enum(*_WORKER_STATUSES),
         "exit_code": INT,
         "timed_out": BOOL,
@@ -354,13 +364,13 @@ _BATCH_RESULT = _Object(
         "stderr_log": PATH,
         "duration_seconds": NUMBER,
         "transport": _enum(*_TRANSPORTS),
-        "requested_model": _pat(_LABEL),
-        "effective_model": _pat(_LABEL),
-        "reasoning": _pat(_TOKEN),
-        "stop_reason": _pat(_TOKEN),
+        "requested_model": DIGEST,
+        "effective_model": DIGEST,
+        "reasoning": DIGEST,
+        "stop_reason": DIGEST,
         "protocol_version": _pat(_VERSION),
-        "session_id": _pat(_TOKEN),
-        "request_id": _pat(_TOKEN),
+        "session_id": DIGEST,
+        "request_id": DIGEST,
         "acpx_version": _pat(_VERSION),
         "attempts": _List(_ATTEMPT),
     }
@@ -372,18 +382,18 @@ _FILE_NODES: dict[str, Node] = {
             "schema": _enum(receipt_schema.RUN_RECEIPT_SCHEMA),
             "schema_version": INT,
             "kind": _enum("work", "research", "batch", "verify"),
-            "orchestrator": _pat(_TOKEN),
-            "worker": _pat(_TOKEN),
+            "orchestrator": DIGEST,
+            "worker": DIGEST,
             "dry_run": BOOL,
             "read_only": BOOL,
             "codex_transport": _enum("exec", "app-server"),
             "lifecycle_journal_requested": BOOL,
             "run_journal_authority_requested": BOOL,
-            "requester_principal": _pat(_TOKEN),
-            "requester_keyid": _pat(_TOKEN),
+            "requester_principal": DIGEST,
+            "requester_keyid": DIGEST,
             "tree_fingerprint": _pat(_HEX),
             "tree_fingerprint_head": _pat(_HEX),
-            "category": _pat(_TOKEN),
+            "category": DIGEST,
             "started_at": _pat(_ISO),
             "status_started_at": _pat(_ISO),
             "finished_at": _pat(_ISO),
@@ -396,7 +406,7 @@ _FILE_NODES: dict[str, Node] = {
             "journal_last_sequence": INT,
             "journal_last_event_digest": _pat(_SHA_OR_HEX),
             "failure_phase": _enum(*_FAILURE_PHASES),
-            "failure_kind": _pat(_TOKEN),
+            "failure_kind": DIGEST,
             "orphaned_at": _pat(_ISO),
             "last_observed_status": _enum(*_RUN_STATUSES),
             "uncommitted_change_count": INT,
@@ -420,12 +430,12 @@ _FILE_NODES: dict[str, Node] = {
         {
             "schema": _enum(receipt_schema.ROSTER_SNAPSHOT_SCHEMA),
             "schema_version": INT,
-            "orchestrator": _pat(_TOKEN),
+            "orchestrator": DIGEST,
             "max_workers": INT,
             "timeout_seconds": NUMBER,
             "sandbox": _enum(*_SANDBOXES),
-            "allow_models": _tags(_LABEL),
-            "agents": _Object({}, any_name=_ROSTER_AGENT, key_pattern=_SEAT_NAME_RE),
+            "allow_models": _tags(),
+            "agents": _Object({}, any_name=_ROSTER_AGENT, digest_keys=True),
         }
     ),
     "plan.json": _Object(
@@ -448,20 +458,20 @@ _FILE_NODES: dict[str, Node] = {
             "schema": _enum(receipt_schema.SYNTHESIS_SCHEMA),
             "schema_version": INT,
             "mode": _enum("direct-worker", "orchestrator", "single-seat"),
-            "worker": _pat(_TOKEN),
-            "orchestrator": _pat(_TOKEN),
+            "worker": DIGEST,
+            "orchestrator": DIGEST,
             "result": _AGENT_RESULT,
         }
     ),
     "batch-request.json": _Object(
         {
             "schema": _enum("brigade.run_batch.v1"),
-            "request_id": _pat(_TOKEN),
+            "request_id": DIGEST,
             "base_sha": _pat(_HEX),
             "fingerprint": _pat(_HEX),
-            "layers": _List(_List(_pat(_TOKEN))),
+            "layers": _List(_List(DIGEST)),
             "tasks": _List(_BATCH_TASK),
-            "synthesis": _Object({"seat": _pat(_TOKEN), "text": PROMPT}),
+            "synthesis": _Object({"seat": DIGEST, "text": PROMPT}),
         }
     ),
     "batch-result.json": _BATCH_RESULT,
@@ -480,6 +490,59 @@ _SCHEMAS: dict[str, tuple[str, int | None, bool]] = {
     "batch-request.json": ("brigade.run_batch.v1", None, False),
     "batch-result.json": (BATCH_RESULT_ENTRY_SCHEMA, 1, True),
 }
+
+
+_MANIFEST_RUN = _Object(
+    {
+        "schema": _enum("brigade.run.v1", fallback=_STRICT),
+        "schema_version": INT,
+        "status": _enum(*_RUN_STATUSES),
+        "started_at": _pat(_ISO),
+        "finished_at": _pat(_ISO),
+        "task_digest": _pat(r"^hmac-sha256:[0-9a-f]{64}$", digest_ok=False),
+    }
+)
+_MANIFEST_COMPAT = _Object(
+    {
+        "min_reader_schema_version": INT,
+        "max_reader_schema_version": INT,
+        "journal_authority": _enum("none", "present", "authoritative", "withheld", fallback=_STRICT),
+        "resume_supported": BOOL,
+        "private_checkpoint_bodies": _enum("strip_to_artifact_reference", fallback=_STRICT),
+        "unsupported_archive_version": _enum("refuse", fallback=_STRICT),
+        "nested_receipt_unknown_keys": _enum("ignore", fallback=_STRICT),
+        "symlinks_and_special_files": _enum("refuse", fallback=_STRICT),
+    }
+)
+_MANIFEST_FILE = _Object(
+    {
+        "path": _pat(_MANIFEST_PATH, digest_ok=False),
+        "sha256": _pat(r"^[0-9a-f]{64}$", digest_ok=False),
+        "byte_size": INT,
+        "role": _enum("receipt", "journal", "checkpoint-reference", "artifact", "support", "other", fallback=_STRICT),
+        "media_type": _enum(*_MEDIA_TYPES, fallback=_STRICT),
+        "nested_schema": _pat(_SCHEMA_NAME, digest_ok=False),
+        "nested_schema_version": INT,
+        "privacy_class": _enum("public", "private", "redacted", fallback=_STRICT),
+    }
+)
+_MANIFEST_NODE = _Object(
+    {
+        "schema": _enum("brigade.work-run", fallback=_STRICT),
+        "schema_version": INT,
+        "run_id": _pat(_RUN_ID, digest_ok=False),
+        "exported_at": _pat(_ISO, digest_ok=False),
+        "exporter_brigade_version": _pat(_VERSION, digest_ok=False),
+        "format": _enum("directory", fallback=_STRICT),
+        "payload_dir": _enum("payload", fallback=_STRICT),
+        "compatibility": _MANIFEST_COMPAT,
+        "files": _List(_MANIFEST_FILE),
+        "run": _MANIFEST_RUN,
+        "journal_withheld": _Object({"chain_head": _pat(_SHA_OR_HEX, digest_ok=False), "event_count": INT}),
+        "source_run_dir": _enum(RUN_DIR_TOKEN, fallback=_STRICT),
+        "schema_artifact": _pat(_MANIFEST_PATH, digest_ok=False),
+    }
+)
 
 
 def is_valid_digest(value: Any) -> bool:
@@ -654,9 +717,11 @@ def _child_for(node: _Object, key: str, *, label: str) -> Node | None:
         return child
     if node.any_name is None:
         return None
-    if node.key_pattern is not None and node.key_pattern.fullmatch(key) is None:
-        raise RunExportProjectionError(f"{label} has invalid key {key!r}")
     return node.any_name
+
+
+def _digest_key(key: bytes, value: str) -> str:
+    return DIGEST_PREFIX + hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _project_prompt(value: Any, ctx: _Context, *, label: str, key: str) -> Any:
@@ -669,7 +734,7 @@ def _project_prompt(value: Any, ctx: _Context, *, label: str, key: str) -> Any:
 
 
 def _project_node(value: Any, node: Node, ctx: _Context, *, label: str, key: str = "") -> Any:
-    if isinstance(node, _Prompt):
+    if isinstance(node, _DigestValue):
         return _project_prompt(value, ctx, label=label, key=key)
     if value is None:
         return None
@@ -686,14 +751,26 @@ def _project_node(value: Any, node: Node, ctx: _Context, *, label: str, key: str
             raise RunExportProjectionError(f"{label}.{key} must be a boolean")
         return value
     if isinstance(node, _CheckedString):
+        if isinstance(value, Mapping) and node.digest_ok:
+            _assert_prompt(value, label=label, key=key)
+            return dict(value)
         if not isinstance(value, str):
             raise RunExportProjectionError(f"{label}.{key} must be a string")
-        return value if node.matches(value) else node.fallback
+        if node.matches(value):
+            return value
+        if node.values is not None:
+            return node.fallback
+        if node.digest_ok:
+            return digest_prompt(ctx.key, value)
+        raise RunExportProjectionError(f"{label}.{key} is not an allowed value")
     if isinstance(node, _Path):
+        if isinstance(value, Mapping):
+            _assert_prompt(value, label=label, key=key)
+            return dict(value)
         if not isinstance(value, str):
             raise RunExportProjectionError(f"{label}.{key} must be a path string")
         mapped = _map_path(value, ctx)
-        return mapped if re.fullmatch(_SAFE_PATH, mapped) else EXTERNAL_PATH_TOKEN
+        return mapped if mapped in _FIXED_PATH_TOKENS else digest_prompt(ctx.key, value)
     if isinstance(node, _List):
         if not isinstance(value, list):
             raise RunExportProjectionError(f"{label}.{key} must be a list")
@@ -712,7 +789,10 @@ def _project_node(value: Any, node: Node, ctx: _Context, *, label: str, key: str
                 continue
             projected = _project_node(item, child, ctx, label=label, key=item_key)
             if projected is not _OMIT:
-                result[item_key] = projected
+                output_key = _digest_key(ctx.key, item_key) if node.digest_keys else item_key
+                if output_key in result:
+                    raise RunExportProjectionError(f"{label} has a duplicate projected key")
+                result[output_key] = projected
         return result
     raise RunExportProjectionError(f"{label} has an unsupported schema node")
 
@@ -818,7 +898,7 @@ def _assert_safe_string(value: str, *, label: str, home: Path) -> None:
 
 
 def _assert_value(value: Any, node: Node, *, label: str, home: Path, key: str = "") -> None:
-    if isinstance(node, _Prompt):
+    if isinstance(node, _DigestValue):
         _assert_prompt(value, label=label, key=key)
         return
     if value is None:
@@ -836,16 +916,19 @@ def _assert_value(value: Any, node: Node, *, label: str, home: Path, key: str = 
             raise RunExportProjectionError(f"{label}.{key} must be a boolean")
         return
     if isinstance(node, _CheckedString):
+        if isinstance(value, Mapping) and node.digest_ok:
+            _assert_prompt(value, label=label, key=key)
+            return
         if not isinstance(value, str) or not node.matches(value):
             raise RunExportProjectionError(f"{label}.{key} is not an allowed value")
         return
     if isinstance(node, _Path):
-        if not isinstance(value, str):
-            raise RunExportProjectionError(f"{label}.{key} must be a path string")
-        _assert_safe_string(value, label=f"{label}.{key}", home=home)
-        if re.fullmatch(_SAFE_PATH, value) is None:
-            raise RunExportProjectionError(f"{label}.{key} is not a safe relative path")
-        return
+        if isinstance(value, Mapping):
+            _assert_prompt(value, label=label, key=key)
+            return
+        if isinstance(value, str) and value in _FIXED_PATH_TOKENS:
+            return
+        raise RunExportProjectionError(f"{label}.{key} must be a fixed path token or digest")
     if isinstance(node, _List):
         if not isinstance(value, list):
             raise RunExportProjectionError(f"{label}.{key} must be a list")
@@ -858,6 +941,8 @@ def _assert_value(value: Any, node: Node, *, label: str, home: Path, key: str = 
         for item_key, item in value.items():
             if not isinstance(item_key, str):
                 raise RunExportProjectionError(f"{label} has a non-string JSON key")
+            if node.digest_keys and not _DIGEST_RE.fullmatch(item_key):
+                raise RunExportProjectionError(f"{label} key is not a digest")
             child = _child_for(node, item_key, label=f"{label}.{item_key}")
             if child is None:
                 raise RunExportProjectionError(f"{label} has a key outside its allowlist: {item_key!r}")
@@ -890,9 +975,9 @@ def _assert_generic(value: Any, *, label: str, home: Path) -> None:
 
 
 def assert_manifest_privacy(manifest: Mapping[str, Any], *, home: Path | None = None) -> None:
-    """Refuse absolute paths or prompt-shaped text anywhere in a v2 manifest."""
+    """Validate every v3 manifest string against its closed type."""
     home = home if home is not None else Path.home()
-    _assert_generic(manifest, label="work-run.json", home=home)
+    _assert_value(manifest, _MANIFEST_NODE, label="work-run.json", home=home)
 
 
 def assert_export_file_set(payload_root: Path) -> None:

@@ -241,10 +241,6 @@ def compatibility_defaults(
         "nested_receipt_unknown_keys": "ignore",
         "private_checkpoint_bodies": _PRIVATE_CHECKPOINT_POLICY,
         "resume_supported": False,
-        "schema_artifact_note": (
-            "schemas/work-run.v3.schema.json versions the published JSON Schema "
-            "artifact; archive wire acceptance uses schema + schema_version"
-        ),
         "symlinks_and_special_files": "refuse",
         "unsupported_archive_version": "refuse",
     }
@@ -343,6 +339,11 @@ def validate_manifest(payload: Any, *, allow_legacy: bool = False) -> dict[str, 
                 category="export-privacy",
             )
         result["schema_artifact"] = schema_artifact
+    if schema_version >= 3:
+        try:
+            run_export_projection.assert_manifest_privacy(result)
+        except run_export_projection.RunExportProjectionError as exc:
+            raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
     return result
 
 
@@ -768,6 +769,11 @@ def _validate_compatibility(value: Any, *, schema_version: int) -> dict[str, Any
     result = {key: value[key] for key in sorted(_REQUIRED_COMPAT_KEYS)}
     note = value.get("schema_artifact_note")
     if note is not None:
+        if schema_version >= 3:
+            raise WorkRunArchiveError(
+                "compatibility.schema_artifact_note is not allowed in schema_version 3",
+                category="export-privacy",
+            )
         result["schema_artifact_note"] = _require_string(note, "compatibility.schema_artifact_note")
     return result
 

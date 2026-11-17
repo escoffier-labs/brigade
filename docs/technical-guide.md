@@ -516,8 +516,9 @@ Use `brigade runs show <run>` or `brigade runs watch <run>` for inspection. Use
 and `brigade runs import <archive-dir>` to copy a validated payload into
 `.brigade/runs/`. Export strips private recovery-checkpoint bodies and applies a
 closed file set plus closed receipt shapes: prompt and generated text become
-keyed HMAC digests, and absolute paths become workspace-relative or fixed
-tokens. Export omits the lifecycle journal because its exception `detail` text
+keyed HMAC digests, and every non-enum string such as a seat, model, id, label,
+relative path, or log name also becomes a keyed digest. Export omits the
+lifecycle journal because its exception `detail` text
 cannot be scrubbed without breaking the hash chain. The manifest records
 `journal_withheld` with the chain head and event count, and an imported run
 reports `journal-withheld` instead of a lifecycle audit match. Import is

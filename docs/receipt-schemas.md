@@ -903,10 +903,12 @@ compatibility (`schema` + `schema_version` on `work-run.json`). Consumers must
 not infer import acceptance from the artifact filename alone.
 
 **Privacy guarantee:** exported archives contain no prompt text, generated text
-or absolute paths. Export applies a closed file set and closed receipt shapes,
-replaces prompt and generated text with per-host HMAC-SHA256 digests, and maps
-absolute paths to workspace-relative paths or fixed tokens. Only receipt JSON,
-scrubbed worker streams, and checkpoint references are exported. Raw artifacts
+or absolute paths. Export applies a closed file set and closed receipt shapes.
+Only fixed enums, ISO timestamps, hex digests, Brigade run ids, numeric
+versions, numbers, booleans, and fixed path tokens remain readable. Every other
+string, including seat names, model names, ids, labels, relative paths, and log
+names, becomes a per-host HMAC-SHA256 keyed digest. Only receipt JSON, scrubbed
+worker streams, and checkpoint references are exported. Raw artifacts
 such as `final.txt`, `summary.md`, logs, and `changes.patch` stay local. Local
 run files are unchanged and keep raw prompts and paths so resume still works.
 Evidence packages (`brigade evidence package`) and remote execution transport
@@ -983,7 +985,7 @@ missing-journal message.
 | Payload files outside the closed export set | **Drop** on export, **refuse** on import |
 | Receipt keys outside the per-kind allowlist | **Drop** on export, **refuse** on import |
 | Prompt and generated text fields | **Replace** with a keyed `{digest, chars}` object. A raw string fails validation |
-| Absolute paths and home-directory prefixes | **Map** to workspace-relative, `<run-dir>/...`, or `<external-path>` |
+| Paths and log names | **Keep** only the fixed tokens `.`, `<run-dir>`, `<external-path>`, or `<home>`. Every other path becomes a keyed digest |
 | Symlinks / special files | **Refuse** |
 | Recovery-checkpoint bodies | **Strip** to closed artifact references on export (#636). Validate refuses bodies |
 | Raw worker event streams (`events/**/*.jsonl` except authenticated lifecycle) | **Refuse** as portable public support. Export replaces with scrubbed sidecars (`events/**/<worker>.scrubbed.json`, `privacy_class=redacted`) or fails closed (#592). Nested smuggling paths are rejected |

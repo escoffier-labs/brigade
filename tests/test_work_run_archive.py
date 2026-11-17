@@ -184,7 +184,7 @@ def test_validate_archive_detects_digest_mismatch(tmp_path: Path):
     archive = tmp_path / "archive"
     work_run_archive.export_run(run_dir, archive)
     roster = json.loads((archive / "payload" / "roster.json").read_text(encoding="utf-8"))
-    roster["orchestrator"] = "tampered"
+    roster["max_workers"] = 999
     _write_json(archive / "payload" / "roster.json", roster)
     with pytest.raises(WorkRunArchiveError, match="sha256 mismatch"):
         work_run_archive.validate_archive(archive)

@@ -175,11 +175,11 @@ def test_export_drops_markers_paths_and_unknown_files(tmp_path: Path):
 
     run_payload = json.loads((archive / "payload" / "run.json").read_text(encoding="utf-8"))
     assert run_payload["task"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
-    assert run_payload["cwd"] == "project"
+    assert run_payload["cwd"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
     assert run_payload["lock_workspace"] == "."
     assert run_payload["artifacts"] == run_export_projection.RUN_DIR_TOKEN
     assert run_payload["handoff"] == run_export_projection.EXTERNAL_PATH_TOKEN
-    assert run_payload["artifact_collection"]["worktree"] == "worktree"
+    assert run_payload["artifact_collection"]["worktree"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
 
     manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
     assert "task" not in manifest["run"]
@@ -256,8 +256,8 @@ def test_legacy_archive_is_projected_before_install(tmp_path: Path):
     installed = json.loads((Path(imported["run_dir"]) / "run.json").read_text(encoding="utf-8"))
     assert installed["task"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
     assert "unexpected" not in installed
-    assert not installed["cwd"].startswith(("/", "~"))
-    assert str(Path.home()) not in installed["cwd"]
+    assert installed["cwd"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    assert str(Path.home()) not in json.dumps(installed)
 
 
 def test_prompt_digest_is_keyed():
@@ -486,15 +486,18 @@ def test_import_refuses_non_json_artifact(tmp_path: Path):
     assert excinfo.value.category == "export-privacy"
 
 
-def test_roster_agent_name_must_be_a_token(tmp_path: Path):
+def test_roster_agent_keys_become_digests(tmp_path: Path):
     _, run_dir = _seed_privacy_run(tmp_path)
     roster = json.loads((run_dir / "roster.json").read_text(encoding="utf-8"))
     roster["agents"]["../evil"] = roster["agents"]["chef"]
     _write_json(run_dir / "roster.json", roster)
 
-    with pytest.raises(WorkRunArchiveError) as excinfo:
-        work_run_archive.export_run(run_dir, tmp_path / "archive")
-    assert excinfo.value.category == "export-privacy"
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    exported = json.loads((archive / "payload" / "roster.json").read_text(encoding="utf-8"))
+    assert exported["agents"]
+    assert all(key.startswith(run_export_projection.DIGEST_PREFIX) for key in exported["agents"])
+    assert b"../evil" not in _archive_bytes(archive)
 
 
 def test_import_refuses_unknown_batch_result_schema(tmp_path: Path):
@@ -561,22 +564,27 @@ def test_free_text_role_label_becomes_digest(tmp_path: Path):
     archive = tmp_path / "archive"
     work_run_archive.export_run(run_dir, archive)
     exported = json.loads((archive / "payload" / "roster.json").read_text(encoding="utf-8"))
-    assert exported["agents"]["chef"]["role"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    assert all(
+        agent["role"]["digest"].startswith(run_export_projection.DIGEST_PREFIX) for agent in exported["agents"].values()
+    )
     assert b"free text label" not in _archive_bytes(archive)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode checks")
-def test_search_log_key_rejects_loose_mode(tmp_path: Path):
+def test_search_log_key_rejects_loose_mode(tmp_path: Path, capsys):
     target = tmp_path / "target"
     path = memory_recall_log.key_path(target)
     path.parent.mkdir(parents=True)
     path.write_text("a" * 64 + "\n", encoding="ascii")
     path.chmod(0o644)
     assert memory_recall_log.load_or_create_key(target) is None
+    err = capsys.readouterr().err
+    assert str(path) in err
+    assert "chmod 600" in err
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX symlink semantics")
-def test_search_log_key_rejects_symlink(tmp_path: Path):
+def test_search_log_key_rejects_symlink(tmp_path: Path, capsys):
     target = tmp_path / "target"
     path = memory_recall_log.key_path(target)
     path.parent.mkdir(parents=True)
@@ -585,6 +593,9 @@ def test_search_log_key_rejects_symlink(tmp_path: Path):
     real.chmod(0o600)
     path.symlink_to(real)
     assert memory_recall_log.load_or_create_key(target) is None
+    err = capsys.readouterr().err
+    assert str(path) in err
+    assert "chmod 600" in err
 
 
 def test_journal_is_withheld_and_audit_reports_it(tmp_path: Path, monkeypatch):
@@ -639,3 +650,83 @@ def test_v2_archive_without_journal_still_imports(tmp_path: Path):
 
     imported = work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
     assert imported["schema_version"] == 2
+
+
+def test_free_text_scalars_are_digested(tmp_path: Path):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    run_meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    run_meta["requester_keyid"] = "api-key-secretvalue"
+    _write_json(run_dir / "run.json", run_meta)
+    roster = json.loads((run_dir / "roster.json").read_text(encoding="utf-8"))
+    agent = roster["agents"].pop("chef")
+    agent["model"] = "api-key-secretvalue"
+    agent["cli"] = "api-key-secretvalue"
+    roster["agents"]["api-key-secretvalue"] = agent
+    _write_json(run_dir / "roster.json", roster)
+    worker = json.loads((run_dir / "worker-results.json").read_text(encoding="utf-8"))
+    worker["results"][0]["worker"] = "api-key-secretvalue"
+    worker["results"][0]["stdout_log"] = "api-key-secretvalue"
+    worker["results"][0]["requested_model"] = "api-key-secretvalue"
+    worker["results"][0]["acpx_version"] = "1.2.3-secret"
+    _write_json(run_dir / "worker-results.json", worker)
+
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    run_payload = json.loads((archive / "payload" / "run.json").read_text(encoding="utf-8"))
+    assert run_payload["requester_keyid"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    roster_payload = json.loads((archive / "payload" / "roster.json").read_text(encoding="utf-8"))
+    assert all(key.startswith(run_export_projection.DIGEST_PREFIX) for key in roster_payload["agents"])
+    agent_payload = next(iter(roster_payload["agents"].values()))
+    assert agent_payload["model"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    assert agent_payload["cli"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    worker_payload = json.loads((archive / "payload" / "worker-results.json").read_text(encoding="utf-8"))
+    entry = worker_payload["results"][0]
+    assert entry["worker"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    assert entry["stdout_log"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    assert entry["requested_model"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    assert entry["acpx_version"]["digest"].startswith(run_export_projection.DIGEST_PREFIX)
+    raw = _archive_bytes(archive)
+    assert b"api-key-secretvalue" not in raw
+    assert b"1.2.3-secret" not in raw
+
+
+@pytest.mark.parametrize("field", ["requester_keyid", "stdout_log", "roster-key", "manifest"])
+def test_import_refuses_raw_free_text_scalar(tmp_path: Path, field: str):
+    _, run_dir = _seed_privacy_run(tmp_path)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    if field == "requester_keyid":
+        payload = json.loads((archive / "payload" / "run.json").read_text(encoding="utf-8"))
+        payload["requester_keyid"] = "api-key-secretvalue"
+        _rewrite_payload(archive, "run.json", payload)
+    elif field == "stdout_log":
+        payload = json.loads((archive / "payload" / "worker-results.json").read_text(encoding="utf-8"))
+        payload["results"][0]["stdout_log"] = "api-key-secretvalue"
+        _rewrite_payload(archive, "worker-results.json", payload)
+    elif field == "roster-key":
+        payload = json.loads((archive / "payload" / "roster.json").read_text(encoding="utf-8"))
+        payload["agents"]["api-key-secretvalue"] = {"cli": "codex"}
+        _rewrite_payload(archive, "roster.json", payload)
+    else:
+        manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+        manifest["run"]["status"] = "api-key-secretvalue"
+        _write_json(archive / "work-run.json", manifest)
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported")
+    assert excinfo.value.category == "export-privacy"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode checks")
+def test_export_warns_when_key_is_refused(tmp_path: Path, capsys):
+    workspace, run_dir = _seed_privacy_run(tmp_path)
+    path = memory_recall_log.key_path(workspace)
+    path.parent.mkdir(parents=True)
+    path.write_text("a" * 64 + "\n", encoding="ascii")
+    path.chmod(0o644)
+
+    with pytest.raises(WorkRunArchiveError):
+        work_run_archive.export_run(run_dir, tmp_path / "archive")
+    err = capsys.readouterr().err
+    assert str(path) in err
+    assert "chmod 600" in err
