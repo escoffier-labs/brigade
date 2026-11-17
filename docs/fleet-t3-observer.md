@@ -174,9 +174,13 @@ Placement reuses the routing candidate evaluator and adds three checks:
   project and environment id rules is `inventory-invalid`. A repository with no usable row
   anywhere is denied as `repo-not-placeable`. A policy
   `repositories.<id>.eligible_machines` list narrows the set further
-  (`repo-machine-not-eligible`). Every spelling of the key (case, trailing
-  `.git`) resolves to the same policy repository entry, so its patches, privacy
-  and machine list apply together. When one machine has several usable projects
+  (`repo-machine-not-eligible`). The policy entry is found by the normalized
+  key only (casefolded, one trailing `.git` removed), never by the caller's
+  spelling, so its patches, privacy and machine list apply together for every
+  spelling. A policy save whose `repositories` keys collide after that
+  normalization is refused, and a stored document that already has such a pair
+  makes placement fail closed with `repo-policy-ambiguous` and no
+  recommendation. When one machine has several usable projects
   for the repository, the lowest project id is chosen, the recommendation
   carries `project_choices`, and that candidate gets the informational reason
   `multiple-projects` (it never changes `eligible`).
@@ -209,10 +213,14 @@ stale or null telemetry) is never placeable, and `place` returns the named error
 `placement-unavailable: <class>` for a storage failure, never row data.
 
 The response schema is `brigade.fleet_placement.v1`. Only the recommended
-machine carries its `environment_id` and `project_id`; every candidate carries
-its eligibility, effective load and reasons only. `expires_at` is the earliest
-of the telemetry expiry, the inventory expiry and two minutes after
-`decided_at`.
+machine carries its `environment_id` and `project_id`, and the block has no node
+id: a caller launching a child agent needs the machine, `environment_id`,
+`project_id` and `expires_at`. Every candidate carries its eligibility,
+effective load and reasons only. `expires_at` is the earliest of the telemetry
+expiry, the inventory expiry and two minutes after `decided_at`. A caller that
+already holds an open database transaction gets
+`placement-unavailable: open-transaction`, because the read snapshot is rolled
+back and must not be the caller's. The HTTP path never has one.
 
 ```mermaid
 flowchart TD

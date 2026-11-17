@@ -39,23 +39,23 @@ _INVENTORY_REASONS = frozenset({"inventory-unbound", "inventory-stale", "invento
 
 @contextmanager
 def _read_snapshot(conn: sqlite3.Connection) -> Iterator[None]:
-    """One deferred read snapshot with writes refused, always rolled back and restored."""
+    """One deferred read snapshot with writes refused, always rolled back and restored.
+
+    The caller guarantees no transaction is open, so the rollback only ever ends our own snapshot."""
     prior = conn.execute("PRAGMA query_only").fetchone()[0]
     conn.execute("PRAGMA query_only=ON")
-    began = not conn.in_transaction
     try:
-        if began:
-            conn.execute("BEGIN")
+        conn.execute("BEGIN")
         yield
     finally:
         try:
-            if began and conn.in_transaction:
+            if conn.in_transaction:
                 conn.execute("ROLLBACK")
         finally:
             conn.execute("PRAGMA query_only=ON" if prior else "PRAGMA query_only=OFF")
 
 
-def _parse(body: Any) -> tuple[str, str, float]:
+def _parse(body: Any) -> tuple[str, float]:
     if not isinstance(body, Mapping):
         raise FleetHubError("fleet placement request must be a JSON object")
     unknown = sorted(set(body).difference(_REQUEST_FIELDS))
@@ -71,7 +71,7 @@ def _parse(body: Any) -> tuple[str, str, float]:
         threshold = DEFAULT_THRESHOLD
     if not 0.0 <= threshold <= 1.0:
         raise FleetHubError("place field 'threshold' must be a number in 0..1")
-    return repo, key, threshold
+    return key, threshold
 
 
 def _telemetry_expiry(telemetry: Mapping[str, Any] | None, routing: Mapping[str, Any]) -> datetime | None:
@@ -86,20 +86,10 @@ def _telemetry_expiry(telemetry: Mapping[str, Any] | None, routing: Mapping[str,
     return observed + timedelta(seconds=min(ttl, report_ttl))
 
 
-def _policy_repo_key(document: Mapping[str, Any], repo: str, key: str) -> str:
-    """The policy repositories entry for this repo: exact spelling, then the key, then by normalization.
-
-    One answer feeds both ``eligible_machines`` and ``resolve_policy``, so every spelling of a
-    repository applies the same patches, privacy and machine list. With no entry, the normalized key.
-    """
+def _policy_repo_keys(document: Mapping[str, Any], key: str) -> list[str]:
+    """Every policy repositories entry that normalizes to ``key``. The caller's spelling never matters."""
     repositories = document.get("repositories") or {}
-    for candidate in (repo, key):
-        if candidate in repositories:
-            return candidate
-    for name in sorted(repositories):
-        if fleet_node_projects.normalize_repo_key(name) == key:
-            return str(name)
-    return key
+    return sorted(str(name) for name in repositories if fleet_policy.normalize_repository_key(str(name)) == key)
 
 
 def _usable_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -169,13 +159,16 @@ def place(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Recommend one machine for a new child agent on ``repo``. Strictly read-only."""
-    repo, key, threshold = _parse(body)
+    key, threshold = _parse(body)
     caller = fleet_hub_routing._bounded(caller_node, "caller_node")
     assert caller is not None
     moment = now or fleet_hub_routing._now()
+    if conn.in_transaction:
+        # The snapshot is rolled back at the end, so it must not be the caller's transaction.
+        raise FleetHubError("placement-unavailable: open-transaction")
     with _read_snapshot(conn):
         try:
-            return _place(conn, repo=repo, key=key, threshold=threshold, caller=caller, now=moment)
+            return _place(conn, key=key, threshold=threshold, caller=caller, now=moment)
         except (ClaimFenceError, sqlite3.Error, ValueError) as exc:
             # A named, data-free error instead of a generic failure. The class name is all that leaves.
             raise FleetHubError(f"placement-unavailable: {type(exc).__name__}") from exc
@@ -184,7 +177,6 @@ def place(
 def _place(
     conn: sqlite3.Connection,
     *,
-    repo: str,
     key: str,
     threshold: float,
     caller: str,
@@ -213,6 +205,11 @@ def _place(
     if requirements is None:
         return denied("unknown-workload")
 
+    matches = _policy_repo_keys(document, key)
+    if len(matches) > 1:
+        # Possible only for a document saved before the parser refused colliding keys: fail closed.
+        return denied("repo-policy-ambiguous")
+    policy_repo = matches[0] if matches else key
     inventory = fleet_node_projects.projects_for_repo(conn, key, now)
     by_machine: dict[str, list[dict[str, Any]]] = {}
     for row in inventory:
@@ -221,7 +218,6 @@ def _place(
     usable = _usable_rows(inventory)
     if not usable:
         return denied("repo-not-placeable")
-    policy_repo = _policy_repo_key(document, repo, key)
     repo_machines = list(((document.get("repositories") or {}).get(policy_repo) or {}).get("eligible_machines") or [])
     live: dict[str, int] | None
     try:
@@ -332,7 +328,6 @@ def _place(
     expiries = [stamp for stamp in (info["telemetry_expires_at"], inventory_expires) if stamp is not None]
     recommended = {
         "machine": chosen,
-        "node_id": row["node_id"],
         "environment_id": row["environment_id"],
         "project_id": row["project_id"],
         "project_choices": len(choices),

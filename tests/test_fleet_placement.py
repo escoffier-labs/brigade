@@ -19,6 +19,7 @@ from brigade import (
     fleet_hub_routing,
     fleet_hub_sessions,
     fleet_node_projects,
+    fleet_policy,
     fleet_quota,
 )
 from brigade.fleet_hub import FleetHubError
@@ -142,7 +143,7 @@ def test_origin_under_threshold_stays_local(fleet):
     assert result["repo_key"] == REPO and result["threshold"] == 0.70
     assert result["trust"] == "node-reported telemetry and inventory; advisory only, never admission"
     chosen = result["recommended"]
-    assert chosen["machine"] == "worker-linux-1" and chosen["node_id"] == NODE_LINUX
+    assert chosen["machine"] == "worker-linux-1" and "node_id" not in chosen
     assert chosen["environment_id"] == ENV[NODE_LINUX] and chosen["project_id"] == PROJECT[NODE_LINUX]
     assert chosen["effective_load"] == 0.1
     assert chosen["load_inputs"] == {"cpu": 0.1, "sessions": 0, "concurrency": 1}
@@ -151,6 +152,7 @@ def test_origin_under_threshold_stays_local(fleet):
     assert result["policy_digest"].startswith("sha256:")
     text = json.dumps(result)
     assert "admitted" not in text and "reserved" not in text
+    assert NODE_LINUX not in text  # the recommended block carries machine, environment_id and project_id only
 
 
 def test_over_threshold_origin_sheds_to_a_peer_with_the_repo(fleet):
@@ -498,12 +500,10 @@ def test_every_spelling_of_a_repo_applies_the_same_policy_entry(fleet):
         variant = _place(fleet, repo=spelling)
         assert variant["candidates"] == baseline["candidates"], spelling
         assert variant["recommended"] == baseline["recommended"], spelling
-    # Resolving the entry is also order independent: the helper returns the stored spelling.
+    # The policy entry is found by the normalized key only, never by the caller's spelling.
     document = fleet_hub_policy.current_policy(fleet)["document"]
-    assert fleet_hub_placement._policy_repo_key(document, "Example.TEST/Org/Repo.git", REPO) == REPO
-    assert fleet_hub_placement._policy_repo_key(document, "example.test/org/other", "example.test/org/other") == (
-        "example.test/org/other"
-    )
+    assert fleet_hub_placement._policy_repo_keys(document, REPO) == [REPO]
+    assert fleet_hub_placement._policy_repo_keys(document, "example.test/org/other") == []
 
 
 @pytest.mark.parametrize("error", [sqlite3.OperationalError("no such table"), RuntimeError("boom")])
@@ -615,3 +615,65 @@ def test_known_failures_map_to_a_named_error_through_the_node_action(fleet, monk
         )
     assert f"placement-unavailable: {type(error).__name__}" in str(raised.value)
     assert "1234" not in str(raised.value) and "fence storage" not in str(raised.value)
+
+
+def test_policy_save_refuses_repository_keys_that_collide_after_normalization(conn):
+    document = _document()
+    document["repositories"] = {"example.test/org/repo": {"privacy": "private"}, "Example.TEST/Org/Repo.git": {}}
+    with pytest.raises(fleet_policy.FleetPolicyError, match="collide after normalization"):
+        fleet_policy.parse_document(document)
+    with pytest.raises(FleetHubError, match="collide after normalization"):
+        fleet_hub_policy.save_policy(
+            conn,
+            document,
+            expected_version=fleet_hub_policy.current_policy(conn)["revision"],
+            actor="operator",
+            reason="collision",
+        )
+    # Distinct repositories and a single entry in any spelling still save.
+    document["repositories"] = {"Example.TEST/Org/Repo.git": {}, "example.test/org/other": {}}
+    assert fleet_policy.parse_document(document)["repositories"]
+
+
+def test_policy_and_inventory_normalize_repository_keys_the_same_way():
+    for sample in (
+        "example.test/org/repo",
+        "Example.TEST/Org/Repo.git",
+        "EXAMPLE.test/ORG/repo.GIT",
+        "github.com/Some-Org/some.repo",
+        "gitlab.example.test/group/sub/repo.git",
+    ):
+        assert fleet_policy.normalize_repository_key(sample) == fleet_node_projects.normalize_repo_key(sample), sample
+
+
+def test_an_ambiguous_stored_policy_fails_closed_for_every_spelling(fleet, monkeypatch):
+    real = fleet_hub_policy.current_policy
+
+    def doctored(connection):
+        current = dict(real(connection))
+        document = dict(current["document"])
+        document["repositories"] = {
+            "example.test/org/repo": {"privacy": "private", "eligible_machines": ["worker-linux-1"]},
+            "Example.TEST/Org/Repo.git": {"privacy": "public"},
+        }
+        current["document"] = document
+        return current
+
+    monkeypatch.setattr(fleet_hub_policy, "current_policy", doctored)
+    for spelling in (REPO, "Example.TEST/Org/Repo.git", "EXAMPLE.test/org/repo"):
+        result = _place(fleet, repo=spelling)
+        assert result["status"] == "none" and result["recommended"] is None
+        assert result["reason"] == "repo-policy-ambiguous"
+
+
+def test_a_caller_transaction_is_refused_not_borrowed(fleet):
+    fleet.commit()
+    fleet.execute("BEGIN")
+    try:
+        with pytest.raises(FleetHubError, match="placement-unavailable: open-transaction"):
+            _place(fleet)
+        assert fleet.in_transaction is True  # untouched
+        assert fleet.execute("PRAGMA query_only").fetchone()[0] == 0
+    finally:
+        fleet.rollback()
+    assert _place(fleet)["status"] == "recommended"
