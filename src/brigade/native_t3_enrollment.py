@@ -328,7 +328,12 @@ def _nt_private() -> Any | None:
         return None
     try:
         from .work_cmd import nt_private
-    except (ImportError, OSError):
+
+        # Bind both lazy API namespaces now, so a missing DLL or symbol refuses
+        # before any lock or run state is written.
+        nt_private._security_api()
+        nt_private.nt._require_api()
+    except (ImportError, OSError, AttributeError):
         return None
     return nt_private
 

@@ -609,3 +609,23 @@ def test_windows_refuses_a_reparse_point_and_a_hardlinked_asset(tmp_path):
     with pytest.raises(enrollment.EnrollmentError) as replay:
         enrollment.enroll(batch_path=batch, target=workspace)
     assert replay.value.code == "asset-custody"
+
+
+@pytest.mark.parametrize("failure", [OSError("advapi32 missing"), AttributeError("symbol missing")])
+def test_windows_gate_refuses_when_security_api_cannot_bind(monkeypatch, failure):
+    import types
+
+    from brigade import dirfd
+    from brigade.work_cmd import nt_private
+
+    def unavailable():
+        raise failure
+
+    monkeypatch.setattr(enrollment, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(dirfd, "nt_available", lambda: True)
+    monkeypatch.setattr(nt_private, "_security_api", unavailable)
+
+    assert enrollment._nt_private() is None
+    with pytest.raises(enrollment.EnrollmentError) as excinfo:
+        enrollment._require_supported_platform()
+    assert excinfo.value.code == "unsupported-platform"
