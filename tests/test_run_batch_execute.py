@@ -347,6 +347,54 @@ def test_read_only_task_on_mutating_cloud_seat_is_refused(setup, capsys):
     assert setup[1] == []
 
 
+@pytest.mark.parametrize(
+    ("agent_block", "limits"),
+    [
+        ('\n[agents.reviewer]\ncli = "opencode"\nrole = "review"\n', ""),
+        ('\n[agents.reviewer]\ncli = "codex"\nrole = "review"\n', "workspace-write"),
+    ],
+)
+def test_read_only_task_without_hard_enforcement_is_refused(setup, capsys, agent_block, limits):
+    roster = setup[0] / ".brigade" / "roster.toml"
+    text = roster.read_text()
+    if limits:
+        text = text.replace("[limits]\n", f'[limits]\nsandbox = "{limits}"\n')
+    roster.write_text(text + agent_block)
+    # Same layer: the read-only task would otherwise run beside the writer.
+    rc, _, err = invoke(
+        setup,
+        capsys,
+        [task("a", read_only=False), {**task("b", read_only=True), "seat": "reviewer"}],
+    )
+    assert rc == 2
+    assert "enforces read-only as" in err
+    assert setup[1] == []
+
+
+def test_writable_task_under_read_only_sandbox_is_refused(setup, capsys):
+    roster = setup[0] / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text().replace("[limits]\n", '[limits]\nsandbox = "read-only"\n'))
+    rc, _, err = invoke(setup, capsys, [task("a", read_only=False), task("b", read_only=True, deps=("a",))])
+    assert rc == 2
+    assert "roster sandbox is read-only" in err
+    assert setup[1] == []
+
+
+def test_worktree_retry_is_not_blocked_by_its_own_request_marker(setup, capsys):
+    root = setup[0]
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    # .brigade/ is deliberately NOT ignored: the batch marker must not dirty the base.
+    (root / ".git" / "info" / "exclude").write_text("batch.json\n")
+    subprocess.run(["git", "-C", str(root), "add", ".brigade/roster.toml"], check=True)
+    _commit(root, "base")
+    tasks = [{**task("a"), "isolation": "worktree"}]
+    for _ in range(2):
+        rc, result, _ = invoke(setup, capsys, tasks)
+        assert rc == 2
+        assert result["error"]["code"] == "isolation-worktree-not-implemented"
+    assert setup[1] == []
+
+
 def test_all_read_only_batch_records_a_read_only_run(setup, capsys):
     rc, result, err = invoke(setup, capsys, [task("a"), task("b")])
     assert rc == 0, err

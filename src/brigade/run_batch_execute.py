@@ -17,6 +17,25 @@ from .run_transport import Assignment, WorkerResult
 from .roster import Roster, read_only_cloud_mutation_error
 
 
+def _read_only_enforcement_error(task_id: str, agent: Any, roster: Roster, *, read_only: bool) -> str | None:
+    """Refuse a per-task read-only setting the seat cannot hard-enforce.
+
+    The shared-writable layer rule lets a read-only task run beside a writer in
+    one checkout, so a soft or prompt-only read-only mode is not enough. A
+    read-only roster sandbox likewise cannot carry a writable task.
+    """
+    if read_only:
+        enforcement = agents.read_only_enforcement(agent.cli or "", sandbox=roster.sandbox, transport=agent.transport)
+        if enforcement != "hard":
+            return (
+                f"task {task_id} is read_only but seat {agent.name!r} enforces read-only as {enforcement!r} "
+                f"under sandbox {roster.sandbox!r}; use isolation worktree, depends_on, or a hard read-only seat"
+            )
+    elif roster.sandbox == "read-only":
+        return f"task {task_id} is writable but the roster sandbox is read-only"
+    return None
+
+
 class BatchExecution:
     def __init__(self, plan: dict[str, Any], run_dir: Path, workspace: Path):
         self.plan = plan
@@ -42,6 +61,8 @@ class BatchExecution:
             if error is None and read_only and agent is not None:
                 # The same refusal a read-only run applies to a mutating cloud seat.
                 error = read_only_cloud_mutation_error(agent)
+            if error is None and agent is not None:
+                error = _read_only_enforcement_error(task["task_id"], agent, roster, read_only=read_only)
             if error is not None:
                 raise BatchError("invalid-seat", error)
         specs = tuple(
@@ -121,6 +142,8 @@ class BatchExecution:
         kwargs["build_prompt"] = build_prompt
         kwargs["on_result"] = self.observe
         kwargs["allow_reinvocation"] = False
+        # Layers are ordered by stage. The DAG scheduler ignores stage, so it is never used here.
+        kwargs["scheduler"] = "waves"
         kwargs["read_only_for"] = self.read_only_for
         return planning.dispatch(waves, roster, **kwargs)
 

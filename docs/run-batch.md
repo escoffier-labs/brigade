@@ -90,6 +90,14 @@ cannot enforce read-only, including a mutating `codex-cloud` seat, is refused as
 an invalid seat, exactly as a read-only run does today. An all-read-only batch
 also launches the run itself with `--read-only`, so its receipt records the mode.
 
+Because a read-only task may share a layer with a writer, a batch is stricter
+than a plain read-only run: the seat must enforce read-only as `hard` under the
+roster sandbox. A soft or prompt-only seat (for example `opencode`, or `codex`
+with `sandbox = "workspace-write"`) is refused as an invalid seat. A writable
+task under a `read-only` roster sandbox is refused too. The base pin ignores
+Brigade's own `.brigade/` state, so the request marker never dirties the base
+for a retry.
+
 ## Base revision pin
 
 When any task declares `isolation: "worktree"`, the request pins a base

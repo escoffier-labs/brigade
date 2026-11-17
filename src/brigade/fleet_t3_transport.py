@@ -189,6 +189,7 @@ def clean_source_revision(
     *,
     runner: Callable[..., Any] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    ignore_prefixes: tuple[str, ...] = (),
 ) -> str:
     """Return a clean 40-character HEAD, or raise ``SourceRevisionError``.
 
@@ -238,7 +239,14 @@ def clean_source_revision(
     proc.check_cancellation(process_registry)
     if getattr(status, "returncode", 1) != 0:
         raise SourceRevisionError("source-unavailable", "source checkout cleanliness is unverifiable")
-    if str(getattr(status, "stdout", "") or "").strip():
+    # Porcelain v1 lines are "XY path". Callers may exclude their own state
+    # directories (for example .brigade/) the same way require_clean_worktree does.
+    dirty = [
+        line
+        for line in str(getattr(status, "stdout", "") or "").splitlines()
+        if line.strip() and not line[3:].startswith(ignore_prefixes)
+    ]
+    if dirty:
         raise SourceRevisionError(
             "source-dirty",
             "source checkout has uncommitted tracked or untracked content; the approved revision is not reproducible",

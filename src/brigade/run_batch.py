@@ -244,7 +244,8 @@ def _pinned_base_sha(canonical: dict[str, Any], cwd: Path | None) -> str | None:
 
     workspace = (cwd or Path.cwd()).expanduser().resolve()
     try:
-        return clean_source_revision(workspace)
+        # Brigade's own run state (the batch request marker) never counts as a dirty base.
+        return clean_source_revision(workspace, ignore_prefixes=(".brigade/",))
     except SourceRevisionError as exc:
         code = "base-dirty" if exc.code == "source-dirty" else "base-unavailable"
         raise BatchError(code, f"worktree isolation needs a pinned base revision: {exc}") from exc
