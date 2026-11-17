@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -47,6 +48,11 @@ def care_home(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(care_receipts, "_crontab_spool_text", lambda: None)
     return home, target
+
+
+# Backdating a symlink's own mtime and parsing systemd calendars are POSIX-only;
+# the systemd backend never runs on Windows.
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="systemd timer behavior is POSIX-only")
 
 
 def _install(home: Path, target: Path, **kwargs) -> None:
@@ -249,6 +255,7 @@ def test_schedule_health_warns_for_each_disabled_timer(care_home):
     assert warning["fix_command"] == f"systemctl --user enable --now {name}"
 
 
+@posix_only
 def test_schedule_health_warns_when_installed_timer_never_recorded_a_receipt(care_home):
     home, target = care_home
     _install(home, target, entry_ids=["daily-care"])
@@ -717,6 +724,7 @@ def test_care_status_launchd_reports_schedule_health(care_home, capsys):
 # --- Warning text (finding 8) ---
 
 
+@posix_only
 def test_never_ran_detail_formats_sub_day_ages_in_hours(care_home):
     home, target = care_home
     _install(home, target, entry_ids=["ingest-sweep"])
@@ -753,6 +761,7 @@ def test_never_ran_is_only_emitted_for_an_enabled_timer_with_extras_on(care_home
 # --- @claude review on 2db648849: never-ran age, rewritten timers, uninstall stop ---
 
 
+@posix_only
 def test_never_ran_counts_from_when_an_old_timer_was_enabled(care_home):
     home, target = care_home
     _install(home, target, entry_ids=["daily-care"], enable=False)
@@ -771,6 +780,7 @@ def test_never_ran_counts_from_when_an_old_timer_was_enabled(care_home):
     assert [warning["code"] for warning in stale["warnings"]] == [care_receipts.SCHEDULE_WARNING_NEVER_RAN]
 
 
+@posix_only
 def test_reinstall_that_rewrites_a_linked_timer_reloads_and_restarts_it(care_home, systemctl_calls):
     home, target = care_home
     _install(home, target, entry_ids=["care-scan"])
