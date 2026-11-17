@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import care_enable, care_patrol, care_receipts, care_schedules, managed_block, memory_cmd, runbook_cmd
+from . import care_enable, care_patrol, care_receipts, care_runbooks, care_schedules, managed_block, memory_cmd
 from .care_launchers import entry_argv, explicit_workspace, install_refusal, persisted_scope
 from .care_launchers import hub_job_status as hub_job_status
 from .care_launchers import runbook_argv, scoped_entries, verify_entry
@@ -659,12 +659,9 @@ def _write_crontab(text: str) -> str | None:
 
 
 def _ensure_memory_care_runbooks(target: Path) -> int:
-    """Write shipped memory-care runbooks when any are missing."""
-    runbook_dir = memory_cmd._memory_care_runbooks_dir(target)
-    missing = [name for name in memory_cmd.MEMORY_CARE_RUNBOOK_NAMES if not (runbook_dir / name).is_file()]
-    if not missing:
-        return 0
-    return memory_cmd._write_memory_care_runbooks(target, only_missing=True)
+    """Write the shipped memory-care runbooks that are missing; keep every existing file."""
+    specs, rc = memory_cmd.memory_care_runbook_specs()
+    return rc if specs is None else care_runbooks.ensure(target, specs)
 
 
 def _write_daily_observability_runbook(target: Path) -> int:
@@ -675,36 +672,20 @@ def _write_daily_observability_runbook(target: Path) -> int:
 
 def _write_memory_closeout_runbook(target: Path) -> int:
     """Materialize the shipped memory-closeout runbook when missing."""
-    dest = memory_cmd._memory_care_runbooks_dir(target) / MEMORY_CLOSEOUT_RUNBOOK_NAME
-    if dest.is_file():
-        return 0
-    temp = dest.parent / f".{MEMORY_CLOSEOUT_RUNBOOK_NAME}.init-tmp"
-    try:
-        from .localio import write_json as _write_json
-
-        temp.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(temp, dict(MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD))
-        validated, error = runbook_cmd._read_runbook(temp, require_pin_hashes=False)
-        if validated is None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-        pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
-        if pins is None:
-            print(f"error: {pin_error}", file=sys.stderr)
-            return 2
-        validated["pins"] = pins
-        _write_json(dest, validated)
-        return 0
-    finally:
-        if temp.is_file():
-            temp.unlink()
+    return care_patrol.write_runbook(
+        target, f"{memory_cmd.MEMORY_CARE_RUNBOOKS_REL}/{MEMORY_CLOSEOUT_RUNBOOK_NAME}", MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD
+    )
 
 
 def _ensure_care_runbooks(target: Path) -> int:
-    rc = _ensure_memory_care_runbooks(target)
-    if rc != 0:
+    """Publish the missing shipped runbooks and daily-observability as one validated batch."""
+    specs, rc = memory_cmd.memory_care_runbook_specs()
+    if specs is None:
         return rc
-    return _write_daily_observability_runbook(target)
+    daily = care_runbooks.RunbookSpec(
+        MEMORY_CARE_RUNBOOK_REL["daily-observability"], DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD
+    )
+    return care_runbooks.ensure(target, [*specs, daily])
 
 
 def _windows_plan_tasks(*, workspace: Path, entries: tuple[CareEntry, ...]) -> list[dict[str, Any]]:

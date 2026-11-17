@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -15,14 +14,13 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from . import engine_paths, memory_bm25
+from . import care_runbooks, engine_paths, memory_bm25
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .frontmatter_literal import bounded_literal_list
 from .install import apply_gitignore
 from .selection import Selection
 from .localio import (
     read_jsonl_dicts as _read_jsonl_dicts,
-    write_json as _write_json,
     write_text_atomic as _write_text_atomic,
     utc_now_iso_z as _utc_iso,
 )
@@ -268,64 +266,30 @@ def _memory_care_runbooks_dir(target: Path) -> Path:
     return target / MEMORY_CARE_RUNBOOKS_REL
 
 
+def memory_care_runbook_specs() -> tuple[list[care_runbooks.RunbookSpec] | None, int]:
+    """The shipped memory-care runbook templates as publishable specs."""
+    return care_runbooks.shipped_specs(
+        template_root() / "memory-care" / "runbooks", MEMORY_CARE_RUNBOOKS_REL, MEMORY_CARE_RUNBOOK_NAMES
+    )
+
+
 def _write_memory_care_runbooks(target: Path, *, only_missing: bool = False) -> int:
-    """Copy pinned mechanical memory-care runbook templates into the target.
+    """Publish the pinned mechanical memory-care runbook templates into the target.
 
-    Templates ship without pins; pins are materialized from the resolved
-    ``brigade`` binary at write time so ``brigade runbook run --approved``
-    can enforce the binary hash without a separate pin step.
+    Pins are materialized from the resolved ``brigade`` binary at write time so
+    ``brigade runbook run --approved`` can enforce the binary hash without a
+    separate pin step. Only the shipped names are ever touched; other runbooks
+    in the directory are never deleted (see ``care_runbooks`` for the rules).
 
-    Writes into a sibling temp directory first so pin-resolution failures do
-    not leave a partial runbook tree behind. Only the shipped names are
-    published, one file at a time: other runbooks in the directory are never
-    touched, and *only_missing* also keeps every shipped file already present.
+    With *only_missing* (``brigade care install``) every shipped file already
+    present is kept as is. Without it (``memory care init --with-runbooks``)
+    shipped files are refreshed from the templates: each replaced file is
+    printed and first copied to ``<name>.bak-<UTC timestamp>``.
     """
-    from . import runbook_cmd
-
-    template_dir = template_root() / "memory-care" / "runbooks"
-    dest_dir = _memory_care_runbooks_dir(target)
-    temp_dir = dest_dir.parent / f".{dest_dir.name}.init-tmp"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True)
-    try:
-        for name in MEMORY_CARE_RUNBOOK_NAMES:
-            src = template_dir / name
-            if not src.is_file():
-                print(f"error: memory-care runbook template missing: {src}", file=sys.stderr)
-                return 4
-            try:
-                payload = json.loads(src.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                print(f"error: invalid memory-care runbook template {src}: {exc}", file=sys.stderr)
-                return 2
-            if not isinstance(payload, dict):
-                print(f"error: memory-care runbook template must be a JSON object: {src}", file=sys.stderr)
-                return 2
-            # Validate shape through the same reader runbook execution uses, then
-            # materialize pins without echoing pin() stdout into care init output.
-            dest = temp_dir / name
-            _write_json(dest, payload)
-            validated, error = runbook_cmd._read_runbook(dest, require_pin_hashes=False)
-            if validated is None:
-                print(f"error: {error}", file=sys.stderr)
-                return 2
-            pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
-            if pins is None:
-                print(f"error: {pin_error}", file=sys.stderr)
-                return 2
-            validated["pins"] = pins
-            _write_json(dest, validated)
-        # Never replace the whole directory: operators keep their own runbooks
-        # (and customized shipped ones) beside the templates.
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        for name in MEMORY_CARE_RUNBOOK_NAMES:
-            if not (only_missing and (dest_dir / name).exists()):
-                (temp_dir / name).replace(dest_dir / name)
-        return 0
-    finally:
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir)
+    specs, rc = memory_care_runbook_specs()
+    if specs is None:
+        return rc
+    return care_runbooks.ensure(target, specs, refresh=not only_missing)
 
 
 def init(

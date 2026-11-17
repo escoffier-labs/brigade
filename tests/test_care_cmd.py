@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import care_cmd, care_schedules, cli, managed_block, memory_cmd
+from brigade import care_cmd, care_schedules, cli, managed_block, memory_cmd, runbook_cmd
 from brigade.isolated_exec import trusted_cwd
 
 
@@ -660,7 +660,7 @@ def test_uses_schtasks_is_backend_not_host(monkeypatch):
 def test_care_explicit_backends_generate_plans_on_win32(tmp_path, monkeypatch, capsys):
     """Explicit launchd/systemd/crontab must not be swallowed by the Windows printer."""
     # Pinning uses native shutil.which, which cannot run with a simulated win32.
-    monkeypatch.setattr(care_cmd.runbook_cmd, "_pin_payload_from_runbook", lambda *args: ({}, None))
+    monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", lambda *args: ({}, None))
     monkeypatch.setattr(care_cmd.sys, "platform", "win32")
     monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
     home = tmp_path / "home"
