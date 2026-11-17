@@ -285,7 +285,12 @@ def test_expired_holder_reclaimed_with_new_generation_cannot_write(ledger):
     headers["If-Match"] = "2"
     assert call(conn, f"/work/items/{work_id}/ownership", checkpoint, headers=headers)[1]["code"] == "stale-generation"
     assert act(conn, work_id) == (200, original)  # historical reply cannot restore authority
-    assert snapshot(conn, work_id) == new["ownership"]
+    # The read derives liveness words; the mutation reply does not carry them.
+    assert {
+        key: value
+        for key, value in snapshot(conn, work_id).items()
+        if key not in {"liveness_basis", "liveness_freshness"}
+    } == new["ownership"]
     assert (
         act(conn, work_id, "release", revision=2, generation=2, key="release", node="node-b", nonce=NONCE_A)[0] == 403
     )
@@ -480,7 +485,12 @@ def test_real_http_take_uses_bearer_identity_and_rejects_spoofed_body(tmp_path, 
         fleet_hub.revoke_node(db, "node-a")
         with pytest.raises(client.WorkloreClientError):
             take({"action": "take", "generation": 0})
-        assert snapshot(db, work_id) == grant["ownership"]
+        # The read derives liveness words; the mutation reply does not carry them.
+        assert {
+            key: value
+            for key, value in snapshot(db, work_id).items()
+            if key not in {"liveness_basis", "liveness_freshness"}
+        } == grant["ownership"]
     finally:
         db.close()
         server.shutdown()

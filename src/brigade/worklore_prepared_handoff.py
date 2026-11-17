@@ -139,7 +139,9 @@ def validate_prepared_handoff(raw: object, work_id: str) -> dict[str, Any]:
         view["last_report"] = {
             "data": _report_data(report["data"]),
             "reporter_node": ownership._node(report["reporter_node"]),
-            "freshness": _choice(report["freshness"], liveness.FRESHNESS_VALUES),
+            # An older Hub sends "unassessed"; the Hub no longer emits it, but a
+            # reader must still accept a handoff from a Hub that has not upgraded.
+            "freshness": _choice(report["freshness"], liveness.FRESHNESS_VALUES | liveness.LEGACY_FRESHNESS_VALUES),
         }
     refs = ownership._object(view["run_refs"], {"items", "truncated"} | set(_RUN_LABELS))
     _labels(refs, _RUN_LABELS)
@@ -193,7 +195,13 @@ def get_prepared_handoff(conn: sqlite3.Connection, work_id: str, *, now: str | N
         observed_at = store._utc_now()
         reference_now = observed_at if now is None else now
         current = _current_ownership(conn, work_id)
-        facts = liveness.owner_facts(conn, current, work_id, now=reference_now)
+        facts = liveness.owner_facts(
+            conn,
+            current,
+            work_id,
+            now=reference_now,
+            generation_start=ownership.generation_start_seq(conn, work_id, current),
+        )
         ownership_view = {key: current[key] for key in _OWNERSHIP_FIELDS}
         ownership_view["liveness"] = liveness.derive_owner_liveness(facts)
         checkpoint = None

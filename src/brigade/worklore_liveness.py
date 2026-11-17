@@ -7,6 +7,12 @@ stores nothing and exposes only the state word, a basis word, and a freshness
 word. Claim targets, session ids, process ids, paths, and capabilities of other
 nodes never leave this module.
 
+Every fact is scoped to this item and this ownership. A session or claim counts
+only for the snapshot's repository identity, and a linked run counts only when
+this owner node linked it after the current generation began. Another node's
+run, a previous owner's run, or another repository's session or claim can
+therefore never make this item read as live, terminal, or idle.
+
 Every missing table, NULL, or malformed timestamp fails to ``unknown`` instead
 of raising. Reads are parameterized and bounded.
 """
@@ -23,30 +29,54 @@ from .fleet_command_deck import is_terminal_state, snapshot_freshness
 LIVENESS_VALUES = frozenset({"live-owner", "idle-owner", "expired-observation", "terminal-execution", "unknown"})
 BASIS_VALUES = frozenset({"session", "claim", "lease", "run", "none"})
 FRESHNESS_VALUES = frozenset({"recent", "stale", "future", "unknown"})
+# An older Hub sends "unassessed". Readers accept it so an older Hub stays
+# readable; the Hub itself only emits ``FRESHNESS_VALUES``.
+LEGACY_FRESHNESS_VALUES = frozenset({"unassessed"})
 STALE_AFTER_SECONDS = 1800
 # Same item-status set as worklore_ownership.TERMINAL_STATUSES. Copied rather
 # than imported because worklore_ownership imports this module.
 _TERMINAL_STATUSES = frozenset({"completed", "canceled", "archived"})
+# One more than the per-node active claim quota in
+# fleet_hub_claim_cardinality.MAX_ACTIVE_CLAIMS_PER_NODE. Live claims (a
+# deadline after now) sort before every expired claim, so this bound always
+# covers all of them.
+_CLAIM_ROW_LIMIT = 1025
+_CASEFOLD_FUNCTION = "brigade_casefold"
+# The node's newest session row for one repository. The CASE clause is the
+# exact predicate fleet_hub_sessions.count_live_by_node uses to exclude a
+# finished v2 cloud report; keep the two in step.
 _SESSIONS_SQL = (
-    "SELECT MAX(CASE WHEN state = 'active' AND expires_at > ? THEN 1 ELSE 0 END), "
-    "MAX(CASE WHEN state = 'ended' AND ended_at IS NOT NULL THEN 1 ELSE 0 END), "
-    "MAX(heartbeat_at), MAX(ended_at) "
-    "FROM interactive_sessions WHERE node_id = ?"
+    "SELECT state, expires_at, heartbeat_at, ended_at, "
+    "CASE WHEN coalesce(json_extract(cloud_context_json, '$.version'), 0) = 2 "
+    "AND coalesce(json_extract(cloud_context_json, '$.reported_state'), '') "
+    "IN ('completed', 'failed', 'cancelled') THEN 1 ELSE 0 END "
+    "FROM interactive_sessions "
+    "WHERE node_id = ? AND brigade_casefold(repo_identity) = ? "
+    "ORDER BY coalesce(ended_at, heartbeat_at) DESC, heartbeat_at DESC, started_at DESC, harness, session_id "
+    "LIMIT 1"
 )
 _CLAIMS_SQL = (
-    "SELECT MAX(CASE WHEN expires_at > ? THEN 1 ELSE 0 END), MAX(renewed_at), MAX(acquired_at) "
-    "FROM claims WHERE owner_node = ?"
+    "SELECT target, expires_at, renewed_at, acquired_at FROM claims "
+    "WHERE owner_node = ? AND expires_at > ? ORDER BY expires_at DESC, target LIMIT ?"
 )
+# Only this owner node's link, and only a link recorded after the ownership
+# event that began the current generation.
 _LINK_SQL = (
     "SELECT node_id, run_id FROM work_events "
-    "WHERE work_id = ? AND event_type = 'execution-linked' ORDER BY seq DESC LIMIT 1"
+    "WHERE work_id = ? AND event_type = 'execution-linked' AND node_id = ? AND seq > ? "
+    "ORDER BY seq DESC LIMIT 1"
 )
 _RUN_SQL = "SELECT state, ts FROM events WHERE node_id = ? AND run_id = ? ORDER BY sequence DESC, ts DESC LIMIT 1"
 
 
 @dataclass(frozen=True)
 class OwnerFacts:
-    """Only the booleans and timestamp that decide owner liveness."""
+    """Only the booleans and timestamp that decide owner liveness.
+
+    Every field is scoped: session and claim facts belong to the snapshot's
+    repository identity, and ``run_terminal`` belongs to this owner node in the
+    current ownership generation.
+    """
 
     owner_node: str | None = None
     item_terminal: bool = False
@@ -66,6 +96,26 @@ def _read(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> tuple[
         return None
 
 
+def _read_all(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+    """One bounded multi-row read; an older database without the table has no fact."""
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
+def _register_casefold(conn: sqlite3.Connection) -> None:
+    """Register the Unicode-aware fold the rest of the Hub uses in SQL.
+
+    ``fleet_hub_sessions`` registers the same function for its filters, and a
+    SQLite ``NOCASE`` collation folds ASCII only. Registering it twice on one
+    connection replaces it with the same behavior.
+    """
+    conn.create_function(
+        _CASEFOLD_FUNCTION, 1, lambda value: "" if value is None else str(value).casefold(), deterministic=True
+    )
+
+
 def _parse_stamp(raw: object) -> datetime | None:
     if isinstance(raw, datetime):
         return raw if raw.tzinfo is not None else None
@@ -79,6 +129,7 @@ def _parse_stamp(raw: object) -> datetime | None:
 
 
 def _latest(stamps: tuple[object, ...]) -> str | None:
+    """Newest valid TEXT stamp. Non-string values carry no comparable fact."""
     best: tuple[datetime, str] | None = None
     for raw in stamps:
         parsed = _parse_stamp(raw)
@@ -104,14 +155,98 @@ def _item_terminal(conn: sqlite3.Connection, work_id: str) -> bool:
     return row is not None and isinstance(row[0], str) and row[0] in _TERMINAL_STATUSES
 
 
+def _repo_identity(snapshot: Mapping[str, Any]) -> str | None:
+    raw = snapshot.get("repo_identity") if isinstance(snapshot, Mapping) else None
+    return raw if isinstance(raw, str) and raw else None
+
+
+def _names_repo(target: object, repo: str) -> bool:
+    """Whether a claim target names this repository.
+
+    A target is the repository key with an optional ``@<worktree>`` suffix
+    (see ``fleet_claim_target``) or an issue suffix, so only the base key is
+    compared, case-insensitively.
+    """
+    if not isinstance(target, str) or not target:
+        return False
+    base = target.split("#", 1)[0].split("@", 1)[0]
+    return bool(base) and base.casefold() == repo.casefold()
+
+
+def _ended_after(ended_at: object, ownership_updated: object) -> bool:
+    ended, updated = _parse_stamp(ended_at), _parse_stamp(ownership_updated)
+    return ended is not None and updated is not None and ended > updated
+
+
+def _session_facts(
+    conn: sqlite3.Connection,
+    owner_node: str,
+    repo: str,
+    *,
+    now_epoch: float,
+    ownership_updated: object,
+) -> tuple[bool, bool, tuple[object, ...]]:
+    """Live and counted-end facts from the node's newest session for this repository.
+
+    Older rows never count: a crashed session that is newer than an ended one
+    hides the end, and an ended session that is newer hides nothing else.
+    """
+    _register_casefold(conn)
+    row = _read(conn, _SESSIONS_SQL, (owner_node, repo.casefold()))
+    if row is None:
+        return False, False, ()
+    state, expires_at, heartbeat_at, ended_at, finished_cloud = row
+    live = state == "active" and isinstance(expires_at, (int, float)) and expires_at > now_epoch and not finished_cloud
+    ended = state == "ended" and _ended_after(ended_at, ownership_updated)
+    stamps: tuple[object, ...] = (heartbeat_at, ended_at) if ended else (heartbeat_at,)
+    return bool(live), bool(ended), stamps
+
+
+def _claim_facts(
+    conn: sqlite3.Connection, owner_node: str, repo: str, *, now_epoch: float
+) -> tuple[bool, tuple[object, ...]]:
+    """Live claims this node holds for this repository only."""
+    live = False
+    stamps: list[object] = []
+    rows = _read_all(conn, _CLAIMS_SQL, (owner_node, now_epoch, _CLAIM_ROW_LIMIT))
+    for target, _expires_at, renewed_at, acquired_at in rows:
+        if not _names_repo(target, repo):
+            continue
+        live = True
+        stamps.extend((renewed_at, acquired_at))
+    return live, tuple(stamps)
+
+
+def _linked_run(
+    conn: sqlite3.Connection, work_id: str, owner_node: str, generation_start: int | None
+) -> tuple[bool, str | None]:
+    """Terminality of the newest run this owner linked in the current generation.
+
+    ``generation_start`` is the work event sequence at which the current
+    ownership generation began. Without it no link is admitted, which can only
+    under-report a terminal run and never make a live owner read terminal.
+    """
+    if generation_start is None:
+        return False, None
+    link = _read(conn, _LINK_SQL, (work_id, owner_node, generation_start))
+    if link is None or not isinstance(link[0], str) or not isinstance(link[1], str):
+        return False, None
+    event = _read(conn, _RUN_SQL, (link[0], link[1]))
+    if event is None:
+        return False, None
+    terminal = isinstance(event[0], str) and is_terminal_state(event[0])
+    return terminal, event[1] if isinstance(event[1], str) else None
+
+
 def owner_facts(
     conn: sqlite3.Connection,
     snapshot: Mapping[str, Any],
     work_id: str,
     *,
     now: str | datetime,
+    generation_start: int | None = None,
 ) -> OwnerFacts:
-    """Read the fixed fact set for one ownership snapshot. Never raises for missing data."""
+    """Read the scoped fact set for one ownership snapshot. Never raises for missing data."""
     raw_owner = snapshot.get("owner_node") if isinstance(snapshot, Mapping) else None
     owner_node = raw_owner if isinstance(raw_owner, str) and raw_owner else None
     item_terminal = _item_terminal(conn, work_id)
@@ -122,23 +257,20 @@ def owner_facts(
         return OwnerFacts(owner_node=owner_node, item_terminal=item_terminal)
     now_epoch = now_stamp.timestamp()
 
-    sessions = _read(conn, _SESSIONS_SQL, (now_epoch, owner_node))
-    has_live_session = bool(sessions and sessions[0])
-    session_ended = bool(sessions and sessions[1])
-    claims = _read(conn, _CLAIMS_SQL, (now_epoch, owner_node))
-    has_live_claim = bool(claims and claims[0])
+    has_live_session = session_ended = has_live_claim = False
+    stamps: list[object] = []
+    repo = _repo_identity(snapshot)
+    if repo is not None:
+        has_live_session, session_ended, session_stamps = _session_facts(
+            conn, owner_node, repo, now_epoch=now_epoch, ownership_updated=snapshot.get("updated_at")
+        )
+        has_live_claim, claim_stamps = _claim_facts(conn, owner_node, repo, now_epoch=now_epoch)
+        stamps.extend(session_stamps)
+        stamps.extend(claim_stamps)
+    run_terminal, run_stamp = _linked_run(conn, work_id, owner_node, generation_start)
+    if run_stamp is not None:
+        stamps.append(run_stamp)
 
-    run_terminal = False
-    run_stamp: str | None = None
-    link = _read(conn, _LINK_SQL, (work_id,))
-    if link is not None and isinstance(link[0], str) and isinstance(link[1], str):
-        event = _read(conn, _RUN_SQL, (link[0], link[1]))
-        if event is not None:
-            run_terminal = isinstance(event[0], str) and is_terminal_state(event[0])
-            run_stamp = event[1] if isinstance(event[1], str) else None
-
-    session_stamps = (sessions[2], sessions[3]) if sessions else ()
-    claim_stamps = (claims[1], claims[2]) if claims else ()
     return OwnerFacts(
         owner_node=owner_node,
         item_terminal=item_terminal,
@@ -147,7 +279,7 @@ def owner_facts(
         has_live_claim=has_live_claim,
         lease_expired=_deadline_lapsed(snapshot.get("expires_at"), now_stamp),
         run_terminal=run_terminal,
-        newest_fact_at=_latest((*session_stamps, *claim_stamps, run_stamp)),
+        newest_fact_at=_latest(tuple(stamps)),
     )
 
 
@@ -155,23 +287,16 @@ def _verdict(facts: OwnerFacts) -> tuple[str, str]:
     """Shared precedence: first match wins, in the documented order."""
     if not facts.owner_node or facts.item_terminal:
         return "unknown", "none"
-    if not (
-        facts.has_live_session
-        or facts.session_ended
-        or facts.has_live_claim
-        or facts.lease_expired
-        or facts.run_terminal
-        or facts.newest_fact_at is not None
-    ):
-        return "unknown", "none"
-    if facts.run_terminal and not facts.has_live_session and not facts.has_live_claim:
-        return "terminal-execution", "run"
+    # A lapsed lease wins: the rest of the system already treats the item as
+    # reclaimable, so no session or claim may mask it.
+    if facts.lease_expired:
+        return "expired-observation", "lease"
     if facts.has_live_session:
         return "live-owner", "session"
     if facts.has_live_claim:
         return "live-owner", "claim"
-    if facts.lease_expired and not facts.session_ended:
-        return "expired-observation", "lease"
+    if facts.run_terminal:
+        return "terminal-execution", "run"
     if facts.session_ended:
         return "idle-owner", "session"
     return "unknown", "none"

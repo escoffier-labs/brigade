@@ -117,31 +117,44 @@ from facts the Hub already stores. Derivation is read-only: no table, index,
 column, or fleet event, nothing stored, and no row written. The prepared handoff
 carries the same derived `liveness` value.
 
-The facts are a bounded set of parameterized reads: an unexpired active
-`interactive_sessions` row for the owner node, an ended session row, an
-unexpired `claims` row for the owner node, the snapshot's explicit campaign
-lease deadline, and whether the newest `events` row for the newest
-`execution-linked` run is terminal. A missing sessions or claims table, a NULL,
-or a malformed timestamp yields no fact and never raises.
+Every fact is scoped to this item and this ownership, never to the owner node in
+general. A session or claim counts only for the snapshot's `repo_identity`, and
+only the newest session for that repository counts. A linked run counts only
+when the owner node itself linked it after the current ownership generation
+began. A previous owner's run, another node's run, and another repository's
+session or claim never decide this item's liveness. When the snapshot has no
+`repo_identity`, sessions and claims are not read at all.
 
-| State | Rule | Basis |
+The facts are a bounded set of parameterized reads: the owner node's newest
+`interactive_sessions` row for this repository (excluding a finished v2 cloud
+report), unexpired `claims` rows whose target names this repository, the
+snapshot's explicit campaign lease deadline, and the terminality of the newest
+`events` row for the newest `execution-linked` run that this owner linked in the
+current generation. A missing sessions or claims table, a NULL, or a malformed
+timestamp yields no fact and never raises.
+
+| State | Exact meaning | Basis |
 | --- | --- | --- |
-| `live-owner` | A live session or live claim exists (after the terminal-execution rule) | `session` or `claim` |
-| `idle-owner` | A session ended and the item is not terminal | `session` |
-| `expired-observation` | The lease deadline lapsed and no session-end marker exists | `lease` |
-| `terminal-execution` | The newest linked run is terminal with no live session and no live claim | `run` |
-| `unknown` | No owner, a terminal item, or no fact at all; also the fallback | `none` |
+| `live-owner` | The owner node has a live session or a live claim for this item's repository. It does not prove the owner is working on this item, only that the node is active in that repository. | `session` or `claim` |
+| `idle-owner` | The owner node's newest session for this repository ended after the ownership snapshot's last update, and the item is not terminal. Work may be unfinished, but nothing currently shows the owner running. | `session` |
+| `expired-observation` | The snapshot's own campaign lease deadline has lapsed. This wins over any session or claim: the rest of the system already treats the item as reclaimable. | `lease` |
+| `terminal-execution` | The newest run this owner linked in the current generation is terminal, with no live session or claim for this repository. | `run` |
+| `unknown` | No owner, a terminal item, or no scoped fact at all; also the fallback. | `none` |
 
-Precedence, first match wins: no `owner_node`, a terminal item, or no fact at
-all is `unknown` (`none`); a terminal newest linked run with no live session or
-claim is `terminal-execution` (`run`); a live session or claim is `live-owner`
-(`session`, then `claim`); a lapsed lease with no session-end marker is
-`expired-observation` (`lease`); an ended session on a non-terminal item is
-`idle-owner` (`session`); anything else is `unknown` (`none`).
+Precedence, first match wins: no `owner_node` or a terminal item is `unknown`
+(`none`); a lapsed lease is `expired-observation` (`lease`); a live session,
+then a live claim, for this repository is `live-owner` (`session`, then
+`claim`); a terminal linked run of this owner in this generation is
+`terminal-execution` (`run`); a counted session end on a non-terminal item is
+`idle-owner` (`session`); anything else is `unknown` (`none`). A live owner is
+therefore never reported as terminal or expired, and an abandoned item is never
+kept live by another node's or another repository's activity.
 
-`liveness_freshness` applies the deck's 1,800 second rule to the newest fact
-timestamp (session heartbeat or end, claim renewal, newest run event): `recent`,
-`stale`, `future`, or `unknown`.
+`liveness_freshness` applies the deck's 1,800 second rule to the newest timestamp
+among the facts that survived that scoping (the scoped session heartbeat and
+counted end, scoped claim renewal, and the scoped run event): `recent`, `stale`,
+`future`, or `unknown`. Unrelated sessions and claims on the same node never
+contribute.
 
 The read is public within the fleet. The three fields reveal only the state,
 basis, and freshness words; a claim target, session id, process id, path, or
@@ -149,7 +162,10 @@ another node's capability is never returned.
 
 Prepared handoff report freshness uses the same four words. An older reader
 accepts only `liveness: "unknown"` and freshness `"unassessed"` and refuses the
-new values, so it fails closed with an invalid-response refusal.
+new values, so it fails closed with an invalid-response refusal. A newer reader
+still accepts an older Hub's `unassessed`, but an older CLI cannot read a newer
+Hub's prepared handoff. Upgrade the Hub and the CLI together; the refusal is
+fail-closed rather than a silently wrong reading.
 
 ## Nonce and replay
 

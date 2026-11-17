@@ -1,4 +1,4 @@
-"""Owner liveness derivation: states, precedence, privacy, writes, and readers."""
+"""Owner liveness derivation: states, precedence, scoping, privacy, writes, and readers."""
 
 import base64
 import json
@@ -14,7 +14,12 @@ from brigade import worklore_store as store
 from brigade.worklore_validate import WorkloreValidationError
 
 NOW = "2026-01-01T00:00:00+00:00"
+# After NOW: an end that happens after the ownership snapshot's last update.
+LATER = "2026-01-01T00:10:00+00:00"
+BEFORE = "2025-12-31T22:00:00+00:00"
+REPO = "example/project"
 NONCE = base64.urlsafe_b64encode(b"a" * 32).decode().rstrip("=")
+NONCE_B = base64.urlsafe_b64encode(b"b" * 32).decode().rstrip("=")
 OFFER = {
     "action": "offer",
     "target_node": "node-a",
@@ -22,10 +27,22 @@ OFFER = {
     "authorization_ref": "grant-1",
     "attempt_budget": {"cap": 1, "source_ref": "budget-1"},
 }
+CHECKPOINT = {
+    "action": "checkpoint",
+    "generation": 1,
+    "repo_identity": REPO,
+    "write_scope": ["src/module.py"],
+    "source_revision": "a" * 40,
+    "next_action": {"kind": "await-review", "resume_condition": ""},
+    "evidence_refs": [],
+}
 
 
 @pytest.fixture
-def ledger(tmp_path):
+def ledger(tmp_path, monkeypatch):
+    # One fixed Hub clock: ownership writes and derived reads share it, so no
+    # test depends on wall time or sleeps.
+    monkeypatch.setattr(store, "_utc_now", lambda: NOW)
     conn = fleet_hub.init_db(tmp_path / "fleet.db")
     for node in ("node-a", "node-b"):
         fleet_hub.add_node(conn, node, node)
@@ -57,31 +74,60 @@ def owned(conn, work_id):
     )
 
 
+def checkpointed(conn, work_id, repo=REPO):
+    """Owned, and checkpointed so the snapshot names a repository identity."""
+    owned(conn, work_id)
+    ownership.ownership_action(
+        conn,
+        work_id,
+        CHECKPOINT | {"repo_identity": repo},
+        expected_revision=2,
+        idempotency_key="checkpoint",
+        actor_id="node-a",
+        actor_type="node",
+        holder_nonce=NONCE,
+    )
+
+
 def _epoch(stamp):
     return datetime.fromisoformat(stamp).timestamp()
 
 
-def session(conn, *, state="active", ended=None, stamp=NOW):
+def session(
+    conn,
+    *,
+    state="active",
+    ended=None,
+    stamp=NOW,
+    repo=REPO,
+    node="node-a",
+    expires=None,
+    session_id="PRIVATE-SESSION-ID",
+    cloud=None,
+):
+    expires_at = _epoch(stamp) + 900 if expires is None else expires
     conn.execute(
         "INSERT INTO interactive_sessions (node_id, harness, session_id, repo_identity, identity_scope, "
         "repo_label, checkout_path, branch, dirty_paths_json, dirty_truncated, state, started_at, "
-        "heartbeat_at, ended_at, ttl_seconds, expires_at) VALUES "
-        "('node-a','claude','PRIVATE-SESSION-ID','example/project','node','example','/tmp/work',NULL,'[]',0,?,?,?,?,900,?)",
-        (state, stamp, stamp, ended, _epoch(stamp) + 900),
+        "heartbeat_at, ended_at, ttl_seconds, expires_at, cloud_context_json) VALUES "
+        "(?,'claude',?,?,'node','example','/tmp/work',NULL,'[]',0,?,?,?,?,900,?,?)",
+        (node, session_id, repo, state, stamp, stamp, ended, expires_at, cloud),
     )
     conn.commit()
 
 
-def claim(conn, stamp=NOW):
+def claim(conn, *, target=None, stamp=NOW, node="node-a", expires=None):
+    target = f"{REPO}@PRIVATE-CLAIM-TARGET" if target is None else target
+    expires_at = _epoch(stamp) + 900 if expires is None else expires
     conn.execute(
         "INSERT INTO claims (target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
-        "VALUES ('PRIVATE-CLAIM-TARGET','node-a','PRIVATE-HOLDER-TOKEN',?,?,900,?)",
-        (stamp, stamp, _epoch(stamp) + 900),
+        "VALUES (?,?,'PRIVATE-HOLDER-TOKEN',?,?,900,?)",
+        (target, node, stamp, stamp, expires_at),
     )
     conn.commit()
 
 
-def finish_run(conn, work_id, state="run.completed"):
+def finish_run(conn, work_id, state="run.completed", *, node="node-a", run="run-a"):
     store._append_event(
         conn,
         work_id=work_id,
@@ -89,28 +135,30 @@ def finish_run(conn, work_id, state="run.completed"):
         from_status=None,
         to_status=None,
         actor_type="node",
-        actor_id="node-a",
-        node_id="node-a",
-        run_id="run-a",
+        actor_id=node,
+        node_id=node,
+        run_id=run,
         now=NOW,
         detail={},
     )
     conn.execute(
         "INSERT INTO events (node_id, run_id, sequence, digest, repo, seat, harness, state, ts, received_at) "
-        "VALUES ('node-a','run-a',1,'d','example/project','seat','claude',?,?,?)",
-        (state, NOW, NOW),
+        "VALUES (?,?,1,'d',?,'seat','claude',?,?,?)",
+        (node, run, REPO, state, NOW, NOW),
     )
     conn.commit()
 
 
-def lapse_lease(conn, work_id):
+def lapse_lease(conn, work_id, deadline="2025-12-31T00:00:00+00:00"):
+    """Rewrite the newest ownership snapshot's campaign deadline, as a lapsed lease."""
+    placeholders = ",".join("?" for _ in ownership.EVENT_TYPES)
     row = conn.execute(
-        "SELECT seq, detail_json FROM work_events WHERE work_id=? AND event_type='ownership-accepted' "
+        f"SELECT seq, detail_json FROM work_events WHERE work_id=? AND event_type IN ({placeholders}) "
         "ORDER BY seq DESC LIMIT 1",
-        (work_id,),
+        (work_id, *ownership.EVENT_TYPES.values()),
     ).fetchone()
     detail = json.loads(row[1])
-    detail["ownership"]["expires_at"] = "2025-12-31T00:00:00+00:00"
+    detail["ownership"]["expires_at"] = deadline
     conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), row[0]))
     conn.commit()
 
@@ -124,7 +172,10 @@ def read(conn, work_id):
     [
         (lambda conn, work_id: session(conn), ("live-owner", "session")),
         (lambda conn, work_id: claim(conn), ("live-owner", "claim")),
-        (lambda conn, work_id: session(conn, state="ended", ended=NOW), ("idle-owner", "session")),
+        (
+            lambda conn, work_id: session(conn, state="ended", stamp=LATER, ended=LATER),
+            ("idle-owner", "session"),
+        ),
         (lambda conn, work_id: lapse_lease(conn, work_id), ("expired-observation", "lease")),
         (lambda conn, work_id: finish_run(conn, work_id), ("terminal-execution", "run")),
     ],
@@ -132,7 +183,7 @@ def read(conn, work_id):
 )
 def test_each_liveness_state(ledger, setup, expected):
     conn, work_id = ledger
-    owned(conn, work_id)
+    checkpointed(conn, work_id)
     setup(conn, work_id)
     before = conn.total_changes
     snapshot = read(conn, work_id)
@@ -144,7 +195,7 @@ def test_each_liveness_state(ledger, setup, expected):
 def test_unknown_without_owner_or_facts(ledger, own):
     conn, work_id = ledger
     if own:
-        owned(conn, work_id)
+        checkpointed(conn, work_id)
     snapshot = read(conn, work_id)
     assert (snapshot["liveness"], snapshot["liveness_basis"], snapshot["liveness_freshness"]) == (
         "unknown",
@@ -155,7 +206,7 @@ def test_unknown_without_owner_or_facts(ledger, own):
 
 def test_unknown_for_terminal_item_even_with_live_session(ledger):
     conn, work_id = ledger
-    owned(conn, work_id)
+    checkpointed(conn, work_id)
     session(conn)
     store.transition(conn, work_id, to_status="canceled", expected_version=1, actor_id="admin")
     conn.commit()
@@ -163,17 +214,172 @@ def test_unknown_for_terminal_item_even_with_live_session(ledger):
     assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
 
 
+def test_live_owner_with_terminal_run_reads_live_owner(ledger):
+    """A live owner is never reported as terminal, even after a terminal run."""
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    session(conn)
+    finish_run(conn, work_id)
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("live-owner", "session")
+
+
+def test_terminal_run_linked_by_another_node_is_ignored(ledger):
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    finish_run(conn, work_id, node="node-b", run="run-b")
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
+
+
+def test_previous_owners_terminal_run_does_not_make_the_new_owner_terminal(ledger):
+    conn, work_id = ledger
+    owned(conn, work_id)
+    finish_run(conn, work_id)
+    ownership.ownership_action(
+        conn,
+        work_id,
+        {"action": "release", "generation": 1},
+        expected_revision=2,
+        idempotency_key="release",
+        actor_id="node-a",
+        actor_type="node",
+        holder_nonce=NONCE,
+    )
+    ownership.ownership_action(
+        conn,
+        work_id,
+        OFFER | {"target_node": "node-b"},
+        expected_revision=3,
+        idempotency_key="offer-b",
+        actor_id="admin",
+        actor_type="operator",
+        is_admin=True,
+    )
+    ownership.ownership_action(
+        conn,
+        work_id,
+        {"action": "accept", "generation": 1},
+        expected_revision=4,
+        idempotency_key="accept-b",
+        actor_id="node-b",
+        actor_type="node",
+        holder_nonce=NONCE_B,
+    )
+    snapshot = read(conn, work_id)
+    assert snapshot["owner_node"] == "node-b" and snapshot["generation"] == 2
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        lambda conn: session(conn, repo="example/other"),
+        lambda conn: claim(conn, target="example/other@PRIVATE-CLAIM-TARGET"),
+    ],
+    ids=["session", "claim"],
+)
+def test_fact_for_another_repository_does_not_make_this_item_live(ledger, setup):
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    setup(conn)
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
+
+
+def test_claim_for_this_repository_counts(ledger):
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    claim(conn, target="Example/Project@PRIVATE-CLAIM-TARGET")
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("live-owner", "claim")
+
+
+def test_newer_crashed_session_hides_an_older_ended_session(ledger):
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    session(conn, state="ended", stamp=BEFORE, ended=BEFORE, session_id="s-old")
+    session(
+        conn,
+        state="active",
+        stamp="2025-12-31T23:59:00+00:00",
+        expires=_epoch(NOW) - 30,
+        session_id="s-crashed",
+    )
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
+
+
+def test_ended_session_before_the_last_ownership_update_does_not_count(ledger):
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    session(conn, state="ended", stamp=BEFORE, ended=BEFORE)
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
+
+
+def test_finished_cloud_session_is_not_live(ledger):
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    session(conn, cloud=json.dumps({"version": 2, "reported_state": "completed"}))
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
+
+
+def test_lapsed_lease_wins_over_a_live_session(ledger):
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    session(conn)
+    lapse_lease(conn, work_id)
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("expired-observation", "lease")
+
+
+def test_freshness_ignores_an_unrelated_repository_heartbeat(ledger):
+    conn, work_id = ledger
+    checkpointed(conn, work_id)
+    session(conn, stamp=BEFORE, expires=_epoch(NOW) + 900)
+    session(conn, stamp=NOW, repo="example/other", session_id="s-other")
+    snapshot = read(conn, work_id)
+    assert (snapshot["liveness"], snapshot["liveness_freshness"]) == ("live-owner", "stale")
+
+
+def test_backdated_now_does_not_let_an_expired_holder_capability_pass(ledger):
+    conn, work_id = ledger
+    owned(conn, work_id)
+    lapse_lease(conn, work_id, "2020-01-01T00:00:00+00:00")
+    with pytest.raises(store.WorkloreConflict) as refusal:
+        ownership.get_ownership(
+            conn,
+            work_id,
+            actor_id="node-a",
+            holder_nonce=NONCE,
+            now="2019-12-31T00:00:00+00:00",
+        )
+    assert refusal.value.code == "stale-generation"
+
+
+def test_copied_terminal_status_set_matches_ownership():
+    assert liveness._TERMINAL_STATUSES == ownership.TERMINAL_STATUSES
+
+
 @pytest.mark.parametrize(
     "setup,expected",
     [
-        (lambda conn, work_id: (session(conn), finish_run(conn, work_id, "run.failed")), ("live-owner", "session")),
-        (lambda conn, work_id: (lapse_lease(conn, work_id), finish_run(conn, work_id)), ("terminal-execution", "run")),
+        (
+            lambda conn, work_id: (session(conn), finish_run(conn, work_id, "run.failed")),
+            ("live-owner", "session"),
+        ),
+        (
+            lambda conn, work_id: (lapse_lease(conn, work_id), finish_run(conn, work_id)),
+            ("expired-observation", "lease"),
+        ),
     ],
-    ids=["session-beats-run", "run-beats-lease"],
+    ids=["session-beats-run", "lease-beats-run"],
 )
 def test_precedence(ledger, setup, expected):
     conn, work_id = ledger
-    owned(conn, work_id)
+    checkpointed(conn, work_id)
     setup(conn, work_id)
     snapshot = read(conn, work_id)
     assert (snapshot["liveness"], snapshot["liveness_basis"]) == expected
@@ -182,7 +388,7 @@ def test_precedence(ledger, setup, expected):
 @pytest.mark.parametrize("table", ["interactive_sessions", "claims"])
 def test_missing_fact_table_returns_unknown_without_raising(ledger, table):
     conn, work_id = ledger
-    owned(conn, work_id)
+    checkpointed(conn, work_id)
     conn.execute(f"DROP TABLE {table}")
     snapshot = read(conn, work_id)
     assert (snapshot["liveness"], snapshot["liveness_basis"]) == ("unknown", "none")
@@ -190,10 +396,9 @@ def test_missing_fact_table_returns_unknown_without_raising(ledger, table):
 
 def test_get_response_names_only_state_basis_and_freshness(ledger):
     conn, work_id = ledger
-    owned(conn, work_id)
-    current = store._utc_now()
-    session(conn, stamp=current)
-    claim(conn, stamp=current)
+    checkpointed(conn, work_id)
+    session(conn, stamp=store._utc_now())
+    claim(conn, stamp=store._utc_now())
     status, payload = http.handle(
         conn, http.Request(method="GET", path=f"/work/items/{work_id}/ownership", node_id="node-b")
     )
@@ -209,7 +414,24 @@ def test_get_response_names_only_state_basis_and_freshness(ledger):
         assert marker not in serialized
 
 
-def _prepared_view(state):
+REPORT_DATA = {
+    "version": 1,
+    "provider": "dot",
+    "session_id": "session-a",
+    "agent_label": "worker-a",
+    "observed_at": NOW,
+    "sequence": 1,
+    "progress": "Checking fixture",
+    "evidence_refs": ["receipt-a"],
+    "source": "explicit-metadata",
+    "source_scope": "explicit-session",
+    "coverage": "explicitly-reported-sessions",
+    "evidence_verification": "reported-unverified",
+    "provider_lifecycle": "unobserved",
+}
+
+
+def _prepared_view(state, freshness="recent"):
     return {
         "schema": "brigade.prepared_handoff.v1",
         "observed_at": NOW,
@@ -239,7 +461,9 @@ def _prepared_view(state):
             "liveness": state,
         },
         "checkpoint": None,
-        "last_report": None,
+        "last_report": None
+        if freshness is None
+        else {"data": REPORT_DATA, "reporter_node": "node-a", "freshness": freshness},
         "run_refs": {
             "items": [],
             "truncated": False,
@@ -255,6 +479,13 @@ def test_prepared_handoff_accepts_each_liveness_state():
         assert view["ownership"]["liveness"] == state
 
 
+def test_prepared_handoff_accepts_an_older_hub_unassessed_freshness():
+    """An older Hub still sends ``unassessed``; the reader must accept it."""
+    view = prepared.validate_prepared_handoff(_prepared_view("unknown", "unassessed"), "work-fixture")
+    assert view["ownership"]["liveness"] == "unknown"
+    assert view["last_report"]["freshness"] == "unassessed"
+
+
 def test_prepared_handoff_refuses_other_liveness_words():
     for state in ("alive", "idle", "LIVE-OWNER", ""):
         with pytest.raises(WorkloreValidationError):
@@ -263,7 +494,7 @@ def test_prepared_handoff_refuses_other_liveness_words():
 
 def test_prepared_handoff_derives_liveness_and_report_freshness(ledger):
     conn, work_id = ledger
-    owned(conn, work_id)
+    checkpointed(conn, work_id)
     session(conn)
     ownership.ownership_action(
         conn,
@@ -282,7 +513,7 @@ def test_prepared_handoff_derives_liveness_and_report_freshness(ledger):
                 "evidence_refs": [],
             },
         },
-        expected_revision=2,
+        expected_revision=3,
         idempotency_key="report",
         actor_id="node-a",
         actor_type="node",

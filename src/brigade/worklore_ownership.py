@@ -317,6 +317,33 @@ def _public(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in snapshot.items() if key != "holder_hash"}
 
 
+def generation_start_seq(conn: sqlite3.Connection, work_id: str, snapshot: Mapping[str, Any]) -> int | None:
+    """Work event sequence at which the snapshot's current generation began.
+
+    Accept and campaign take are the only actions that increment the
+    generation, and every later action of the same generation retains it, so
+    the earliest ownership event carrying the current generation number is
+    exactly where that generation began. The snapshot's own ``last_seq`` is the
+    fallback: it is the newest event of the generation, never earlier, so a
+    link is only ever admitted later than the exact answer would admit it.
+    """
+    generation = snapshot.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        return None
+    try:
+        row = conn.execute(
+            f"SELECT MIN(seq) FROM work_events WHERE work_id=? AND {_EVENT_PREDICATE} "
+            "AND json_extract(detail_json, '$.ownership.generation') = ?",
+            (work_id, *EVENT_TYPES.values(), generation),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is not None and isinstance(row[0], int) and not isinstance(row[0], bool):
+        return row[0]
+    last_seq = snapshot.get("last_seq")
+    return last_seq if isinstance(last_seq, int) and not isinstance(last_seq, bool) else None
+
+
 def get_ownership(
     conn: sqlite3.Connection,
     work_id: str,
@@ -333,6 +360,9 @@ def get_ownership(
     campaign lease is refused as ``stale-generation`` exactly as a holder write would be. A foreign
     node, a foreign or stale capability, an admin token, or an item with no node holder is
     refused as ``holder-mismatch``. A read with no capability header is unchanged.
+
+    ``now`` only sets the clock the derived liveness is observed at. It never
+    reaches the holder capability check, which always uses the Hub clock.
     """
     store.get_item(conn, work_id)
     current = _current(conn, work_id)
@@ -347,9 +377,15 @@ def get_ownership(
             generation=current["generation"],
             digest=nonce_hash(holder_nonce),
         )
-        if expired(current, observed_at):
+        if expired(current, store._utc_now()):
             raise store.WorkloreConflict("campaign ownership lease expired", code="stale-generation")
-    facts = liveness.owner_facts(conn, current, work_id, now=observed_at)
+    facts = liveness.owner_facts(
+        conn,
+        current,
+        work_id,
+        now=observed_at,
+        generation_start=generation_start_seq(conn, work_id, current),
+    )
     projection = _public(current)
     projection["liveness"] = liveness.derive_owner_liveness(facts)
     projection["liveness_basis"] = liveness.derive_owner_liveness_basis(facts)
