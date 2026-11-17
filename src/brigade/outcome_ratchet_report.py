@@ -84,10 +84,16 @@ def _write_report(
 ) -> Path | None:
     path = report_path(target)
     if _has_symlinked_component(path, path.parents[len(REPORT_RELATIVE_PATH.parts) - 1]):
+        # The previous report stays in place, so say this run's write was skipped.
+        print(f"warning: outcome ratchet report not written: symlinked path refused: {path}", file=sys.stderr)
         return None
     report = build_report(items, apply=apply, generated_at=generated_at, target=target)
     encoded = _encode(report)
     if len(encoded) > REPORT_MAX_BYTES:
+        print(
+            f"warning: outcome ratchet report not written: still over {REPORT_MAX_BYTES} bytes after truncation",
+            file=sys.stderr,
+        )
         return None
     localio.write_text_atomic(path, encoded.decode("utf-8"))
     return path
@@ -173,7 +179,11 @@ def load_report(target: Path) -> dict[str, Any]:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {}
-    if not isinstance(payload, dict) or payload.get("version") != REPORT_VERSION:
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("version")) is not int
+        or payload.get("version") != REPORT_VERSION
+    ):
         return {}
     return payload
 

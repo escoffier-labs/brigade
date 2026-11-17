@@ -132,6 +132,10 @@ def test_loader_rejects_oversized_version_mismatch_and_garbage(tmp_path):
     path.write_text(json.dumps({"version": report_mod.REPORT_VERSION + 1, "summary": {}}))
     assert report_mod.load_report(tmp_path) == {}
 
+    # True == 1 in Python, so a boolean version must not pass the version check.
+    path.write_text(json.dumps({"version": True, "summary": {}}))
+    assert report_mod.load_report(tmp_path) == {}
+
     path.write_text("{not json")
     assert report_mod.load_report(tmp_path) == {}
 
@@ -142,7 +146,7 @@ def test_loader_rejects_oversized_version_mismatch_and_garbage(tmp_path):
     assert report_mod.load_report(tmp_path) == {}
 
 
-def test_loader_and_writer_refuse_a_symlinked_report(tmp_path):
+def test_loader_and_writer_refuse_a_symlinked_report(tmp_path, capsys):
     outside = tmp_path / "outside.json"
     outside.write_text(json.dumps({"version": report_mod.REPORT_VERSION, "generated_at": "planted"}))
     path = report_mod.report_path(tmp_path)
@@ -151,6 +155,8 @@ def test_loader_and_writer_refuse_a_symlinked_report(tmp_path):
 
     assert report_mod.load_report(tmp_path) == {}
     assert _write(tmp_path, [_hold()]) is None
+    # A skipped write leaves any older report in place, so it must say so.
+    assert "outcome ratchet report not written: symlinked path refused" in capsys.readouterr().err
     # The symlink and its target are untouched.
     assert path.is_symlink()
     assert json.loads(outside.read_text())["generated_at"] == "planted"
@@ -200,7 +206,7 @@ def test_reconcile_report_flag_writes_report_and_keeps_dry_run(tmp_path, monkeyp
     assert payload["apply"] is False
     assert payload["applied"] == []
     assert payload["decisions"][0]["reason_code"] == "regression_hold"
-    assert not (tmp_path / ".brigade" / "memory" / "outcome" / "status.json").exists()
+    assert not outcome_cmd._status_path(tmp_path).exists()
 
     assert outcome_cmd.reconcile(target=tmp_path, json_output=True, report=True) == 0
     capsys.readouterr()
@@ -213,7 +219,7 @@ def test_reconcile_report_flag_writes_report_and_keeps_dry_run(tmp_path, monkeyp
         "regression_hold_ids": ["skill-regressed"],
     }
     assert report["regressions"][0]["artifact_id"] == "skill-regressed"
-    assert not (tmp_path / ".brigade" / "memory" / "outcome" / "status.json").exists()
+    assert not outcome_cmd._status_path(tmp_path).exists()
 
 
 def test_decide_sets_reason_codes_on_legacy_decisions():
@@ -429,3 +435,11 @@ def test_cli_reconcile_report_flag_writes_advisory_file(tmp_path, capsys):
         "regression_rollbacks": 0,
         "regression_hold_ids": [],
     }
+
+
+def test_writer_warns_when_the_report_cannot_fit_the_cap(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(report_mod, "REPORT_MAX_BYTES", 10)
+
+    assert _write(tmp_path, [_hold()]) is None
+    assert "still over 10 bytes after truncation" in capsys.readouterr().err
+    assert not report_mod.report_path(tmp_path).exists()
