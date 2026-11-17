@@ -98,9 +98,9 @@ rejected before reserving a budget slot or contacting the Hub.
 Checked by asking Duet in its app on 2026-11-17. These are Duet's own answers
 and were not tested, except the lines marked "Observed".
 
-- Connectors: Duet reports two Gmail inboxes, Calendar, Drive, Docs, Sheets,
-  Slides, Claude Docs, Stripe Link, Cloudflare, Vercel, Indeed, web search and a
-  cloud shell, plus a custom connector like this one. Through the Brigade
+- Connectors: Duet reports mail, calendar and document connectors, hosting and
+  payment connectors, web search and a cloud shell, plus a custom connector like
+  this one. Through the Brigade
   connector it reports reading fleet status, work, inbox and memory, and sending
   messages.
 - Schedules: Duet reports that routines on a cron (a morning brief, check-ins,
