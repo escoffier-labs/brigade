@@ -85,10 +85,12 @@ payload, and `--dry-run` reports it without changing anything.
 `brigade care status`, `brigade work brief`, and `brigade doctor` report schedule
 health from installed unit files, LaunchAgents plists, and runbook receipts,
 without running `systemctl`. You get one warning per installed entry whose timer is
-disabled, one when an enabled timer or LaunchAgent is older than its schedule
-period and no run has ever written a receipt (with `brigade extras` on), and one
-when runbook-backed entries are enabled while `brigade extras` is off (those runs
-exit 2 without a receipt). A crontab is read only when its spool file is readable
+disabled, one when an enabled timer or LaunchAgent has been enabled for longer
+than its schedule period and no run has ever written a receipt (with `brigade
+extras` on), and one when runbook-backed entries are enabled while `brigade extras`
+is off (those runs exit 2 without a receipt). A timer's age counts from its
+`timers.target.wants` link, so a long-installed timer that was just enabled does
+not warn. A crontab is read only when its spool file is readable
 without a subprocess; otherwise `brigade doctor` says crontab was not inspected
 instead of reporting it healthy, and with nothing installed it reports that no
 schedule was found. The status aggregate `enabled` is false while any installed

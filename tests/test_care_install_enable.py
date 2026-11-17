@@ -256,6 +256,7 @@ def test_schedule_health_warns_when_installed_timer_never_recorded_a_receipt(car
     stamp = time.time()
     old = stamp - 30 * 24 * 60 * 60
     os.utime(timer, (old, old))
+    os.utime(_wants_dir(home) / timer.name, (old, old), follow_symlinks=False)
 
     health = care_receipts.schedule_health(target, home=home, extras_on=True, now=stamp)
 
@@ -723,6 +724,7 @@ def test_never_ran_detail_formats_sub_day_ages_in_hours(care_home):
     stamp = time.time()
     old = stamp - 7 * 60 * 60
     os.utime(timer, (old, old))
+    os.utime(_wants_dir(home) / timer.name, (old, old), follow_symlinks=False)
 
     health = care_receipts.schedule_health(target, home=home, extras_on=True, now=stamp)
 
@@ -746,3 +748,66 @@ def test_never_ran_is_only_emitted_for_an_enabled_timer_with_extras_on(care_home
     (_wants_dir(home) / timer.name).unlink()
     disabled = care_receipts.schedule_health(target, home=home, extras_on=True, now=stamp)
     assert [warning["code"] for warning in disabled["warnings"]] == [care_receipts.SCHEDULE_WARNING_TIMER_DISABLED]
+
+
+# --- @claude review on 2db648849: never-ran age, rewritten timers, uninstall stop ---
+
+
+def test_never_ran_counts_from_when_an_old_timer_was_enabled(care_home):
+    home, target = care_home
+    _install(home, target, entry_ids=["daily-care"], enable=False)
+    timer = _unit_path(home, target, "daily-care", ".timer")
+    stamp = time.time()
+    old = stamp - 90 * 24 * 60 * 60
+    os.utime(timer, (old, old))
+
+    _install(home, target, entry_ids=["daily-care"])
+    assert (_wants_dir(home) / timer.name).is_symlink()
+    fresh = care_receipts.schedule_health(target, home=home, extras_on=True, now=stamp)
+    assert fresh["warnings"] == []
+
+    os.utime(_wants_dir(home) / timer.name, (old, old), follow_symlinks=False)
+    stale = care_receipts.schedule_health(target, home=home, extras_on=True, now=stamp)
+    assert [warning["code"] for warning in stale["warnings"]] == [care_receipts.SCHEDULE_WARNING_NEVER_RAN]
+
+
+def test_reinstall_that_rewrites_a_linked_timer_reloads_and_restarts_it(care_home, systemctl_calls):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"])
+    name = _timer_name(target, "care-scan")
+    systemctl_calls.clear()
+
+    _install(home, target, entry_ids=["care-scan"], schedule_specs=["care-scan=*-*-* 07:15:00"])
+
+    assert systemctl_calls == [["daemon-reload"], ["restart", name]]
+
+
+def test_uninstall_does_not_stop_a_timer_brigade_never_linked(care_home, systemctl_calls, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"], enable=False)
+    systemctl_calls.clear()
+    capsys.readouterr()
+
+    assert (
+        care_cmd.uninstall(target=target, backend="systemd", home=home, entry_ids=["care-scan"], json_output=True) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert systemctl_calls == []
+    assert payload["enable_links"]["errors"] == {}
+
+
+def test_uninstall_treats_a_not_loaded_timer_as_stopped(care_home, monkeypatch, capsys):
+    home, target = care_home
+    _install(home, target, entry_ids=["care-scan"])
+    name = _timer_name(target, "care-scan")
+    monkeypatch.setattr(care_enable, "run_systemctl", lambda args: (False, f"Unit {name} not loaded."))
+    capsys.readouterr()
+
+    assert (
+        care_cmd.uninstall(target=target, backend="systemd", home=home, entry_ids=["care-scan"], json_output=True) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["enable_links"]["stopped"] == [name]
+    assert payload["enable_links"]["errors"] == {}

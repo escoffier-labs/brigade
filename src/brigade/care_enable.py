@@ -207,6 +207,12 @@ def enable_timers(
         )
         if links_to_timer(unit_dir=unit_dir, timer_name=name):
             record.update(action=ACTION_NONE, status=STATUS_ALREADY, enabled=True)
+            # A rewritten unit that is already linked still needs a reload and
+            # restart, or systemd keeps running the old schedule.
+            record["rewritten"] = not dry_run and result.get("action") in (
+                managed_block.ACTION_CREATE,
+                managed_block.ACTION_UPDATE,
+            )
             if reason == "--no-enable":
                 record["detail"] = "--no-enable did not remove the existing enable link"
             elif reason:
@@ -260,13 +266,16 @@ def activate_timers(enable: dict[str, Any]) -> None:
     missing or failing systemctl keeps the link and records the error per timer.
     """
     fresh = [timer for timer in enable["timers"] if timer["status"] == STATUS_LINKED]
-    if not fresh:
+    rewritten = [timer for timer in enable["timers"] if timer.get("rewritten")]
+    if not fresh and not rewritten:
         return
     reloaded, reload_error = run_systemctl(["daemon-reload"])
     enable["daemon_reload"] = {"ok": reloaded, "error": reload_error or None}
-    for timer in fresh:
+    for timer in fresh + rewritten:
         if reloaded:
-            started, error = run_systemctl(["start", str(timer["name"])])
+            # restart applies a changed OnCalendar to a running timer and starts a stopped one.
+            verb = "start" if timer in fresh else "restart"
+            started, error = run_systemctl([verb, str(timer["name"])])
         else:
             started, error = False, f"not attempted: daemon-reload failed ({reload_error})"
         timer["started"] = started
@@ -330,8 +339,11 @@ def finish_uninstall(
         outcome["removed"].append(name)
     if not dry_run:
         for name in removed_timers:
+            if name not in outcome["removed"]:
+                # Never linked by us, so systemd never loaded it as wanted; nothing to stop.
+                continue
             stopped, error = run_systemctl(["stop", name])
-            if stopped:
+            if stopped or "not loaded" in (error or ""):
                 outcome["stopped"].append(name)
             else:
                 outcome["errors"][name] = error

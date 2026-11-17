@@ -395,12 +395,22 @@ def schedule_health(
         else:
             continue
         age = _age_seconds(path, stamp)
+        if timer_enabled:
+            # Count from when the timer was enabled, not when its unit was written:
+            # a months-old unit that was just linked has not had a period to run yet.
+            link = path.parent / "timers.target.wants" / timer_name
+            try:
+                enabled_age = stamp - link.lstat().st_mtime
+            except OSError:
+                enabled_age = None
+            if age is not None and enabled_age is not None:
+                age = min(age, enabled_age)
         if age is not None and age > _schedule_period_seconds(entry_id):
             warnings.append(
                 _warning(
                     SCHEDULE_WARNING_NEVER_RAN,
                     entry_id,
-                    f"{subject} was written {_age_text(age)} ago and no run has ever recorded a receipt",
+                    f"{subject} was written or enabled {_age_text(age)} ago and no run has ever recorded a receipt",
                     fix,
                 )
             )
