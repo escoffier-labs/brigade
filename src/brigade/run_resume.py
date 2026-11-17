@@ -24,6 +24,7 @@ from . import (
     run_events,
     run_journal,
     run_lifecycle,
+    run_tasks,
     runguard,
     seat_health,
     verification_contract,
@@ -699,6 +700,14 @@ def _finish_direct_worker_resume_receipt(
 
 def resume(run_dir: Path) -> int:
     run_dir = run_dir.expanduser().resolve()
+    if (
+        (run_dir / "batch-request.json").exists()
+        or (run_dir / "batch-journal-enrolled.json").exists()
+        or run_tasks.batch_accepted(run_dir)
+    ):
+        # Resume re-invokes a provider thread without a per-task launch claim.
+        print("error: explicit batch runs cannot be resumed; rerun the batch request instead", file=sys.stderr)
+        return 2
     run_meta = _load_json(run_dir, "run.json")
     if run_meta is None:
         print(
