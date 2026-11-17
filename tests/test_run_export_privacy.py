@@ -519,7 +519,7 @@ def test_windows_workspace_path_maps_relative(monkeypatch):
     ctx = run_export_projection._Context(
         workspace=pathlib.PureWindowsPath(r"D:\a\workspace"),
         run_dir=pathlib.PureWindowsPath(r"D:\a\workspace\.brigade\runs\id"),
-        home=pathlib.PurePosixPath("/home/example"),
+        home=pathlib.PurePosixPath("/home/example"),  # content-guard: allow home-path
         key=b"k" * 32,
     )
     assert run_export_projection._map_path(r"D:\a\workspace\project", ctx) == "project"
