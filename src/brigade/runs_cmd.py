@@ -17,18 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-_NONTERMINAL_STATUSES = frozenset(
-    {
-        "started",
-        "planning",
-        "dispatching",
-        "result-processing",
-        "synthesizing",
-        "handoff",
-        "artifact-collection",
-        "running",
-    }
-)
+from . import runs_status
+
+# Status classification lives in ``runs_status`` so this frozen module does not
+# grow. External callers keep the historical attribute names.
+_NONTERMINAL_STATUSES = runs_status.NONTERMINAL_STATUSES
 _SUCCESS_STATUSES = frozenset({"ok", "dry-run", "completed"})
 
 # Versioned read contracts for higher-level surfaces (issue #631). These are
@@ -490,10 +483,7 @@ def _resolve_sibling_run_dir(runs_root: Path, run_id: str) -> Path | None:
 
 
 def _is_terminal(meta: dict[str, Any]) -> bool:
-    status = meta.get("status")
-    if meta.get("finished_at"):
-        return True
-    return isinstance(status, str) and status not in _NONTERMINAL_STATUSES
+    return runs_status.is_terminal(meta)
 
 
 def _run_display_is_terminal(run_dir: Path, meta: Mapping[str, Any]) -> bool:
@@ -1247,7 +1237,7 @@ def _finalize_redeemed_approval(
 
 def resume(run_dir: Path) -> int:
     """Resume a durable child, a legacy run, or an approval-paused continuation."""
-    from . import native_t3_enrollment, run_lifecycle, run_resume, runguard
+    from . import run_lifecycle, run_resume, runguard
 
     run_dir = run_dir.expanduser().resolve()
     try:
@@ -1255,14 +1245,7 @@ def resume(run_dir: Path) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if meta is not None and native_t3_enrollment.awaiting_native_parent(meta):
-        # Enrollment runs have no live lock holder between verbs by design.
-        # Their next transition belongs to the external native parent, so
-        # resume must never reconstruct one here.
-        print(
-            "error: run is externally controlled by a native T3 parent and cannot be resumed",
-            file=sys.stderr,
-        )
+    if meta is not None and runs_status.refuse_resume(meta):
         return 2
     if meta is not None and _durable_child_lineage(meta) is not None:
         return _resume_durable_child(run_dir, meta)
@@ -3100,6 +3083,8 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
 
     # Terminal runs keep the legacy behavior: tolerate foreign locks and only
     # clear a matching stale lock when the failure phase is stale-lock-recovery.
+    if parseable and run_meta is not None and runs_status.refuse_recovery(run_meta):
+        return 2
     if parseable and run_meta is not None and _is_terminal(run_meta):
         return _recover_terminal(run_dir, run_meta, cwd)
 

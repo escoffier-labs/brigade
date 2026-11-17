@@ -5,6 +5,14 @@ delegate tool. Brigade never calls T3 and records no acceptance here. This
 module validates a whole batch, binds each task's seat to a declared native
 target, retains the exact delegation input as a digest-addressed asset, and
 publishes reference-only enrollment facts.
+
+Custody is descriptor-bound on every platform that supplies a no-follow
+directory primitive: the run directory is bound before any asset read, each
+asset is created with exclusive no-follow creation in owner-only mode, and
+publish replay plus readback require a single-link regular file. On POSIX the
+mode must be exactly 0600. Windows cannot express that mode, so its owner-only
+guarantee comes from the creation handle and inherited ACL while the regular,
+single-link and no-follow checks still apply.
 """
 
 from __future__ import annotations
@@ -13,13 +21,14 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from . import localio, roster as roster_mod, run_batch, run_journal, run_lifecycle, runguard
+from . import dirfd, localio, roster as roster_mod, run_batch, run_dirfd, run_journal, run_lifecycle, runguard
 from . import run_task_journal as journal
 from . import run_tasks
 from .native_t3_contract import NativeIntentTemplate, NativeTarget
@@ -27,7 +36,7 @@ from .native_t3_contract import NativeIntentTemplate, NativeTarget
 SCHEMA = "brigade.t3_enrollment.v1"
 INPUT_SCHEMA = "brigade.t3_delegation_input.v1"
 RUN_KIND = "native-t3"
-AWAITING_NATIVE_PARENT = "awaiting-native-parent"
+AWAITING_NATIVE_PARENT = runguard.EXTERNALLY_CONTROLLED_STATUS
 REQUEST_KEY_PREFIX = "brigade-t3:"
 REQUEST_KEY_DOMAIN = "brigade.t3.request-key.v1"
 ENROLLED_STATE = "enrolled"
@@ -202,11 +211,15 @@ def _load_roster(workspace: Path, roster_path: Path | None) -> roster_mod.Roster
 
 def plan_enrollment(*, workspace: Path, batch_path: Path, roster_path: Path | None = None) -> EnrollmentPlan:
     """Validate every refusal before any run state is written."""
-    source_revision = _clean_revision(workspace)
     payload = run_batch.load_batch(batch_path)
     canonical = run_batch.validate_batch(payload)
-    needs_base = any(task["isolation"] == "worktree" for task in canonical["tasks"])
-    plan = run_batch.plan_batch(payload, base_sha=source_revision if needs_base else None)
+    for task in canonical["tasks"]:
+        if task["isolation"] != "worktree":
+            raise EnrollmentError("isolation-required", f"task {task['task_id']} must declare worktree isolation")
+    if canonical["synthesis"] is not None:
+        raise EnrollmentError("synthesis-unsupported", "batch synthesis is not part of native enrollment")
+    source_revision = _clean_revision(workspace)
+    plan = run_batch.plan_batch(payload, base_sha=source_revision)
     loaded = _load_roster(workspace, roster_path)
     targets: dict[str, NativeTarget] = {}
     for task in canonical["tasks"]:
@@ -274,8 +287,7 @@ def owned_run(workspace: Path, run_dir: Path) -> Iterator[None]:
 def _initialize_run(plan: EnrollmentPlan) -> None:
     from . import aboyeur
 
-    plan.run_dir.mkdir(parents=True, exist_ok=True)
-    run_journal._fsync_directory(plan.run_dir.parent)
+    _create_run_dir(plan.run_dir)
     run_json = plan.run_dir / "run.json"
     if not run_json.is_file():
         aboyeur._write_json(
@@ -309,34 +321,113 @@ def _check_marker(plan: EnrollmentPlan) -> None:
         raise EnrollmentError("request-conflict", "request_id already belongs to a different enrollment")
 
 
+def _create_run_dir(run_dir: Path) -> None:
+    """Create the run directory owner-only, refusing a symlink at the name."""
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(mode=0o700, exist_ok=True)
+    try:
+        descriptor = dirfd.open_directory_nofollow(run_dir)
+    except OSError:
+        raise EnrollmentError("run-dir", "the run directory is not bindable") from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise EnrollmentError("run-dir", "the run directory is not a directory")
+        try:
+            os.fchmod(descriptor, 0o700)
+        except (AttributeError, OSError):
+            # Windows has no POSIX mode bits. Creation mode stays owner-only.
+            pass
+    finally:
+        os.close(descriptor)
+    run_journal._fsync_directory(run_dir.parent)
+
+
+def _private_asset(info: os.stat_result) -> bool:
+    """Owner-only single-link regular file: the custody shape we can trust."""
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return False
+    # Windows cannot express POSIX mode bits through S_IMODE. Its owner-only
+    # guarantee comes from the creation handle and inherited ACL.
+    return os.name != "posix" or stat.S_IMODE(info.st_mode) == 0o600
+
+
+def _require_private_asset(info: os.stat_result) -> None:
+    if not _private_asset(info):
+        raise EnrollmentError("asset-custody", "delegation input asset is not a private regular file")
+
+
+def _create_asset(bound: run_dirfd.BoundRunDir, name: str, content: bytes) -> None:
+    """Publish one asset with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600."""
+    try:
+        descriptor = bound.open_file((), name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise EnrollmentError("asset-conflict", "delegation input asset already exists") from None
+    except OSError:
+        raise EnrollmentError("asset-write", "delegation input asset could not be created") from None
+    info: os.stat_result | None = None
+    try:
+        try:
+            os.fchmod(descriptor, 0o600)
+        except (AttributeError, OSError):
+            pass
+        try:
+            with os.fdopen(os.dup(descriptor), "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            raise EnrollmentError("asset-write", "delegation input asset could not be written") from None
+        info = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if info is None or not _private_asset(info):
+        try:
+            dirfd.unlink_child(bound.dir_fd(), name)
+        except OSError:
+            pass
+        raise EnrollmentError("asset-custody", "delegation input asset custody was not established")
+    dirfd.fsync_directory(bound.dir_fd())
+
+
 def write_delegation_asset(run_dir: Path, name: str, content: bytes) -> None:
     """Publish one owner-only asset atomically, refusing to replace a file."""
     if not journal.native_asset_path(name):
         raise EnrollmentError("asset-name", "delegation input asset name is invalid")
-    path = run_dir / name
     try:
-        localio.write_text_exclusive(path, content.decode("utf-8"))
-    except FileExistsError:
-        raise EnrollmentError("asset-conflict", "delegation input asset already exists") from None
-    except (OSError, UnicodeDecodeError):
-        raise EnrollmentError("asset-write", "delegation input asset could not be written") from None
-    try:
-        os.chmod(path, 0o600)
+        with run_dirfd.bound_run_dir(run_dir) as bound:
+            _create_asset(bound, name, content)
+            if not bound.still_bound():
+                raise EnrollmentError("asset-custody", "run directory changed during asset publish")
     except OSError:
-        raise EnrollmentError("asset-write", "delegation input asset permissions were not applied") from None
-    run_journal._fsync_directory(run_dir)
+        raise EnrollmentError("asset-custody", "run directory could not be bound") from None
+
+
+def _existing_asset(bound: run_dirfd.BoundRunDir, name: str, content: bytes) -> bool:
+    """True when an already published asset matches; refuses unsafe custody."""
+    try:
+        info = bound.stat((), name)
+    except FileNotFoundError:
+        return False
+    _require_private_asset(info)
+    existing = bound.read_bytes(name)
+    if existing is None:
+        raise EnrollmentError("asset-missing", "retained delegation input disappeared")
+    if existing != content:
+        raise EnrollmentError("asset-conflict", "retained delegation input already differs")
+    return True
 
 
 def _publish_assets(plan: EnrollmentPlan) -> None:
-    for entry in plan.entries:
-        path = plan.run_dir / entry.asset_path
-        try:
-            existing = run_journal.bound_read_bytes(path)
-        except FileNotFoundError:
-            write_delegation_asset(plan.run_dir, entry.asset_path, entry.content)
-        else:
-            if existing != entry.content:
-                raise EnrollmentError("asset-conflict", "retained delegation input already differs")
+    try:
+        with run_dirfd.bound_run_dir(plan.run_dir) as bound:
+            for entry in plan.entries:
+                if not _existing_asset(bound, entry.asset_path, entry.content):
+                    _create_asset(bound, entry.asset_path, entry.content)
+            if not bound.still_bound():
+                raise EnrollmentError("asset-custody", "run directory changed during enrollment")
+    except OSError:
+        raise EnrollmentError("asset-custody", "run directory could not be bound") from None
 
 
 def _accept(plan: EnrollmentPlan) -> None:
@@ -399,17 +490,28 @@ def enroll(*, batch_path: Path, target: Path, roster_path: Path | None = None) -
 
 
 def read_delegation_input(run_dir: Path, *, task_id: str) -> DelegationInput:
-    """Read one retained asset back, refusing any digest mismatch."""
+    """Read one retained asset back, refusing any digest or custody mismatch."""
     result = next(
         (item for item in run_tasks.read_tasks(run_dir) if item.handle.spec.task_id == task_id),
         None,
     )
     if result is None or result.enrollment is None:
         raise EnrollmentError("not-enrolled", "task has no native enrollment record")
-    path = run_dir / result.enrollment.asset_path
-    if not run_journal.bound_is_file(path):
-        raise EnrollmentError("asset-missing", "retained delegation input is missing")
-    raw = run_journal.bound_read_bytes(path)
+    name = result.enrollment.asset_path
+    try:
+        with run_dirfd.bound_run_dir(run_dir) as bound:
+            try:
+                info = bound.stat((), name)
+            except FileNotFoundError:
+                raise EnrollmentError("asset-missing", "retained delegation input is missing") from None
+            _require_private_asset(info)
+            raw = bound.read_bytes(name)
+            if raw is None:
+                raise EnrollmentError("asset-missing", "retained delegation input is missing")
+            if not bound.still_bound():
+                raise EnrollmentError("asset-custody", "run directory changed during readback")
+    except OSError:
+        raise EnrollmentError("asset-custody", "run directory could not be bound") from None
     if hashlib.sha256(raw).hexdigest() != result.enrollment.asset_digest:
         raise EnrollmentError("asset-digest", "retained delegation input failed digest verification")
     try:

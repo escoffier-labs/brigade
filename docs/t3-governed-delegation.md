@@ -54,13 +54,19 @@ workspace refuses.
 
 ## What open writes
 
-- A run directory named from the request identity, reported as `run_id`.
+- A run directory named from the request identity, reported as `run_id`, and
+  created owner-only (`0700`).
 - `run.json` with status `awaiting-native-parent` and the lifecycle journal
   requested.
 - A request marker holding the batch fingerprint and the source revision.
-- One atomic `0600` asset per task holding the exact retained delegation input:
-  task text and the selected target. The write is no-replace, so custody is
-  never silently overwritten.
+- One atomic asset per task holding the exact retained delegation input: task
+  text and the selected target. Each asset is created with exclusive no-follow
+  creation in owner-only mode (`0600` on POSIX), and the write never replaces
+  an existing file. Publish replay and readback bind the run directory
+  descriptor-relative and require a single-link regular file with the expected
+  mode before any bytes are trusted. Windows cannot express the POSIX mode, so
+  its custody guarantee comes from the creation handle and inherited ACL while
+  the regular, single-link and no-follow checks still apply.
 - One task batch acceptance.
 - One `task.native-enrolled` fact per task carrying only the task ID, the asset
   relative name, the asset SHA-256 digest, the template digest and the
@@ -76,8 +82,11 @@ mutation remains its own transaction.
 
 A run whose status is `awaiting-native-parent` normally has no live lock holder
 between verbs. That is the externally controlled state, not a stale or
-resumable run. A dead holder lock is reclaimed without rewriting the receipt as
-failed, and `brigade runs resume` refuses the run.
+resumable run. `runs show` reports it as non-terminal, the reaper skips it and
+never terminalizes it, patrol classifies it as waiting, and `brigade runs
+resume` and `brigade runs recover` both refuse it. A dead holder lock is
+reclaimed by the next verb's own claim without rewriting the receipt as
+failed.
 
 ## Idempotency and refusals
 
@@ -86,13 +95,18 @@ workspace source revision both match. Brigade replays the same journal facts
 and reports the same `run_id`. Any other reuse of that request ID refuses with
 `request-conflict` and writes nothing.
 
+Every task must declare `worktree` isolation, and a batch with synthesis
+refuses, because native enrollment has no local shared checkout and no
+synthesis step.
+
 `t3 open` prints JSON with `schema`, `run_id` and one entry per task holding
 only `task_id`, `seat`, `state` and the target summary (`provider_instance`,
 `model`). Refusals print one bounded `error [<code>]: <diagnostic>` line to
 stderr and exit non-zero. Refusal codes include `source-dirty`,
 `roster-missing`, `unknown-seat`, `seat-unbound`, `invalid-target`,
-`target-isolation`, `run-busy`, `request-conflict`, `asset-conflict`,
-`asset-digest` and `journal-refused`.
+`target-isolation`, `isolation-required`, `synthesis-unsupported`, `run-busy`,
+`request-conflict`, `asset-conflict`, `asset-custody`, `asset-digest` and
+`journal-refused`.
 
 ## Limits
 

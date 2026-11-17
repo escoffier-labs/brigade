@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from dataclasses import FrozenInstanceError, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from brigade import cli, native_t3_enrollment as enrollment, proc, run_journal, run_tasks
+from brigade import (
+    cli,
+    native_t3_enrollment as enrollment,
+    proc,
+    run_journal,
+    run_lane_state,
+    run_reap,
+    run_tasks,
+)
 from brigade.native_t3_contract import NativeIntentTemplate
 
 TASK_TEXT = "retained-input-marker"
@@ -47,7 +57,7 @@ def _roster_text(*, targets: tuple[str, ...] = ("coder",), isolation: str = "wor
 
 def _workspace(tmp_path: Path, *, targets: tuple[str, ...] = ("coder",), isolation: str = "worktree") -> Path:
     repo = tmp_path / "workspace"
-    repo.mkdir()
+    repo.mkdir(parents=True)
     _git(repo, "init")
     _git(repo, "config", "user.email", "test@example.invalid")
     _git(repo, "config", "user.name", "Test User")
@@ -67,17 +77,25 @@ def _batch(
     seat: str = "coder",
     ids: tuple[str, ...] = ("one", "two"),
     text: str = TASK_TEXT,
+    isolation: str = "worktree",
+    synthesis: dict | None = None,
 ) -> Path:
     payload = {
         "schema": "brigade.run_batch.v1",
         "request_id": request_id,
         "tasks": [
-            {"task_id": task_id, "text": f"{text} {task_id}", "seat": seat, "isolation": "worktree"} for task_id in ids
+            {"task_id": task_id, "text": f"{text} {task_id}", "seat": seat, "isolation": isolation} for task_id in ids
         ],
+        "synthesis": synthesis,
     }
     path = tmp_path / f"batch-{request_id}.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def _asset(run_dir: Path, task_id: str) -> Path:
+    result = next(item for item in run_tasks.read_tasks(run_dir) if item.handle.spec.task_id == task_id)
+    return run_dir / result.enrollment.asset_path
 
 
 def _run_dir(workspace: Path, run_id: str) -> Path:
@@ -102,6 +120,8 @@ def test_open_enrolls_two_tasks_on_one_seat(tmp_path, capsys):
         assert entry["target"] == {"provider_instance": "codex-test", "model": "launch-model"}
 
     run_dir = _run_dir(workspace, report["run_id"])
+    if os.name == "posix":
+        assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
     results = run_tasks.read_tasks(run_dir)
     assert [result.handle.spec.task_id for result in results] == ["one", "two"]
     assert all(result.status == "queued" and result.enrollment is not None for result in results)
@@ -109,7 +129,8 @@ def test_open_enrolls_two_tasks_on_one_seat(tmp_path, capsys):
     assert len(assets) == 2
     for name in assets:
         asset = run_dir / name
-        assert stat.S_IMODE(asset.stat().st_mode) == 0o600
+        if os.name == "posix":
+            assert stat.S_IMODE(asset.stat().st_mode) == 0o600
         assert TASK_TEXT.encode("utf-8") in asset.read_bytes()
 
     journal_path = run_dir / "events" / "lifecycle.jsonl"
@@ -147,21 +168,36 @@ def test_refusals_are_bounded_and_write_nothing(tmp_path, capsys, roster_kwargs,
     assert not (workspace / ".brigade" / "run.lock").exists()
 
 
+@pytest.mark.parametrize(
+    ("batch_kwargs", "code"),
+    [
+        ({"isolation": "shared", "ids": ("one",)}, "isolation-required"),
+        ({"synthesis": {"text": "combine", "seat": "coder"}}, "synthesis-unsupported"),
+    ],
+)
+def test_batch_shape_refusals_write_nothing(tmp_path, capsys, batch_kwargs, code):
+    workspace = _workspace(tmp_path)
+    assert _open(_batch(tmp_path, **batch_kwargs), workspace) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and f"[{code}]" in captured.err
+    assert not (workspace / ".brigade" / "runs").exists()
+
+
 def test_asset_is_owner_only_append_only_and_digest_checked(tmp_path):
     workspace = _workspace(tmp_path)
     report = enrollment.enroll(batch_path=_batch(tmp_path), target=workspace)
     run_dir = _run_dir(workspace, report["run_id"])
-    result = run_tasks.read_tasks(run_dir)[0]
-    asset = run_dir / result.enrollment.asset_path
+    asset = _asset(run_dir, "one")
     original = asset.read_bytes()
-    assert stat.S_IMODE(asset.stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(asset.stat().st_mode) == 0o600
 
     retained = enrollment.read_delegation_input(run_dir, task_id="one")
     assert retained.text == f"{TASK_TEXT} one"
     assert retained.target.provider_instance == "codex-test"
 
     with pytest.raises(enrollment.EnrollmentError) as refused:
-        enrollment.write_delegation_asset(run_dir, result.enrollment.asset_path, b"{}")
+        enrollment.write_delegation_asset(run_dir, asset.name, b"{}")
     assert refused.value.code == "asset-conflict"
     assert asset.read_bytes() == original
 
@@ -169,6 +205,93 @@ def test_asset_is_owner_only_append_only_and_digest_checked(tmp_path):
     with pytest.raises(enrollment.EnrollmentError) as tampered:
         enrollment.read_delegation_input(run_dir, task_id="one")
     assert tampered.value.code == "asset-digest"
+
+
+def test_custody_refuses_a_planted_symlink(tmp_path):
+    workspace = _workspace(tmp_path)
+    batch = _batch(tmp_path)
+    report = enrollment.enroll(batch_path=batch, target=workspace)
+    run_dir = _run_dir(workspace, report["run_id"])
+    journal_path = run_dir / "events" / "lifecycle.jsonl"
+    asset = _asset(run_dir, "one")
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(asset.read_bytes())
+    asset.unlink()
+    try:
+        os.symlink(outside, asset)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+    with pytest.raises(enrollment.EnrollmentError) as symlinked:
+        enrollment.read_delegation_input(run_dir, task_id="one")
+    assert symlinked.value.code == "asset-custody"
+    before = journal_path.read_bytes()
+    with pytest.raises(enrollment.EnrollmentError) as replay:
+        enrollment.enroll(batch_path=batch, target=workspace)
+    assert replay.value.code == "asset-custody"
+    assert journal_path.read_bytes() == before
+
+
+def test_custody_refuses_a_hardlinked_asset(tmp_path):
+    workspace = _workspace(tmp_path)
+    batch = _batch(tmp_path)
+    report = enrollment.enroll(batch_path=batch, target=workspace)
+    run_dir = _run_dir(workspace, report["run_id"])
+    asset = _asset(run_dir, "one")
+    try:
+        os.link(asset, tmp_path / "linked.json")
+    except (OSError, NotImplementedError):
+        pytest.skip("hardlink creation is unavailable on this platform")
+    with pytest.raises(enrollment.EnrollmentError) as linked:
+        enrollment.read_delegation_input(run_dir, task_id="one")
+    assert linked.value.code == "asset-custody"
+    with pytest.raises(enrollment.EnrollmentError) as replay:
+        enrollment.enroll(batch_path=batch, target=workspace)
+    assert replay.value.code == "asset-custody"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are the custody contract here")
+def test_custody_refuses_a_widened_mode(tmp_path):
+    workspace = _workspace(tmp_path)
+    batch = _batch(tmp_path)
+    report = enrollment.enroll(batch_path=batch, target=workspace)
+    run_dir = _run_dir(workspace, report["run_id"])
+    os.chmod(_asset(run_dir, "one"), 0o644)
+    with pytest.raises(enrollment.EnrollmentError) as widened:
+        enrollment.read_delegation_input(run_dir, task_id="one")
+    assert widened.value.code == "asset-custody"
+    with pytest.raises(enrollment.EnrollmentError) as replay:
+        enrollment.enroll(batch_path=batch, target=workspace)
+    assert replay.value.code == "asset-custody"
+
+
+def test_enrolled_run_reports_non_terminal_and_is_not_reaped(tmp_path, capsys):
+    workspace = _workspace(tmp_path)
+    report = enrollment.enroll(batch_path=_batch(tmp_path), target=workspace)
+    assert cli.main(["runs", "show", report["run_id"], "--cwd", str(workspace)]) == 0
+    shown = capsys.readouterr().out
+    assert "terminal: no" in shown
+    assert "terminal: yes" not in shown
+
+    lanes = run_lane_state.collect_lanes(workspace, now=datetime.now(timezone.utc))
+    lane = next(item for item in lanes if item.run_dir is not None and item.run_dir.name == report["run_id"])
+    assert run_lane_state.classify(lane, datetime.now(timezone.utc), run_lane_state.Thresholds()).state == "waiting"
+
+    run_dir = _run_dir(workspace, report["run_id"])
+    run_json = run_dir / "run.json"
+    before = run_json.read_bytes()
+    clock = datetime.now(timezone.utc)
+    meta = json.loads(before)
+    # The reaper's selection rule and its reapable set both exclude this state,
+    # so it can never be terminalized locally. The full reap transaction is run
+    # where the existing reaper suite is verified (POSIX).
+    assert enrollment.AWAITING_NATIVE_PARENT not in run_reap._REAPABLE_STATUSES
+    assert run_reap._revalidate_metadata(meta, older_than=timedelta(seconds=1), now=clock) == ("externally-controlled")
+    if os.name == "posix":
+        assert run_reap.reap(cwd=workspace, runs_dir=None, older_than="1s", json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["reaped"] == []
+        assert payload["skipped"] == [{"run_id": report["run_id"], "reason": "externally-controlled"}]
+    assert run_json.read_bytes() == before
 
 
 def test_second_open_is_idempotent_and_changed_input_conflicts(tmp_path):
