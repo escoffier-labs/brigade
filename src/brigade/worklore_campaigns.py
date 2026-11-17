@@ -236,6 +236,14 @@ def create_campaign(
             campaign_work_id = str(row[0])
             current = store._loaded_item(conn, campaign_work_id)
             title = current["title"]
+            # A terminal campaign accepts no members, so a re-create is refused whatever
+            # it asks for. Leaving it open would add captured members to a finished
+            # campaign and make "completed with an unfinished member" reachable.
+            if str(current["status"]) in TERMINAL_BUCKETS:
+                raise WorkloreConflict(
+                    f"campaign is {current['status']} and accepts no members",
+                    code="campaign-closed",
+                )
             stored_spec = spec_fingerprint(current["description"], current["acceptance"])
             if stored_spec != requested_spec:
                 raise WorkloreConflict(

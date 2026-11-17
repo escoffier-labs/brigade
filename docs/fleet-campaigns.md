@@ -129,6 +129,19 @@ the campaign item is refused with `campaign-incomplete` (409) until every member
 terminal, and an accepted completion changes only the campaign item. The route is
 `POST /work/items/<id>/completions`, operator only, and requires `If-Match`.
 
+The membership check runs inside the same write transaction as the walk, after `If-Match`
+and the terminal check, so a member added concurrently cannot slip in: re-creating a
+campaign also takes that write lock, so the two writers serialize. A client holding the
+campaign's earlier `version` therefore gets `version-conflict` after a completion, as it
+would after any other transition.
+
+## A closed campaign refuses a re-create
+
+A campaign whose item is `completed`, `canceled` or `archived` accepts no members. A
+re-create of its key is refused with `campaign-closed` (HTTP 409) whether or not it names
+a new repository, and writes nothing. `create --dry-run` reports the same refusal when
+the Hub read finds the stored campaign closed.
+
 ## Buckets
 
 Each member falls in exactly one bucket, checked in this order:

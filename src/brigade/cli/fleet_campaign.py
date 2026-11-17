@@ -342,6 +342,7 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
                 "existing": [],
                 "spec_changed": False,
                 "offer_changed": False,
+                "status": None,
             }
         return {"checked": False, "error": _text(exc), **({"code": exc.code} if exc.code else {})}
     except worklore_client.FleetClientError as exc:
@@ -367,7 +368,15 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
         "existing": sorted(str(m.get("repo")) for m in members if isinstance(m, dict)),
         "spec_changed": stored.get("spec_fingerprint") != wanted,
         "offer_changed": offer_changed,
+        "status": stored.get("status"),
     }
+
+
+def _campaign_closed(hub: dict[str, Any]) -> bool:
+    """True when the Hub read found a terminal campaign, which refuses any re-create."""
+    from ..worklore_campaigns import TERMINAL_BUCKETS
+
+    return hub.get("status") in TERMINAL_BUCKETS
 
 
 def _create_acknowledged(result: object, body: dict[str, Any]) -> bool:
@@ -413,6 +422,8 @@ def _create(args: argparse.Namespace) -> int:
         if not hub.get("checked"):
             print(f"hub not checked: {_text(hub.get('error') or hub.get('reason'))}")
         else:
+            if _campaign_closed(hub):
+                print(f"warning: campaign is {_text(hub.get('status'))}; create would be refused (campaign-closed)")
             if hub.get("spec_changed"):
                 print("warning: spec differs from the stored campaign; create would be refused (campaign-spec-changed)")
             if hub.get("offer_changed"):

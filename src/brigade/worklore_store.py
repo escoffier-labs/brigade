@@ -1708,8 +1708,13 @@ def _transition_locked(
     actor_id: str,
     actor_type: str = "operator",
     node_id: str | None = None,
+    now: str | None = None,
 ) -> dict[str, Any]:
-    """Apply one legal lifecycle edge inside a transaction the caller already holds."""
+    """Apply one legal lifecycle edge inside a transaction the caller already holds.
+
+    ``now`` lets a caller that applies several edges stamp them all with one timestamp.
+    Omitted, each call reads the clock as before.
+    """
     current = _loaded_item(conn, work_id)
     _require_version(current, expected_version)
     if not can_transition(str(current["status"]), to_status):
@@ -1719,7 +1724,7 @@ def _transition_locked(
         )
     if to_status == "ready":
         assert_ready({"acceptance": current["effective_acceptance"]})
-    now = _utc_now()
+    now = _utc_now() if now is None else now
     ready_at = current["ready_at"]
     archived_at = current["archived_at"]
     if to_status == "ready" and current["status"] != "ready":

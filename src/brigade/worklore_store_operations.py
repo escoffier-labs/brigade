@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from .worklore_validate import completion_path, parse_create, safe_optional_text
 
@@ -331,6 +331,7 @@ def complete_item(
     actor_type: str = "operator",
     node_id: str | None = None,
     evidence_refs: Sequence[str] = (),
+    precondition: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Complete one item by walking every legal edge, in one transaction.
 
@@ -338,6 +339,12 @@ def complete_item(
     transaction opens. Each step then runs the ordinary transition rule, so a refusal
     anywhere rolls the whole walk back and leaves the item untouched. The completion is
     recorded once with the path it took and the bounded evidence the operator supplied.
+
+    ``precondition`` runs inside that same write transaction, after the version and the
+    current status are accepted and before the first step. It is how a caller refuses on
+    state that must be read under the write lock (a campaign's membership, say) while
+    keeping this store free of that caller's domain, and it keeps the refusal order
+    version, then terminal, then precondition.
     """
     refs = _completion_evidence(evidence_refs)
 
@@ -350,6 +357,9 @@ def complete_item(
                 f"cannot complete from {current['status']}",
                 code="invalid-transition",
             )
+        if precondition is not None:
+            precondition()
+        now = _utc_now()
         version = int(current["version"])
         for step in path:
             _transition_locked(
@@ -360,6 +370,7 @@ def complete_item(
                 actor_id=actor_id,
                 actor_type=actor_type,
                 node_id=node_id,
+                now=now,
             )
             version += 1
         _append_event(
@@ -370,7 +381,7 @@ def complete_item(
             to_status=path[-1],
             actor_type=actor_type,
             actor_id=actor_id,
-            now=_utc_now(),
+            now=now,
             node_id=node_id,
             detail={"path": path, "evidence_refs": refs},
         )
