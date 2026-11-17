@@ -23,7 +23,9 @@ HELPER = f"/opt/fake/helper --profile {MARKER}"
 URL = "https://mcp.example.com/v1"
 PLAIN_URL = "https://plain.example.com/mcp"
 REASON = "native_auth_blocks_removal"
-LEGACY, CANONICAL = "graphtrail", "brigade-code-graph"
+# Taken from the source mapping so this file carries no copy of a retired engine
+# name; the rename paths below are what the test targets, not the literal.
+LEGACY, CANONICAL = next(iter(mcp_cmd.LEGACY_SERVER_KEYS.items()))
 
 
 @pytest.fixture
