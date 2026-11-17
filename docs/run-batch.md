@@ -193,7 +193,7 @@ Once the batch is accepted into the journal, the run directory also records
 the request refuses with `request-unknown` if the journal is absent, unreadable,
 or no longer holds the batch, whether or not the marker survives. A missing
 journal would otherwise read as "nothing launched" and re-enroll every task.
-This holds even if the journal was deleted before any launch; use a new
+This holds even if the journal was deleted before any launch. Use a new
 `request_id` to start over. A request that never reached acceptance has none of
 these files and still retries after a preflight refusal. The guarantee assumes
 the journal is append-only: a journal rewound to an earlier valid state that
