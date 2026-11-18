@@ -2284,7 +2284,12 @@ def reconcile(
             f"- {decision.artifact_id} {prior_status} -> {shown_status} "
             f"[{decision.action}] {decision.reason}{fingerprint_tail}{graph_tail}{brief_tail}{tail}"
         )
-        for command in pending.get(decision.artifact_id, []):
+        commands = pending.get(decision.artifact_id, [])
+        for command in commands:
+            inspect = outcome_skill_exec.inspect_command_for(command)
+            if inspect is not None:
+                print(f"    {outcome_skill_exec.ROLLBACK_WARNING}")
+                print(f"    inspect first: {inspect}")
             print(f"    operator: {command}")
     return 0
 

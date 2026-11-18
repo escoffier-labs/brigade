@@ -144,6 +144,47 @@ def test_edit_after_prepare_check_is_never_overwritten_and_earlier_mutations_res
     assert not (workspace / "a-create.txt").exists()
 
 
+@pytest.mark.parametrize("victim", ["b-replace.txt", "c-remove.txt"])
+def test_edit_after_the_final_check_is_caught_by_quarantine_and_never_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, victim: str
+) -> None:
+    workspace, plan = mixed_workspace(tmp_path)
+    real_check = projection._assert_unchanged_since_plan
+
+    def check_then_edit(spec: projection.MutationSpec) -> None:
+        real_check(spec)
+        # The last digest check has just passed; the edit lands before the mutation.
+        if spec.destination.name == victim:
+            spec.destination.write_bytes(b"operator edit after the check\n")
+
+    monkeypatch.setattr(projection, "_assert_unchanged_since_plan", check_then_edit)
+
+    receipt = projection.execute(plan, target=workspace)
+
+    assert receipt.terminal_state == "restored"
+    assert (workspace / victim).read_bytes() == b"operator edit after the check\n"
+    assert not (workspace / "a-create.txt").exists()
+    assert list(workspace.rglob("*.quarantine")) == []
+
+
+def test_write_into_the_quarantined_file_is_caught_not_deleted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, plan = mixed_workspace(tmp_path)
+    real_rename = projection._quarantine_rename
+
+    def rename_then_write_to_the_moved_file(parent_fd: int, name: str, quarantine_name: str) -> None:
+        real_rename(parent_fd, name, quarantine_name)
+        if name == "c-remove.txt":
+            (workspace / quarantine_name).write_bytes(b"late edit through the moved file\n")
+
+    monkeypatch.setattr(projection, "_quarantine_rename", rename_then_write_to_the_moved_file)
+
+    receipt = projection.execute(plan, target=workspace)
+
+    assert receipt.terminal_state == "restored"
+    assert (workspace / "c-remove.txt").read_bytes() == b"late edit through the moved file\n"
+    assert list(workspace.rglob("*.quarantine")) == []
+
+
 def test_crash_state_restart_detects_and_recovers(tmp_path: Path) -> None:
     workspace, plan = mixed_workspace(tmp_path)
     before = _snapshot(workspace)

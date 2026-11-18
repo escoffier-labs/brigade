@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 from .. import __version__ as BRIGADE_VERSION
 from .. import mcp_server
 from ..localio import slugify, utc_now_iso as _now
+from ..outcome_skill_exec import ROLLBACK_WARNING
 from ..projection import kernel as projection
 from ..templates import template_root
 from ..untrusted import scan_untrusted
@@ -31,6 +32,7 @@ from ..untrusted import scan_untrusted
 from . import registry as _registry_mod
 from . import search_validate
 from . import packs as _packs_mod
+from . import quarantine as _quarantine_mod
 
 if TYPE_CHECKING:
     import brigade.skills_cmd.install as _install_mod
@@ -941,6 +943,12 @@ def rollback(
             }
             if expected_binding is not None:
                 _install_mod._check_review_binding(expected_binding, workspace, skill_id, harness, anchor=state_anchor)
+            if not json_output:
+                # Say what is about to be trusted before anything is restored:
+                # the pointer and fingerprint come from the workspace receipt.
+                print(ROLLBACK_WARNING, file=sys.stderr)
+                print(f"rollback_snapshot: {snapshot_value}")
+                print(f"rollback_snapshot_fingerprint: {recorded_snapshot_fingerprint}")
             live_identity: _install_mod.TreeIdentity | None = None
             edit_snapshot_stamp: str | None = None
             if dest_state == "dir":
@@ -983,12 +991,18 @@ def rollback(
                         _registry_mod._rollback_root(workspace, skill_id, harness) / edit_snapshot_stamp
                     )
 
-            def require_checked_bytes() -> None:
-                """Bind the removal to the bytes the edit check saw; an edit snapshot of stale bytes is dropped."""
+            def quarantine_checked_bytes() -> _quarantine_mod.TreeQuarantine | None:
+                """Move the copy aside and verify it is what the edit check saw; stale edit snapshots are dropped."""
                 if dest_state != "dir":
-                    return
+                    return None
                 try:
                     _install_mod._require_tree_unchanged(live_identity, workspace, dest, anchor=state_anchor)
+                    return _quarantine_mod.quarantine_checked_tree(
+                        dest,
+                        live_identity,
+                        anchor=state_anchor if under_state_root else None,
+                        state_parts=state_parts if under_state_root else None,
+                    )
                 except _registry_mod.SkillsStatePathError:
                     if edit_snapshot_stamp is not None:
                         with contextlib.suppress(_registry_mod.SkillsStatePathError, OSError):
@@ -997,10 +1011,17 @@ def rollback(
                             )
                     raise
 
+            quarantine: _quarantine_mod.TreeQuarantine | None = None
             if under_state_root:
-                require_checked_bytes()
-                _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
-                _registry_mod._write_collected_tree_into_anchor(dirs, files, state_anchor, *state_parts)
+                quarantine = quarantine_checked_bytes()
+                try:
+                    _registry_mod._write_collected_tree_into_anchor(
+                        dirs, files, state_anchor, *state_parts, replace=quarantine is None
+                    )
+                except BaseException:
+                    if quarantine is not None:
+                        quarantine.abort_publish()
+                    raise
             else:
                 # Classify again right before writing: the first check is
                 # old by now (snapshot read, lint, binding re-checks). A link
@@ -1016,15 +1037,20 @@ def rollback(
                         file=sys.stderr,
                     )
                     return 2
-                if dest_state == "dir":
-                    require_checked_bytes()
-                    _install_mod._remove_plain_install_dir(dest)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                os.mkdir(dest)
-                for parts in dirs:
-                    (dest.joinpath(*parts)).mkdir(parents=True, exist_ok=True)
-                for parts, data in files.items():
-                    (dest.joinpath(*parts)).write_bytes(data)
+                quarantine = quarantine_checked_bytes()
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    os.mkdir(dest)
+                    for parts in dirs:
+                        (dest.joinpath(*parts)).mkdir(parents=True, exist_ok=True)
+                    for parts, data in files.items():
+                        (dest.joinpath(*parts)).write_bytes(data)
+                except BaseException:
+                    if quarantine is not None:
+                        quarantine.abort_publish()
+                    raise
+            if quarantine is not None:
+                quarantine.discard()
             if previous_receipt:
                 _registry_mod._write_state_file(
                     state_anchor, "skills", "installs", receipt_name, data=_registry_mod._json_bytes(previous_receipt)
@@ -1040,7 +1066,8 @@ def rollback(
         return 2
     payload["receipt_path"] = str(rollback_receipt_path)
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        shown = {**payload, "snapshot_fingerprint": recorded_snapshot_fingerprint, "warning": ROLLBACK_WARNING}
+        print(json.dumps(shown, indent=2, sort_keys=True))
         return 0
     print(f"skill_rollback: {skill_id}")
     print(f"target: {harness}")

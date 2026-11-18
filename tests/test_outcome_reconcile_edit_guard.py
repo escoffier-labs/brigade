@@ -222,6 +222,23 @@ def test_text_output_lists_each_pending_operator_command(tmp_path, capsys):
     assert f"    operator: brigade skills install {SKILL} --target claude --force" in out
 
 
+def test_text_output_warns_that_rollback_inputs_are_unauthenticated_and_names_the_inspection(tmp_path, capsys):
+    _import(tmp_path, capsys)
+    _install_all(tmp_path, capsys)
+    seed_registry_skill_scorecard_promotion(tmp_path, SKILL)
+    _reconcile(tmp_path, capsys)
+    seed_registry_skill_scorecard_hurt(tmp_path, SKILL)
+    capsys.readouterr()
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=CFG) == 0
+
+    out = capsys.readouterr().out
+    assert "not authenticated" in out
+    assert f"    inspect first: brigade skills history {SKILL} --target {tmp_path} --harness claude --json" in out
+    assert f"    operator: brigade skills rollback {SKILL} --target claude" in out
+    assert out.index("inspect first:") < out.index("operator: brigade skills rollback")
+
+
 def test_the_ratchet_report_counts_pending_physical_actions(tmp_path, capsys):
     _import(tmp_path, capsys)
     seed_registry_skill_scorecard_promotion(tmp_path, SKILL)

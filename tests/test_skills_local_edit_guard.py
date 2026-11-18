@@ -855,3 +855,137 @@ def test_sync_write_aborts_when_a_file_is_edited_after_the_prepare_check(tmp_pat
     assert "registry moved on" not in installed.read_text()
     assert _receipt_path(tmp_path).read_bytes() == receipt_before
     assert _history_rows(tmp_path, HARNESS) == history_before
+
+
+# ---- quarantine-then-verify: a change AFTER the final check is still caught ---
+
+
+def _change_after_final_check(monkeypatch, mutate) -> None:
+    """Run ``mutate`` once, after the last ``_require_tree_unchanged`` passed and before the mutation."""
+    install_mod = importlib.import_module("brigade.skills_cmd.install")
+    real = install_mod._require_tree_unchanged
+    seen: list[int] = []
+
+    def checked_then_changed(*args, **kwargs):
+        real(*args, **kwargs)
+        if not seen:
+            seen.append(1)
+            mutate()
+
+    monkeypatch.setattr(install_mod, "_require_tree_unchanged", checked_then_changed)
+
+
+def _quarantines(root: Path) -> list[Path]:
+    return sorted(root.rglob("*.quarantine"))
+
+
+@pytest.mark.parametrize("mutator", [_late_edit, _swap_directory], ids=["file-edit", "directory-swap"])
+def test_install_force_catches_a_change_made_after_the_final_check(tmp_path, capsys, monkeypatch, mutator):
+    installed = _pristine_stale_workspace(tmp_path, capsys)
+    receipt_before = _receipt_path(tmp_path).read_bytes()
+    history_before = _history_rows(tmp_path, HARNESS)
+    _change_after_final_check(monkeypatch, mutator(installed))
+
+    rc = skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, force=True)
+
+    assert rc == 2
+    assert "changed" in capsys.readouterr().err
+    assert installed.is_file()
+    assert "registry moved on" not in installed.read_text()
+    if mutator is _late_edit:
+        assert "edit after the check" in installed.read_text()
+    assert _receipt_path(tmp_path).read_bytes() == receipt_before
+    assert _history_rows(tmp_path, HARNESS) == history_before
+    assert _rollback_snapshots(tmp_path) == []
+    assert _quarantines(tmp_path) == []
+
+
+def test_install_force_catches_a_write_that_lands_in_the_quarantined_copy(tmp_path, capsys, monkeypatch):
+    installed = _pristine_stale_workspace(tmp_path, capsys)
+    dirfd_mod = importlib.import_module("brigade.dirfd")
+    real_rename = dirfd_mod.rename_child
+    seen: list[int] = []
+
+    def rename_then_write_to_the_moved_copy(*args, **kwargs):
+        real_rename(*args, **kwargs)
+        if not seen:
+            seen.append(1)
+            moved = _quarantines(tmp_path)
+            assert len(moved) == 1
+            (moved[0] / "SKILL.md").write_text("late hand edit\n")
+
+    monkeypatch.setattr(dirfd_mod, "rename_child", rename_then_write_to_the_moved_copy)
+
+    rc = skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, force=True)
+
+    assert rc == 2
+    assert installed.read_text() == "late hand edit\n"
+    assert _quarantines(tmp_path) == []
+
+
+@pytest.mark.parametrize("mutator", [_late_edit, _swap_directory], ids=["file-edit", "directory-swap"])
+def test_rollback_catches_a_change_made_after_the_final_check(tmp_path, capsys, monkeypatch, mutator):
+    installed = _pristine_rollbackable_workspace(tmp_path, capsys)
+    state_before = {k: v for k, v in _state_bytes(tmp_path).items() if k.startswith("state/")}
+    _change_after_final_check(monkeypatch, mutator(installed))
+
+    rc = skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS)
+
+    assert rc == 2
+    assert "changed" in capsys.readouterr().err
+    assert {k: v for k, v in _state_bytes(tmp_path).items() if k.startswith("state/")} == state_before
+    assert "registry moved on" in installed.read_text()
+    if mutator is _late_edit:
+        assert "edit after the check" in installed.read_text()
+    assert _quarantines(tmp_path) == []
+
+
+def test_sync_commit_catches_a_change_made_after_the_final_check(tmp_path, capsys, monkeypatch):
+    installed = _pristine_stale_workspace(tmp_path, capsys)
+    receipt_before = _receipt_path(tmp_path).read_bytes()
+    kernel = importlib.import_module("brigade.projection.kernel")
+    real_check = kernel._assert_unchanged_since_plan
+
+    def checked_then_edited(spec):
+        real_check(spec)
+        # Only the skill file's own last check counts: an earlier mutation's check is not "the final check".
+        if spec.destination == installed:
+            installed.write_text(installed.read_text() + "\nedit after the final check\n")
+
+    monkeypatch.setattr(kernel, "_assert_unchanged_since_plan", checked_then_edited)
+
+    rc, payload = _sync(tmp_path, capsys, write=True)
+
+    assert rc == 1
+    assert payload["projection"]["terminal_state"] == "restored"
+    assert "edit after the final check" in installed.read_text()
+    assert "registry moved on" not in installed.read_text()
+    assert _receipt_path(tmp_path).read_bytes() == receipt_before
+    assert _quarantines(tmp_path) == []
+
+
+# ---- rollback names what it is about to trust ---------------------------------
+
+
+def test_rollback_text_output_warns_and_shows_the_snapshot_and_its_fingerprint(tmp_path, capsys):
+    _pristine_rollbackable_workspace(tmp_path, capsys)
+    receipt = json.loads(_receipt_path(tmp_path).read_text())
+
+    assert skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS) == 0
+
+    captured = capsys.readouterr()
+    assert "not authenticated" in captured.err
+    assert f"rollback_snapshot: {receipt['rollback_snapshot']}" in captured.out
+    assert f"rollback_snapshot_fingerprint: {receipt['rollback_snapshot_fingerprint']}" in captured.out
+    assert captured.out.index("rollback_snapshot:") < captured.out.index("skill_rollback:")
+
+
+def test_rollback_json_output_carries_the_warning_and_fingerprint(tmp_path, capsys):
+    _pristine_rollbackable_workspace(tmp_path, capsys)
+    receipt = json.loads(_receipt_path(tmp_path).read_text())
+
+    assert skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert "not authenticated" in payload["warning"]
+    assert payload["snapshot_fingerprint"] == receipt["rollback_snapshot_fingerprint"]

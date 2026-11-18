@@ -774,34 +774,127 @@ def _apply_remover(spec: MutationSpec, *, held: _HeldParent | None, parent_fd: i
     _assert_held_parent_current(spec.destination, held)
 
 
+def _quarantine_for_verify(spec: MutationSpec, held: _HeldParent | None, parent_fd: int | None) -> str | None:
+    """Move the destination aside, then require the moved bytes to be the planned before-state.
+
+    The digest check before a mutation and the mutation itself are separate
+    pathname operations. Renaming the destination to a fresh unpredictable name
+    through the held parent first means a later write can only reach the moved
+    object, and this comparison sees it. Returns the quarantine name, or ``None``
+    when nothing needs protecting: a created destination, a custom writer or
+    remover (they merge into the live file and manage their own bytes), or a
+    platform without a held parent descriptor.
+    """
+    if (
+        parent_fd is None
+        or held is None
+        or spec.expected_before == ABSENT
+        or spec.writer is not None
+        or spec.remover is not None
+    ):
+        return None
+    name = f".{held.filename}.{uuid.uuid4().hex}.quarantine"
+    _quarantine_rename(parent_fd, held.filename, name)
+    try:
+        observed = _digest_via_parent(parent_fd, name)
+    except OSError:
+        observed = None
+    if observed == spec.expected_before:
+        return name
+    try:
+        _restore_quarantined(parent_fd, name, held.filename)
+    except OSError as error:
+        raise DriftError(f"destination drift between check and commit; moved aside as {name}") from error
+    raise DriftError("destination drift between check and commit")
+
+
+def _quarantine_rename(parent_fd: int, name: str, quarantine_name: str) -> None:
+    try:
+        os.rename(name, quarantine_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except OSError as error:
+        raise DriftError("destination drift between check and commit") from error
+
+
+def _digest_via_parent(parent_fd: int, name: str) -> str:
+    descriptor = os.open(
+        name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("quarantined destination is not a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            return content_digest(handle.read())
+    finally:
+        os.close(descriptor)
+
+
+def _restore_quarantined(parent_fd: int, quarantine_name: str, name: str) -> None:
+    """Put the moved object back, never over an entry that appeared since (link fails on an existing name)."""
+    os.link(quarantine_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+    os.unlink(quarantine_name, dir_fd=parent_fd)
+
+
+def _finish_quarantine(parent_fd: int, quarantined: str, name: str, *, published: bool) -> None:
+    """Drop the verified moved copy after a publish, or put it back when the mutation failed."""
+    try:
+        if published:
+            os.unlink(quarantined, dir_fd=parent_fd)
+            return
+        try:
+            _restore_quarantined(parent_fd, quarantined, name)
+        except FileExistsError:
+            # The failed step still left new bytes at the name; the planned
+            # before-image is the record of the original, so the moved copy goes.
+            os.unlink(quarantined, dir_fd=parent_fd)
+    except OSError:
+        pass
+
+
 def _apply_mutation(spec: MutationSpec) -> None:
     held = _current_held_parent(spec)
     parent_fd, extra = _materialize_held_parent(spec, held)
     try:
-        if spec.mutation == "remove":
-            if spec.remover is not None:
-                _apply_remover(spec, held=held, parent_fd=parent_fd)
-            elif parent_fd is not None and held is not None:
-                _unlink_via_parent(parent_fd, held.filename)
-            else:
-                spec.destination.unlink()
-            return
-        if spec.staged_bytes is None:
-            raise PlanError("staged bytes required")
-        if spec.writer is not None:
-            _apply_writer(spec, held=held, parent_fd=parent_fd)
-        elif parent_fd is not None and held is not None:
-            _publish_bytes_via_parent(parent_fd, held.filename, spec.staged_bytes)
-        else:
-            spec.destination.parent.mkdir(parents=True, exist_ok=True)
-            localio.write_bytes_atomic(spec.destination, spec.staged_bytes)
-        if spec.mode is not None:
-            if parent_fd is not None and held is not None:
-                _chmod_via_parent(parent_fd, held.filename, spec.mode)
-            else:
-                os.chmod(spec.destination, spec.mode)
+        quarantined = _quarantine_for_verify(spec, held, parent_fd)
+        try:
+            _apply_verified_mutation(spec, held=held, parent_fd=parent_fd, quarantined=quarantined is not None)
+        except BaseException:
+            if quarantined is not None and parent_fd is not None and held is not None:
+                _finish_quarantine(parent_fd, quarantined, held.filename, published=False)
+            raise
+        if quarantined is not None and parent_fd is not None and held is not None:
+            _finish_quarantine(parent_fd, quarantined, held.filename, published=True)
     finally:
         _close_descriptors(extra)
+
+
+def _apply_verified_mutation(
+    spec: MutationSpec, *, held: _HeldParent | None, parent_fd: int | None, quarantined: bool
+) -> None:
+    if spec.mutation == "remove":
+        if spec.remover is not None:
+            _apply_remover(spec, held=held, parent_fd=parent_fd)
+        elif parent_fd is not None and held is not None:
+            # A quarantined destination is already out of the way; deleting the
+            # verified moved copy is the removal.
+            if not quarantined:
+                _unlink_via_parent(parent_fd, held.filename)
+        else:
+            spec.destination.unlink()
+        return
+    if spec.staged_bytes is None:
+        raise PlanError("staged bytes required")
+    if spec.writer is not None:
+        _apply_writer(spec, held=held, parent_fd=parent_fd)
+    elif parent_fd is not None and held is not None:
+        _publish_bytes_via_parent(parent_fd, held.filename, spec.staged_bytes)
+    else:
+        spec.destination.parent.mkdir(parents=True, exist_ok=True)
+        localio.write_bytes_atomic(spec.destination, spec.staged_bytes)
+    if spec.mode is not None:
+        if parent_fd is not None and held is not None:
+            _chmod_via_parent(parent_fd, held.filename, spec.mode)
+        else:
+            os.chmod(spec.destination, spec.mode)
 
 
 def _restore_one(op_dir: Path, spec: MutationSpec, index: int | None = None) -> None:

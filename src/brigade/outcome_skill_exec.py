@@ -24,6 +24,14 @@ from typing import Any
 
 ROUTING_ONLY = "routing-only"
 
+# Rollback restores whatever the install receipt's snapshot pointer and
+# fingerprint name, and both live in the workspace beside the agent the ratchet
+# gates. Printed beside every suggested rollback so the operator looks first.
+ROLLBACK_WARNING = (
+    "warning: rollback inputs (the install receipt and its snapshot) live in the workspace and are "
+    "not authenticated; inspect them before running the rollback"
+)
+
 
 def _install_command(target: Path, artifact_id: str, harness: str) -> str:
     return shlex.join(
@@ -33,6 +41,26 @@ def _install_command(target: Path, artifact_id: str, harness: str) -> str:
 
 def _rollback_command(target: Path, artifact_id: str, harness: str) -> str:
     return shlex.join(["brigade", "skills", "rollback", artifact_id, "--target", harness, "--workspace", str(target)])
+
+
+def rollback_inspect_command(target: Path, artifact_id: str, harness: str) -> str:
+    """Read-only command that shows the receipt, snapshot path and fingerprint a rollback would trust."""
+    return shlex.join(
+        ["brigade", "skills", "history", artifact_id, "--target", str(target), "--harness", harness, "--json"]
+    )
+
+
+def inspect_command_for(command: str) -> str | None:
+    """The read-only inspection command that pairs with a suggested rollback command, else ``None``."""
+    try:
+        words = shlex.split(command)
+        if words[:3] != ["brigade", "skills", "rollback"]:
+            return None
+        return rollback_inspect_command(
+            Path(words[words.index("--workspace") + 1]), words[3], words[words.index("--target") + 1]
+        )
+    except (ValueError, IndexError):
+        return None
 
 
 def _stale_harnesses(artifact_id: str, plan: list[dict[str, Any]]) -> list[str]:

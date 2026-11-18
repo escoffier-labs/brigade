@@ -123,6 +123,32 @@ unless you say so:
   byte); a hand edit or a swapped directory that lands after the check aborts the
   command with exit 2 and changes nothing. The snapshot written for the aborted
   command is dropped.
+- The re-verify is bound to the mutation by quarantine-then-verify, because a
+  check followed by a separate pathname removal still leaves a window.
+  `install --force` and `rollback` rename the installed directory to a fresh
+  unpredictable `.<name>.<random>.quarantine` name in the same parent through a
+  held parent descriptor (the Windows handle equivalents there), then compare
+  the moved directory's inode, device and bytes with what the check saw. A match
+  publishes the new content (which refuses an entry that appeared at the name)
+  and deletes the moved copy; a mismatch renames it back, never over a new
+  entry, and aborts with exit 2. A write that lands after the rename can only
+  reach the moved copy, so the comparison sees it. The projection kernel does
+  the same for a replaced or removed file in `sync --write`: the destination is
+  moved aside, its digest is checked against the plan, and a mismatch restores
+  it and reports the drift. Custom writer and remover callbacks, which merge
+  into the live file themselves, keep the digest check alone. A crash between
+  the rename and the cleanup can leave a hidden `.quarantine` entry beside the
+  destination, which is safe to delete after inspection.
+- `skills rollback` restores whatever the install receipt's snapshot pointer and
+  fingerprint name, and both live in the workspace and are not authenticated, so
+  the agent's own user could have chosen them. Text output prints a warning on
+  stderr and the snapshot path and its recorded fingerprint before anything is
+  restored (JSON output carries `warning` and `snapshot_fingerprint`). The
+  `brigade outcome reconcile` text output prints the same warning and an
+  `inspect first:` line (`brigade skills history <id> --target <workspace>
+  --harness <harness> --json`, which shows the receipt's snapshot pointer and
+  fingerprint) before every suggested rollback command. Which snapshot a
+  rollback uses is unchanged.
 - A copy with a missing, corrupt or digest-less receipt reads as `unknown`. A
   manual `install --force` on it stays operator-driven and repairs it. No
   unattended path writes over it: the receipt sits in the workspace the agent's

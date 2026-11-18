@@ -33,6 +33,7 @@ from . import registry
 from . import search_validate
 from . import sync_history
 from . import packs as _packs_mod
+from . import quarantine as _quarantine_mod
 
 
 def _evaluate_install_dir(
@@ -525,13 +526,7 @@ def _local_edit_state(
     return "unknown" if nested_metadata else "current"
 
 
-@dataclass(frozen=True)
-class TreeIdentity:
-    """What a drift check saw of an installed copy: its directory inode and a digest of every byte."""
-
-    device: int
-    inode: int
-    digest: str
+TreeIdentity = _quarantine_mod.TreeIdentity
 
 
 def _tree_identity(installed_dir: Path, inspection: InstalledTreeInspection) -> TreeIdentity | None:
@@ -542,13 +537,7 @@ def _tree_identity(installed_dir: Path, inspection: InstalledTreeInspection) -> 
         info = os.lstat(installed_dir)
     except OSError:
         return None
-    digest = hashlib.sha256()
-    for parts in sorted(inspection.dirs):
-        digest.update(b"d\0" + "/".join(parts).encode("utf-8") + b"\0")
-    for parts in sorted(inspection.files):
-        digest.update(b"f\0" + "/".join(parts).encode("utf-8") + b"\0")
-        digest.update(inspection.files[parts] + b"\0")
-    return TreeIdentity(info.st_dev, info.st_ino, digest.hexdigest())
+    return TreeIdentity(info.st_dev, info.st_ino, _quarantine_mod.tree_digest(inspection.dirs, inspection.files))
 
 
 def _require_tree_unchanged(
@@ -1143,6 +1132,7 @@ def install(
                     continue
             rollback_snapshot: str | None = None
             rollback_snapshot_fingerprint: str | None = None
+            quarantine: _quarantine_mod.TreeQuarantine | None = None
             if dest_present:
                 stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-")
                 rollback_dir = registry._rollback_root(workspace, skill_id, install_target) / stamp
@@ -1178,10 +1168,17 @@ def install(
                         _check_review_binding(
                             expected_binding, workspace, skill_id, install_target, anchor=state_anchor
                         )
-                    # Bind the removal to the bytes the edit check and snapshot saw.
+                    # Bind the removal to the bytes the edit check and snapshot saw:
+                    # the cheap re-check first, then move the copy aside and verify
+                    # what was actually moved, so a write after the check lands on
+                    # the quarantined object and is caught, never deleted.
                     _require_tree_unchanged(checked_identity, workspace, dest, anchor=state_anchor)
-                    if not under_state_root:
-                        _remove_plain_install_dir(dest)
+                    quarantine = _quarantine_mod.quarantine_checked_tree(
+                        dest,
+                        checked_identity,
+                        anchor=state_anchor if under_state_root else None,
+                        state_parts=state_parts if under_state_root else None,
+                    )
                 except registry.SkillsStatePathError:
                     # Nothing was replaced yet, so the snapshot just written
                     # must not outlive the refusal.
@@ -1190,13 +1187,20 @@ def install(
                             state_anchor, "skills", "rollback", skill_id, install_target, stamp
                         )
                     raise
+            try:
                 if under_state_root:
-                    registry._remove_tree_in_anchor(state_anchor, *state_parts)
-            if under_state_root:
-                registry._write_collected_tree_into_anchor(snapshot_dirs, install_files, state_anchor, *state_parts)
-            else:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                registry._write_snapshot_tree(snapshot_dirs, install_files, dest)
+                    registry._write_collected_tree_into_anchor(
+                        snapshot_dirs, install_files, state_anchor, *state_parts, replace=quarantine is None
+                    )
+                else:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    registry._write_snapshot_tree(snapshot_dirs, install_files, dest, fresh=quarantine is not None)
+            except BaseException:
+                if quarantine is not None:
+                    quarantine.abort_publish()
+                raise
+            if quarantine is not None:
+                quarantine.discard()
             # Fingerprints are computed from the same bytes that were written;
             # nothing is read back through a pathname.
             installed_fingerprint = registry._files_fingerprint(install_files)
