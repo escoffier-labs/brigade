@@ -2184,13 +2184,13 @@ def reconcile(
                 and kinds.get(decision.artifact_id, "skill") == "skill"
                 and execution != "installed"
             )
-            # Rollback demotes routing authority immediately; physical revert is best-effort.
-            # A harness skipped for local edits is not a demotion: it stays pending for a retry.
-            rollback_skipped = decision.action == "rollback" and "rollback-skipped: local edits" in execution
-            if decision.action == "rollback" and not rollback_skipped:
+            # Rollback demotes routing authority immediately; the physical revert is
+            # best-effort, and a harness with local edits keeps its files (the
+            # execution string records the skip) while routing is still demoted.
+            if decision.action == "rollback":
                 new_status = decision.new_status
             else:
-                new_status = prior_status if install_failed or rollback_skipped else decision.new_status
+                new_status = prior_status if install_failed else decision.new_status
             effective_status[decision.artifact_id] = new_status
             if cohorts is not None:
                 score_payload: dict[str, Any] = dataclasses.asdict(cohorts.current)
@@ -2224,10 +2224,6 @@ def reconcile(
             ):
                 receipt["route_policy"] = scorecard_mod.route_policy_marker_for_promotion()
             _write_decision_receipt(target, now, decision.artifact_id, receipt)
-            if rollback_skipped:
-                # The receipt records the skip; the status entry (and its route policy)
-                # stays as it was so the demotion is retried, not recorded as applied.
-                continue
             status_map[decision.artifact_id] = _status_entry_for_transition(
                 new_status=new_status,
                 now=now,

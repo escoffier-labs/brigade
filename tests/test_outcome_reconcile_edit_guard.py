@@ -56,10 +56,14 @@ def test_reconcile_rollback_skips_an_edited_copy_and_never_uninstalls_it(tmp_pat
     # A first install has no snapshot, so the old fallback would have uninstalled it.
     assert "hand edit" in installed.read_text()
     assert _claude_bytes(tmp_path) == before
-    # The demotion is not recorded as applied for a harness reconcile skipped.
-    assert decision["new_status"] == "promoted"
-    assert SKILL not in decision["applied"]
-    assert _status(tmp_path) == promoted
+    # Routing demotion is authoritative and not gated on the physical revert
+    # (docs/proposals/skill-scorecards.md): the skill is demoted, its route
+    # policy is gone, and only the edited files are left in place.
+    assert promoted.get("status") == "promoted"
+    assert decision["new_status"] == "demoted"
+    assert SKILL in decision["applied"]
+    assert _status(tmp_path).get("status") == "demoted"
+    assert "route_policy" not in _status(tmp_path)
 
 
 def test_reconcile_rollback_skips_an_edited_copy_even_when_a_snapshot_exists(tmp_path, capsys):
