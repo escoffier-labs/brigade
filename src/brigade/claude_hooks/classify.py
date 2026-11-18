@@ -143,6 +143,5 @@ def classify(target: Path) -> dict[str, Any] | None:
         "skill_present": skill_present,
         "skill_current": skill_current,
         "hooks": hook_status,
-        "detail": integrity_issue
-        or f"state={state}; " + ("; ".join(issues) if issues else "current guidance, skill, and hooks"),
+        "detail": f"state={state}; " + ("; ".join(issues) if issues else "current guidance, skill, and hooks"),
     }
