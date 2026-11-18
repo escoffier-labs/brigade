@@ -36,6 +36,7 @@ from .worktree_lease import (
     is_upstream_fast_forward,
     remove_worktree_directory,
     reserved_worktree_lock_dir as reserved_worktree_lock_dir,
+    workspace_for_lock_path,
     worktree_lock_dir as worktree_lock_dir,
 )
 
@@ -352,7 +353,7 @@ def _owner_with_workspace(owner: dict[str, object] | None, path: Path) -> dict[s
     if owner is None:
         return None
     enriched = dict(owner)
-    enriched["_lock_workspace"] = str(path.parent.parent.resolve())
+    enriched["_lock_workspace"] = str(workspace_for_lock_path(path))
     return enriched
 
 
@@ -1296,7 +1297,7 @@ def _retained_claim_wait_error(path: Path) -> RunLockError | None:
     run_id = Path(run_dir).name
     if not run_id:
         return None
-    workspace = path.parent.parent.resolve()
+    workspace = workspace_for_lock_path(path)
     return RunLockError(
         "retained stale run lock claim requires explicit recovery: "
         f"{claim}; owner run_dir {run_dir}; owner pid {pid} is dead; "

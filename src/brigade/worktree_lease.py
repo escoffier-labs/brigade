@@ -30,6 +30,14 @@ def reserved_worktree_lock_dir(checkout: Path) -> Path | None:
     return None
 
 
+def workspace_for_lock_path(path: Path) -> Path:
+    """Map an ordinary or external lease lock back to its workspace."""
+    parent = path.parent.parent.resolve()
+    if parent == brigade_worktree_root().resolve() / ".run-locks":
+        return parent.parent / path.parent.name
+    return parent
+
+
 def workspace_identity_ancestors(start: Path) -> Iterator[Path]:
     """Stop before an automatic checkout whose claim is Git-derived."""
     current = Path(start).expanduser()
