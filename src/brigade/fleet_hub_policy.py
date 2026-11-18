@@ -236,7 +236,7 @@ def sweep_idle_sessions(
     conn: sqlite3.Connection,
     *,
     now: datetime | None = None,
-    retention: timedelta = SESSION_RETENTION,
+    retention: timedelta | None = None,
     limit: int | None = None,
 ) -> int:
     """Delete dead policy sessions from the session, pending and acknowledged tables.
@@ -250,11 +250,12 @@ def sweep_idle_sessions(
     exactly like an unknown session and must prepare again.
 
     ``fleet_policy_acknowledged_history`` and ``fleet_policy_revisions`` are the
-    audit trail and are never read or written here. Runs inside the caller's
-    transaction and removes at most ``limit`` sessions, oldest first. Returns
-    the number of sessions removed.
+    audit trail and are never read or written here. The deletes run under their
+    own savepoint, so a failure removes nothing, even on an autocommit
+    connection. Removes at most ``limit`` sessions, oldest first. Returns the
+    number of sessions removed.
     """
-    cutoff = (now or datetime.now(timezone.utc)) - retention
+    cutoff = (now or datetime.now(timezone.utc)) - (SESSION_RETENTION if retention is None else retention)
     batch = SESSION_SWEEP_LIMIT if limit is None else limit
     # (table, primary key, identity keys, timestamp columns) for every candidate row.
     entries: list[tuple[str, str, list[str], list[Any]]] = []
@@ -298,30 +299,40 @@ def sweep_idle_sessions(
     doomed = {root for _when, root in idle[: max(batch, 0)]}
     if not doomed:
         return 0
-    for table, column, name in (
-        ("fleet_policy_sessions", "session_id", "sessions"),
-        ("fleet_policy_pending", "pending_key", "pending"),
-        ("fleet_policy_acknowledged", "receipt_key", "acknowledged"),
-    ):
-        conn.executemany(
-            f"DELETE FROM {table} WHERE {column}=?",
-            [(pk,) for kind, pk, keys, _stamps in entries if kind == name and find(keys[0]) in doomed],
-        )
+    conn.execute("SAVEPOINT policy_session_sweep")
+    try:
+        for table, column, name in (
+            ("fleet_policy_sessions", "session_id", "sessions"),
+            ("fleet_policy_pending", "pending_key", "pending"),
+            ("fleet_policy_acknowledged", "receipt_key", "acknowledged"),
+        ):
+            conn.executemany(
+                f"DELETE FROM {table} WHERE {column}=?",
+                [(pk,) for kind, pk, keys, _stamps in entries if kind == name and find(keys[0]) in doomed],
+            )
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK TO SAVEPOINT policy_session_sweep")
+            conn.execute("RELEASE SAVEPOINT policy_session_sweep")
+        except sqlite3.Error:
+            pass  # SQLite already discarded the whole transaction; the original error is the real one
+        raise
+    conn.execute("RELEASE SAVEPOINT policy_session_sweep")
     return len(doomed)
 
 
 def _sweep_best_effort(conn: sqlite3.Connection) -> None:
-    """Retention must never fail the write that triggered it, and never commit half a sweep.
+    """Retention never fails the write that triggered it, and never commits half a sweep.
 
-    A savepoint undoes every delete if any one fails, so a session is removed from all three
-    tables or from none (a partial removal could leave a receipt without its session row).
+    The sweep undoes its own deletes on error, so a session leaves all three tables or none.
+    If SQLite discarded the whole transaction (disk full, I/O error), the triggering write is
+    lost anyway, so that error is raised instead of being hidden.
     """
-    conn.execute("SAVEPOINT policy_session_sweep")
     try:
         sweep_idle_sessions(conn, now=_stamp(fleet_hub._utc_now()))
     except sqlite3.Error:
-        conn.execute("ROLLBACK TO SAVEPOINT policy_session_sweep")
-    conn.execute("RELEASE SAVEPOINT policy_session_sweep")
+        if not conn.in_transaction:
+            raise
 
 
 def _bounded(raw: Any, field: str, limit: int, *, required: bool = True, allow_newlines: bool = False) -> str | None:
@@ -1636,9 +1647,12 @@ def record_acknowledged_policy(
                     now,
                 ),
             )
-        # Identical ack is idempotent: do not rewrite sessions or reset
-        # observed requested/failed runtime refresh state. A fresh generation
-        # or restart is an explicit new apply, not a duplicate acknowledgement.
+        else:
+            # Identical ack is idempotent: do not rewrite the receipt or reset
+            # observed requested/failed runtime refresh state. A fresh generation
+            # or restart is an explicit new apply, not a duplicate acknowledgement.
+            # It still counts as activity, so retention keeps a session that re-acks.
+            conn.execute("UPDATE fleet_policy_sessions SET updated_at=? WHERE session_id=?", (now, receipt_key))
 
         if external_session_id != receipt_key:
             conn.execute(

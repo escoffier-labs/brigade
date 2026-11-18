@@ -184,6 +184,65 @@ def test_a_failed_delete_undoes_the_whole_sweep_and_the_save_still_lands(conn):
     assert after["fleet_policy_revisions"] == before["fleet_policy_revisions"] + 1
 
 
+def _three(conn: sqlite3.Connection) -> tuple[int, int, int]:
+    counts = _counts(conn)
+    return (counts["fleet_policy_sessions"], counts["fleet_policy_pending"], counts["fleet_policy_acknowledged"])
+
+
+def test_an_identical_re_ack_counts_as_activity(conn):
+    pending = _acknowledged_session(conn, "steady")
+    _age(conn, pending["pending_key"], "steady", 20)
+    fleet_hub_policy.record_acknowledged_policy(
+        conn, pending, node_id=NODE_A, expected_context_hash=_context_hash("steady")
+    )
+
+    _save(conn)
+
+    assert _three(conn) == (1, 1, 1)
+
+
+def test_a_discarded_transaction_raises_the_real_error_not_a_savepoint_error(conn):
+    pending = _acknowledged_session(conn, "doomed")
+    _age(conn, pending["pending_key"], "doomed", 30)
+    conn.execute(
+        "CREATE TRIGGER drop_txn BEFORE DELETE ON fleet_policy_acknowledged "
+        "BEGIN SELECT RAISE(ROLLBACK, 'storage gone'); END"
+    )
+    conn.commit()
+    before = _counts(conn)
+
+    with pytest.raises(sqlite3.Error, match="storage gone"):
+        _save(conn)
+
+    assert _counts(conn) == before
+
+
+def test_a_direct_sweep_is_atomic_on_its_own(conn):
+    pending = _acknowledged_session(conn, "direct")
+    _age(conn, pending["pending_key"], "direct", 30)
+    conn.execute(
+        "CREATE TRIGGER block_direct BEFORE DELETE ON fleet_policy_acknowledged "
+        "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+    )
+    conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="blocked"):
+        fleet_hub_policy.sweep_idle_sessions(conn, now=datetime.now(timezone.utc))
+    conn.commit()
+
+    assert _three(conn) == (1, 1, 1)
+
+
+def test_the_retention_constant_is_read_at_call_time(conn, monkeypatch):
+    pending = _acknowledged_session(conn, "short")
+    _age(conn, pending["pending_key"], "short", 2)
+    monkeypatch.setattr(fleet_hub_policy, "SESSION_RETENTION", timedelta(days=1))
+
+    _save(conn)
+
+    assert _three(conn) == (0, 0, 0)
+
+
 def test_idle_session_is_removed_on_the_next_session_record(conn):
     pending = _acknowledged_session(conn, "idle")
     _receipt_session(conn, "old-receipt")
