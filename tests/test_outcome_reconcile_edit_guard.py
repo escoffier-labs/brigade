@@ -13,7 +13,7 @@ import json
 import shlex
 from pathlib import Path
 
-from brigade import outcome, outcome_cmd, outcome_ratchet_report, skills_cmd
+from brigade import outcome, outcome_cmd, outcome_ratchet_report, outcome_skill_exec, skills_cmd
 from brigade.skills_cmd import registry
 from tests.test_scorecard_reconcile import seed_registry_skill_scorecard_hurt, seed_registry_skill_scorecard_promotion
 from tests.test_skills_local_edit_guard import SKILL, _write_skill
@@ -234,7 +234,10 @@ def test_text_output_warns_that_rollback_inputs_are_unauthenticated_and_names_th
 
     out = capsys.readouterr().out
     assert "not authenticated" in out
-    assert f"    inspect first: brigade skills history {SKILL} --target {tmp_path} --harness claude --json" in out
+    # shlex quoting of the workspace path differs by platform (Windows backslashes are quoted).
+    expected = outcome_skill_exec.rollback_inspect_command(tmp_path, SKILL, "claude")
+    assert expected.startswith(f"brigade skills history {SKILL} --target ")
+    assert f"    inspect first: {expected}" in out
     assert f"    operator: brigade skills rollback {SKILL} --target claude" in out
     assert out.index("inspect first:") < out.index("operator: brigade skills rollback")
 
