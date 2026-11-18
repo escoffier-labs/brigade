@@ -34,6 +34,8 @@ pipx install brigadestack
 npm install -g brigadestack
 ```
 
+Sections marked <sup>*</sup> describe the 0.32.0 beta. The stable release is 0.31.0. To try the beta, run `pipx install --pip-args='--pre' brigade-cli`.
+
 ## Shared memory, shared tools
 
 Claude Code, Codex and Cursor each keep their own notes and their own MCP config. What one agent learns on Monday is gone when another one starts on Tuesday.
@@ -80,7 +82,9 @@ memory search: retry backoff (1 match(es))
 
 ### One list of MCP servers and skills
 
-MCP servers and skills follow the same rule as memory. List a server once in `.brigade/mcp.json`, and `brigade mcp sync` writes it into the config each tool reads. It previews until you pass `--write`, and it keeps each tool's existing auth settings. The targets are Claude Code, Codex, Cursor, OpenCode, Grok and Antigravity. `brigade skills sync` does the same for reviewed skills.
+MCP servers and skills follow the same rule as memory. List a server once in `.brigade/mcp.json`, and `brigade mcp sync` writes it into the config each tool reads. It previews until you pass `--write`, and it keeps each tool's existing auth settings<sup>*</sup>. The targets are Claude Code, Codex, Cursor, OpenCode, Grok and Antigravity. `brigade skills sync` does the same for reviewed skills.
+
+<sup>*</sup> Keeping auth is in the 0.32.0 beta. The rest of this section works in 0.31.0.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-tools.svg" alt="The MCP catalog .brigade/mcp.json and the skill registry are each kept once, then written to the config and skills folder of Claude Code, Codex, Cursor and OpenCode." width="720">
@@ -90,7 +94,7 @@ MCP servers and skills follow the same rule as memory. List a server once in `.b
 
 "Tests pass" is a claim. `brigade work verify run` turns it into a record. It runs the command and keeps the command, the exit code, the logs and a fingerprint of the tree that was tested. Another agent can open the record and see what ran against which code, without taking anyone's word for it.
 
-Records live under `.brigade/work/verify-runs/`, one folder per run. A failing command leaves a failed record, so a red check is as easy to find as a green one. Each record is a folder of plain files that any agent or script can read.
+Records live under `.brigade/work/verify-runs/`, one folder per run. A failing command leaves a failed record, so a red check is as easy to find as a green one.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-check-record.svg" alt="A check record: the command python -m pytest -q, exit code 0, the two log files, and the fingerprint of the tree that was tested." width="720">
@@ -98,15 +102,17 @@ Records live under `.brigade/work/verify-runs/`, one folder per run. A failing c
 
 ### Know what a change touches
 
-The code graph is a local index of your repository's symbols and the calls between them. An optional engine builds it, and `brigade setup` installs that engine. `brigade code sync` builds the index. `brigade code callers <symbol>` shows who calls a function, `brigade code impact <symbol>` shows callers and callees together, and `brigade code affected <files>` lists the tests that reach changed files. The picture below is the real answer for one function in this repository.
+The code graph is a local index of your repository's symbols and the calls between them. `brigade setup` installs the optional engine that builds it, and `brigade code sync` runs the build. `brigade code callers <symbol>` shows who calls a function, `brigade code impact <symbol>` shows callers and callees together, and `brigade code affected <files>` lists the tests that reach changed files. Below is a real answer for one function in this repository.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-code-graph.svg" alt="Code graph for the function normalized_url in src/brigade/mcp_native_auth.py, lines 201 to 208. Its direct callers are merge_imported_native_auth and two tests. merge_imported_native_auth is called by import_servers and two more tests. In total 6 functions in 3 files call it, 4 of them tests." width="720">
 </p>
 
-## Modes
+## Modes<sup>*</sup>
 
-`strict` is the default. Checks run through `brigade work verify run`, and Claude Code's stop hook asks for a record before a session finishes. `observe` records checks and blocks nothing. `off` drops the check rules and keeps memory and briefs. The names `yolo` and `engineer` still work as input for `off` and `strict`. Safety rails, meaning secret scanning and pre-push checks, are a separate setting and are on by default in every mode.
+`strict` is the default. Checks run through `brigade work verify run`, and Claude Code's stop hook asks for a record before a session finishes. `observe` records checks and blocks nothing. `off` drops the check rules and keeps memory and briefs. Safety rails, meaning secret scanning and pre-push checks, are a separate setting and are on by default in every mode.
+
+<sup>*</sup> `observe` and the names `strict` and `off` are in the 0.32.0 beta, and the capture below shows them. Version 0.31.0 calls them `engineer` and `yolo` and has no `observe`. The beta still accepts the old names.
 
 ```console
 $ brigade work mode show
@@ -130,7 +136,7 @@ brigade handoff draft --type setup --title "Test command" \
 brigade work verify run --command "git diff --check"
 ```
 
-The first command writes `.brigade/`, a handoff inbox for each tool you name, and the MCP config. The second drafts a handoff, and its lint refuses anything the ingester would reject. The third records the command, the exit code and the logs. Keep local `.brigade/` state out of commits unless you mean to share it. The [first 10 minutes](https://github.com/escoffier-labs/brigade/blob/main/docs/first-10-minutes.md) covers the rest.
+The first command writes `.brigade/`, a handoff inbox for each tool you name, and the MCP config. The second drafts a handoff, and lint refuses what the ingester would reject. The third records the command, exit code and logs. Keep `.brigade/` state out of commits unless you mean to share it. See the [first 10 minutes](https://github.com/escoffier-labs/brigade/blob/main/docs/first-10-minutes.md).
 
 ## Works with
 
@@ -149,7 +155,7 @@ Run the BrigadeStack backend on a network you control, and agents on several mac
 
 ## Limits
 
-A check record shows what ran. It does not show that the tests are good. Handoffs are drafts: a reviewer files them as cards, and nothing files itself yet. Session-start recall is Claude Code only. Sharing across machines and the hosted connectors need a backend or host that you run.
+A check record shows what ran. It does not show that the tests are good. A handoff is a draft until someone files it as a card. Session-start recall is Claude Code only. Sharing across machines and the hosted connectors need a backend or host that you run.
 
 ## MCP servers
 
@@ -169,3 +175,12 @@ A check record shows what ran. It does not show that the tests are good. Handoff
 </p>
 
 The Python CLI may send a passive version request. [Telemetry](https://github.com/escoffier-labs/brigade/blob/main/docs/telemetry.md) lists its fields and opt-outs.
+
+The `brigade-cli` and `@escoffier-labs/brigade` packages and the `brigade` command remain supported.
+
+<details>
+<summary>About the downloads badge</summary>
+
+The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
+
+</details>
