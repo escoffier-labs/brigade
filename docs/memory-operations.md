@@ -1183,24 +1183,44 @@ must hold `merge_exact_duplicates` ops and nothing else
 (`retrieval_eval_merge_mixed_ops`), in one scope, with each retired card named
 once (`retrieval_eval_merge_shape`). Each retired card then needs:
 
+- To be newer than the keeper (`retrieval_eval_merge_retires_older`). The gate
+  compares the log sequence of each card's first revision, so a later copy of a
+  card can never retire the card it copied, and an edit never makes a card
+  newer. A card with no first revision on record is held.
 - The same trust class as the keeper (`retrieval_eval_merge_trust_mismatch`)
   and the same `automated` value after the apply
-  (`retrieval_eval_merge_automated_mismatch`).
-- No other live card that names its id as a front-matter value, wiki link or
-  markdown link target (`retrieval_eval_merge_inbound_link`), because a retired
-  card leaves the index and a link to it would dangle.
+  (`retrieval_eval_merge_automated_mismatch`). When trust is
+  `agent-unreviewed`, its writer and class must also be the applier's
+  (`retrieval_eval_writer_changed`), the same rule the keeper meets.
+- No other live card that names its id as a front-matter value, wiki link,
+  markdown link or reference definition (`retrieval_eval_merge_inbound_link`),
+  because a retired card leaves the index and a link to it would dangle. The scan
+  parses every live card in the scope, in any front-matter key and at any list
+  position, and decodes escapes and implicit concatenation the way search does.
+  It ignores a leading `./`, `../` or `/`, angle brackets and a `#fragment`.
 - Title tokens (`retrieval_eval_merge_title_uncovered`) and every search token
   (`retrieval_eval_merge_tokens_lost`) held by the keeper's after text, counted
   as a multiset. An untitled card's title is its id, which the alias the merge
   adds carries.
+- Every punctuation substring literal search can match
+  (`retrieval_eval_merge_literal_lost`). Token counts do not carry those, so
+  each front-matter line of the retired card, except `aliases` and `evidence`,
+  must appear as a line of the keeper's text after the merge, and the retired
+  card's title, tags and summary must appear in the keeper's lowercased
+  indexed text.
 
+The retired card's own text must be unchanged by the proposal, and the keeper's
+`after_hash` must be the hash of its after text. Either forgery holds the merge.
 The keeper may then change only by the `aliases` and `evidence` fields the merge
 writes. The hub recomputes the merge from the live cards, and the keeper's
 ranking projection must match its old one once the `aliases` line is set aside
-(`retrieval_eval_merge_keeper_changed`). The history veto, the lineage rule and
-the published-index lineage check apply to both cards as before. A merge whose
-keeper has `agent-unreviewed` trust also holds with
-`retrieval_eval_writer_changed` when the applier is not the keeper's writer.
+(`retrieval_eval_merge_keeper_changed`). A principal applier flips `automated`
+on a keeper that was not automated, and that holds with
+`retrieval_eval_merge_automated_mismatch`. The history veto, the lineage rule
+and the published-index lineage check apply to both cards as before. The
+keeper's `aliases` line names the retired id as a predecessor. Only trusted
+cards form lineage edges, and the keeper of a merge that can apply today is not
+trusted, so no edge appears even when a new card later reuses the retired id.
 
 This bounds what a merge may remove from search. It does not freeze ranking.
 The retired card's matches move to the keeper, whose searchable content is a
