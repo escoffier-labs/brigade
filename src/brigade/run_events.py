@@ -211,6 +211,24 @@ _TASK_EVENT_TYPES = frozenset(
 EVENT_TYPES.update(
     {
         "task.batch-accepted": frozenset({"descriptor_version", "request_id", "members", "membership_digest"}),
+        # Governed native T3 verbs. These are generic paired facts, not folded
+        # task facts: they bind a claim intent, a caller-reported correlation
+        # and a task hold by digest. No task text or native payload enters the
+        # journal.
+        "task.native-claimed": frozenset(
+            {
+                "task_id",
+                "attempt_id",
+                "dispatch_attempt",
+                "parent_thread",
+                "template_digest",
+                "intent_digest",
+            }
+        ),
+        "task.native-correlated": frozenset(
+            {"task_id", "attempt_id", "mode", "handle_digest", "child_thread_id", "child_run_id"}
+        ),
+        "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
         # Native T3 enrollment holds one immutable delegation input asset
         # outside the journal. Only its relative name and digests are retained
         # here, never task text, options values, or raw native JSON.
@@ -244,7 +262,8 @@ APPROVAL_DECISION_EVENT_STATES = {
     "approval.rejected": "rejected",
     "approval.held": "held",
 }
-_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES
+_NATIVE_T3_EVENT_TYPES = frozenset({"task.native-claimed", "task.native-correlated", "task.native-held"})
+_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
 _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "approval": frozenset(
         {

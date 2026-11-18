@@ -380,7 +380,9 @@ class NativeIntentTemplate:
 
 @dataclass(frozen=True)
 class NativeIntent:
-    work: WorkBinding
+    # A native enrolled batch has no Worklore binding. ``None`` states that
+    # absence; it never stands for an unverified holder.
+    work: WorkBinding | None
     handle: run_tasks.TaskHandle
     dispatch_attempt: int
     target: NativeTarget
@@ -390,7 +392,8 @@ class NativeIntent:
     authority_refs: tuple[AuthorityReference, ...]
 
     def __post_init__(self) -> None:
-        _require(type(self.work) is WorkBinding and type(self.target) is NativeTarget)
+        _require(self.work is None or type(self.work) is WorkBinding)
+        _require(type(self.target) is NativeTarget)
         _require(type(self.handle) is run_tasks.TaskHandle and type(self.handle.spec) is run_tasks.TaskSpec)
         handle = self.handle
         _require(run_task_journal.token(handle.run_id) and run_task_journal.token(handle.request_id))

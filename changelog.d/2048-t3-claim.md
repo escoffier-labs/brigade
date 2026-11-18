@@ -1,0 +1,3 @@
+- `brigade t3 claim` reserves one dispatch unit, binds the finalized intent, consumes the launch claim and prints the exact `delegate_task` arguments once after the durable commit.
+- `brigade t3 accepted` records a returned native projection as parent-reported correlation, never as authenticated acceptance, and refuses a mismatched provider, model, options, parent thread or child handle.
+- `brigade t3 hold-resolve` records an operator assertion or abandons an attempt as terminal-unknown, and a lost reply always holds the task instead of authorizing resubmission.
