@@ -1070,9 +1070,12 @@ impl Store {
             Ok(a) => a,
             Err(_) => return error(503, "memory_action_unavailable", "policy read unavailable"),
         };
+        let snapshot = self.index.current();
         authority.retrieval = Some(retrieval_eval::Live {
             applier: credential.class(),
-            indexed_seq: self.index.current().indexed_seq,
+            principal: credential.principal().into(),
+            indexed_seq: snapshot.indexed_seq,
+            snapshot: Some(snapshot),
             embedder_id: self.dense.active_id(),
             weights: self.rrf.json(),
         });

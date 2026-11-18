@@ -115,6 +115,11 @@ fn drift_budget(member_count: usize) -> usize {
 pub struct Live {
     /// Credential class that will apply the proposal, which sets writer class.
     pub applier: &'static str,
+    /// Credential principal that will apply it, which sets the head's writer.
+    pub principal: String,
+    /// The published index the gate is judged against. Search answers from it,
+    /// so its trusted lineage graph is read here beside the live store.
+    pub snapshot: Option<std::sync::Arc<super::index::Snapshot>>,
     pub indexed_seq: i64,
     pub embedder_id: Option<String>,
     pub weights: Json,
@@ -378,7 +383,7 @@ pub fn hold<T: ReadTx + ?Sized>(
         .iter()
         .any(|c| c["scope"] != FIXTURE_SCOPE)
     {
-        return real_scope_hold(tx, proposal, mode, live.applier, now);
+        return real_scope_hold(tx, proposal, mode, live, now);
     }
     let rows=tx.query("SELECT report_json,report_sha256,corpus_members,dense_identity FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
     let Some(row) = rows.first() else {
@@ -518,9 +523,10 @@ fn real_scope_hold<T: ReadTx + ?Sized>(
     tx: &T,
     proposal: &Json,
     mode: &str,
-    applier: &str,
+    live: &Live,
     now: i64,
 ) -> rusqlite::Result<Option<&'static str>> {
+    let applier = live.applier;
     if mode != "lexical" {
         return Ok(Some("retrieval_eval_projection_changed"));
     }
@@ -549,7 +555,16 @@ fn real_scope_hold<T: ReadTx + ?Sized>(
     for target in cards {
         let scope = string(target, "scope");
         let id = string(target, "card_id");
-        let rows = tx.query(&format!("SELECT c.revision,c.content_hash,c.trust,b.bytes,c.writer_class,{},c.state FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", super::index::ORIGIN_AUTOMATED_SQL), &[ops::t(scope),ops::t(id)])?;
+        // Search answers from the published graph. The scan above reads the live
+        // store, which no longer shows an edge its owner has since dropped.
+        if live
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.in_lineage(scope, id))
+        {
+            return Ok(Some("retrieval_eval_lineage_exposed"));
+        }
+        let rows = tx.query(&format!("SELECT c.revision,c.content_hash,c.trust,b.bytes,c.writer_class,{},c.state,c.writer FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", super::index::ORIGIN_AUTOMATED_SQL), &[ops::t(scope),ops::t(id)])?;
         let Some(row) = rows.first() else {
             return Ok(Some("retrieval_eval_target_drifted"));
         };
@@ -558,6 +573,16 @@ fn real_scope_hold<T: ReadTx + ?Sized>(
         };
         if target["base_revision"] != *revision || target["before_hash"] != ops::s(&row[1]) {
             return Ok(Some("retrieval_eval_target_drifted"));
+        }
+        // An apply also rewrites the head's writer and writer class to the
+        // applier's. Push and connector search admit an agent-unreviewed head
+        // only for the credential that wrote it, so a different applier would
+        // move the card in or out of a connector's results. The digest cannot
+        // see that, so it is held here.
+        if ops::s(&row[2]) == "agent-unreviewed"
+            && (ops::s(&row[7]) != live.principal || ops::s(&row[4]) != applier)
+        {
+            return Ok(Some("retrieval_eval_writer_changed"));
         }
         // An apply rewrites the card's writer class to the applier's. Source
         // demotion reads the result, so project it as it will be afterwards.
@@ -577,8 +602,8 @@ fn real_scope_hold<T: ReadTx + ?Sized>(
             automated: applier == "principal" || origin,
             ..before.clone()
         };
-        if super::index::projection(&before, ops::s(&row[6]) == "live").ranking_digest
-            != super::index::projection(&after, target["after_state"] == "live").ranking_digest
+        if super::index::ranking_digest(&before, ops::s(&row[6]) == "live")
+            != super::index::ranking_digest(&after, target["after_state"] == "live")
         {
             return Ok(Some("retrieval_eval_projection_changed"));
         }

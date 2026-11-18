@@ -248,6 +248,14 @@ pub struct Snapshot {
     forward: Arc<HashMap<u32, Vec<super::ranking::Neighbour>>>,
     reverse: Arc<HashMap<u32, Vec<super::ranking::Neighbour>>>,
 }
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snapshot")
+            .field("indexed_seq", &self.indexed_seq)
+            .field("documents", &self.docs.len)
+            .finish()
+    }
+}
 impl Snapshot {
     pub fn forward(&self, n: u32) -> &[super::ranking::Neighbour] {
         self.forward.get(&n).map(Vec::as_slice).unwrap_or_default()
@@ -257,6 +265,20 @@ impl Snapshot {
     }
     pub fn scopes(&self) -> &[String] {
         &self.scopes
+    }
+    /// True when the live document for this card is an end of a trusted
+    /// lineage edge in this publication. A gate asks it because the store can
+    /// no longer show an edge that an owner has since dropped, while search
+    /// still answers from the published graph until the next publication.
+    pub fn in_lineage(&self, scope: &str, card_id: &str) -> bool {
+        let Some(scope) = self.scopes.iter().position(|s| s == scope) else {
+            return false;
+        };
+        self.forward
+            .keys()
+            .chain(self.reverse.keys())
+            .map(|n| self.docs.get(*n))
+            .any(|d| d.live && d.scope as usize == scope && &*d.card_id == card_id)
     }
     pub fn doc(&self, n: u32) -> &Doc {
         self.docs.get(n)
@@ -444,10 +466,6 @@ pub struct Projection {
     pub tokens: Vec<String>,
     pub links: super::ranking::Links,
     pub digest: String,
-    /// Everything ranking reads and nothing it does not: no raw text,
-    /// revision, head sequence or content hash. Lineage recency is the one
-    /// ranking input this leaves out, so a gate must exclude lineage targets.
-    pub ranking_digest: String,
 }
 pub fn projection(card: &Card, live: bool) -> Projection {
     let fields = text::fields(&card.text, &card.card_id);
@@ -456,13 +474,6 @@ pub fn projection(card: &Card, live: bool) -> Projection {
     let links = super::ranking::Links::parse(&card.text, &card.scope);
     let digest_of =
         |body: serde_json::Value| super::ids::sha256_hex(super::ids::canonical(&body).as_bytes());
-    let ranking_digest = digest_of(serde_json::json!({
-        "scope":card.scope,"card_id":card.card_id,"live":live,
-        "tokens":tokens,"literal":text::py_lower(&indexed),
-        "title":fields.title,"summary":fields.summary,"tags":fields.tags,
-        "trust":card.trust,"automated":card.automated,
-        "successor":links.successor,"predecessors":links.predecessors
-    }));
     let digest = digest_of(serde_json::json!({
         "scope":card.scope,"card_id":card.card_id,"live":live,
         "indexed_text":indexed,"text":card.text,"tokens":tokens,
@@ -476,8 +487,30 @@ pub fn projection(card: &Card, live: bool) -> Projection {
         tokens,
         links,
         digest,
-        ranking_digest,
     }
+}
+
+/// A digest of the inputs ranking and literal search read from one card, and
+/// nothing else. It leaves out the raw text, revision, head sequence and
+/// content hash. It covers ranking and literal search only. `writer` and
+/// `writer_class` decide push and connector visibility, and the revision moves
+/// lineage recency. Neither is in the digest, so the gate guards both apart.
+/// Lineage recency is the one ranking input left out, so a gate must exclude
+/// lineage targets. Only the gate computes it. Indexing never pays for it.
+pub fn ranking_digest(card: &Card, live: bool) -> String {
+    let fields = text::fields(&card.text, &card.card_id);
+    let indexed = text::card_text(&fields, &card.text);
+    let links = super::ranking::Links::parse(&card.text, &card.scope);
+    super::ids::sha256_hex(
+        super::ids::canonical(&serde_json::json!({
+            "scope":card.scope,"card_id":card.card_id,"live":live,
+            "tokens":text::tokenize(&indexed),"literal":text::py_lower(&indexed),
+            "title":fields.title,"summary":fields.summary,"tags":fields.tags,
+            "trust":card.trust,"automated":card.automated,
+            "successor":links.successor,"predecessors":links.predecessors
+        }))
+        .as_bytes(),
+    )
 }
 
 /// What the tail replay found for one changed card.
@@ -1209,19 +1242,19 @@ mod projection_tests {
     #[test]
     fn ranking_digest_ignores_only_what_search_never_reads() {
         let before = card();
-        let digest = projection(&before, true).ranking_digest;
+        let digest = ranking_digest(&before, true);
         for (what, text) in [
             ("anchor suffix", "needle ^c-abcdef\n"),
             ("evidence line", "---\nevidence: [\"a/b/c\"]\n---\nneedle\n"),
         ] {
             let mut same = before.clone();
             same.text = text.into();
-            assert_eq!(projection(&same, true).ranking_digest, digest, "{what}");
+            assert_eq!(ranking_digest(&same, true), digest, "{what}");
         }
         let mut same = before.clone();
         same.revision += 1;
         same.content_hash = "different".into();
-        assert_eq!(projection(&same, true).ranking_digest, digest, "stored");
+        assert_eq!(ranking_digest(&same, true), digest, "stored");
         for (field, text) in [
             ("body", "another token\n"),
             ("title", "---\ntitle: two\n---\nneedle\n"),
@@ -1229,19 +1262,15 @@ mod projection_tests {
         ] {
             let mut changed = before.clone();
             changed.text = text.into();
-            assert_ne!(projection(&changed, true).ranking_digest, digest, "{field}");
+            assert_ne!(ranking_digest(&changed, true), digest, "{field}");
         }
         let mut changed = before.clone();
         changed.automated = true;
-        assert_ne!(
-            projection(&changed, true).ranking_digest,
-            digest,
-            "automated"
-        );
+        assert_ne!(ranking_digest(&changed, true), digest, "automated");
         changed = before.clone();
         changed.trust = "flagged".into();
-        assert_ne!(projection(&changed, true).ranking_digest, digest, "trust");
-        assert_ne!(projection(&before, false).ranking_digest, digest, "live");
+        assert_ne!(ranking_digest(&changed, true), digest, "trust");
+        assert_ne!(ranking_digest(&before, false), digest, "live");
     }
     #[test]
     fn projection_invariant_index_replay_is_byte_equal() {

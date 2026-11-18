@@ -438,6 +438,8 @@ async fn retrieval_eval_late_stale_reply_never_claims_an_unpersisted_transition(
     let mut a = ops::Authority::with_credentials(&Tx(&hub), &digest(ADMIN_TOKEN)).unwrap();
     a.retrieval = Some(retrieval_eval::Live {
         applier: "admin",
+        principal: super::ADMIN.into(),
+        snapshot: Some(store.index.current()),
         indexed_seq: store.index.current().indexed_seq,
         embedder_id: None,
         weights: store.rrf.json(),
@@ -1957,6 +1959,8 @@ async fn retrieval_eval_invariant_projection_passes_without_any_measurement() {
     let mut authority = ops::Authority::with_credentials(&Tx(&hub), &digest(ADMIN_TOKEN)).unwrap();
     authority.retrieval = Some(retrieval_eval::Live {
         applier: "admin",
+        principal: super::ADMIN.into(),
+        snapshot: None,
         indexed_seq: h.events(),
         embedder_id: None,
         weights: json!({"lexical":1.0,"dense":1.0}),
