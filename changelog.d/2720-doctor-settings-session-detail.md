@@ -1,0 +1,1 @@
+- Keep the full `brigade doctor` diagnostic when a malformed `.claude/settings.json` and a refused Claude hook session directory occur together, so the session integrity refusal and the other ordered issues stay visible instead of being replaced by the hook settings error.
