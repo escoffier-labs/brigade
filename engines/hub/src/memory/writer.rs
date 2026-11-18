@@ -140,7 +140,7 @@ impl Metrics {
     /// Records one batch in both histograms. Each bound is checked on its own,
     /// so a bucket holds every observation at or below it: a scrape reads
     /// cumulative counts, and the open bucket is the batch count. The sums are
-    /// the `_sum` series those histograms sit beside.
+    /// the `_sum` series of those histograms.
     pub fn observe_lock(&mut self, wait: Duration, residence: Duration) {
         let wait = wait.as_secs_f64();
         let residence = residence.as_secs_f64();
@@ -153,22 +153,26 @@ impl Metrics {
             *count += u64::from(residence <= bound);
         }
     }
-    /// Both histograms for `/metrics`: fixed names, one fixed `lane` label, and
-    /// one bucket series per bound. Only batches that took the authority lock
+    /// Both histograms for `/metrics`, each as one block: HELP, TYPE, every
+    /// bucket, the sum, then the count. A bucket carries only `le`, and the sum
+    /// and count carry no labels, so a parser joins them into one series and
+    /// the cardinality stays fixed. Only batches that took the authority lock
     /// are observed, so a batch refused at the lock is counted by
     /// `authority_timeouts`, not here.
     pub fn lock_histograms(&self) -> String {
         let mut text = String::new();
-        for (name, help, buckets) in [
+        for (name, help, buckets, sum) in [
             (
                 "brigade_hub_memory_hub_lock_wait_seconds",
                 "Time each memory batch waited for an arbiter turn and the hub write lock, from the memory lock.",
                 self.wait_buckets,
+                self.wait_sum,
             ),
             (
                 "brigade_hub_memory_hub_lock_residence_seconds",
                 "Time each memory batch held the arbiter turn and the hub write lock.",
                 self.residence_buckets,
+                self.residence_sum,
             ),
         ] {
             text += &format!("# HELP {name} {help}\n# TYPE {name} histogram\n");
@@ -178,9 +182,12 @@ impl Metrics {
                 } else {
                     bound.to_string()
                 };
-                text += &format!("{name}_bucket{{lane=\"memory\",le=\"{le}\"}} {count}\n");
+                text += &format!("{name}_bucket{{le=\"{le}\"}} {count}\n");
             }
-            text += &format!("{name}_count {}\n", buckets[LOCK_BUCKETS - 1]);
+            text += &format!(
+                "{name}_sum {sum}\n{name}_count {}\n",
+                buckets[LOCK_BUCKETS - 1]
+            );
         }
         text
     }
