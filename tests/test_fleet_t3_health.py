@@ -447,7 +447,24 @@ def test_memory_in_range_is_accepted(conn, value):
 
 @pytest.mark.parametrize(
     "value",
-    [-0.0001, -1, 1.0001, 2, 100, float("nan"), float("inf"), float("-inf"), True, False, "0.5", [0.5], {"v": 1}, b"1"],
+    [
+        -0.0001,
+        -1,
+        1.0001,
+        2,
+        100,
+        10**400,
+        -(10**400),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        True,
+        False,
+        "0.5",
+        [0.5],
+        {"v": 1},
+        b"1",
+    ],
 )
 def test_invalid_memory_is_rejected_and_never_stored(conn, value):
     with pytest.raises(FleetHubError, match="memory_used"):

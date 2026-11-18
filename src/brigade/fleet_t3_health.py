@@ -57,7 +57,10 @@ def _memory(payload: Mapping[str, Any]) -> float | None:
         return None
     if type(raw) is bool or not isinstance(raw, (int, float)):
         raise FleetHubError("t3 observation field 'memory_used' must be a number in 0..1")
-    value = float(raw)
+    try:
+        value = float(raw)
+    except OverflowError:  # a JSON integer too large for a float
+        raise FleetHubError("t3 observation field 'memory_used' must be a number in 0..1") from None
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise FleetHubError("t3 observation field 'memory_used' must be a number in 0..1")
     return value
