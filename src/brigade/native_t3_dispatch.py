@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import fleet_t3_transport, run_budget, run_events, run_journal, run_lifecycle, run_tasks, runguard
+from . import native_t3_admission as admission
+from . import native_t3_capacity as capacity
 from . import native_t3_observations as observations
 from . import run_task_journal as journal
 from . import native_t3_enrollment as enrollment
@@ -489,6 +491,7 @@ def _claim_record(
     parent_thread: str,
     attempt: int,
     batch_ref: str,
+    admission_evidence: admission.Admission,
     out: dict[str, Any],
 ) -> int | None:
     """Prepare, bind, claim, then record the requested fact, in that order."""
@@ -512,6 +515,9 @@ def _claim_record(
             "parent_thread": parent_thread,
             "template_digest": verified.template.template_digest,
             "intent_digest": digest,
+            "admission": admission_evidence.code,
+            "roster_digest": admission_evidence.roster_digest,
+            "policy_digest": admission_evidence.policy_digest,
         },
         key=_key("claimed", task_id, handle.attempt_id),
     )
@@ -866,70 +872,100 @@ def claim(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) -> 
     if not journal.provider_reference(parent_thread):
         raise _refuse("invalid-identity", "the parent thread identity is not valid")
     run_dir = _context(workspace, run_id, task_id)
-    with enrollment.owned_run(workspace, run_dir):
-        meta = _run_meta(workspace, run_dir)
-        events = _read(run_dir)
-        _barrier(events)
-        verified = _verified(workspace, run_dir)
-        current = verified.get(task_id)
-        if current is None:
-            raise _refuse("not-enrolled", "the task has no native enrollment record")
-        held = _held(events, task_id)
-        if held is not None:
-            raise _refuse("task-held", f"the task is held ({held})")
-        if current.result.launch_claim is not None:
-            raise _refuse("already-claimed", "the task already consumed its launch claim")
-        batch_ref = _batch_ref(events, run_dir.name, task_id)
-        coordinator = _coordinator(workspace, run_dir, meta)
-        out: dict[str, Any] = {}
-        try:
-            attempt = coordinator.reserve_and_record_dispatch(
-                seat=current.result.handle.spec.seat,
-                allocate_attempt=lambda: run_lifecycle.allocate_next_dispatch_attempt(
-                    run_dir, current.result.handle.spec.seat
-                ),
-                record_requested=lambda candidate: _claim_record(
-                    workspace=workspace,
-                    run_dir=run_dir,
-                    verified=current,
-                    parent_thread=parent_thread,
-                    attempt=candidate,
-                    batch_ref=batch_ref,
-                    out=out,
-                ),
-                reclaim_pending=False,
-            )
-        except run_budget.BudgetPolicyError as exc:
-            code = "capacity-denied" if not exc.exhausted else "budget-exhausted"
-            raise _refuse(code, f"the run budget refused a dispatch unit ({exc.dimension})") from None
-        except run_budget.BudgetError as exc:
-            raise _refuse("budget-refused", exc.diagnostic) from None
-        except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError):
-            raise _refuse("journal-refused", "the dispatch transaction was refused") from None
-        if type(attempt) is not int or "intent" not in out:
-            raise _refuse("claim-refused", "the dispatch transaction did not complete")
-        intent, handle = out["intent"], out["handle"]
-        target = current.retained.target
-        return {
-            "schema": SCHEMA,
-            "run_id": run_dir.name,
-            "task_id": task_id,
-            "seat": handle.spec.seat,
-            "attempt_id": handle.attempt_id,
-            "dispatch_attempt": attempt,
-            "state": "claimed",
-            "clientRequestId": intent.native_client_request_key,
-            "delegate_task": {
-                "task": current.retained.text,
-                "target": {
-                    "providerInstanceId": target.provider_instance,
-                    "model": target.launch_model,
-                    "options": [{"id": key, "value": value} for key, value in target.options],
-                },
-                "isolation": "worktree",
-                "clientRequestId": intent.native_client_request_key,
-            },
-        }
+    # The Hub read is network I/O, so it stays outside the capacity lock and
+    # never stretches the bounded wait. The roster is re-read inside the locks
+    # because an edit while waiting must not be evaluated stale.
+    hub = admission.read_hub_authority(workspace)
+    try:
+        lock = capacity.capacity_lock(workspace)
+        with lock:
+            # Occupancy is read and trusted before the run lock. The capacity
+            # lock serializes every claim that can add a unit, so this snapshot
+            # stays valid through the existing claim path. Other verbs can only
+            # free a unit, which keeps this snapshot conservative.
+            occupancy = capacity.governed_occupancy(workspace)
+            if not occupancy.authoritative:
+                raise _refuse("capacity-unknown", "live governed native capacity cannot be verified")
+            with enrollment.owned_run(workspace, run_dir):
+                try:
+                    roster = admission.load_roster(workspace)
+                except enrollment.EnrollmentError as exc:
+                    raise _refuse(exc.code, _bound(str(exc))) from None
+                meta = _run_meta(workspace, run_dir)
+                events = _read(run_dir)
+                _barrier(events)
+                verified = _verified(workspace, run_dir)
+                current = verified.get(task_id)
+                if current is None:
+                    raise _refuse("not-enrolled", "the task has no native enrollment record")
+                held = _held(events, task_id)
+                if held is not None:
+                    raise _refuse("task-held", f"the task is held ({held})")
+                if current.result.launch_claim is not None:
+                    raise _refuse("already-claimed", "the task already consumed its launch claim")
+                seat = current.result.handle.spec.seat
+                decision = capacity.assess(roster, seat, occupancy)
+                if not decision.granted:
+                    raise _refuse("capacity-denied", "no governed native capacity remains for this claim")
+                evidence = admission.evaluate(roster, seat, current.retained.target, hub=hub)
+                if evidence.code == admission.UNAVAILABLE:
+                    raise _refuse(
+                        "admission-unavailable", f"seat admission authority is unavailable ({evidence.reason})"
+                    )
+                if not evidence.admitted:
+                    raise _refuse("admission-denied", f"seat admission refused this claim ({evidence.reason})")
+                batch_ref = _batch_ref(events, run_dir.name, task_id)
+                coordinator = _coordinator(workspace, run_dir, meta)
+                out: dict[str, Any] = {}
+                try:
+                    attempt = coordinator.reserve_and_record_dispatch(
+                        seat=seat,
+                        allocate_attempt=lambda: run_lifecycle.allocate_next_dispatch_attempt(run_dir, seat),
+                        record_requested=lambda candidate: _claim_record(
+                            workspace=workspace,
+                            run_dir=run_dir,
+                            verified=current,
+                            parent_thread=parent_thread,
+                            attempt=candidate,
+                            batch_ref=batch_ref,
+                            admission_evidence=evidence,
+                            out=out,
+                        ),
+                        reclaim_pending=False,
+                    )
+                except run_budget.BudgetPolicyError as exc:
+                    code = "capacity-denied" if not exc.exhausted else "budget-exhausted"
+                    raise _refuse(code, f"the run budget refused a dispatch unit ({exc.dimension})") from None
+                except run_budget.BudgetError as exc:
+                    raise _refuse("budget-refused", exc.diagnostic) from None
+                except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError):
+                    raise _refuse("journal-refused", "the dispatch transaction was refused") from None
+                if type(attempt) is not int or "intent" not in out:
+                    raise _refuse("claim-refused", "the dispatch transaction did not complete")
+                intent, handle = out["intent"], out["handle"]
+                target = current.retained.target
+                return {
+                    "schema": SCHEMA,
+                    "run_id": run_dir.name,
+                    "task_id": task_id,
+                    "seat": handle.spec.seat,
+                    "attempt_id": handle.attempt_id,
+                    "dispatch_attempt": attempt,
+                    "state": "claimed",
+                    "clientRequestId": intent.native_client_request_key,
+                    "delegate_task": {
+                        "task": current.retained.text,
+                        "target": {
+                            "providerInstanceId": target.provider_instance,
+                            "model": target.launch_model,
+                            "options": [{"id": key, "value": value} for key, value in target.options],
+                        },
+                        "isolation": "worktree",
+                        "clientRequestId": intent.native_client_request_key,
+                    },
+                }
+    except capacity.CapacityError as exc:
+        raise _refuse(exc.code, _bound(str(exc))) from None
 
 
 def _durable_claim(

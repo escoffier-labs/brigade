@@ -223,6 +223,12 @@ EVENT_TYPES.update(
                 "parent_thread",
                 "template_digest",
                 "intent_digest",
+                # Digests-only admission evidence: the roster digest that
+                # admitted the claim and, when enrolled, the live Hub policy
+                # digest that agreed. Neither carries roster text or policy text.
+                "admission",
+                "roster_digest",
+                "policy_digest",
             }
         ),
         # Child thread and run ids are optional legacy input. New correlation

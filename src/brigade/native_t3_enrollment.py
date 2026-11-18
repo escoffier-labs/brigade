@@ -52,7 +52,7 @@ _TARGET_STRING_FIELDS = (
     "driver",
 )
 _TARGET_REQUIRED = (*_TARGET_STRING_FIELDS, "model", "isolation")
-_TARGET_FIELDS = frozenset({*_TARGET_REQUIRED, "options", "runtime_mode", "interaction_mode"})
+_TARGET_FIELDS = frozenset({*_TARGET_REQUIRED, "options", "runtime_mode", "interaction_mode", "max_live"})
 _OPTION_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*", re.ASCII)
 
 
