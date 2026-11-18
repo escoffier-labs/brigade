@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="330" viewBox="0 0 880 330" role="img" aria-labelledby="title desc">
+  <title id="title">A check record</title>
+  <desc id="desc">A check record for the command python -m pytest -q: exit code 0, the stdout and stderr log files, the fingerprint of the tree that was tested, d16d2fee98f0, and baseline commit f1199ad.</desc>
+  <defs>
+    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#202428"/></pattern>
+    <radialGradient id="fade" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient>
+    <mask id="m"><rect width="880" height="330" fill="url(#fade)"/></mask>
+  </defs>
+  <rect x="0.5" y="0.5" width="879" height="329" rx="10" fill="#0f1215" stroke="#202428"/>
+  <rect width="880" height="330" fill="url(#dots)" mask="url(#m)"/>
+  <g font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14">
+    <rect x="60" y="44" width="500" height="248" rx="8" fill="#0a0c0e" stroke="#2e3338"/>
+    <text x="80" y="74" fill="#929aa3">$</text><text x="100" y="74" fill="#e9ecef" font-size="15">python -m pytest -q</text>
+    <path d="M60 92.5H560" stroke="#202428"/>
+    <text x="80" y="117" fill="#929aa3">exit code</text>
+    <rect x="502" y="101" width="38" height="22" rx="11" fill="none" stroke="#6bbf7a"/><text x="521" y="117" text-anchor="middle" fill="#6bbf7a">0</text>
+    <path d="M60 132.5H560" stroke="#202428"/>
+    <text x="80" y="157" fill="#929aa3">stdout</text>
+    <text x="540" y="157" text-anchor="end" fill="#a1a8b0">command-1-stdout.log</text>
+    <path d="M60 172.5H560" stroke="#202428"/>
+    <text x="80" y="197" fill="#929aa3">stderr</text>
+    <text x="540" y="197" text-anchor="end" fill="#a1a8b0">command-1-stderr.log</text>
+    <path d="M60 212.5H560" stroke="#202428"/>
+    <text x="80" y="237" fill="#929aa3">tree fingerprint</text>
+    <text x="540" y="237" text-anchor="end" fill="#a1a8b0">d16d2fee98f0…</text>
+    <path d="M60 252.5H560" stroke="#202428"/>
+    <text x="80" y="277" fill="#929aa3">baseline commit</text>
+    <text x="540" y="277" text-anchor="end" fill="#a1a8b0">f1199ad</text>
+    <path d="M560 168.0 C610 168.0 610 168.0 660 168.0" fill="none" stroke="#2e3338"/><circle cx="610.0" cy="168.0" r="2.2" fill="#6d8cff"/>
+    <rect x="660" y="146.0" width="44" height="44" rx="8" fill="#0a0c0e" stroke="#202428"/><g transform="translate(672 158.0) scale(0.8333)" fill="none" stroke="#e9ecef" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 12 2 2 4-4"/></g>
+    <text x="718" y="165.0" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#a1a8b0">Check record</text>
+    <text x="718" y="184.0" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#929aa3">tied to the tree it tested</text>
+    <text x="60" y="30" font-size="12" fill="#929aa3">brigadestack work verify run</text>
+  </g>
+</svg>
