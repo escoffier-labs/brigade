@@ -25,3 +25,9 @@ def unknown_note(reason: str) -> tuple[str, bool]:
 def idle_card_text(slots: int, unknown: int) -> str:
     """The Idle card value: spare slots, naming the stations whose sessions could not be counted."""
     return f"{slots} ({unknown} unknown)" if unknown else str(slots)
+
+
+def t3_session_gaps(control_plane) -> list[str]:
+    """The coverage gap for machines whose telemetry is fresh but whose T3 observer is not reporting."""
+    machines = control_plane.machines if "machines" in control_plane.present else ()
+    return ["machine sessions (T3 observer)"] if any(m.unused_reason in T3_UNKNOWN_LABELS for m in machines) else []

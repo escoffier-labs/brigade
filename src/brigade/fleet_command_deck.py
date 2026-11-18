@@ -22,7 +22,7 @@ from brigade.fleet_deck_brands import (
 )
 
 from .fleet_event_freshness import observation_state
-from .fleet_t3_unknown import T3_UNKNOWN_LABELS, unused_label
+from .fleet_t3_unknown import t3_session_gaps, unused_label
 from . import fleet_deck_shell, ui_theme, fleet_live_routing
 from .fleet_deck_empty_copy import COPY
 
@@ -1571,10 +1571,10 @@ def coverage_gaps(control_plane: ControlPlane | None) -> tuple[str, ...]:
         return ("control-plane telemetry",)
     gaps = [section for section in CONTROL_PLANE_SECTIONS if section not in control_plane.present]
     if "machines" in control_plane.present and any(
-        machine.capacity == UNKNOWN or machine.state == UNKNOWN or machine.unused_reason in T3_UNKNOWN_LABELS
-        for machine in control_plane.machines
-    ):  # a machine whose T3 observer is not reporting has unknown sessions, so it is never all clear
+        machine.capacity == UNKNOWN or machine.state == UNKNOWN for machine in control_plane.machines
+    ):
         gaps.append("machine capacity")
+    gaps.extend(t3_session_gaps(control_plane))  # unknown T3 sessions are never all clear
     if "queue" in control_plane.present and (
         control_plane.queue.eligible_count == UNKNOWN or not control_plane.queue.blocked_known
     ):

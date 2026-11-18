@@ -156,6 +156,8 @@ def test_deck_names_a_missing_observer_and_leaves_the_seat_bar_unknown(conn):
     assert "sessions unknown: T3 observer not reporting" in deck.render_control_plane(view.control_plane)
     seats = overview._seats_html(stale, overview.machine_for(view, stale), "unknown")
     assert "1 unknown" in seats and "idle" not in seats
+    assert overview.verdict_text(view, _now()).startswith("COVERAGE UNKNOWN")
+    assert "machine sessions (T3 observer)" in deck.coverage_gaps(view.control_plane)
 
 
 def test_deck_renders_every_machine_unknown_when_the_health_read_fails(conn):
