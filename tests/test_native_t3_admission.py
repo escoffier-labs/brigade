@@ -69,7 +69,7 @@ def _roster_text(
         limit = max_live.get(name) if isinstance(max_live, dict) else max_live
         lines += [
             f"[t3_targets.{name}]",
-            'origin_environment = "env-origin"',
+            'origin_environment = "env-target"',
             'origin_thread = "thread-parent"',
             'target_environment = "env-target"',
             'target_project = "project-test"',

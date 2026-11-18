@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -10,17 +11,41 @@ from pathlib import Path
 import pytest
 
 from brigade import (
+    aboyeur,
     cli,
+    native_t3_admission as admission,
     native_t3_dispatch as dispatch,
     native_t3_enrollment as enrollment,
     proc,
     run_events,
     run_journal,
+    run_lifecycle,
     run_tasks,
 )
+from brigade.native_t3_contract import NativeIntentTemplate, NativeTarget
 
 TASK_TEXT = "retained-input-marker"
 THREAD = "thread-parent"
+# Field names pinned from the T3 Code delegate_task input schema at
+# packages/contracts/src/orchestratorMcp.ts in revision c52df24d28. The printed
+# claim arguments must stay a subset of these reviewed names.
+REVIEWED_DELEGATE_TASK_FIELDS = frozenset(
+    {
+        "task",
+        "target",
+        "title",
+        "role",
+        "isolation",
+        "mode",
+        "timeoutMs",
+        "clientRequestId",
+        "runtimeMode",
+        "interactionMode",
+    }
+)
+REVIEWED_TARGET_FIELDS = frozenset(
+    {"providerInstanceId", "driverKind", "model", "options", "environmentId", "projectId"}
+)
 POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt", reason="native T3 custody refuses Windows for lack of owner-only DACLs"
 )
@@ -31,7 +56,13 @@ def _git(repo: Path, *args: str) -> None:
     assert result.code == 0, result.stderr
 
 
-def _workspace(tmp_path: Path, *, targets: tuple[str, ...] = ("coder",)) -> Path:
+def _workspace(
+    tmp_path: Path,
+    *,
+    targets: tuple[str, ...] = ("coder",),
+    target_environment: str = "env-target",
+    target_extra: tuple[str, ...] = (),
+) -> Path:
     repo = tmp_path / "workspace"
     repo.mkdir(parents=True)
     _git(repo, "init")
@@ -55,14 +86,15 @@ def _workspace(tmp_path: Path, *, targets: tuple[str, ...] = ("coder",)) -> Path
     for name in targets:
         lines += [
             f"[t3_targets.{name}]",
-            'origin_environment = "env-origin"',
+            'origin_environment = "env-target"',
             'origin_thread = "thread-parent"',
-            'target_environment = "env-target"',
+            f'target_environment = "{target_environment}"',
             'target_project = "project-test"',
             'provider_instance = "codex-test"',
             'driver = "codex"',
             'model = "launch-model"',
             'isolation = "worktree"',
+            *target_extra,
             "",
             f"[t3_targets.{name}.options]",
             'reasoningEffort = "high"',
@@ -89,8 +121,8 @@ def _batch(tmp_path: Path, ids: tuple[str, ...] = ("one", "two"), *, seat: str =
     return path
 
 
-def _enroll(tmp_path: Path, ids: tuple[str, ...] = ("one", "two")) -> tuple[Path, str]:
-    workspace = _workspace(tmp_path)
+def _enroll(tmp_path: Path, ids: tuple[str, ...] = ("one", "two"), **workspace_kwargs: object) -> tuple[Path, str]:
+    workspace = _workspace(tmp_path, **workspace_kwargs)  # type: ignore[arg-type]
     report = enrollment.enroll(batch_path=_batch(tmp_path, ids), target=workspace)
     return workspace, report["run_id"]
 
@@ -147,6 +179,79 @@ def _claim(workspace: Path, run_id: str, task_id: str = "one", *, parent: str = 
     return dispatch.claim(workspace=workspace, run_id=run_id, task_id=task_id, parent_thread=parent)
 
 
+def _unchecked_target(**changes: object) -> NativeTarget:
+    """Build a target as an older Brigade release would have retained it."""
+    target = NativeTarget(
+        origin_environment="env-origin",
+        origin_thread="thread-parent",
+        target_environment="env-target",
+        target_project="project-test",
+        provider_instance="codex-test",
+        driver="codex",
+        launch_model="launch-model",
+        options=(("reasoningEffort", "high"),),
+        runtime_mode="inherit",
+        interaction_mode="inherit",
+        isolation="worktree",
+        source_revision="a" * 40,
+    )
+    legacy = object.__new__(NativeTarget)
+    legacy.__dict__.update({**target.__dict__, **changes})
+    return legacy
+
+
+def _legacy_claim_run(
+    workspace: Path, *, target_changes: dict[str, object] | None = None, seed: bytes = b"legacy-request"
+) -> str:
+    """Create a run whose retained asset predates the current target rules."""
+    text = f"{TASK_TEXT} one"
+    head = enrollment._clean_revision(workspace)
+    run_id = "t3-" + hashlib.sha256(seed).hexdigest()
+    run_dir = _run_dir(workspace, run_id)
+    run_dir.mkdir(parents=True, mode=0o700)
+    spec = run_tasks.TaskSpec("one", "coder", hashlib.sha256(text.encode("utf-8")).hexdigest())
+    changes = {"runtime_mode": "app-server", "source_revision": head, **(target_changes or {})}
+    target = _unchecked_target(**changes)
+    content = enrollment.delegation_input_bytes(task_id="one", seat="coder", text=text, target=target)
+    name = enrollment.asset_name("one")
+    template = NativeIntentTemplate(
+        run_id=run_id,
+        task_id="one",
+        seat="coder",
+        target=target,
+        payload_digest=spec.payload_digest,
+        source_revision=head,
+    )
+    with enrollment.owned_run(workspace, run_dir):
+        aboyeur._write_json(
+            run_dir / "run.json",
+            {
+                "schema": "brigade.run.v1",
+                "kind": enrollment.RUN_KIND,
+                "status": enrollment.AWAITING_NATIVE_PARENT,
+                "task": "Legacy native T3 run",
+                "started_at": "2026-01-01T00:00:00Z",
+                "lock_workspace": str(workspace),
+                "lifecycle_journal_requested": True,
+            },
+        )
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_tasks.accept_task_batch(run_dir, workspace=workspace, request_id="request-legacy", specs=(spec,))
+        enrollment.write_delegation_asset(run_dir, name, content)
+        run_tasks.record_native_enrollment(
+            run_dir,
+            workspace=workspace,
+            task_id="one",
+            enrollment=run_tasks.TaskEnrollment(
+                descriptor_version=enrollment.journal.NATIVE_ENROLLMENT_DESCRIPTOR_VERSION,
+                asset_path=name,
+                asset_digest=hashlib.sha256(content).hexdigest(),
+                template_digest=template.template_digest,
+            ),
+        )
+    return run_id
+
+
 @POSIX_ONLY
 def test_two_tasks_get_distinct_attempts_intents_and_request_keys(tmp_path):
     workspace, run_id = _enroll(tmp_path)
@@ -160,7 +265,9 @@ def test_two_tasks_get_distinct_attempts_intents_and_request_keys(tmp_path):
         assert report["delegate_task"]["isolation"] == "worktree"
         assert report["delegate_task"]["target"] == {
             "providerInstanceId": "codex-test",
+            "driverKind": "codex",
             "model": "launch-model",
+            "projectId": "project-test",
             "options": [{"id": "reasoningEffort", "value": "high"}],
         }
     assert one["delegate_task"]["task"] == f"{TASK_TEXT} one"
@@ -172,6 +279,102 @@ def test_two_tasks_get_distinct_attempts_intents_and_request_keys(tmp_path):
     assert requested == [1, 2]
     journal_text = (_run_dir(workspace, run_id) / "events" / "lifecycle.jsonl").read_text(encoding="utf-8")
     assert TASK_TEXT not in journal_text
+
+
+@POSIX_ONLY
+def test_inherit_defaults_omit_mode_fields_from_claim_output(tmp_path):
+    workspace, run_id = _enroll(tmp_path)
+    report = _claim(workspace, run_id)
+    arguments = report["delegate_task"]
+    assert arguments["target"]["projectId"] == "project-test"
+    assert "environmentId" not in arguments["target"]
+    assert "runtimeMode" not in arguments and "interactionMode" not in arguments
+
+
+@POSIX_ONLY
+def test_explicit_native_modes_appear_in_claim_output(tmp_path):
+    workspace, run_id = _enroll(
+        tmp_path,
+        target_extra=('runtime_mode = "auto"', 'interaction_mode = "plan"'),
+    )
+    arguments = _claim(workspace, run_id)["delegate_task"]
+    assert arguments["runtimeMode"] == "auto"
+    assert arguments["interactionMode"] == "plan"
+
+
+@POSIX_ONLY
+def test_claim_arguments_are_a_subset_of_the_reviewed_delegate_schema(tmp_path):
+    workspace, run_id = _enroll(tmp_path)
+    arguments = _claim(workspace, run_id)["delegate_task"]
+    assert set(arguments) <= REVIEWED_DELEGATE_TASK_FIELDS
+    assert set(arguments["target"]) <= REVIEWED_TARGET_FIELDS
+    assert "environmentId" not in arguments["target"]
+
+
+@pytest.mark.parametrize(
+    ("target_environment", "target_extra", "code"),
+    [
+        ("env-target", ('runtime_mode = "app-server"',), "target-mode-invalid"),
+        ("env-remote", (), "target-remote-unsupported"),
+    ],
+)
+@POSIX_ONLY
+def test_open_refuses_modes_t3_rejects_and_remote_targets(tmp_path, capsys, target_environment, target_extra, code):
+    workspace = _workspace(tmp_path, target_environment=target_environment, target_extra=target_extra)
+    batch = _batch(tmp_path)
+    with pytest.raises(enrollment.EnrollmentError) as refused:
+        enrollment.enroll(batch_path=batch, target=workspace)
+    assert refused.value.code == code
+    capsys.readouterr()
+    assert cli.main(["t3", "open", str(batch), "--target", str(workspace)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and f"[{code}]" in captured.err and TASK_TEXT not in captured.err
+
+
+@POSIX_ONLY
+def test_admission_predicate_refuses_legacy_modes_and_remote_targets(tmp_path):
+    workspace = _workspace(tmp_path)
+    roster = admission.load_roster(workspace)
+    hub = admission.HubAuthority(state="unenrolled")
+    for target, reason in (
+        (_unchecked_target(runtime_mode="app-server"), admission.TARGET_MODE_INVALID),
+        (_unchecked_target(target_environment="env-remote"), admission.TARGET_REMOTE_UNSUPPORTED),
+    ):
+        verdict = admission.evaluate(roster, "coder", target, hub=hub)
+        assert verdict.code == "admission-denied" and verdict.reason == reason
+
+
+@POSIX_ONLY
+def test_legacy_retained_app_server_is_refused_by_claim(tmp_path, capsys):
+    workspace = _workspace(tmp_path)
+    run_id = _legacy_claim_run(workspace)
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _claim(workspace, run_id)
+    assert refused.value.code == "target-mode-invalid"
+    assert not [event for event in _events(workspace, run_id) if event.event_type == dispatch.CLAIM_EVENT]
+    capsys.readouterr()
+    assert cli.main(["t3", "claim", run_id, "one", "--parent-thread", THREAD, "--target", str(workspace)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "[target-mode-invalid]" in captured.err and TASK_TEXT not in captured.err
+
+
+@POSIX_ONLY
+def test_legacy_retained_remote_target_is_refused_by_claim(tmp_path, capsys):
+    workspace = _workspace(tmp_path)
+    run_id = _legacy_claim_run(
+        workspace,
+        target_changes={"target_environment": "env-remote", "runtime_mode": "inherit"},
+        seed=b"legacy-remote",
+    )
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _claim(workspace, run_id)
+    assert refused.value.code == "admission-denied"
+    assert admission.TARGET_REMOTE_UNSUPPORTED in str(refused.value)
+    capsys.readouterr()
+    assert cli.main(["t3", "claim", run_id, "one", "--parent-thread", THREAD, "--target", str(workspace)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "[admission-denied]" in captured.err
+    assert admission.TARGET_REMOTE_UNSUPPORTED in captured.err and TASK_TEXT not in captured.err
 
 
 @POSIX_ONLY

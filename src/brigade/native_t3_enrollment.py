@@ -32,7 +32,13 @@ from typing import Any, Iterator, Mapping
 from . import dirfd, localio, roster as roster_mod, run_batch, run_dirfd, run_journal, run_lifecycle, runguard
 from . import run_task_journal as journal
 from . import run_tasks
-from .native_t3_contract import NativeIntentTemplate, NativeTarget
+from .native_t3_contract import (
+    INHERIT_MODE,
+    INTERACTION_MODES,
+    RUNTIME_MODES,
+    NativeIntentTemplate,
+    NativeTarget,
+)
 
 SCHEMA = "brigade.t3_enrollment.v1"
 INPUT_SCHEMA = "brigade.t3_delegation_input.v1"
@@ -151,13 +157,25 @@ def target_for_seat(loaded: roster_mod.Roster, seat: str, *, source_revision: st
     model = binding["model"]
     if type(model) is not str or not model:
         raise EnrollmentError("invalid-target", f"seat {seat!r} T3 target model must be non-empty text")
+    runtime_mode = _target_string(binding, "runtime_mode", default=INHERIT_MODE)
+    interaction_mode = _target_string(binding, "interaction_mode", default=INHERIT_MODE)
+    if runtime_mode not in RUNTIME_MODES | {INHERIT_MODE}:
+        raise EnrollmentError(
+            "target-mode-invalid",
+            f"seat {seat!r} T3 target runtime_mode must be a T3 runtime literal or inherit",
+        )
+    if interaction_mode not in INTERACTION_MODES | {INHERIT_MODE}:
+        raise EnrollmentError(
+            "target-mode-invalid",
+            f"seat {seat!r} T3 target interaction_mode must be a T3 interaction literal or inherit",
+        )
     try:
         target = NativeTarget(
             **{key: _target_string(binding, key) for key in _TARGET_STRING_FIELDS},
             launch_model=model,
             options=tuple(options),
-            runtime_mode=_target_string(binding, "runtime_mode", default="app-server"),
-            interaction_mode=_target_string(binding, "interaction_mode", default="default"),
+            runtime_mode=runtime_mode,
+            interaction_mode=interaction_mode,
             isolation=_target_string(binding, "isolation"),
             source_revision=source_revision,
         )
@@ -165,6 +183,11 @@ def target_for_seat(loaded: roster_mod.Roster, seat: str, *, source_revision: st
         raise EnrollmentError("invalid-target", f"seat {seat!r} T3 target binding is invalid") from None
     if target.isolation != "worktree":
         raise EnrollmentError("target-isolation", f"seat {seat!r} T3 target must use worktree isolation")
+    if target.target_environment != target.origin_environment:
+        raise EnrollmentError(
+            "target-remote-unsupported",
+            f"seat {seat!r} T3 target must be local because cross-machine governed targets are unsupported",
+        )
     return target
 
 
@@ -714,6 +737,18 @@ def read_delegation_input(run_dir: Path, *, task_id: str) -> DelegationInput:
     seat, text, raw_target = payload.get("seat"), payload.get("text"), payload.get("target")
     if type(seat) is not str or type(text) is not str or not isinstance(raw_target, dict):
         raise EnrollmentError("asset-invalid", "retained delegation input is incomplete")
+    runtime_mode = raw_target.get("runtime_mode")
+    interaction_mode = raw_target.get("interaction_mode")
+    if (
+        type(runtime_mode) is not str
+        or runtime_mode not in RUNTIME_MODES | {INHERIT_MODE}
+        or type(interaction_mode) is not str
+        or interaction_mode not in INTERACTION_MODES | {INHERIT_MODE}
+    ):
+        raise EnrollmentError(
+            "target-mode-invalid",
+            "retained delegation input target uses a mode T3 does not accept",
+        )
     try:
         target = NativeTarget(
             **{key: raw_target[key] for key in (*_TARGET_STRING_FIELDS, "runtime_mode", "interaction_mode")},

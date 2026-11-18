@@ -23,7 +23,7 @@ from typing import Any, Mapping
 from . import agents as agents_mod
 from . import fleet_model_roster, roster as roster_mod
 from . import native_t3_enrollment as enrollment
-from .native_t3_contract import NativeTarget
+from .native_t3_contract import INHERIT_MODE, INTERACTION_MODES, RUNTIME_MODES, NativeTarget
 
 ADMITTED = "admitted"
 DENIED = "admission-denied"
@@ -34,6 +34,8 @@ SEAT_ORCHESTRATOR = "seat-orchestrator"
 TARGET_MISSING = "target-missing"
 TARGET_INVALID = "target-invalid"
 TARGET_CHANGED = "target-changed"
+TARGET_MODE_INVALID = "target-mode-invalid"
+TARGET_REMOTE_UNSUPPORTED = "target-remote-unsupported"
 ADAPTER_NOT_ALLOWED = "adapter-not-allowed"
 DRIVER_UNKNOWN = "driver-unknown"
 DRIVER_MISMATCH = "driver-mismatch"
@@ -110,7 +112,11 @@ def _target_refusal(roster: roster_mod.Roster, seat: str, retained: NativeTarget
     try:
         declared = enrollment.target_for_seat(roster, seat, source_revision=retained.source_revision)
     except enrollment.EnrollmentError as exc:
-        reason = TARGET_MISSING if exc.code == "seat-unbound" else TARGET_INVALID
+        reason = {
+            "seat-unbound": TARGET_MISSING,
+            "target-mode-invalid": TARGET_MODE_INVALID,
+            "target-remote-unsupported": TARGET_REMOTE_UNSUPPORTED,
+        }.get(exc.code, TARGET_INVALID)
         return DENIED, reason
     if declared != retained:
         # NativeTarget equality covers every field, including canonical options.
@@ -157,6 +163,14 @@ def evaluate(
         return _verdict(DENIED, SEAT_UNKNOWN, roster, hub)
     if seat == roster.orchestrator:
         return _verdict(DENIED, SEAT_ORCHESTRATOR, roster, hub)
+    if retained.runtime_mode not in RUNTIME_MODES | {
+        INHERIT_MODE
+    } or retained.interaction_mode not in INTERACTION_MODES | {INHERIT_MODE}:
+        # A retained target from before the native mode contract is never
+        # rewritten. It refuses until the operator re-enrolls with inherit.
+        return _verdict(DENIED, TARGET_MODE_INVALID, roster, hub)
+    if retained.target_environment != retained.origin_environment:
+        return _verdict(DENIED, TARGET_REMOTE_UNSUPPORTED, roster, hub)
     refusal = _target_refusal(roster, seat, retained)
     if refusal is not None:
         return _verdict(*refusal, roster, hub)

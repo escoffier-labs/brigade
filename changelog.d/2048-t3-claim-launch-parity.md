@@ -1,0 +1,2 @@
+- Make governed native T3 targets default `runtime_mode` and `interaction_mode` to `inherit`, accept only T3's mode literals, refuse legacy `app-server` targets with `target-mode-invalid`, and require local targets with `target-remote-unsupported`.
+- Emit `projectId`, `driverKind` and explicit modes in printed `delegate_task` arguments while never emitting `environmentId`.

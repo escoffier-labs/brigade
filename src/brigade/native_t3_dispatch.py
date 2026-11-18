@@ -36,7 +36,7 @@ from . import native_t3_observations as observations
 from . import run_task_journal as journal
 from . import native_t3_enrollment as enrollment
 from .fleet_t3_transport import SourceRevisionError
-from .native_t3_contract import NativeIntent, NativeIntentTemplate, NativeTarget
+from .native_t3_contract import INHERIT_MODE, NativeIntent, NativeIntentTemplate, NativeTarget
 
 SCHEMA = "brigade.t3_claim.v1"
 CORRELATION_SCHEMA = "brigade.t3_correlation.v1"
@@ -866,6 +866,33 @@ def _context(workspace: Path, run_id: str, task_id: str) -> Path:
     return _run_dir(workspace, run_id)
 
 
+def _delegate_arguments(text: str, target: NativeTarget, client_request_id: str) -> dict[str, Any]:
+    """Build exactly the reviewed ``delegate_task`` input for one claim.
+
+    Every emitted name is a field of the pinned T3 Code delegate schema. The
+    environment id is deliberately absent, because naming a linked environment
+    selects T3's remote path, which rejects worktree isolation. Modes are sent
+    only when the retained target declares one instead of ``inherit``.
+    """
+    arguments: dict[str, Any] = {
+        "task": text,
+        "target": {
+            "providerInstanceId": target.provider_instance,
+            "driverKind": target.driver,
+            "model": target.launch_model,
+            "projectId": target.target_project,
+            "options": [{"id": key, "value": value} for key, value in target.options],
+        },
+        "isolation": "worktree",
+        "clientRequestId": client_request_id,
+    }
+    if target.runtime_mode != INHERIT_MODE:
+        arguments["runtimeMode"] = target.runtime_mode
+    if target.interaction_mode != INHERIT_MODE:
+        arguments["interactionMode"] = target.interaction_mode
+    return arguments
+
+
 def claim(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) -> dict[str, Any]:
     """Reserve, prepare, bind, claim and request exactly once for one task."""
     workspace = workspace.expanduser().resolve()
@@ -953,16 +980,9 @@ def claim(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) -> 
                     "dispatch_attempt": attempt,
                     "state": "claimed",
                     "clientRequestId": intent.native_client_request_key,
-                    "delegate_task": {
-                        "task": current.retained.text,
-                        "target": {
-                            "providerInstanceId": target.provider_instance,
-                            "model": target.launch_model,
-                            "options": [{"id": key, "value": value} for key, value in target.options],
-                        },
-                        "isolation": "worktree",
-                        "clientRequestId": intent.native_client_request_key,
-                    },
+                    "delegate_task": _delegate_arguments(
+                        current.retained.text, target, intent.native_client_request_key
+                    ),
                 }
     except capacity.CapacityError as exc:
         raise _refuse(exc.code, _bound(str(exc))) from None

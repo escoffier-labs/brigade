@@ -15,6 +15,12 @@ from typing import Literal
 
 from brigade import fleet_model_admission, roster_readiness, run_task_journal, run_tasks
 
+# The exact literals accepted by the T3 Code delegate_task schema, plus
+# ``inherit`` so a target can defer to the parent thread's own modes.
+RUNTIME_MODES = frozenset({"approval-required", "auto-accept-edits", "auto", "full-access"})
+INTERACTION_MODES = frozenset({"default", "plan"})
+INHERIT_MODE = "inherit"
+
 _REFUSALS = fleet_model_admission._POLICY_DENIALS | fleet_model_admission._PROOF_DENIALS
 _AUTHORITY_KINDS = frozenset(
     {"policy", "decision", "delegation", "admission", "reservation", "launch-proof", "budget-dispatch"}
@@ -111,7 +117,9 @@ class NativeTarget:
             self.isolation,
         ):
             _reference(value)
-        _require(self.interaction_mode in {"default", "plan"} and self.isolation in {"shared", "worktree"})
+        _require(self.runtime_mode in RUNTIME_MODES | {INHERIT_MODE})
+        _require(self.interaction_mode in INTERACTION_MODES | {INHERIT_MODE})
+        _require(self.isolation in {"shared", "worktree"})
         _require(type(self.source_revision) is str and re.fullmatch(r"[0-9a-f]{40}", self.source_revision) is not None)
         pairs = []
         for pair in _sequence(self.options):

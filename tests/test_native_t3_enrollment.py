@@ -55,7 +55,7 @@ def _roster_text(*, targets: tuple[str, ...] = ("coder",), isolation: str = "wor
     for name in targets:
         lines += [
             f"[t3_targets.{name}]",
-            'origin_environment = "env-origin"',
+            'origin_environment = "env-target"',
             'origin_thread = "thread-parent"',
             'target_environment = "env-target"',
             'target_project = "project-test"',
