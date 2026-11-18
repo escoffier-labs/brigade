@@ -106,8 +106,12 @@ apply. It admits only all-`append_evidence` Tier 0 proposals and then requires
 each target card's search projection to stay unchanged. Any applied edit
 changes it, including an evidence append, so reflection's Tier 0 applies happen
 only on the evaluation fixture scope. An exact-duplicate merge is the one
-exception. It is admitted under the retrieval gate's bounded-drift checks, and
-the blast cap and evidence gates still hold it for a reviewer today. Verifier
+exception. It is admitted under the retrieval gate's bounded-drift checks. One
+pair of trusted exact duplicates counts as one change, identical claims stand in
+for attested evidence, and the merge's own alias is not lineage, so a clean
+merge applies without a reviewer. An `agent-unreviewed` pair, a pair with
+earlier lineage, several pairs in one proposal and a pair beside other ops still
+wait for a reviewer. Verifier
 applies and automatic compensations take their own gates instead.
 
 External and handoff-only curation

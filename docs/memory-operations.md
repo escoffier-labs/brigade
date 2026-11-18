@@ -1249,12 +1249,32 @@ frees a slot. Hybrid mode is out of scope. The gate holds any scope that is not
 lexical with `retrieval_eval_projection_changed`. The compensation watch
 reverses an automatic merge with its exact inverse.
 
-Three older gates still hold every merge before this one is the deciding hold.
-The one-card blast cap counts the keeper and the retired card
-(`blast_cap_exceeded`). The evidence floors need attested proof a merge does not
-carry. `card_trust` refuses `agent-unreviewed` cards, and a trusted keeper is
-Tier 2 because the merge adds an alias to a lineage-trusted card. Until a later
-change reconsiders those, a merge opens and waits for a reviewer.
+Three older preflight gates used to hold every merge before this gate was the
+deciding hold. Each is now relaxed for `merge_exact_duplicates` alone, and every
+other op class keeps them exactly as before:
+
+- Blast cap. One exact-merge pair counts as one changed path, though it changes
+  the keeper's text and retires the other card. The proposal must hold exactly
+  one merge pair. Several pairs, or a pair beside any other op, still exceed the
+  cap (`blast_cap_exceeded`). Both cards stay in the 24 hour cooldown.
+- Evidence floors. For a merge, identical claims are the proof, in the same way
+  `anchor_proof` lets anchoring skip attested evidence. Preflight recomputes
+  that fact from the live heads with the comparison the merge op validates with,
+  never from the proposal body, and the report records it as
+  `structural_merge_proof`. A pair whose live claims differ keeps the floors and
+  holds with `proof_binding_incomplete`. Contrary evidence still holds.
+- Lineage. A trusted keeper no longer goes to Tier 2 because of the alias the
+  merge itself adds. Lineage is read from the before texts of both cards, so a
+  link that existed before the merge still routes the merge to review: a
+  predecessor or successor field, an existing alias on either card, or another
+  live card that names either one.
+
+Trust is unchanged. `agent-unreviewed` cards stay out of automatic apply
+(`card_trust_denied`), and only reviewed, imported and policy-promoted cards
+qualify. The kill switch, `auto_apply` policy, the policy's class listing,
+curation ownership, the cooldown and the history veto all apply to a merge as
+they do to any other automatic apply. A clean merge of two trusted exact
+duplicates therefore applies with no reviewer on a real scope.
 
 Operator procedure:
 
