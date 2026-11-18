@@ -246,13 +246,16 @@ def _dispatch_ratchet(args) -> int:
     if summary.get("stale_physical_actions"):
         print(f"stale_physical_actions: {summary['stale_physical_actions']} (status older than the pending window)")
     now = datetime.now(timezone.utc)
-    for pending_row in report.get("pending_physical") or []:
-        if isinstance(pending_row, dict):
-            age = outcome_skill_exec.age_label(
-                str(pending_row.get("status") or "status"), pending_row.get("status_changed_at"), now
-            )
-            for command in pending_row.get("commands") or []:
-                print(f"  operator: {command} ({age})")
+    for key, prefix in (("pending_physical", "operator: "), ("stale_physical", "")):
+        if key == "stale_physical" and report.get(key):
+            print("stale: older rollbacks, not pending actions (review before running any)")
+        for row in report.get(key) or []:
+            if isinstance(row, dict):
+                age = outcome_skill_exec.age_label(
+                    str(row.get("status") or "status"), row.get("status_changed_at"), now
+                )
+                for command in row.get("commands") or []:
+                    print(f"  {prefix}{command} ({age})")
     print(f"ineligibility_rate: {report.get('ineligibility_rate')}")
     if report.get("leading_ineligibility_reason"):
         print(f"leading_ineligibility_reason: {report['leading_ineligibility_reason']}")

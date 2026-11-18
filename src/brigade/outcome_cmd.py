@@ -2192,8 +2192,9 @@ def reconcile(
             cohorts = item.cohorts
             prior_status = item.prior_status
             execution = "noop"
-            if decision.action in ("install", "rollback"):
-                if kinds.get(decision.artifact_id, "skill") == "skill":
+            is_skill = kinds.get(decision.artifact_id, "skill") == "skill"
+            if decision.action in ("install", "rollback") or (decision.action == "bump" and is_skill):
+                if is_skill:
                     execution = outcome_skill_exec.ROUTING_ONLY
                     pending[decision.artifact_id] = outcome_skill_exec.pending_commands(
                         target, decision.artifact_id, decision.new_status

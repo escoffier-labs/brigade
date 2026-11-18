@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import localio, outcome
-from .outcome_skill_exec import PendingPhysical
+from .outcome_skill_exec import PendingAction, PendingPhysical, sort_pending
 
 REPORT_VERSION = 1
 REPORT_MAX_BYTES = 64 * 1024
@@ -140,6 +140,7 @@ def build_report(
     audit = _receipt_audit(target)
     pending_set = pending or PendingPhysical()
     recent = {key: action for key, action in pending_set.recent.items() if action.commands}
+    stale = {key: action for key, action in pending_set.stale.items() if action.commands}
     hold_ids = [row["artifact_id"] for row in regressions if row["reason_code"] in outcome.HOLD_CODES]
     report: dict[str, Any] = {
         "version": REPORT_VERSION,
@@ -155,21 +156,27 @@ def build_report(
             "pending_physical_actions": sum(len(action.commands) for action in recent.values()),
             "stale_physical_actions": pending_set.stale_actions,
         },
-        "pending_physical": [
-            {
-                "artifact_id": artifact_id,
-                "status": action.status,
-                "status_changed_at": action.changed_at,
-                "commands": [str(c) for c in action.commands[:_PENDING_MAX_COMMANDS]],
-            }
-            for artifact_id, action in sorted(recent.items())[:_PENDING_MAX_ARTIFACTS]
-        ],
+        "pending_physical": _pending_rows(recent),
+        "stale_physical": _pending_rows(stale),
         "decisions_by_action": dict(sorted(counts.items())),
         "regressions": regressions,
         "ineligibility_rate": audit["ineligibility_rate"],
         "leading_ineligibility_reason": audit["leading_ineligibility_reason"],
     }
     return _fit(report)
+
+
+def _pending_rows(actions: Mapping[str, PendingAction]) -> list[dict[str, Any]]:
+    """Bounded rows, current-run first then newest, so the cap never drops a fresh change."""
+    return [
+        {
+            "artifact_id": artifact_id,
+            "status": action.status,
+            "status_changed_at": action.changed_at,
+            "commands": [str(c) for c in action.commands[:_PENDING_MAX_COMMANDS]],
+        }
+        for artifact_id, action in sort_pending(actions)[:_PENDING_MAX_ARTIFACTS]
+    ]
 
 
 def mode_label(apply: object) -> str:

@@ -382,3 +382,190 @@ def test_text_output_labels_a_current_run_command_with_its_age(tmp_path, capsys)
     ]
     assert operator_lines
     assert all(line.endswith("(promoted today)") for line in operator_lines)
+
+
+def _set_status_ts(tmp_path: Path, value: object) -> None:
+    path = outcome_cmd._status_path(tmp_path)
+    data = json.loads(path.read_text())
+    data["artifacts"][SKILL]["last_action_ts"] = value
+    path.write_text(json.dumps(data))
+
+
+def test_a_promoted_install_older_than_the_window_stays_listed(tmp_path, capsys):
+    # Install commands come from current drift, not history: an install that was never run, or a copy
+    # that drifted later, must not stop being reported just because the promotion is old.
+    _import(tmp_path, capsys)
+    seed_registry_skill_scorecard_promotion(tmp_path, SKILL)
+    assert _reconcile(tmp_path, capsys)["new_status"] == "promoted"
+    _age_status(tmp_path, 90)
+
+    report = _dry_run_report(tmp_path, capsys)
+
+    assert report["summary"]["pending_physical_actions"] >= 2
+    assert report["summary"]["stale_physical_actions"] == 0
+    assert report.get("stale_physical") == []
+    (row,) = report["pending_physical"]
+    assert row["artifact_id"] == SKILL
+    assert row["status"] == "promoted"
+    assert all(command.startswith("brigade skills install") for command in row["commands"])
+
+
+def test_ratchet_text_and_json_list_stale_rollbacks_under_their_own_heading(tmp_path, capsys):
+    _demote(tmp_path, capsys)
+    _age_status(tmp_path, 90)
+    _dry_run_report(tmp_path, capsys)
+
+    assert cli.main(["outcome", "ratchet", "--target", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "pending_physical_actions: 0" in out
+    assert "stale:" in out
+    assert f"brigade skills rollback {SKILL} --target claude" in out
+    assert "(demoted 90 days ago)" in out
+    # Stale rows are not presented as pending operator actions.
+    assert "operator:" not in out
+
+    assert cli.main(["outcome", "ratchet", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pending_physical"] == []
+    (row,) = payload["stale_physical"]
+    assert row["artifact_id"] == SKILL
+    assert row["status"] == "demoted"
+    assert row["status_changed_at"]
+    assert all(command.startswith("brigade skills rollback") for command in row["commands"])
+
+
+def test_a_malformed_transition_time_is_stale_and_still_listed_under_stale(tmp_path, capsys):
+    _demote(tmp_path, capsys)
+    _set_status_ts(tmp_path, "not-a-date")
+
+    report = _dry_run_report(tmp_path, capsys)
+
+    assert report["summary"]["pending_physical_actions"] == 0
+    assert report["summary"]["stale_physical_actions"] >= 2
+    assert report["pending_physical"] == []
+    assert [row["artifact_id"] for row in report["stale_physical"]] == [SKILL]
+    assert cli.main(["outcome", "ratchet", "--target", str(tmp_path)]) == 0
+    assert "unknown age" in capsys.readouterr().out
+
+
+def _fake_commands(monkeypatch, ids: list[str]) -> None:
+    monkeypatch.setattr(
+        outcome_skill_exec,
+        "pending_commands",
+        lambda target, artifact_id, status, plan=None: (
+            [f"brigade skills {status} {artifact_id}"] if artifact_id in ids else []
+        ),
+    )
+
+
+def _status_map(now: datetime, **entries: tuple[str, object]) -> dict[str, dict]:
+    return {name: {"status": status, "last_action_ts": ts} for name, (status, ts) in entries.items()}
+
+
+def test_a_run_with_one_recent_and_one_stale_demotion_splits_them(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 17, tzinfo=timezone.utc)
+    status_map = _status_map(
+        now,
+        recent=("demoted", (now - timedelta(days=3)).isoformat()),
+        old=("demoted", (now - timedelta(days=90)).isoformat()),
+    )
+    _fake_commands(monkeypatch, ["recent", "old"])
+
+    pending = outcome_skill_exec.pending_by_artifact(
+        tmp_path, status_map, {}, now=now, window_days=14, current_run_ids=()
+    )
+
+    assert set(pending.recent) == {"recent"}
+    assert set(pending.stale) == {"old"}
+    assert pending.stale_actions == 1
+    assert pending.stale["old"].status == "demoted"
+
+
+def test_the_window_compares_exact_time_not_whole_days(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
+    # 14 days and 23 hours old floors to 14 whole days, but it is older than a 14 day window.
+    over = (now - timedelta(days=14, hours=23)).isoformat()
+    exact = (now - timedelta(days=14)).isoformat()
+    status_map = _status_map(now, over=("demoted", over), exact=("demoted", exact))
+    _fake_commands(monkeypatch, ["over", "exact"])
+
+    pending = outcome_skill_exec.pending_by_artifact(tmp_path, status_map, {}, now=now, window_days=14)
+
+    assert set(pending.recent) == {"exact"}
+    assert set(pending.stale) == {"over"}
+
+
+def test_a_promoted_install_is_listed_whatever_its_age_or_timestamp(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 17, tzinfo=timezone.utc)
+    status_map = _status_map(
+        now,
+        ancient=("promoted", (now - timedelta(days=400)).isoformat()),
+        malformed=("promoted", "garbage"),
+        missing=("promoted", None),
+    )
+    _fake_commands(monkeypatch, ["ancient", "malformed", "missing"])
+    monkeypatch.setattr(outcome_skill_exec, "_read_plan", lambda target: [])
+
+    pending = outcome_skill_exec.pending_by_artifact(tmp_path, status_map, {}, now=now, window_days=14)
+
+    assert set(pending.recent) == {"ancient", "malformed", "missing"}
+    assert pending.stale == {} and pending.stale_actions == 0
+
+
+def test_pending_rows_sort_current_run_then_newest_before_the_cap(tmp_path):
+    base = datetime(2026, 11, 17, tzinfo=timezone.utc)
+    recent = {
+        f"skill-{n:02d}": outcome_skill_exec.PendingAction(
+            "demoted", (base - timedelta(days=n % 10)).isoformat(), [f"brigade skills rollback skill-{n:02d}"]
+        )
+        for n in range(25)
+    }
+    recent["zzz-current"] = outcome_skill_exec.PendingAction(
+        "demoted", (base - timedelta(days=13)).isoformat(), ["brigade skills rollback zzz-current"], current_run=True
+    )
+    stale = {
+        f"old-{n:02d}": outcome_skill_exec.PendingAction(
+            "demoted", (base - timedelta(days=100 + n)).isoformat(), [f"brigade skills rollback old-{n:02d}"]
+        )
+        for n in range(25)
+    }
+
+    report = outcome_ratchet_report.build_report(
+        [],
+        apply=True,
+        generated_at=base,
+        target=tmp_path,
+        pending=outcome_skill_exec.PendingPhysical(recent=recent, stale=stale, stale_actions=25),
+    )
+
+    listed = [row["artifact_id"] for row in report["pending_physical"]]
+    assert len(listed) == 20
+    assert listed[0] == "zzz-current"
+    assert report["summary"]["pending_physical_actions"] == 26
+    # Newest first, then artifact id: skill-00 and skill-10 share the newest day.
+    assert listed[1:4] == ["skill-00", "skill-10", "skill-20"]
+    stale_listed = [row["artifact_id"] for row in report["stale_physical"]]
+    assert stale_listed[0] == "old-00" and len(stale_listed) == 20
+    assert report["summary"]["stale_physical_actions"] == 25
+
+
+def test_a_bump_shows_the_same_pending_install_in_reconcile_output_and_the_report(tmp_path, capsys):
+    _import(tmp_path, capsys)
+    seed_registry_skill_scorecard_promotion(tmp_path, SKILL)
+    assert _reconcile(tmp_path, capsys)["action"] == "install"
+    config = outcome.ReconcileConfig(cooldown_seconds=0, bump_min_helped=1)
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=config, json_output=True, report=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    decision = next(item for item in payload["decisions"] if item["artifact_id"] == SKILL)
+    assert decision["action"] == "bump"
+    report = outcome_ratchet_report.load_report(tmp_path)
+    assert set(decision["pending_commands"]) == {
+        command for row in report["pending_physical"] for command in row["commands"]
+    }
+    assert decision["pending_commands"]
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=config, report=True) == 0
+    out = capsys.readouterr().out
+    for command in decision["pending_commands"]:
+        assert f"operator: {command}" in out
