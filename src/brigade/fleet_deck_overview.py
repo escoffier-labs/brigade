@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 from . import fleet_action_sources, fleet_command_deck as deck
 from .fleet_action_auth import canonical
 from .fleet_deck_empty_copy import COPY
-from .fleet_t3_unknown import T3_UNKNOWN_LABELS, unknown_note
+from .fleet_t3_unknown import T3_UNKNOWN_LABELS, idle_card_text, unknown_note
 from . import fleet_deck_activity as activity, fleet_live_routing, ui_theme
 from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, StationView, Tile
 
@@ -145,15 +145,15 @@ def summarize(view: DeckView) -> Summary:
     total = sum(station.station.capacity for station in view.stations)
     idle = offline = UNKNOWN
     if plane is not None and "machines" in plane.present:
-        idle_slots = offline_count = 0
+        idle_slots = offline_count = unknown_count = 0
         for station in view.stations:
             machine = machine_for(view, station)
             status = station_status(station, machine)
-            if status in {"offline", "stale"}:
-                offline_count += 1
-            elif status in {"idle", "working"} and machine is not None:
+            offline_count += status in {"offline", "stale"}
+            unknown_count += status == "unknown" and machine is not None  # T3 observer not reporting: uncounted
+            if status in {"idle", "working"} and machine is not None:
                 idle_slots += free_seats(station, machine)
-        idle, offline = str(idle_slots), str(offline_count)
+        idle, offline = idle_card_text(idle_slots, unknown_count), str(offline_count)
     queued = plane.queue.eligible_count if plane is not None and "queue" in plane.present else UNKNOWN
     return Summary(busy=busy, total=total, idle=idle, offline=offline, queued=queued)
 

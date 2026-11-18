@@ -102,9 +102,16 @@ def test_snapshot_reports_a_node_with_no_health_row_as_unknown(conn):
     assert row["unused_reason"] == fleet_t3_health.T3_HEALTH_MISSING
 
 
-def test_snapshot_reports_every_machine_unknown_when_the_health_read_fails(conn, monkeypatch):
+def _break_health_table(conn) -> None:
+    """A real read error (not a missing table), so ``classify_nodes`` takes its unreadable path."""
+    conn.execute("ALTER TABLE fleet_t3_observations DROP COLUMN last_success_at")
+    conn.commit()
+    assert fleet_t3_health.classify_nodes(conn, _now()) is None
+
+
+def test_snapshot_reports_every_machine_unknown_when_the_health_read_fails(conn):
     _observe_machines(conn)
-    monkeypatch.setattr(fleet_t3_health, "classify_nodes", lambda *_a, **_k: None)
+    _break_health_table(conn)
     for name in (LINUX_1, LINUX_2):
         row = _machine(conn, name)
         assert row["available_slots"] is None
@@ -128,7 +135,8 @@ def test_deck_renders_a_fresh_node_as_idle_and_a_stale_node_as_unknown(conn):
     fresh, stale = view.stations
     assert overview.station_status(fresh, overview.machine_for(view, fresh)) == "idle"
     assert overview.station_status(stale, overview.machine_for(view, stale)) == "unknown"
-    assert overview.summarize(view).idle == "1"  # only the fresh node's slot; the stale one is not counted
+    assert overview.summarize(view).idle == "1 (1 unknown)"  # the stale node's slot is not counted, but is named
+    assert overview.verdict_text(view, _now()).startswith("COVERAGE UNKNOWN")  # never ALL CLEAR (#2724 review)
     assert overview.summarize(view).offline == "0"  # unknown is not offline either
     machine = overview.machine_for(view, stale)
     assert overview.machine_notes(stale, machine, "unknown") == (("sessions unknown", True),)
@@ -150,14 +158,14 @@ def test_deck_names_a_missing_observer_and_leaves_the_seat_bar_unknown(conn):
     assert "1 unknown" in seats and "idle" not in seats
 
 
-@pytest.mark.parametrize("name", [LINUX_1, LINUX_2])
-def test_deck_renders_every_machine_unknown_when_the_health_read_fails(conn, monkeypatch, name):
+def test_deck_renders_every_machine_unknown_when_the_health_read_fails(conn):
     _observe_machines(conn)
-    monkeypatch.setattr(fleet_t3_health, "classify_nodes", lambda *_a, **_k: None)
+    _break_health_table(conn)
     view = _deck_view(conn)
     for station in view.stations:
         assert overview.station_status(station, overview.machine_for(view, station)) == "unknown"
-    assert overview.summarize(view).idle == "0"
+    assert overview.summarize(view).idle == "0 (2 unknown)"
+    assert overview.verdict_text(view, _now()).startswith("COVERAGE UNKNOWN")
 
 
 def test_a_fresh_machine_state_renders_exactly_as_before():
