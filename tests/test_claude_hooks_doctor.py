@@ -55,6 +55,26 @@ def test_doctor_reports_session_integrity_refusal_without_crashing(tmp_path: Pat
     assert check["detail"].index("stale skill") < check["detail"].index("session directory integrity refused:")
 
 
+def test_doctor_keeps_full_detail_for_settings_error_and_integrity_refusal(tmp_path: Path, capsys):
+    target = _wired(tmp_path)
+    (target / ".claude" / "settings.json").write_text("{not-json\n")
+    sessions = target / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.parent.mkdir(parents=True, exist_ok=True)
+    sessions.write_text("not a directory")
+    (target / ".claude" / "skills" / "brigade-work" / "SKILL.md").write_text("locally edited skill\n")
+
+    check = _loop_check(target, capsys, expect_rc=1)
+
+    assert check["status"] == "FAIL"
+    assert ": state=error; " in check["detail"]
+    assert "stale skill" in check["detail"]
+    assert "hook settings error" in check["detail"]
+    assert "JSONDecodeError" in check["detail"]
+    assert "session directory integrity refused:" in check["detail"]
+    assert check["detail"].index("stale skill") < check["detail"].index("hook settings error")
+    assert check["detail"].index("hook settings error") < check["detail"].index("session directory integrity refused:")
+
+
 def test_doctor_reports_advisory_only_without_hooks(tmp_path: Path, capsys):
     target = _wired(tmp_path)
     assert hooks_uninstall(target=target) == 0

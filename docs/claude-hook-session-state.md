@@ -60,7 +60,7 @@ fail-open response with the doctor pointer. Best-effort sidecar append failures
 retain their false result. Backend unavailability also remains an ordinary I/O
 error, with no pathname fallback.
 
-Doctor reports `FAIL claude work loop: session directory integrity refused: ...`
+Doctor reports `FAIL claude work loop: state=error; session directory integrity refused: ...`
 for unsafe session storage. Repository adoption records the refusal as an issue
 on that repository's partial row and continues reporting the other repositories.
 

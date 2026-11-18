@@ -837,7 +837,9 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
     # whole work-loop package; treat that as FAIL so agents stop guessing.
     if hook_error:
         status = FAIL
-        detail = f"state=error; hook settings error: {hook_error}"
+        # Keep the classifier's full, ordered diagnostic; force only the state token.
+        _state, sep, diagnostics = detail.partition("; ")
+        detail = f"state=error; {diagnostics}" if sep else detail
     legacy_count = hooks.get("legacy_handler_count", 0)
     if legacy_count and status != FAIL:
         status = WARN
