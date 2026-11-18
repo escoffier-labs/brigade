@@ -92,6 +92,13 @@ def register(sub: argparse._SubParsersAction) -> None:
                 "--case", dest="cases", action="append", help="Run only this case; repeat for several (default: all)."
             )
             parser.add_argument("--timeout", type=float, default=600.0, help="Seconds allowed per arm session.")
+            parser.add_argument(
+                "--resume-digest",
+                help=(
+                    "Reviewed evidence digest of the existing output. Without it, earlier evidence in the "
+                    "output directory is moved aside and every cell runs fresh."
+                ),
+            )
         parser.set_defaults(func=_dispatch_paired)
     p_mcp = trial_sub.add_parser(
         "paired-mcp", help="Exclusive MCP server for a live paired arm (spawned by the adapter)."
@@ -197,7 +204,12 @@ def _dispatch_paired(args) -> int:
             if args.output_dir is None:
                 raise ValueError("live paired trials need --output-dir")
             result = model_trials.paired_live(
-                args.manifest, args.output_dir, claude_bin=args.claude_bin, cases=args.cases, timeout=args.timeout
+                args.manifest,
+                args.output_dir,
+                claude_bin=args.claude_bin,
+                cases=args.cases,
+                timeout=args.timeout,
+                resume_digest=args.resume_digest,
             )
         elif args.trial_command == "paired-plan":
             result = model_trials.paired_plan(args.manifest)

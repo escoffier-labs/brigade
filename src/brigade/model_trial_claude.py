@@ -20,11 +20,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, BinaryIO, Iterator, Mapping, Sequence
 
-from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS
+from . import dirfd, proc
+from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS, open_executable
 from .model_trial_paired import (
     INSTRUCTION,
     TOOLS,
@@ -39,7 +42,8 @@ from .model_trial_paired import (
 from .paired_mcp import RECEIPT_FILE, SERVER_NAME, TRACE_FILE
 from .paired_output import inspect_tree, safe_output
 from .paired_output import write as safe_write
-from .skills_cmd.registry import _collect_source_tree, _package_identity
+from .model_trial_paired import collect_package
+from .skills_cmd.registry import _package_identity
 
 ADAPTER_ID = "brigade.claude-cli-live.v1"
 LIVE_SCHEMA = "brigade.paired_trial.live.v1"
@@ -56,8 +60,15 @@ VERSION_TIMEOUT = 30.0
 EXIT_GRACE = 10.0
 REDACTED = b"[redacted]"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Every read of child or server output is bounded before it is buffered. Exceeding a cap fails the cell.
 MAX_STREAM_BYTES = 16 * 1024 * 1024
+MAX_LINE_BYTES = 4 * 1024 * 1024
+MAX_STDERR_BYTES = 1024 * 1024
 STDERR_TAIL = 65536
+MAX_TRACE_BYTES = 4 * 1024 * 1024
+MAX_RECEIPT_BYTES = 1024 * 1024
+MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
+MAX_LAUNCHER_FILE_BYTES = 1024 * 1024
 PRELUDE = (
     "You are the subject of one paired skill evaluation cell.\n"
     "The only tools you have are brief, verify, receipt, scoreability and capture, served by the evaluator. "
@@ -114,6 +125,7 @@ LIVE_MODULES = (
     "mcp_server.py",
     "memory_verify_seat.py",
     "dirfd.py",
+    "proc.py",
     "run_dirfd.py",
     "skills_cmd/registry.py",
 )
@@ -124,12 +136,105 @@ def module_hashes() -> dict[str, str]:
     return {name: _sha((here / name).read_bytes()) for name in LIVE_MODULES}
 
 
+def _token_forms(token: str) -> list[bytes]:
+    return sorted({form.encode("utf-8") for form in (token, json.dumps(token)[1:-1]) if form}, key=len, reverse=True)
+
+
 def redact(data: bytes, token: str) -> bytes:
     """Remove the OAuth token, raw and JSON-escaped, from bytes about to be hashed and saved."""
-    for form in {token, json.dumps(token)[1:-1]}:
-        if form:
-            data = data.replace(form.encode("utf-8"), REDACTED)
+    for form in _token_forms(token):
+        data = data.replace(form, REDACTED)
     return data
+
+
+class ClaudeExecutable:
+    """The Claude Code file this run executes, hashed once and bound for the whole run.
+
+    On Linux the file is opened, hashed and kept open, and every launch (the version probe and each
+    arm) execs that open descriptor (``proc.held_argv``), so replacing the path after the hash cannot
+    change what runs and receives the OAuth token. ``verify`` re-hashes the held file before each
+    launch to catch an in-place rewrite. A ``launcher`` prefix (a script stand-in in tests) cannot be
+    held, so it is hashed and re-checked by path and recorded as ``launch: launcher``. Other
+    platforms have no held launch and refuse live runs.
+    """
+
+    def __init__(self, *, display: str, sha256: str, size: int, held_fd: int | None, launcher: Sequence[str]) -> None:
+        self.display, self.sha256, self.size, self.held_fd, self.launcher = (
+            display,
+            sha256,
+            size,
+            held_fd,
+            tuple(launcher),
+        )
+
+    @property
+    def argv0(self) -> str:
+        return self.display
+
+    @property
+    def pass_fds(self) -> tuple[int, ...]:
+        return () if self.held_fd is None else (self.held_fd,)
+
+    def command(self, argv: Sequence[str]) -> list[str]:
+        """The process command for ``argv`` (whose first item is only the name the CLI sees)."""
+        if self.held_fd is not None:
+            return proc.held_argv(self.held_fd, argv)
+        return [*self.launcher, *argv]
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "sha256": self.sha256,
+            "size_bytes": self.size,
+            "launch": "held-fexecve" if self.held_fd is not None else "launcher",
+        }
+
+    def verify(self) -> None:
+        """Refuse when the bound file no longer hashes to the recorded digest."""
+        if self.held_fd is not None:
+            digest_, size = _hash_descriptor(self.held_fd)
+        else:
+            data = read_capped(Path(self.display), MAX_LAUNCHER_FILE_BYTES)
+            digest_, size = _sha(data), len(data)
+        if (digest_, size) != (self.sha256, self.size):
+            raise ValueError("the Claude executable changed after it was hashed; no further cell was launched")
+
+
+def _hash_descriptor(fd: int) -> tuple[str, int]:
+    """SHA-256 and size of a held file, read at explicit offsets so the descriptor position is untouched."""
+    hasher, offset = hashlib.sha256(), 0
+    while chunk := os.pread(fd, 1024 * 1024, offset):
+        hasher.update(chunk)
+        offset += len(chunk)
+    return hasher.hexdigest(), offset
+
+
+@contextmanager
+def bind_executable(claude_bin: str, launcher: Sequence[str] = ()) -> Iterator[ClaudeExecutable]:
+    """Resolve ``claude_bin`` once. Hash it, hold it open and yield the handle every launch uses."""
+    if launcher:
+        path = Path(claude_bin)
+        if not path.is_file():
+            raise ValueError(f"claude executable not found: {claude_bin}")
+        data = read_capped(path, MAX_LAUNCHER_FILE_BYTES)
+        yield ClaudeExecutable(display=str(path), sha256=_sha(data), size=len(data), held_fd=None, launcher=launcher)
+        return
+    if not proc.held_exec_supported():
+        raise ValueError(
+            "live paired trials launch the verified Claude executable from a held descriptor, which this "
+            "platform does not support. No model was launched."
+        )
+    resolved = shutil.which(claude_bin)
+    if resolved is None:
+        raise ValueError(f"claude executable not found: {claude_bin}")
+    try:
+        fd, canonical, identity = open_executable(resolved)  # Refuses scripts and launchers: they run another file.
+    except OSError as exc:
+        raise ValueError(f"the Claude executable could not be opened and hashed: {claude_bin}") from exc
+    try:
+        # identity is (device, inode, size, mtime, sha256) of the file behind fd.
+        yield ClaudeExecutable(display=canonical, sha256=identity[4], size=identity[2], held_fd=fd, launcher=())
+    finally:
+        os.close(fd)
 
 
 def ancestor_instruction_file(cwd: Path) -> Path | None:
@@ -231,7 +336,8 @@ def mcp_config(case: str, target: Path, package_dir: Path, state_dir: Path) -> d
                     "--state-dir",
                     str(state_dir),
                 ],
-                "env": {"PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+                # The empty value overrides any inherited token, so the server process never holds it.
+                "env": {"PYTHONPATH": str(Path(__file__).resolve().parents[1]), TOKEN_ENV: ""},
             }
         }
     }
@@ -382,100 +488,168 @@ def _kill(proc: subprocess.Popen[bytes]) -> None:
         pass
 
 
+class _StderrCapture:
+    """Drain the child's stderr into memory, removing the token before any byte is kept or saved.
+
+    Only the last ``STDERR_TAIL`` redacted bytes survive. Total output past ``MAX_STDERR_BYTES`` is
+    an overflow the caller turns into a failed cell.
+    """
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.hold = max((len(form) for form in _token_forms(token)), default=1) - 1
+        self.tail = bytearray()
+        self.total = 0
+        self.overflow = False
+
+    def _keep(self, data: bytes) -> None:
+        self.tail += data
+        if len(self.tail) > STDERR_TAIL:
+            del self.tail[:-STDERR_TAIL]
+
+    def drain(self, pipe: BinaryIO, on_overflow: Any) -> None:
+        carry = b""  # The last bytes of the previous read, in case the token straddles two reads.
+        try:
+            while chunk := pipe.read1(65536):  # type: ignore[attr-defined]
+                self.total += len(chunk)
+                if self.total > MAX_STDERR_BYTES and not self.overflow:
+                    self.overflow = True
+                    on_overflow()
+                data = redact(carry + chunk, self.token)
+                cut = max(len(data) - self.hold, 0)
+                self._keep(data[:cut])
+                carry = data[cut:]
+        except (OSError, ValueError):
+            pass
+        self._keep(redact(carry, self.token))
+
+
 def _run_process(
-    argv: list[str],
+    command: list[str],
     env: dict[str, str],
     cwd: Path,
     message: str,
     timeout: float,
     observer: _Observer,
-    stderr_path: Path,
     token: str,
-) -> tuple[bytes, int | None, bool]:
+    *,
+    pass_fds: tuple[int, ...] = (),
+) -> tuple[bytes, bytes, int | None, bool]:
+    """Run one arm. Stdout and stderr stay in memory, redacted, and bounded line by line and in total."""
     raw: list[bytes] = []
     size = 0
-    with stderr_path.open("wb") as err:
-        proc = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=err,
-            start_new_session=os.name == "posix",
-        )
-        timed_out = threading.Event()
-        expiry = threading.Lock()
+    capture = _StderrCapture(token)
+    extra: dict[str, Any] = {"pass_fds": pass_fds} if pass_fds else {}
+    child = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=os.name == "posix",
+        **extra,
+    )
+    timed_out = threading.Event()
+    expiry = threading.Lock()
 
-        def expire() -> None:
-            with expiry:
-                # A finished cell must not flip to a timeout or signal a pid group that was recycled.
-                if proc.poll() is None:
-                    timed_out.set()
-                    _kill(proc)
-
-        timer = threading.Timer(timeout, expire)
-        timer.daemon = True
-        timer.start()
-        try:
-            assert proc.stdin is not None and proc.stdout is not None
-            try:
-                proc.stdin.write(message.encode("utf-8"))
-                proc.stdin.close()
-            except OSError:
-                pass
-            for line in proc.stdout:
-                line = redact(line, token)  # Observer, evidence and hashes only ever see redacted bytes.
-                raw.append(line)
-                size += len(line)
-                if size > MAX_STREAM_BYTES:
-                    observer.failure = observer.failure or "stream_too_large"
-                    break
-                text = line.decode("utf-8", "replace").strip()
-                if not text:
-                    continue
-                try:
-                    event = json.loads(text)
-                except ValueError:
-                    event = None
-                if not isinstance(event, dict):
-                    observer.failure = observer.failure or "malformed_stream"
-                    break
-                if observer.feed(event):
-                    break
-            if observer.failure is not None:
-                _kill(proc)
-            timer.cancel()
-            with expiry:  # An expiry already running finishes before we reap.
-                pass
-            try:
-                code = proc.wait(timeout=EXIT_GRACE)
-            except subprocess.TimeoutExpired:  # Closed stdout but kept running.
+    def expire() -> None:
+        with expiry:
+            # A finished cell must not flip to a timeout or signal a pid group that was recycled.
+            if child.poll() is None:
                 timed_out.set()
-                _kill(proc)
-                code = proc.wait()
-        finally:
-            timer.cancel()
-            _kill(proc)
-            if proc.stdout is not None:
-                proc.stdout.close()
-    return b"".join(raw), code, timed_out.is_set()
+                _kill(child)
+
+    drainer = threading.Thread(target=capture.drain, args=(child.stderr, lambda: _kill(child)), daemon=True)
+    drainer.start()
+    timer = threading.Timer(timeout, expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        assert child.stdin is not None and child.stdout is not None
+        try:
+            child.stdin.write(message.encode("utf-8"))
+            child.stdin.close()
+        except OSError:
+            pass
+        # readline(n) stops at n bytes, so a line with no newline is never buffered past the cap.
+        while line := child.stdout.readline(MAX_LINE_BYTES + 1):
+            if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
+                observer.failure = observer.failure or "stream_line_too_large"
+                break
+            line = redact(line, token)  # Observer, evidence and hashes only ever see redacted bytes.
+            size += len(line)
+            if size > MAX_STREAM_BYTES:
+                observer.failure = observer.failure or "stream_too_large"
+                break
+            raw.append(line)
+            text = line.decode("utf-8", "replace").strip()
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except ValueError:
+                event = None
+            if not isinstance(event, dict):
+                observer.failure = observer.failure or "malformed_stream"
+                break
+            if observer.feed(event):
+                break
+        if observer.failure is not None:
+            _kill(child)
+        timer.cancel()
+        with expiry:  # An expiry already running finishes before we reap.
+            pass
+        try:
+            code = child.wait(timeout=EXIT_GRACE)
+        except subprocess.TimeoutExpired:  # Closed stdout but kept running.
+            timed_out.set()
+            _kill(child)
+            code = child.wait()
+    finally:
+        timer.cancel()
+        _kill(child)
+        drainer.join(timeout=EXIT_GRACE)
+        for pipe in (child.stdout, child.stderr):
+            if pipe is not None:
+                pipe.close()
+    if capture.overflow:
+        observer.failure = observer.failure or "stderr_too_large"
+    return b"".join(raw), bytes(capture.tail), code, timed_out.is_set()
 
 
-def _read_server_state(state_dir: Path, token: str) -> tuple[list[dict[str, Any]] | None, bytes, bytes | None]:
+def read_capped(path: Path, cap: int) -> bytes:
+    """At most ``cap`` bytes of a file; refuses before buffering more."""
+    with path.open("rb") as handle:
+        data = handle.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError(f"{path.name} is larger than {cap} bytes")
+    return data
+
+
+def _read_server_state(
+    state_dir: Path, token: str
+) -> tuple[list[dict[str, Any]] | None, bytes, bytes | None, str | None]:
+    """Parsed trace rows, redacted trace and receipt bytes, and a failure when a file breaks its size cap."""
     trace_path, receipt_path = state_dir / TRACE_FILE, state_dir / RECEIPT_FILE
-    trace_bytes = redact(trace_path.read_bytes(), token) if trace_path.is_file() else b""
-    receipt = redact(receipt_path.read_bytes(), token) if receipt_path.is_file() else None
+    try:
+        trace_bytes = redact(read_capped(trace_path, MAX_TRACE_BYTES), token) if trace_path.is_file() else b""
+    except ValueError:
+        return None, b"", None, "server_trace_too_large"
+    try:
+        receipt = redact(read_capped(receipt_path, MAX_RECEIPT_BYTES), token) if receipt_path.is_file() else None
+    except ValueError:
+        return None, trace_bytes, None, "server_receipt_too_large"
     rows = []
     try:
         for index, line in enumerate(trace_bytes.decode("utf-8").splitlines(), start=1):
             row = json.loads(line)
             if not isinstance(row, dict) or row.get("seq") != index or not isinstance(row.get("tool"), str):
-                return None, trace_bytes, receipt
+                return None, trace_bytes, receipt, None
             rows.append(row)
     except ValueError:
-        return None, trace_bytes, receipt
-    return rows, trace_bytes, receipt
+        return None, trace_bytes, receipt, None
+    return rows, trace_bytes, receipt, None
 
 
 def _server_failure(rows: list[dict[str, Any]] | None, observer: _Observer) -> tuple[str | None, list[dict[str, Any]]]:
@@ -528,8 +702,9 @@ def run_cell(
     config_file = work / "mcp.json"
     config_file.write_text(json.dumps(mcp_config(cell["case"], work / "target", package_dir, work / "state")))
     session_id = str(uuid.uuid4())
+    executable: ClaudeExecutable = ctx["executable"]
     argv = build_argv(
-        ctx["claude_bin"],
+        executable.argv0,
         session_id=session_id,
         mcp_config=config_file,
         system_prompt_file=prompt_file,
@@ -539,24 +714,23 @@ def run_cell(
     cwd = Path(os.path.realpath(work / "cwd"))
     token = ctx["environ"][TOKEN_ENV]
     observer = _Observer(expected_model=ctx["expected_model"], session_id=session_id, version=ctx["version"], cwd=cwd)
-    stderr_path = work / "stderr.txt"
     blocked = ancestor_instruction_file(cwd)
     if blocked is not None:  # Never launch: the CLI would load this file as instructions.
-        stream, code, timed_out = b"", None, False
-        stderr_path.write_bytes(b"")
+        stream, stderr, code, timed_out = b"", b"", None, False
     else:
-        stream, code, timed_out = _run_process(
-            [*ctx["launcher"], *argv],
+        executable.verify()  # What runs is the file hashed at the start, never a replacement.
+        stream, stderr, code, timed_out = _run_process(
+            executable.command(argv),
             build_env(ctx["environ"], work),
             cwd,
             user_message(cell["case"]),
             ctx["timeout"],
             observer,
-            stderr_path,
             token,
+            pass_fds=executable.pass_fds,
         )
-    rows, trace_bytes, receipt_bytes = _read_server_state(work / "state", token)
-    server_failure, trace = _server_failure(rows, observer)
+    rows, trace_bytes, receipt_bytes, oversize = _read_server_state(work / "state", token)
+    server_failure, trace = (oversize, []) if oversize else _server_failure(rows, observer)
     result = observer.result
     failure = observer.failure
     if blocked is not None:
@@ -569,7 +743,6 @@ def run_cell(
         failure = f"model_error:{result.get('subtype')}"
     diagnostics = [] if server_failure is None else [server_failure]
     failure = failure or server_failure
-    stderr = redact(stderr_path.read_bytes(), token)[-STDERR_TAIL:]
     return {
         "trace": trace,
         "receipt": json.loads(receipt_bytes) if receipt_bytes is not None else None,
@@ -604,10 +777,20 @@ def _cli_settings(manifest: dict[str, Any]) -> tuple[str, str | None]:
     return cli_model, effort if effort in EFFORTS else None
 
 
-def _probe_version(command: Sequence[str], environ: Mapping[str, str]) -> str:
+def _probe_version(executable: ClaudeExecutable, environ: Mapping[str, str]) -> str:
+    """Ask the bound executable for its version, through the same launch path the arms use."""
+    executable.verify()
     env = {key: environ[key] for key in ENV_PASSTHROUGH if key in environ}
+    extra: dict[str, Any] = {"pass_fds": executable.pass_fds} if executable.pass_fds else {}
     done = subprocess.run(
-        [*command, "--version"], env=env, capture_output=True, text=True, timeout=VERSION_TIMEOUT, check=False
+        executable.command([executable.argv0, "--version"]),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=VERSION_TIMEOUT,
+        check=False,
+        **extra,
     )
     parts = done.stdout.split()
     if done.returncode != 0 or not parts:
@@ -626,13 +809,14 @@ def _arms(packages: dict[str, dict[tuple[str, ...], bytes]]) -> dict[str, dict[s
 
 
 def adapter_identity(
-    manifest: dict[str, Any], packages: dict[str, Any], version: str, timeout: float
+    manifest: dict[str, Any], packages: dict[str, Any], version: str, timeout: float, executable: ClaudeExecutable
 ) -> dict[str, Any]:
     cli_model, effort = _cli_settings(manifest)
     return {
         "id": ADAPTER_ID,
         "transport": "claude-cli-stream-json",
         "claude_code_version": version,
+        "executable": executable.identity(),
         "expected_model": manifest["model"],
         "cli_model": cli_model,
         "effort": effort,
@@ -677,36 +861,78 @@ def execute_live(
     environ: Mapping[str, str] | None = None,
     timeout: float = 600.0,
     launcher: Sequence[str] = (),
+    resume_digest: str | None = None,
 ) -> dict[str, Any]:
-    """``launcher`` is a command prefix (for example the Python interpreter for a script stand-in)."""
+    """Run the live cells. ``launcher`` is a command prefix for a script stand-in and is a test seam.
+
+    ``resume_digest`` is the evidence digest the operator reviewed. Only evidence that matches it is
+    carried forward; without it an existing output directory is started fresh (see ``_execute``).
+    """
     environ = os.environ if environ is None else environ
     if not environ.get(TOKEN_ENV):
         raise ValueError(
             f"live paired trials authenticate with {TOKEN_ENV} from `claude setup-token` (subscription). "
             "API keys are never used. No model was launched."
         )
-    resolved = (claude_bin if Path(claude_bin).is_file() else None) if launcher else shutil.which(claude_bin)
-    if resolved is None:
-        raise ValueError(f"claude executable not found: {claude_bin}")
-    manifest, packages = _load(path)
-    cli_model, effort = _cli_settings(manifest)
-    adapter = adapter_identity(manifest, packages, _probe_version([*launcher, resolved], environ), timeout)
-    ctx = {
-        "claude_bin": resolved,
-        "launcher": list(launcher),
-        "cli_model": cli_model,
-        "effort": effort,
-        "expected_model": manifest["model"],
-        "version": adapter["claude_code_version"],
-        "environ": environ,
-        "timeout": timeout,
-    }
-    with safe_output(output) as bound:
-        return _execute(path, bound.path, adapter, ctx, bound, cases)
+    with bind_executable(claude_bin, launcher) as executable:
+        manifest, packages = _load(path)
+        cli_model, effort = _cli_settings(manifest)
+        adapter = adapter_identity(manifest, packages, _probe_version(executable, environ), timeout, executable)
+        ctx = {
+            "executable": executable,
+            "cli_model": cli_model,
+            "effort": effort,
+            "expected_model": manifest["model"],
+            "version": adapter["claude_code_version"],
+            "environ": environ,
+            "timeout": timeout,
+        }
+        with safe_output(output) as bound:
+            return _execute(path, bound.path, adapter, ctx, bound, cases, resume_digest)
+
+
+def _supersede_prior_evidence(bound: Any) -> str | None:
+    """Move earlier evidence aside, by held descriptors, so a fresh run never reuses or overwrites it.
+
+    Runs before anything is cached on ``bound``. Returns the holder directory name, or None when the
+    output held no evidence.
+    """
+    root = bound.dir_fd()
+    present = [name for name in ("evidence.json", "evidence.sha256", "attempts") if _exists_child(root, name)]
+    if not present:
+        return None
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    holder, number = f"superseded-{stamp}", 0
+    while _exists_child(root, holder):
+        number += 1
+        holder = f"superseded-{stamp}-{number}"
+    dirfd.mkdir_child(root, holder, 0o700)
+    held = dirfd.open_child_directory(root, holder)
+    try:
+        for name in present:
+            move = dirfd.rename_child if name == "attempts" else dirfd.rename_file_child
+            move(root, name, held, name)
+    finally:
+        os.close(held)
+    return holder
+
+
+def _exists_child(parent: int, name: str) -> bool:
+    try:
+        dirfd.stat_child(parent, name)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _execute(
-    path: Path, output: Path, adapter: dict[str, Any], ctx: dict[str, Any], bound: Any, cases: list[str] | None
+    path: Path,
+    output: Path,
+    adapter: dict[str, Any],
+    ctx: dict[str, Any],
+    bound: Any,
+    cases: list[str] | None,
+    resume_digest: str | None,
 ) -> dict[str, Any]:
     planned = {**plan(path, adapter), "schema": LIVE_SCHEMA, "model_executed": True}
     _, packages = _load(path)
@@ -717,22 +943,27 @@ def _execute(
         if not cases or any(c not in available for c in cases):
             raise ValueError("unsupported case selection")
         planned["cells"] = [c for c in planned["cells"] if c["case"] in cases]
+    evidence_path = output / "evidence.json"
+    if resume_digest is None:
+        # Evidence stored beside owner-writable files proves nothing, so it is never trusted on its own.
+        _supersede_prior_evidence(bound)
+    elif not evidence_path.exists():
+        raise ValueError("--resume-digest was given but the output directory holds no evidence to resume")
     inspect_tree(bound)
     snapshots = {}
     for arm, files in packages.items():
         snapshot = output / "packages" / planned["packages"][arm]
         snapshots[arm] = snapshot
         if snapshot.exists():
-            _, saved = _collect_source_tree(snapshot)
+            saved = collect_package(snapshot)
             if saved != files:
                 raise ValueError("immutable package snapshot changed")
         else:
             for rel, data in files.items():
                 safe_write(bound, snapshot.joinpath(*rel), data)
-    evidence_path = output / "evidence.json"
     attempts: list[dict[str, Any]] = []
-    if evidence_path.exists():
-        previous = validate_live(output, (output / "evidence.sha256").read_text().strip())
+    if resume_digest is not None:
+        previous = validate_live(output, resume_digest)  # The operator's digest, never the stored file.
         if previous["plan"] != planned:
             raise ValueError("paired identity changed; use a new output directory")
         attempts = previous["attempts"]
@@ -803,7 +1034,7 @@ def _validate_attempt(
         ("server-trace.jsonl", "server_trace_sha256"),
         ("stderr.txt", "stderr_sha256"),
     ):
-        if _sha((folder / name).read_bytes()) != live[key]:
+        if _sha(read_capped(folder / name, MAX_STREAM_BYTES + MAX_LINE_BYTES)) != live[key]:
             raise ValueError(f"{name} artifact mismatch")
     session_id = live["session_id"]  # The requested uuid, stored at launch. Never derived from init.
     if not isinstance(session_id, str) or not session_id or not isinstance(live["cwd"], str):
@@ -832,14 +1063,17 @@ def _validate_attempt(
             raise ValueError("response envelope mismatch")
     if grade(attempt) != attempt["grade"]:
         raise ValueError("trace grade mismatch")
-    if attempt["receipt"] is not None and json.loads((folder / "receipt.json").read_text()) != attempt["receipt"]:
+    if (
+        attempt["receipt"] is not None
+        and json.loads(read_capped(folder / "receipt.json", MAX_RECEIPT_BYTES)) != attempt["receipt"]
+    ):
         raise ValueError("receipt snapshot mismatch")
 
 
 def validate_live(output: Path, expected_digest: str) -> dict[str, Any]:
     with safe_output(output) as bound:
         inspect_tree(bound)
-    payload = json.loads((output / "evidence.json").read_text())
+    payload = json.loads(read_capped(output / "evidence.json", MAX_EVIDENCE_BYTES))
     if digest(payload) != expected_digest:
         raise ValueError("evidence digest mismatch")
     if payload.get("schema") != LIVE_SCHEMA:
@@ -850,13 +1084,21 @@ def validate_live(output: Path, expected_digest: str) -> dict[str, Any]:
         raise ValueError("evaluator identity changed")
     if not isinstance(adapter, dict) or adapter.get("id") != ADAPTER_ID:
         raise ValueError("invalid adapter identity")
+    executable = adapter.get("executable")
+    if not (
+        isinstance(executable, dict)
+        and isinstance(executable.get("sha256"), str)
+        and len(executable["sha256"]) == 64
+        and executable.get("launch") in ("held-fexecve", "launcher")
+    ):
+        raise ValueError("adapter identity does not record the Claude executable hash")
     if adapter.get("modules") != module_hashes():
         raise ValueError("live adapter implementation changed")
     if any(cell.get("adapter") != adapter for cell in plan_data["cells"]):
         raise ValueError("cell adapter identity mismatch")
     packages = {}
     for arm, identity in plan_data["packages"].items():
-        _, files = _collect_source_tree(output / "packages" / identity)
+        files = collect_package(output / "packages" / identity)
         if _package_identity(files) != identity:
             raise ValueError("immutable package identity mismatch")
         packages[arm] = files

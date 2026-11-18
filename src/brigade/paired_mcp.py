@@ -14,8 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .mcp_server import serve_stdio
-from .model_trial_paired import TOOLS, Boundary
-from .skills_cmd.registry import _collect_source_tree
+from .model_trial_paired import TOOLS, Boundary, collect_package
 
 SERVER_NAME = "brigade-paired"
 TRACE_FILE = "trace.jsonl"
@@ -27,8 +26,8 @@ DESCRIPTIONS = {
     "capture": "Capture the outcome for the verification run. Takes no arguments.",
     "scoreability": "Read the scoreability notice for the receipt. Takes no arguments.",
 }
-# The server inherits whatever its parent passes. Never hand an auth token to the
-# subprocesses the Boundary launches for the fixture checks.
+# The adapter blanks the token in the server's MCP config env, so the server starts without it.
+# This scrub is a second line: the Boundary's fixture subprocesses must never inherit a token.
 _SCRUB_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_OAUTH")
 
 
@@ -81,7 +80,7 @@ def scrub_environment() -> None:
 
 def serve(case: str, target: Path, package_dir: Path, state_dir: Path) -> int:
     scrub_environment()
-    _, files = _collect_source_tree(package_dir)
+    files = collect_package(package_dir)
     server = PairedServer(Boundary(target, case, files), state_dir)
     return serve_stdio(
         server_name=SERVER_NAME,

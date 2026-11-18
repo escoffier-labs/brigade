@@ -19,7 +19,7 @@ GOOD_STEPS = [{"call": tool} for tool in TOOLS]
 _SCRIPT = r"""#!__PYTHON__
 import json, os, subprocess, sys, uuid
 
-SC = json.load(open("__SCENARIO__"))
+SC = json.load(open(__SCENARIO__))
 if "--version" in sys.argv:
     if SC.get("version_hang"):
         import time
@@ -32,9 +32,11 @@ sid = opt("--session-id")
 cfg = json.load(open(opt("--mcp-config")))
 prompt = open(opt("--system-prompt-file"), "rb").read().decode()
 stdin = sys.stdin.read()
+server_env = {**os.environ, **cfg["mcpServers"]["brigade-paired"].get("env", {})}
 with open(SC["record"], "a") as handle:
     handle.write(json.dumps({"argv": argv, "env": dict(os.environ), "cwd": os.getcwd(), "system_prompt": prompt,
-                             "stdin": stdin, "session_id": sid, "config": cfg}) + "\n")
+                             "stdin": stdin, "session_id": sid, "config": cfg,
+                             "server_token": server_env.get("CLAUDE_CODE_OAUTH_TOKEN")}) + "\n")
 QUAL = "mcp__brigade-paired__"
 TOOLS = ["brief", "verify", "receipt", "scoreability", "capture"]
 
@@ -54,6 +56,9 @@ def rpc(method, params=None):
     return json.loads(proc.stdout.readline())
 
 
+if SC.get("stderr_flood"):
+    sys.stderr.write("e" * SC["stderr_flood"])
+    sys.stderr.flush()
 if SC.get("leak"):  # A misbehaving CLI echoing its credential to the stream and to stderr.
     sys.stderr.write("auth debug " + os.environ["CLAUDE_CODE_OAUTH_TOKEN"] + "\n")
 for event in SC.get("pre_events", []):
@@ -80,6 +85,9 @@ init.update(SC.get("init", {}))
 emit(init)
 if SC.get("leak"):
     emit({"type": "system", "subtype": "debug", "note": "token=" + os.environ["CLAUDE_CODE_OAUTH_TOKEN"]})
+if SC.get("big_line"):
+    sys.stdout.write("x" * SC["big_line"] + "\n")
+    sys.stdout.flush()
 for event in SC.get("post_init_events", []):
     emit(event)
 if SC.get("hang"):
@@ -134,6 +142,12 @@ emit({"type": "result", "subtype": SC.get("result_subtype", "success"), "is_erro
 """
 
 
+def render_script(python: str, scenario_path: Path | str) -> str:
+    """The fake's source. The scenario path goes in as a Python literal, because a Windows path with
+    backslashes would otherwise form invalid escape sequences and the fake would never start."""
+    return _SCRIPT.replace("__PYTHON__", python).replace("__SCENARIO__", json.dumps(str(scenario_path)))
+
+
 def make_fake(directory: Path, **scenario: Any) -> Path:
     """Write the fake executable and its scenario next to it. Returns the executable path."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -141,7 +155,7 @@ def make_fake(directory: Path, **scenario: Any) -> Path:
     scenario_path = directory / "scenario.json"
     scenario_path.write_text(json.dumps(scenario))
     exe = directory / "claude"
-    exe.write_text(_SCRIPT.replace("__PYTHON__", sys.executable).replace("__SCENARIO__", str(scenario_path)))
+    exe.write_text(render_script(sys.executable, scenario_path))
     exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
     return exe
 

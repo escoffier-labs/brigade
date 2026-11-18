@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, model_trial_claude, model_trials
+from brigade import cli, model_trial_claude, model_trials, proc
 from brigade.memory_verify_seat import CLAUDE_SETTINGS
 from brigade.model_trial_claude import (
     ADAPTER_ID,
@@ -23,14 +23,16 @@ from brigade.model_trial_claude import (
     TOKEN_ENV,
     _Observer,
     _run_process,
+    _StderrCapture,
     ancestor_instruction_file,
     build_argv,
+    bind_executable,
     build_env,
     execute_live as _execute_live,
     module_hashes,
 )
-from brigade.model_trial_paired import TOOLS, digest
-from tests.paired_live_fake import GOOD_STEPS, make_fake, records
+from brigade.model_trial_paired import TOOLS, _pairs, digest
+from tests.paired_live_fake import GOOD_STEPS, make_fake, records, render_script
 
 pytestmark = pytest.mark.allow_agent_cli  # launches only the fake claude from tests/paired_live_fake.py
 
@@ -336,17 +338,20 @@ def test_final_report_must_be_a_json_object_graded_against_the_receipt(tmp_path)
     assert all(a["final"] is None and a["grade"]["passed"] is False for a in result["attempts"])
 
 
-def test_resume_appends_and_refuses_any_identity_change(tmp_path):
+def test_resume_appends_only_with_the_reviewed_digest_and_refuses_any_identity_change(tmp_path):
     first, fake_dir, output = _live(tmp_path, init={"model": "wrong"})
     exe = fake_dir / "claude"
-    again = execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60)
+    again = execute_live(
+        LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=first["evidence_sha256"]
+    )
     assert len(again["attempts"]) == 4 and again["attempts"][:2] == first["attempts"]
+    reviewed = again["evidence_sha256"]
     make_fake(fake_dir, init={"model": "wrong"}, version="2.1.400")
     with pytest.raises(ValueError, match="identity changed"):
-        execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=reviewed)
     make_fake(fake_dir, init={"model": "wrong"})
     with pytest.raises(ValueError, match="identity changed"):
-        execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=61)
+        execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=61, resume_digest=reviewed)
     copy = tmp_path / "pkg"
     shutil.copytree(FIXTURES, copy)
     first_copy = execute_live(
@@ -356,7 +361,72 @@ def test_resume_appends_and_refuses_any_identity_change(tmp_path):
     skill = copy / "candidate/SKILL.md"
     skill.write_text(skill.read_text() + "\nChanged.\n")
     with pytest.raises(ValueError, match="identity changed"):
-        execute_live(copy / "live-claude.json", tmp_path / "out3", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        execute_live(
+            copy / "live-claude.json",
+            tmp_path / "out3",
+            claude_bin=str(exe),
+            environ=ENVIRON,
+            timeout=60,
+            resume_digest=first_copy["evidence_sha256"],
+        )
+
+
+def _forge_one_attempt_away(output, destination):
+    """What a local process can do: drop an attempt and rewrite evidence.json and its stored digest to match."""
+    shutil.copytree(output, destination)
+    payload = json.loads((destination / "evidence.json").read_text())
+    payload["attempts"].pop()
+    payload["pairs"] = _pairs(payload["plan"], payload["attempts"])
+    (destination / "evidence.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    (destination / "evidence.sha256").write_text(digest(payload) + "\n")
+    return digest(payload)
+
+
+def test_a_stored_digest_cannot_vouch_for_rewritten_attempts(tmp_path):
+    first, fake_dir, output = _live(tmp_path, init={"model": "wrong"})
+    exe = fake_dir / "claude"
+    forged = tmp_path / "forged"
+    forged_digest = _forge_one_attempt_away(output, forged)
+    # The file beside the evidence says the forged tree is intact. Without the operator's digest nothing is reused.
+    fresh = execute_live(LIVE, forged, claude_bin=str(exe), environ=ENVIRON, timeout=60)
+    assert len(fresh["attempts"]) == 2 and all(a["attempt_id"].endswith("-1") for a in fresh["attempts"])
+    moved = sorted(path.name for path in forged.glob("superseded-*"))
+    assert len(moved) == 1
+    held = json.loads((forged / moved[0] / "evidence.json").read_text())
+    assert len(held["attempts"]) == 1  # the earlier evidence is kept aside, never overwritten
+    # The reviewed digest of the genuine run does not match the forged tree.
+    forged_again = tmp_path / "forged2"
+    _forge_one_attempt_away(output, forged_again)
+    with pytest.raises(ValueError, match="digest mismatch"):
+        execute_live(
+            LIVE,
+            forged_again,
+            claude_bin=str(exe),
+            environ=ENVIRON,
+            timeout=60,
+            resume_digest=first["evidence_sha256"],
+        )
+    assert len(json.loads((forged_again / "evidence.json").read_text())["attempts"]) == 1
+    assert forged_digest != first["evidence_sha256"]
+
+
+def test_resume_digest_without_evidence_is_refused(tmp_path):
+    exe = make_fake(tmp_path / "f")
+    with pytest.raises(ValueError, match="no evidence to resume"):
+        execute_live(LIVE, tmp_path / "empty", claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest="0" * 64)
+    assert records(tmp_path / "f") == []
+
+
+def test_cli_resume_digest_flag_resumes_only_matching_evidence(tmp_path, monkeypatch, capsys, cli_launcher):
+    exe = make_fake(tmp_path / "cli", init={"model": "wrong"})
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", SECRET_TOKEN)
+    args = ["model", "trial", "paired-live", str(LIVE), "--output-dir", str(tmp_path / "o"), "--claude-bin", str(exe)]
+    assert cli.main([*args, "--case", "passing-verify", "--timeout", "30"]) == 0
+    reviewed = json.loads(capsys.readouterr().out)["evidence_sha256"]
+    assert cli.main([*args, "--case", "passing-verify", "--timeout", "30", "--resume-digest", "0" * 64]) == 2
+    assert "digest mismatch" in capsys.readouterr().err
+    assert cli.main([*args, "--case", "passing-verify", "--timeout", "30", "--resume-digest", reviewed]) == 0
+    assert len(json.loads(capsys.readouterr().out)["attempts"]) == 4
 
 
 def test_tampered_live_evidence_fails_validation(good, tmp_path):
@@ -613,11 +683,245 @@ def test_expiry_cannot_flip_a_finished_cell_or_signal_a_recycled_group(monkeypat
     monkeypatch.setattr(model_trial_claude, "_kill", lambda proc: kills.append(proc.pid))
     observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
     env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
-    _, code, timed_out = _run_process(
-        [sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, tmp_path / "err.txt", "tok"
-    )
+    _, _, code, timed_out = _run_process([sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok")
     assert (code, timed_out) == (0, False)
     assert events.index("cancel") < events.index("wait")  # the timer is gone before we reap
     before = list(kills)
     callbacks[0]()  # a late expiry for a process that already exited
     assert kills == before
+
+
+# ---- Daybreak review: executable binding ------------------------------------------------------
+
+
+def _elf(name):
+    found = shutil.which(name)
+    if found is None or not proc.held_exec_supported():
+        pytest.skip(f"needs a native {name} and held-descriptor launch")
+    if Path(found).read_bytes()[:4] != b"\x7fELF":
+        pytest.skip(f"{name} is not a native ELF binary here")
+    return Path(found)
+
+
+def test_adapter_identity_records_the_executable_hash_and_a_changed_file_refuses_resume(tmp_path):
+    first, fake_dir, output = _live(tmp_path, init={"model": "wrong"})
+    exe = fake_dir / "claude"
+    recorded = first["plan"]["adapter"]["executable"]
+    assert recorded["sha256"] == hashlib.sha256(exe.read_bytes()).hexdigest()
+    assert recorded["size_bytes"] == exe.stat().st_size and recorded["launch"] == "launcher"
+    assert all(cell["adapter"]["executable"] == recorded for cell in first["plan"]["cells"])
+    with exe.open("a") as handle:  # Same version string, different bytes.
+        handle.write("\n# replaced\n")
+    with pytest.raises(ValueError, match="identity changed"):
+        execute_live(
+            LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=first["evidence_sha256"]
+        )
+    stripped = json.loads((output / "evidence.json").read_text())
+    stripped["plan"]["adapter"].pop("executable")
+    (output / "evidence.json").write_text(json.dumps(stripped))
+    with pytest.raises(ValueError, match="executable hash"):
+        model_trials.paired_validate(output, digest(stripped))
+
+
+def test_the_bound_executable_is_rechecked_before_every_launch(tmp_path, monkeypatch):
+    exe = make_fake(tmp_path / "fake")
+    with bind_executable(str(exe), LAUNCH) as bound:
+        bound.verify()
+        with exe.open("a") as handle:
+            handle.write("# swapped after the hash\n")
+        with pytest.raises(ValueError, match="changed after it was hashed"):
+            bound.verify()
+    fake_dir = tmp_path / "fake2"
+    swapped = make_fake(fake_dir, steps=GOOD_STEPS)
+    real = model_trial_claude.run_cell
+    calls = []
+
+    def run_after_a_swap(**kwargs):
+        calls.append(1)
+        with swapped.open("a") as handle:
+            handle.write("# swapped between cells\n")
+        return real(**kwargs)
+
+    monkeypatch.setattr(model_trial_claude, "run_cell", run_after_a_swap)
+    with pytest.raises(ValueError, match="changed after it was hashed"):
+        execute_live(LIVE, tmp_path / "out", claude_bin=str(swapped), environ=ENVIRON, timeout=60)
+    assert calls == [1] and records(fake_dir) == []  # the swapped file never received the token
+
+
+def test_a_replaced_path_cannot_change_what_runs_after_the_hash(tmp_path):
+    echo, true = _elf("echo"), _elf("true")
+    claude = tmp_path / "claude"
+    shutil.copy(echo, claude)
+    other = tmp_path / "other"
+    shutil.copy(true, other)
+    with bind_executable(str(claude)) as bound:
+        assert bound.identity()["launch"] == "held-fexecve"
+        assert bound.sha256 == hashlib.sha256(echo.read_bytes()).hexdigest()
+        os.replace(other, claude)  # the path now names a different binary
+        assert subprocess.run([str(claude), "held"], capture_output=True).stdout == b""  # by path: the replacement
+        ran = subprocess.run(bound.command(["claude", "held"]), capture_output=True, pass_fds=bound.pass_fds)
+        assert ran.stdout == b"held\n"  # by descriptor: the file that was hashed
+        bound.verify()  # a replaced path leaves the held file intact
+    rewritten = tmp_path / "claude2"
+    shutil.copy(echo, rewritten)
+    with bind_executable(str(rewritten)) as bound:
+        with rewritten.open("ab") as handle:  # an in-place rewrite of the held inode
+            handle.write(b"\0")
+        with pytest.raises(ValueError, match="changed after it was hashed"):
+            bound.verify()
+
+
+def test_a_live_run_with_a_native_executable_records_its_hash_and_launches_by_descriptor(tmp_path):
+    echo = _elf("echo")
+    claude = tmp_path / "claude"
+    shutil.copy(echo, claude)
+    result = _execute_live(LIVE, tmp_path / "out", claude_bin=str(claude), environ=ENVIRON, timeout=30)
+    recorded = result["plan"]["adapter"]["executable"]
+    assert recorded["sha256"] == hashlib.sha256(claude.read_bytes()).hexdigest()
+    assert recorded["launch"] == "held-fexecve"
+    assert result["plan"]["adapter"]["claude_code_version"]  # read through the held descriptor
+    assert all(a["failure"] for a in result["attempts"])  # echo is no Claude, and no cell passes
+
+
+def test_live_runs_refuse_a_platform_without_held_launch_before_any_process(tmp_path, monkeypatch):
+    exe = make_fake(tmp_path / "never")
+    monkeypatch.setattr(proc, "held_exec_supported", lambda: False)
+    with pytest.raises(ValueError, match="held descriptor"):
+        _execute_live(LIVE, tmp_path / "o", claude_bin=str(exe), environ=ENVIRON)  # no launcher: no path launch
+    assert records(tmp_path / "never") == [] and not (tmp_path / "o").exists()
+
+
+def test_scripts_and_launchers_are_not_accepted_as_the_executable(tmp_path):
+    if not proc.held_exec_supported():
+        pytest.skip("needs held-descriptor launch")
+    exe = make_fake(tmp_path / "script")
+    with pytest.raises(ValueError, match="script or launcher"):
+        with bind_executable(str(exe)):
+            pass
+
+
+def test_the_fake_claude_source_compiles_with_a_windows_style_scenario_path():
+    # Backslash separators broke the unescaped literal on Windows runners: the fake died on a syntax
+    # error and the version probe read nothing.
+    windows_path = "\\".join(["D:", "runner", "work", "temp", "pytest-0", "scenario.json"])
+    source = render_script("python", windows_path)
+    compile(source, "claude", "exec")
+    assert json.dumps(windows_path) in source
+
+
+def test_the_version_probe_runs_through_the_same_launcher_as_the_arms(tmp_path):
+    exe = make_fake(tmp_path / "fake", version="2.1.999")
+    with bind_executable(str(exe), LAUNCH) as bound:
+        assert model_trial_claude._probe_version(bound, ENVIRON) == "2.1.999"
+        assert bound.command(["claude", "--version"]) == [*LAUNCH, "claude", "--version"]
+
+
+# ---- Daybreak review: token never reaches disk, MCP server never holds it ---------------------
+
+
+def test_the_mcp_server_starts_without_the_token(good):
+    for run in records(good[1]):
+        assert run["config"]["mcpServers"]["brigade-paired"]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+        assert run["server_token"] == ""  # what the server process inherits once its config env applies
+        assert run["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == SECRET_TOKEN  # only the CLI holds it
+
+
+def test_child_output_is_redacted_in_memory_before_any_byte_reaches_disk(tmp_path, monkeypatch):
+    """Keep the arm work directories as a crash before cleanup would, then look for the token in them."""
+    kept = []
+
+    class KeepDirectory:
+        def __init__(self, prefix="tmp"):
+            self.name = tempfile.mkdtemp(prefix=prefix)
+            kept.append(Path(self.name))
+
+        def __enter__(self):
+            return self.name
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(model_trial_claude.tempfile, "TemporaryDirectory", KeepDirectory)
+    result, _, output = _live(tmp_path, steps=GOOD_STEPS, leak=True)
+    assert all(a["failure"] is None for a in result["attempts"]) and len(kept) == 2
+    leaked = [p for root in kept for p in root.rglob("*") if p.is_file() and SECRET_TOKEN.encode() in p.read_bytes()]
+    assert leaked == []
+    assert not list(kept[0].rglob("stderr.txt"))  # stderr is never staged on disk
+    for root in kept:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+class _Pipe:
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    def read1(self, size):
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+def test_stderr_redaction_catches_a_token_split_across_reads():
+    token = SECRET_TOKEN
+    raw = f"before {token} after".encode()
+    for cut in range(1, len(raw)):
+        capture = _StderrCapture(token)
+        capture.drain(_Pipe([raw[:cut], raw[cut:]]), lambda: None)
+        assert token.encode() not in bytes(capture.tail), cut
+        assert bytes(capture.tail) == b"before [redacted] after"
+
+
+def test_stderr_keeps_only_a_bounded_redacted_tail_and_flags_overflow(monkeypatch):
+    monkeypatch.setattr(model_trial_claude, "MAX_STDERR_BYTES", 1000)
+    monkeypatch.setattr(model_trial_claude, "STDERR_TAIL", 100)
+    flagged = []
+    capture = _StderrCapture("tok")
+    capture.drain(_Pipe([b"a" * 600, b"b" * 600]), lambda: flagged.append(1))
+    assert capture.overflow and flagged == [1] and len(capture.tail) == 100 and capture.tail.endswith(b"b" * 100)
+
+
+# ---- Daybreak review: size caps before buffering ----------------------------------------------
+
+
+def test_a_stream_line_past_the_cap_fails_the_cell_without_being_buffered(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_trial_claude, "MAX_LINE_BYTES", 4096)
+    result, _, output = _live(tmp_path, steps=GOOD_STEPS, big_line=500_000)
+    assert _failures(result) == ["stream_line_too_large"]
+    stream = (output / "attempts" / result["attempts"][0]["attempt_id"] / "stream.jsonl").read_bytes()
+    assert len(stream) < 100_000  # the oversized line was never kept
+
+
+def test_stderr_past_the_cap_fails_the_cell_and_the_saved_tail_stays_small(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_trial_claude, "MAX_STDERR_BYTES", 20_000)
+    monkeypatch.setattr(model_trial_claude, "STDERR_TAIL", 1000)
+    result, _, output = _live(tmp_path, steps=GOOD_STEPS, stderr_flood=400_000)
+    assert _failures(result) == ["stderr_too_large"]
+    saved = (output / "attempts" / result["attempts"][0]["attempt_id"] / "stderr.txt").read_bytes()
+    assert len(saved) <= 1000
+
+
+def test_an_oversized_server_trace_fails_the_cell(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_trial_claude, "MAX_TRACE_BYTES", 200)
+    result, _, _ = _live(tmp_path, steps=GOOD_STEPS)
+    assert _failures(result) == ["server_trace_too_large"]
+    assert all(a["trace"] == [] and a["grade"]["passed"] is False for a in result["attempts"])
+
+
+def test_oversized_packages_are_refused_before_any_launch(tmp_path):
+    exe = make_fake(tmp_path / "never")
+    big = tmp_path / "big"
+    shutil.copytree(FIXTURES, big)
+    (big / "candidate/SKILL.md").write_bytes(b"x" * (256 * 1024 + 1))
+    with pytest.raises(ValueError, match="larger than its cap"):
+        execute_live(big / "live-claude.json", tmp_path / "o", claude_bin=str(exe), environ=ENVIRON)
+    flood = tmp_path / "flood"
+    shutil.copytree(FIXTURES, flood)
+    for index in range(600):
+        (flood / "candidate" / f"extra-{index}.txt").write_text("x")
+    with pytest.raises(ValueError, match="too many entries"):
+        execute_live(flood / "live-claude.json", tmp_path / "o2", claude_bin=str(exe), environ=ENVIRON)
+    total = tmp_path / "total"
+    shutil.copytree(FIXTURES, total)
+    for index in range(5):
+        (total / "candidate" / f"blob-{index}.bin").write_bytes(b"y" * (1024 * 1024))
+    with pytest.raises(ValueError, match="larger than its cap"):
+        execute_live(total / "live-claude.json", tmp_path / "o3", claude_bin=str(exe), environ=ENVIRON)
+    assert records(tmp_path / "never") == []

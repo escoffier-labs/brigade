@@ -158,17 +158,38 @@ per-arm `HOME` and `USERPROFILE`, and these fixed values:
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `DISABLE_TELEMETRY=1` and
 `DISABLE_AUTOUPDATER=1`. `ANTHROPIC_API_KEY` and every other parent variable are
-dropped. The MCP server also drops `ANTHROPIC_*` and `CLAUDE_CODE_OAUTH*` before
-it runs any fixture command.
+dropped. The MCP server config sets `CLAUDE_CODE_OAUTH_TOKEN` to an empty value in
+its own `env`, so the server process starts without the token and never holds it.
+It still drops `ANTHROPIC_*` and `CLAUDE_CODE_OAUTH*` before running any fixture
+command, as a second line.
+
+#### Executable binding
+
+The adapter does not trust a path. It resolves `claude` once, opens that file
+without following links, hashes it with SHA-256 and holds the descriptor for the
+whole run. Both the `--version` probe and every arm exec that held file through
+`proc.held_argv` (`fexecve`, the same mechanism the memory verify seat uses), so a
+same-version replacement written to the path after the hash cannot receive
+`CLAUDE_CODE_OAUTH_TOKEN` or forge init and stream events. The hash is recorded as
+`adapter.executable.sha256` in every cell identity, so a different binary refuses
+resume. The held file is re-hashed before each launch to catch an in-place rewrite,
+and a mismatch stops the run before the next cell. The file must be a native
+binary: a script or launcher runs another file and is refused.
+
+Held-descriptor launch exists on Linux. On any other platform, Windows included,
+`paired-live` exits 2 before launching a process rather than starting `claude` by
+path. The tests run a fake `claude` through an injectable launcher prefix, which is
+a test seam and records `launch: launcher` in the identity; it is not reachable from
+the command line.
 
 `--system-prompt-file` holds a fixed protocol prelude followed by the exact
 `SKILL.md` bytes of that arm. Arms therefore differ only in skill bytes. The
 system prompt, prelude and skill sha256 values are part of the adapter identity
 inside every cell id, so a changed skill, prelude, flag set, CLI version, model,
-timeout or adapter source file refuses resume. "Adapter source file" covers the
-adapter, the paired MCP server, the stdio server, the safe-output helpers, the
-settings constants it shares with the verify seat, the evaluator and the skill
-registry; editing any of them refuses resume.
+timeout, executable hash or adapter source file refuses resume. "Adapter source file"
+covers the adapter, the paired MCP server, the stdio server, the safe-output
+helpers, the settings constants it shares with the verify seat, the process
+launcher, the evaluator and the skill registry; editing any of them refuses resume.
 
 #### Init gate
 
@@ -223,12 +244,27 @@ Live results use adapter id `brigade.claude-cli-live.v1` and schema
 `brigade.offline-replay.v1`, which is unchanged. Raw stream, server trace and
 stderr are kept under each attempt and bound by hash. The OAuth token value is
 removed from the stream, stderr, server trace and receipt bytes before they are
-hashed or saved, so artifacts show `[redacted]` in its place. The requested
+hashed or saved, so artifacts show `[redacted]` in its place. Child stdout and
+stderr are read into memory, redacted there (a token split across two reads is
+caught) and only then hashed or written; stderr is never staged in a file, so a
+crash before cleanup leaves nothing token-bearing in the arm's temporary directory.
+Only the last 64 KiB of redacted stderr is kept. The requested
 session id and arm working directory are stored with each attempt and revalidated
 against the init event instead of being read back from it. `paired-validate` picks the
 live validator from the schema. The init gate reports the CLI's own view of its
 configuration. Model and CLI authenticity remain unverified, and the result can
 neither score nor promote a skill.
+
+#### Size caps
+
+Every read is bounded before it is buffered, and exceeding a cap fails the cell
+(or refuses the run for a package): a skill package may hold 512 entries, 4 MiB in
+total and 1 MiB per file, and `SKILL.md` at most 256 KiB, all enforced during the
+directory walk. A stream line may not exceed 4 MiB and the stream 16 MiB
+(`stream_line_too_large`, `stream_too_large`), stderr 1 MiB (`stderr_too_large`),
+the server trace 4 MiB and the receipt 1 MiB (`server_trace_too_large`,
+`server_receipt_too_large`). Revalidation reads saved artifacts under the same
+caps.
 
 #### Auth
 
@@ -257,14 +293,26 @@ Prove one tool-interacting pair before expanding to all five scenarios.
 3. Read `attempts[].failure`, `attempts[].live.init` and `pairs[].comparison`.
    A failure beginning `init_gate:` means the CLI session was not the exclusive
    configuration. Do not loosen the gate to make a cell pass.
-4. Retain `evidence.sha256` outside agent write authority, then validate:
+4. Retain the printed `evidence_sha256` outside agent write authority, then validate:
 
    ```bash
    python -m brigade model trial paired-validate src/brigade/fixtures/paired-brigade-work/live-claude.json --output-dir <private-output-dir> --evidence-sha256 REVIEWED_SHA256
    ```
 
-5. Re-running the same command appends attempts. Any identity change needs a new
-   output directory. Expand to the other cases only after the first pair shows
+5. Re-running the same command without `--resume-digest` starts fresh: evidence
+   already in the output directory is moved to `superseded-<time>/` and never
+   reused. To append attempts, pass the digest you reviewed:
+
+   ```bash
+   python -m brigade model trial paired-live src/brigade/fixtures/paired-brigade-work/live-claude.json --output-dir <private-output-dir> --case passing-verify --resume-digest REVIEWED_SHA256
+   ```
+
+   Resume validates the whole tree against that digest, and the `evidence.sha256`
+   file stored beside the evidence is never read for it, because a process able to
+   rewrite attempts can rewrite that file too. Resume integrity is only as strong
+   as the digest you hold: keep it outside agent write authority, and a digest of
+   tampered evidence carries the tampered attempts forward. Any identity change needs
+   a new output directory. Expand to the other cases only after the first pair shows
    observed calls, a matching server trace and a graded receipt.
 
 The pair is a measurement of one scenario. It is not a promotion decision.
