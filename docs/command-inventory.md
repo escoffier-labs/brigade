@@ -70,7 +70,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills`: 30 command path(s)
 - `brigade stations`: 3 command path(s)
 - `brigade status`: 1 command path(s)
-- `brigade t3`: 4 command path(s)
+- `brigade t3`: 9 command path(s)
 - `brigade tokens`: 3 command path(s)
 - `brigade tools`: 48 command path(s)
 - `brigade untrusted` (extras): 2 command path(s)
@@ -781,9 +781,14 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade stations verify`
 - `brigade status`
 - `brigade t3 accepted`
+- `brigade t3 ack`
+- `brigade t3 cancel`
 - `brigade t3 claim`
+- `brigade t3 finalize`
 - `brigade t3 hold-resolve`
+- `brigade t3 observe`
 - `brigade t3 open`
+- `brigade t3 status`
 - `brigade tokens doctor`
 - `brigade tokens status`
 - `brigade tokens wire plan`

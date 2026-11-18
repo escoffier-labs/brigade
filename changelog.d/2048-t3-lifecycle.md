@@ -1,0 +1,4 @@
+- Add `brigade t3 observe`, `cancel`, `ack`, `finalize` and `status` to finish the governed native T3 task loop, with evidence-bound terminal result ids, a durable cancel request, explicit closeout and a read-only status view (#2048).
+- New native T3 correlation events carry no child thread or run ids. Those fields remain optional legacy input.
+- `hold-resolve --native-json` now clears a resolvable accept-conflict hold through a closed resolution fact and still never re-grants launch.
+- Bundle the `t3-governed-delegation` skill with the exact parent-session call order and the lost-reply hold rule.

@@ -225,10 +225,14 @@ EVENT_TYPES.update(
                 "intent_digest",
             }
         ),
+        # Child thread and run ids are optional legacy input. New correlation
+        # events carry no child identities, so a status projection cannot leak
+        # them back out of the journal.
         "task.native-correlated": frozenset(
             {"task_id", "attempt_id", "mode", "handle_digest", "child_thread_id", "child_run_id"}
         ),
         "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
+        "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
         # Native T3 enrollment holds one immutable delegation input asset
         # outside the journal. Only its relative name and digests are retained
         # here, never task text, options values, or raw native JSON.
@@ -262,7 +266,14 @@ APPROVAL_DECISION_EVENT_STATES = {
     "approval.rejected": "rejected",
     "approval.held": "held",
 }
-_NATIVE_T3_EVENT_TYPES = frozenset({"task.native-claimed", "task.native-correlated", "task.native-held"})
+_NATIVE_T3_EVENT_TYPES = frozenset(
+    {
+        "task.native-claimed",
+        "task.native-correlated",
+        "task.native-held",
+        "task.native-cancel-requested",
+    }
+)
 _SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
 _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "approval": frozenset(
@@ -294,10 +305,9 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "task.native-claimed": frozenset(
         {"task_id", "attempt_id", "dispatch_attempt", "parent_thread", "template_digest", "intent_digest"}
     ),
-    "task.native-correlated": frozenset(
-        {"task_id", "attempt_id", "mode", "handle_digest", "child_thread_id", "child_run_id"}
-    ),
+    "task.native-correlated": frozenset({"task_id", "attempt_id", "mode", "handle_digest"}),
     "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
+    "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
 }
 
 # Private-data exclusion list: these payload key names are never part of any
@@ -527,8 +537,14 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
         if not run_task_journal.digest(payload.get("handle_digest")):
             raise CanonicalizationError("task.native-correlated handle digest is invalid")
         for field in ("child_thread_id", "child_run_id"):
-            if not run_task_journal.provider_reference(payload.get(field)):
+            value = payload.get(field)
+            if value is not None and not run_task_journal.provider_reference(value):
                 raise CanonicalizationError(f"task.native-correlated {field} is invalid")
+        return
+    if event_type == "task.native-cancel-requested":
+        for field in ("handle_digest", "cancel_key"):
+            if not run_task_journal.digest(payload.get(field)):
+                raise CanonicalizationError(f"task.native-cancel-requested {field} is invalid")
         return
     if payload.get("reason") not in _NATIVE_HELD_REASONS:
         raise CanonicalizationError("task.native-held reason is invalid")

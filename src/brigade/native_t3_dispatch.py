@@ -51,6 +51,7 @@ _MAX_NATIVE_BYTES = 1_048_576
 _INTENT_DOMAIN = "brigade.native-t3.intent.v1"
 _KEY_DOMAIN = "brigade.native-t3.idempotency.v1"
 _HANDLE_DOMAIN = "brigade.native-t3.handle.v1"
+_EVIDENCE_DOMAIN = "brigade.native-t3.evidence.v1"
 _STATUS_MAP = {
     "queued": "queued",
     "running": "running",
@@ -662,6 +663,31 @@ def _handle_digest(result: NativeResult, parent_thread: str) -> str:
     )
 
 
+def _evidence_digest(handle_digest: str, result: NativeResult, observation: observations.NativeObservation) -> str:
+    """Bind a terminal acknowledgement candidate to its exact projection.
+
+    The digest covers the correlated handle, the terminal status and run id,
+    the selected result-transfer id, the pending flags and work state, and the
+    containment verdict. It becomes the terminal artifact digest, so two
+    different terminal projections cannot share a result identity.
+    """
+    return _digest(
+        {
+            "handle_digest": handle_digest,
+            "status": result.status,
+            "terminal_run_id": observation.terminal_run_id,
+            "result_transfer_id": observation.result_transfer_id,
+            "work_state": result.work_state,
+            "has_pending_child_runs": result.has_pending_child_runs,
+            "has_pending_question": result.has_pending_question,
+            "pending_approval": result.pending_approval is not None,
+            "wait_timed_out": result.wait_timed_out,
+            "containment": observation.containment,
+        },
+        _EVIDENCE_DOMAIN,
+    )
+
+
 def _require_target(result: NativeResult, target: NativeTarget) -> None:
     if result.provider_instance != target.provider_instance:
         raise _refuse("provider-mismatch", "the native provider instance does not match the finalized intent")
@@ -735,6 +761,8 @@ def _observe(
     verified: _Verified,
     result: NativeResult,
     observation: observations.NativeObservation,
+    *,
+    evidence: str | None = None,
 ) -> run_tasks.TaskResult:
     terminal = observation.family == "terminal-candidate"
     containment = "quiescent" if terminal else ("active" if result.has_pending_child_runs else "unknown")
@@ -748,6 +776,8 @@ def _observe(
                 provider_task_id=result.child_node_id,
                 original_run_id=result.child_run_id,
                 provider_result_id=observation.terminal_run_id if terminal else None,
+                artifact_kind="receipt" if terminal else None,
+                artifact_digest=evidence if terminal else None,
                 containment=containment,
             ),
             expected_version=verified.result.version,
@@ -776,7 +806,10 @@ def _correlate(
     observation = _classify(verified, binding, result)
     if observation.family == "refused":
         raise _refuse("native-mismatch", "the native projection does not correlate with this task")
-    updated = _observe(workspace, run_dir, verified, result, observation)
+    evidence = (
+        _evidence_digest(handle_digest, result, observation) if observation.family == "terminal-candidate" else None
+    )
+    updated = _observe(workspace, run_dir, verified, result, observation, evidence=evidence)
     _append(
         workspace,
         run_dir,
@@ -786,8 +819,6 @@ def _correlate(
             "attempt_id": binding.attempt_id,
             "mode": mode,
             "handle_digest": handle_digest,
-            "child_thread_id": result.child_thread_id,
-            "child_run_id": result.child_run_id,
         },
         key=_key("correlated", result.task_id, binding.attempt_id, mode, handle_digest),
     )
@@ -798,6 +829,7 @@ def _correlate(
         "attempt_id": binding.attempt_id,
         "mode": mode,
         "status": updated.status,
+        "result_id": updated.result_id,
         "child_thread_id": result.child_thread_id,
         "child_run_id": result.child_run_id,
         "child_node_id": result.child_node_id,

@@ -397,7 +397,7 @@ def test_accepted_records_a_terminal_projection(tmp_path, transfers):
     assert report["status"] == "completed"
     task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
     assert task.status == "completed" and task.result_id is not None
-    assert task.artifact_kind == "unavailable"
+    assert task.artifact_kind == "receipt" and task.artifact_digest is not None
 
 
 @POSIX_ONLY
@@ -625,7 +625,7 @@ def test_native_json_refuses_an_abandoned_task(tmp_path):
                 "attempt_id": "a" * 64,
                 "mode": "parent-reported",
                 "handle_digest": "b" * 64,
-                "child_thread_id": None,
+                "child_thread_id": 5,
                 "child_run_id": "run-child",
             },
         ),

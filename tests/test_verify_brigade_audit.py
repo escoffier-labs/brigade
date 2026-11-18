@@ -31,6 +31,7 @@ ACTIVE = {
     "storage-parity.md",
     "t3-enrollment.md",
     "t3-claim.md",
+    "t3-lifecycle.md",
 }
 PAUSED = {"handoff-lint.md", "run-dry-run.md"}
 
