@@ -232,8 +232,7 @@ def test_operator_list_defaults_pending_and_all_is_explicit(setup, capsys, monke
 
 
 EMPTY_LIST_NOTE = (
-    "note: an empty list also means this credential lacks list_proposals on *. "
-    "Use proposals show <id> with a known id."
+    "note: an empty list also means this credential lacks list_proposals on *. Use proposals show <id> with a known id."
 )
 
 
