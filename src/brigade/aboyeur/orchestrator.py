@@ -719,6 +719,10 @@ def run(
         # canonical-write behavior.
         if lock_workspace != cwd:
             drift_snapshot = runguard.capture_pre_run_snapshot(lock_workspace)
+        elif defer_artifact_collection:
+            # The CLI owns this checkout's patch and cleanup. Workers may
+            # branch or commit here while the parent checkout advances.
+            drift_snapshot = None
         else:
             drift_snapshot = pre_run_snapshot
     except runguard.RunGuardError as exc:

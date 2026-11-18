@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import tomllib
 
-import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 
-from . import toml_format
+from . import localio, toml_format
 
 SCHEMA = "brigade.run_preference.v1"
 CACHE_REL_PATH = Path(".brigade") / "run-preference.toml"
@@ -129,7 +128,6 @@ def load_cached(home: Path | None = None) -> RunPreference:
 
 def write_cached(preference: RunPreference, home: Path | None = None) -> Path:
     path = cache_path(home)
-    path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# Local cache of the fleet run preference (#1223).",
         "# --worker and a spoken seat name always win.",
@@ -137,9 +135,7 @@ def write_cached(preference: RunPreference, home: Path | None = None) -> Path:
     payload = preference.payload()
     if payload:
         lines.extend(f"{key} = {toml_format.format_toml_value(value)}" for key, value in payload.items())
-    tmp = path.with_suffix(".toml.tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    localio.write_text_atomic(path, "\n".join(lines) + "\n")
     return path
 
 

@@ -1879,7 +1879,6 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_worktree_creation(tmp_pa
         "create_detached_worktree",
         lambda repo_root, worktree_path: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
-    monkeypatch.setattr(runguard, "remove_worktree", lambda repo_root, worktree_path: None)
 
     assert (
         cli.main(
@@ -1905,6 +1904,7 @@ def test_run_cli_terminalizes_keyboard_interrupt_during_worktree_creation(tmp_pa
     assert receipt["tree_fingerprint"] == "c" * 40
     assert receipt["tree_fingerprint_head"] == "d" * 40
     assert receipt["failure"]["seat"] == "coder"
+    assert not checkout.exists()
     assert not (repo / ".brigade" / "run.lock").exists()
 
 
@@ -2938,7 +2938,7 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
         tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
     ).resolve()
     assert seen["cwd"] == expected_checkout
-    assert seen["lock_workspace"] == repo.resolve()
+    assert seen["lock_workspace"] == expected_checkout
     assert seen["defer_artifact_collection"] is True
     assert expected_checkout.exists()
     assert (repo / "tracked.txt").read_text() == "base\n"
@@ -3456,6 +3456,7 @@ def test_run_cli_worktree_keeps_checkout_when_receipt_finalization_fails(tmp_pat
         run_meta["status"] = "artifact-collection"
         run_meta.pop("finished_at", None)
         run_meta.pop("duration_seconds", None)
+        run_meta["lock_workspace"] = str(kwargs["lock_workspace"])
         run_path.write_text(json.dumps(run_meta) + "\n")
         fail_writes = True
         return 0
@@ -3478,7 +3479,8 @@ def test_run_cli_worktree_keeps_checkout_when_receipt_finalization_fails(tmp_pat
     assert checkout.exists()
     assert "failed to update run receipt after artifact collection: receipt disk full" in capsys.readouterr().err
     assert json.loads((output_dir / "run.json").read_text())["status"] == "artifact-collection"
-    assert runguard.lock_path(repo).is_dir()
+    assert runguard.lock_path(checkout).is_dir()
+    assert not runguard.lock_path(repo).exists()
 
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
     assert runs_cmd.watch(output_dir, cwd=repo, interval=0) == 1
@@ -3486,7 +3488,7 @@ def test_run_cli_worktree_keeps_checkout_when_receipt_finalization_fails(tmp_pat
     assert recovered["status"] == "failed"
     assert recovered["failure_phase"] == "stale-lock-recovery"
     assert recovered["failure"]["prior_status"] == "artifact-collection"
-    assert not runguard.lock_path(repo).exists()
+    assert not runguard.lock_path(checkout).exists()
 
 
 def test_run_cli_worktree_records_patch_reference_failure(tmp_path, monkeypatch, capsys):

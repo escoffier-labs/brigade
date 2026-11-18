@@ -1,0 +1,1 @@
+- Let `brigade run --worktree` use a separate run lock and fleet claim for each detached checkout so sibling runs can proceed concurrently.

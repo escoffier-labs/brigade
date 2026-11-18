@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Barrier
 
 import pytest
 
@@ -72,6 +75,25 @@ def test_cache_round_trip(tmp_path) -> None:
     assert not path.with_suffix(".toml.tmp").exists()
     loaded = run_preference.load_cached(tmp_path)
     assert loaded == pref
+
+
+def test_cache_concurrent_refreshes_publish_complete_preferences(tmp_path, monkeypatch) -> None:
+    path = run_preference.cache_path(tmp_path)
+    ready = Barrier(2, timeout=10)
+    replace = os.replace
+
+    def overlap_replacements(src, dst, **kwargs):
+        if dst == path:
+            ready.wait()
+        return replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "replace", overlap_replacements)
+    preferences = [run_preference.RunPreference(impl="first"), run_preference.RunPreference(impl="second")]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writes = [pool.submit(run_preference.write_cached, pref, tmp_path) for pref in preferences]
+        assert [write.result() for write in writes] == [path, path]
+    assert run_preference.load_cached(tmp_path) in preferences
+    assert list(path.parent.iterdir()) == [path]
 
 
 def test_hub_preference_get_put_and_rejects_secrets(tmp_path) -> None:

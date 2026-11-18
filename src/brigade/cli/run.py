@@ -716,8 +716,8 @@ def dispatch(args) -> int:
 
     worktree_cwd = None
     effective_cwd = run_cwd
+    worktree_lock_dir = None
     keep_worktree = False
-    worktree_removed = False
     lifecycle_seat = args.worker or loaded_roster.orchestrator
     # Set when the fleet heartbeat reports a mid-run credential refusal
     # (#1161): the outer KeyboardInterrupt handler turns the resulting
@@ -796,6 +796,20 @@ def dispatch(args) -> int:
                 _thread.interrupt_main()
 
     try:
+        if args.worktree:
+            assert output_dir is not None
+            checkout = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
+            reservation = runguard.worktree_lock_dir(checkout)
+            try:
+                reservation.mkdir(parents=True, exist_ok=False)
+            except FileExistsError as exc:
+                raise runguard.RunGuardError(f"worktree already reserved: {checkout}") from exc
+            worktree_lock_dir = reservation
+            try:
+                checkout.mkdir()
+            except FileExistsError as exc:
+                raise runguard.RunGuardError(f"worktree already exists: {checkout}") from exc
+            worktree_cwd = checkout
         with ExitStack() as lifecycle:
             lifecycle.enter_context(
                 _terminalize_escaped_run(output_dir, seat=lifecycle_seat, interrupt_failure=_fleet_interrupt_failure)
@@ -809,7 +823,7 @@ def dispatch(args) -> int:
                     "read_only": args.read_only,
                     "worker": args.worker,
                     "dry_run": args.dry_run,
-                    "lock_workspace": run_cwd,
+                    "lock_workspace": worktree_cwd or run_cwd,
                     "codex_transport": args.codex_transport or loaded_roster.codex_transport,
                     "scheduler": _resolved_scheduler(args, loaded_roster),
                 }
@@ -829,17 +843,29 @@ def dispatch(args) -> int:
                         "output_warnings": output_warnings,
                     },
                 )
+            if worktree_cwd is not None:
+                effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
+                keep_worktree = True
+                print(f"worktree: {effective_cwd}", file=sys.stderr)
             # The local lease's verdict on the previous run at this lock
             # (issue #1141): each dead owner it reconciled on the way in.
             reconciled_dead_owners: list[dict[str, object] | None] = []
             lock_path = lifecycle.enter_context(
                 runguard.run_lock(
-                    run_cwd,
+                    effective_cwd,
                     run_dir=output_dir,
                     wait_seconds=_resolved_run_lock_wait_seconds(args, run_cwd),
                     on_reconcile=reconciled_dead_owners.append,
                 )
             )
+            if args.worktree:
+                # Startup errors after acquisition must be checkpointed before
+                # the worktree's lock unwinds, including fleet claim refusal.
+                lifecycle.enter_context(
+                    _terminalize_escaped_run(
+                        output_dir, seat=lifecycle_seat, interrupt_failure=_fleet_interrupt_failure
+                    )
+                )
             # Hub-arbitrated cross-machine claim (issue #1125), taken after
             # the local lease so only the run that owns run.lock ever holds
             # (or releases) the hub claim — a queued sibling can neither run
@@ -855,10 +881,10 @@ def dispatch(args) -> int:
             # local-only run. A relative BRIGADE_HOME has no claim key at all (#2423): the
             # run takes no hub claim, unless --require-fleet-claim asks for one.
             claim_skip = "--no-fleet-claim" if args.no_fleet_claim else None
-            claim_target = run_cwd.name
+            claim_target = effective_cwd.name
             if claim_skip is None:
                 try:
-                    claim_target = fleet_client.resolve_claim_target(run_cwd)
+                    claim_target = fleet_client.resolve_claim_target(effective_cwd)
                 except fleet_home_guard.RelativeBrigadeHomeError:
                     if getattr(args, "require_fleet_claim", False):
                         raise
@@ -867,7 +893,7 @@ def dispatch(args) -> int:
             if claim_skip is not None:
                 _FLEET_LOG.warning(
                     "fleet claim skipped for run directory %s (%s); relying on the local run lock alone",
-                    run_cwd.name,
+                    effective_cwd.name,
                     claim_skip,
                 )
             else:
@@ -878,7 +904,7 @@ def dispatch(args) -> int:
                 claim_decision = lifecycle.enter_context(
                     fleet_client.repo_claim(
                         claim_target,
-                        base_path=run_cwd,
+                        base_path=effective_cwd,
                         conductor=lifecycle_seat,
                         lock_owner=runguard.read_lock_owner(lock_path),
                         supersede_dead_owner=dead_owner,
@@ -901,6 +927,7 @@ def dispatch(args) -> int:
                         task=args.task,
                         key=args.requester_key,
                         principal=args.requester_principal,
+                        **({"baseline_workspace": effective_cwd} if args.worktree else {}),
                     )
                 except agent_request.AgentRequestError as exc:
                     detail = f"requester signing failed: {exc}"
@@ -914,11 +941,6 @@ def dispatch(args) -> int:
                     )
                     print(f"error: {detail}", file=sys.stderr)
                     return 2
-            if args.worktree:
-                worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
-                effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
-                keep_worktree = True
-                print(f"worktree: {effective_cwd}", file=sys.stderr)
             run_kwargs: dict[str, Any] = {
                 "dry_run": args.dry_run,
                 "show_plan": args.show_plan,
@@ -934,7 +956,7 @@ def dispatch(args) -> int:
             if args.worktree and any(agent.transport == "acpx" for agent in loaded_roster.agents.values()):
                 run_kwargs["authorized_writable_worktree"] = True
             if args.worktree:
-                run_kwargs["lock_workspace"] = run_cwd
+                run_kwargs["lock_workspace"] = effective_cwd
                 run_kwargs["defer_artifact_collection"] = True
             if args.worker is not None:
                 run_kwargs["worker"] = args.worker
@@ -1136,7 +1158,6 @@ def dispatch(args) -> int:
                                 file=sys.stderr,
                             )
                         else:
-                            worktree_removed = True
                             aboyeur_mod.record_worktree_removal(
                                 output_dir,
                                 path=effective_cwd,
@@ -1185,8 +1206,14 @@ def dispatch(args) -> int:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
     finally:
-        if worktree_cwd is not None and not keep_worktree and not worktree_removed:
-            runguard.remove_worktree(run_cwd, worktree_cwd)
+        if not keep_worktree:
+            if worktree_cwd is not None and worktree_cwd.exists():
+                runguard.discard_incomplete_worktree(run_cwd, worktree_cwd)
+            if worktree_lock_dir is not None:
+                try:
+                    worktree_lock_dir.rmdir()
+                except OSError:
+                    pass  # Never remove a retained lease or a recovery claim.
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)
         _print_suspected_noop_warning(output_dir)

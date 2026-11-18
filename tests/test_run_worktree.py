@@ -5,10 +5,15 @@ from __future__ import annotations
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Event, Lock
 from typing import Any
 
-from brigade import aboyeur, cli, proc, runguard
+import pytest
+
+from brigade import aboyeur, cli, doctor, fleet_client, proc, runguard
 
 
 def _git(repo: Path, *args: str) -> proc.Result:
@@ -103,6 +108,141 @@ def _checkout_path(tmp_path: Path, repo: Path, output_dir: Path) -> Path:
 def _age_directory(path: Path, days: int) -> None:
     old = time.time() - days * 86400
     os.utime(path, (old, old))
+
+
+@pytest.mark.parametrize("isolated", [True, False])
+def test_sibling_runs_lock_only_their_checkout(tmp_path, monkeypatch, isolated):
+    repo = _git_repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://github.com/example/project.git")
+    (repo / ".brigade" / "node.toml").write_text("# Workspace identity marker\n")
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "node.toml").write_text("# Enclosing identity marker\n")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    entered, finish = Event(), Event()
+    claims: set[str] = set()
+    claim_guard = Lock()
+
+    @contextmanager
+    def claim(target, *, lock_owner, **kwargs):
+        with claim_guard:
+            assert target not in claims
+            assert lock_owner["run_dir"]
+            claims.add(target)
+        try:
+            yield
+        finally:
+            with claim_guard:
+                claims.remove(target)
+
+    def fake_run(task, loaded_roster, *, cwd, output_dir, **kwargs):
+        meta = json.loads((output_dir / "run.json").read_text())
+        assert runguard.resolve_run_lock_workspace(meta, output_dir) == cwd
+        assert runguard.is_active_run_owner(cwd, output_dir)
+        aboyeur.record_run_start(output_dir, task=task, cwd=cwd, roster=loaded_roster, read_only=False, worker="coder")
+        if task == "first":
+            assert doctor._recovery_checkpoint_run_verdict(repo, output_dir) == ("ok", "live owner")
+            if isolated:
+                (cwd / ".brigade" / "node.toml").write_text("# Identity written during the run\n")
+                assert fleet_client.resolve_claim_target(cwd) == f"example/project@{cwd.name}"
+                (cwd / ".brigade" / "node.toml").unlink()
+            entered.set()
+            assert finish.wait(30)
+        elif isolated:
+            first_cwd = _checkout_path(tmp_path, repo, tmp_path / "first")
+            assert runguard.is_active_run_owner(first_cwd, tmp_path / "first")
+            assert runguard.lock_path(first_cwd) != runguard.lock_path(cwd)
+            with claim_guard:
+                assert f"example/project@{first_cwd.name}" in claims
+                expected = f"example/project@{cwd.name}" if cwd != repo else repo.name
+                assert expected in claims
+        if cwd != repo:
+            meta = json.loads((output_dir / "run.json").read_text())
+            aboyeur._write_json(output_dir / "run.json", {**meta, "status": "artifact-collection"})
+        return 0
+
+    monkeypatch.setattr(fleet_client, "repo_claim", claim)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    def launch(task, *, worktree):
+        argv = ["run", task, "--cwd", str(repo), "--output-dir", str(tmp_path / task), "--worker", "coder"]
+        return cli.main([*argv, "--worktree"] if worktree else argv)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(launch, "first", worktree=isolated)
+        try:
+            assert entered.wait(10), first.result(timeout=1)
+            if isolated:
+                first_checkout = _checkout_path(tmp_path, repo, tmp_path / "first")
+                assert not runguard.lock_path(repo).exists()
+                assert cli.main(["runs", "prune-worktrees", "--target", str(repo), "--older-than", "0", "--apply"]) == 0
+                assert first_checkout.is_dir()
+                assert launch("second", worktree=True) == 0
+                assert launch("in-place", worktree=False) == 0
+            else:
+                assert launch("second", worktree=False) == 2
+        finally:
+            finish.set()
+        assert first.result(timeout=10) == 0
+    assert not runguard.lock_path(repo).exists()
+    if isolated:
+        for name in ("first", "second"):
+            output_dir = tmp_path / name
+            checkout = _checkout_path(tmp_path, repo, output_dir)
+            assert not checkout.exists()
+            assert not runguard.lock_path(checkout).exists()
+            assert (output_dir / "changes.patch").read_text() == ""
+            assert doctor._recovery_checkpoint_run_verdict(repo, output_dir) == (
+                "ok",
+                "projected snapshot matches run.json",
+            )
+
+
+def test_failed_worktree_creation_does_not_take_a_lock_or_leave_a_checkout(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    checkout = _checkout_path(tmp_path, repo, output_dir)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    create = runguard.create_detached_worktree
+    before = _git(repo, "worktree", "list", "--porcelain").stdout
+
+    def fail_after_add(repo, path):
+        assert not runguard.lock_path(repo).exists()
+        assert not runguard.lock_path(checkout).exists()
+        create(repo, path)
+        raise runguard.RunGuardError("simulated checkout hook failure")
+
+    monkeypatch.setattr(runguard, "create_detached_worktree", fail_after_add)
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"]) == 2
+    assert not checkout.exists()
+    assert not runguard.lock_path(repo).exists()
+    assert not runguard.worktree_lock_dir(checkout).exists()
+    assert _git(repo, "worktree", "list", "--porcelain").stdout == before
+    assert "simulated checkout hook failure" in (output_dir / "run.json").read_text()
+
+
+def test_removal_receipt_failure_retains_the_worktree_lock(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    checkout = _checkout_path(tmp_path, repo, output_dir)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def fake_run(task, loaded_roster, *, cwd, output_dir, **kwargs):
+        aboyeur.record_run_start(output_dir, task=task, cwd=cwd, roster=loaded_roster, read_only=False)
+        meta = json.loads((output_dir / "run.json").read_text())
+        aboyeur._write_json(output_dir / "run.json", {**meta, "status": "artifact-collection"})
+        return 0
+
+    def fail_removal_receipt(output_dir, *, path, reason):
+        assert not path.exists()
+        assert runguard.is_active_run_owner(path, output_dir)
+        raise runguard.RetainRunLockError("simulated removal receipt failure")
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(aboyeur, "record_worktree_removal", fail_removal_receipt)
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"]) == 2
+    assert not checkout.exists()
+    assert not runguard.lock_path(repo).exists()
+    assert runguard.run_lock_state(checkout, output_dir) == "live"
 
 
 class TestRunWorktreeLifecycle:

@@ -97,7 +97,13 @@ def _safe_key_path(key: Path) -> Path:
 
 
 def record_request(
-    *, target: Path, run_dir: Path, task: str, key: Path, principal: str | None = None
+    *,
+    target: Path,
+    run_dir: Path,
+    task: str,
+    key: Path,
+    principal: str | None = None,
+    baseline_workspace: Path | None = None,
 ) -> dict[str, str]:
     """Sign and append the request evidence before any worker dispatches."""
     try:
@@ -118,7 +124,7 @@ def record_request(
             raise AgentRequestError("a signed request is already recorded for this run")
 
         run_id = run_dir.name
-        baseline_commit = _baseline_commit(target)
+        baseline_commit = _baseline_commit(baseline_workspace or target)
         requested_at = _timestamp(datetime.now(timezone.utc))
         nonce = secrets.token_hex(16)
         statement = build_statement(

@@ -52,9 +52,16 @@ def _classify_worktree_for_removal(
     if not old_enough and not any(r.startswith("unreadable directory age") for r in reasons):
         reasons.append(f"younger than {older_than_days} days")
 
+    # The lease may live beside the checkout, so Git's clean verdict alone
+    # cannot distinguish a disposable tree from a live or retained run.
+    lock = runguard.lock_path(path)
+    has_lease = lock.exists() or any(lock.parent.glob(f".{lock.name}.*.stale"))
+    if has_lease:
+        reasons.append("run lock is present")
+
     return {
         "path": str(path),
-        "removable": clean and branch_backed and old_enough,
+        "removable": clean and branch_backed and old_enough and not has_lease,
         "reasons": reasons,
         "age_days": round(age_days, 2),
         "clean": clean,

@@ -310,8 +310,8 @@ def _read_fleet_section(config_path: Path, *, strict: bool = False) -> dict[str,
 
 
 def find_workspace_for_path(start: Path) -> Path | None:
-    """Nearest ancestor (or ``start`` itself) that holds ``.brigade/node.toml``."""
-    from . import node as node_mod
+    """Find a workspace identity without crossing an automatic worktree boundary."""
+    from . import node as node_mod, runguard
 
     try:
         current = Path(start).expanduser().resolve()
@@ -320,6 +320,10 @@ def find_workspace_for_path(start: Path) -> Path | None:
     if current.is_file():
         current = current.parent
     for candidate in (current, *current.parents):
+        # Autocreated worktrees have their own lease and claim. An identity
+        # there or above the cache must not change the Git-derived claim key.
+        if runguard.reserved_worktree_lock_dir(candidate) is not None:
+            break
         try:
             if node_mod.node_path(candidate).is_file():
                 return candidate
