@@ -226,9 +226,9 @@ def _place(
         # Fail closed: unreadable sessions must never read as zero sessions.
         live = None
     # Only nodes whose T3 observer reported recently have a trustworthy count. Expired presence rows
-    # read as zero sessions, so a stale node, or one with no health row (every host runs the observer
-    # after rollout), is unknown. None means the health read itself failed: all unknown.
-    healthy = fleet_t3_health.fresh_nodes(conn, now)
+    # read as zero sessions, so a stale node is unknown, and so is one with no health row (every host
+    # runs the observer after rollout; the reason differs). None means the health read failed: all unknown.
+    health = fleet_t3_health.classify_nodes(conn, now)
 
     loads: dict[str, dict[str, Any]] = {}
 
@@ -250,9 +250,15 @@ def _place(
         cpu = None if telemetry is None else telemetry.get("load")
         capacity = int(machine.get("concurrency") or 0)
         node = str(machine.get("node_id"))
-        sessions = None if live is None or healthy is None or node not in healthy else int(live.get(node, 0))
-        if sessions is None:
+        # A node with no health row at all is its own reason, so an operator can tell a node that has
+        # not posted health yet (rollout order) from one that is failing or stale.
+        sessions = None
+        if live is None or health is None or node in health[1]:
             reasons.append("sessions-unknown")
+        elif node not in health[0]:
+            reasons.append("t3-health-missing")
+        else:
+            sessions = int(live.get(node, 0))
         # Hub-counted sessions are a floor under the node-reported CPU load. Node memory joins this
         # max in a follow-up once nodes report it.
         session_ratio = None if sessions is None else (sessions / capacity if capacity > 0 else 1.0)
@@ -266,8 +272,8 @@ def _place(
         }
         if effective is None:
             # Fail closed on our own evidence: a machine with no usable load is never placeable, even if
-            # the routing evaluator's reasons change. ``sessions-unknown`` already names the session case.
-            if "sessions-unknown" not in reasons:
+            # the routing evaluator's reasons change. The two session reasons already name that case.
+            if "sessions-unknown" not in reasons and "t3-health-missing" not in reasons:
                 reasons.append("machine-load-unknown")
         elif effective >= threshold:
             reasons.append("machine-load-shed")

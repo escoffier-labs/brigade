@@ -71,9 +71,12 @@ workspaces use the existing node-scoped `local:` path-hash identity.
 
 A poll has a total 15-second work budget. The first native snapshot may use the
 rest of it minus a reserve for publishing (the session call timeout plus the policy
-call timeout, 4.5 seconds, so about 10 seconds), and the
-optional detail pass keeps its eight-second cap. Up to 50 publication attempts while time permits. The caller should allow five
-additional seconds for process cleanup with an outer 20-second hard timeout.
+call timeout, plus one safety margin, so about 10 seconds), and the optional detail
+pass keeps its eight-second cap, less the policy call timeout. Up to 50 publication
+attempts while time permits, leaving the policy call timeout free after the loop for
+the health post. The observer finishes inside its own 15-second budget. The per-host
+telemetry script that runs it applies a subprocess timeout of its own (17 seconds in
+the reference script), which must stay above 15 seconds.
 Every native/Git call uses the remaining deadline. Publication starts only when
 the public client's fixed two-second call plus 250 ms fits. A fast Hub can
 refresh all 13 active threads in one pass. Slow calls or the 50-row cap leave
@@ -179,8 +182,22 @@ node with no row alone.
 Placement is stricter: it trusts a session count only for a node whose observer
 succeeded within 300 seconds. A stale node, a node that only ever failed, a node
 with no health row (every host runs the observer, so a missing row means the node
-is not reporting) and an unreadable health table all give `sessions-unknown` and
-an ineligible machine. A node can only write its own row.
+is not reporting) and an unreadable health table all make the machine ineligible.
+A node with no row at all gets its own reason, `t3-health-missing`, so it can be
+told apart from a failing or stale node, which gets `sessions-unknown`. A node can
+only write its own row.
+
+Rollout order: upgrade the Hub first, then each node's observer. Until a node
+posts its first health report, placement has `t3-health-missing` for it, so
+placement recommends nothing until every candidate machine has reported once
+(about one observer cycle after its upgrade).
+
+Causes that keep a node unknown until fixed: an active thread that stays invalid
+(its `invalid_rows` count is non-zero every run, so `ok: true` is never posted), a
+`rotation_state_unavailable` error from an unreadable cursor file, and a host that
+has no T3 install or cannot reach the native client, because its observer fails
+every run and posts `ok: false`. Read the observer's JSON (`error`, `invalid_rows`,
+`health`) on that host to tell which.
 
 ## Placement
 

@@ -743,26 +743,40 @@ def test_an_idle_node_with_a_healthy_observer_stays_placeable(fleet):
     assert "sessions-unknown" not in _reasons(result, "worker-linux-1")
 
 
-def test_a_node_with_no_health_row_is_sessions_unknown_in_placement(fleet):
+def test_a_node_with_no_health_row_gets_its_own_reason_in_placement(fleet):
     # Every host runs the observer after rollout, so a missing row means the node is not reporting.
     fleet.execute("DELETE FROM fleet_t3_observations WHERE node_id=?", (NODE_LINUX,))
     fleet.commit()
     result = _place(fleet)
     row = next(r for r in result["candidates"] if r["machine"] == "worker-linux-1")
-    assert "sessions-unknown" in row["reasons"] and row["eligible"] is False and row["effective_load"] is None
+    # Distinct from a stale or failing node, but just as ineligible.
+    assert "t3-health-missing" in row["reasons"] and "sessions-unknown" not in row["reasons"]
+    assert row["eligible"] is False and row["effective_load"] is None
     assert result["recommended"]["machine"] != "worker-linux-1"
     for peer in ("worker-linux-2", "worker-cloud-1"):
-        assert "sessions-unknown" not in _reasons(result, peer)
+        assert "t3-health-missing" not in _reasons(result, peer) and "sessions-unknown" not in _reasons(result, peer)
 
 
-def test_a_hub_with_no_health_table_makes_every_machine_sessions_unknown(fleet):
+def test_stale_and_missing_health_have_different_reasons(fleet):
+    _health(fleet, NODE_LINUX, 9999)
+    fleet.execute("DELETE FROM fleet_t3_observations WHERE node_id=?", (NODE_LINUX_2,))
+    fleet.commit()
+    result = _place(fleet)
+    assert "sessions-unknown" in _reasons(result, "worker-linux-1")
+    assert "t3-health-missing" not in _reasons(result, "worker-linux-1")
+    assert "t3-health-missing" in _reasons(result, "worker-linux-2")
+    assert "sessions-unknown" not in _reasons(result, "worker-linux-2")
+    assert result["recommended"]["machine"] == "worker-cloud-1"
+
+
+def test_a_hub_with_no_health_table_makes_every_machine_health_missing(fleet):
     fleet.execute("DROP TABLE fleet_t3_observations")
     fleet.commit()
     before = _row_counts(fleet)
     result = _place(fleet)
     assert result["status"] == "none" and result["reason"] == "no-eligible-candidate"
     for row in result["candidates"]:
-        assert "sessions-unknown" in row["reasons"] and row["eligible"] is False
+        assert "t3-health-missing" in row["reasons"] and row["eligible"] is False
     # Reading creates nothing.
     assert _row_counts(fleet) == before and "fleet_t3_observations" not in before
 

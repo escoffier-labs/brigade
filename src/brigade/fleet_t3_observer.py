@@ -24,6 +24,7 @@ from .fleet_openclaw_observer import (
     ObservationError,
     RecentSession,
     _PublicationBatch,
+    _MARGIN_SECONDS,
     _absolute_workspace,
     _bounded_json,
     _opaque_id,
@@ -204,9 +205,12 @@ def _native_timeout(deadline: float, *, detail: bool) -> float:
     """Seconds the native subprocess may run. Raises observation_timeout when none is left."""
     if detail:
         # A failed optional phase must leave time to publish the metadata batch.
-        reserve = fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS
+        reserve = (
+            fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS + fleet_client_policy.POLICY_TIMEOUT_SECONDS
+        )
         return _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
-    return _remaining(deadline, cap=float("inf"), reserve=PUBLISH_RESERVE_SECONDS)
+    # One extra margin, because the publish loop's first check needs its own margin on top of the reserve.
+    return _remaining(deadline, cap=float("inf"), reserve=PUBLISH_RESERVE_SECONDS + _MARGIN_SECONDS)
 
 
 def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: list[str] | None = None) -> object:
@@ -498,7 +502,16 @@ def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
         batch = _select_publication_batch(recent, harness="t3", deadline=deadline)
         if len(cast(dict[str, list[object]], payload)["threads"]) > PUBLISH_LIMIT:
             batch = _link_publication_batch(batch, payload, interpreter=t3_python, deadline=deadline)
-        report.update(_publish_recent(recent, harness="t3", deadline=deadline, batch=batch))
+        report.update(
+            _publish_recent(
+                recent,
+                harness="t3",
+                deadline=deadline,
+                batch=batch,
+                # Leave room for the health post, so a full-cap snapshot still reports health.
+                tail_reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS,
+            )
+        )
         report["skipped"] = cast(int, report["skipped"]) + invalid
         report["ok"] = not (report["truncated"] or invalid or report.get("error"))
         # Never changes ok or the exit code. Rotation truncation and the inventory do not matter:

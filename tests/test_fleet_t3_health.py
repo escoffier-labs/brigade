@@ -343,3 +343,42 @@ def test_cli_json_is_silent_on_stderr_when_every_node_is_known(monkeypatch, caps
     assert cli.main(["fleet", "sessions", "--json"]) == 0
     captured = capsys.readouterr()
     assert captured.out == "[]\n" and captured.err == ""
+
+
+@pytest.mark.parametrize("stored", [5, 5.5, b"2026-09-05T12:00:00+00:00", "", "not a date"])
+def test_a_non_text_or_unparseable_stored_value_is_unknown_not_a_crash(conn, stored):
+    fleet_t3_health.ensure_schema(conn)
+    conn.execute("INSERT INTO fleet_t3_observations VALUES (?, ?, ?, ?)", (NODE_LINUX, stored, "x", "x"))
+    conn.commit()
+    assert fleet_t3_health.classify_nodes(conn, MOMENT) == (set(), {NODE_LINUX})
+    assert fleet_t3_health.stale_nodes(conn, MOMENT) == {NODE_LINUX}
+
+
+def test_sessions_rows_and_unknown_nodes_come_from_one_read_snapshot(hub, monkeypatch):
+    from brigade import fleet_hub_sessions
+
+    url, token, db = hub
+    _get_sessions(url, token)  # opens the schema
+    _seed_db(db, NODE_LINUX_2, 5)  # creates the health table
+    seen: dict[str, object] = {}
+    original = fleet_hub_sessions.list_sessions
+
+    def spy(conn, **kwargs):
+        rows = original(conn, **kwargs)
+        seen["in_transaction"] = conn.in_transaction
+        seen["query_only"] = conn.execute("PRAGMA query_only").fetchone()[0]
+        try:
+            conn.execute("CREATE TABLE scratch_write (x)")
+        except sqlite3.OperationalError:
+            seen["write_refused"] = True
+        # A write that commits after the rows were read must not show up in the same response.
+        _seed_db(db, NODE_LINUX, 9999)
+        return rows
+
+    monkeypatch.setattr(fleet_hub_sessions, "list_sessions", spy)
+    payload = _get_sessions(url, token)
+    assert seen == {"in_transaction": True, "query_only": 1, "write_refused": True}
+    assert payload["nodes_unknown"] == []
+    # The next request sees it.
+    monkeypatch.setattr(fleet_hub_sessions, "list_sessions", original)
+    assert _get_sessions(url, token)["nodes_unknown"] == [NODE_LINUX]

@@ -1200,11 +1200,12 @@ def test_snapshot_cap_is_the_remaining_budget_minus_the_publish_reserve():
     margin = shared._MARGIN_SECONDS
     deadline = time.monotonic() + shared.OBSERVATION_BUDGET_SECONDS
     cap = observer._native_timeout(deadline, detail=False)
-    expected = shared.OBSERVATION_BUDGET_SECONDS - margin - observer.PUBLISH_RESERVE_SECONDS
+    # One margin for the snapshot's own check and one for the publish loop's first check.
+    expected = shared.OBSERVATION_BUDGET_SECONDS - 2 * margin - observer.PUBLISH_RESERVE_SECONDS
     assert expected - 0.5 < cap <= expected
     # Larger than the old fixed 8 s, and the whole observer still fits inside the shared budget.
     assert cap > observer.NATIVE_TIMEOUT_SECONDS
-    assert cap + observer.PUBLISH_RESERVE_SECONDS + margin <= shared.OBSERVATION_BUDGET_SECONDS + 1e-6
+    assert cap + observer.PUBLISH_RESERVE_SECONDS + 2 * margin <= shared.OBSERVATION_BUDGET_SECONDS + 1e-6
     # The shared budget is untouched: OpenClaw uses the same constant.
     assert shared.OBSERVATION_BUDGET_SECONDS == 15 and observer.OBSERVATION_BUDGET_SECONDS == 15
 
@@ -1212,7 +1213,7 @@ def test_snapshot_cap_is_the_remaining_budget_minus_the_publish_reserve():
 def test_snapshot_cap_shrinks_with_the_clock_and_never_goes_negative():
     from brigade import fleet_openclaw_observer as shared, fleet_t3_observer as observer
 
-    soon = time.monotonic() + observer.PUBLISH_RESERVE_SECONDS + shared._MARGIN_SECONDS + 2
+    soon = time.monotonic() + observer.PUBLISH_RESERVE_SECONDS + 2 * shared._MARGIN_SECONDS + 2
     assert 1.5 < observer._native_timeout(soon, detail=False) <= 2
     with pytest.raises(shared.ObservationError, match="observation_timeout"):
         observer._native_timeout(time.monotonic() + observer.PUBLISH_RESERVE_SECONDS, detail=False)
@@ -1223,5 +1224,105 @@ def test_detail_pass_keeps_its_fixed_cap_and_reserve():
 
     deadline = time.monotonic() + observer.OBSERVATION_BUDGET_SECONDS
     assert observer._native_timeout(deadline, detail=True) == observer.NATIVE_TIMEOUT_SECONDS
-    tight = time.monotonic() + fleet_client.REPORT_TIMEOUT_SECONDS + observer.DETAIL_RESERVE_SECONDS + 0.25 + 1
+    reserve = (
+        fleet_client.REPORT_TIMEOUT_SECONDS
+        + observer.DETAIL_RESERVE_SECONDS
+        + fleet_client_policy.POLICY_TIMEOUT_SECONDS
+    )
+    tight = time.monotonic() + reserve + 0.25 + 1
     assert 0.5 < observer._native_timeout(tight, detail=True) <= 1
+
+
+def _pinned_clock(monkeypatch, *modules):
+    """One fake monotonic clock for the observer modules. Only the test advances it."""
+    from types import SimpleNamespace
+
+    clock = [1000.0]
+    fake = SimpleNamespace(monotonic=lambda: clock[0], time_ns=time.time_ns)
+    for module in modules:
+        monkeypatch.setattr(module, "time", fake)
+    return clock
+
+
+def test_a_snapshot_that_uses_its_full_cap_still_publishes_and_reports_health(native_t3, monkeypatch, capsys):
+    from brigade import fleet_openclaw_observer as shared, fleet_t3_observer as observer
+
+    _, published, root, worktree = native_t3
+    clock = _pinned_clock(monkeypatch, observer, shared)
+    payload = {
+        "schemaVersion": 2,
+        "total_threads": 2,
+        "projects": [{"id": "p", "workspaceRoot": str(root)}],
+        "threads": [{**_running(f"app-thread-{i}"), "worktreePath": str(worktree)} for i in range(2)],
+        "archived_count": 0,
+    }
+
+    def full_cap_snapshot(interpreter, deadline, **_kwargs):
+        clock[0] += observer._native_timeout(deadline, detail=False)
+        return payload
+
+    monkeypatch.setattr(observer, "_native_metadata", full_cap_snapshot)
+    started = clock[0]
+    assert observer.main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert clock[0] - started == pytest.approx(shared.OBSERVATION_BUDGET_SECONDS - 5.0)  # snapshot took the cap
+    assert len(published) == 2 and report["published"] == 2 and "error" not in report
+    assert report["health"] == "ok" and HEALTH_POSTS == [{"node_id": NODE, "ok": True}]
+
+
+def _recent(worktree, count):
+    from brigade.fleet_openclaw_observer import RecentSession
+
+    return [RecentSession(f"session-{i}", worktree, 0) for i in range(count)]
+
+
+def test_the_default_tail_reserve_leaves_the_openclaw_loop_unchanged(native_t3, monkeypatch):
+    from brigade import fleet_openclaw_observer as shared
+
+    _, published, _, worktree = native_t3
+    clock = _pinned_clock(monkeypatch, shared)
+    # Room for the loop's own checks (2.0 s call plus 0.25 s margin) and a little more, not for a tail.
+    deadline = clock[0] + fleet_client.REPORT_TIMEOUT_SECONDS + shared._MARGIN_SECONDS + 0.5
+    result = shared._publish_recent(_recent(worktree, 3), harness="openclaw", deadline=deadline)
+    assert result["published"] == 3 and result["truncated"] is False and "error" not in result
+    assert shared._publish_recent.__kwdefaults__["tail_reserve"] == 0
+    # With no room even for the call, the loop still ends with observation_timeout as before.
+    published.clear()
+    result = shared._publish_recent(_recent(worktree, 3), harness="openclaw", deadline=clock[0] + 1)
+    assert result["published"] == 0 and result["error"] == "observation_timeout" and result["truncated"] is True
+
+
+def test_a_tail_reserve_stops_the_loop_as_truncation_not_a_timeout(native_t3, monkeypatch):
+    from brigade import fleet_openclaw_observer as shared
+
+    _, published, _, worktree = native_t3
+    clock = _pinned_clock(monkeypatch, shared)
+    deadline = clock[0] + fleet_client.REPORT_TIMEOUT_SECONDS + shared._MARGIN_SECONDS + 0.5
+    result = shared._publish_recent(_recent(worktree, 3), harness="t3", deadline=deadline, tail_reserve=2.5)
+    assert result["published"] == 0 and result["truncated"] is True and "error" not in result
+    assert not published
+
+
+def test_a_tail_reserve_reached_mid_loop_keeps_what_was_published_and_no_error(native_t3, monkeypatch):
+    from brigade import fleet_openclaw_observer as shared
+
+    _, published, _, worktree = native_t3
+    clock = _pinned_clock(monkeypatch, shared)
+
+    def slow_publish(snapshot):
+        published.append(snapshot)
+        clock[0] += 1.0
+        return fleet_client.SessionWriteResult(ok=True)
+
+    monkeypatch.setattr(fleet_client, "publish_session", slow_publish)
+    # Enough for one session plus the tail, and for all three without a tail.
+    deadline = clock[0] + fleet_client.REPORT_TIMEOUT_SECONDS + shared._MARGIN_SECONDS + 2.5 + 0.5
+    result = shared._publish_recent(_recent(worktree, 3), harness="t3", deadline=deadline, tail_reserve=2.5)
+    assert result["published"] == 1 and result["truncated"] is True and "error" not in result
+    # The unsent session is retried first on the next run: the cursor advanced by what was sent only.
+    cursor_path, offset = shared._rotation_state("t3")
+    assert offset == 1
+    clock[0] = 1000.0
+    published.clear()
+    result = shared._publish_recent(_recent(worktree, 3), harness="openclaw", deadline=deadline)
+    assert result["published"] == 3 and "error" not in result

@@ -114,8 +114,8 @@ def classify_nodes(
     for node_id, last_success in rows:
         try:
             success = _parse_stamp(last_success) if last_success is not None else None
-        except ValueError:
-            success = None  # An unparseable stamp is as unknown as a missing one.
+        except (ValueError, TypeError, AttributeError):
+            success = None  # An unparseable or non-text stamp is as unknown as a missing one.
         # Session rows are published before the health post, so at exactly ``ttl`` they have expired.
         known = success is not None and moment - success < timedelta(seconds=ttl)
         (fresh if known else stale).add(str(node_id))
