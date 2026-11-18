@@ -8,6 +8,14 @@
 <h1 align="center">Run agents anywhere. Same memory everywhere.</h1>
 
 <p align="center">
+  <a href="https://brigadestack.com">Website</a> ·
+  <a href="https://brigadestack.com/docs">Docs</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/QUICKSTART.md">Quickstart</a> ·
+  <a href="https://brigadestack.com/compare">Compare</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/CHANGELOG.md">Changelog</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/escoffier-labs/brigade/actions/workflows/ci.yml?query=event%3Amerge_group"><img src="https://github.com/escoffier-labs/brigade/actions/workflows/ci.yml/badge.svg?event=merge_group" alt="CI status of the merge queue"></a>
   <a href="https://pypi.org/project/brigadestack/"><img src="https://shieldcn.dev/pypi/v/brigadestack.svg?label=pypi&size=xs" alt="PyPI version of brigadestack"></a>
   <img src="https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json.svg?size=xs" alt="Combined PyPI and npm downloads per month">
@@ -72,7 +80,7 @@ memory search: retry backoff (1 match(es))
 
 ### One list of MCP servers and skills
 
-MCP servers and skills follow the same rule as memory. List a server once in `.brigade/mcp.json`, and `brigade mcp sync` writes it into the config each tool reads. It previews until you pass `--write`. The targets are Claude Code, Codex, Cursor, OpenCode, Grok and Antigravity. `brigade skills sync` does the same for reviewed skills.
+MCP servers and skills follow the same rule as memory. List a server once in `.brigade/mcp.json`, and `brigade mcp sync` writes it into the config each tool reads. It previews until you pass `--write`, and it keeps each tool's existing auth settings. The targets are Claude Code, Codex, Cursor, OpenCode, Grok and Antigravity. `brigade skills sync` does the same for reviewed skills.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-tools.svg" alt="The MCP catalog .brigade/mcp.json and the skill registry are each kept once, then written to the config and skills folder of Claude Code, Codex, Cursor and OpenCode." width="720">
@@ -86,6 +94,14 @@ Records live under `.brigade/work/verify-runs/`, one folder per run. A failing c
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-check-record.svg" alt="A check record: the command python -m pytest -q, exit code 0, the two log files, and the fingerprint of the tree that was tested." width="720">
+</p>
+
+### Know what a change touches
+
+The code graph is a local index of your repository's symbols and the calls between them. An optional engine builds it, and `brigade setup` installs that engine. `brigade code sync` builds the index. `brigade code callers <symbol>` shows who calls a function, `brigade code impact <symbol>` shows callers and callees together, and `brigade code affected <files>` lists the tests that reach changed files. The picture below is the real answer for one function in this repository.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-code-graph.svg" alt="Code graph for the function normalized_url in src/brigade/mcp_native_auth.py, lines 201 to 208. Its direct callers are merge_imported_native_auth and two tests. merge_imported_native_auth is called by import_servers and two more tests. In total 6 functions in 3 files call it, 4 of them tests." width="720">
 </p>
 
 ## Modes
@@ -135,17 +151,21 @@ Run the BrigadeStack backend on a network you control, and agents on several mac
 
 A check record shows what ran. It does not show that the tests are good. Handoffs are drafts: a reviewer files them as cards, and nothing files itself yet. Session-start recall is Claude Code only. Sharing across machines and the hosted connectors need a backend or host that you run.
 
+## MCP servers
+
+- `brigade memory serve-mcp --stdio` serves your memory cards: search and read cards, the work brief, and `write_handoff`, which drafts a handoff and never edits a card.
+- `brigade skills serve-mcp --stdio` serves the reviewed skill registry, read-only: search, read and lint skills.
+
+<!-- MCP Registry ownership markers; keep each on its own line. -->
+<!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
+<!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
+
 <p align="center">
-  <a href="https://brigadestack.com">Website</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/QUICKSTART.md">Quickstart</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/tree/main/docs">Docs</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/CHANGELOG.md">Changelog</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/docs/command-inventory.md">Commands</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/docs/execution-model.md">Execution model</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/CONTRIBUTING.md">Contributing</a> ·
   <a href="https://github.com/escoffier-labs/brigade/issues">Issues</a> ·
   <a href="https://github.com/escoffier-labs/brigade/blob/main/LICENSE">MIT license</a>
 </p>
 
 The Python CLI may send a passive version request. [Telemetry](https://github.com/escoffier-labs/brigade/blob/main/docs/telemetry.md) lists its fields and opt-outs.
-
-<!-- MCP Registry ownership markers; keep each on its own line. -->
-<!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
-<!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
