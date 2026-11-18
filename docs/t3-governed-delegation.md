@@ -188,9 +188,10 @@ exact result id, idempotently, and stays readable after finalization.
 
 `t3 finalize` is explicit, never automatic. Under the run lock it re-reads
 every task, journals the transition, then updates `run.json`. It writes
-`completed` only when every task completed and was acknowledged, and `failed`
-otherwise, and never refunds budget. An abandoned-unknown task refuses
-finalization with `finalize-abandoned` rather than release live-work capacity.
+`completed` only when every task has terminal status `completed`, a result id
+and an acknowledgement, and `failed` otherwise, and never refunds budget. An
+unresolved hold refuses with `finalize-held`. An abandoned-unknown task refuses
+with `finalize-abandoned` rather than release live-work capacity.
 
 `t3 status <run> [--json]` is read-only and prints fixed tokens, booleans, the
 attempt number and a seat digest, with no task text, option values, native
@@ -202,7 +203,10 @@ payload or child ids.
 `t3 hold-resolve --native-json` applies the same projection validation as
 `t3 accepted`, records the result as an operator assertion, and first records a
 missing dispatch request so the run barrier clears and the unit is charged. It
-refuses a task that is already held. `--abandon` marks the attempt
+refuses an abandoned task. When the task is held on an accept conflict, the
+assertion clears the hold only when its handle digest matches the already
+recorded correlation, and it records a closed `task.native-hold-resolved` fact.
+A different handle keeps the hold. `--abandon` marks the attempt
 terminal-unknown with a durable hold fact. When a launch claim exists without
 its dispatch request it records that request, so the unit stays charged. When
 no launch claim exists it charges nothing. Neither path ever re-grants launch,
@@ -255,8 +259,8 @@ Claim and correlation refusals use the same one-line form. Codes include
 `intent-mismatch`, `native-invalid`, `native-mismatch`,
 `provider-mismatch`, `model-mismatch`, `options-mismatch`,
 `accept-conflict`, `handle-mismatch`, `no-correlation`, `task-terminal`,
-`task-nonterminal`, `result-mismatch`, `ack-refused`, `finalize-abandoned`
-and `observation-conflict`.
+`task-nonterminal`, `result-mismatch`, `ack-refused`, `finalize-held`,
+`finalize-abandoned` and `observation-conflict`.
 
 ## Limits
 

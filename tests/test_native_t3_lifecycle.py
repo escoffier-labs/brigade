@@ -13,6 +13,8 @@ from brigade import (
     native_t3_lifecycle as lifecycle,
     native_t3_observations as observations,
     run_events,
+    run_journal,
+    run_projector,
     run_tasks,
 )
 from tests.test_native_t3_claim import (
@@ -26,6 +28,8 @@ from tests.test_native_t3_claim import (
     _run_dir,
     _terminal,
 )
+
+SKILL = Path(__file__).resolve().parents[1] / "src/brigade/templates/skills/t3-governed-delegation/SKILL.md"
 
 
 def _journal(workspace: Path, run_id: str) -> Path:
@@ -52,9 +56,9 @@ def _accepted(workspace: Path, run_id: str, task_id: str = "one", payload: dict 
     )
 
 
-def _complete(workspace: Path, run_id: str, task_id: str) -> str:
+def _complete(workspace: Path, run_id: str, task_id: str, *, status: str = "completed") -> str:
     _claim(workspace, run_id, task_id)
-    report = _accepted(workspace, run_id, task_id, _terminal(task_id))
+    report = _accepted(workspace, run_id, task_id, _terminal(task_id, status=status))
     assert report["result_id"] is not None
     return report["result_id"]
 
@@ -243,6 +247,9 @@ def test_finalize_completed_when_every_task_completed_and_acked(tmp_path):
     assert report["status"] == "completed" and report["acknowledged"] == 2
     meta = json.loads((_run_dir(workspace, run_id) / "run.json").read_text(encoding="utf-8"))
     assert meta["status"] == "completed" and meta["finished_at"]
+    assert "native_finalize" in run_projector.PRESERVED_FIELDS
+    events = list(run_journal.read_journal_bounded(_journal(workspace, run_id)).events)
+    run_projector.project_run_snapshot(meta, events, journal_present=True)
     view = lifecycle.status(workspace=workspace, run_id=run_id)
     assert view["status"] == "completed"
     assert all(task["terminal"] and task["acked"] for task in view["tasks"])
@@ -260,6 +267,86 @@ def test_finalize_failed_when_a_task_is_incomplete(tmp_path):
     _accepted(workspace, run_id, "two")
     report = lifecycle.finalize(workspace=workspace, run_id=run_id)
     assert report["status"] == "failed" and report["acknowledged"] == 1
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "interrupted"])
+@POSIX_ONLY
+def test_finalize_failed_for_an_acknowledged_non_completed_terminal(tmp_path, status):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    result_id = _complete(workspace, run_id, "one", status=status)
+    lifecycle.ack(workspace=workspace, run_id=run_id, task_id="one", result_id=result_id)
+    report = lifecycle.finalize(workspace=workspace, run_id=run_id)
+    assert report["status"] == "failed"
+    meta = json.loads((_run_dir(workspace, run_id) / "run.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "failed"
+
+
+@POSIX_ONLY
+def test_finalize_failed_for_a_mixed_terminal_outcome(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one", "two"))
+    for task_id, status in (("one", "completed"), ("two", "failed")):
+        result_id = _complete(workspace, run_id, task_id, status=status)
+        lifecycle.ack(workspace=workspace, run_id=run_id, task_id=task_id, result_id=result_id)
+    assert lifecycle.finalize(workspace=workspace, run_id=run_id)["status"] == "failed"
+
+
+@POSIX_ONLY
+def test_finalize_refuses_an_unresolved_accept_conflict(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _accepted(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError) as conflict:
+        _accepted(workspace, run_id, payload=_native("one", childRunId="run-child-other"))
+    assert conflict.value.code == "accept-conflict"
+    with pytest.raises(dispatch.DispatchError) as refused:
+        lifecycle.finalize(workspace=workspace, run_id=run_id)
+    assert refused.value.code == "finalize-held"
+
+
+@POSIX_ONLY
+def test_hold_resolve_clears_a_resolvable_hold_and_never_regrants(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _accepted(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError) as conflict:
+        _accepted(workspace, run_id, payload=_native("one", childRunId="run-child-other"))
+    assert conflict.value.code == "accept-conflict"
+    cleared = dispatch.hold_resolve(
+        workspace=workspace, run_id=run_id, task_id="one", payload=_native("one"), abandon=False
+    )
+    assert cleared["mode"] == "hold-resolved"
+    assert lifecycle.status(workspace=workspace, run_id=run_id)["tasks"][0]["held_reason"] is None
+    with pytest.raises(dispatch.DispatchError) as regrant:
+        _claim(workspace, run_id, "one")
+    assert regrant.value.code == "already-claimed"
+
+    terminal = _observe(workspace, run_id)
+    assert terminal["result_id"] is not None
+    lifecycle.ack(workspace=workspace, run_id=run_id, task_id="one", result_id=terminal["result_id"])
+    assert lifecycle.finalize(workspace=workspace, run_id=run_id)["status"] == "completed"
+
+
+@POSIX_ONLY
+def test_hold_resolve_refuses_a_different_handle_and_abandoned_stays_held(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _accepted(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError):
+        _accepted(workspace, run_id, payload=_native("one", childRunId="run-child-other"))
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.hold_resolve(
+            workspace=workspace,
+            run_id=run_id,
+            task_id="one",
+            payload=_native("one", childRunId="run-child-third"),
+            abandon=False,
+        )
+    assert refused.value.code == "accept-conflict"
+    dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=None, abandon=True)
+    assert lifecycle.status(workspace=workspace, run_id=run_id)["tasks"][0]["held_reason"] == dispatch.ABANDONED
+    with pytest.raises(dispatch.DispatchError) as held:
+        dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=_native("one"), abandon=False)
+    assert held.value.code == "task-held"
 
 
 @POSIX_ONLY
@@ -315,3 +402,40 @@ def test_new_native_event_shapes_are_closed():
         payload={"task_id": "one", "attempt_id": "a" * 64, "handle_digest": "b" * 64, "cancel_key": "c" * 64},
         idempotency_key="k",
     )
+    run_events.validate_event_request(
+        event_type="task.native-hold-resolved",
+        payload={"task_id": "one", "attempt_id": "a" * 64, "reason": "accept-conflict", "evidence_digest": "b" * 64},
+        idempotency_key="k",
+    )
+    with pytest.raises(run_events.CanonicalizationError):
+        run_events.validate_event_request(
+            event_type="task.native-hold-resolved",
+            payload={
+                "task_id": "one",
+                "attempt_id": "a" * 64,
+                "reason": "abandoned-unknown",
+                "evidence_digest": "b" * 64,
+            },
+            idempotency_key="k",
+        )
+    with pytest.raises(run_events.CanonicalizationError):
+        run_events.validate_event_request(
+            event_type="task.native-correlated",
+            payload={
+                "task_id": "one",
+                "attempt_id": "a" * 64,
+                "mode": "parent-reported",
+                "handle_digest": "b" * 64,
+                "child_thread_id": None,
+            },
+            idempotency_key="k",
+        )
+
+
+def test_skill_template_names_every_verb_and_the_ack_boundary():
+    text = SKILL.read_text(encoding="utf-8")
+    for verb in ("t3 open", "t3 claim", "t3 accepted", "t3 observe", "t3 cancel", "t3 ack", "t3 finalize"):
+        assert verb in text
+    assert "acknowledges T3 delivery" in text and "Brigade `ack` is separate" in text
+    assert "do not resubmit `delegate_task`" in text.lower() or "do not resubmit `delegate_task`" in text
+    assert "hold-resolve" in text and "delegate_task" in text

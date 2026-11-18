@@ -234,7 +234,19 @@ def finalize(*, workspace: Path, run_id: str) -> dict[str, Any]:
                 "finalize-abandoned",
                 "an abandoned task keeps live-work capacity, so the run cannot be finalized",
             )
-        completed = all(result.result_id is not None and result.acknowledged for result in results)
+        held = [
+            result.handle.spec.task_id
+            for result in results
+            if dispatch._held(events, result.handle.spec.task_id) is not None
+        ]
+        if held:
+            raise dispatch._refuse(
+                "finalize-held",
+                "an unresolved task hold prevents finalization until an operator resolves it",
+            )
+        completed = all(
+            result.status == "completed" and result.result_id is not None and result.acknowledged for result in results
+        )
         decision = "completed" if completed else "failed"
         try:
             from . import aboyeur, localio

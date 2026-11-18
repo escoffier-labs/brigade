@@ -15,6 +15,7 @@ BUNDLED_TEMPLATES = (
     "card-refresh",
     "forward-plan",
     "fleet-hub-upgrade",
+    "t3-governed-delegation",
 )
 
 

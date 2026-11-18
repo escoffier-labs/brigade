@@ -41,6 +41,7 @@ CORRELATION_SCHEMA = "brigade.t3_correlation.v1"
 CLAIM_EVENT = "task.native-claimed"
 CORRELATION_EVENT = "task.native-correlated"
 HELD_EVENT = "task.native-held"
+HOLD_RESOLVED_EVENT = "task.native-hold-resolved"
 PARENT_REPORTED = "parent-reported"
 OPERATOR_ASSERTED = "operator-asserted"
 ABANDONED = "abandoned-unknown"
@@ -318,13 +319,26 @@ def _correlation(events: Sequence[run_journal.RunEvent], task_id: str) -> tuple[
 
 
 def _held(events: Sequence[run_journal.RunEvent], task_id: str) -> str | None:
-    payload = _latest(events, HELD_EVENT, task_id)
-    if payload is None:
-        return None
-    reason = payload.get("reason")
-    if reason not in {ACCEPT_CONFLICT, ABANDONED}:
-        raise _refuse("journal-refused", "the task hold record is not usable")
-    return str(reason)
+    """Return the active hold reason, folding durable resolutions in order.
+
+    A resolved accept-conflict hold stays resolved. An abandoned attempt has no
+    resolution event and stays held forever.
+    """
+    for event in reversed(events):
+        if event.event_type not in {HELD_EVENT, HOLD_RESOLVED_EVENT}:
+            continue
+        payload = event.payload
+        if payload.get("task_id") != task_id:
+            continue
+        reason = payload.get("reason")
+        if reason not in {ACCEPT_CONFLICT, ABANDONED}:
+            raise _refuse("journal-refused", "the task hold record is not usable")
+        if event.event_type == HOLD_RESOLVED_EVENT:
+            if reason != ACCEPT_CONFLICT:
+                raise _refuse("journal-refused", "the task hold resolution is not usable")
+            return None
+        return str(reason)
+    return None
 
 
 def _batch_ref(events: Sequence[run_journal.RunEvent], run_id: str, task_id: str) -> str:
@@ -1021,7 +1035,7 @@ def hold_resolve(
         )
         held = _held(events, task_id)
         if not abandon:
-            if held is not None:
+            if held == ABANDONED:
                 raise _refuse("task-held", f"the task is held ({held})")
             if verified.result.launch_claim is None:
                 raise _refuse("no-claim", "the task has no durable launch claim")
@@ -1039,6 +1053,8 @@ def hold_resolve(
             return {**base, "mode": ABANDONED, "status": verified.result.status, "replayed": replay}
         result = parse_native_result(payload, task_id=task_id)
         _require_target(result, verified.retained.target)
+        if held == ACCEPT_CONFLICT:
+            return _resolve_hold(workspace, run_dir, verified, result, binding, base)
         return _correlate(
             workspace=workspace,
             run_dir=run_dir,
@@ -1047,6 +1063,52 @@ def hold_resolve(
             binding=binding,
             mode=OPERATOR_ASSERTED,
         )
+
+
+def _resolve_hold(
+    workspace: Path,
+    run_dir: Path,
+    verified: _Verified,
+    result: NativeResult,
+    binding: ClaimBinding,
+    base: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Clear an accept-conflict hold only for the already-recorded handle.
+
+    The operator assertion is an assertion, not acceptance. It records a closed
+    resolution fact and re-observes the matching projection. A different handle
+    keeps the hold, and nothing here re-grants launch.
+    """
+    prior = _correlation(_read(run_dir), result.task_id)
+    handle_digest = _handle_digest(result, binding.parent_thread)
+    if prior is None or prior[1] != handle_digest:
+        raise _refuse("accept-conflict", "the operator assertion contradicts the recorded native handle")
+    _append(
+        workspace,
+        run_dir,
+        HOLD_RESOLVED_EVENT,
+        {
+            "task_id": result.task_id,
+            "attempt_id": binding.attempt_id,
+            "reason": ACCEPT_CONFLICT,
+            "evidence_digest": handle_digest,
+        },
+        key=_key("hold-resolved", result.task_id, binding.attempt_id, ACCEPT_CONFLICT, handle_digest),
+    )
+    observation = _classify(verified, binding, result)
+    if observation.family == "refused":
+        raise _refuse("native-mismatch", "the native projection does not correlate with this task")
+    evidence = (
+        _evidence_digest(handle_digest, result, observation) if observation.family == "terminal-candidate" else None
+    )
+    updated = _observe(workspace, run_dir, verified, result, observation, evidence=evidence)
+    return {
+        **base,
+        "mode": "hold-resolved",
+        "status": updated.status,
+        "result_id": updated.result_id,
+        "replayed": False,
+    }
 
 
 def _read_native(path: str) -> object:

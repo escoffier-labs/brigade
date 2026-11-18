@@ -154,6 +154,30 @@ def command(args, helper):
     reclaim = helper.run([*t3, "claim", run_id, "two", *parent], root=root, name="t3-claim-held")
     finalized = helper.run([*t3, "finalize", run_id, "--target", str(work)], root=root, name="t3-finalize")
     status = helper.run([*t3, "status", run_id, "--json", "--target", str(work)], root=root, name="t3-status")
+
+    final_batch = target / "batch-final.json"
+    final_batch.write_text(
+        json.dumps({**BATCH, "request_id": "verify-brigade-t3-final", "tasks": [BATCH["tasks"][0]]}), encoding="utf-8"
+    )
+    final_open = helper.run([*t3, "open", str(final_batch), "--target", str(work)], root=root, name="t3-final-open")
+    final_run = str((final_open.get("json") or {}).get("run_id"))
+    final_claim = helper.run([*t3, "claim", final_run, "one", *parent], root=root, name="t3-final-claim")
+    final_accepted = helper.run(
+        [*t3, "accepted", final_run, "one", *_accepted_args(native, work)], root=root, name="t3-final-accepted"
+    )
+    final_observe = helper.run(
+        [*t3, "observe", final_run, "one", *_accepted_args(native_terminal, work)], root=root, name="t3-final-observe"
+    )
+    final_result = str((final_observe.get("json") or {}).get("result_id"))
+    final_ack = helper.run(
+        [*t3, "ack", final_run, "one", "--result-id", final_result, "--target", str(work)],
+        root=root,
+        name="t3-final-ack",
+    )
+    final_finalize = helper.run(
+        [*t3, "finalize", final_run, "--target", str(work)], root=root, name="t3-final-finalize"
+    )
+    final_meta = json.loads((work / ".brigade" / "runs" / final_run / "run.json").read_text(encoding="utf-8"))
     run_dir = work / ".brigade" / "runs" / str(report.get("run_id"))
     run_json = run_dir / "run.json"
     meta = json.loads(run_json.read_text(encoding="utf-8")) if run_json.is_file() else {}
@@ -193,6 +217,14 @@ def command(args, helper):
         and all(not {"child_thread_id", "child_run_id"} & set(event["payload"]) for event in correlated)
         and finalized["returncode"] == 2
         and "finalize-abandoned" in (finalized.get("stderr") or "")
+        and final_open["returncode"] == 0
+        and all(
+            record["returncode"] == 0
+            for record in (final_claim, final_accepted, final_observe, final_ack, final_finalize)
+        )
+        and final_result
+        and (final_finalize.get("json") or {}).get("status") == "completed"
+        and final_meta.get("status") == "completed"
         and status["returncode"] == 0
         and all(task.get("acked") is True for task in view.get("tasks") or [] if task.get("task_id") == "one")
         and len({item.get("clientRequestId") for item in claims}) == 2
@@ -234,6 +266,8 @@ def command(args, helper):
             "cancel": helper.slim(cancel),
             "cancel_replay": helper.slim(cancel_replay),
             "finalize": helper.slim(finalized),
+            "final_run": final_run,
+            "final_finalize": helper.slim(final_finalize),
             "status": helper.slim(status),
             "abandon": helper.slim(abandoned),
             "reclaim": helper.slim(reclaim),

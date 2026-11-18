@@ -124,6 +124,8 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "orphaned_at",
         "last_observed_status",
         "uncommitted_change_count",
+        # Governed native T3 explicit closeout projection
+        "native_finalize",
     }
 )
 
@@ -192,6 +194,7 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "task.native-correlated",
         "task.native-held",
         "task.native-cancel-requested",
+        "task.native-hold-resolved",
         "control.requested",
         "control.observed",
         "control.failed",

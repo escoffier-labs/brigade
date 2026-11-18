@@ -28,9 +28,13 @@ text, option values, native payloads or child ids.
   refuses a terminal or held task with empty stdout.
 - `ack` refuses a nonterminal task, a held task or a wrong result id, and is
   idempotent for the exact terminal result.
-- `finalize` writes `completed` only when every task completed and was
-  acknowledged, otherwise `failed`, and refuses while an abandoned-unknown task
-  exists. `status` and an idempotent `ack` still work after finalization.
+- `finalize` writes `completed` only when every task has terminal status
+  `completed`, a result id and an acknowledgement, otherwise `failed`. It
+  refuses an unresolved hold and an abandoned-unknown task. `status` and an
+  idempotent `ack` still work after finalization.
+- `hold-resolve --native-json` clears a resolvable accept-conflict hold after
+  the same validation as `accepted`, records a closed resolution fact, and
+  never re-grants launch. `abandoned-unknown` stays permanent.
 - New `task.native-correlated` events carry no `child_thread_id` or
   `child_run_id`. Those fields remain optional legacy input.
 
@@ -63,9 +67,11 @@ $C cleanup
 
 The shared enrollment drive claims both tasks, accepts and observes task one
 to a terminal result, acknowledges it, accepts task two, cancels it twice,
-abandons it, then runs finalize and status. It asserts one cancel fact,
-identical cancel arguments on replay, no child ids in correlation events, task
-text absent from the journal, and the abandoned finalize refusal.
+abandons it, then runs finalize and status. It then opens a second one-task run,
+completes and acknowledges it, and finalizes it as `completed`. It asserts one
+cancel fact, identical cancel arguments on replay, no child ids in correlation
+events, task text absent from the journal, the abandoned refusal, and the
+successful completed closeout.
 
 ## Gotchas
 

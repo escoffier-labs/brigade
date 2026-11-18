@@ -625,7 +625,7 @@ def test_native_json_refuses_an_abandoned_task(tmp_path):
                 "attempt_id": "a" * 64,
                 "mode": "parent-reported",
                 "handle_digest": "b" * 64,
-                "child_thread_id": 5,
+                "child_thread_id": None,
                 "child_run_id": "run-child",
             },
         ),
