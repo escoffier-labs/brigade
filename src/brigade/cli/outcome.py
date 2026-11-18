@@ -220,7 +220,9 @@ def _dispatch_reconcile(args) -> int:
 
 
 def _dispatch_ratchet(args) -> int:
-    from .. import outcome_ratchet_report
+    from datetime import datetime, timezone
+
+    from .. import outcome_ratchet_report, outcome_skill_exec
 
     report = outcome_ratchet_report.load_report(args.target)
     if args.json:
@@ -241,10 +243,16 @@ def _dispatch_ratchet(args) -> int:
         f"regression_rollbacks={summary.get('regression_rollbacks')}"
     )
     print(f"pending_physical_actions: {summary.get('pending_physical_actions') or 0}")
+    if summary.get("stale_physical_actions"):
+        print(f"stale_physical_actions: {summary['stale_physical_actions']} (status older than the pending window)")
+    now = datetime.now(timezone.utc)
     for pending_row in report.get("pending_physical") or []:
         if isinstance(pending_row, dict):
+            age = outcome_skill_exec.age_label(
+                str(pending_row.get("status") or "status"), pending_row.get("status_changed_at"), now
+            )
             for command in pending_row.get("commands") or []:
-                print(f"  operator: {command}")
+                print(f"  operator: {command} ({age})")
     print(f"ineligibility_rate: {report.get('ineligibility_rate')}")
     if report.get("leading_ineligibility_reason"):
         print(f"leading_ineligibility_reason: {report['leading_ineligibility_reason']}")

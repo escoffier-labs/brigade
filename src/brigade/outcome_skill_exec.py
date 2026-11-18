@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import importlib
 import shlex
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from . import localio
 
 ROUTING_ONLY = "routing-only"
 
@@ -112,24 +116,75 @@ def pending_commands(
     return []
 
 
+@dataclass(frozen=True)
+class PendingAction:
+    """Commands for one skill whose last status transition is inside the window."""
+
+    status: str
+    changed_at: str | None
+    commands: list[str]
+
+
+@dataclass(frozen=True)
+class PendingPhysical:
+    """Recent pending operator commands, plus a count of older ones kept out of the list."""
+
+    recent: dict[str, PendingAction] = field(default_factory=dict)
+    stale_actions: int = 0
+
+
+def age_label(status: str, changed_at: Any, now: datetime) -> str:
+    """Human age of a status, such as ``demoted 3 days ago``; ``unknown age`` without a timestamp."""
+    changed = localio.parse_iso_datetime(changed_at)
+    if changed is None:
+        return f"{status}, unknown age"
+    days = max(0, (now - changed).days)
+    if days == 0:
+        return f"{status} today"
+    return f"{status} {days} day{'' if days == 1 else 's'} ago"
+
+
 def pending_by_artifact(
-    target: Path, status_map: Mapping[str, Mapping[str, Any]], kinds: Mapping[str, str]
-) -> dict[str, list[str]]:
-    """Pending operator commands for every skill currently promoted or demoted."""
+    target: Path,
+    status_map: Mapping[str, Mapping[str, Any]],
+    kinds: Mapping[str, str],
+    *,
+    now: datetime,
+    window_days: int,
+    current_run_ids: Collection[str] = (),
+) -> PendingPhysical:
+    """Pending operator commands for skills whose status changed inside the window.
+
+    A skill counts as recent when its ``last_action_ts`` is within ``window_days``
+    of ``now`` or it was decided in this run (``current_run_ids``). A missing or
+    unreadable timestamp cannot prove recency, so it is stale. Older commands are
+    counted in ``stale_actions`` instead of listed, so a demotion that predates
+    routing-only reconcile never reads as an action to take.
+    """
     wanted = {
         artifact_id: str(entry.get("status"))
         for artifact_id, entry in status_map.items()
         if kinds.get(artifact_id, "skill") == "skill" and entry.get("status") in {"promoted", "demoted"}
     }
     if not wanted:
-        return {}
+        return PendingPhysical()
     plan: list[dict[str, Any]] | None = None
     if "promoted" in wanted.values():
         try:
             plan = _read_plan(target)
         except Exception:  # noqa: BLE001 - see pending_commands
             plan = []
-    result = {
-        artifact_id: pending_commands(target, artifact_id, status, plan=plan) for artifact_id, status in wanted.items()
-    }
-    return {artifact_id: commands for artifact_id, commands in result.items() if commands}
+    recent: dict[str, PendingAction] = {}
+    stale = 0
+    for artifact_id, status in wanted.items():
+        commands = pending_commands(target, artifact_id, status, plan=plan)
+        if not commands:
+            continue
+        changed_at = status_map[artifact_id].get("last_action_ts")
+        changed = localio.parse_iso_datetime(changed_at)
+        is_recent = artifact_id in current_run_ids or (changed is not None and (now - changed).days <= window_days)
+        if is_recent:
+            recent[artifact_id] = PendingAction(status, changed_at if isinstance(changed_at, str) else None, commands)
+        else:
+            stale += len(commands)
+    return PendingPhysical(recent=recent, stale_actions=stale)

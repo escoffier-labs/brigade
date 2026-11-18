@@ -94,7 +94,9 @@ def _ratchet_panel(raw: object) -> str:
         f"{stamp}; mode={mode}; decisions {summary.get('decisions', '-')}, "
         f"regression holds {summary.get('regression_holds', '-')}, "
         f"regression rollbacks {summary.get('regression_rollbacks', '-')}, "
-        f"pending physical actions {summary.get('pending_physical_actions') or 0}; "
+        f"pending physical actions {summary.get('pending_physical_actions') or 0}"
+        + (f" (stale {summary['stale_physical_actions']})" if summary.get("stale_physical_actions") else "")
+        + "; "
         f"ineligibility_rate {_fmt(ratchet.get('ineligibility_rate'))}"
     )
     leading = ratchet.get("leading_ineligibility_reason")

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import shlex
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from brigade import outcome, outcome_cmd, outcome_ratchet_report, outcome_skill_exec, skills_cmd
+from brigade import cli, outcome, outcome_cmd, outcome_ratchet_report, outcome_skill_exec, skills_cmd
 from brigade.skills_cmd import registry
 from tests.test_scorecard_reconcile import seed_registry_skill_scorecard_hurt, seed_registry_skill_scorecard_promotion
 from tests.test_skills_local_edit_guard import SKILL, _write_skill
@@ -259,3 +260,125 @@ def test_the_ratchet_report_counts_pending_physical_actions(tmp_path, capsys):
     assert outcome_cmd.reconcile(target=tmp_path, apply=False, report=True, json_output=True) == 0
     capsys.readouterr()
     assert outcome_ratchet_report.load_report(tmp_path)["summary"]["pending_physical_actions"] == 0
+
+
+def _demote(tmp_path: Path, capsys) -> None:
+    """Promote then demote the skill through reconcile, leaving both copies installed."""
+    _import(tmp_path, capsys)
+    _install_all(tmp_path, capsys)
+    seed_registry_skill_scorecard_promotion(tmp_path, SKILL)
+    _reconcile(tmp_path, capsys)
+    seed_registry_skill_scorecard_hurt(tmp_path, SKILL)
+    assert _reconcile(tmp_path, capsys)["new_status"] == "demoted"
+
+
+def _age_status(tmp_path: Path, days: int) -> None:
+    """Rewrite the skill's last transition to ``days`` ago, as a demotion from before routing-only would carry."""
+    path = outcome_cmd._status_path(tmp_path)
+    data = json.loads(path.read_text())
+    data["artifacts"][SKILL]["last_action_ts"] = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    path.write_text(json.dumps(data))
+
+
+def _dry_run_report(tmp_path: Path, capsys, config: outcome.ReconcileConfig = CFG) -> dict:
+    assert outcome_cmd.reconcile(target=tmp_path, apply=False, config=config, json_output=True, report=True) == 0
+    capsys.readouterr()
+    return outcome_ratchet_report.load_report(tmp_path)
+
+
+def test_an_old_demotion_is_not_listed_but_is_counted_as_stale(tmp_path, capsys):
+    _demote(tmp_path, capsys)
+    _age_status(tmp_path, 90)
+
+    report = _dry_run_report(tmp_path, capsys)
+
+    assert report["summary"]["pending_physical_actions"] == 0
+    assert report["summary"]["stale_physical_actions"] >= 2
+    assert report["pending_physical"] == []
+    brief = outcome_ratchet_report.brief_payload(report)
+    assert brief["pending_physical_actions"] == 0
+    assert brief["stale_physical_actions"] == report["summary"]["stale_physical_actions"]
+
+
+def test_a_skill_with_no_transition_time_is_stale(tmp_path, capsys):
+    _demote(tmp_path, capsys)
+    path = outcome_cmd._status_path(tmp_path)
+    data = json.loads(path.read_text())
+    del data["artifacts"][SKILL]["last_action_ts"]
+    path.write_text(json.dumps(data))
+
+    report = _dry_run_report(tmp_path, capsys)
+
+    assert report["summary"]["pending_physical_actions"] == 0
+    assert report["summary"]["stale_physical_actions"] >= 2
+
+
+def test_a_fresh_demotion_is_listed_with_its_age_in_json_and_text(tmp_path, capsys):
+    _demote(tmp_path, capsys)
+    _age_status(tmp_path, 3)
+
+    report = _dry_run_report(tmp_path, capsys)
+
+    assert report["summary"]["pending_physical_actions"] >= 2
+    assert report["summary"]["stale_physical_actions"] == 0
+    (row,) = report["pending_physical"]
+    assert row["artifact_id"] == SKILL
+    assert row["status"] == "demoted"
+    assert row["status_changed_at"]
+    assert all(command.startswith("brigade skills rollback") for command in row["commands"])
+
+    assert cli.main(["outcome", "ratchet", "--target", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert f"operator: brigade skills rollback {SKILL} --target claude" in out
+    assert "(demoted 3 days ago)" in out
+    assert "stale_physical_actions" not in out
+
+
+def test_the_window_is_a_config_field(tmp_path, capsys):
+    _demote(tmp_path, capsys)
+    _age_status(tmp_path, 3)
+
+    narrow = _dry_run_report(
+        tmp_path, capsys, outcome.ReconcileConfig(cooldown_seconds=0, pending_physical_window_days=2)
+    )
+    assert narrow["summary"]["pending_physical_actions"] == 0
+    assert narrow["summary"]["stale_physical_actions"] >= 2
+
+    wide = _dry_run_report(
+        tmp_path, capsys, outcome.ReconcileConfig(cooldown_seconds=0, pending_physical_window_days=30)
+    )
+    assert wide["summary"]["pending_physical_actions"] >= 2
+    assert wide["summary"]["stale_physical_actions"] == 0
+
+
+def test_a_decision_from_the_current_run_is_always_listed_with_its_time(tmp_path, capsys):
+    _import(tmp_path, capsys)
+    _install_all(tmp_path, capsys)
+    seed_registry_skill_scorecard_promotion(tmp_path, SKILL)
+    _reconcile(tmp_path, capsys)
+    seed_registry_skill_scorecard_hurt(tmp_path, SKILL)
+    # A negative window excludes every status by age, so only the current-run rule can list it.
+    config = outcome.ReconcileConfig(cooldown_seconds=0, pending_physical_window_days=-1)
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=config, json_output=True, report=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    decision = next(item for item in payload["decisions"] if item["artifact_id"] == SKILL)
+    assert decision["status_changed_at"]
+    report = outcome_ratchet_report.load_report(tmp_path)
+    assert report["summary"]["pending_physical_actions"] == len(decision["pending_commands"]) > 0
+    assert report["summary"]["stale_physical_actions"] == 0
+    assert report["pending_physical"][0]["status_changed_at"] == decision["status_changed_at"]
+
+
+def test_text_output_labels_a_current_run_command_with_its_age(tmp_path, capsys):
+    _import(tmp_path, capsys)
+    seed_registry_skill_scorecard_promotion(tmp_path, SKILL)
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=CFG) == 0
+
+    operator_lines = [
+        line for line in capsys.readouterr().out.splitlines() if "operator: brigade skills install" in line
+    ]
+    assert operator_lines
+    assert all(line.endswith("(promoted today)") for line in operator_lines)

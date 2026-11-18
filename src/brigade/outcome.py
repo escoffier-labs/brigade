@@ -139,6 +139,8 @@ class ReconcileConfig:
     """Session-observed hurt older than this never counts toward the observed veto (veto only)."""
     observed_hurt_min_sessions: int = 2
     """Distinct sessions with unresolved observed hurt needed before the veto holds."""
+    pending_physical_window_days: int = 14
+    """Only statuses changed within this many days (or in this run) list operator commands."""
 
 
 REGRESSION_HOLD = "regression_hold"
