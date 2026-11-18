@@ -1162,6 +1162,26 @@
    "card_id": "only-evidence",
    "ranking_text": "",
    "text": "---\nevidence: []\n---\n"
+  },
+  {
+   "card_id": "evidence-blank-last-line",
+   "ranking_text": "---\ntitle: T\n---\nbody\n",
+   "text": "---\ntitle: T\nevidence: [\"a/b/c\"]\n\n---\nbody ^c-abcdef\n"
+  },
+  {
+   "card_id": "evidence-blank-middle-line",
+   "ranking_text": "---\n\ntitle: T\n---\nbody\n",
+   "text": "---\nevidence: [\"a/b/c\"]\n\ntitle: T\n---\nbody\n"
+  },
+  {
+   "card_id": "fence-trailing-space",
+   "ranking_text": "---\nevidence: [\"a/b/c\"]\n---  \nClaim. ^c-abcdef\n",
+   "text": "---\nevidence: [\"a/b/c\"]\n---  \nClaim. ^c-abcdef\n"
+  },
+  {
+   "card_id": "fence-earlier-than-writers",
+   "ranking_text": "---\ntitle: T\n---  \nevidence: [\"a/b/c\"]\n---\nClaim.\n",
+   "text": "---\ntitle: T\n---  \nevidence: [\"a/b/c\"]\n---\nClaim.\n"
   }
  ],
  "round": [

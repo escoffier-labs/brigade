@@ -34,16 +34,41 @@ def tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+def _writer_lines(meta: str) -> list[str]:
+    """``str::lines`` in Rust: split at ``\\n``, drop a ``\\r`` before it and a final empty line."""
+    parts = meta.split("\n")
+    lines = [part[:-1] if part.endswith("\r") else part for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _front_matter_body(text: str) -> str | None:
+    """What follows the closing fence ``memory_cmd._parse_frontmatter`` reads."""
+    if not text.startswith("---\n"):
+        return None
+    lines = text.splitlines(keepends=True)
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "".join(lines[index + 1 :])
+    return None
+
+
 def _without_evidence(text: str) -> str:
-    """Drop the front-matter lines the hub writer treats as the ``evidence`` field."""
+    """Drop the front-matter lines the hub writer treats as the ``evidence`` field.
+
+    The lines come from the writer's own parse, so a blank line or a final newline in
+    the metadata reads the same before and after the writer rewrites it. Nothing is
+    dropped when the writer's closing fence and the search parser's differ.
+    """
     if not text.startswith("---\n"):
         return text
     meta, sep, body = text[4:].partition("\n---\n")
     if not sep:
         return text
-    lines = meta.split("\n")
+    lines = _writer_lines(meta)
     kept = [line for line in lines if not (":" in line and line.partition(":")[0] == "evidence")]
-    if len(kept) == len(lines):
+    if len(kept) == len(lines) or _front_matter_body(text) != body:
         return text
     # A front matter left with no lines goes too, so a card that gains its first evidence field reads the same.
     return "---\n" + "\n".join(kept) + "\n---\n" + body if kept else body

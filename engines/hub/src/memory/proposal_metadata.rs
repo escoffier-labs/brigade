@@ -85,20 +85,21 @@ fn is_key(line: &str, key: &str) -> bool {
 }
 /// The card without any front-matter line that [`set`] would treat as `key`.
 /// Search uses it to leave out `evidence`, so the drop is never looser than
-/// the writer's parser and every other byte stays as stored. A front matter
+/// the writer's parser and every other byte stays as stored. The lines come
+/// from [`front`], the parser `set` uses, so a blank line or a final newline
+/// in the metadata reads the same before and after a `set`. A front matter
 /// left with no lines goes too, so a card that gains its first `evidence`
-/// field reads the same as before.
+/// field reads the same as before. Nothing is dropped when the writer's
+/// closing fence and the search parser's [`text::front_matter_body`] disagree
+/// on where the metadata ends, because the two would then name different lines.
 pub fn without_key(text: &str, key: &str) -> String {
-    let Some((meta, body)) = text
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---\n"))
-    else {
+    let Ok((meta, body)) = front(text) else {
         return text.to_string();
     };
-    if !meta.split('\n').any(|line| is_key(line, key)) {
+    if !meta.iter().any(|line| is_key(line, key)) || text::front_matter_body(text) != Some(body) {
         return text.to_string();
     }
-    let kept: Vec<&str> = meta.split('\n').filter(|l| !is_key(l, key)).collect();
+    let kept: Vec<&str> = meta.into_iter().filter(|l| !is_key(l, key)).collect();
     if kept.is_empty() {
         return body.to_string();
     }

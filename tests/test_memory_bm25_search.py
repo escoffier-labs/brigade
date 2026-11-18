@@ -330,6 +330,14 @@ def test_search_log_append_fails_open_while_another_writer_holds_the_lock(tmp_pa
         ('---\n evidence: ["a/b/c"]\n---\nClaim.\n', '---\n evidence: ["a/b/c"]\n---\nClaim.\n'),
         ("Claim. ^c-abcdef  \t\n", "Claim.  \t\n"),
         ("Claim. ^c-ABCDEF\n", "Claim. ^c-ABCDEF\n"),
+        # The writer rewrites metadata with Rust `str::lines`, which drops a blank last line.
+        ('---\ntitle: T\nevidence: ["a/b/c"]\n\n---\nbody\n', "---\ntitle: T\n---\nbody\n"),
+        ('---\nevidence: ["a/b/c"]\n\ntitle: T\n---\nbody\n', "---\n\ntitle: T\n---\nbody\n"),
+        # A fence the search parser closes earlier than the writer does leaves the card as stored.
+        (
+            '---\ntitle: T\n---  \nevidence: ["a/b/c"]\n---\nClaim.\n',
+            '---\ntitle: T\n---  \nevidence: ["a/b/c"]\n---\nClaim.\n',
+        ),
     ],
 )
 def test_ranking_text(text, expected):
@@ -346,3 +354,10 @@ def test_adding_evidence_or_anchors_does_not_change_search():
             fields = [{"title": t, "tags": [], "summary": "", "body": b} for t, b in (("Alpha", body), ("Beta", other))]
             answers.append(memory_bm25.rank([memory_bm25.card_text(f) for f in fields], query))
         assert answers[0] == answers[1], query
+
+
+def test_a_blank_metadata_line_reads_the_same_before_and_after_an_evidence_rewrite():
+    before = '---\ntitle: T\nevidence: ["a/b/c"]\n\n---\nbody ^c-abcdef\n'
+    # `set` rewrites the metadata without the blank line and puts the field last.
+    after = '---\ntitle: T\nevidence: ["a/b/c","d/e/f"]\n---\nbody ^c-abcdef\n'
+    assert memory_bm25.ranking_text(before) == memory_bm25.ranking_text(after)

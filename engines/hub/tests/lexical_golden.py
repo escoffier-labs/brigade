@@ -130,6 +130,12 @@ RANKING = [
     ("fenced", "```\ncode ^c-abcdef\n```\n\nProse. ^c-123456\n"),
     ("first-evidence", '---\nevidence: ["a/b/c"]\n---\nClaim. ^c-abcdef\n'),
     ("only-evidence", '---\nevidence: []\n---\n'),
+    # The writer rewrites metadata through `str::lines`, which drops a blank last line.
+    ("evidence-blank-last-line", '---\ntitle: T\nevidence: ["a/b/c"]\n\n---\nbody ^c-abcdef\n'),
+    ("evidence-blank-middle-line", '---\nevidence: ["a/b/c"]\n\ntitle: T\n---\nbody\n'),
+    # The search parser closes the front matter at a fence with trailing whitespace.
+    ("fence-trailing-space", '---\nevidence: ["a/b/c"]\n---  \nClaim. ^c-abcdef\n'),
+    ("fence-earlier-than-writers", '---\ntitle: T\n---  \nevidence: ["a/b/c"]\n---\nClaim.\n'),
 ]
 
 ROUND = [0.03125, 0.00015, 1.23455, 2.5, 0.000049999, 12.34565, 1e-05, 3.14159265, 0.99995, 7.00005]
