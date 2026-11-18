@@ -39,7 +39,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_runs_list.add_argument(
         "--json",
         action="store_true",
-        help="Emit the versioned brigade.runs-list.v1 JSON contract.",
+        help="Emit the versioned brigade.runs-list.v2 JSON contract.",
     )
     p_runs_list.add_argument(
         "--show-task",
@@ -62,7 +62,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_runs_latest.add_argument(
         "--json",
         action="store_true",
-        help="Emit the versioned brigade.run-detail.v1 JSON contract.",
+        help="Emit the versioned brigade.run-detail.v2 JSON contract.",
     )
     p_runs_show = runs_sub.add_parser("show", help="Show a readable summary of one run directory.")
     p_runs_show.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
@@ -81,7 +81,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_runs_show.add_argument(
         "--json",
         action="store_true",
-        help="Emit the versioned brigade.run-detail.v1 JSON contract.",
+        help="Emit the versioned brigade.run-detail.v2 JSON contract.",
     )
     p_runs_show.add_argument(
         "--show-task",

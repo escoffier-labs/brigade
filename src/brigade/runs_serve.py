@@ -18,9 +18,13 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import runs_cmd
+from . import run_export_projection, runs_cmd, runs_privacy
 
 _LOOPBACK_HOST = "127.0.0.1"
+_UNAVAILABLE_BODY = "error: run view unavailable\n"
+_MISSING_DIAGNOSTIC = "runs-directory-missing"
+_UNREADABLE_DIAGNOSTIC = "run-unreadable"
+_UNAVAILABLE_DIAGNOSTIC = "run-view-unavailable"
 _DEFAULT_LIST_LIMIT = 10
 _MAX_LIST_LIMIT = 200
 _SERVED_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -259,19 +263,19 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         if limit < 1 or limit > _MAX_LIST_LIMIT:
             self._write_response(400, "error: limit must be a positive integer\n")
             return
-        payload, diagnostic, _rc = runs_cmd.runs_list_contract(
+        payload, diagnostic, rc = runs_cmd.runs_list_contract(
             cwd=self._cwd,
             runs_dir=self._runs_dir,
             limit=limit,
         )
         if payload is None:
-            self._write_response(400, (diagnostic or "error: invalid list request") + "\n")
+            if rc in {3, 4}:
+                code = "digest-key-unavailable" if rc == 3 else _UNAVAILABLE_DIAGNOSTIC
+                self._write_response(503, _UNAVAILABLE_BODY, extra_headers={"X-Brigade-Diagnostic": code})
+                return
+            self._write_response(400, "error: invalid list request\n")
             return
-        extra = None
-        if diagnostic:
-            cleaned = runs_cmd._clean_str(diagnostic, 400)
-            if cleaned:
-                extra = {"X-Brigade-Diagnostic": cleaned}
+        extra = {"X-Brigade-Diagnostic": _MISSING_DIAGNOSTIC} if diagnostic else None
         self._write_json(200, payload, extra)
 
     def _resolved_run(self, run_id: str | None) -> Path | None:
@@ -285,14 +289,17 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         if run_dir is None:
             self._write_response(404, "error: run not found\n")
             return
-        payload, diagnostic, _rc = runs_cmd.run_detail_contract(run_dir)
+        payload, _diagnostic, rc = runs_cmd.run_detail_contract(run_dir)
         if payload is None:
-            extra = None
-            if diagnostic:
-                cleaned = runs_cmd._clean_str(diagnostic, 400)
-                if cleaned:
-                    extra = {"X-Brigade-Diagnostic": cleaned}
-            self._write_response(502, (diagnostic or "error: run unreadable") + "\n", extra_headers=extra)
+            if rc in {3, 4}:
+                code = "digest-key-unavailable" if rc == 3 else _UNAVAILABLE_DIAGNOSTIC
+                self._write_response(503, _UNAVAILABLE_BODY, extra_headers={"X-Brigade-Diagnostic": code})
+                return
+            self._write_response(
+                502,
+                "error: run unreadable\n",
+                extra_headers={"X-Brigade-Diagnostic": _UNREADABLE_DIAGNOSTIC},
+            )
             return
         self._write_json(200, payload)
 
@@ -302,6 +309,15 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         run_dir = self._resolved_run(run_id)
         if run_dir is None:
             self._write_response(404, "error: run not found\n")
+            return
+        try:
+            runs_privacy.digest_key(run_dir)
+        except runs_privacy.DigestKeyUnavailable:
+            self._write_response(
+                503,
+                _UNAVAILABLE_BODY,
+                extra_headers={"X-Brigade-Diagnostic": "digest-key-unavailable"},
+            )
             return
         headers, _nonce = self._security_headers()
         self.send_response(200)
@@ -319,11 +335,18 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         def _should_stop() -> bool:
             return closed
 
+        def _write_record(record: dict[str, object]) -> None:
+            line = f"data: {json.dumps(record, sort_keys=True)}\n\n"
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+
         try:
             for record in runs_cmd.iter_watch_records(run_dir, interval=0.25, should_stop=_should_stop):
-                line = f"data: {json.dumps(record, sort_keys=True)}\n\n"
-                self.wfile.write(line.encode("utf-8"))
-                self.wfile.flush()
+                _write_record(record)
+        except runs_privacy.DigestKeyUnavailable:
+            _write_record(runs_privacy.error_record("digest-key-unavailable"))
+        except run_export_projection.RunExportProjectionError:
+            _write_record(runs_privacy.error_record("run-view-unavailable"))
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
             closed = True
             self.close_connection = True

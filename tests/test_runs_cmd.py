@@ -1321,7 +1321,7 @@ def test_runs_show_json_includes_child_lineage(tmp_path, capsys):
 
     assert runs_cmd.show(run_dir, json_output=True) == 0
     detail = json.loads(capsys.readouterr().out)
-    assert detail["schema"] == "brigade.run-detail.v1"
+    assert detail["schema"] == "brigade.run-detail.v2"
     assert detail["run"]["lineage"] == {
         "kind": "child",
         "parent_run_id": "20260817-120000-parent-aaaaaa",
@@ -1350,7 +1350,7 @@ def test_runs_list_json_includes_parent_run_id(tmp_path, capsys):
 
     assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert listed["schema"] == "brigade.runs-list.v1"
+    assert listed["schema"] == "brigade.runs-list.v2"
     assert listed["runs"][0]["parent_run_id"] == "20260817-120000-parent-aaaaaa"
 
 
@@ -1438,7 +1438,7 @@ def test_runs_show_json_emits_versioned_detail_contract(tmp_path, capsys):
     assert runs_cmd.show(run_dir, json_output=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema"] == "brigade.run-detail.v1"
+    assert payload["schema"] == "brigade.run-detail.v2"
     assert sorted(payload) == [
         "briefs",
         "plan",
@@ -1453,13 +1453,14 @@ def test_runs_show_json_emits_versioned_detail_contract(tmp_path, capsys):
     assert payload["run"]["status"] == "ok"
     assert payload["run"]["mode"] == "read-only"
     assert payload["run"]["resume_available"] is False
-    assert payload["roster"]["orchestrator"] == "chef"
-    assert payload["roster"]["agents"]["chef"]["cli"] == "codex"
+    assert _assert_closed_digest(payload["roster"]["orchestrator"]) == len("chef")
+    agent = next(iter(payload["roster"]["agents"].values()))
+    assert _assert_closed_digest(agent["cli"]) == len("codex")
     assignment = payload["plan"]["assignments"][0]
-    assert assignment["worker"] == "coder"
+    assert _assert_closed_digest(assignment["worker"]) == len("coder")
     assert _assert_closed_digest(assignment["task"]) == len("implement it")
-    assert payload["workers"]["results"][0]["worker"] == "coder"
-    assert payload["workers"]["results"][0]["requested_model"] == "gpt-5.5"
+    assert _assert_closed_digest(payload["workers"]["results"][0]["worker"]) == len("coder")
+    assert _assert_closed_digest(payload["workers"]["results"][0]["requested_model"]) == len("gpt-5.5")
     assert payload["synthesis"]["result"]["ok"] is True
     verification = payload["verification"][0]
     assert verification["run_id"] == "verify-1"
@@ -1505,19 +1506,19 @@ def test_runs_view_contracts_omit_planted_token_path_and_prompt(tmp_path, capsys
     assert runs_cmd.list_runs(cwd=tmp_path, json_output=True) == 0
     listed = capsys.readouterr().out
     _assert_no_planted_secrets(listed, leaks)
-    assert json.loads(listed)["schema"] == "brigade.runs-list.v1"
+    assert json.loads(listed)["schema"] == "brigade.runs-list.v2"
 
     assert runs_cmd.show(run_dir, json_output=True) == 0
     detail = capsys.readouterr().out
     _assert_no_planted_secrets(detail, leaks)
-    assert json.loads(detail)["schema"] == "brigade.run-detail.v1"
+    assert json.loads(detail)["schema"] == "brigade.run-detail.v2"
 
     assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.0, json_output=True) == 0
     watched = capsys.readouterr().out
     _assert_no_planted_secrets(watched, leaks)
     frames = [json.loads(line) for line in watched.splitlines()]
     assert frames
-    assert all(frame["schema"] == "brigade.run-watch.v1" for frame in frames)
+    assert all(frame["schema"] == "brigade.run-watch.v2" for frame in frames)
 
 
 def test_runs_show_json_replaces_long_task_with_digest(tmp_path, capsys):
@@ -1548,7 +1549,7 @@ def test_runs_show_json_cli_flag(tmp_path, capsys):
 
     assert cli.main(["runs", "show", str(run_dir), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema"] == "brigade.run-detail.v1"
+    assert payload["schema"] == "brigade.run-detail.v2"
 
 
 def test_runs_latest_json_shares_detail_contract(tmp_path, capsys):
@@ -1565,7 +1566,7 @@ def test_runs_latest_json_shares_detail_contract(tmp_path, capsys):
     assert cli.main(["runs", "latest", "--cwd", str(tmp_path), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema"] == "brigade.run-detail.v1"
+    assert payload["schema"] == "brigade.run-detail.v2"
     assert payload["run"]["run_id"] == "20260526-140000-bbbb"
 
 
@@ -1671,7 +1672,7 @@ def test_runs_list_json_emits_versioned_contract(tmp_path, capsys):
 
     out = capsys.readouterr().out
     payload = json.loads(out)
-    assert payload["schema"] == "brigade.runs-list.v1"
+    assert payload["schema"] == "brigade.runs-list.v2"
     assert payload["skipped_invalid"] == 1
     assert [run["run_id"] for run in payload["runs"]] == [
         "20260526-140000-bbbb",

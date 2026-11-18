@@ -4,8 +4,11 @@ Local run files keep raw prompts, worker text, and absolute paths because resume
 needs them. ``brigade runs list --json``, ``brigade runs show --json``, the
 loopback Run View, its watch stream, and the memory handoff note are readable
 surfaces, so they reuse the export rules from :mod:`run_export_projection`:
-prompt and generated text becomes the keyed ``{digest, chars}`` object, and a
-path-like string becomes a keyed digest instead of a filesystem location.
+each payload is projected through the same closed node types the export uses.
+Prompt and generated text becomes the keyed ``{digest, chars}`` object, a
+mapping key such as an agent name becomes a keyed digest, and every other
+string stays readable only when it is a known enum value, an ISO timestamp,
+pure hex, a run or event id, a numeric version, or a fixed path token.
 
 The digest key is the same per-host HMAC key the export uses, so a digest is not
 portable across hosts and a short prompt cannot be reversed by guessing.
@@ -27,11 +30,221 @@ from . import run_export_projection
 
 TEXT_PREVIEW_CHARS = 80
 
-# Values under these keys carry prompt or generated text. The export set already
-# covers task, text, detail, final, error, output, result and content. The run
-# views add the watch record's ``failure_detail`` spelling, verify ``command``
-# text, and the roster ``role`` note that export treats as a prompt too.
-TEXT_KEYS = run_export_projection.PROMPT_KEYS | frozenset({"failure_detail", "command", "role"})
+RUNS_LIST_SCHEMA = "brigade.runs-list.v2"
+RUN_DETAIL_SCHEMA = "brigade.run-detail.v2"
+RUN_WATCH_SCHEMA = "brigade.run-watch.v2"
+
+# The serve layer resolves run directory names with this same form. A run id is
+# a navigation identifier, so it stays readable. Anything outside it is digested.
+RUN_ID = run_export_projection.pattern(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+EVENT_ID = run_export_projection.pattern(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+_RUN_STATUS = run_export_projection.enum(*run_export_projection.RUN_STATUSES, "timeout", "incomplete", "canceled")
+# The export set plus the failure phases the run lifecycle records today. An
+# unknown phase still becomes "<other>" rather than raw text.
+_VIEW_FAILURE_PHASES = (
+    *run_export_projection.FAILURE_PHASES,
+    "output-validation",
+    "harness",
+    "admission",
+    "startup",
+    "handoff",
+    "run-isolation",
+    "provider-preflight",
+    "launch",
+    "launch-argument",
+    "inference",
+    "configured-request",
+    "artifact-validation",
+    "stale-lock-recovery",
+    "worker",
+    "workers",
+    "result",
+    "routing",
+)
+_FAILURE_PHASE = run_export_projection.enum(*_VIEW_FAILURE_PHASES)
+_TRANSPORT = run_export_projection.enum(*run_export_projection.TRANSPORTS)
+_WORKER_STATUS = run_export_projection.enum(*run_export_projection.WORKER_STATUSES)
+_RUN_MODE = run_export_projection.enum("normal", "read-only", "normal, dry-run", "read-only, dry-run")
+_TERMINAL = run_export_projection.enum("terminal", "nonterminal")
+_LINEAGE_KIND = run_export_projection.enum("branch", "child", "parent", "root", "unknown")
+_SYNTHESIS_MODE = run_export_projection.enum("direct-worker", "orchestrator", "single-seat")
+_VERIFY_STATUS = run_export_projection.enum("ok", "completed", "failed", "rejected", "timeout", "running", "unknown")
+_LOCAL_STATE = run_export_projection.enum("cleared", "required", "unknown")
+_BRIEF_NAME = run_export_projection.enum("code-graph", "drift-impact", "evidence")
+_WATCH_TYPE = run_export_projection.enum(
+    "watch", "run", "plan", "event", "workers", "synthesis", "final", "summary", "error"
+)
+_DIAGNOSTIC_CODE = run_export_projection.enum("digest-key-unavailable", "run-view-unavailable")
+
+PROMPT = run_export_projection.PROMPT
+NUMBER = run_export_projection.NUMBER
+INT = run_export_projection.INT
+BOOL = run_export_projection.BOOL
+
+_SHARED_PREFIX = run_export_projection.object_node(
+    {
+        "event_sequence": INT,
+        "event_digest": run_export_projection.SHA_OR_HEX_ID,
+        "previous_digest": run_export_projection.SHA_OR_HEX_ID,
+    }
+)
+_CHILD = run_export_projection.object_node(
+    {
+        "run_id": RUN_ID,
+        "status": _RUN_STATUS,
+        "branch_point_event_id": EVENT_ID,
+    }
+)
+_LINEAGE = run_export_projection.object_node(
+    {
+        "kind": _LINEAGE_KIND,
+        "parent_run_id": RUN_ID,
+        "branch_point_event_id": EVENT_ID,
+        "shared_prefix": _SHARED_PREFIX,
+        "children": run_export_projection.list_node(_CHILD),
+    }
+)
+_RUN_FAILURE = run_export_projection.object_node({"phase": _FAILURE_PHASE, "kind": PROMPT, "detail": PROMPT})
+_RUN_SECTION = run_export_projection.object_node(
+    {
+        "run_id": RUN_ID,
+        "status": _RUN_STATUS,
+        "task": PROMPT,
+        "mode": _RUN_MODE,
+        "started_at": run_export_projection.ISO_TIMESTAMP,
+        "finished_at": run_export_projection.ISO_TIMESTAMP,
+        "duration_seconds": NUMBER,
+        "failure": _RUN_FAILURE,
+        "error": PROMPT,
+        "suspected_noop": BOOL,
+        "resume_available": BOOL,
+        "terminal": _TERMINAL,
+        "lineage": _LINEAGE,
+    }
+)
+_RUN_SUMMARY = run_export_projection.object_node(
+    {
+        "run_id": RUN_ID,
+        "status": _RUN_STATUS,
+        "task": PROMPT,
+        "started_at": run_export_projection.ISO_TIMESTAMP,
+        "finished_at": run_export_projection.ISO_TIMESTAMP,
+        "duration_seconds": NUMBER,
+        "failure_phase": _FAILURE_PHASE,
+        "mode": _RUN_MODE,
+        "resume_available": BOOL,
+        "parent_run_id": RUN_ID,
+    }
+)
+_ROSTER_AGENT = run_export_projection.object_node(
+    {
+        "cli": PROMPT,
+        "model": PROMPT,
+        "reasoning": PROMPT,
+        "role": PROMPT,
+        "timeout_seconds": NUMBER,
+    }
+)
+_ROSTER = run_export_projection.object_node(
+    {
+        "orchestrator": PROMPT,
+        "max_workers": INT,
+        "timeout_seconds": NUMBER,
+        "allow_models": run_export_projection.list_node(PROMPT),
+        "agents": run_export_projection.object_node({}, any_name=_ROSTER_AGENT, digest_keys=True),
+    }
+)
+_ASSIGNMENT = run_export_projection.object_node({"stage": INT, "worker": PROMPT, "task": PROMPT})
+_PLAN = run_export_projection.object_node({"assignments": run_export_projection.list_node(_ASSIGNMENT)})
+_WORKER_FAILURE = run_export_projection.object_node({"class": PROMPT, "detail": PROMPT})
+_WORKER_RESULT = run_export_projection.object_node(
+    {
+        "worker": PROMPT,
+        "ok": BOOL,
+        "status": _WORKER_STATUS,
+        "task": PROMPT,
+        "detail": PROMPT,
+        "duration_seconds": NUMBER,
+        "exit_code": INT,
+        "timed_out": BOOL,
+        "requested_model": PROMPT,
+        "transport": _TRANSPORT,
+        "failure": _WORKER_FAILURE,
+    }
+)
+_WORKERS = run_export_projection.object_node({"results": run_export_projection.list_node(_WORKER_RESULT)})
+_AGENT_RESULT = run_export_projection.object_node(
+    {
+        "ok": BOOL,
+        "detail": PROMPT,
+        "duration_seconds": NUMBER,
+        "exit_code": INT,
+        "requested_model": PROMPT,
+    }
+)
+_SYNTHESIS = run_export_projection.object_node(
+    {"orchestrator": PROMPT, "mode": _SYNTHESIS_MODE, "result": _AGENT_RESULT}
+)
+_VERIFY_COMMAND = run_export_projection.object_node({"command": PROMPT, "exit_code": INT, "duration_seconds": NUMBER})
+_VERIFY = run_export_projection.object_node(
+    {
+        "run_id": RUN_ID,
+        "status": _VERIFY_STATUS,
+        "started_at": run_export_projection.ISO_TIMESTAMP,
+        "duration_seconds": NUMBER,
+        "commands": run_export_projection.list_node(_VERIFY_COMMAND),
+    }
+)
+_BRIEF = run_export_projection.object_node({"name": _BRIEF_NAME, "attached": BOOL, "bytes": INT, "pending_count": INT})
+_DETAIL = run_export_projection.object_node(
+    {
+        "schema": run_export_projection.enum(RUN_DETAIL_SCHEMA),
+        "run": _RUN_SECTION,
+        "roster": _ROSTER,
+        "plan": _PLAN,
+        "workers": _WORKERS,
+        "synthesis": _SYNTHESIS,
+        "verification": run_export_projection.list_node(_VERIFY),
+        "briefs": run_export_projection.list_node(_BRIEF),
+    }
+)
+_WATCH_EVENT = run_export_projection.object_node({"method": PROMPT, "item_type": PROMPT})
+_WATCH = run_export_projection.object_node(
+    {
+        "schema": run_export_projection.enum(RUN_WATCH_SCHEMA),
+        "type": _WATCH_TYPE,
+        "run_id": RUN_ID,
+        "status": _RUN_STATUS,
+        "task": PROMPT,
+        "started_at": run_export_projection.ISO_TIMESTAMP,
+        "finished_at": run_export_projection.ISO_TIMESTAMP,
+        "duration_seconds": NUMBER,
+        "failure_phase": _FAILURE_PHASE,
+        "failure_kind": PROMPT,
+        "failure_detail": PROMPT,
+        "assignments": run_export_projection.list_node(_ASSIGNMENT),
+        "worker": PROMPT,
+        "event": _WATCH_EVENT,
+        "results": run_export_projection.list_node(_WORKER_RESULT),
+        "orchestrator": PROMPT,
+        "mode": _SYNTHESIS_MODE,
+        "result": _AGENT_RESULT,
+        "text": PROMPT,
+        "inspect_command": PROMPT,
+        "recover_status": _LOCAL_STATE,
+        "resume_available": BOOL,
+        "error": _DIAGNOSTIC_CODE,
+    }
+)
+
+
+DIGEST_KEY_UNAVAILABLE = "error: run digest key unavailable"
+VIEW_UNAVAILABLE = "error: run view unavailable"
+
+
+class DigestKeyUnavailable(RuntimeError):
+    """The per-host digest key is refused or cannot be created."""
 
 
 @lru_cache(maxsize=64)
@@ -41,19 +254,10 @@ def _key_for_target(target: Path) -> bytes:
 
 def digest_key(run_dir: Path) -> bytes:
     """Return the per-host keyed digest key for the workspace that owns *run_dir*."""
-    return _key_for_target(run_export_projection.digest_key_target(run_dir))
-
-
-def digest_text(run_dir: Path, text: str) -> dict[str, Any]:
-    """Return the closed ``{digest, chars}`` shape for one text value."""
-    return run_export_projection.digest_prompt(digest_key(run_dir), text)
-
-
-def digest_value(run_dir: Path, value: object) -> dict[str, Any] | None:
-    """Return the digest shape for a text value, or None when it is absent."""
-    if not isinstance(value, str) or not value:
-        return None
-    return digest_text(run_dir, value)
+    try:
+        return _key_for_target(run_export_projection.digest_key_target(run_dir))
+    except run_export_projection.RunExportProjectionError as exc:
+        raise DigestKeyUnavailable("run digest key unavailable") from exc
 
 
 def task_preview(value: object) -> str | None:
@@ -61,72 +265,40 @@ def task_preview(value: object) -> str | None:
     return _clean_str(value, TEXT_PREVIEW_CHARS)
 
 
-def _project_text(value: Any, *, key: bytes) -> Any:
-    if isinstance(value, str):
-        return run_export_projection.digest_prompt(key, value)
-    if isinstance(value, Mapping):
-        if set(value) == {"digest", "chars"} and run_export_projection.is_valid_digest(value.get("digest")):
-            return dict(value)
-        return _project(value, key=key)
-    if isinstance(value, list):
-        return _project(value, key=key)
-    return value
+def text_value(value: object) -> str | None:
+    """Return a raw string for the projection node, or None when absent."""
+    return value if isinstance(value, str) and value else None
 
 
-def _project(value: Any, *, key: bytes) -> Any:
-    if isinstance(value, str):
-        return run_export_projection.digest_prompt(key, value) if run_export_projection.is_path_like(value) else value
-    if isinstance(value, list):
-        return [_project(item, key=key) for item in value]
-    if isinstance(value, Mapping):
-        return {
-            item_key: (_project_text(item, key=key) if item_key in TEXT_KEYS else _project(item, key=key))
-            for item_key, item in value.items()
-            if isinstance(item_key, str)
-        }
-    return value
+_ERROR_CODES = frozenset({"digest-key-unavailable", "run-view-unavailable"})
 
 
-def _assert_closed(value: Any, *, label: str, home: Path) -> None:
-    """Fail closed when a projected view still holds raw text or a filesystem path."""
-    if isinstance(value, str):
-        if run_export_projection.is_path_like(value) or (bool(str(home)) and str(home) in value):
-            raise run_export_projection.RunExportProjectionError(f"{label} still holds an absolute path")
-        return
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _assert_closed(item, label=f"{label}[{index}]", home=home)
-        return
-    if isinstance(value, Mapping):
-        for item_key, item in value.items():
-            if not isinstance(item_key, str):
-                raise run_export_projection.RunExportProjectionError(f"{label} has a non-string JSON key")
-            if item_key in TEXT_KEYS and isinstance(item, str):
-                raise run_export_projection.RunExportProjectionError(f"{label}.{item_key} still holds raw text")
-            if (
-                item_key in TEXT_KEYS
-                and isinstance(item, Mapping)
-                and set(item) == {"digest", "chars"}
-                and not run_export_projection.is_valid_digest(item.get("digest"))
-            ):
-                raise run_export_projection.RunExportProjectionError(f"{label}.{item_key} is not a keyed digest")
-            _assert_closed(item, label=f"{label}.{item_key}", home=home)
-        return
+def error_record(code: str) -> dict[str, Any]:
+    """Return the one closed SSE record sent when the view cannot be projected."""
+    closed = code if code in _ERROR_CODES else "run-view-unavailable"
+    return {"schema": RUN_WATCH_SCHEMA, "type": "error", "error": closed}
 
 
-def project_value(value: Any, run_dir: Path) -> Any:
-    """Project one served JSON value: text becomes a digest, paths become digests."""
-    key = digest_key(run_dir)
-    projected = _project(value, key=key)
-    _assert_closed(projected, label="run-view", home=Path.home())
+def _project(value: Any, node: Any, run_dir: Path, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise run_export_projection.RunExportProjectionError(f"{label} must be an object")
+    projected = run_export_projection.project_node(
+        dict(value),
+        node,
+        workspace=run_export_projection.workspace_for_run(run_dir),
+        run_dir=run_dir,
+        key=digest_key(run_dir),
+        label=label,
+    )
+    run_export_projection.assert_node(projected, node, label=label)
     return projected
 
 
 def project_summary(
     payload: Mapping[str, Any], run_dir: Path, *, task: object = None, show_task: bool = False
 ) -> dict[str, Any]:
-    """Project one ``brigade.runs-list.v1`` run summary."""
-    projected = project_value(dict(payload), run_dir)
+    """Project one ``brigade.runs-list.v2`` run summary."""
+    projected = _project(payload, _RUN_SUMMARY, run_dir, label="brigade.runs-list.v2")
     if show_task:
         preview = task_preview(task)
         if preview:
@@ -137,8 +309,8 @@ def project_summary(
 def project_detail(
     payload: Mapping[str, Any], run_dir: Path, *, task: object = None, show_task: bool = False
 ) -> dict[str, Any]:
-    """Project one ``brigade.run-detail.v1`` payload."""
-    projected = project_value(dict(payload), run_dir)
+    """Project one ``brigade.run-detail.v2`` payload."""
+    projected = _project(payload, _DETAIL, run_dir, label="brigade.run-detail.v2")
     if show_task:
         preview = task_preview(task)
         run_section = projected.get("run")
@@ -148,12 +320,20 @@ def project_detail(
 
 
 def watch_record_projector(run_dir: Path) -> Callable[[Mapping[str, Any]], dict[str, Any]]:
-    """Return a projection callable for ``brigade.run-watch.v1`` records."""
+    """Return a projection callable for ``brigade.run-watch.v2`` records."""
     key = digest_key(run_dir)
+    workspace = run_export_projection.workspace_for_run(run_dir)
 
     def project(record: Mapping[str, Any]) -> dict[str, Any]:
-        projected = _project(dict(record), key=key)
-        _assert_closed(projected, label="run-watch", home=Path.home())
+        projected = run_export_projection.project_node(
+            dict(record),
+            _WATCH,
+            workspace=workspace,
+            run_dir=run_dir,
+            key=key,
+            label="brigade.run-watch.v2",
+        )
+        run_export_projection.assert_node(projected, _WATCH, label="brigade.run-watch.v2")
         return projected
 
     return project

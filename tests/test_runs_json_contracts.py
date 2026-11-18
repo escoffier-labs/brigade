@@ -524,7 +524,13 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_prompt_digest(worker["detail"], _redacted_len(PLANTED_WORKER_DETAIL))
     _assert_prompt_digest(worker["failure"]["detail"], _redacted_len(PLANTED_WORKER_FAILURE))
     _assert_prompt_digest(shown["synthesis"]["result"]["detail"], _redacted_len(PLANTED_SYNTHESIS_DETAIL))
-    _assert_prompt_digest(shown["roster"]["agents"]["chef"]["role"], _redacted_len(PLANTED_ROSTER_ROLE))
+    assert len(shown["roster"]["agents"]) == 1
+    agent = next(iter(shown["roster"]["agents"].values()))
+    _assert_prompt_digest(agent["cli"], _redacted_len("codex"))
+    _assert_prompt_digest(agent["model"], _redacted_len("gpt-5.5"))
+    _assert_prompt_digest(agent["reasoning"], _redacted_len(PLANTED_ROSTER_REASONING))
+    _assert_prompt_digest(agent["role"], _redacted_len(PLANTED_ROSTER_ROLE))
+    _assert_prompt_digest(shown["roster"]["orchestrator"], _redacted_len("chef"))
     _assert_prompt_digest(shown["verification"][0]["commands"][0]["command"], _redacted_len(PLANTED_ABS_COMMAND))
     final_frames = [frame for frame in frames if frame.get("type") == "final"]
     assert final_frames
@@ -562,6 +568,164 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     assert PLANTED_SPACED_HOME in human
     assert PLANTED_APOSTROPHE_HOME in human
     _assert_artifacts_keep_home_needles(run_dir)
+
+
+def _assert_digest_string(value: object) -> None:
+    assert isinstance(value, str) and value.startswith("hmac-sha256:")
+    assert len(value) == len("hmac-sha256:") + 64
+
+
+CLOSED_RULE_MARKERS = (
+    "TASK-MARKER closed-rule",
+    "Bearer tok_123",
+    "ORCH-MARKER",
+    "MODEL-MARKER-AGENT",
+    "REASONING-MARKER",
+    "ROLE-MARKER",
+    "AGENT-MARKER",
+    "ALLOW-MODEL-MARKER",
+    "PLAN-WORKER-MARKER",
+    "PLAN-TASK-MARKER",
+    "WORKER-MARKER",
+    "WORKER-TASK-MARKER",
+    "WORKER-DETAIL-MARKER",
+    "REQ-MODEL-MARKER",
+    "auth failed: sk-ant-secret",
+    "FAILURE-CLASS-MARKER",
+    "missing /etc/ssl/private/key.pem",
+    "SYNTH-DETAIL-MARKER",
+    "SYNTH-MODEL-MARKER",
+)
+
+
+def _plant_closed_rule_run(run_dir: Path) -> None:
+    run_dir.mkdir(parents=True)
+    _write_json(
+        run_dir / "run.json",
+        {
+            "task": "TASK-MARKER closed-rule",
+            "status": "Bearer tok_123",
+            "started_at": "2026-08-21T10:00:00Z",
+            "finished_at": "2026-08-21T10:00:01Z",
+            "duration_seconds": 1.0,
+            "read_only": False,
+            "failure": {
+                "phase": "dispatch",
+                "kind": "auth failed: sk-ant-secret",
+                "detail": "missing /etc/ssl/private/key.pem",
+            },
+        },
+    )
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "ORCH-MARKER",
+            "max_workers": 1,
+            "allow_models": ["ALLOW-MODEL-MARKER", "/etc/ssl/private/key.pem"],
+            "agents": {
+                "AGENT-MARKER": {
+                    "cli": "codex",
+                    "model": "MODEL-MARKER-AGENT",
+                    "reasoning": "REASONING-MARKER",
+                    "role": "ROLE-MARKER missing /etc/ssl/private/key.pem",
+                }
+            },
+        },
+    )
+    _write_json(
+        run_dir / "plan.json",
+        {"assignments": [{"stage": 1, "worker": "PLAN-WORKER-MARKER", "task": "PLAN-TASK-MARKER"}]},
+    )
+    _write_json(
+        run_dir / "worker-results.json",
+        {
+            "results": [
+                {
+                    "worker": "WORKER-MARKER",
+                    "ok": True,
+                    "status": "ok",
+                    "task": "WORKER-TASK-MARKER",
+                    "detail": "WORKER-DETAIL-MARKER",
+                    "requested_model": "REQ-MODEL-MARKER",
+                    "transport": "cli",
+                    "failure": {"class": "FAILURE-CLASS-MARKER", "detail": "missing /etc/ssl/private/key.pem"},
+                }
+            ]
+        },
+    )
+    _write_json(
+        run_dir / "synthesis.json",
+        {
+            "orchestrator": "ORCH-MARKER",
+            "mode": "orchestrator",
+            "result": {"ok": True, "detail": "SYNTH-DETAIL-MARKER", "requested_model": "SYNTH-MODEL-MARKER"},
+        },
+    )
+
+
+def test_closed_rule_digests_free_text_enums_and_mapping_keys(tmp_path, capsys):
+    """Issue #2046 review: only known enum values and fixed shapes stay readable."""
+    run_dir = tmp_path / ".brigade" / "runs" / "20260821-160000-closed"
+    _plant_closed_rule_run(run_dir)
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    blob = json.dumps(payload)
+    for marker in CLOSED_RULE_MARKERS:
+        assert marker not in blob, marker
+
+    assert payload["run"]["status"] == "<other>"
+    assert payload["run"]["started_at"] == "2026-08-21T10:00:00Z"
+    assert payload["run"]["failure"]["phase"] == "dispatch"
+    _assert_prompt_digest(payload["run"]["failure"]["kind"], len("auth failed: sk-ant-secret"))
+
+    roster = payload["roster"]
+    _assert_prompt_digest(roster["orchestrator"], len("ORCH-MARKER"))
+    assert len(roster["allow_models"]) == 2
+    for allow_model in roster["allow_models"]:
+        assert set(allow_model) == {"digest", "chars"}
+    agent_key = next(iter(roster["agents"]))
+    _assert_digest_string(agent_key)
+    agent = roster["agents"][agent_key]
+    _assert_prompt_digest(agent["model"], len("MODEL-MARKER-AGENT"))
+    _assert_prompt_digest(agent["reasoning"], len("REASONING-MARKER"))
+    _assert_prompt_digest(agent["role"], len("ROLE-MARKER missing /etc/ssl/private/key.pem"))
+
+    assignment = payload["plan"]["assignments"][0]
+    _assert_prompt_digest(assignment["worker"], len("PLAN-WORKER-MARKER"))
+    result = payload["workers"]["results"][0]
+    _assert_prompt_digest(result["worker"], len("WORKER-MARKER"))
+    _assert_prompt_digest(result["requested_model"], len("REQ-MODEL-MARKER"))
+    _assert_prompt_digest(result["failure"]["class"], len("FAILURE-CLASS-MARKER"))
+
+
+def _refuse_digest_key(workspace: Path) -> None:
+    key_dir = workspace / ".brigade" / "memory"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key = key_dir / "search-log-key"
+    key.write_text("ab" * 32 + "\n")
+    key.chmod(0o644)
+
+
+def _block_digest_key(workspace: Path) -> None:
+    (workspace / ".brigade" / "memory").write_text("not a directory")
+
+
+@pytest.mark.parametrize("block", [_refuse_digest_key, _block_digest_key])
+@pytest.mark.parametrize("command", ["list", "show"])
+def test_digest_key_failure_fails_closed_in_cli_json(tmp_path, capsys, block, command):
+    """Issue #2046 review: a refused or unusable key never falls back to raw text."""
+    run_dir = tmp_path / ".brigade" / "runs" / "20260821-170000-keyfail"
+    _write_legacy_run(run_dir)
+    block(tmp_path)
+
+    argv = ["runs", command, "--cwd", str(tmp_path), "--json"]
+    if command == "show":
+        argv.insert(2, run_dir.name)
+    assert cli.main(argv) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: run digest key unavailable" in captured.err
 
 
 def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):
@@ -785,10 +949,9 @@ def test_show_json_bounds_oversized_sibling_child_status(tmp_path, capsys):
     _assert_allowlist(shown)
     child_entry = shown["run"]["lineage"]["children"][0]
     assert child_entry["run_id"] == child.name
-    assert len(child_entry["status"]) <= 400
-    assert len(child_entry["branch_point_event_id"]) <= 400
-    assert child_entry["status"].endswith("...")
-    assert child_entry["branch_point_event_id"].endswith("...")
+    assert child_entry["status"] == "<other>"
+    assert set(child_entry["branch_point_event_id"]) == {"digest", "chars"}
+    assert child_entry["branch_point_event_id"]["chars"] == len("y" * 50_000)
     assert UNEXPECTED_CONTRACT_KEY not in child_entry
 
     assert cli.main(["runs", "show", parent.name, "--cwd", str(tmp_path)]) == 0
@@ -805,12 +968,12 @@ def test_human_list_and_show_remain_text_when_json_omitted(tmp_path, capsys):
     assert cli.main(["runs", "list", "--cwd", str(tmp_path)]) == 0
     listed = capsys.readouterr().out
     assert listed.startswith("2026-05-26T14:00:00Z [ok]")
-    assert "brigade.runs-list.v1" not in listed
+    assert "brigade.runs-list.v2" not in listed
 
     assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path)]) == 0
     shown = capsys.readouterr().out
     assert shown.startswith(f"run: {run_dir.resolve()}")
-    assert "brigade.run-detail.v1" not in shown
+    assert "brigade.run-detail.v2" not in shown
 
 
 def test_allowlisted_rejects_allowlist_key_without_cleaned_counterpart():

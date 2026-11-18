@@ -471,7 +471,7 @@ def test_list_route_matches_cli_contract(server: ThreadingHTTPServer, workspace:
     status, body, headers = _get_json(server, "/api/runs?limit=10")
     assert status == 200
     assert body == payload
-    assert body["schema"] == "brigade.runs-list.v1"
+    assert body["schema"] == "brigade.runs-list.v2"
     assert body["skipped_invalid"] == 1
     ids = {item["run_id"] for item in body["runs"]}
     assert "20260821-100000-active1" in ids
@@ -491,7 +491,7 @@ def test_detail_route_matches_cli_contract(server: ThreadingHTTPServer, planted:
         status, body, _headers = _get_json(server, f"/api/runs/{run_id}")
         assert status == 200
         assert body == expected
-        assert body["schema"] == "brigade.run-detail.v1"
+        assert body["schema"] == "brigade.run-detail.v2"
         assert body["run"]["run_id"] == run_id
         for item in _walk(body):
             if isinstance(item, str):
@@ -513,8 +513,9 @@ def test_detail_includes_lineage_roster_verify_and_briefs(
 
     status, success, _ = _get_json(server, f"/api/runs/{planted['ok'].name}")
     assert status == 200
-    assert success["roster"]["agents"]["coder"]["model"] == "gpt-5.5"
-    assert success["roster"]["agents"]["coder"]["reasoning"] == "low"
+    coder_agent = next(iter(success["roster"]["agents"].values()))
+    assert set(coder_agent["model"]) == {"digest", "chars"}
+    assert set(coder_agent["reasoning"]) == {"digest", "chars"}
     assert success["verification"]
     assert {brief["name"] for brief in success["briefs"]} >= {"code-graph", "drift-impact", "evidence"}
     assert success["run"]["resume_available"] is not True
@@ -526,7 +527,7 @@ def test_detail_includes_lineage_roster_verify_and_briefs(
     status, failed, _ = _get_json(server, f"/api/runs/{planted['failed'].name}")
     assert status == 200
     assert failed["run"]["failure"]["phase"] == "worker"
-    assert failed["run"]["failure"]["kind"] == "exit-error"
+    assert failed["run"]["failure"]["kind"]["chars"] == len("exit-error")
 
 
 def test_missing_runs_dir_is_empty_state_with_diagnostic(tmp_path: Path) -> None:
@@ -538,9 +539,8 @@ def test_missing_runs_dir_is_empty_state_with_diagnostic(tmp_path: Path) -> None
     try:
         status, body, headers = _get_json(httpd, "/api/runs")
         assert status == 200
-        assert body == {"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0}
-        assert "X-Brigade-Diagnostic:" in headers
-        assert "runs directory not found" in headers
+        assert body == {"schema": "brigade.runs-list.v2", "runs": [], "skipped_invalid": 0}
+        assert "X-Brigade-Diagnostic: runs-directory-missing" in headers
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -557,8 +557,10 @@ def test_unreadable_selected_run_returns_stale_signal(
     planted["ok"].joinpath("run.json").write_text("{broken\n")
     response = _raw_request(server, _host(server), path=f"/api/runs/{run_id}")
     assert _status_code(response) == "502"
-    headers, _body = _headers_and_body(response)
-    assert "X-Brigade-Diagnostic:" in headers
+    headers, body = _headers_and_body(response)
+    assert body == "error: run unreadable\n"
+    assert str(planted["ok"]) not in response
+    assert "X-Brigade-Diagnostic: run-unreadable" in headers
 
 
 def test_app_route_is_embedded_and_same_origin(server: ThreadingHTTPServer) -> None:
@@ -626,7 +628,7 @@ def test_events_stream_uses_watch_contract(server: ThreadingHTTPServer, planted:
         if line.startswith("data:"):
             records.append(json.loads(line[5:].strip()))
     assert records
-    assert all(record["schema"] == "brigade.run-watch.v1" for record in records)
+    assert all(record["schema"] == "brigade.run-watch.v2" for record in records)
     types = {record.get("type") for record in records}
     assert "watch" in types
     assert "run" in types
@@ -859,6 +861,170 @@ def test_served_views_and_stream_carry_no_prompt_text(server: ThreadingHTTPServe
 
     for name, content in local_files.items():
         assert (run_dir / name).read_bytes() == content
+
+
+def _refuse_digest_key(workspace: Path) -> None:
+    key_dir = workspace / ".brigade" / "memory"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key = key_dir / "search-log-key"
+    key.write_text("ab" * 32 + "\n")
+    key.chmod(0o644)
+
+
+def _block_digest_key(workspace: Path) -> None:
+    (workspace / ".brigade" / "memory").write_text("not a directory")
+
+
+@pytest.mark.parametrize("block", [_refuse_digest_key, _block_digest_key])
+def test_served_endpoints_fail_closed_without_digest_key(tmp_path: Path, block) -> None:
+    """Issue #2046 review: a refused or unusable key yields 503, never raw text."""
+    workspace = _workspace(tmp_path)
+    run_dir = _runs_root(workspace) / "20260821-180000-keyfail"
+    _plant_run(
+        run_dir,
+        status="ok",
+        task="PRIVATE-KEY-TASK-MARKER",
+        started_at="2026-08-21T18:00:00Z",
+        finished_at="2026-08-21T18:00:01Z",
+        duration_seconds=1.0,
+    )
+    block(workspace)
+
+    httpd = runs_serve.make_server(cwd=workspace, port=0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_until_ready(httpd)
+    try:
+        for path in ("/api/runs", f"/api/runs/{run_dir.name}", f"/api/runs/{run_dir.name}/events"):
+            response = _raw_request(httpd, _host(httpd), path=path)
+            assert _status_code(response) == "503", path
+            headers, body = _headers_and_body(response)
+            assert body == "error: run view unavailable\n"
+            assert "X-Brigade-Diagnostic: digest-key-unavailable" in headers
+            assert "PRIVATE-KEY-TASK-MARKER" not in response
+            assert str(run_dir) not in response
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def test_watch_stream_sends_one_closed_error_record_without_key(tmp_path: Path) -> None:
+    """The serve-only watch feed degrades to one closed record and ends."""
+    workspace = _workspace(tmp_path)
+    run_dir = _runs_root(workspace) / "20260821-181000-keyfail"
+    _plant_run(
+        run_dir,
+        status="ok",
+        task="PRIVATE-KEY-TASK-MARKER",
+        started_at="2026-08-21T18:10:00Z",
+        finished_at="2026-08-21T18:10:01Z",
+        duration_seconds=1.0,
+    )
+    _refuse_digest_key(workspace)
+
+    records = list(runs_cmd.iter_watch_records(run_dir, interval=0))
+
+    assert records == [
+        {
+            "schema": "brigade.run-watch.v2",
+            "type": "error",
+            "error": "digest-key-unavailable",
+        }
+    ]
+
+
+def test_served_detail_and_stream_close_roster_and_worker_text(server: ThreadingHTTPServer, workspace: Path) -> None:
+    """Issue #2046 review: roster, agent, worker and failure kind leaks stay closed."""
+    run_dir = _runs_root(workspace) / "20260821-190000-closed"
+    _plant_run(
+        run_dir,
+        status="failed",
+        task="PRIVATE-SERVED-TASK",
+        started_at="2026-08-21T19:00:00Z",
+        finished_at="2026-08-21T19:00:01Z",
+        duration_seconds=1.0,
+    )
+    (run_dir / "final.txt").write_text("PRIVATE-SERVED-FINAL\n")
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["failure"] = {
+        "phase": "dispatch",
+        "kind": "auth failed: sk-ant-secret",
+        "detail": "auth failed: sk-ant-secret",
+    }
+    _write_json(run_dir / "run.json", meta)
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "ORCH-MARKER",
+            "max_workers": 1,
+            "allow_models": ["MODEL-MARKER", "/etc/ssl/private/key.pem"],
+            "agents": {
+                "AGENT-MARKER": {
+                    "cli": "codex",
+                    "model": "MODEL-AGENT-MARKER",
+                    "reasoning": "Bearer tok_123",
+                    "role": "ROLE-MARKER /etc/ssl/private/key.pem",
+                }
+            },
+        },
+    )
+    _write_json(
+        run_dir / "plan.json",
+        {"assignments": [{"stage": 1, "worker": "PLAN-WORKER-MARKER", "task": "PLAN-TASK-MARKER"}]},
+    )
+    _write_json(
+        run_dir / "worker-results.json",
+        {
+            "results": [
+                {
+                    "worker": "WORKER-NAME-MARKER",
+                    "ok": False,
+                    "status": "failed",
+                    "task": "WORKER-TASK-MARKER",
+                    "detail": "WORKER-DETAIL-MARKER",
+                    "requested_model": "REQ-MODEL-MARKER",
+                    "transport": "cli",
+                    "failure": {
+                        "class": "auth failed: sk-ant-secret",
+                        "detail": "missing /etc/ssl/private/key.pem",
+                    },
+                }
+            ]
+        },
+    )
+
+    status, detail, _ = _get_json(server, f"/api/runs/{run_dir.name}")
+    assert status == 200
+    response = _raw_request(server, _host(server), path=f"/api/runs/{run_dir.name}/events", timeout=5)
+    assert _status_code(response) == "200"
+    _headers, body = _headers_and_body(response)
+    streamed = [json.loads(block.strip()[5:]) for block in body.split("\n\n") if block.strip().startswith("data:")]
+    served = json.dumps(detail) + json.dumps(streamed)
+
+    for marker in (
+        "ORCH-MARKER",
+        "MODEL-MARKER",
+        "AGENT-MARKER",
+        "MODEL-AGENT-MARKER",
+        "Bearer tok_123",
+        "ROLE-MARKER",
+        "PLAN-WORKER-MARKER",
+        "PLAN-TASK-MARKER",
+        "WORKER-NAME-MARKER",
+        "WORKER-TASK-MARKER",
+        "WORKER-DETAIL-MARKER",
+        "REQ-MODEL-MARKER",
+        "auth failed: sk-ant-secret",
+        "/etc/ssl/private/key.pem",
+    ):
+        assert marker not in served, marker
+
+    agent_key = next(iter(detail["roster"]["agents"]))
+    assert agent_key.startswith("hmac-sha256:")
+    assert set(detail["run"]["failure"]["kind"]) == {"digest", "chars"}
+    assert detail["run"]["failure"]["phase"] == "dispatch"
 
 
 def _assert_text_values_digested(value: object) -> None:
