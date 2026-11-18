@@ -25,6 +25,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from . import dirfd, proc
 from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS, open_executable
@@ -57,6 +58,7 @@ STREAM_TOOL_TYPES = frozenset({"tool_use", "server_tool_use", "mcp_tool_use"})
 # Without --safe-mode (it disables MCP) the CLI still walks parent directories for these files.
 ANCESTOR_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
 VERSION_TIMEOUT = 30.0
+VERSION_MAX_BYTES = 4096
 EXIT_GRACE = 10.0
 REDACTED = b"[redacted]"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -102,6 +104,7 @@ ENV_PASSTHROUGH = (
     "COMSPEC",
     "PATHEXT",
 )
+PROXY_ENV = tuple(key for key in ENV_PASSTHROUGH if key.lower().endswith("_proxy") and key.lower() != "no_proxy")
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 FIXED_ENV = {
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
@@ -138,6 +141,28 @@ def module_hashes() -> dict[str, str]:
 
 def _token_forms(token: str) -> list[bytes]:
     return sorted({form.encode("utf-8") for form in (token, json.dumps(token)[1:-1]) if form}, key=len, reverse=True)
+
+
+def refuse_proxy_credentials(environ: Mapping[str, str]) -> None:
+    """Refuse a live run when a passed-through proxy URL carries userinfo.
+
+    ``redact`` only removes the OAuth token, so a ``user:password@`` proxy URL could land in saved
+    stream or stderr bytes. The message names the variable, never the value.
+    """
+    for key in PROXY_ENV:
+        value = environ.get(key)
+        if not value:
+            continue
+        try:
+            parts = urlsplit(value if "//" in value else f"//{value}")
+            userinfo = parts.username is not None or parts.password is not None
+        except ValueError:
+            userinfo = True  # A proxy value that does not parse is not passed to a child either.
+        if userinfo:
+            raise ValueError(
+                f"{key} carries proxy credentials (user:password in the URL). Live paired trials save the "
+                "child's output, so unset it or use a proxy that needs no credentials. No model was launched."
+            )
 
 
 def redact(data: bytes, token: str) -> bytes:
@@ -352,7 +377,12 @@ def mcp_config(case: str, target: Path, package_dir: Path, state_dir: Path) -> d
                     str(state_dir),
                 ],
                 # The empty value overrides any inherited token, so the server process never holds it.
-                "env": {"PYTHONPATH": str(Path(__file__).resolve().parents[1]), TOKEN_ENV: ""},
+                # Proxy variables are blanked the same way: the server has no network need.
+                "env": {
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+                    TOKEN_ENV: "",
+                    **{key: "" for key in (*PROXY_ENV, "NO_PROXY", "no_proxy")},
+                },
             }
         }
     }
@@ -797,18 +827,41 @@ def _probe_version(executable: ClaudeExecutable, environ: Mapping[str, str]) -> 
     executable.verify()
     env = {key: environ[key] for key in ENV_PASSTHROUGH if key in environ}
     extra: dict[str, Any] = {"pass_fds": executable.pass_fds} if executable.pass_fds else {}
-    done = subprocess.run(
+    child = subprocess.Popen(
         executable.command([executable.argv0, "--version"]),
         env=env,
         stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=VERSION_TIMEOUT,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=os.name == "posix",
         **extra,
     )
-    parts = done.stdout.split()
-    if done.returncode != 0 or not parts:
+    expired = threading.Event()
+
+    def expire() -> None:
+        expired.set()
+        _kill(child)
+
+    timer = threading.Timer(VERSION_TIMEOUT, expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        # One byte past the cap proves overflow without buffering more.
+        data = child.stdout.read(VERSION_MAX_BYTES + 1) if child.stdout else b""
+        if len(data) > VERSION_MAX_BYTES:
+            _kill(child)
+            raise ValueError("the Claude Code version output is too large")
+        returncode = child.wait()
+    finally:
+        timer.cancel()
+        _kill(child)
+        if child.stdout:
+            child.stdout.close()
+        child.wait()
+    if expired.is_set():
+        raise subprocess.TimeoutExpired(executable.argv0, VERSION_TIMEOUT)
+    parts = data.decode("utf-8", errors="replace").split()
+    if returncode != 0 or not parts:
         raise ValueError("could not read the Claude Code version")
     return parts[0]
 
@@ -889,6 +942,7 @@ def execute_live(
             f"live paired trials authenticate with {TOKEN_ENV} from `claude setup-token` (subscription). "
             "API keys are never used. No model was launched."
         )
+    refuse_proxy_credentials(environ)
     with bind_executable(claude_bin, launcher) as executable:
         manifest, packages = _load(path)
         cli_model, effort = _cli_settings(manifest)

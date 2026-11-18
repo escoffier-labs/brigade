@@ -24,6 +24,11 @@ if "--version" in sys.argv:
     if SC.get("version_hang"):
         import time
         time.sleep(600)
+    if SC.get("version_flood"):
+        sys.stdout.write("9" * SC["version_flood"])
+        sys.stdout.flush()
+        import time
+        time.sleep(600)
     print(SC.get("version", "2.1.327") + " (Claude Code)")
     sys.exit(0)
 argv = sys.argv[1:]

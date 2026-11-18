@@ -959,3 +959,43 @@ def test_oversized_packages_are_refused_before_any_launch(tmp_path):
     with pytest.raises(ValueError, match="larger than its cap"):
         execute_live(total / "live-claude.json", tmp_path / "o3", claude_bin=str(exe), environ=ENVIRON)
     assert records(tmp_path / "never") == []
+
+
+@pytest.mark.parametrize("key", ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"])
+def test_a_proxy_url_with_credentials_refuses_the_run_without_naming_the_secret(tmp_path, key):
+    exe = make_fake(tmp_path / "px")
+    environ = {**ENVIRON, key: "http://proxyuser:hunter2-proxy-secret@proxy.example:3128"}
+    with pytest.raises(ValueError, match=key) as caught:
+        execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=environ, timeout=60)
+    assert "hunter2-proxy-secret" not in str(caught.value) and "proxyuser" not in str(caught.value)
+    assert not (tmp_path / "px" / "record.jsonl").exists()  # No model was launched.
+
+
+def test_a_username_only_proxy_url_is_refused_and_a_plain_one_is_allowed():
+    model_trial_claude.refuse_proxy_credentials({"HTTPS_PROXY": "http://proxy.example:3128", "NO_PROXY": "a@b"})
+    model_trial_claude.refuse_proxy_credentials({"http_proxy": "proxy.example:3128"})
+    with pytest.raises(ValueError, match="http_proxy"):
+        model_trial_claude.refuse_proxy_credentials({"http_proxy": "http://user@proxy.example:3128"})
+
+
+def test_the_mcp_server_config_blanks_every_proxy_variable(tmp_path):
+    env = model_trial_claude.mcp_config("passing-verify", tmp_path, tmp_path, tmp_path)["mcpServers"][
+        model_trial_claude.SERVER_NAME
+    ]["env"]
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "NO_PROXY", "no_proxy"):
+        assert env[key] == ""
+
+
+def test_paired_validate_refuses_oversize_evidence_without_reading_it(tmp_path, monkeypatch):
+    (tmp_path / "evidence.json").write_bytes(b" " * 64)
+    monkeypatch.setattr(model_trial_claude, "MAX_EVIDENCE_BYTES", 16)
+    monkeypatch.setattr(Path, "read_text", lambda *a, **k: pytest.fail("unbounded read_text"))
+    with pytest.raises(ValueError):
+        model_trials.paired_validate(tmp_path, "0" * 64)
+
+
+def test_the_version_probe_is_bounded_and_kills_a_flood(tmp_path):
+    exe = make_fake(tmp_path / "vf", version_flood=model_trial_claude.VERSION_MAX_BYTES * 4)
+    with bind_executable(str(exe), LAUNCH) as bound:
+        with pytest.raises(ValueError, match="too large"):
+            model_trial_claude._probe_version(bound, ENVIRON)

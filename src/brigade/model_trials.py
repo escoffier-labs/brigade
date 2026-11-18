@@ -1155,12 +1155,18 @@ def paired_execute(path: Path, output: Path, session: Any, *, cases: list[str] |
 
 
 def paired_validate(output: Path, expected_digest: str) -> dict[str, Any]:
-    from .model_trial_claude import LIVE_SCHEMA, validate_live
+    from .model_trial_claude import LIVE_SCHEMA, MAX_EVIDENCE_BYTES, read_capped, validate_live
     from .model_trial_paired import validate
 
     try:
-        schema = json.loads((output / "evidence.json").read_text(encoding="utf-8")).get("schema")
-    except (OSError, ValueError, AttributeError):
+        schema = json.loads(read_capped(output / "evidence.json", MAX_EVIDENCE_BYTES)).get("schema")
+    except OSError:
+        schema = None
+    except ValueError as error:
+        # Oversize (or unparseable) evidence never reaches the unbounded legacy reader: the capped
+        # live validator reads it again and refuses it.
+        schema = LIVE_SCHEMA if "is larger than" in str(error) else None
+    except AttributeError:
         schema = None
     # Each validator re-checks the whole tree; this only picks the one that owns the schema.
     return (validate_live if schema == LIVE_SCHEMA else validate)(output, expected_digest)
