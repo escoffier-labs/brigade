@@ -30,6 +30,13 @@ from .runguard_gate import _recovery_gate_busy_error, _RecoveryGate, _stale_reco
 from .runguard_gate import _recovery_gate_path as _recovery_gate_path
 from .runguard_gate import _try_lock_descriptor as _try_lock_descriptor
 
+from .worktree_lease import (
+    brigade_worktree_root as brigade_worktree_root,
+    discard_incomplete_worktree as discard_incomplete_worktree,
+    reserved_worktree_lock_dir as reserved_worktree_lock_dir,
+    worktree_lock_dir as worktree_lock_dir,
+)
+
 # Separate from journal-owned run.json; bounded even for many failing siblings.
 RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
 RETENTION_DIAGNOSTICS_LIMIT = 16
@@ -217,23 +224,6 @@ def lock_path(cwd: Path) -> Path:
     if reserved is not None:
         return reserved / "run.lock"
     return base / ".brigade" / "run.lock"
-
-
-def worktree_lock_dir(checkout: Path) -> Path:
-    """Reservation and lease storage for an automatically created checkout.
-
-    Keep the lease out of Git's patch and preserve it through checkout removal
-    so the final removal receipt can still be checkpointed under ownership.
-    """
-    return checkout.parent / ".run-locks" / checkout.name
-
-
-def reserved_worktree_lock_dir(checkout: Path) -> Path | None:
-    if checkout.parent == brigade_worktree_root().resolve():
-        reservation = worktree_lock_dir(checkout)
-        if reservation.is_dir():
-            return reservation
-    return None
 
 
 def resolve_run_lock_workspace(
@@ -1559,15 +1549,6 @@ def create_detached_worktree(repo: Path, worktree_path: Path) -> Path:
     return worktree_path
 
 
-def discard_incomplete_worktree(repo: Path, worktree_path: Path) -> None:
-    """Discard a reserved checkout that failed setup before any worker ran."""
-    result = _git(repo, "worktree", "remove", "--force", str(worktree_path), timeout=120.0)
-    if result.code != 0:
-        # Git cannot remove the reserved directory if add failed before it
-        # registered the checkout. Only the caller that reserved it can clean it.
-        shutil.rmtree(worktree_path)
-
-
 def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> None:
     if not worktree_path.exists():
         return
@@ -1614,10 +1595,6 @@ def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
     if failed:
         print(f"brigade: kept worktree {worktree_path} so {len(failed)} pending handoff(s) survive", file=sys.stderr)
     return not failed
-
-
-def brigade_worktree_root() -> Path:
-    return Path.home() / ".cache" / "brigade" / "worktrees"
 
 
 def is_brigade_created_worktree(path: Path, repo_root: Path) -> bool:

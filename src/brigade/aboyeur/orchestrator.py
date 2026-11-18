@@ -709,14 +709,7 @@ def run(
     # rather than running without isolation attribution.
     try:
         pre_run_snapshot = runguard.capture_pre_run_snapshot(cwd)
-        # Branch/HEAD drift is checked against the resolved lock workspace, which
-        # may be a separate canonical checkout from the assigned cwd worktree.
-        # The cwd snapshot stays the ground-truth baseline for worker change
-        # attribution; a separate drift snapshot is captured from lock_workspace
-        # before dispatch when it differs, so movement of the canonical checkout
-        # is detected even though the assigned worktree never moved. When they
-        # are the same path, reuse the cwd snapshot to preserve explicit
-        # canonical-write behavior.
+        # Track canonical-checkout drift separately when it has its own lock.
         if lock_workspace != cwd:
             drift_snapshot = runguard.capture_pre_run_snapshot(lock_workspace)
         elif defer_artifact_collection:
