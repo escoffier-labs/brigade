@@ -10,8 +10,9 @@ A proposal here is a review request, never authorization. It stages the current
 skill text unchanged and is marked ``requires_revision``: Brigade drafts no
 text and calls no model, and ``inbox accept`` refuses it until the operator files
 a revised candidate. Only a copy whose own install receipt is a reviewed
-``brigade-bundle`` is staged; a skill whose copies come from different sources is
-flagged ``mixed-source`` instead. The contract is filled only from observed evidence: the
+``brigade-bundle`` and whose files still match that receipt is staged. A skill whose copies come from
+different sources is flagged ``mixed-source``, and a bundled copy with a local edit is flagged
+``local-edit``, because the regression is then not evidence about the bundled text. The contract is filled only from observed evidence: the
 artifact id, the reason code, the receipt run ids and paths from the scorecard
 receipt trail, and the failing check ids and commands read back from those
 receipts. A receipt that is gone yields ``command unavailable``, never an
@@ -19,25 +20,33 @@ invented command.
 
 This module never writes a SKILL.md, the registry or any skill file. It only
 stages inbox copies through ``inbox_add``. Filing is idempotent through the
-``outcome:<artifact_id>:<reason_code>:<fingerprint>`` dedupe key, so a rejected
-proposal stays muted until the skill text changes. Every failure here warns on
+``outcome:<artifact_id>:<fingerprint>`` dedupe key (the reason code lives in the contract, not the
+key), so one request exists per skill text and a rejected proposal stays muted, for a hold and a later
+rollback alike, until the skill text changes. Every failure here warns on
 stderr and is reported as a skipped row; none changes reconcile's exit code.
 """
 
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from . import outcome, scorecard
 from .skills_cmd import registry as _registry_mod
 from .skills_cmd.adapters import _fleet_receipts
 from .skills_cmd.inbox import inbox_add, proposal_for_dedupe_key
+
+if TYPE_CHECKING:
+    import brigade.skills_cmd.install as _install_mod
+else:
+    # ``skills_cmd`` re-exports the ``install`` function over the submodule's attribute.
+    _install_mod = importlib.import_module("brigade.skills_cmd.install")
 
 FILED = "filed"
 EXISTING = "existing"
@@ -148,28 +157,47 @@ def _receipt_kind(skill_id: str, receipt: dict[str, Any]) -> str:
     return "registry" if kind == "registry" else "other"
 
 
-def _copy_harness(content: Path) -> str | None:
-    """Harness key of an installed copy at ``<root>/.<harness>/skills/<id>/SKILL.md``, else None."""
-    skills_dir = content.parent.parent
-    harness_dir = skills_dir.parent.name
-    if skills_dir.name != "skills" or not harness_dir.startswith("."):
+def _copy_harness(target: Path, content: Path, skill_id: str) -> str | None:
+    """Harness key whose adapter ``install_path`` is the directory holding ``content``, else None."""
+    try:
+        copy_dir = content.resolve().parent
+        adapters = _install_mod._adapter_map(target)
+    except (OSError, _registry_mod.SkillsStatePathError):
         return None
-    return harness_dir[1:] or None
+    for harness in adapters:
+        try:
+            install_dir, _escapes = _install_mod._evaluate_install_dir(target, harness, skill_id)
+            if install_dir.resolve() == copy_dir:
+                return harness
+        except (OSError, ValueError, KeyError, _registry_mod.SkillsStatePathError):
+            continue
+    return None
 
 
-def _classify(skill_id: str, content: Path, receipts: dict[tuple[str, str], dict[str, Any]]) -> tuple[str, str | None]:
-    """Return ``(kind, mixed)`` for the copy at ``content``.
+def _classify(
+    target: Path, skill_id: str, content: Path, receipts: dict[tuple[str, str], dict[str, Any]]
+) -> tuple[str, str | None]:
+    """Return ``(kind, flag)`` for the copy at ``content``.
 
     ``kind`` comes from that copy's own receipt (``other`` when it has none, as for
-    a registry master). ``mixed`` is set when the skill's receipts disagree about
-    their source, so a bundle copy in one harness never vouches for a registry or
-    path copy in another.
+    a registry master), and a ``bundled`` copy must still match that receipt: a
+    changed copy is flagged ``local-edit`` and one that cannot be judged is ``other``.
+    ``flag`` is ``mixed-source`` when the skill's receipts disagree about their source,
+    so a bundle copy in one harness never vouches for a registry or path copy in another.
     """
     kinds = {_receipt_kind(skill_id, receipt) for (name, _harness), receipt in receipts.items() if name == skill_id}
-    harness = _copy_harness(content)
+    harness = _copy_harness(target, content, skill_id)
     receipt = receipts.get((skill_id, harness)) if harness else None
     copy_kind = _receipt_kind(skill_id, receipt) if receipt is not None else "other"
-    return copy_kind, ("mixed-source" if len(kinds) > 1 else None)
+    flag = "mixed-source" if len(kinds) > 1 else None
+    if copy_kind == "bundled" and receipt is not None and harness is not None:
+        inspection = _install_mod._inspect_installed_tree(target, content.parent)
+        state = _install_mod._local_edit_state(receipt, inspection.files, skill_id=skill_id, harness=harness)
+        if state == "changed":
+            flag = flag or "local-edit"
+        elif state != "current":
+            copy_kind = "other"
+    return copy_kind, flag
 
 
 def _propose(target: Path, item: Any, receipts: dict[tuple[str, str], dict[str, Any]]) -> ProposalOutcome:
@@ -182,9 +210,14 @@ def _propose(target: Path, item: Any, receipts: dict[tuple[str, str], dict[str, 
     content = outcome_cmd._artifact_content_path(target, artifact_id, "skill")
     if content is None or not content.parent.is_dir():
         return ProposalOutcome(artifact_id, code, SKIPPED, "skill text unavailable")
-    kind, mixed = _classify(skill_id, content, receipts)
-    if mixed:
-        return ProposalOutcome(artifact_id, code, FLAGGED, mixed)
+    try:
+        content.resolve().relative_to(target)
+    except (OSError, ValueError):
+        # A linked worktree can resolve the parent clone's copy; never stage text from outside the target.
+        return ProposalOutcome(artifact_id, code, SKIPPED, "skill text outside the target")
+    kind, flag = _classify(target, skill_id, content, receipts)
+    if flag:
+        return ProposalOutcome(artifact_id, code, FLAGGED, flag)
     if kind == "registry":
         return ProposalOutcome(artifact_id, code, FLAGGED, "registry")
     if kind != "bundled":
@@ -195,7 +228,7 @@ def _propose(target: Path, item: Any, receipts: dict[tuple[str, str], dict[str, 
     fingerprint = str(card.subject.content_fingerprint or "").removeprefix("sha256:")
     if not fingerprint:
         return ProposalOutcome(artifact_id, code, SKIPPED, "no content fingerprint")
-    key = f"outcome:{artifact_id}:{code}:{fingerprint}"
+    key = f"outcome:{artifact_id}:{fingerprint}"
     prior = proposal_for_dedupe_key(target, key)
     if prior is not None:
         return ProposalOutcome(artifact_id, code, EXISTING, str(prior.get("status") or ""), _proposal_id(prior))

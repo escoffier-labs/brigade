@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from brigade import outcome, outcome_cmd, outcome_ratchet_report, outcome_skill_proposals as proposals, skills_cmd
+from tests.test_outcome_cmd import _make_linked_worktree, _write_harness_skill
 from tests.test_scorecard_reconcile import seed_registry_skill_scorecard_hurt
 from tests.test_skills_local_edit_guard import SKILL, _write_skill
 
@@ -63,7 +65,9 @@ def test_hold_files_one_proposal_with_a_behavioral_contract(bundled_regression, 
     assert proposal["requires_revision"] is True
     assert proposal["unrevised_identity"] == proposal["candidate_identity"]
     assert proposal["source"] == f"brigade://outcome-regression/{BUNDLED}"
-    assert proposal["dedupe_key"].startswith(f"outcome:{BUNDLED}:regression_hold:")
+    assert proposal["dedupe_key"].startswith(f"outcome:{BUNDLED}:")
+    assert "regression_hold" not in proposal["dedupe_key"]  # the reason code lives in the contract
+    assert "regression_hold" in proposal["behavioral_contract"]["reason"]
     fingerprint = proposal["dedupe_key"].rsplit(":", 1)[1]
     assert len(fingerprint) == 64 and not fingerprint.startswith("sha256")
     assert proposal["contract_status"] == "complete"
@@ -227,12 +231,23 @@ def test_rollback_of_a_promoted_bundled_skill_files_a_proposal(bundled_regressio
     row = payload["outcome_proposals"]["proposals"][0]
     assert (row["reason_code"], row["status"]) == ("regression_rollback", "filed")
     (proposal,) = _inbox(tmp_path, capsys)
-    assert proposal["dedupe_key"].startswith(f"outcome:{BUNDLED}:regression_rollback:")
+    assert proposal["dedupe_key"].startswith(f"outcome:{BUNDLED}:")
+    assert "regression_rollback" not in proposal["dedupe_key"]
     assert "regression_rollback" in proposal["behavioral_contract"]["reason"]
 
 
-def test_a_rejected_proposal_unmutes_when_the_skill_text_changes(bundled_regression, capsys):
-    tmp_path, installed = bundled_regression
+def _bundle_source(tmp_path: Path, monkeypatch) -> Path:
+    """A private copy of the bundled skill that tests can revise, as a new Brigade release would."""
+    source = tmp_path.parent / f"{tmp_path.name}-bundle" / BUNDLED
+    shutil.copytree(skills_cmd._bundled_skill_path(BUNDLED), source)
+    monkeypatch.setattr(skills_cmd.registry, "_bundled_skill_path", lambda _skill_id: source)
+    return source
+
+
+def test_a_rejected_proposal_unmutes_when_the_skill_text_changes(tmp_path, capsys, monkeypatch):
+    source = _bundle_source(tmp_path, monkeypatch)
+    installed = _install_bundled(tmp_path, capsys)
+    seed_registry_skill_scorecard_hurt(tmp_path, BUNDLED)
     first, _ = _reconcile(tmp_path, capsys)
     old_id = first["outcome_proposals"]["proposals"][0]["proposal_id"]
     assert skills_cmd.inbox_reject(target=tmp_path, proposal_id=old_id, reason="not now", json_output=True) == 0
@@ -240,7 +255,15 @@ def test_a_rejected_proposal_unmutes_when_the_skill_text_changes(bundled_regress
     muted, _ = _reconcile(tmp_path, capsys)
     assert muted["outcome_proposals"]["proposals"][0]["status"] == "existing"
 
-    installed.write_text(installed.read_text() + "\nLocal edit that changes the fingerprint.\n")
+    # A new bundle release changes the text through a receipted reinstall, not a hand edit.
+    skill_md = source / "SKILL.md"
+    skill_md.write_text(skill_md.read_text() + "\nRevised in a newer bundle.\n")
+    reinstalled = skills_cmd.install(
+        workspace=tmp_path, skill=f"bundled:{BUNDLED}", harness="claude", force=True, json_output=True
+    )
+    assert reinstalled == 0
+    capsys.readouterr()
+    assert "Revised in a newer bundle." in installed.read_text()
     seed_registry_skill_scorecard_hurt(tmp_path, BUNDLED)
     again, _ = _reconcile(tmp_path, capsys)
 
@@ -249,6 +272,107 @@ def test_a_rejected_proposal_unmutes_when_the_skill_text_changes(bundled_regress
     assert row["proposal_id"] != old_id
     keys = {p["dedupe_key"] for p in _inbox(tmp_path, capsys)}
     assert len(keys) == 2
+
+
+def test_a_hand_edited_bundled_copy_is_flagged_and_files_nothing(bundled_regression, capsys):
+    tmp_path, installed = bundled_regression
+    installed.write_text(installed.read_text() + "\nAn operator's local edit.\n")
+    seed_registry_skill_scorecard_hurt(tmp_path, BUNDLED)
+    edited = _tree(installed.parent)
+
+    payload, _err = _reconcile(tmp_path, capsys)
+
+    row = payload["outcome_proposals"]["proposals"][0]
+    assert (row["artifact_id"], row["status"], row["detail"]) == (BUNDLED, "flagged", "local-edit")
+    assert (payload["outcome_proposals"]["flagged"], payload["outcome_proposals"]["filed"]) == (1, 0)
+    assert _inbox(tmp_path, capsys) == []
+    assert _tree(installed.parent) == edited
+
+
+def test_a_bundled_copy_whose_receipt_cannot_vouch_for_it_is_skipped(bundled_regression, capsys):
+    tmp_path, _installed = bundled_regression
+    receipt_path = tmp_path / ".brigade/skills/installs" / f"{BUNDLED}-claude.json"
+    receipt = json.loads(receipt_path.read_text())
+    del receipt["render"]  # still reads as a bundle receipt, but no longer satisfies the receipt contract
+    receipt_path.write_text(json.dumps(receipt))
+
+    payload, _err = _reconcile(tmp_path, capsys)
+
+    row = payload["outcome_proposals"]["proposals"][0]
+    assert (row["artifact_id"], row["status"], row["detail"]) == (BUNDLED, "skipped", "unclassified")
+    assert _inbox(tmp_path, capsys) == []
+
+
+def test_a_rejected_hold_also_mutes_the_later_rollback_for_the_same_text(bundled_regression, capsys):
+    tmp_path, _installed = bundled_regression
+    first, _ = _reconcile(tmp_path, capsys)
+    row = first["outcome_proposals"]["proposals"][0]
+    assert (row["reason_code"], row["status"]) == ("regression_hold", "filed")
+    assert skills_cmd.inbox_reject(target=tmp_path, proposal_id=row["proposal_id"], reason="no", json_output=True) == 0
+    capsys.readouterr()
+
+    status = outcome_cmd._status_path(tmp_path)
+    status.parent.mkdir(parents=True, exist_ok=True)
+    status.write_text(json.dumps({"version": 1, "artifacts": {BUNDLED: {"status": "promoted"}}}))
+    later, _ = _reconcile(tmp_path, capsys)
+
+    rollback = later["outcome_proposals"]["proposals"][0]
+    assert (rollback["reason_code"], rollback["status"], rollback["detail"]) == (
+        "regression_rollback",
+        "existing",
+        "rejected",
+    )
+    assert rollback["proposal_id"] == row["proposal_id"]
+    assert later["outcome_proposals"]["filed"] == 0
+    assert len(_inbox(tmp_path, capsys)) == 1
+
+
+def test_a_custom_harness_is_matched_by_its_install_path_not_its_directory_name(tmp_path, capsys):
+    adapters = tmp_path / ".brigade" / "skills" / "adapters.json"
+    adapters.parent.mkdir(parents=True, exist_ok=True)
+    adapters.write_text(
+        json.dumps(
+            {
+                "adapters": {
+                    "mine": {"status": "local", "format": "custom-skill", "install_path": ".custom/skills/{skill_id}"}
+                }
+            }
+        )
+    )
+    assert skills_cmd.install(workspace=tmp_path, skill=f"bundled:{BUNDLED}", harness="mine", json_output=True) == 0
+    capsys.readouterr()
+    copy = tmp_path / ".custom" / "skills" / BUNDLED / "SKILL.md"
+    assert copy.is_file()
+    assert proposals._copy_harness(tmp_path, copy, BUNDLED) == "mine"
+    # The directory name alone is not the harness: a dot directory no adapter installs to matches nothing.
+    stray = tmp_path / ".zz-stray" / "skills" / BUNDLED / "SKILL.md"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("stray")
+    assert proposals._copy_harness(tmp_path, stray, BUNDLED) is None
+    seed_registry_skill_scorecard_hurt(tmp_path, BUNDLED)
+
+    payload, _err = _reconcile(tmp_path, capsys)
+
+    row = payload["outcome_proposals"]["proposals"][0]
+    assert (row["artifact_id"], row["status"]) == (BUNDLED, "filed")
+    (proposal,) = _inbox(tmp_path, capsys)
+    assert (Path(proposal["skill_path"]) / "SKILL.md").read_bytes() == copy.read_bytes()
+
+
+def test_a_copy_resolved_outside_the_target_is_never_staged(tmp_path, capsys):
+    parent, worktree = _make_linked_worktree(tmp_path)
+    parent_copy = _write_harness_skill(parent, BUNDLED, "# the parent clone's copy\n")
+    assert outcome_cmd._artifact_content_path(worktree, BUNDLED, "skill") == parent_copy
+    item = SimpleNamespace(
+        decision=outcome.Decision(BUNDLED, "hold", "candidate", "withheld", code=outcome.REGRESSION_HOLD),
+        artifact_kind="skill",
+        scorecard=None,
+    )
+
+    (row,) = proposals.file_regression_proposals(worktree, [item])
+
+    assert (row.status, row.detail) == (proposals.SKIPPED, "skill text outside the target")
+    assert not (worktree / ".brigade" / "skills" / "inbox").exists()
 
 
 def test_a_run_that_loses_the_filing_race_reports_existing(bundled_regression, capsys, monkeypatch):
