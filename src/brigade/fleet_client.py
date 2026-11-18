@@ -122,7 +122,6 @@ from .fleet_claim_lifecycle import (
     CLEANUP_RETRY_REASONS,
     STALE_CLAIM_REFUSALS,
     TERMINAL_CLAIM_REFUSALS,
-    UNCERTAIN_CLEANUP_REASONS,
     _ConfirmedClaimLease as _ConfirmedClaimLease,
 )
 

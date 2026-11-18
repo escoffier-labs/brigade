@@ -1,1 +1,2 @@
 - Let `brigade run --worktree` use a separate run lock and fleet claim for each detached checkout so sibling runs can proceed concurrently.
+- Recover and prune clean, branch-backed worktrees with dead leases. Prune empty directories left by interrupted setup after the stale-lease grace period.

@@ -93,6 +93,58 @@ def _remove_prunable_worktree(repo_root: Path, path: Path) -> None:
         lock.parent.rmdir()
 
 
+def _old_empty_dir_mtime(path: Path, threshold: datetime) -> datetime | None:
+    try:
+        if path.is_symlink() or not path.is_dir():
+            return None
+        mtime = runguard.worktree_mtime(path)
+        if mtime <= threshold and next(path.iterdir(), None) is None:
+            return mtime
+    except OSError:
+        pass
+    return None
+
+
+def _prune_abandoned_setup(
+    root: Path, prefix: str, threshold: datetime, now: datetime, *, apply: bool
+) -> list[dict[str, Any]]:
+    """Classify aged, empty setup paths left before the lease was published."""
+    leases = root / ".run-locks"
+    entries: list[dict[str, Any]] = []
+    for base, other in ((root, leases), (leases, root)):
+        if base.is_symlink() or not base.is_dir():
+            continue
+        for path in sorted(base.iterdir()):
+            if not path.name.startswith(prefix):
+                continue
+            mtime = _old_empty_dir_mtime(path, threshold)
+            if mtime is None:
+                continue
+            peer = other / path.name
+            if peer.is_symlink() or (peer.exists() and _old_empty_dir_mtime(peer, threshold) is None):
+                continue
+            age = (now - mtime).total_seconds() / 86400
+            entry: dict[str, Any] = {
+                "path": str(path),
+                "kind": "incomplete-setup",
+                "removable": True,
+                "reasons": [],
+                "age_days": round(age, 2),
+                "clean": True,
+                "branch_backed": False,
+            }
+            if apply:
+                try:
+                    if _old_empty_dir_mtime(path, threshold) != mtime:
+                        raise OSError("directory changed during pruning")
+                    path.rmdir()
+                except OSError as exc:
+                    entry["removable"] = False
+                    entry["reasons"].append(f"removal failed: {exc}")
+            entries.append(entry)
+    return entries
+
+
 def _classify_worktree_for_removal(
     path: Path,
     threshold: datetime,
@@ -155,7 +207,8 @@ def prune_worktrees(
 
     A worktree is removable only when it is clean, its HEAD is reachable from
     a branch, and it is older than the threshold. Non-Brigade worktrees are
-    never touched.
+    never touched. Empty directories from interrupted setup must also age
+    past the stale-lease grace period, even with a zero-day threshold.
     """
     target = cwd.expanduser().resolve()
     if not target.is_dir():
@@ -187,11 +240,16 @@ def prune_worktrees(
             print(f"no Brigade worktrees found under {root}")
         return 0
 
-    threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=older_than_days)
     repo_common = handoff_worktrees.git_common_dir(repo_root)
-    entries: list[dict[str, Any]] = []
-    removed: list[Path] = []
+    setup_threshold = min(threshold, now - runguard.STALE_LOCK_RECONCILE_MAX_AGE)
+    entries = _prune_abandoned_setup(root, f"{repo_root.name}-", setup_threshold, now, apply=apply)
+    setup_paths = {Path(entry["path"]) for entry in entries}
+    removed = [Path(entry["path"]) for entry in entries if apply and entry["removable"]]
     for path in runguard.brigade_worktrees_for_repo(repo_root):
+        if path in setup_paths:
+            continue
         common = handoff_worktrees.git_common_dir(path)
         if common is not None and common != repo_common:
             continue
