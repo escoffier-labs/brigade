@@ -157,7 +157,7 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
         if event in {"PostToolUse", "PostToolUseFailure"}:
             state["calls"] = state.get("calls", 0) + 1
         save(target, state)
-        acknowledge_prompts(target)
+        _acknowledge_saved_prompts(target)
     return None
 
 
@@ -288,7 +288,20 @@ def drain_prompts(target: Path, state: dict[str, Any], *, acknowledge: bool = Tr
         state["drained_prompt_ids"] = [p["prompt_id"] for p in prompts]
         save(target, state)
     if acknowledge:
+        _acknowledge_saved_prompts(target)
+
+
+def _acknowledge_saved_prompts(target: Path) -> None:
+    """Keep prompts queued when the acknowledgement write fails.
+
+    The signed saved event, not the spool write, suppresses a repeat drain, so a
+    failed acknowledgement must not abort the caller after it has saved its own
+    event.
+    """
+    try:
         acknowledge_prompts(target)
+    except OSError:
+        pass
 
 
 def acknowledge_prompts(target: Path) -> None:

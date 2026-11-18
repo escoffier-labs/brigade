@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from brigade import lesson_activity as activity, lesson_admission as admission
+from brigade import lesson_activity as activity, lesson_admission as admission, lesson_review as review
 from tests.test_lesson_review import event, proposal
 from tests.test_lesson_review_r4 import scope as scope
 
@@ -42,10 +42,10 @@ def test_prompt_retry_requires_matching_authenticated_saved_event(scope, monkeyp
 
     with monkeypatch.context() as patch:
         patch.setattr(activity.io, "write", fail_ack)
-        with pytest.raises(OSError, match="injected acknowledgement failure"):
-            event(scope)
+        event(scope)
         state = activity.load(scope)
         assert prompt_id in state["drained_prompt_ids"]
+        assert [e["kind"] for e in state["events"]] == ["UserPromptSubmit", "PostToolUse"]
         if damage == "deleted":
             state["events"].clear()
         else:
@@ -57,9 +57,9 @@ def test_prompt_retry_requires_matching_authenticated_saved_event(scope, monkeyp
             }[damage]
             state["events"][0][field] = value
         activity.save(scope, state)
-        with pytest.raises(OSError, match="injected acknowledgement failure"):
-            event(scope)
-        # A second crash still leaves the spool and a newly recorded correction.
+        event(scope)
+        # A second failed acknowledgement still leaves the spool and a newly
+        # recorded correction.
         assert activity._read_prompts(spool)[0]["prompt_id"] == prompt_id
         prompts = [e for e in activity.load(scope)["events"] if e["kind"] == "UserPromptSubmit"]
         assert prompts
@@ -69,6 +69,38 @@ def test_prompt_retry_requires_matching_authenticated_saved_event(scope, monkeyp
         assert prompts[-1]["at"] == 99
     event(scope)
     assert not activity._read_prompts(spool)
+
+
+def test_failed_acknowledgement_keeps_hook_event_and_prompt(scope, monkeypatch):
+    text = "Correction: keep publication atomic to prevent partial reads."
+    activity.record_event(scope, "UserPromptSubmit", {"prompt": text}, now=99)
+    spool = activity.prompt_path(scope)
+
+    def fail_ack(_target):
+        raise OSError("injected acknowledgement failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(activity, "acknowledge_prompts", fail_ack)
+        event(scope, now=100)
+    state = activity.load(scope)
+    assert [e["kind"] for e in state["events"]] == ["UserPromptSubmit", "PostToolUse"]
+    assert state["events"][0]["text"] == text
+    assert activity._read_prompts(spool)[0]["prompt_id"] == state["events"][0]["prompt_id"]
+    event(scope, now=101)
+    assert not activity._read_prompts(spool)
+    assert [e["kind"] for e in activity.load(scope)["events"]].count("UserPromptSubmit") == 1
+
+
+def test_failed_acknowledgement_does_not_force_review_retry(scope, monkeypatch):
+    activity.record_event(scope, "UserPromptSubmit", {"prompt": "Keep publication atomic."}, now=99)
+
+    def fail_ack(_target):
+        raise OSError("injected acknowledgement failure")
+
+    monkeypatch.setattr(activity, "acknowledge_prompts", fail_ack)
+    assert review.run(scope, now=100) == {"status": "waiting"}
+    assert activity._read_prompts(activity.prompt_path(scope))
+    assert activity.load(scope)["drained_prompt_ids"]
 
 
 def test_late_prompt_drain_does_not_move_last_activity_backwards(scope):
