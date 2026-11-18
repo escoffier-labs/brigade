@@ -14,17 +14,23 @@ from typing import Any
 
 STATE_KEY = "invoked_skills"
 MAX_INVOKED = 128
+LOCAL_PLUGIN_PREFIXES = frozenset({"brigade"})
+"""Plugin names whose skills are this install's own (plugins/brigade). Another plugin's
+``<plugin>:brigade-work`` is a different skill and must not credit the local one."""
 
 
 def invoked_names(state: dict[str, Any]) -> list[str]:
-    """Recorded names plus the bare id of a ``plugin:skill`` name, ordered and unique."""
+    """Bare recorded names plus the id of a local-plugin ``brigade:skill`` name, ordered and unique."""
     names: dict[str, None] = {}
     value = state.get(STATE_KEY)
     for item in value if isinstance(value, list) else []:
-        if isinstance(item, str) and item:
+        if not isinstance(item, str) or not item:
+            continue
+        prefix, sep, bare = item.partition(":")
+        if not sep:
             names.setdefault(item, None)
-            if ":" in item:
-                names.setdefault(item.rsplit(":", 1)[1], None)
+        elif prefix.casefold() in LOCAL_PLUGIN_PREFIXES and bare:
+            names.setdefault(bare, None)
     return list(names)
 
 

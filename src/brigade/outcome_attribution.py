@@ -14,7 +14,10 @@ VETO, never promote:
 * reconcile may turn an install or bump into a hold
   (``observed_regression_hold``). It never produces an install, a bump or a
   rollback from these rows, for skills or cards. Rollback policy is a later,
-  security-reviewed PR;
+  security-reviewed PR. The hold is bounded so it cannot pin a skill forever:
+  only unresolved observed hurt inside a recency window, from at least a
+  minimum number of distinct sessions, counts, and it releases on its own
+  (``observed_hurt_sessions``);
 * scorecards stay receipt-only and never read these rows.
 
 When ``auto`` resolves no observed skill (Codex repos, plain shells) the run
@@ -24,12 +27,13 @@ falls back to the previous default, ``brigade-work``, recorded as
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
 import stat
 import sys
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -45,6 +49,8 @@ OBSERVED_REGRESSION_HOLD = core.OBSERVED_REGRESSION_HOLD
 
 CLAUDE_SESSION_ENV = "BRIGADE_CLAUDE_SESSION"
 """Set by the hook-built verify command for exactly this session. Preferred."""
+SESSION_TARGET_ENV = "BRIGADE_CLAUDE_SESSION_TARGET"
+"""Set when the verifier's checkout differs from the checkout holding the session state."""
 AGENT_SESSION_ENV = "BRIGADE_AGENT_SESSION"
 """Ambient: exported to every shell of a session, so subagents and workers inherit it."""
 MAX_STATE_BYTES = 1_048_576
@@ -159,26 +165,38 @@ def resolve_observed_skill_ids(
     File-only: reads the hook session state, never calls the hook. Returns ``[]``
     when there is no session identity, no matching state, an unreadable or
     refused state, or no known skill was read. Failure never raises. Ids compare
-    case-insensitively and come back in the known spelling.
+    case-insensitively and come back in the known spelling. The verify target's
+    state wins; the hook target named by ``BRIGADE_CLAUDE_SESSION_TARGET`` is the
+    fallback, because the hook stores the session where it fired.
     """
     environ = os.environ if environ is None else environ
     fingerprint = session_fingerprint_from_env(environ)
     if fingerprint is None:
         return []
-    known_names = target_known_skill_ids(target) if known_skill_ids is None else set(known_skill_ids)
+    roots = [target.expanduser().resolve()]
+    hook_target = environ.get(SESSION_TARGET_ENV, "")
+    if hook_target and os.path.isabs(hook_target) and Path(hook_target).is_dir():
+        roots.append(Path(hook_target).resolve())
+    roots = list(dict.fromkeys(roots))
+    known_names = set(target_known_skill_ids(roots[0]) if known_skill_ids is None else known_skill_ids)
+    for extra in roots[1:]:
+        known_names |= target_known_skill_ids(extra)
     known = {name.casefold(): name for name in known_names}
     if not known:
         return []
-    for state in _iter_states(target.expanduser().resolve()):
-        if not _state_matches(state, fingerprint):
-            continue
-        named = [*skill_ids_from_read_files(state.get("read_files")), *skill_invocations.invoked_names(state)]
-        resolved: dict[str, None] = {}
-        for name in named:
-            canonical = known.get(name.casefold())
-            if canonical is not None:
-                resolved.setdefault(canonical, None)
-        return list(resolved)
+    for root in roots:
+        for state in _iter_states(root):
+            if not _state_matches(state, fingerprint):
+                continue
+            named = [*skill_ids_from_read_files(state.get("read_files")), *skill_invocations.invoked_names(state)]
+            resolved: dict[str, None] = {}
+            for name in named:
+                canonical = known.get(name.casefold())
+                if canonical is not None:
+                    resolved.setdefault(canonical, None)
+            if resolved:
+                return list(resolved)
+            break
     return []
 
 
@@ -200,6 +218,26 @@ def resolve_auto_capture(target: Path, environ: Mapping[str, str] | None = None)
         file=sys.stderr,
     )
     return [fallback], False
+
+
+def observed_capture_meta(artifact_ids: Sequence[str], environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Receipt stamp for an observed capture: the source, every observed id, and the session.
+
+    ``outcome_capture.artifact_id`` only names the first id, so retry hints and the
+    bounded veto read the rest from here instead of treating ``artifact_id`` as typed.
+    """
+    environ = os.environ if environ is None else environ
+    return {
+        "attribution_source": SESSION_OBSERVED,
+        "observed_artifact_ids": list(artifact_ids),
+        "session_fingerprint": session_fingerprint_from_env(environ),
+    }
+
+
+def receipt_is_observed(receipt: Mapping[str, Any] | None) -> bool:
+    """Whether a verify receipt's capture stamp came from ``--capture auto`` resolution."""
+    capture = receipt.get("outcome_capture") if isinstance(receipt, Mapping) else None
+    return isinstance(capture, Mapping) and capture.get("attribution_source") == SESSION_OBSERVED
 
 
 def capture_artifacts(
@@ -230,25 +268,175 @@ def capture_artifacts(
     return rc
 
 
+def capture_auto(*, target: Path, artifact_kind: str, run_id: str | None, run_receipt: str | None) -> int:
+    """``brigade outcome capture auto``: resolve the session's skills and capture a past verify run."""
+    if artifact_kind != "skill" or run_receipt is not None:
+        print(
+            "error: capture auto resolves skills for a verify run; drop --kind card and --run-receipt", file=sys.stderr
+        )
+        return 1
+    target = target.expanduser().resolve()
+    ids, observed = resolve_auto_capture(target)
+    return capture_artifacts(
+        target=target, artifact_ids=ids, artifact_kind=artifact_kind, run_id=run_id or "latest", observed=observed
+    )
+
+
+def _receipt_session(receipt: Mapping[str, Any] | None) -> str | None:
+    """Session fingerprint a verify receipt was produced under, when it records one."""
+    if not isinstance(receipt, Mapping):
+        return None
+    capture = receipt.get("outcome_capture")
+    session = capture.get("session_fingerprint") if isinstance(capture, Mapping) else None
+    if not session:
+        harness = receipt.get("harness_session")
+        session = harness.get("fingerprint") if isinstance(harness, Mapping) else None
+    return session if isinstance(session, str) and session else None
+
+
+def _receipt_started(receipt: Mapping[str, Any]) -> dt.datetime | None:
+    return localio.parse_iso_datetime(receipt.get("started_at") or receipt.get("completed_at"))
+
+
+def _receipt_identity(receipt: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    """What the receipt verified: its manifest id, else its normalized planned commands."""
+    from .work_cmd import verification
+
+    manifest = receipt.get("verify_manifest_id")
+    if isinstance(manifest, str) and manifest:
+        return ("manifest", manifest)
+    planned = verification._receipt_planned_commands_identity(dict(receipt))
+    return ("commands", *planned) if planned else None
+
+
+class _FixedLaterIndex:
+    """Passing verify receipts by (session, verified thing), loaded once and only when needed."""
+
+    def __init__(self, target: Path) -> None:
+        self._target = target
+        self._passing: dict[tuple[str, tuple[Any, ...]], list[dt.datetime]] | None = None
+
+    def _load(self) -> dict[tuple[str, tuple[Any, ...]], list[dt.datetime]]:
+        from .work_cmd import verification
+
+        passing: dict[tuple[str, tuple[Any, ...]], list[dt.datetime]] = {}
+        for receipt in verification._verify_receipts(self._target):
+            session = _receipt_session(receipt)
+            identity = _receipt_identity(receipt)
+            started = _receipt_started(receipt)
+            if session and identity and started and core.signal_value("verify", str(receipt.get("status"))) > 0:
+                passing.setdefault((session, identity), []).append(started)
+        return passing
+
+    def session_of(self, record: core.OutcomeRecord) -> str:
+        """The failing receipt's session, or a per-receipt key when it cannot be proven."""
+        return _receipt_session(self.receipt_for(record)) or f"receipt:{record.evidence_ref or id(record)}"
+
+    def receipt_for(self, record: core.OutcomeRecord) -> dict[str, Any] | None:
+        from .work_cmd import helpers, verification
+
+        if not record.evidence_ref:
+            return None
+        path = Path(record.evidence_ref)
+        try:
+            path.resolve().relative_to(helpers._verify_runs_root(self._target).resolve())
+        except (OSError, ValueError):
+            return None
+        return verification._verify_read_receipt(path)
+
+    def fixed_later(self, record: core.OutcomeRecord) -> bool:
+        """A failure later passed again by the same session on the same verifier is iteration, not regression."""
+        receipt = self.receipt_for(record)
+        session = _receipt_session(receipt)
+        identity = _receipt_identity(receipt) if receipt is not None else None
+        started = _receipt_started(receipt) if receipt is not None else None
+        if not (session and identity and started):
+            return False
+        if self._passing is None:
+            self._passing = self._load()
+        return any(stamp > started for stamp in self._passing.get((session, identity), ()))
+
+
+def observed_hurt_sessions(
+    target: Path,
+    records: Sequence[core.OutcomeRecord],
+    cohorts_by_artifact: Mapping[str, core.FingerprintCohorts],
+    *,
+    now: dt.datetime,
+    config: core.ReconcileConfig,
+) -> dict[str, int]:
+    """Per artifact, distinct sessions whose observed hurt still counts toward the veto.
+
+    A session-observed hurt row counts only when it is content-current, inside
+    ``observed_hurt_window_days``, and not fixed later (a passing receipt for the
+    same verifier in the same session after the failure). Counted per distinct
+    session, so one noisy session never reaches the threshold alone.
+    """
+    window = config.observed_hurt_window_days * 86_400.0
+    by_artifact: dict[str, list[core.OutcomeRecord]] = {}
+    for record in records:
+        by_artifact.setdefault(record.artifact_id, []).append(record)
+    index = _FixedLaterIndex(target)
+    counts: dict[str, int] = {}
+    for artifact_id, rows in by_artifact.items():
+        if not any(r.attribution_source == SESSION_OBSERVED and r.signal_value < 0 for r in rows):
+            continue
+        cohort = cohorts_by_artifact.get(artifact_id)
+        # Deduped first, so an observed row twinned by a caller-typed row of the same receipt is not counted.
+        current = core.current_content_records(rows, cohort.current_fingerprint if cohort else None)
+        sessions = {
+            index.session_of(r)
+            for r in current
+            if r.attribution_source == SESSION_OBSERVED
+            and r.signal_value < 0
+            and core._record_age_seconds(now, r.ts) <= window
+            and not index.fixed_later(r)
+        }
+        if sessions:
+            counts[artifact_id] = len(sessions)
+    return counts
+
+
 def apply_observed_veto(
     decision: core.Decision,
-    cohorts: core.FingerprintCohorts | None,
+    sessions: int,
     *,
     prior_status: str,
+    config: core.ReconcileConfig,
 ) -> core.Decision:
-    """Turn an install or bump into a hold when observed sessions show hurt.
+    """Turn an install or bump into a hold while bounded observed hurt stands.
 
-    Applies to skills and cards alike. Never produces install, bump or rollback.
-    A receipt-derived rollback or a cooldown hold passes through unchanged.
+    ``sessions`` is ``observed_hurt_sessions`` for the artifact. Applies to skills
+    and cards alike. Never produces install, bump or rollback, and releases on its
+    own once the count falls below ``observed_hurt_min_sessions`` (hurt ages out of
+    the window or its session fixed it). A receipt-derived rollback or a cooldown
+    hold passes through unchanged.
     """
-    if cohorts is None or cohorts.current.observed_hurt <= 0:
-        return decision
-    if decision.action not in {"install", "bump"}:
+    if sessions < max(1, config.observed_hurt_min_sessions) or decision.action not in {"install", "bump"}:
         return decision
     return core.Decision(
         decision.artifact_id,
         "hold",
         prior_status,
-        "withheld: regression observed in sessions that read this skill (session_observed attribution, veto only)",
+        "withheld: unresolved regression observed in sessions that read this skill "
+        "(session_observed attribution, veto only)",
         code=OBSERVED_REGRESSION_HOLD,
     )
+
+
+def veto_projection(
+    decisions: Mapping[str, core.Decision],
+    sessions: Mapping[str, int],
+    *,
+    config: core.ReconcileConfig,
+) -> dict[str, core.Decision]:
+    """Apply the observed veto to a dry-run projection, as reconcile does (bump starts promoted)."""
+    return {
+        artifact_id: apply_observed_veto(
+            decision,
+            sessions.get(artifact_id, 0),
+            prior_status="promoted" if decision.action == "bump" else "candidate",
+            config=config,
+        )
+        for artifact_id, decision in decisions.items()
+    }

@@ -6,7 +6,7 @@ import contextlib
 import io
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -50,6 +50,46 @@ def _record(artifact_id: str, signal: int, ref: str, source: str = outcome.CALLE
         "2026-06-20T00:00:00+00:00",
         attribution_source=source,
     )
+
+
+NOW = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
+SESSION_A = "aaaaaaaaaaaaaaaa"
+SESSION_B = "bbbbbbbbbbbbbbbb"
+
+
+def _receipt(
+    target: Path, run_id: str, status: str, started: datetime, *, session: str = SESSION_A, command: str = "pytest -q"
+) -> str:
+    run_dir = target / ".brigade" / "work" / "verify-runs" / run_id
+    run_dir.mkdir(parents=True)
+    path = run_dir / "receipt.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": status,
+                "started_at": started.isoformat(),
+                "planned_commands": [command],
+                "harness_session": {"harness": "claude", "fingerprint": session},
+            }
+        )
+    )
+    return str(path)
+
+
+def _observed_hurt(target: Path, run_id: str, age_days: float = 1.0, **kwargs) -> outcome.OutcomeRecord:
+    started = NOW - timedelta(days=age_days)
+    ref = _receipt(target, run_id, "failed", started, **kwargs)
+    return outcome.OutcomeRecord(
+        "alpha", "skill", "", "verify", -1, ref, started.isoformat(), attribution_source=outcome.SESSION_OBSERVED
+    )
+
+
+def _sessions(target: Path, records: list[outcome.OutcomeRecord], config: outcome.ReconcileConfig | None = None):
+    cohorts = {"alpha": _cohorts(records)}
+    return outcome_attribution.observed_hurt_sessions(
+        target, records, cohorts, now=NOW, config=config or outcome.ReconcileConfig()
+    ).get("alpha", 0)
 
 
 # resolver
@@ -213,7 +253,7 @@ def test_resolver_includes_skill_tool_invocations(tmp_path):
             {
                 "session_fingerprint": FINGERPRINT,
                 "read_files": [".claude/skills/alpha/SKILL.md"],
-                "invoked_skills": ["superpowers:Beta", "gamma", "ghost"],
+                "invoked_skills": ["brigade:Beta", "superpowers:gamma", "gamma", "ghost"],
             }
         )
     )
@@ -362,12 +402,14 @@ def _cohorts(records: list[outcome.OutcomeRecord]) -> outcome.FingerprintCohorts
     return outcome.split_by_fingerprint("alpha", records, None)
 
 
+CONFIG = outcome.ReconcileConfig()
+
+
 def test_veto_turns_install_and_bump_into_observed_hold():
-    cohorts = _cohorts([_record("alpha", -1, "o1", outcome.SESSION_OBSERVED)])
     for action, status in (("install", "promoted"), ("bump", "promoted")):
         decision = outcome.Decision("alpha", action, status, "ok")
         vetoed = outcome_attribution.apply_observed_veto(
-            decision, cohorts, prior_status="candidate" if action == "install" else "promoted"
+            decision, 2, prior_status="candidate" if action == "install" else "promoted", config=CONFIG
         )
         assert vetoed.action == "hold"
         assert vetoed.code == outcome_attribution.OBSERVED_REGRESSION_HOLD
@@ -375,23 +417,23 @@ def test_veto_turns_install_and_bump_into_observed_hold():
 
 
 def test_veto_never_creates_rollback_install_or_bump():
-    cohorts = _cohorts([_record("alpha", -1, "o1", outcome.SESSION_OBSERVED)])
     held = outcome.Decision("alpha", "hold", "promoted", "no change")
-    result = outcome_attribution.apply_observed_veto(held, cohorts, prior_status="promoted")
-    assert result == held
+    assert outcome_attribution.apply_observed_veto(held, 5, prior_status="promoted", config=CONFIG) == held
     for status in ("candidate", "promoted"):
         result = outcome_attribution.apply_observed_veto(
-            outcome.Decision("alpha", "hold", status, "cooldown active"),
-            cohorts,
-            prior_status=status,
+            outcome.Decision("alpha", "hold", status, "cooldown active"), 5, prior_status=status, config=CONFIG
         )
         assert result.action == "hold"
+    rollback = outcome.Decision("alpha", "rollback", "demoted", "verified regression measured")
+    assert outcome_attribution.apply_observed_veto(rollback, 5, prior_status="promoted", config=CONFIG) == rollback
 
 
-def test_veto_ignores_caller_typed_hurt():
-    typed = _cohorts([_record("alpha", -1, "t1")])
+def test_veto_needs_the_configured_number_of_sessions():
     decision = outcome.Decision("alpha", "install", "promoted", "ok")
-    assert outcome_attribution.apply_observed_veto(decision, typed, prior_status="candidate") == decision
+    assert outcome_attribution.apply_observed_veto(decision, 1, prior_status="candidate", config=CONFIG) == decision
+    one = outcome.ReconcileConfig(observed_hurt_min_sessions=1)
+    assert outcome_attribution.apply_observed_veto(decision, 1, prior_status="candidate", config=one).action == "hold"
+    assert outcome_attribution.apply_observed_veto(decision, 0, prior_status="candidate", config=one) == decision
 
 
 def test_observed_hurt_never_rolls_back_a_promoted_card_and_vetoes_its_bump():
@@ -403,7 +445,7 @@ def test_observed_hurt_never_rolls_back_a_promoted_card_and_vetoes_its_bump():
     assert cohorts.current.observed_hurt == 1
     decision = outcome.decide(cohorts.current, current_status="promoted", last_action_ts=None, now=now, config=config)
     assert decision.action == "bump"  # the decision core itself no longer rolls back on observed hurt
-    vetoed = outcome_attribution.apply_observed_veto(decision, cohorts, prior_status="promoted")
+    vetoed = outcome_attribution.apply_observed_veto(decision, 2, prior_status="promoted", config=config)
     assert (vetoed.action, vetoed.code) == ("hold", outcome.OBSERVED_REGRESSION_HOLD)
     rollback_only = _cohorts([observed])
     assert (
@@ -435,14 +477,120 @@ def test_observed_veto_is_surfaced_for_every_prior_status():
     assert not outcome_cmd._surface_hold_decision(quiet, "promoted")
 
 
+# the veto is bounded: iteration, recency, session count, release
+
+
+def test_decision_core_ignores_observed_hurt_for_a_candidate_card():
+    config = outcome.ReconcileConfig(cooldown_seconds=0)
+    typed = [_record("alpha", 1, f"t{i}") for i in range(config.install_min_helped)]
+    cohorts = _cohorts([*typed, _record("alpha", -1, "o1", outcome.SESSION_OBSERVED)])
+    decision = outcome.decide(cohorts.current, current_status="candidate", last_action_ts=None, now=NOW, config=config)
+    assert decision.action == "install"  # only the bounded veto may hold on observed hurt
+
+
+def test_a_failure_fixed_later_in_the_same_session_is_iteration_not_regression(tmp_path):
+    failing = _observed_hurt(tmp_path, "run-1")
+    assert _sessions(tmp_path, [failing]) == 1
+    _receipt(tmp_path, "run-2", "completed", NOW - timedelta(hours=1))
+    assert _sessions(tmp_path, [failing]) == 0
+
+
+def test_a_pass_that_is_not_a_fix_does_not_clear_the_failure(tmp_path):
+    failing = _observed_hurt(tmp_path, "run-1")
+    _receipt(tmp_path, "other-session", "completed", NOW - timedelta(hours=1), session=SESSION_B)
+    _receipt(tmp_path, "other-command", "completed", NOW - timedelta(hours=1), command="ruff check")
+    _receipt(tmp_path, "earlier", "completed", NOW - timedelta(days=2))
+    _receipt(tmp_path, "still-failing", "failed", NOW - timedelta(hours=1))
+    assert _sessions(tmp_path, [failing]) == 1
+
+
+def test_two_sessions_with_unresolved_failures_hold_and_one_does_not(tmp_path):
+    a = _observed_hurt(tmp_path, "run-a", session=SESSION_A)
+    b = _observed_hurt(tmp_path, "run-b", session=SESSION_B)
+    assert _sessions(tmp_path, [a]) == 1
+    assert _sessions(tmp_path, [a, a]) == 1  # one noisy session never reaches the threshold
+    assert _sessions(tmp_path, [a, b]) == 2
+    install = outcome.Decision("alpha", "install", "promoted", "ok")
+    for rows, action in (([a], "install"), ([a, b], "hold")):
+        veto = outcome_attribution.apply_observed_veto(
+            install, _sessions(tmp_path, rows), prior_status="candidate", config=CONFIG
+        )
+        assert veto.action == action
+
+
+def test_fixing_one_of_two_sessions_releases_the_hold(tmp_path):
+    a = _observed_hurt(tmp_path, "run-a", session=SESSION_A)
+    b = _observed_hurt(tmp_path, "run-b", session=SESSION_B)
+    assert _sessions(tmp_path, [a, b]) == 2
+    _receipt(tmp_path, "run-b-fix", "completed", NOW - timedelta(minutes=5), session=SESSION_B)
+    assert _sessions(tmp_path, [a, b]) == 1
+
+
+def test_observed_hurt_outside_the_window_releases_the_hold(tmp_path):
+    fresh = _observed_hurt(tmp_path, "run-a", age_days=29, session=SESSION_A)
+    old = _observed_hurt(tmp_path, "run-b", age_days=31, session=SESSION_B)
+    assert _sessions(tmp_path, [fresh, old]) == 1
+    # The same evidence holds while it is inside the window, and the window is configurable.
+    young = _observed_hurt(tmp_path, "run-c", age_days=5, session=SESSION_B)
+    assert _sessions(tmp_path, [fresh, young]) == 2
+    assert _sessions(tmp_path, [fresh, young], outcome.ReconcileConfig(observed_hurt_window_days=3)) == 0
+    assert _sessions(tmp_path, [fresh, old], outcome.ReconcileConfig(observed_hurt_window_days=60)) == 2
+
+
+def test_a_caller_typed_twin_of_the_receipt_wins_over_the_observed_row(tmp_path):
+    a = _observed_hurt(tmp_path, "run-a", session=SESSION_A)
+    b = _observed_hurt(tmp_path, "run-b", session=SESSION_B)
+    twin = outcome.OutcomeRecord(
+        "alpha", "skill", "", "verify", -1, a.evidence_ref, a.ts, attribution_source=outcome.CALLER_TYPED
+    )
+    assert _sessions(tmp_path, [a, b, twin]) == 1
+
+
+def test_an_unattributable_failure_counts_alone_and_never_clears(tmp_path):
+    a = _observed_hurt(tmp_path, "run-a")
+    ghost = outcome.OutcomeRecord(
+        "alpha",
+        "skill",
+        "",
+        "verify",
+        -1,
+        str(tmp_path / "gone.json"),
+        NOW.isoformat(),
+        attribution_source=outcome.SESSION_OBSERVED,
+    )
+    assert _sessions(tmp_path, [a, ghost]) == 2
+
+
+def _append_unresolved_observed_hurt(target: Path, *, sessions: int, age_days: float = 1.0) -> None:
+    """Observed failing verify rows for ``brigade-work``, one per session, with real receipts."""
+    now = datetime.now(timezone.utc)
+    rows = []
+    for index in range(sessions):
+        started = now - timedelta(days=age_days, minutes=index)
+        ref = _receipt(
+            target, f"observed-fail-{index}", "failed", started, session=f"{index:016x}", command=f"pytest {index}"
+        )
+        rows.append(
+            outcome.OutcomeRecord(
+                "brigade-work",
+                "skill",
+                "",
+                "verify",
+                -1,
+                ref,
+                started.isoformat(),
+                attribution_source=outcome.SESSION_OBSERVED,
+            )
+        )
+    outcome_cmd.append_records(target, rows)
+
+
 def test_reconcile_holds_install_on_observed_hurt_and_never_rolls_back(scoreable_target, capsys, monkeypatch):
     from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready, _stub_execute
 
     _stub_execute(monkeypatch)
     _seed_dual_gate_promotion_ready(scoreable_target)
-    outcome_cmd.append_records(
-        scoreable_target, [_record("brigade-work", -1, "observed-hurt", outcome.SESSION_OBSERVED)]
-    )
+    _append_unresolved_observed_hurt(scoreable_target, sessions=2)
 
     assert outcome_cmd.reconcile(target=scoreable_target, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -472,9 +620,7 @@ def test_reconcile_promoted_artifact_with_observed_hurt_is_not_rolled_back(score
     [control] = json.loads(capsys.readouterr().out)["decisions"]
     assert control["action"] == "bump"
 
-    outcome_cmd.append_records(
-        scoreable_target, [_record("brigade-work", -1, "observed-hurt", outcome.SESSION_OBSERVED)]
-    )
+    _append_unresolved_observed_hurt(scoreable_target, sessions=2)
     assert outcome_cmd.reconcile(target=scoreable_target, apply=True, config=cfg, json_output=True) == 0
     decisions = json.loads(capsys.readouterr().out)["decisions"]
 
@@ -482,6 +628,85 @@ def test_reconcile_promoted_artifact_with_observed_hurt_is_not_rolled_back(score
     assert decisions[0]["reason_code"] == outcome_attribution.OBSERVED_REGRESSION_HOLD
     assert decisions[0]["new_status"] == "promoted"
     assert json.loads(status_path.read_text())["artifacts"]["brigade-work"]["status"] == "promoted"
+
+
+def test_one_observed_session_does_not_hold_reconcile(scoreable_target, capsys, monkeypatch):
+    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready, _stub_execute
+
+    _stub_execute(monkeypatch)
+    _seed_dual_gate_promotion_ready(scoreable_target)
+    _append_unresolved_observed_hurt(scoreable_target, sessions=1)
+    assert outcome_cmd.reconcile(target=scoreable_target, apply=False, json_output=True) == 0
+    [decision] = json.loads(capsys.readouterr().out)["decisions"]
+    assert decision["action"] == "install"
+
+
+def test_reconcile_hold_releases_once_the_hurt_ages_out(scoreable_target, capsys, monkeypatch):
+    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready, _stub_execute
+
+    _stub_execute(monkeypatch)
+    _seed_dual_gate_promotion_ready(scoreable_target)
+    _append_unresolved_observed_hurt(scoreable_target, sessions=2, age_days=31)
+    assert outcome_cmd.reconcile(target=scoreable_target, apply=False, json_output=True) == 0
+    [decision] = json.loads(capsys.readouterr().out)["decisions"]
+    assert decision["action"] == "install"
+
+
+def _append_unresolved_observed_hurt_second_session(target: Path) -> None:
+    now = datetime.now(timezone.utc)
+    ref = _receipt(target, "observed-fail-second", "failed", now - timedelta(days=2), session="f" * 16, command="x")
+    outcome_cmd.append_records(
+        target,
+        [
+            outcome.OutcomeRecord(
+                "brigade-work",
+                "skill",
+                "",
+                "verify",
+                -1,
+                ref,
+                (now - timedelta(days=2)).isoformat(),
+                attribution_source=outcome.SESSION_OBSERVED,
+            )
+        ],
+    )
+
+
+def _fork_artifact(target: Path, tmp_path: Path) -> dict:
+    out = tmp_path / "fork.json"
+    assert outcome_cmd.fork(target=target, out=out, json_output=False) == 0
+    return json.loads(out.read_text())["artifacts"]["brigade-work"]
+
+
+def test_fork_projection_applies_the_same_veto_as_reconcile(scoreable_target, tmp_path, monkeypatch, capsys):
+    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready
+
+    _seed_dual_gate_promotion_ready(scoreable_target)
+    assert _fork_artifact(scoreable_target, tmp_path)["action"] == "install"  # control
+    _append_unresolved_observed_hurt(scoreable_target, sessions=1)
+    assert _fork_artifact(scoreable_target, tmp_path)["action"] == "install"
+    _append_unresolved_observed_hurt_second_session(scoreable_target)
+    held = _fork_artifact(scoreable_target, tmp_path)
+    assert (held["action"], held["new_status"]) == ("hold", "candidate")
+    assert "observed" in held["reason"]
+
+
+def test_fleet_skills_report_applies_the_same_veto_as_reconcile(scoreable_target):
+    from brigade import fleet_skills_report
+    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready
+
+    _seed_dual_gate_promotion_ready(scoreable_target)
+    now = datetime.now(timezone.utc)
+
+    def suggestion() -> str:
+        [row] = [
+            r for r in fleet_skills_report.build_scores(scoreable_target, now) if r["artifact_id"] == "brigade-work"
+        ]
+        return row["suggestion"]
+
+    assert suggestion() == "install"  # control
+    _append_unresolved_observed_hurt(scoreable_target, sessions=2)
+    assert suggestion() == "hold"
 
 
 def test_observed_hold_is_counted_in_the_ratchet_report():
@@ -565,3 +790,109 @@ def test_resolver_reads_real_hook_state_and_auto_is_never_an_exercised_artifact(
     state = runtime.read_session_state(target, "session-1")
     assert state is not None
     assert state.get("exercised_artifact_id") != "auto"
+
+
+# receipt stamp, retry hint, hook target lookup, breakdowns
+
+
+def test_observed_capture_stamps_source_every_id_and_session_on_the_receipt(tmp_path, monkeypatch, capsys):
+    _install_skill(tmp_path, "alpha")
+    _install_skill(tmp_path, "beta")
+    _write_state(tmp_path, [".claude/skills/alpha/SKILL.md", ".claude/skills/beta/SKILL.md"])
+    assert _verify_auto(tmp_path, monkeypatch, capsys) == 0
+    receipt = verification._verify_receipts(tmp_path)[0]
+    assert receipt["outcome_capture"] == {
+        "artifact_id": "alpha",
+        "artifact_kind": "skill",
+        "attribution_source": outcome.SESSION_OBSERVED,
+        "observed_artifact_ids": ["alpha", "beta"],
+        "session_fingerprint": FINGERPRINT,
+    }
+
+
+def test_explicit_and_fallback_captures_carry_no_observed_stamp(tmp_path, monkeypatch, capsys):
+    _install_skill(tmp_path, "alpha")
+    monkeypatch.delenv("BRIGADE_CLAUDE_SESSION", raising=False)
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert verification.verify_run(target=tmp_path, commands=["true"], capture="alpha", reuse=False) == 0
+    capsys.readouterr()
+    assert verification._verify_receipts(tmp_path)[0]["outcome_capture"] == {
+        "artifact_id": "alpha",
+        "artifact_kind": "skill",
+    }
+
+
+def test_retry_hint_for_an_observed_stamp_suggests_auto_not_the_observed_id(tmp_path, monkeypatch, capsys):
+    _install_skill(tmp_path, "alpha")
+    _write_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", FINGERPRINT)
+    monkeypatch.setattr(outcome_attribution, "capture_artifacts", lambda **_: 0)  # the first run dies before capture
+    with contextlib.redirect_stderr(io.StringIO()):
+        verification.verify_run(target=tmp_path, commands=["false"], capture="auto", reuse=False)
+    failed = verification._verify_receipts(tmp_path)[0]
+    assert outcome_attribution.receipt_is_observed(failed)
+    capsys.readouterr()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        verification.verify_run(target=tmp_path, commands=["false"], capture="auto", reuse=False)
+    text = err.getvalue()
+    assert f"brigade outcome capture auto --run-id {failed['run_id']}" in text
+    assert "brigade outcome capture alpha" not in text
+
+
+def test_outcome_capture_auto_writes_observed_rows_for_a_past_run(tmp_path, monkeypatch, capsys):
+    _install_skill(tmp_path, "alpha")
+    _write_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert verification.verify_run(target=tmp_path, commands=["true"], reuse=False) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", FINGERPRINT)
+    assert outcome_attribution.capture_auto(target=tmp_path, artifact_kind="skill", run_id=None, run_receipt=None) == 0
+    capsys.readouterr()
+    [row] = outcome_cmd.load_records(tmp_path)
+    assert (row.artifact_id, row.attribution_source) == ("alpha", outcome.SESSION_OBSERVED)
+    assert outcome_attribution.capture_auto(target=tmp_path, artifact_kind="card", run_id=None, run_receipt=None) == 1
+
+
+def test_resolver_falls_back_to_the_hook_target_when_the_verifier_checkout_differs(tmp_path):
+    hook_target = tmp_path / "hook"
+    verify_target = tmp_path / "verify"
+    for repo in (hook_target, verify_target):
+        repo.mkdir()
+        _install_skill(repo, "alpha")
+    _write_state(hook_target, [".claude/skills/alpha/SKILL.md"])
+    assert outcome_attribution.resolve_observed_skill_ids(verify_target, _env()) == []
+    env = {**_env(), outcome_attribution.SESSION_TARGET_ENV: str(hook_target)}
+    assert outcome_attribution.resolve_observed_skill_ids(verify_target, env) == ["alpha"]
+    relative = {**_env(), outcome_attribution.SESSION_TARGET_ENV: "hook"}
+    assert outcome_attribution.resolve_observed_skill_ids(verify_target, relative) == []
+
+
+def test_route_and_capability_breakdowns_exclude_observed_helped():
+    route = {"followed": True, "path": "fast", "size": "s"}
+    context = {"harness": "claude", "model_family": "opus"}
+    rows = [
+        outcome.OutcomeRecord(
+            "alpha",
+            "skill",
+            "",
+            "verify",
+            signal,
+            ref,
+            "2026-06-20T00:00:00+00:00",
+            route=route,
+            route_fingerprint="rf",
+            context=context,
+            capability_fingerprint="cf",
+            attribution_source=source,
+        )
+        for signal, ref, source in (
+            (1, "r1", outcome.CALLER_TYPED),
+            (1, "r2", outcome.SESSION_OBSERVED),
+            (-1, "r3", outcome.SESSION_OBSERVED),
+        )
+    ]
+    [routed] = outcome_cmd._route_breakdown(rows) or []
+    [capability] = outcome_cmd._capability_breakdown(rows) or []
+    for group in (routed, capability):
+        assert (group["helped"], group["hurt"]) == (1, 1)

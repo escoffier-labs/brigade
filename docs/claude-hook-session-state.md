@@ -78,8 +78,10 @@ Windows directory sharing modes are unchanged.
 
 `brigade work verify run --capture auto` reads the session file for the current
 session and derives skill ids from two lists: the ordered `read_files` and the
-`invoked_skills` the PostToolUse `Skill` hook records (the tool name, such as
-`taste` or `plugin:taste`, with the plugin prefix also tried bare). A read counts
+`invoked_skills` the PostToolUse `Skill` hook records. A bare name such as
+`taste` counts, and so does a name under this install's own plugin prefix
+(`brigade:taste`, tried bare); another plugin's `other:taste` is a different skill
+and credits nothing. A read counts
 only when it is a repo-relative `.<harness>/skills/<id>/SKILL.md` or
 `.brigade/skills/registry/<id>/SKILL.md`, so a fixture such as
 `tests/fixtures/skills/<id>/SKILL.md` never matches. Ids compare
@@ -97,7 +99,14 @@ sessions directory, skips anything that is not a regular file, refuses a state
 file over 1 MiB, scans at most the 512 most recently modified files newest first
 (stopping at the first state that matches the session), and returns no skills on
 any read failure. Only ids the registry or an installed harness has are kept.
-The attribution is forgeable and veto-only; see
+Reads and invocations never become the hook's `exercised_artifact_id`: only an id
+typed in a `--capture <id>` is preferred by the verify replacement, the
+unsupported-shell hint and the failed-verify follow-up, and otherwise they all say
+`--capture auto`. When the verifier runs in a different checkout than the one
+holding the session state, the replacement also sets
+`BRIGADE_CLAUDE_SESSION_TARGET` to the checkout holding the state, and the reader
+tries the verify target first and that checkout second (same fingerprint match,
+same file-only rules). The attribution is forgeable and veto-only; see
 [attribution sources](outcome-scoring.md#attribution-sources). With no skill
 resolved, `--capture auto` falls back to `brigade-work` as a caller-typed
 capture.

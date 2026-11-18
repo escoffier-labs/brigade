@@ -43,8 +43,17 @@ def target(tmp_path: Path, monkeypatch) -> Path:
 
 
 def read_skill(target: Path) -> None:
-    event(
-        target, "PostToolUse", tool_name="Read", tool_input={"file_path": str(target / ".claude/skills/taste/SKILL.md")}
+    """A concurrent explicit `--capture taste` lands in the locked state.
+
+    A plain Read no longer sets the exercised artifact (session-derived ids are veto-only),
+    so the race that matters is another hook recording a typed capture mid-flight.
+    """
+    state = runtime.read_session_state(target, SESSION)
+    assert state is not None
+    state["exercised_artifact_id"] = "taste"
+    state["exercised_artifact_kind"] = "skill"
+    runtime._write_session_state_preserving_latch(
+        target, SESSION, state, patch_fields=("exercised_artifact_id", "exercised_artifact_kind")
     )
     state = runtime.read_session_state(target, SESSION)
     assert state is not None

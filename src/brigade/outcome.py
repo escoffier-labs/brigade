@@ -135,6 +135,10 @@ class ReconcileConfig:
     z: float = 1.96
     effective_wilson_min: float = 0.15
     utility_min_passing_units: int = 2
+    observed_hurt_window_days: int = 30
+    """Session-observed hurt older than this never counts toward the observed veto (veto only)."""
+    observed_hurt_min_sessions: int = 2
+    """Distinct sessions with unresolved observed hurt needed before the veto holds."""
 
 
 REGRESSION_HOLD = "regression_hold"
@@ -533,8 +537,11 @@ def decide(
     if last_action_ts is not None and (now - last_action_ts).total_seconds() < config.cooldown_seconds:
         return Decision(score.artifact_id, "hold", current_status, "cooldown active")
 
+    # session_observed hurt is forgeable and bounded elsewhere (outcome_attribution
+    # recency, session count and fixed-later rules), so the decision core ignores it.
+    hurt = score.hurt - score.observed_hurt
     if current_status == "candidate":
-        if candidate_regression_withheld(score.helped, score.hurt):
+        if candidate_regression_withheld(score.helped, hurt):
             return Decision(
                 score.artifact_id,
                 "hold",
@@ -543,7 +550,7 @@ def decide(
                 code=REGRESSION_HOLD,
             )
         if score.helped >= config.install_min_helped and not candidate_install_margin_met(
-            score.helped, score.hurt, install_min_helped=config.install_min_helped
+            score.helped, hurt, install_min_helped=config.install_min_helped
         ):
             return Decision(
                 score.artifact_id,
@@ -551,18 +558,17 @@ def decide(
                 "candidate",
                 f"withheld: verified helped margin over regressions below {config.install_min_helped}",
             )
-        if score.helped >= config.install_min_helped and score.helped > score.hurt:
+        if score.helped >= config.install_min_helped and score.helped > hurt:
             return Decision(
                 score.artifact_id,
                 "install",
                 "promoted",
-                candidate_install_reason(score.helped, score.hurt),
+                candidate_install_reason(score.helped, hurt),
             )
         return Decision(score.artifact_id, "hold", "candidate", "insufficient verified evidence")
 
     if current_status == "promoted":
-        # session_observed hurt is forgeable and veto-only: it never rolls back.
-        if score.hurt - score.observed_hurt >= config.revert_min_hurt:
+        if hurt >= config.revert_min_hurt:
             return Decision(
                 score.artifact_id,
                 "rollback",

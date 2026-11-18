@@ -1834,25 +1834,6 @@ def _session_fingerprint(session_id: str) -> str:
     return localio.stable_hash({"claude_session_id": session_id})
 
 
-def _skill_id_from_skill_path(target: Path, raw_path: object) -> str | None:
-    """Return an installed target skill id when ``raw_path`` names its ``SKILL.md``."""
-    if not isinstance(raw_path, str) or not raw_path:
-        return None
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        path = target / path
-    parts = path.parts
-    for index, part in enumerate(parts):
-        if part == "skills" and index + 2 < len(parts) and parts[index + 2] == "SKILL.md":
-            skill_id = parts[index + 1]
-            if skill_id and skill_id not in {".", ".."}:
-                from .. import outcome_cmd
-
-                if outcome_cmd._artifact_known(target, skill_id, "skill"):
-                    return skill_id
-    return None
-
-
 def _parse_capture_flag(command: object) -> str | None:
     """Extract ``--capture <id>`` from a verify command string when present."""
     if not isinstance(command, str) or not command.strip():
@@ -1914,6 +1895,7 @@ def _verify_replacement(
     session_fingerprint: str,
     *,
     capture_artifact_id: str | None = None,
+    hook_target: Path | None = None,
 ) -> str:
     from .. import outcome_attribution
 
@@ -1923,8 +1905,10 @@ def _verify_replacement(
         or exercised_artifact_for_fingerprint(target, session_fingerprint)
         or outcome_attribution.AUTO_CAPTURE
     )
+    # The session state lives where the hook fired; point a verifier in another checkout at it.
+    state_at = f"{outcome_attribution.SESSION_TARGET_ENV}={shlex.quote(str(hook_target))} " if hook_target else ""
     return (
-        f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} "
+        f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} {state_at}"
         f"brigade work verify run --target {shlex.quote(str(target))} "
         f"--command {shlex.quote(command)} --capture {shlex.quote(artifact_id)}"
     )
@@ -2393,6 +2377,7 @@ def _handle_event(
                 _first_verifier_command(str(command)),
                 str(state["session_fingerprint"]),
                 capture_artifact_id=capture_artifact_id,
+                hook_target=target if verify_target != target else None,
             )
             reason = (
                 "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
@@ -2415,17 +2400,14 @@ def _handle_event(
             skill_invocations.handle(target, session_id, state, post_tool_input, payload.get("tool_response"))
             return None
         if tool_name == "Read":
-            skill_id = _skill_id_from_skill_path(target, post_tool_input.get("file_path"))
-            read_recorded = dependencies.record_read(target, state, payload)
-            artifact_recorded = _record_exercised_artifact(state, skill_id)
-            if artifact_recorded or read_recorded:
-                fields: tuple[str, ...] = ("read_files",) if read_recorded else ()
-                if read_recorded:
-                    # Only this read refreshes recency in the locked merge.
-                    state["read_files"] = state["read_files"][-1:]
-                if artifact_recorded:
-                    fields += ("exercised_artifact_id", "exercised_artifact_kind")
-                _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
+            # A read is session-observed, never an explicit capture id: `--capture auto` resolves it from
+            # read_files (veto only). Only a typed `--capture <id>` becomes exercised_artifact_id.
+            if dependencies.record_read(target, state, payload):
+                # Only this read refreshes recency in the locked merge.
+                state["read_files"] = state["read_files"][-1:]
+                _write_session_state_preserving_latch(
+                    target, session_id, state, log_target=target, patch_fields=("read_files",)
+                )
             return None
         wrote = tool_name in _WRITE_TOOLS or (
             tool_name == "Bash" and write_attribution.touches_worktree(target, command, cwd=payload.get("cwd"))

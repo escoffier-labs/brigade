@@ -44,11 +44,23 @@ def test_skill_tool_invocation_reaches_auto_capture_resolution(tmp_path: Path):
     assert "exercised_artifact_id" not in state  # veto-only: never a caller-typed artifact
 
 
-def test_plugin_prefixed_skill_name_resolves_to_the_installed_id(tmp_path: Path):
+def test_local_plugin_prefixed_skill_name_resolves_to_the_installed_id(tmp_path: Path):
     target = _wired_claude(tmp_path)
     _install_skill(target, "taste")
-    _invoke(target, "superpowers:taste")
+    _invoke(target, "brigade:taste")
     assert outcome_attribution.resolve_observed_skill_ids(target, _env()) == ["taste"]
+
+
+def test_another_plugins_skill_name_does_not_credit_the_local_skill(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    _install_skill(target, "taste")
+    for name in ("superpowers:taste", "other-plugin:taste", "a:b:taste"):
+        _invoke(target, name)
+    assert outcome_attribution.resolve_observed_skill_ids(target, _env()) == []
+    assert skill_invocations.invoked_names({skill_invocations.STATE_KEY: ["taste", "brigade:scout", "x:y"]}) == [
+        "taste",
+        "scout",
+    ]
 
 
 def test_invocations_survive_later_hook_writes_and_dedupe(tmp_path: Path):
@@ -93,23 +105,66 @@ def test_unsupported_structure_hint_uses_auto_capture(tmp_path: Path):
     assert "--capture brigade-work" not in reason
 
 
-def test_unsupported_structure_hint_keeps_an_exercised_artifact(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    _install_skill(target, "taste")
+def _read_skill(target: Path, skill_id: str) -> None:
     runtime.handle_payload(
         "PostToolUse",
         _payload(
             target,
             "PostToolUse",
             tool_name="Read",
-            tool_input={"file_path": str(target / ".claude" / "skills" / "taste" / "SKILL.md")},
+            tool_input={"file_path": str(target / ".claude" / "skills" / skill_id / "SKILL.md")},
         ),
     )
+
+
+def _type_capture(target: Path, skill_id: str) -> None:
+    command = f'brigade work verify run --target . --command "true" --capture {skill_id}'
+    runtime.handle_payload(
+        "PostToolUse", _payload(target, "PostToolUse", tool_name="Bash", tool_input={"command": command})
+    )
+
+
+def test_unsupported_structure_hint_says_auto_after_a_skill_read(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    _install_skill(target, "taste")
+    _read_skill(target, "taste")
+    result = runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "cd src && pytest -q"}),
+    )
+    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "--capture auto" in reason
+    assert "--capture taste" not in reason
+
+
+def test_unsupported_structure_hint_keeps_an_explicitly_typed_capture(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    _install_skill(target, "taste")
+    _type_capture(target, "taste")
     result = runtime.handle_payload(
         "PreToolUse",
         _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "cd src && pytest -q"}),
     )
     assert "--capture taste" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_failure_followup_says_auto_after_a_skill_read(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    _install_skill(target, "taste")
+    _read_skill(target, "taste")
+    result = runtime.handle_payload(
+        "PostToolUseFailure",
+        _payload(
+            target,
+            "PostToolUseFailure",
+            tool_name="Bash",
+            tool_input={"command": 'brigade work verify run --target . --command "pytest"'},
+            error="exit 1",
+        ),
+    )
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "--capture auto" in context
+    assert "--capture taste" not in context
 
 
 def test_failure_followup_uses_auto_capture_without_an_explicit_or_exercised_id(tmp_path: Path):

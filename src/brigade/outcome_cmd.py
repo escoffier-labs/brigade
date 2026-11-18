@@ -1488,11 +1488,20 @@ def fork(
     scorecards = _scorecards_by_artifact(target)
     kinds = _artifact_kinds(records, {}, scorecards)
     now = localio.utc_now()
-    skill_decisions = scorecard_mod.project_scorecard_statuses(scorecards, config=config, now=now)
-    card_decisions = core.project_statuses(
-        {artifact_id: cohorts.current for artifact_id, cohorts in cohorts_by_artifact.items()},
+    observed_sessions = outcome_attribution.observed_hurt_sessions(
+        target, records, cohorts_by_artifact, now=now, config=config
+    )
+    skill_decisions = outcome_attribution.veto_projection(
+        scorecard_mod.project_scorecard_statuses(scorecards, config=config, now=now), observed_sessions, config=config
+    )
+    card_decisions = outcome_attribution.veto_projection(
+        core.project_statuses(
+            {artifact_id: cohorts.current for artifact_id, cohorts in cohorts_by_artifact.items()},
+            config=config,
+            now=now,
+        ),
+        observed_sessions,
         config=config,
-        now=now,
     )
     artifacts: dict[str, dict[str, Any]] = {}
     for artifact_id, decision in sorted(skill_decisions.items()):
@@ -1748,6 +1757,15 @@ def _fingerprint_decision_suffix(cohorts: core.FingerprintCohorts) -> str:
     )
 
 
+def _scored_without_observed_helped(records: list[core.OutcomeRecord]) -> list[core.OutcomeRecord]:
+    """Scored records minus session-observed helped, which never counts anywhere (veto only)."""
+    return [
+        r
+        for r in core.scored_records(records)
+        if not (r.signal_value > 0 and r.attribution_source == core.SESSION_OBSERVED)
+    ]
+
+
 def _route_breakdown(records: list[core.OutcomeRecord]) -> list[dict] | None:
     """Split an artifact's scored records into routed vs unrouted cohorts (Phase 1,
     display-only). This is the receipt the route feature was missing: whether runs
@@ -1758,7 +1776,7 @@ def _route_breakdown(records: list[core.OutcomeRecord]) -> list[dict] | None:
     unrouted records (a bare verify with no owning run) share one cohort. Not
     scored: Phase 1 records and surfaces, the ratchet ignores it.
     """
-    scored = core.scored_records(records)
+    scored = _scored_without_observed_helped(records)
     if not any(isinstance(r.route, dict) for r in scored):
         return None
     groups: dict[str, dict] = {}
@@ -1789,7 +1807,7 @@ def _capability_breakdown(records: list[core.OutcomeRecord]) -> list[dict] | Non
     bucket rather than being dropped, so the counts always reconcile with the
     lifetime fold. This is informational: Phase 1 does not score on these cohorts.
     """
-    scored = core.scored_records(records)
+    scored = _scored_without_observed_helped(records)
     if not any(r.capability_fingerprint for r in scored):
         return None
     groups: dict[str, dict] = {}
@@ -2173,6 +2191,9 @@ def reconcile(
     status_map = load_status(target)
     kinds = _artifact_kinds(records, status_map, scorecards)
     now = localio.utc_now()
+    observed_sessions = outcome_attribution.observed_hurt_sessions(
+        target, records, cohorts_by_artifact, now=now, config=config
+    )
 
     results: list[_ReconcileItem] = []
     reported: list[_ReconcileItem] = []
@@ -2195,8 +2216,9 @@ def reconcile(
                 now=now,
                 config=config,
             ),
-            cohorts,
+            observed_sessions.get(artifact_id, 0),
             prior_status=prior_status,
+            config=config,
         )
         item = _ReconcileItem(
             decision=decision,
