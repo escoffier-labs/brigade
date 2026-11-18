@@ -669,13 +669,17 @@ async fn a_loosely_spelled_link_to_the_retired_id_holds_the_merge() {
     }
 }
 
+/// A clean trusted merge reaches the apply, so the recheck under the writer lock
+/// is what stops a link that lands after the preparation read.
 #[tokio::test]
 async fn a_link_added_between_preflight_and_apply_is_caught_at_apply() {
-    let mut r = pair().await;
+    let mut r = trusted().await;
     // The linker exists but names nothing, so the first read finds no link.
     link(&r, "Nothing to see.\n").await;
     let opened = open(&r).await;
     assert_eq!(held(&r, &r.body(&opened)), None);
+    let report = preflight_report(&r, &opened).await;
+    assert!(preflight::all_satisfied(&report), "{report:?}");
     // The link lands inside the writer's own seam, after the preparation read
     // and before the writer lock, so only the recheck under the lock can see it.
     let path = r.h.memory();
@@ -694,13 +698,10 @@ async fn a_link_added_between_preflight_and_apply_is_caught_at_apply() {
             }
         })),
     );
-    let request = attestation_tests::auto_request(&r.h, &opened.body["proposal_id"]).await;
-    let reply = r.h.call(ADMIN_TOKEN, request).await;
-    // The older gates hold every merge today, so the apply never reaches the
-    // recheck under the lock and the reply cannot name the link. What the seam
-    // can pin is that the merge does not apply and that the gate reads the link
-    // from the store, the same read the recheck makes once a merge can reach it.
-    assert_ne!(reply.body["state"], "applied", "{reply:?}");
+    let reply = auto(&r, &opened).await;
+    assert_eq!(reply.body["state"], "pending", "{reply:?}");
+    assert_eq!(reply.body["reason"], "auto_apply_held", "{reply:?}");
+    assert_eq!(codes(&reply), vec![json!(INBOUND)], "{reply:?}");
     assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live");
     assert_eq!(held(&r, &r.body(&opened)), Some(INBOUND));
 }
@@ -753,6 +754,137 @@ async fn only_lineage_that_existed_before_the_merge_routes_to_review() {
         t.replacen("aliases: [", "aliases: [\"fleet/older\",", 1)
     });
     assert_eq!(held(&r, &forged), Some(KEEPER));
+}
+
+/// The older gates a merge relaxes all pass for one trusted exact pair, so the
+/// merge gate alone is left to decide the apply.
+async fn relaxed_gates_pass(r: &Real, opened: &Reply, why: &str) {
+    let report = preflight_report(r, opened).await;
+    for name in [
+        "delta",
+        "evidence_floor",
+        "source_group_floor",
+        "card_trust",
+    ] {
+        let (state, _) = gate(&report, name);
+        assert_eq!(state, json!("satisfied"), "{why}: {name}: {report:?}");
+    }
+    assert_eq!(report["structural_merge_proof"], true, "{why}");
+}
+/// An automatic attempt that ends held for the merge gate rule `code`. The
+/// retrieval check names it in the report, the proposal stays pending with
+/// `auto_apply_held`, and every card the proposal would retire stays live.
+async fn held_by_merge_gate(r: &Real, opened: &Reply, retired: &[&str], code: &str, why: &str) {
+    let report = preflight_report(r, opened).await;
+    assert_eq!(
+        gate(&report, "retrieval_eval"),
+        (json!("unverifiable"), json!(code)),
+        "{why}: {report:?}"
+    );
+    assert!(!preflight::all_satisfied(&report), "{why}");
+    let attempt = auto(r, opened).await;
+    assert_eq!(attempt.body["state"], "pending", "{why}: {attempt:?}");
+    assert_eq!(
+        attempt.body["reason"], "auto_apply_held",
+        "{why}: {attempt:?}"
+    );
+    assert!(codes(&attempt).contains(&json!(code)), "{why}: {attempt:?}");
+    for id in retired {
+        assert_eq!(
+            card(&r.h, "fleet", id).await["state"],
+            "live",
+            "{why}: {id}"
+        );
+    }
+}
+/// A churn written by the admin leaves the cards agent-unreviewed. Both read as
+/// imported again, so the pair is the trusted one the auto-apply route admits.
+fn reimport(r: &Real) {
+    r.db.execute("UPDATE memory_cards SET trust='imported'", [])
+        .unwrap();
+}
+
+/// The three merge gate rules a card's history can break stay in force once the
+/// older preflight gates stop holding a clean merge.
+#[tokio::test]
+async fn a_revived_id_or_a_copy_by_edit_as_keeper_ends_held_on_a_real_scope() {
+    let (old, victim) = ("attacker-old", "victim");
+    let (old_text, victim_text) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
+    // The attacker retires the card made first and writes it again.
+    let r = Real::new(&[(old, &old_text), (victim, &victim_text)]).await;
+    retire(&r, old).await;
+    rewrite(&r, old, &old_text).await;
+    reimport(&r);
+    let opened = open_ops(&r, old, &[victim]).await;
+    relaxed_gates_pass(&r, &opened, "revived id").await;
+    held_by_merge_gate(&r, &opened, &[victim], RETIRES_OLDER, "revived id").await;
+    // The attacker edits an unrelated old card into a copy of the victim.
+    let own = "Something unrelated. ^c-zzzzzz\n";
+    let r = Real::new(&[(old, own), (victim, &victim_text)]).await;
+    rewrite(&r, old, &old_text).await;
+    reimport(&r);
+    let opened = open_ops(&r, old, &[victim]).await;
+    relaxed_gates_pass(&r, &opened, "copy by edit").await;
+    held_by_merge_gate(&r, &opened, &[victim], RETIRES_OLDER, "copy by edit").await;
+    // Control: the victim as keeper retires the copy and applies automatically.
+    let r = Real::new(&[(old, own), (victim, &victim_text)]).await;
+    rewrite(&r, old, &old_text).await;
+    reimport(&r);
+    let opened = open_ops(&r, victim, &[old]).await;
+    let applied = auto(&r, &opened).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    assert_eq!(card(&r.h, "fleet", old).await["state"], "retired");
+}
+
+/// A link that differs from the retired id only in case or spacing still holds.
+#[tokio::test]
+async fn a_case_folded_inbound_link_ends_held_on_a_real_scope() {
+    for (name, text) in [
+        ("capitalized wiki link", "See [[Dup-Retired]].\n"),
+        ("spaced wiki link", "See [[dup retired]].\n"),
+        ("cased path", "See [[Cards/Dup-Retired.MD]].\n"),
+        (
+            "cased front matter value",
+            "---\nrelated: DUP-RETIRED\n---\nBody.\n",
+        ),
+    ] {
+        let r = trusted().await;
+        link(&r, text).await;
+        let opened = open(&r).await;
+        relaxed_gates_pass(&r, &opened, name).await;
+        held_by_merge_gate(&r, &opened, &[GONE], INBOUND, name).await;
+    }
+}
+
+/// The proposal card limit already refuses a ninth card on submit, so a group
+/// larger than eight can only reach the gate as a stored body the hub did not
+/// build. The body is grown in the store, and the automatic attempt must hold.
+#[tokio::test]
+async fn a_group_larger_than_eight_ends_held_on_a_real_scope() {
+    let r = trusted().await;
+    let opened = open(&r).await;
+    let mut body = r.body(&opened);
+    let cards = body["cards"].as_array().unwrap().clone();
+    let op = body["ops"][0].clone();
+    let retired = cards.iter().find(|c| c["card_id"] == GONE).unwrap().clone();
+    for i in 0..8 {
+        let id = format!("extra-{i}");
+        let mut card = retired.clone();
+        card["card_id"] = json!(id);
+        body["cards"].as_array_mut().unwrap().push(card);
+        let mut more = op.clone();
+        more["other_card"]["card_id"] = json!(id);
+        body["ops"].as_array_mut().unwrap().push(more);
+    }
+    r.db.execute(
+        "UPDATE memory_proposals SET body=?1 WHERE proposal_id=?2",
+        rusqlite::params![
+            body.to_string(),
+            opened.body["proposal_id"].as_str().unwrap()
+        ],
+    )
+    .unwrap();
+    held_by_merge_gate(&r, &opened, &[GONE], GROUP_TOO_LARGE, "nine retired").await;
 }
 
 /// A published index whose trusted lineage graph holds `linked` as an edge end.
@@ -1214,8 +1346,8 @@ async fn a_front_matter_fence_the_readers_disagree_on_is_not_admitted() {
 }
 
 /// The alias the merge writes names the retired id as a predecessor of the
-/// keeper. Only trusted cards form edges, and the keeper of a Tier 0 merge is
-/// not trusted, so a card that later reuses the retired id gains no edge to it.
+/// keeper. Only trusted cards form edges. With an untrusted keeper a card that
+/// later reuses the retired id gains no edge to it, and a trusted keeper does.
 #[tokio::test]
 async fn the_keepers_alias_makes_no_edge_to_a_card_that_reuses_the_retired_id() {
     let r = pair().await;
@@ -1245,8 +1377,8 @@ async fn the_keepers_alias_makes_no_edge_to_a_card_that_reuses_the_retired_id() 
         )
     };
     assert_eq!(edges("agent-unreviewed"), (false, false));
-    // Control: once the keeper is trusted the alias is a live edge. The merge
-    // gate must not admit that pair without a rule for it.
+    // Control: a trusted keeper's alias is a live edge once the id is reused.
+    // The merge gate admits trusted pairs and does not look ahead to that write.
     assert_eq!(edges("reviewed"), (true, true));
 }
 

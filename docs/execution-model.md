@@ -98,20 +98,30 @@ enable auto apply, list the proposer and list the op class. The supported policy
 writer accepts evidence appends and exact duplicate merges for this route.
 
 The hub rechecks the Tier 0 class, cited evidence, ownership, retrieval
-evaluation, one-card blast cap, 24-hour cooldown, card heads, pins, trust, scans
-and the admin kill switch in one transaction.
+evaluation, one-card blast cap (one merge pair counts as one card), 24-hour
+cooldown, card heads, pins, trust, scans and the admin kill switch in one
+transaction.
 
 On a real scope, the retrieval evaluation holds every automatic reflection
 apply. It admits only all-`append_evidence` Tier 0 proposals and then requires
 each target card's search projection to stay unchanged. Any applied edit
 changes it, including an evidence append, so reflection's Tier 0 applies happen
 only on the evaluation fixture scope. An exact-duplicate merge is the one
-exception. It is admitted under the retrieval gate's bounded-drift checks. One
-pair of trusted exact duplicates counts as one change, identical claims stand in
-for attested evidence, and the merge's own alias is not lineage, so a clean
-merge applies without a reviewer. An `agent-unreviewed` pair, a pair with
-earlier lineage, several pairs in one proposal and a pair beside other ops still
-wait for a reviewer. Verifier
+exception, and a merge of trusted cards now applies on a real scope with no
+reviewer once every merge gate rule holds. The retrieval gate admits it under
+bounded drift: the retired card must be newer than the keeper by its content
+history, no live card may link to a retired id in any case or spacing, a keeper
+retires at most eight cards, the keeper's after text must be the exact merge of
+the live cards, and search must keep every token and literal the retired card
+held. Three older preflight gates are relaxed for this one op class. A single
+pair of exact duplicates counts as one changed path, identical claims stand in
+for attested evidence, and the alias the merge adds is not lineage. Reviewed,
+imported and policy-promoted cards qualify, while an `agent-unreviewed` pair,
+earlier lineage, several pairs in one proposal, a group of more than eight and a
+pair beside other ops still wait for a reviewer. The drift is bounded, not
+zero: the same cards answer each query, but the keeper's own position can move
+because the added alias lengthens it, and scope statistics shift every score.
+Verifier
 applies and automatic compensations take their own gates instead.
 
 External and handoff-only curation

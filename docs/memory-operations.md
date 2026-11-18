@@ -1235,8 +1235,10 @@ on a keeper that was not automated, and that holds with
 `retrieval_eval_merge_automated_mismatch`. The history veto, the lineage rule
 and the published-index lineage check apply to both cards as before. The
 keeper's `aliases` line names the retired id as a predecessor. Only trusted
-cards form lineage edges, and the keeper of a merge that can apply today is not
-trusted, so no edge appears even when a new card later reuses the retired id.
+cards form lineage edges, and a trusted keeper can now apply a merge, so a
+later write that reuses the retired id gains a lineage edge to the keeper. No
+edge exists at merge time, because the retired id is not live, and the merge
+gate does not look ahead to that write.
 
 This bounds what a merge may remove from search. It does not freeze ranking.
 The retired card's matches move to the keeper, whose searchable content is a
