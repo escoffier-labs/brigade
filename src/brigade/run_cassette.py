@@ -292,10 +292,11 @@ def record_result(
     codex_transport: str = "exec",
     projection_window: _ProjectionWindow | None = None,
     coordinator_prompt_sha256: str | None = None,
+    policy_workspace: Path | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort recording. Failure stops recording, never the worker run."""
     try:
-        cfg = config.load_config(workspace)
+        cfg = config.load_config(policy_workspace or workspace)
     except Exception:
         print("cassette recording skipped: configuration unavailable", file=sys.stderr)
         return None
@@ -557,6 +558,7 @@ def dispatch_recorder(
     transport: Callable[[Agent], str],
     codex_transport: str,
     coordinator_prompt_sha256: str | None,
+    policy_workspace: Path | None = None,
 ) -> Callable[[Assignment, list[WorkerResult]], WorkerResult]:
     """Observe the final worker result without changing retry or scheduler flow."""
 
@@ -574,6 +576,7 @@ def dispatch_recorder(
             sandbox=sandbox,
             codex_transport=codex_transport,
             coordinator_prompt_sha256=coordinator_prompt_sha256,
+            policy_workspace=policy_workspace,
         )
 
     return run_one
@@ -592,6 +595,7 @@ def record_dispatch_result(
     sandbox: str | None,
     codex_transport: str = "exec",
     coordinator_prompt_sha256: str | None = None,
+    policy_workspace: Path | None = None,
 ) -> WorkerResult:
     from .run_receipts import agent_result_from_worker
 
@@ -613,6 +617,7 @@ def record_dispatch_result(
                 codex_transport=codex_transport,
                 projection_window=window,
                 coordinator_prompt_sha256=coordinator_prompt_sha256,
+                policy_workspace=policy_workspace,
             )
 
     assigned_agent = agent()

@@ -957,6 +957,7 @@ def dispatch(args) -> int:
                 run_kwargs["authorized_writable_worktree"] = True
             if args.worktree:
                 run_kwargs["lock_workspace"] = effective_cwd
+                run_kwargs["recording_policy_workspace"] = run_cwd
                 run_kwargs["defer_artifact_collection"] = True
             if args.worker is not None:
                 run_kwargs["worker"] = args.worker
