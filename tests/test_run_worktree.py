@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from brigade import aboyeur, cli, doctor, fleet_client, proc, runguard
+from brigade import aboyeur, agents, cli, doctor, fleet_client, proc, runguard
 
 
 def _git(repo: Path, *args: str) -> proc.Result:
@@ -108,6 +108,28 @@ def _checkout_path(tmp_path: Path, repo: Path, output_dir: Path) -> Path:
 def _age_directory(path: Path, days: int) -> None:
     old = time.time() - days * 86400
     os.utime(path, (old, old))
+
+
+@pytest.mark.parametrize("inside_repo", [False, True])
+def test_worktree_run_rejects_parent_file_edit(tmp_path, monkeypatch, capsys, inside_repo):
+    repo = _git_repo(tmp_path)
+    output_dir = (repo if inside_repo else tmp_path) / "run"
+    checkout = _checkout_path(tmp_path, repo, output_dir)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def fake_run_agent(cli_ref, prompt, *, cwd, **kwargs):
+        assert cwd == checkout
+        (repo / "tracked.txt").write_text("edited outside assigned worktree\n")
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worker", "coder", "--worktree"])
+
+    assert rc == 2
+    assert "isolation breach: modified files outside assigned worktree: tracked.txt" in capsys.readouterr().err
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["status"] == "failed"
+    assert receipt["failure"]["kind"] == "isolation-breach"
 
 
 @pytest.mark.parametrize("isolated", [True, False])

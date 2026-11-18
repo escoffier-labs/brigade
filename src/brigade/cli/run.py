@@ -795,10 +795,12 @@ def dispatch(args) -> int:
             else:
                 _thread.interrupt_main()
 
+    canonical_workspace = None
     try:
         if args.worktree:
             assert output_dir is not None
-            checkout = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
+            canonical_workspace = runguard.git_root(run_cwd)
+            checkout = _worktree_checkout_path(canonical_workspace, output_dir)
             reservation = runguard.worktree_lock_dir(checkout)
             try:
                 reservation.mkdir(parents=True, exist_ok=False)
@@ -957,6 +959,7 @@ def dispatch(args) -> int:
                 run_kwargs["authorized_writable_worktree"] = True
             if args.worktree:
                 run_kwargs["lock_workspace"] = effective_cwd
+                run_kwargs["canonical_workspace"] = canonical_workspace
                 run_kwargs["recording_policy_workspace"] = run_cwd
                 run_kwargs["defer_artifact_collection"] = True
             if args.worker is not None:
