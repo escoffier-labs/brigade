@@ -339,8 +339,8 @@ def test_mutating_supplied_containers_cannot_change_frozen_values():
         (target, {"source_revision": "A" * 40}),
         (target, {"source_revision": "a" * 39}),
         (target, {"isolation": "unknown"}),
-        (target, {"runtime_mode": "app-server"}),
-        (target, {"interaction_mode": "auto"}),
+        (target, {"runtime_mode": ""}),
+        (target, {"interaction_mode": ""}),
         (target, {"target_environment": ""}),
         (discovery, {"project": ""}),
         (discovery, {"child_enabled": 1}),
@@ -370,6 +370,11 @@ def test_malformed_identity_and_boolean_ordinals_are_bounded_refusals(factory, c
 def test_native_modes_accept_only_t3_literals_and_inherit(runtime_mode, interaction_mode):
     selected = target(runtime_mode=runtime_mode, interaction_mode=interaction_mode)
     assert selected.runtime_mode == runtime_mode and selected.interaction_mode == interaction_mode
+
+
+def test_inherit_runtime_mode_skips_discovery_membership():
+    # Capabilities never advertise `inherit`, so it cannot be a membership miss.
+    assert qualify(target(runtime_mode="inherit"), discovery=discovery(runtime_modes=("auto",))).status == "declared"
 
 
 @pytest.mark.parametrize(

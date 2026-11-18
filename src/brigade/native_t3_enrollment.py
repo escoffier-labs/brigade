@@ -737,18 +737,9 @@ def read_delegation_input(run_dir: Path, *, task_id: str) -> DelegationInput:
     seat, text, raw_target = payload.get("seat"), payload.get("text"), payload.get("target")
     if type(seat) is not str or type(text) is not str or not isinstance(raw_target, dict):
         raise EnrollmentError("asset-invalid", "retained delegation input is incomplete")
-    runtime_mode = raw_target.get("runtime_mode")
-    interaction_mode = raw_target.get("interaction_mode")
-    if (
-        type(runtime_mode) is not str
-        or runtime_mode not in RUNTIME_MODES | {INHERIT_MODE}
-        or type(interaction_mode) is not str
-        or interaction_mode not in INTERACTION_MODES | {INHERIT_MODE}
-    ):
-        raise EnrollmentError(
-            "target-mode-invalid",
-            "retained delegation input target uses a mode T3 does not accept",
-        )
+    # A retained target is read back exactly as enrolled, including a legacy
+    # `app-server` mode. New declarations are checked in target_for_seat and a
+    # claim re-applies the mode rules in admission.evaluate.
     try:
         target = NativeTarget(
             **{key: raw_target[key] for key in (*_TARGET_STRING_FIELDS, "runtime_mode", "interaction_mode")},

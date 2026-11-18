@@ -59,7 +59,11 @@ The eight identity fields above are required. `runtime_mode` and
 the pinned T3 Code delegate schema accepts. `interaction_mode` also accepts only
 `default` and `plan`. A target that still declares `app-server`, or any other
 mode T3 does not accept, refuses at `t3 open` and at claim admission with
-`target-mode-invalid`. Set `inherit` and let the parent thread's mode apply.
+`target-mode-invalid`. Set `inherit` and let the parent thread's mode apply. A
+retained target from an older release is still read back unchanged, so an
+attempt that was already claimed can finish its verbs. A new claim re-applies
+these rules and refuses with `admission-denied` and reason
+`target-mode-invalid`.
 
 `target_environment` must equal `origin_environment`, because a governed child
 must run locally. A different value refuses with `target-remote-unsupported` at
@@ -137,6 +141,16 @@ because naming a linked environment selects T3's remote path, which rejects
 worktree isolation. `runtimeMode` and `interactionMode` are sent only when the
 target declares one instead of `inherit`. The same arguments are not printed
 again for that attempt.
+
+### The local project precondition
+
+`target.projectId` is the declared `target_project`. T3's local `delegate_task`
+path refuses a child whose `projectId` differs from the parent thread's project
+with `invalid_request`, after Brigade has consumed the launch. The roster
+`target_project` must therefore equal the T3 project of the parent thread that
+calls `delegate_task`. A mismatch is a held lost launch. Resolve it with
+`t3 hold-resolve` and never resubmit. The hold keeps its capacity slot until a
+reviewed release operation exists.
 
 ### The lost-reply hold
 

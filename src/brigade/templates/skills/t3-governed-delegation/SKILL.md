@@ -42,6 +42,8 @@ Resolve it with `brigade t3 hold-resolve <run> <task> --abandon` when the attemp
 
 A target must run locally: `target_environment` must equal `origin_environment`. A different value refuses with `target-remote-unsupported` at `t3 open` and at claim. Cross-machine governed children are unsupported. Remote editing children belong to `t3_thread_launch` with a worktree workspace strategy, which needs its own design.
 
+`target_project` must equal the T3 project of the parent thread that calls `delegate_task`. T3's local path refuses a different `projectId` with `invalid_request` after the claim already consumed the launch. That is a held lost launch: resolve it with `hold-resolve`, never resubmit. The hold keeps its capacity slot until a reviewed release operation exists.
+
 T3 refuses an explicit runtime or interaction mode broader than the parent thread's. Brigade cannot see the parent ceiling when it prints a claim, so a broader declared mode makes the native call fail after launch permission was consumed. That is a lost launch, not a retry: resolve it with the existing hold and never resubmit.
 
 ## Refusals that are expected

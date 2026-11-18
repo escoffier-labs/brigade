@@ -117,8 +117,9 @@ class NativeTarget:
             self.isolation,
         ):
             _reference(value)
-        _require(self.runtime_mode in RUNTIME_MODES | {INHERIT_MODE})
-        _require(self.interaction_mode in INTERACTION_MODES | {INHERIT_MODE})
+        # Mode literals are enforced where a new declaration is accepted, not
+        # here. A retained asset from an earlier release must still deserialize
+        # unchanged, so its legacy `app-server` mode stays readable.
         _require(self.isolation in {"shared", "worktree"})
         _require(type(self.source_revision) is str and re.fullmatch(r"[0-9a-f]{40}", self.source_revision) is not None)
         pairs = []
@@ -264,7 +265,9 @@ def _discovery_refusal(target: NativeTarget, evidence: DiscoveryEvidence) -> str
         return "discovery-context-mismatch"
     if not evidence.child_enabled:
         return "provider-disabled"
-    if target.runtime_mode not in evidence.runtime_modes:
+    if target.runtime_mode != INHERIT_MODE and target.runtime_mode not in evidence.runtime_modes:
+        # `inherit` defers to the parent thread. T3's capabilities list never
+        # advertises it, so membership cannot apply.
         return "runtime-undeclared"
     model = next((model for model in evidence.models if model.model == target.launch_model), None)
     if model is None:
