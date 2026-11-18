@@ -18,6 +18,7 @@ from typing import Mapping
 
 from . import fleet_admin_explorer as explorer
 from . import fleet_command_deck as deck
+from . import fleet_form_fields as ff
 from . import fleet_skills_review as review
 from .fleet_skills_review import Plan, Skill, SkillsView
 
@@ -235,7 +236,7 @@ def _decision_form(
         usable = review.allowed(skill, name)
         attrs = (" checked" if name == chosen else "") + ("" if usable and editable else " disabled")
         options.append(
-            f'<label><input type="radio" name="decision" value="{name}"{attrs}><span>{_esc(review.DECISION_LABELS[name])}</span></label>'
+            f'<label><input type="radio" name="decision" value="{name}"{ff.attr(review.DECISION_FORM["decision"])}{attrs}><span>{_esc(review.DECISION_LABELS[name])}</span></label>'
         )
     hints = []
     if not skill.can_roll_back:
@@ -260,7 +261,8 @@ def _decision_form(
             )
         per_machine = (
             '<details class="overrides"><summary>Different choice for one machine</summary>'
-            '<div class="table-wrap"><table><thead><tr><th>Machine</th><th>Harness</th><th>Decision</th></tr></thead>'
+            '<div class="table-wrap"><table><thead><tr><th>Machine</th><th>Harness</th>'
+            f"<th>Decision {ff.marker(review.DECISION_FORM['ov'])}</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table></div></details>"
         )
     hint_html = "".join(f'<p class="decision-hint">{_esc(h)}</p>' for h in hints)
@@ -277,7 +279,7 @@ def _decision_form(
     )
     return (
         '<form class="decision" method="post" action="/deck/skills">'
-        "<h3>Decision</h3>"
+        f"<h3>Decision {ff.marker(review.DECISION_FORM['decision'])}</h3>"
         f"{_csrf_field(csrf, editable)}"
         f'<input type="hidden" name="display_token" value="{review.review_token(skill)}">'
         '<input type="hidden" name="action" value="save">'

@@ -1742,3 +1742,31 @@ def test_orphan_release_does_not_attach_config_provenance_to_an_explicit_token(m
     )
     assert done.wait(5)
     assert tokens == ["fake-admin-one", "fake-admin-two"]
+
+
+def test_release_vanished_worktree_checks_external_lease(hub, tmp_path, monkeypatch):
+    from brigade import cli, runguard
+
+    url, token, _db = hub
+    _env(monkeypatch, url, token)
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("BRIGADE_HOME", str(home / ".brigade"))
+    _plant_home_identity(home, NODE_A)
+    checkout = runguard.brigade_worktree_root() / "repo-run"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"lock_workspace": str(checkout)}))
+    target = "example/repo@repo-run"
+    assert _post(url, token, _claim(target=target, lock=_lease(run_dir=str(run_dir))))[1]["granted"]
+    lock = runguard.worktree_lock_dir(checkout) / "run.lock"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+
+    assert cli.main(["fleet", "claims", "--release", target]) == 1
+    assert [c["target"] for c in fleet_client.fetch_claims()] == [target]
+    (lock / "pid").write_text(f"{DEAD_PID}\n")
+
+    assert cli.main(["fleet", "claims", "--release", target]) == 0
+    assert fleet_client.fetch_claims() == []
+    assert not checkout.exists()

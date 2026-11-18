@@ -1,5 +1,7 @@
 # Memory verification: evidence-checked reflection and access-weighted cadence
 
+> The 2026-11-15 owner decision in #2591 supersedes this plan's review-only and manual go/no-go rollout. The shipped slice 11 behavior is documented in [Memory Care](memory-care.md#model-backed-verification-admission): configured verify is on by default and admitted classes apply automatically. Historical rollout steps below are retained as design history.
+
 Design for #2385 (a model-backed reflect pass that checks cards against the
 evidence they cite) and #2387 (an access-weighted verification cadence). The
 sibling #2386 adds a deterministic broken-link pass and shares the scheduling

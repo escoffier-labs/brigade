@@ -22,6 +22,7 @@ from .. import (
     generated_patch_quarantine,
     code_graph_delta,
     localio,
+    outcome_attribution,
     receipt_json,
     receipt_schema,
     receipt_signing,
@@ -575,6 +576,7 @@ def _finalize_verify_receipt(
             key, key_id = signing_key
             receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
             receipt["digests"]["key_id"] = key_id
+        receipt_signing.stamp_workspace_signature(target, receipt)
     except Exception:
         receipt.pop("digests", None)
     helpers._write_json(run_dir / "receipt.json", receipt)
@@ -1169,14 +1171,16 @@ def _stamp_verify_causal_receipt(receipt: dict[str, Any]) -> None:
     )
 
 
-def _stamp_outcome_capture(receipt: dict[str, Any], capture: str | None, capture_kind: str) -> None:
-    """Record the intended outcome artifact on the receipt before digests are sealed."""
+def _stamp_outcome_capture(
+    receipt: dict[str, Any], capture: str | None, capture_kind: str, meta: dict[str, Any] | None = None
+) -> None:
+    """Record the intended outcome artifact on the receipt before digests are sealed.
+
+    ``meta`` carries the observed-attribution stamp (source, every observed id, session).
+    """
     if not capture:
         return
-    receipt["outcome_capture"] = {
-        "artifact_id": capture,
-        "artifact_kind": capture_kind,
-    }
+    receipt["outcome_capture"] = {"artifact_id": capture, "artifact_kind": capture_kind, **(meta or {})}
 
 
 def _capture_before_retry_message(run_id: str, *, artifact_id: str) -> str:
@@ -1198,9 +1202,10 @@ def _enforce_capture_before_retry(
         return None
     from .. import outcome_cmd
 
-    artifact_id = outcome_cmd.resolve_capture_artifact_id(
-        _receipt_capture_artifact_id(failed),
-        capture_artifact_id,
+    artifact_id = (  # an observed stamp must not be suggested back as a caller-typed id
+        outcome_attribution.AUTO_CAPTURE
+        if outcome_attribution.receipt_is_observed(failed) or capture_artifact_id == outcome_attribution.AUTO_CAPTURE
+        else outcome_cmd.resolve_capture_artifact_id(_receipt_capture_artifact_id(failed), capture_artifact_id)
     )
     message = _capture_before_retry_message(str(failed.get("run_id") or ""), artifact_id=artifact_id)
     if mode == "block":
@@ -1541,6 +1546,7 @@ def _run_verify_commands(
     manifest: verify_manifest.VerifyManifest | None = None,
     capture: str | None = None,
     capture_kind: str = "skill",
+    capture_meta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
@@ -1571,7 +1577,8 @@ def _run_verify_commands(
         receipt_schema.stamp_optional_producer_run_id(receipt)
         _stamp_verify_causal_receipt(receipt)
         _stamp_harness_session(receipt, target)
-        _stamp_outcome_capture(receipt, capture, capture_kind)
+        receipt["producer_work_session_id"] = _active_work_session_id(target)
+        _stamp_outcome_capture(receipt, capture, capture_kind, capture_meta)
         try:
             graph_delta_before = code_graph_delta.capture_before(target, run_dir, timeout=code_graph_timeout)
         except KeyboardInterrupt:
@@ -1699,6 +1706,7 @@ def _write_reused_receipt(
     *,
     capture: str | None = None,
     capture_kind: str = "skill",
+    capture_meta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Write a fresh receipt dir that records a reused passing run (no commands executed)."""
     started = helpers._now()
@@ -1727,7 +1735,8 @@ def _write_reused_receipt(
     receipt_schema.stamp_optional_producer_run_id(receipt)
     _stamp_verify_causal_receipt(receipt)
     _stamp_harness_session(receipt, target)
-    _stamp_outcome_capture(receipt, capture, capture_kind)
+    receipt["producer_work_session_id"] = _active_work_session_id(target)
+    _stamp_outcome_capture(receipt, capture, capture_kind, capture_meta)
     reused_from = latest.get("run_id")
     if isinstance(reused_from, str) and reused_from:
         receipt["reused_from"] = reused_from
@@ -1744,6 +1753,7 @@ def _write_reused_receipt(
         key, key_id = signing_key
         receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
         receipt["digests"]["key_id"] = key_id
+    receipt_signing.stamp_workspace_signature(target, receipt)
     helpers._write_json(run_dir / "receipt.json", receipt)
     _write_verify_markdown(run_dir, receipt)
     try:
@@ -1998,6 +2008,14 @@ def verify_run(
         return 2
     planned_display = _planned_commands_display(planned)
     planned_identity = _planned_commands_identity(planned)
+    auto_ids: list[str] = []
+    auto_observed = False
+    capture_meta = None
+    if capture == outcome_attribution.AUTO_CAPTURE:
+        # Resolve once, before the retry gate; the literal "auto" is never persisted.
+        auto_ids, auto_observed = outcome_attribution.resolve_auto_capture(target)
+        capture, capture_kind = auto_ids[0], "skill"
+        capture_meta = outcome_attribution.observed_capture_meta(auto_ids) if auto_observed else None
     try:
         capture_before_retry = config.resolve_capture_before_retry(target)
     except ValueError as exc:
@@ -2007,7 +2025,7 @@ def verify_run(
         target,
         planned_identity,
         mode=capture_before_retry,
-        capture_artifact_id=capture,
+        capture_artifact_id=outcome_attribution.AUTO_CAPTURE if auto_observed else capture,
     )
     if blocked_rc is not None:
         return blocked_rc
@@ -2025,6 +2043,7 @@ def verify_run(
                         timeout,
                         capture=capture,
                         capture_kind=capture_kind,
+                        capture_meta=capture_meta,
                     )
             if receipt is None:
                 receipt, rc = _run_verify_commands(
@@ -2035,6 +2054,7 @@ def verify_run(
                     manifest=manifest,
                     capture=capture,
                     capture_kind=capture_kind,
+                    capture_meta=capture_meta,
                 )
         except KeyboardInterrupt:
             cancellation.raised = True
@@ -2065,8 +2085,6 @@ def verify_run(
         # receive their one neutral capture, including after repeated signals.
         if json_output:
             if capture:
-                from .. import outcome_cmd
-
                 scoreability = _scoreability_notice(target, receipt)
                 if (
                     receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
@@ -2074,12 +2092,12 @@ def verify_run(
                 ):
                     sink = io.StringIO()
                     with redirect_stdout(sink), redirect_stderr(sink):
-                        outcome_cmd.capture(
+                        outcome_attribution.capture_artifacts(
                             target=target,
-                            artifact_id=capture,
+                            artifact_ids=auto_ids or [capture],
                             artifact_kind=capture_kind,
                             run_id=receipt["run_id"],
-                            json_output=False,
+                            observed=auto_observed,
                         )
                     receipt["outcome_scoreability"] = scoreability
                     _attach_miseledger_indexing(receipt, target=target, json_output=True)
@@ -2100,20 +2118,18 @@ def verify_run(
                     )
             verify_runtime._print_verify_console(f"receipt: {Path(str(receipt['path'])) / 'receipt.json'}")
             if capture:
-                from .. import outcome_cmd
-
                 scoreability = _scoreability_notice(target, receipt)
                 if (
                     receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
                     or cancellation.received is None
                 ):
                     with verify_runtime._verify_console_output():
-                        outcome_cmd.capture(
+                        outcome_attribution.capture_artifacts(
                             target=target,
-                            artifact_id=capture,
+                            artifact_ids=auto_ids or [capture],
                             artifact_kind=capture_kind,
                             run_id=receipt["run_id"],
-                            json_output=False,
+                            observed=auto_observed,
                         )
                     receipt["outcome_scoreability"] = scoreability
                     with verify_runtime._verify_console_output():

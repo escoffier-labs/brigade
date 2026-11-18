@@ -211,17 +211,24 @@ def test_secret_named_literal_override_is_scrubbed_without_rewriting_configurati
     assert body["text"] == "1 test passed: prefix[redacted]suffix"
 
 
-def test_retention_does_not_purge_live_old_run(tmp_path):
+@pytest.mark.parametrize("separate_lease", [False, True])
+def test_retention_does_not_purge_live_old_run(tmp_path, separate_lease):
     import os
     import time
 
     run = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
     _record(run)
-    (run / "run.json").write_text(json.dumps({"run_id": run.name}))
+    workspace = tmp_path
+    summary = {"run_id": run.name}
+    if separate_lease:
+        workspace = tmp_path / "worker-checkout"
+        workspace.mkdir()
+        summary["lock_workspace"] = str(workspace)
+    (run / "run.json").write_text(json.dumps(summary))
     expired = time.time() - 40 * 86400
     os.utime(run, (expired, expired))
     before = _documents(run)
-    with runguard.run_lock(tmp_path, run_dir=run):
+    with runguard.run_lock(workspace, run_dir=run):
         assert store.retain_private(tmp_path, run.parent, current=run.parent / "next") == 0
         assert _documents(run) == before
 

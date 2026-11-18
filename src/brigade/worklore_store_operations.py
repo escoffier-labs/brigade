@@ -9,15 +9,17 @@ from __future__ import annotations
 import json
 import sqlite3
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
-from .worklore_validate import parse_create, safe_optional_text
+from .worklore_validate import completion_path, parse_create, safe_optional_text
 
 if TYPE_CHECKING:
     from .worklore_store import (  # noqa: F401
         ADAPTER_ID_MAX,
         ADMIN_LINK_TYPES,
         DISPLAY_REF_MAX,
+        EVIDENCE_REF_RE,
+        EVIDENCE_REFS_MAX_ITEMS,
         EXTERNAL_KEY_MAX,
         IDEMPOTENCY_KEY_MAX,
         IMPORT_LINK_TYPES,
@@ -84,6 +86,7 @@ if TYPE_CHECKING:
         _select_item_row,
         _touch_cursor,
         _touch_link_synced_at,
+        _transition_locked,
         _trim_adapter_events,
         _trim_fleet_run_links,
         _trim_import_keys,
@@ -97,6 +100,8 @@ _CORE_BINDING_NAMES = (
     "ADAPTER_ID_MAX",
     "ADMIN_LINK_TYPES",
     "DISPLAY_REF_MAX",
+    "EVIDENCE_REF_RE",
+    "EVIDENCE_REFS_MAX_ITEMS",
     "EXTERNAL_KEY_MAX",
     "IDEMPOTENCY_KEY_MAX",
     "IMPORT_LINK_TYPES",
@@ -163,6 +168,7 @@ _CORE_BINDING_NAMES = (
     "_select_item_row",
     "_touch_cursor",
     "_touch_link_synced_at",
+    "_transition_locked",
     "_trim_adapter_events",
     "_trim_fleet_run_links",
     "_trim_import_keys",
@@ -298,6 +304,86 @@ def record_attempt(
             node_id=node_id,
             run_id=accepted_run_id,
             detail={"action": action},
+        )
+        return _loaded_item(conn, work_id)
+
+    return _in_transaction(conn, _write)
+
+
+def _completion_evidence(raw: object) -> list[str]:
+    """Bound completion evidence with the same item-evidence limits the store already uses."""
+    if not isinstance(raw, (list, tuple)):
+        raise _field_bound("evidence_refs must be an array of strings")
+    if len(raw) > EVIDENCE_REFS_MAX_ITEMS:
+        raise _field_bound(f"evidence_refs must have at most {EVIDENCE_REFS_MAX_ITEMS} items")
+    refs = list(raw)
+    if any(not isinstance(ref, str) or not EVIDENCE_REF_RE.fullmatch(ref) for ref in refs):
+        raise _field_bound("evidence_refs items must match the evidence token pattern")
+    return refs
+
+
+def complete_item(
+    conn: sqlite3.Connection,
+    work_id: str,
+    *,
+    expected_version: int,
+    actor_id: str,
+    actor_type: str = "operator",
+    node_id: str | None = None,
+    evidence_refs: Sequence[str] = (),
+    precondition: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Complete one item by walking every legal edge, in one transaction.
+
+    ``expected_version`` is checked once against the item as it stands when the
+    transaction opens. Each step then runs the ordinary transition rule, so a refusal
+    anywhere rolls the whole walk back and leaves the item untouched. The completion is
+    recorded once with the path it took and the bounded evidence the operator supplied.
+
+    ``precondition`` runs inside that same write transaction, after the version and the
+    current status are accepted and before the first step. It is how a caller refuses on
+    state that must be read under the write lock (a campaign's membership, say) while
+    keeping this store free of that caller's domain, and it keeps the refusal order
+    version, then terminal, then precondition.
+    """
+    refs = _completion_evidence(evidence_refs)
+
+    def _write() -> dict[str, Any]:
+        current = _loaded_item(conn, work_id)
+        _require_version(current, expected_version)
+        path = completion_path(str(current["status"]))
+        if path is None:
+            raise WorkloreValidationError(
+                f"cannot complete from {current['status']}",
+                code="invalid-transition",
+            )
+        if precondition is not None:
+            precondition()
+        now = _utc_now()
+        version = int(current["version"])
+        for step in path:
+            _transition_locked(
+                conn,
+                work_id,
+                to_status=step,
+                expected_version=version,
+                actor_id=actor_id,
+                actor_type=actor_type,
+                node_id=node_id,
+                now=now,
+            )
+            version += 1
+        _append_event(
+            conn,
+            work_id=work_id,
+            event_type="completion-recorded",
+            from_status=str(current["status"]),
+            to_status=path[-1],
+            actor_type=actor_type,
+            actor_id=actor_id,
+            now=now,
+            node_id=node_id,
+            detail={"path": path, "evidence_refs": refs},
         )
         return _loaded_item(conn, work_id)
 

@@ -594,6 +594,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     register_projects(fleet_sub)
 
+    from .fleet_place import register as register_place
+
+    register_place(fleet_sub)
+
 
 def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:
     from .. import fleet_command_deck, fleet_hub
@@ -754,12 +758,24 @@ def _dispatch_sessions(args: argparse.Namespace) -> int:
     from .. import fleet_client
 
     try:
-        sessions = fleet_client.fetch_sessions(include_all=args.all)
+        unknown: dict[str, object] = {}
+        sessions = fleet_client.fetch_sessions(include_all=args.all, extras=unknown)
     except fleet_client.FleetClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    unknown_nodes = unknown.get("nodes_unknown")
+    if unknown.get("nodes_unknown_error") is True:
+        unknown_note = "T3 sessions unknown: the hub could not read T3 observer health"
+    elif isinstance(unknown_nodes, list) and unknown_nodes:
+        names = ", ".join(_safe_table_cell(str(node)) for node in unknown_nodes)
+        unknown_note = f"T3 sessions unknown for: {names} (observer not reporting; absent rows are not zero)"
+    else:
+        unknown_note = None
     if args.json:
         print(_json.dumps(sessions, indent=2, sort_keys=True))
+        if unknown_note:
+            # stdout stays the bare session list; the warning goes to stderr.
+            print(f"warning: {unknown_note}", file=sys.stderr)
         return 0
     headers = ("NODE", "HARNESS", "SESSION", "REPO", "BRANCH", "DIRTY", "AGE", "EXPIRES")
     rows = []
@@ -788,6 +804,8 @@ def _dispatch_sessions(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
     if not rows:
         print("(no active fleet sessions)")
+    if unknown_note:
+        print(unknown_note)
     return 0
 
 
@@ -1150,7 +1168,17 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
     if args.json:
         print(_json.dumps({"claims": claims}, indent=2, sort_keys=True))
         return 0
-    headers = ("target", "node", "conductor", "harness", "session", "acquired", "expires")
+    has_parent_repos = any(claim.get("parent_repo") for claim in claims)
+    headers = (
+        "target",
+        *(("parent repo",) if has_parent_repos else ()),
+        "node",
+        "conductor",
+        "harness",
+        "session",
+        "acquired",
+        "expires",
+    )
     rows = []
     for claim in claims:
         expires = str(claim.get("expires_at") or "-")
@@ -1159,6 +1187,7 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
         rows.append(
             [
                 _safe_table_cell(str(claim.get("target") or "-")),
+                *([_safe_table_cell(str(claim.get("parent_repo") or "-"))] if has_parent_repos else []),
                 _safe_table_cell(str(claim.get("owner_node") or "-"))[:12],
                 _safe_table_cell(str(claim.get("owner_conductor") or "-")),
                 _safe_table_cell(str(claim.get("harness") or "-")),
@@ -1637,9 +1666,12 @@ def _run_work(args: argparse.Namespace, producer: Callable[[], object]) -> int:
             code = worklore_client._error_code(getattr(exc, "code", None))
             if code is not None:
                 payload["code"] = code
+            payload.update(getattr(exc, "details", None) or {})
             print(json.dumps(payload, sort_keys=True), file=sys.stderr)
             return 1
         print(f"error: {error}", file=sys.stderr)
+        for line in worklore_client.describe_refusal_details(exc):
+            print(f"  {line}", file=sys.stderr)
         return 1
     return _print_work_payload(payload, json_output=bool(getattr(args, "json", False)))
 

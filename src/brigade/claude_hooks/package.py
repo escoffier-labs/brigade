@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE_ID = "brigade-claude-work-loop"
-PACKAGE_VERSION = "1.4.0"
+PACKAGE_VERSION = "1.5.0"
 PACKAGE_REF = f"{PACKAGE_ID}@{PACKAGE_VERSION}"
 COMMAND_PREFIX = "brigade work hook-run"
 DIRECT_ENTRY_COMMAND = "brigade-hook"
@@ -50,7 +50,7 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
         "PostModelSwitch": [group("PostModelSwitch")],
         "UserPromptSubmit": [group("UserPromptSubmit")],
         "PreToolUse": [group("PreToolUse", "Bash"), group("PreToolUse", "Edit|Write|NotebookEdit")],
-        "PostToolUse": [group("PostToolUse", "Bash|Read|Edit|Write|NotebookEdit")],
+        "PostToolUse": [group("PostToolUse", "Bash|Read|Edit|Write|NotebookEdit|Skill")],
         "PostToolUseFailure": [group("PostToolUseFailure", "Bash")],
         "PreCompact": [group("PreCompact")],
         "Stop": [group("Stop")],
@@ -142,7 +142,7 @@ def managed_user_groups(script_path: Path) -> dict[str, list[dict[str, Any]]]:
         "PostModelSwitch": [group("PostModelSwitch")],
         "UserPromptSubmit": [group("UserPromptSubmit")],
         "PreToolUse": [group("PreToolUse", "Bash"), group("PreToolUse", "Edit|Write|NotebookEdit")],
-        "PostToolUse": [group("PostToolUse", "Bash|Read|Edit|Write|NotebookEdit")],
+        "PostToolUse": [group("PostToolUse", "Bash|Read|Edit|Write|NotebookEdit|Skill")],
         "PostToolUseFailure": [group("PostToolUseFailure", "Bash")],
         "PreCompact": [group("PreCompact")],
         "Stop": [group("Stop")],

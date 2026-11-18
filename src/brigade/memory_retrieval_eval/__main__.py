@@ -45,7 +45,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--gate", choices=("R0", "R1"), help="R1 checks the public half only, private model qualification is separate."
     )
+    parser.add_argument(
+        "--live-target", type=Path, help="Derive private judged queries from this workspace's recorded use."
+    )
+    parser.add_argument("--proposal-id", help="Measure this hub proposal's exact candidate against the live scope.")
+    parser.add_argument(
+        "--record", action="store_true", help="Record the aggregate live report with explicit admin authority."
+    )
     args = parser.parse_args(argv)
+    if args.live_target is not None:
+        from .live import LiveEvalError, run_live_eval
+
+        if not args.proposal_id or args.gate or args.k is not None:
+            parser.error("--live-target requires --proposal-id and uses its own fixed live gate at k=5")
+        try:
+            report = run_live_eval(
+                args.live_target,
+                HubOptions(
+                    url=args.hub_url,
+                    token_file=args.hub_token_file,
+                    scope=args.hub_scope,
+                    binary=args.hub_binary,
+                    memory_config=args.hub_memory_config,
+                ),
+                args.proposal_id,
+                record=args.record,
+            )
+        except LiveEvalError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except (HubRefusal, HubUnavailable, OSError, ValueError, KeyError, TypeError):
+            # Underlying responses and private state can contain query or card text.
+            print("error: live retrieval evaluation unavailable or insufficient judged queries", file=sys.stderr)
+            return 2
+        sys.stdout.write(format_json(report))
+        return 0 if report["gate"]["passed"] else 1
+    if args.record or args.proposal_id:
+        parser.error("--record and --proposal-id require --live-target")
 
     adapter_names = [part.strip() for part in str(args.adapters).split(",") if part.strip()]
     try:

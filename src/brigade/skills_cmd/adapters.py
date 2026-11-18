@@ -583,12 +583,16 @@ def _fleet_copy_keys(target: Path) -> list[tuple[str, str]]:
             continue
         root = probe.parent
         if root.is_dir():
-            for path in sorted(item for item in root.iterdir() if item.is_dir()):
-                if _registry_mod._skill_md_path(path).is_file():
+            for path in sorted(root.iterdir()):
+                if path.is_symlink():
+                    # Linked copies are reported by state, never followed for
+                    # a SKILL.md probe.
+                    keys.add((_registry_mod._slug(path.name), harness))
+                elif path.is_dir() and _registry_mod._skill_md_path(path).is_file():
                     keys.add((_registry_mod._slug(path.name), harness))
         for skill_id in skill_ids:
             install_dir, escapes = _install_mod._evaluate_install_dir(target, harness, skill_id)
-            if not escapes and install_dir.exists():
+            if not escapes and (install_dir.exists() or install_dir.is_symlink()):
                 keys.add((skill_id, harness))
     return sorted(keys)
 
@@ -665,6 +669,8 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
                     "harness": harness,
                     "installed_path": str(install_dir),
                     "status": "external",
+                    "link_target": None,
+                    "status_detail": None,
                     "drift": {
                         "overall": "unknown",
                         "source": "unknown",
@@ -679,6 +685,33 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
                 }
             )
             continue
+        path_state, link_target = _install_mod._installed_path_state(target, install_dir)
+        if path_state not in {"dir", "missing"}:
+            # A symlinked, dangling, or otherwise non-plain copy is reported by
+            # state and skipped; nothing is read, diffed, or updated through it.
+            copies.append(
+                {
+                    "skill_id": skill_id,
+                    "harness": harness,
+                    "installed_path": str(install_dir),
+                    "status": "symlink" if path_state == "symlink" else "unusable",
+                    "link_target": link_target,
+                    "status_detail": _install_mod._installed_state_reason(path_state, link_target, install_dir),
+                    "drift": {
+                        "overall": "unknown",
+                        "source": "unknown",
+                        "render": "unknown",
+                        "local_edit": "unknown",
+                        "receipt_known": False,
+                        "content_changed": False,
+                    },
+                    "source": receipt.get("source") if isinstance(receipt.get("source"), dict) else None,
+                    "supported": None,
+                    "update_command": None,
+                    "remove_command": None,
+                }
+            )
+            continue
         selector = _fleet_source_selector(skill_id, receipt)
         lint_payload = (
             _search_validate_mod._lint_payload(target, selector) if selector is not None else {"valid": False}
@@ -690,6 +723,8 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
                     "harness": harness,
                     "installed_path": str(install_dir),
                     "status": "unknown",
+                    "link_target": None,
+                    "status_detail": None,
                     "drift": {
                         "overall": "unknown",
                         "source": "unknown",
@@ -731,7 +766,9 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         elif drift["overall"] == "missing":
             status = "missing"
         elif drift["overall"] == "changed":
-            status = "stale"
+            # A hand-edited copy is never offered a command that would
+            # overwrite it; the operator gets the diff and the explicit override.
+            status = "edited" if drift["local_edit"] == "changed" else "stale"
         elif drift["overall"] == "current":
             status = "current"
         else:
@@ -746,12 +783,25 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
             if status == "unsupported"
             else None
         )
+        diff_command: str | None = None
+        discard_command: str | None = None
+        if status == "edited":
+            edit_selector, against = _install_mod._local_edit_selector(receipt, skill_id=skill_id, fallback=skill_id)
+            if _fleet_source_selector(skill_id, receipt) is not None:
+                diff_command = _install_mod._local_edit_diff_command(
+                    workspace=target, selector=edit_selector, harness=harness, against=against
+                )
+                discard_command = _install_mod._local_edit_discard_command(
+                    workspace=target, selector=edit_selector, harness=harness
+                )
         copies.append(
             {
                 "skill_id": skill_id,
                 "harness": harness,
                 "installed_path": str(installed_dir),
                 "status": status,
+                "link_target": None,
+                "status_detail": None,
                 "drift": {
                     key: drift[key]
                     for key in (
@@ -767,12 +817,28 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
                 "supported": supported_state,
                 "update_command": update_command,
                 "remove_command": remove_command,
+                "diff_command": diff_command,
+                "discard_command": discard_command,
             }
         )
+    for row in copies:
+        # Every row has the same override keys; only an edited copy fills them.
+        row.setdefault("diff_command", None)
+        row.setdefault("discard_command", None)
     copies.sort(key=lambda row: (str(row["skill_id"]), str(row["harness"])))
     counts = {
         state: sum(row["status"] == state for row in copies)
-        for state in ("current", "stale", "missing", "unsupported", "unknown", "external")
+        for state in (
+            "current",
+            "stale",
+            "edited",
+            "missing",
+            "unsupported",
+            "unknown",
+            "external",
+            "symlink",
+            "unusable",
+        )
     }
     return {
         "schema_version": 1,
@@ -780,10 +846,13 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         "checked_count": len(copies),
         "current_count": counts["current"],
         "stale_count": counts["stale"],
+        "edited_count": counts["edited"],
         "missing_count": counts["missing"],
         "unsupported_count": counts["unsupported"],
         "unknown_count": counts["unknown"],
         "external_count": counts["external"],
+        "symlink_count": counts["symlink"],
+        "unusable_count": counts["unusable"],
         "copies": copies,
         "stale": [row for row in copies if row["status"] in {"stale", "missing"}],
     }
@@ -798,17 +867,23 @@ def fleet_status(*, target: Path, json_output: bool = False) -> int:
     print(f"skills fleet status: {target}")
     print(
         f"checked={payload['checked_count']} current={payload['current_count']} "
-        f"stale={payload['stale_count']} missing={payload['missing_count']} "
+        f"stale={payload['stale_count']} edited={payload['edited_count']} missing={payload['missing_count']} "
         f"unsupported={payload['unsupported_count']} unknown={payload['unknown_count']} "
-        f"external={payload['external_count']}"
+        f"external={payload['external_count']} symlink={payload['symlink_count']} "
+        f"unusable={payload['unusable_count']}"
     )
     for row in (item for item in payload["copies"] if item["status"] != "current"):
         support = " supported=false" if row.get("supported") is False else ""
-        print(f"- {row['skill_id']} [{row['harness']}] {row['status']}{support}")
+        linked = f" -> {row['link_target']}" if row.get("link_target") else ""
+        print(f"- {row['skill_id']} [{row['harness']}] {row['status']}{linked}{support}")
         if row["update_command"]:
             print(f"  update: {row['update_command']}")
         elif row.get("remove_command"):
             print(f"  remove: {row['remove_command']}")
+        if row.get("diff_command"):
+            print(f"  diff: {row['diff_command']}")
+        if row.get("discard_command"):
+            print(f"  discard: {row['discard_command']}")
     return 0
 
 
@@ -906,6 +981,42 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
                         "detail": f"{adapter_id} installed skill differs from current registry render",
                         "fingerprint": adapter.get("installed_render_fingerprint")
                         or adapter.get("current_render_fingerprint"),
+                    }
+                )
+            if adapter.get("install_refused"):
+                issues.append(
+                    {
+                        "status": _registry_mod.WARN,
+                        "name": "skill_install_refused",
+                        "issue_type": "install_refused",
+                        "skill_id": skill_id,
+                        "harness": adapter_id,
+                        "detail": (
+                            f"{adapter_id} installed copy is not a plain path inside the workspace; "
+                            "Brigade leaves it untouched instead of following it"
+                        ),
+                        "fingerprint": lint_payload.get("fingerprint"),
+                    }
+                )
+            installed_state = str(adapter.get("installed_state") or "")
+            if installed_state in {"symlink", "file", "other", "unreadable"}:
+                link_target = adapter.get("link_target")
+                reason = _install_mod._installed_state_reason(
+                    installed_state,
+                    link_target if isinstance(link_target, str) else None,
+                    Path(str(adapter.get("installed_path") or "")),
+                )
+                issues.append(
+                    {
+                        "status": _registry_mod.WARN,
+                        "name": "skill_install_not_plain",
+                        "issue_type": "install_not_plain",
+                        "skill_id": skill_id,
+                        "harness": adapter_id,
+                        "installed_state": installed_state,
+                        "link_target": link_target,
+                        "detail": f"{adapter_id}: {reason}",
+                        "fingerprint": lint_payload.get("fingerprint"),
                     }
                 )
     return issues

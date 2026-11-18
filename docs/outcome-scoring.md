@@ -3,7 +3,34 @@
 Outcome capture classifies runs when it reads stored receipts and persists the resulting `signal_value` in the outcome ledger. Upgrading Brigade can change a new capture of the same historical `run.json` and `worker-results.json` files. Ranking reads the stored ledger signals and also builds current verification scorecards
 ([capture and ranking](../src/brigade/outcome_cmd.py), [scorecard projection](../src/brigade/scorecard.py)).
 
-This is outcome-based skill scoring, promotion, and rollback from verification evidence. It is not autonomous reflective memory learning.
+This is outcome-based skill scoring, promotion, and rollback from verification evidence.
+Scheduled memory work runs separately from this scoring loop.
+
+Hub reflection opens pinned proposals for exact duplicate merges, near-duplicate
+supersedes, broken-link repairs and anchors. Stale-newer-evidence and
+opposite-polarity candidates are local only, and a contradicted card is a verify
+verdict. Of the reflection lanes, only evidence appends and exact duplicate
+merges are eligible for automatic apply under the supported policy writer, and
+only when workspace and fleet policies enable it and every hub gate passes. On a
+real scope the retrieval evaluation holds every automatic reflection apply,
+including all-`append_evidence` Tier 0 proposals and exact merges, so
+reflection applies nothing automatically outside the fixture scope
+`repo:brigade/retrieval-eval-fixture`. Verifier applies and automatic
+compensations take their own gates. Near-duplicate supersedes and broken-link repairs are Tier 2, so they
+wait for a reviewer. Local repository candidates stay proposal-only. The
+`[reflect] scopes` setting limits where the job proposes, applies and watches.
+Unlisted read scopes are still read, never changed.
+
+The verify pass uses two seats and opens correction proposals. Per-class go or
+no-go records gate `verify_auto_apply`, and without a current admin `go` record
+on the hub it applies nothing. A scheduled run still opens correction proposals
+because only their application is gated. Scheduled reflection also polls the
+compensation watch over its own automatic applies. Automatic reversal needs two
+independent verifier signals, or an attributable lexical regression. A watch
+attempt that is not exact or is blocked ends `held`, or `stale` when a target
+no longer matches its pins. See
+[Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
+for the `auto_apply` policy field, the switch and rollback.
 
 ## Workflow
 
@@ -14,13 +41,16 @@ brigade work verify run --manifest verify/manifests/work-cmd-verification.json -
 # audit-only evidence: a receipt a human can read, never a scoreable trial
 brigade work verify run --target . --command "pytest -q" --capture brigade-work
 
+# let Brigade name the skills this session read (no hand-typed id; veto-only, see below)
+brigade work verify run --target . --command "pytest -q" --capture auto
+
 # or, after a verify without --capture:
 brigade outcome capture brigade-work --run-id latest --kind skill
 
 brigade outcome rank --target .
 brigade outcome score --target .
 brigade outcome reconcile --target .          # dry-run
-brigade outcome reconcile --target . --apply  # install or roll back
+brigade outcome reconcile --target . --apply  # routing only: status and route policy, no skill files
 brigade outcome explain <skill-or-card-id> --target .
 ```
 
@@ -29,10 +59,140 @@ brigade outcome explain <skill-or-card-id> --target .
 | `outcome capture` | Bind a verify/run receipt's real result to the skill or card that did the work (`+1` / `0` / `-1`) |
 | `outcome rank` | Order artifacts by current score (Wilson lower bound) |
 | `outcome score` | Recompute and show scores from stored receipts |
-| `outcome reconcile` | Dry-run by default. `--apply` promotes a proven registry skill or rolls a regressed one back across harnesses |
+| `outcome reconcile` | Dry-run by default. `--apply` records status and the route policy for a proven or regressed registry skill (routing only) and lists the operator commands that would change the installed copies |
+| `outcome reconcile --report` | Also write the advisory `.brigade/memory-care/outcome/ratchet-report.json` summary of this run |
+| `outcome ratchet` | Print the last written ratchet report, read-only, without ranking or reconciling |
 | `outcome explain` | Print the signal trail behind a score or reconcile decision |
 
+### Routing only
+
+`outcome reconcile --apply` is routing only ([owner decision on #2589](https://github.com/escoffier-labs/brigade/issues/2589#issuecomment-6965099265), 2026-11-18). It changes a skill's status and route policy marker and nothing else: it never installs, rolls back, uninstalls or otherwise writes a skill file, under any harness directory, receipt or rollback snapshot.
+
+Why: every local input to a physical change is writable by the agent being gated. Install receipts, rollback snapshot pointers and fingerprints, and the registry all sit in a workspace that agent's own user controls, so a scheduled rollback could install bytes the agent chose. Forgeable state may veto a change, never authorize one, so no unattended path acts on it.
+
+- **Promotion** rests on scorecard evidence alone. It sets the status to `promoted` and stamps the route policy marker. It does not wait for an install and never reads a receipt.
+- **Demotion** sets the status to `demoted` and removes the route policy, so broad routing authority is withdrawn immediately.
+- **The decision's `execution` is `routing-only`.** `--apply` text and JSON also list `pending_commands` (text prints each as an `operator:` line), computed read-only from current drift and never run: `brigade skills install <id> --target <harness> --force` for a promoted skill whose copy is missing or stale, `brigade skills rollback <id> --target <harness>` for a demoted skill whose copy still exists. Each command ends with `--workspace <workspace>`. A hand-edited copy gets no install command: review it with `skills diff` and repair it with `--discard-local-edits` when you decide to. The same commands are stored in the decision receipt.
+- **Pending actions stay visible.** The ratchet report carries `summary.pending_physical_actions` and a bounded `pending_physical` list. Install commands for a promoted skill come from current drift, not history, so they are always listed. Rollback commands for a demoted skill are listed only when its last status change (`last_action_ts` in `status.json`) is within `pending_physical_window_days` (a `ReconcileConfig` field, default 14, compared by exact time) or was made in the current run, so a skill demoted months ago, before reconcile was routing only, never reads as a rollback to run. A demoted skill with no readable timestamp is treated as old. Older rollbacks are counted in `summary.stale_physical_actions` and listed under `stale_physical` (also bounded), which `outcome ratchet` prints under a separate `stale:` heading in text and JSON. Rows are ordered current run first, then newest status change, then artifact id, before the cap. Each listed command carries the age of its status: text prints `(demoted 3 days ago)` after it, each `pending_physical` and `stale_physical` row carries `status` and `status_changed_at`, and an `--apply` decision carries `status_changed_at` beside its `new_status` and `decided_status`. An install, a bump of an already promoted skill, and a rollback all list their pending commands in the reconcile output and the report alike. The session brief's `outcome_ratchet:` line shows `pending_physical_actions=<n>`, plus `stale=<n>` when nonzero, and `outcome ratchet` lists the commands.
+
+The commands you run by hand keep their own guards (see `docs/skill-registry.md`): `install --force` and `rollback` refuse an installed copy with local edits unless `--discard-local-edits` is passed, in which case the edit is snapshotted first, and both re-verify the copy's bytes immediately before they remove it.
+
 Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
+
+## Attribution sources
+
+Every ledger row carries `attribution_source`:
+
+| Source | Written by | Trust |
+| --- | --- | --- |
+| `caller_typed` | `--capture <id>`, `brigade outcome capture <id>`, the `--capture auto` fallback | The caller named the artifact. Rows without the field read as `caller_typed` and are never reclassified. |
+| `session_observed` | `--capture auto`, `brigade outcome capture auto` | Brigade read the Claude Code hook session state ([session-state containment](claude-hook-session-state.md#skills-read-by-the-session)) and found a skill the session read (`SKILL.md`) or invoked (`Skill` tool). |
+
+`--capture auto` resolves once, before the capture-before-retry gate, to the
+ordered unique skill ids the current session read or invoked through the `Skill`
+tool that the registry or an installed harness actually has. It writes one row
+per skill and never persists the literal `auto`. When nothing resolves (no
+session identity, no matching state, no known skill, as in a Codex repo or a plain
+shell) it falls back to the previous default: one `brigade-work` row recorded as
+`caller_typed`, plus one stderr note, so the loop never silently records nothing.
+The verification result and exit code are unchanged.
+
+Session-observed attribution is caller-side: the agent chooses what it reads,
+so it is forgeable. It may only veto, never promote:
+
+- `outcome rank` and `outcome score` count a `session_observed` row toward
+  `hurt` only. It can lower a rank and never raises `helped`.
+- One physical receipt scores once per artifact. A `session_observed` row and a
+  later caller-typed row for the same receipt collapse to the caller-typed row.
+- `outcome reconcile`, `outcome fork` and the fleet skills report (the dry-run
+  projections) apply the same bounded veto, so they agree. It can turn a
+  candidate install or a promoted bump into a hold with
+  `reason_code: observed_regression_hold`. The hold is surfaced for any prior
+  status and counted with the regression holds in the ratchet report. It never
+  produces an install, a bump or a rollback from these rows, skills and cards
+  alike: observed hurt is excluded from every rollback decision and from the
+  decision core. Rollback policy for observed rows needs its own
+  security-reviewed change.
+- The veto is bounded so one noisy session cannot pin a skill forever. A
+  `session_observed` failing row counts toward the hold only when all of these
+  hold:
+  - it is current content (not proven stale against the skill's fingerprint);
+  - it is inside `observed_hurt_window_days` (default 30);
+  - no later passing receipt for the same verify command or manifest exists in
+    the same session, because a failure fixed later in that session is
+    iteration, not regression;
+  - the hold needs unresolved observed hurt from at least
+    `observed_hurt_min_sessions` distinct sessions (default 2). A receipt whose
+    session cannot be read counts as its own session and is never treated as
+    fixed.
+
+  The count is recomputed on every run, so the hold releases on its own once
+  the hurt ages out of the window or a later pass in its session fixes it, in
+  the spirit of the verified-regression hold that clears when clears outnumber
+  hurts. Both thresholds are `ReconcileConfig` fields; `outcome fork` takes
+  `--observed-hurt-window-days` and `--observed-hurt-min-sessions` to project
+  other values.
+- A `--capture auto` receipt stamps `outcome_capture.attribution_source`, every
+  `observed_artifact_ids` entry and the `session_fingerprint`.
+  `outcome_capture.artifact_id` still names only the first id, so the
+  capture-before-retry hint reads the stamp and suggests
+  `brigade outcome capture auto --run-id <run>` (which resolves skills again and
+  writes `session_observed` rows) instead of a caller-typed
+  `brigade outcome capture <observed-id>`.
+- Route and capability breakdowns in `outcome explain` leave out
+  `session_observed` helped rows, as the score does.
+- Scorecards are built from receipts only, with verifier-authored
+  `subject_binding`. They never read `session_observed` rows, and promotion
+  stays verifier-only (see [skill scorecards](proposals/skill-scorecards.md)).
+
+## Weekly ratchet report
+
+`outcome reconcile` prints its decisions and then forgets them. The weekly memory-care ratchet runs it as a dry run, so a skill held for "withheld: verified regression present" left no structured trace. `--report` writes one small file per run:
+
+```bash
+brigade outcome reconcile --target . --report
+brigade outcome ratchet --target . --json
+```
+
+`.brigade/memory-care/outcome/ratchet-report.json` is versioned (`"version": 1`), written atomically, capped at 64 KiB, and written at most once per reconcile call. It holds `generated_at`, the `apply` flag, summary counts (`decisions`, `regression_holds`, `regression_rollbacks`, plus the first `regression_hold_ids` and `pending_physical_actions`, the count of operator install or rollback commands still pending), decision counts by action, `stale_physical_actions` (the count of rollback commands older than the window, listed in `stale_physical` unless the size cap drops that list, which sets `stale_physical_truncated`), a bounded `pending_physical` list and a bounded `stale_physical` list, each of `{artifact_id, status, status_changed_at, commands}`, a `regressions` list of `{artifact_id, prior_state, reason_code, reason, helped, hurt}`, the receipt ineligibility rate, and the leading ineligibility reason. Only counts, ids and decision reasons are stored: no card body, handoff text or receipt payload. If a run produces more regression rows than the cap allows, trailing rows are dropped and `truncated` plus `regressions_omitted` say how many; the counts and the hold ids still describe the whole run. A `helped`/`hurt` pair in a row is the one the decision used: a skill reports its scorecard effectiveness counts, a card its fingerprint cohorts.
+
+Two counts read differently from `reconcile --json`. The report's `decisions` counts every artifact the run evaluated, including `no change` and `cooldown active` holds, while the reconcile JSON lists only changes and reported holds. A candidate inside its cooldown window reports `cooldown active` even when it has verified hurt, so a zero `regression_holds` count does not by itself mean no regressions. When a write is skipped (an unwritable or symlinked path, or a report still over the cap), reconcile prints a warning and the previous report stays in place. Its `generated_at` shows how old it is.
+
+`reason_code` comes from the decision itself (`regression_hold` or `regression_rollback`), never from reason prose, so rewording a reason cannot silently recategorize a decision.
+
+The report is advisory:
+
+- `--apply` never reads it. Promotions and demotions come from receipts and status, exactly as before. A report path that cannot be written (read-only directory, full disk, a directory in place of the file) warns once on stderr and leaves the reconcile run's own exit code and output alone.
+- An absent, unreadable, oversized, wrong-version or symlinked file is a normal empty state. The loader refuses a symlinked path rather than following it, including between its check and its open.
+- Readers never recompute `rank` or `reconcile`, so an old file reads as old instead of being silently refreshed.
+
+Three surfaces read it, all read-only:
+
+- `brigade work brief` prints one bounded line: `outcome_ratchet: generated_at=... mode=dry-run regression_holds=4 (a, b, c, d) ineligibility_rate=1.0 leading=unattributed`, or `outcome_ratchet: no report yet`. The mode comes from the report's `apply` flag, so a dry-run rollback row never reads as a completed rollback. When the hold count exceeds the listed ids the line ends `+N more`.
+- `brigade outcome ratchet` prints the file with the same `mode=` stamp and row counts, or `report: none` when the ratchet has not run with `--report`.
+- The Center dashboard outcomes view adds a panel below the ranking with the report age, mode, summary counts, ineligibility rate and the regression rows. A report older than seven days is labeled stale.
+
+## Regression proposals
+
+`brigade outcome reconcile --proposals` turns a verified regression into a skills inbox review request (#2590, criterion 1). The weekly ratchet runbook passes it with `--report`.
+
+```bash
+brigade outcome reconcile --target . --report --proposals
+brigade skills inbox list --target .
+```
+
+The trigger is a decision coded `regression_hold` or `regression_rollback`, read from the live reconcile run and its scorecard receipt trail, not from the persisted report, which deliberately carries no receipt data. `observed_regression_hold` files nothing in this slice, because its session attribution is not verified. Each decision becomes one of:
+
+| Result | Meaning |
+| --- | --- |
+| `filed` | A new inbox proposal, marked `requires_revision`, with a behavioral contract. |
+| `existing` | The dedupe key already names a proposal in any status but `superseded`. Nothing is written, and a rejected proposal stays muted until the skill text changes. |
+| `flagged` | `registry`: the staged copy's install receipt says it came from the registry. `mixed-source`: the skill's copies in different harnesses were installed from different sources (for example the registry in one and the bundle in another), so no single copy can stand for the skill. `local-edit`: the staged bundled copy no longer matches its install receipt, so the regression is not evidence about the bundled text. No proposal in any case. Brigade never guesses an upstream. |
+| `skipped` | The skill is unclassified (the staged copy's receipt is a path source or missing, or no longer satisfies the receipt contract so it cannot prove what was installed), its text or scorecard is unavailable, or filing failed (a warning names it). |
+
+Only a skill whose staged copy has an install receipt recording a reviewed `brigade-bundle` source, with no other source among its receipts, and whose files still match that receipt, gets a proposal. The staged copy is the one the scorecard fingerprints, so the receipt checked is the receipt of the text that gets staged. Its harness is the one whose adapter `install_path` holds the copy, and a copy that resolves outside the target (a linked worktree can return the parent clone's) is never staged. The proposal stages the current skill text unchanged. Brigade drafts no text and calls no model, and `brigade skills inbox accept` refuses the proposal until the operator files a revised candidate (see [Skill revision contracts](skill-revision-contracts.md#outcome-regression-proposals)). It is a review request, never authorization, and it never writes a SKILL.md, the registry or any installed copy.
+
+`--proposals` also files in a dry run: without `--apply` the run changes no status or decision, and its output says the proposals were filed because the flag was passed. A failure to file warns on stderr and never changes the exit code. Reconcile prints the counts and up to 20 rows (artifact id, reason code, status, proposal id), and `--json` carries the same under `outcome_proposals`. With `--report` the four counts are stored in the ratchet report summary as `outcome_proposals`. `brigade work brief` prints `outcome_proposals: filed=1 existing=0 flagged=0 skipped=0` (or `not requested` when the last run did not pass the flag), and the dashboard ratchet panel shows the same counts.
 
 ## Which receipts are scoreable
 
@@ -54,7 +214,7 @@ warning: scoreable: no (reason=unattributed); this receipt cannot score the capt
 
 `--json` carries the same verdict as `outcome_scoreability` on the printed payload. `brigade work brief` lists the ids this target has as `outcome_verify_manifests`, and the `outcome_loop_half_fed` warning names them inline.
 
-A repo with no tracked manifest cannot produce an eligible receipt at all. That is the expected state until someone declares one; `ineligibility_rate=1.0` there means "nothing has been declared scoreable yet", not "the checks were untrustworthy".
+A repo with no tracked manifest cannot produce an eligible receipt at all. That is the expected state until someone declares one. `ineligibility_rate=1.0` there means "nothing has been declared scoreable yet", not "the checks were untrustworthy".
 
 ## Tracked manifests in this checkout
 
@@ -192,3 +352,50 @@ deterministic candidates. Proposal admission refuses translation of the negative
 review candidate.
 A failed check does not establish that a claim is false. This workflow adds no
 semantic adjudication or card mutation operation.
+
+### Failure signals for automatic memory verification
+
+Failed `brigade run` receipts retain the recalled cards as bounded
+`evidence_brief.memory_refs` entries with `scope`, `card_id`, and `hash`.
+The receipt omits `memory_refs` when there are no citations.
+File-backed cards cited through `outcome capture --kind card --run-receipt`
+also produce a negative row on failure. Review findings may supply the same
+`memory_refs` list. Completed reviews log
+new findings automatically, and `work review import-findings` retries logging
+without adding duplicate rows. Dry imports and dry runs write no failure rows.
+
+Each producer writes at most one `negative-outcome` row per receipt and scoped
+card through `.brigade/memory/reflect/lesson-signals.jsonl`. Rows contain identifiers and digests,
+with a synthetic card path keyed by the scope and card identity. They contain
+no card body or finding prose. The `.brigade/memory/lesson-cards/` directory
+is reserved for these synthetic identifiers. Do not store file-backed cards
+there. A shared append lock serializes deduplication.
+The lock waits up to 30 seconds. Deduplication scans the complete signal log
+with bounded memory, so its runtime grows with retained history.
+An unreadable or truncated scan refuses the optional append with a fixed
+warning rather than admitting duplicates.
+
+The verify pass reads its own log and the logs under its revalidated workspace
+roots. A workspace that is neither the controller nor a configured verify
+workspace records signals that no verify pass reads. Citations in a configured
+workspace log can prioritize cards from any bound scope. Legacy file rows
+inherit only the configured workspace scope. The log schema has no optional
+`scope` field, which keeps it compatible with older readers.
+Pending negative cards get the first half of a batch, rounded up.
+Remaining slots follow the existing staleness and score order. A one-slot
+batch gives previously verified negatives priority only when no eligible card
+has an older verification day. Existing
+eligibility rules and minimum intervals still apply, so repeated failures
+cannot force a card into every run. Review or consolidation timestamps clear
+older priority signals. These rows supply scheduling priority, never positive
+proof or a drafted lesson card. Reflection reads only `evidence-log.jsonl`,
+which retains eligible verification outcomes. File-backed run citations also
+write to the scheduling log because their hashes are not verification receipts.
+
+Verification consumes signals through its recorded UTC day, including failures
+later that day. Selection reads the newest 4 MiB of each log, so an unconsumed
+signal can expire by signal-log volume. Unrelated reflection evidence cannot
+push signals out of this window. Digest-addressed retractions belong in the
+same log as the original row. No supported command writes signal-log
+retractions today. Retries retain original rows as deduplication
+tombstones and cannot restore a withdrawn signal.

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 from .. import __version__ as BRIGADE_VERSION
 from .. import mcp_server
 from ..localio import slugify, utc_now_iso as _now
+from ..outcome_skill_exec import ROLLBACK_WARNING
 from ..projection import kernel as projection
 from ..templates import template_root
 from ..untrusted import scan_untrusted
@@ -31,6 +32,7 @@ from ..untrusted import scan_untrusted
 from . import registry as _registry_mod
 from . import search_validate
 from . import packs as _packs_mod
+from . import quarantine as _quarantine_mod
 
 if TYPE_CHECKING:
     import brigade.skills_cmd.install as _install_mod
@@ -43,6 +45,32 @@ def _trust_at_least(actual: str, minimum: str) -> bool:
         return _registry_mod.TRUST_LEVELS.index(actual) >= _registry_mod.TRUST_LEVELS.index(minimum)
     except ValueError:
         return False
+
+
+def _local_edit_kept_reason(item: dict[str, Any], installed_dir: Path, workspace: Path) -> str:
+    """Why an edited copy is kept, naming the diff and the explicit override."""
+    skill_id = str(item["skill_id"])
+    harness = str(item["harness"])
+    selector = f"registry:{skill_id}"
+    return _install_mod._local_edit_reason(
+        installed_dir=installed_dir,
+        diff_command=_install_mod._local_edit_diff_command(
+            workspace=workspace, selector=selector, harness=harness, against="registry"
+        ),
+        discard_command=_install_mod._local_edit_discard_command(
+            workspace=workspace, selector=selector, harness=harness
+        ),
+    )
+
+
+def _unproven_copy_reason(*, has_skill_md: bool) -> str:
+    """Why sync will not touch a copy it cannot judge; the dry run and the write agree on it."""
+    if not has_skill_md:
+        return (
+            "installed copy is missing SKILL.md but other files remain; "
+            "repair it with `brigade skills install <skill> --target <harness> --force`"
+        )
+    return "installed copy has no valid provenance receipt"
 
 
 def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[str, Any]], str | None]:
@@ -124,7 +152,24 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 item["reason"] = "; ".join(render_errors)
                 items.append(item)
                 continue
-            installed_dir = _install_mod._install_dir(workspace, install_target, skill_id)
+            install_dir, escapes = _install_mod._evaluate_install_dir(workspace, install_target, skill_id)
+            if escapes:
+                # A copy resolving outside the workspace is reported and left
+                # alone rather than refused with an exception.
+                item.update(
+                    state="external",
+                    action="none",
+                    result="skipped",
+                    reason=f"installed copy resolves outside the workspace ({install_dir}); left untouched",
+                )
+                items.append(item)
+                continue
+            try:
+                installed_dir = _install_mod._install_dir(workspace, install_target, skill_id)
+            except (ValueError, _registry_mod.SkillsStatePathError) as exc:
+                item.update(state="unusable", action="none", result="skipped", reason=str(exc))
+                items.append(item)
+                continue
             drift = _install_mod._drift_payload(
                 target=workspace,
                 skill_id=skill_id,
@@ -137,25 +182,53 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 key: drift[key]
                 for key in ("overall", "source", "render", "local_edit", "receipt_known", "content_changed")
             }
+            path_state = str(drift.get("path_state") or "dir")
+            link_target = raw_link_target if isinstance((raw_link_target := drift.get("link_target")), str) else None
+            if path_state not in {"dir", "missing"}:
+                # A symlinked, dangling, or otherwise non-plain installed copy is
+                # reported and skipped here, so neither the dry-run nor a later
+                # write plans any mutation through it.
+                item.update(
+                    state="symlink" if path_state == "symlink" else "unusable",
+                    action="none",
+                    result="skipped",
+                    link_target=link_target,
+                    reason=_install_mod._installed_state_reason(path_state, link_target, installed_dir),
+                )
+                items.append(item)
+                continue
             if drift["overall"] == "current":
                 item.update(state="current", result="unchanged")
             elif drift["overall"] == "missing":
                 item.update(state="missing", action="install", result="planned")
+            elif drift["local_edit"] == "changed":
+                # A hand-edited copy is kept: no mutation, receipt, history row
+                # or snapshot. The operator decides with the diff and the
+                # explicit override, never a scheduled sync.
+                item.update(
+                    state="edited",
+                    action="none",
+                    result="kept",
+                    reason=_local_edit_kept_reason(item, installed_dir, workspace),
+                )
             elif drift["overall"] == "changed":
                 item.update(state="changed", action="update", result="planned")
             else:
-                item["reason"] = "installed copy has no valid provenance receipt"
+                item["reason"] = _unproven_copy_reason(has_skill_md=bool(drift["installed"]))
             items.append(item)
     return items, None
 
 
 def _sync_file_entries(root: Path) -> dict[str, tuple[bytes, int]]:
-    if not root.is_dir():
+    try:
+        if not stat_module.S_ISDIR(root.lstat().st_mode):
+            return {}
+    except OSError:
         return {}
     return {
         path.relative_to(root).as_posix(): (path.read_bytes(), path.stat().st_mode & 0o777)
         for path in sorted(root.rglob("*"))
-        if path.is_file()
+        if not path.is_symlink() and path.is_file()
     }
 
 
@@ -195,12 +268,20 @@ def _sync_file_mutations(
     before: dict[str, tuple[bytes, int]],
     after: dict[str, tuple[bytes, int]],
     display_prefix: str,
+    bind_unchanged: bool = False,
 ) -> list[projection.MutationSpec]:
+    """File mutations turning ``before`` into ``after``.
+
+    ``bind_unchanged`` also binds every file that stays byte-identical with an
+    idempotent replace, so its ``expected_before`` digest is a precondition: an
+    edit made between planning and execution aborts the write instead of being
+    recorded as pristine in a new receipt and snapshot.
+    """
     mutations: list[projection.MutationSpec] = []
     for relative in sorted(set(before) | set(after)):
         old = before.get(relative)
         new = after.get(relative)
-        if old == new:
+        if old == new and not (bind_unchanged and old is not None):
             continue
         destination = root / relative
         mutation_type = "create" if old is None else "remove" if new is None else "replace"
@@ -300,6 +381,22 @@ def _sync_projection_plan(
                 continue
             desired_files = _sync_rendered_files(snapshot_files, metadata, skill_id, harness)
             installed_dir = _install_mod._install_dir(workspace, harness, skill_id)
+            dest_state, dest_link_target = _install_mod._installed_path_state(
+                workspace, installed_dir, anchor=state_anchor
+            )
+            if dest_state not in {"dir", "missing"}:
+                # Planning already skipped non-plain copies; this re-check covers
+                # a destination swapped between planning and writing, so no
+                # mutation is ever planned through a link.
+                item.update(
+                    state="symlink" if dest_state == "symlink" else "unusable",
+                    action="none",
+                    result="skipped",
+                    link_target=dest_link_target,
+                    reason=_install_mod._installed_state_reason(dest_state, dest_link_target, installed_dir),
+                )
+                item["receipt"] = None
+                continue
             installed_parts = _packs_mod._lexical_state_root_parts(workspace, installed_dir)
             if installed_parts is not None:
                 # State-backed install destinations are inspected through the
@@ -325,12 +422,57 @@ def _sync_projection_plan(
                 }
             else:
                 previous_files = _sync_file_entries(installed_dir)
+            receipt_before = _registry_mod._read_state_file_bytes(
+                state_anchor, "skills", "installs", f"{skill_id}-{harness}.json"
+            )
+            previous_receipt: dict[str, Any] = {}
+            if receipt_before is not None:
+                try:
+                    parsed = json.loads(receipt_before.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    previous_receipt = parsed
+            # Re-check the edit state against the exact bytes this plan would
+            # replace: an edit made after the dry-run plan is still kept, and
+            # a copy no receipt can vouch for is never overwritten here.
+            edit_state = (
+                _install_mod._local_edit_state(
+                    previous_receipt,
+                    {tuple(Path(relative).parts): data for relative, (data, _mode) in previous_files.items()},
+                    skill_id=skill_id,
+                    harness=harness,
+                )
+                if previous_files
+                else "current"
+            )
+            if edit_state != "current":
+                if edit_state == "changed":
+                    item.update(
+                        state="edited",
+                        action="none",
+                        result="kept",
+                        reason=_local_edit_kept_reason(item, installed_dir, workspace),
+                    )
+                else:
+                    item.update(
+                        state="blocked",
+                        action="none",
+                        result="blocked",
+                        reason=_unproven_copy_reason(has_skill_md="SKILL.md" in previous_files),
+                    )
+                # The report must say why the item was kept, not the stale dry-run view.
+                if isinstance(item.get("drift"), dict):
+                    item["drift"] = {**item["drift"], "local_edit": edit_state}
+                item["receipt"] = None
+                continue
             mutations.extend(
                 _sync_file_mutations(
                     root=installed_dir,
                     before=previous_files,
                     after=desired_files,
                     display_prefix=f"bundle:{skill_id}:{harness}",
+                    bind_unchanged=True,
                 )
             )
             installed_at = _now()
@@ -353,17 +495,6 @@ def _sync_projection_plan(
             render = _install_mod._renderer_contract(workspace, harness)
             skill_content = desired_files.get("SKILL.md", (b"", 0))[0].decode("utf-8", errors="replace")
             receipt_path = _registry_mod._installs_root(workspace) / f"{skill_id}-{harness}.json"
-            receipt_before = _registry_mod._read_state_file_bytes(
-                state_anchor, "skills", "installs", f"{skill_id}-{harness}.json"
-            )
-            previous_receipt: dict[str, Any] = {}
-            if receipt_before is not None:
-                try:
-                    parsed = json.loads(receipt_before.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    parsed = None
-                if isinstance(parsed, dict):
-                    previous_receipt = parsed
             receipt = {
                 "schema_version": _registry_mod.RECEIPT_SCHEMA_VERSION,
                 "workspace": str(workspace),
@@ -378,6 +509,9 @@ def _sync_projection_plan(
                 "render": {**render, "fingerprint": _registry_mod._text_fingerprint(skill_content)},
                 "installed": {
                     "bundle_fingerprint": _sync_files_fingerprint(desired_files),
+                    "edit_fingerprint": _registry_mod._edit_fingerprint(
+                        {tuple(Path(relative).parts): data for relative, (data, _mode) in desired_files.items()}
+                    ),
                     "skill_fingerprint": _registry_mod._text_fingerprint(skill_content),
                     "metadata_fingerprint": _registry_mod._text_fingerprint(
                         desired_files.get("skill.json", (b"", 0))[0].decode("utf-8", errors="replace")
@@ -482,14 +616,27 @@ def sync(
                         applied[result] += 1
                 else:
                     state = "restored" if receipt.terminal_state == "restored" else "recovery-required"
-                    for item in mutable_items:
+                    # Items the projection pass kept (edited, blocked, excluded)
+                    # were never part of the failed operation: keep their result.
+                    failed_items = [item for item in mutable_items if item["action"] in {"install", "update"}]
+                    for item in failed_items:
                         item["result"] = state
-                    applied["restored"] = len(mutable_items) if state == "restored" else 0
+                    applied["restored"] = len(failed_items) if state == "restored" else 0
                     applied["failed"] = 1
 
     counts = {
         state: sum(item["state"] == state for item in items)
-        for state in ("current", "missing", "changed", "blocked", "excluded")
+        for state in (
+            "current",
+            "missing",
+            "changed",
+            "edited",
+            "blocked",
+            "excluded",
+            "external",
+            "symlink",
+            "unusable",
+        )
     }
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -516,7 +663,20 @@ def sync(
             print(f"projection operation: {projection_view['operation_id']}")
             print(f"projection status: {projection_view['terminal_state']}")
         print(
-            " ".join(f"{state}={counts[state]}" for state in ("current", "missing", "changed", "blocked", "excluded"))
+            " ".join(
+                f"{state}={counts[state]}"
+                for state in (
+                    "current",
+                    "missing",
+                    "changed",
+                    "edited",
+                    "blocked",
+                    "excluded",
+                    "external",
+                    "symlink",
+                    "unusable",
+                )
+            )
         )
         for item in items:
             detail_value = item.get("error") or item.get("reason")
@@ -553,6 +713,7 @@ def uninstall(
         return 2
     targets = install_targets if harness == "all" else (harness,)
     removed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     try:
         state_anchor = _registry_mod._hold_state_root(workspace)
     except _registry_mod.SkillsStatePathError as exc:
@@ -562,7 +723,7 @@ def uninstall(
         for install_target in targets:
             state_anchor.revalidate()
             try:
-                dest = _install_mod._install_dir(workspace, install_target, skill_id)
+                dest = _install_mod._install_dir(workspace, install_target, skill_id, leaf_link_is_local=True)
             except ValueError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
@@ -579,13 +740,34 @@ def uninstall(
                 _install_mod._check_review_binding(
                     expected_binding, workspace, skill_id, install_target, anchor=state_anchor
                 )
-            if not dest.exists() and not has_receipt:
+            dest_state, dest_link_target = _install_mod._installed_path_state(workspace, dest, anchor=state_anchor)
+            if dest_state not in {"dir", "missing"}:
+                # A symlinked, dangling, or otherwise non-plain copy is left
+                # exactly as it is; its receipt stays authoritative.
+                skipped.append(
+                    {
+                        "harness": install_target,
+                        "path": str(dest),
+                        "state": dest_state,
+                        "reason": _install_mod._installed_state_reason(dest_state, dest_link_target, dest),
+                    }
+                )
                 continue
-            if dest.exists():
+            if dest_state == "missing" and not has_receipt:
+                continue
+            if dest_state == "dir":
                 if under_state_root:
                     _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 else:
-                    shutil.rmtree(dest)
+                    try:
+                        _install_mod._remove_plain_install_dir(dest)
+                    except _registry_mod.SkillsStatePathError as exc:
+                        # Swapped to a link after the classification: left
+                        # alone, its receipt stays authoritative.
+                        skipped.append(
+                            {"harness": install_target, "path": str(dest), "state": "symlink", "reason": str(exc)}
+                        )
+                        continue
             if has_receipt:
                 _registry_mod._unlink_in_anchor(state_anchor, "skills", "installs", receipt_name)
             _registry_mod._append_state_line(
@@ -613,16 +795,24 @@ def uninstall(
         return 2
     finally:
         state_anchor.close()
-    if not removed:
+    if not removed and not skipped:
         print(f"error: skill not installed: {skill} ({harness})", file=sys.stderr)
         return 1
-    payload = {"workspace": str(workspace), "skill_id": skill_id, "uninstalled": removed, "count": len(removed)}
+    payload = {
+        "workspace": str(workspace),
+        "skill_id": skill_id,
+        "uninstalled": removed,
+        "skipped": skipped,
+        "count": len(removed),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"skills uninstall: {skill_id}")
     for record in removed:
         print(f"removed: {record['harness']} -> {record['path']}")
+    for record in skipped:
+        print(f"skipped: {record['harness']} -> {record['reason']}")
     return 0
 
 
@@ -632,9 +822,11 @@ def rollback(
     workspace: Path,
     skill: str,
     harness: str,
+    discard_local_edits: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
+    """Restore the last snapshot."""
     workspace = workspace.expanduser().resolve()
     skill_id = _registry_mod._slug(skill)
     if harness not in _install_mod._install_targets(workspace):
@@ -686,7 +878,17 @@ def rollback(
             if _registry_mod._state_entry_kind(state_anchor, *snapshot_rel) != "dir":
                 print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
                 return 1
-            dest = _install_mod._install_dir(workspace, harness, skill_id)
+            dest = _install_mod._install_dir(workspace, harness, skill_id, leaf_link_is_local=True)
+            dest_state, dest_link_target = _install_mod._installed_path_state(workspace, dest, anchor=state_anchor)
+            if dest_state not in {"dir", "missing"}:
+                # A symlinked, dangling, or otherwise non-plain install is left
+                # untouched; the rollback snapshot stays recorded for later.
+                print(
+                    f"skipped: rollback left {skill_id} on {harness} untouched: "
+                    + _install_mod._installed_state_reason(dest_state, dest_link_target, dest),
+                    file=sys.stderr,
+                )
+                return 2
             install_rel = str(_install_mod._adapter_map(workspace)[harness]["install_path"]).format(skill_id=skill_id)
             under_state_root = install_rel.startswith(".brigade/")
             state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
@@ -741,17 +943,114 @@ def rollback(
             }
             if expected_binding is not None:
                 _install_mod._check_review_binding(expected_binding, workspace, skill_id, harness, anchor=state_anchor)
+            if not json_output:
+                # Say what is about to be trusted before anything is restored:
+                # the pointer and fingerprint come from the workspace receipt.
+                print(ROLLBACK_WARNING, file=sys.stderr)
+                print(f"rollback_snapshot: {snapshot_value}")
+                print(f"rollback_snapshot_fingerprint: {recorded_snapshot_fingerprint}")
+            live_identity: _install_mod.TreeIdentity | None = None
+            edit_snapshot_stamp: str | None = None
+            if dest_state == "dir":
+                # Read the live bytes now, right before anything is deleted, so an
+                # edit made after validation is still seen. A hand edit is never
+                # discarded unless asked, and then it is snapshotted first.
+                live = _install_mod._inspect_installed_tree(workspace, dest, anchor=state_anchor)
+                live_identity = _install_mod._tree_identity(dest, live)
+                edit_state = _install_mod._local_edit_state(
+                    current_receipt, live.files, skill_id=skill_id, harness=harness
+                )
+                if edit_state == "changed" and not discard_local_edits:
+                    selector, against = _install_mod._local_edit_selector(
+                        current_receipt, skill_id=skill_id, fallback=f"registry:{skill_id}"
+                    )
+                    reason = _install_mod._local_edit_reason(
+                        installed_dir=dest,
+                        diff_command=_install_mod._local_edit_diff_command(
+                            workspace=workspace, selector=selector, harness=harness, against=against
+                        ),
+                        discard_command=_install_mod._local_edit_rollback_discard_command(
+                            workspace=workspace, skill_id=skill_id, harness=harness
+                        ),
+                    )
+                    print(f"error: {reason}", file=sys.stderr)
+                    return 2
+                if edit_state == "changed":
+                    edit_snapshot_stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-") + "-local-edits"
+                    _registry_mod._write_collected_tree_into_anchor(
+                        live.dirs,
+                        live.files,
+                        state_anchor,
+                        "skills",
+                        "rollback",
+                        skill_id,
+                        harness,
+                        edit_snapshot_stamp,
+                    )
+                    payload["edit_snapshot"] = str(
+                        _registry_mod._rollback_root(workspace, skill_id, harness) / edit_snapshot_stamp
+                    )
+
+            def quarantine_checked_bytes() -> _quarantine_mod.TreeQuarantine | None:
+                """Move the copy aside and verify it is what the edit check saw; stale edit snapshots are dropped."""
+                if dest_state != "dir":
+                    return None
+                try:
+                    _install_mod._require_tree_unchanged(live_identity, workspace, dest, anchor=state_anchor)
+                    return _quarantine_mod.quarantine_checked_tree(
+                        dest,
+                        live_identity,
+                        anchor=state_anchor if under_state_root else None,
+                        state_parts=state_parts if under_state_root else None,
+                    )
+                except _registry_mod.SkillsStatePathError:
+                    if edit_snapshot_stamp is not None:
+                        with contextlib.suppress(_registry_mod.SkillsStatePathError, OSError):
+                            _registry_mod._remove_tree_in_anchor(
+                                state_anchor, "skills", "rollback", skill_id, harness, edit_snapshot_stamp
+                            )
+                    raise
+
+            quarantine: _quarantine_mod.TreeQuarantine | None = None
             if under_state_root:
-                _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
-                _registry_mod._write_collected_tree_into_anchor(dirs, files, state_anchor, *state_parts)
+                quarantine = quarantine_checked_bytes()
+                try:
+                    _registry_mod._write_collected_tree_into_anchor(
+                        dirs, files, state_anchor, *state_parts, replace=quarantine is None
+                    )
+                except BaseException:
+                    if quarantine is not None:
+                        quarantine.abort_publish()
+                    raise
             else:
-                if dest.exists():
-                    shutil.rmtree(dest)
-                dest.mkdir(parents=True, exist_ok=True)
-                for parts in dirs:
-                    (dest.joinpath(*parts)).mkdir(parents=True, exist_ok=True)
-                for parts, data in files.items():
-                    (dest.joinpath(*parts)).write_bytes(data)
+                # Classify again right before writing: the first check is
+                # old by now (snapshot read, lint, binding re-checks). A link
+                # planted since is refused here, and the leaf is created with
+                # a plain mkdir (no exist_ok), so it is never followed.
+                recheck_state, recheck_link_target = _install_mod._installed_path_state(
+                    workspace, dest, anchor=state_anchor
+                )
+                if recheck_state != dest_state:
+                    print(
+                        f"skipped: rollback left {skill_id} on {harness} untouched: installed copy changed to "
+                        + _install_mod._installed_state_reason(recheck_state, recheck_link_target, dest),
+                        file=sys.stderr,
+                    )
+                    return 2
+                quarantine = quarantine_checked_bytes()
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    os.mkdir(dest)
+                    for parts in dirs:
+                        (dest.joinpath(*parts)).mkdir(parents=True, exist_ok=True)
+                    for parts, data in files.items():
+                        (dest.joinpath(*parts)).write_bytes(data)
+                except BaseException:
+                    if quarantine is not None:
+                        quarantine.abort_publish()
+                    raise
+            if quarantine is not None:
+                quarantine.discard()
             if previous_receipt:
                 _registry_mod._write_state_file(
                     state_anchor, "skills", "installs", receipt_name, data=_registry_mod._json_bytes(previous_receipt)
@@ -762,12 +1061,13 @@ def rollback(
                 state_anchor, "skills", "installs", rollback_receipt_name, data=_registry_mod._json_bytes(payload)
             )
             _registry_mod._remove_tree_in_anchor(state_anchor, *snapshot_rel)
-    except _registry_mod.SkillsStatePathError as exc:
+    except (_registry_mod.SkillsStatePathError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     payload["receipt_path"] = str(rollback_receipt_path)
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        shown = {**payload, "snapshot_fingerprint": recorded_snapshot_fingerprint, "warning": ROLLBACK_WARNING}
+        print(json.dumps(shown, indent=2, sort_keys=True))
         return 0
     print(f"skill_rollback: {skill_id}")
     print(f"target: {harness}")
@@ -834,11 +1134,18 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
     else:
         source_text = _registry_mod._skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
     rendered = _registry_mod._render_skill_text_for_harness(source_text, metadata, skill_id, harness)
-    installed_dir = _install_mod._install_dir(target, harness, skill_id)
+    try:
+        installed_dir = _install_mod._install_dir(target, harness, skill_id, leaf_link_is_local=True)
+    except ValueError as exc:
+        # A linked install resolving outside the workspace is reported, never
+        # followed into an outside diff.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     # The installed side is inspected through one anchored snapshot; a
     # symlinked SKILL.md in a state-backed install target contributes
     # absence, never outside file content.
-    _snapshot_dirs, snapshot_files = _install_mod._installed_tree_snapshot(target, installed_dir)
+    inspection = _install_mod._inspect_installed_tree(target, installed_dir)
+    snapshot_files = inspection.files
     installed_raw = snapshot_files.get(("SKILL.md",))
     installed_present = installed_raw is not None
     installed_text = installed_raw.decode("utf-8", errors="replace") if installed_raw is not None else ""
@@ -860,6 +1167,7 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
         lint_payload=lint_payload,
         rendered=rendered,
         installed_dir=installed_dir,
+        inspection=inspection,
     )
     payload = {
         "target": str(target),
@@ -869,6 +1177,8 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
         "baseline_skill": baseline_skill,
         "installed": installed_present,
         "installed_path": str(installed_skill),
+        "installed_state": drift["path_state"],
+        "link_target": drift["link_target"],
         "changed": bool(diff_lines),
         "diff": diff_lines,
         "drift": {

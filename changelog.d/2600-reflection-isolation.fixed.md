@@ -1,0 +1,1 @@
+- Keep run and review scheduling signals in a separate append-only log so they cannot block local reflection proposals. Preserve scope matching, deduplication, and retractions. Route nested run receipts to the recall workspace and bound dispatch citations.

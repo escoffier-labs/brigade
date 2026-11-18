@@ -62,6 +62,24 @@ pub fn input_blocker<T: ReadTx + ?Sized>(
     }
     Ok(None)
 }
+/// True when any changed card was applied or rolled back in the last 24 hours.
+/// History is read in the caller's snapshot or transaction, never from the candidate.
+pub fn cooldown_active<'a, T: ReadTx + ?Sized>(
+    tx: &T,
+    changed: impl IntoIterator<Item = &'a Json>,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    for card in changed {
+        let rows = tx.query("SELECT 1 FROM memory_events WHERE scope=?1 AND card_id=?2 AND kind IN ('proposal.apply','proposal.rollback') AND revision IS NOT NULL AND created_at>?3 LIMIT 1", &[
+            ops::t(string(card,"scope")),ops::t(string(card,"card_id")),ops::t(&ids::isoformat(now.saturating_sub(86_400_000)))
+        ])?;
+        if !rows.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn evaluate<T: ReadTx + ?Sized>(
     tx: &T,
     body: &Json,
@@ -77,6 +95,8 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         Some("policy_missing")
     } else if memory.get("auto_apply").is_some_and(|v| !v.is_boolean()) {
         Some("policy_invalid")
+    } else if super::compensation::class_held(tx, body)? {
+        Some("compensation_class_held")
     } else if ops.is_empty()
         || ops
             .iter()
@@ -155,11 +175,14 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         },
         "held",
     );
+    let structural = tier == 0 && super::proposal_tiers::anchor_proof(tx, body)?;
     let proof = super::attestation::resolve(tx, body, authority, scanner, now)?;
     check(
         &mut checks,
         "evidence_floor",
-        if !proof.complete {
+        if structural {
+            None
+        } else if !proof.complete {
             Some("proof_binding_incomplete")
         } else {
             (proof.hashes.len() < 3).then_some("evidence_floor_unmet")
@@ -169,7 +192,9 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     check(
         &mut checks,
         "source_group_floor",
-        if !proof.complete {
+        if structural {
+            None
+        } else if !proof.complete {
             Some("proof_binding_incomplete")
         } else {
             (proof.principals.len() < 2).then_some("source_group_floor_unmet")
@@ -216,7 +241,9 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     check(
         &mut checks,
         "evidence_authority",
-        if !proof.complete {
+        if structural {
+            proof.contrary.then_some("contrary_evidence")
+        } else if !proof.complete {
             Some("evidence_authority_unbound")
         } else {
             proof.contrary.then_some("contrary_evidence")
@@ -243,13 +270,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     );
     // Match #2187's diagnostic defaults. History is read in the same snapshot
     // (and the apply transaction), never accepted from the candidate.
-    let mut recent = false;
-    for card in &changed {
-        let rows = tx.query("SELECT 1 FROM memory_events WHERE scope=?1 AND card_id=?2 AND kind IN ('proposal.apply','proposal.rollback') AND revision IS NOT NULL AND created_at>?3 LIMIT 1", &[
-            ops::t(string(card,"scope")),ops::t(string(card,"card_id")),ops::t(&ids::isoformat(now.saturating_sub(86_400_000)))
-        ])?;
-        recent |= !rows.is_empty();
-    }
+    let recent = cooldown_active(tx, changed.iter().copied(), now)?;
     check(
         &mut checks,
         "cooldown_history",
@@ -280,13 +301,21 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "workspace_fingerprint":null,"evidence_log_sha256":"incomplete","delta_sha256":delta,"changed_path_count":changed.len(),
         "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.principals.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
     });
+    report["structural_anchor_proof"] = json!(structural);
     report["retrieval_eval_record"] = super::retrieval_eval::summary(tx, authority)?;
-    let eval_expiry = super::retrieval_eval::expires(tx, authority)?;
+    let eval_expiry = if proposals::cards(body)
+        .iter()
+        .all(|c| c["scope"] == super::retrieval_eval::FIXTURE_SCOPE)
+    {
+        super::retrieval_eval::expires(tx, authority)?
+    } else {
+        None // Real-scope invariance needs no measurement or report lifetime.
+    };
     report["valid_until_ms"] = json!(
         proof
             .expires_ms
-            .unwrap_or(now)
-            .min(eval_expiry.unwrap_or(now))
+            .unwrap_or(if structural { i64::MAX } else { now })
+            .min(eval_expiry.unwrap_or(i64::MAX))
     );
     // Bind the diagnostic facts, not an unverified proof or promotion permit.
     bind_evaluation(&mut report);

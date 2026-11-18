@@ -1,9 +1,13 @@
 """Retrieval protects cards, while bulk listings do not count as use."""
 
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
+
 import os
 from datetime import date, timedelta
 
 import pytest
+
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
 
 from brigade import memory_card_reads as reads, memory_hooks, memory_vault, obsidian_vault, dispatch_memory
 from brigade import memory_care_retire as retire, memory_care_tend as tend, memory_cmd
@@ -16,7 +20,7 @@ from tests.test_hook_hub_recall import wired, _read  # noqa: F401
 
 
 @pytest.mark.parametrize("source", ["cwd", "workspace"])
-def test_checkout_recall_records_reads_without_search_log(tmp_path, source):
+def test_checkout_recall_does_not_record_opens(tmp_path, source):
     setup_card(tmp_path)
     cwd = tmp_path if source == "workspace" else tmp_path / "unique-word"
     cwd.mkdir(exist_ok=True)
@@ -26,26 +30,31 @@ def test_checkout_recall_records_reads_without_search_log(tmp_path, source):
         (tmp_path / "memory/cards/old.md").write_text("---\ncard_id: old\ntitle: workspace\n---\nworkspace\n")
         payload = memory_hooks.recall_cards_payload(target=tmp_path, cwd=cwd)
     assert payload["matches"]
-    assert reads.load(tmp_path).last_read
+    assert not reads.load(tmp_path).last_read
     assert not (tmp_path / ".brigade/memory/search-log.jsonl").exists()
 
 
-def test_read_tool_records_in_owning_memory_root(wired):  # noqa: F811
+def test_read_tool_records_in_owning_memory_root(wired, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(reads, "_day", lambda: date(2026, 11, 1))
     target, memory = wired
     assert _read(target, memory / "memory/cards/comet.md")
-    assert reads.last_read(reads.load(memory), ["memory/cards/comet.md"]) == date.today()
+    assert reads.last_read(reads.load(memory), ["memory/cards/comet.md"]) == date(2026, 11, 1)
     assert reads.load(target).last_read == {}
 
 
-def test_dispatch_local_context_records_reads(tmp_path):
+def test_dispatch_local_context_does_not_record_opens(tmp_path):
     setup_card(tmp_path)
     assert dispatch_memory._local_matches(tmp_path, "unique-word")
-    assert reads.last_read(reads.load(tmp_path), ["memory/cards/old.md"]) == date.today()
+    assert reads.last_read(reads.load(tmp_path), ["memory/cards/old.md"]) is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="vault containment checks are unavailable on Windows")
 @pytest.mark.parametrize("operation", ["search", "show"])
-def test_vault_projection_reads_protect_canonical_card(tmp_path, operation, capsys):
+def test_vault_projection_reads_protect_canonical_card(tmp_path, operation, capsys, monkeypatch):
+    from tests.memory_read_fixtures import signing_key
+
+    monkeypatch.setattr(reads, "_day", lambda: date(2026, 11, 1))
+    signing_key(tmp_path)
     _write_card(tmp_path, "alpha", title="Alpha", body="rotation policy", tags=["rotation"])
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -58,7 +67,9 @@ def test_vault_projection_reads_protect_canonical_card(tmp_path, operation, caps
     if operation == "show":
         (tmp_path / reads.READS_REL).unlink(missing_ok=True)
         memory_vault.show_payload(tmp_path, hits[0]["id"])
-    assert reads.last_read(reads.load(tmp_path), ["memory/cards/alpha.md"]) == date.today()
+    assert reads.last_read(reads.load(tmp_path), ["memory/cards/alpha.md"]) == (
+        date(2026, 11, 1) if operation == "show" else None
+    )
 
 
 def test_listings_record_nothing(stores):  # noqa: F811
@@ -87,51 +98,50 @@ def test_no_expiry_is_never_candidate_however_long_unread(tmp_path):
     assert not retire.plan(tmp_path, memory_cmd.MemoryCareConfig(), tend.TendConfig(), today=date.today())["candidates"]
 
 
-def test_local_read_retries_lock_once_with_longer_wait(tmp_path, monkeypatch):
+def test_local_read_lock_failure_records_coverage_error(tmp_path, monkeypatch):
     from contextlib import contextmanager
     from brigade import inbox_lock
 
-    original = inbox_lock.held_file_lock
-    deadlines = []
-
     @contextmanager
     def contended(path, *, deadline_seconds):
-        deadlines.append(deadline_seconds)
-        if len(deadlines) == 1:
-            raise inbox_lock.InboxLockTimeout("busy")
-        with original(path, deadline_seconds=deadline_seconds):
-            yield
+        raise inbox_lock.InboxLockTimeout("busy")
+        yield
 
     monkeypatch.setattr(inbox_lock, "held_file_lock", contended)
-    reads.record(tmp_path, iter(["seen"]))
-    assert len(deadlines) == 2 and min(deadlines) > 1
-    assert reads.last_read(reads.load(tmp_path), ["seen"]) == date.today()
+    assert reads.record(tmp_path, ["seen"]) is False
+    assert reads.load(tmp_path).recorder_error
+    assert reads.last_read(reads.load(tmp_path), ["seen"]) is None
 
 
-@pytest.mark.parametrize("operation", ["dispatch", "content", "hook"])
-def test_read_ledger_failure_does_not_fail_retrieval(tmp_path, monkeypatch, operation):
-    attempts = []
-
+def test_content_read_succeeds_if_coverage_intent_cannot_be_saved(tmp_path, monkeypatch):
     def broken(*args, **kwargs):
-        attempts.append(1)
-        raise OSError("ledger unavailable")
+        raise OSError("coverage unavailable")
 
-    setup_card(tmp_path)
-    monkeypatch.setattr(reads.store, "write_json", broken)
-    if operation == "dispatch":
-        assert dispatch_memory._local_matches(tmp_path, "unique-word")
-    elif operation == "hook":
-        assert memory_hooks._recall_cards_payload_impl(target=tmp_path, cwd=tmp_path / "unique-word")["matches"]
-    else:
-        reads.record_content(tmp_path, "body", "memory/cards/old.md")
-    assert len(attempts) == 2
+    monkeypatch.setattr(reads, "_write_json", broken)
+    reads.record_content(tmp_path, "body", "memory/cards/old.md")
+    assert reads.load(tmp_path).recorder_error
 
 
-def test_read_tool_ledger_failure_still_observes_card(wired, monkeypatch):  # noqa: F811
+def test_read_tool_reports_unrecordable_coverage(wired, monkeypatch):  # noqa: F811
     target, memory = wired
 
     def broken(*args, **kwargs):
         raise OSError("ledger unavailable")
 
-    monkeypatch.setattr(reads, "record", broken)
+    monkeypatch.setattr(reads, "_write_json", broken)
     assert _read(target, memory / "memory/cards/comet.md")
+    assert reads.load(memory).recorder_error
+
+
+def test_mcp_content_read_survives_unwritable_state(stores, monkeypatch):  # noqa: F811
+    repo, _ = stores
+    _card(repo, "old.md", "Old", "still readable")
+
+    def denied(*args, **kwargs):
+        raise PermissionError("state directory unavailable")
+
+    monkeypatch.setattr(reads, "_write_json", denied)
+    content, error = _tools(repo).call("get_card", {"path": "memory/cards/old.md"})
+    assert "still readable" in content
+    assert not error
+    assert reads.load(repo).recorder_error

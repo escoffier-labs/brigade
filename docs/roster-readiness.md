@@ -51,6 +51,8 @@ Unix timestamp, age in seconds, and TTL. Nonfinite timestamps are unknown and
 render as JSON null. Malformed operation observations are unknown with reason
 `observation-malformed`. Invalid health values are unknown with reason
 `health-unobserved`. Valid refusals in other evidence retain precedence.
+Plain-text output prints the same report's status, operation scope, and
+observation time before the roster, seats, and evidence rows.
 
 `selected_seats` includes the declared role and a separate selection role
 (`worker`, `orchestrator`, `missing`, or `unresolved`). `structural_worker_count` counts local
@@ -79,8 +81,15 @@ or writes a health receipt. It uses the shared `SeatHealthProbe` only for
 selected Brigade workers, excludes their fallback chains, disables model
 smoke and executable version collection, and retains the shared 30-second
 per-seat and 35-second overall health bounds. Prompt-free provider status
-checks and transport initialization may still run. The shared probe's
-in-process cache may be reused when an embedding caller supplies a probe.
+checks and transport initialization may still run. With model smoke disabled,
+the probe still runs prompt-free model inventory for direct Cursor, Grok, and
+Ollama seats and the `agy models` listing for Antigravity. Ollama resolves the
+requested model from the `ollama:` cli suffix when `model` is unset. Inventory
+subprocesses share the per-check health budget, and a seat `command` override
+is honored. It never sends a prompt, inference request, or paid request. An
+adapter without a prompt-free inventory keeps model reachability unknown. The
+shared probe's in-process cache may be reused when an embedding caller supplies
+a probe.
 
 The generic CLI dispatcher records nonzero exits in the user-local
 `brigade/last-error.json` under the platform data directory. Both blocked
@@ -88,30 +97,104 @@ The generic CLI dispatcher records nonzero exits in the user-local
 error record used by `brigade bug report`, including routine checks with
 missing live producers. `roster doctor` uses the same dispatcher behavior.
 
-For worktree requests, a non-Git workspace is blocked before health probing.
-Git eligibility alone does not establish writable disk capacity or permission
-to create a worktree. Worktree isolation remains unverified without scoped
-isolation evidence. Writable ACPX workers with shared isolation are blocked.
-The operation-level isolation row never passes when a selected seat is
-incompatible.
-If injected isolation evidence passed, `observed_status` retains that supplied
-status alongside the derived failure. The CLI has no read-only operation flag,
-so it does not claim readiness for a read-only ACPX exception.
+For worktree requests, a workspace that is not a Git checkout with a committed
+HEAD is blocked before health probing, because an unborn HEAD cannot create a
+worktree. When the workspace qualifies, the Brigade route emits an
+operation-scoped `isolation` observation with status `passed`, a `git-eligible`
+detail, the same scope as its admission and capacity evidence, and the shared
+30-second freshness. Git eligibility alone does not establish disk space or
+permission to create a worktree. The observation reports eligibility, not
+reserved capacity. Writable ACPX workers with shared isolation are blocked. The
+operation-level isolation row never passes when a selected seat is
+incompatible. If injected isolation evidence passed, `observed_status` retains
+that supplied status alongside the derived failure. The CLI has no read-only
+operation flag, so it sets `read_only=False` explicitly and does not claim
+readiness for a read-only ACPX exception.
 
-The health `isolation-compatibility` check currently tests read-only
-enforcement. Readiness conservatively requires it even for a writable
-operation, separately from requested worktree isolation. This can leave a
-writable adapter unverified or blocked despite adequate write isolation.
-Adapter-aware operation health requirements need an explicit source contract
-before this gate can be relaxed. Unknown evidence remains unverified.
+Readiness maps each fresh seat-health check by what the check can establish for
+this adapter and operation. A degraded check is not automatically unknown, but
+missing evidence is never turned into passed:
 
-**The CLI currently has no authoritative live admission, capacity, or T3
-capability/governance observation producer.** It therefore cannot return ready
-for a live operation. A structurally eligible request normally returns
-unverified, or blocked if selected-seat health supplies a fresh failure.
-T3 requests skip local provider probes because those do not establish T3
-execution health. No claim of T3 integration with Brigade budgets follows
-from this command. Active inference probing is not offered by this subcommand.
+- `version-gates` counts as passed with reason `not-applicable` only when seat
+  health reports cause `no-reviewed-gate`, meaning that adapter has
+  no reviewed gate. A generic `probe-incomplete` cause never maps, and ACPX
+  transport-version and Antigravity seats never map because they have declared
+  gates.
+- `isolation-compatibility` counts as passed with reason `not-applicable` only
+  when the request sets `read_only=False` explicitly. An unset or true
+  `read_only` keeps the check unknown, and the roster sandbox value does not
+  decide operation writability. The check tests read-only enforcement, which a
+  declared writable operation does not depend on.
+- `authentication-entitlement` stays unknown when the adapter has no
+  prompt-free authentication status check. Authentication could apply, so an
+  absent check is not treated as a pass.
+- `model-reachability` stays unknown when no prompt-free inventory exists for
+  the adapter. A successful prompt-free inventory or Antigravity model listing
+  passes it. An unavailable or missing model fails it.
+
+A failed check is always a blocker. A degraded check not listed above remains
+unknown.
+
+For `route = "brigade"`, `inspect_readiness` and `brigade roster ready` produce
+authoritative, read-only `admission` and `capacity` observations, plus an
+`isolation` observation for worktree requests, without
+acquiring a lease or claim, writing LKG or audit caches, or launching a task.
+Without a configured Hub (and when no prior enrollment activation was observed),
+admission uses `route_receipts.admissible_seats` and the retired-model policy,
+and capacity uses `runguard.inspect_run_lock_reconcile` combined with
+`limits.max_workers`. When a Fleet Hub is configured, admission queries
+`GET /models` via `fetch_versioned_roster(..., allow_lkg=True, cache_write=False)`
+and resolves the effective roster via `resolve_fleet_model_policy`. Seat health
+probing, `operation_scope`, and readiness evaluation all bind to that
+Hub-resolved effective roster instead of the un-updated local declaration.
+When enrolled, admission also queries `GET /policy` via
+`fleet_client_policy.show_policy()` and evaluates `fleet_policy.admissible_seat`.
+Because `authorize_launch` requires live Hub admission (`allow_lkg=False`), an
+enrolled node falling back to LKG reports `admission` as `unknown` (`unverified`)
+instead of `passed`.
+
+Capacity inspects the local run lock plus a read-only `POST /claims`
+(`action = "inspect"`) check when a live Hub roster is reachable and uses an
+absolute `BRIGADE_HOME`. If the claim check fails with `auth-failed`, capacity
+reports `failed` (`blocked`) and tells the operator to enroll the node, matching
+`claim_workspace` fail-closed behavior. Claim `no-identity`, `missing`, and
+`hub-unavailable` outcomes are reported conservatively as `unknown`
+(`unverified`), even though `brigade run` proceeds on the local run lock. When
+unenrolled, Hub seat-limit checks scan every selected worker seat before
+deciding capacity: any `limit = 0` reports `admitted_capacity = 0` (`blocked`),
+and only a malformed limit reports `unknown` (`unverified`), independent of
+`--worker` order.
+
+A positive seat limit reads live occupancy from the read-only
+`GET /models/usage` route. It requires the same admin or node bearer as
+`GET /models` and `GET /policy`, refuses unauthenticated callers with the same
+401, and acquires, extends, or releases nothing. Under active fleet policy
+authority the Hub counts active reservations and deduplicated leases.
+Otherwise it counts unexpired, unreleased `model_leases`. The response carries
+the roster revision and policy digest it was computed against, and readiness
+requires both to match its admission snapshot exactly. Capacity becomes
+`max(0, limit - occupied)`: positive capacity is `passed`, a full seat reports
+`admitted_capacity = 0` (`blocked`), and a revision or digest mismatch is
+`unknown` (`unverified`), never ready. Enrolled fleet policy seats use the same
+read. LKG fallback leaves live Hub capacity `unknown` (`unverified`), and
+`limit = 0` or a held lock or claim reports `admitted_capacity = 0`
+(`blocked`).
+
+Network calls use the existing 2.5-second client timeouts. Reading the roster
+high-water mark and LKG cache takes `_spool_lock`, which also runs on the
+no-Hub path through `enrollment_activation_observed`. `_spool_lock` can create
+`<BRIGADE_HOME>/fleet-spool/`, `chmod` that directory to `0700`, and create
+empty `.lock` files. No cache content is written. The readiness producer bounds
+both waits with the same 2.5-second client timeout and turns a spool-lock
+timeout into an `unknown` admission or capacity observation, so a timeout never
+reads as "not enrolled". `brigade run` admission keeps its blocking acquisition
+and its existing empty-record fallback.
+
+T3 capability and governance observation production remains unimplemented, so
+T3 requests still skip local provider probes and remain unverified (or blocked
+on structural or refusal evidence). No claim of T3 integration with Brigade
+budgets follows from this command. Active inference probing is not offered by
+this subcommand.
 
 ## Integration interface
 
@@ -120,7 +203,8 @@ execution integration:
 
 ```python
 ReadinessRequest(workers: tuple[str, ...], concurrency=1,
-                 route="brigade", isolation="shared", capability=None)
+                 route="brigade", isolation="shared", capability=None,
+                 read_only=None)
 Observation(status, observed_at, scope, detail="", capacity=None)
 operation_scope(roster, request, workspace) -> str
 evaluate_readiness(roster, request, *, workspace, health=None,
@@ -161,9 +245,11 @@ must be finite `int` or `float` values, excluding booleans. Status, scope, and
 detail must be strings. The scope binds the
 workspace, request, selected seats, model/transport fingerprints, declared
 capabilities, orchestrator, configured limit, and model allow patterns.
-Changed concurrency, route, isolation, or capability invalidates earlier
-operation evidence. A passed capacity observation also needs a nonnegative
-integer `capacity`, representing currently admitted available workers.
+Changed concurrency, route, isolation, capability, or `read_only` invalidates
+earlier operation evidence. A passed capacity observation also needs a
+nonnegative integer `capacity`, representing currently admitted available
+workers. `read_only` is `None` when unspecified. `brigade roster ready` sets it
+to `False` because it can only express writable operations today.
 
 The caller owns the authority and provenance of injected observations. This
 interface evaluates supplied evidence and does not grant admission, acquire a

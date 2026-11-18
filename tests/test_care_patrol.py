@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from brigade import care_cmd, care_schedules, runbook_cmd
+from brigade import care_cmd, care_patrol, care_schedules, runbook_cmd, shipped_history
 
 
 @pytest.mark.parametrize("backend,schedule", [("systemd", "*:0/10"), ("launchd", "*/10 * * * *")])
 def test_selected_patrol_installs_report_only_runbook(tmp_path, monkeypatch, capsys, backend, schedule):
     target = tmp_path / "workspace"
     target.mkdir()
-    monkeypatch.setattr(care_cmd, "_ensure_memory_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", lambda *args: ({}, None))
     analyzed = []
     real_run = subprocess.run
@@ -65,7 +65,7 @@ def test_patrol_is_optional_except_in_atomic_crontab(tmp_path, monkeypatch, caps
     assert "run-patrol" not in {entry.entry_id for entry in care_cmd.CARE_ENTRIES}
     assert "run-patrol.json" in care_cmd._crontab_body(workspace=tmp_path)
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     assert care_cmd.install(target=tmp_path, backend="crontab", entry_ids=["run-patrol"]) == 2
     assert "atomic managed block" in capsys.readouterr().err
 
@@ -204,8 +204,7 @@ def test_explicit_crontab_selection_does_not_add_patrol(tmp_path):
 
 @pytest.mark.parametrize("backend", ["systemd", "launchd"])
 def test_unselected_patrol_does_not_write_or_pin_runbook(tmp_path, monkeypatch, capsys, backend):
-    monkeypatch.setattr(care_cmd, "_ensure_memory_care_runbooks", lambda target: 0)
-    monkeypatch.setattr(care_cmd, "_write_daily_observability_runbook", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     def unexpected(*args):
         pytest.fail("unselected patrol must not pin its runbook")
@@ -214,3 +213,34 @@ def test_unselected_patrol_does_not_write_or_pin_runbook(tmp_path, monkeypatch, 
     assert care_cmd.install(target=tmp_path, backend=backend, home=tmp_path / "home") == 0
     capsys.readouterr()
     assert not (tmp_path / ".brigade/runbooks/run-patrol.json").exists()
+
+
+def _record_patrol_history(tmp_path, monkeypatch, *old_payloads):
+    key = shipped_history.runbook_key(care_patrol.RUNBOOK_REL)
+    digests = [shipped_history.runbook_payload_digest(p) for p in (*old_payloads, care_patrol.RUNBOOK_PAYLOAD)]
+    manifest = tmp_path / "history.json"
+    rows = [{"sha256": d, "tag": f"v0.{i}.0"} for i, d in enumerate(digests, start=1)]
+    manifest.write_text(json.dumps({"schema": 1, "files": {key: rows}}))
+    monkeypatch.setattr(shipped_history, "manifest_path", lambda: manifest)
+
+
+def test_a_pristine_past_release_patrol_runbook_is_refreshed_and_an_edited_one_is_kept(tmp_path, monkeypatch, capsys):
+    old = {"id": "run-patrol", "steps": [{"id": "patrol", "run": "brigade runs patrol --target ."}]}
+    _record_patrol_history(tmp_path, monkeypatch, old)
+    work = tmp_path / "work"
+    book = work / care_patrol.RUNBOOK_REL
+    book.parent.mkdir(parents=True)
+    book.write_text(json.dumps({**old, "pins": []}))
+
+    assert care_patrol.write_runbook(work, care_patrol.RUNBOOK_REL, care_patrol.RUNBOOK_PAYLOAD) == 0
+
+    assert f"refreshed (pristine): {book}" in capsys.readouterr().out
+    refreshed = json.loads(book.read_text())
+    assert refreshed["steps"] == care_patrol.RUNBOOK_PAYLOAD["steps"] and refreshed["pins"]
+    assert not list(book.parent.glob("*.bak-*"))
+
+    edited = json.dumps({**care_patrol.RUNBOOK_PAYLOAD, "allowed_commands": ["brigade", "rm"]})
+    book.write_text(edited)
+    assert care_patrol.write_runbook(work, care_patrol.RUNBOOK_REL, care_patrol.RUNBOOK_PAYLOAD) == 0
+    assert f"kept (drifted): {book}" in capsys.readouterr().out
+    assert book.read_text() == edited

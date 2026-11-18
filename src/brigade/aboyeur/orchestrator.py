@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from functools import partial, wraps
 from json import JSONDecoder
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from .. import agents
 from .. import claim_loss_cancellation
@@ -33,7 +33,7 @@ from .. import message_envelope
 from .. import proc, receipt_schema, runguard
 from .. import run_control
 from .. import run_checkpoint
-from .. import run_budget
+from .. import run_batch_launch, run_budget
 from .. import run_events
 from .. import run_journal
 from .. import run_lifecycle
@@ -64,7 +64,10 @@ from ..route_policy import (
 )
 
 from . import briefs, run_io, planning, prompts, artifacts, model_admission
-from . import direct_worker_finish
+from . import direct_worker_finish, isolation
+
+if TYPE_CHECKING:
+    from ..run_batch_execute import BatchExecution
 
 
 @dataclass(frozen=True)
@@ -439,6 +442,8 @@ def run(
     verbose: bool = False,
     cwd: Path | None = None,
     lock_workspace: Path | None = None,
+    canonical_workspace: Path | None = None,
+    recording_policy_workspace: Path | None = None,
     output_dir: Path | None = None,
     handoff_inbox: Path | None = None,
     read_only: bool = False,
@@ -466,6 +471,7 @@ def run(
     model_policy_snapshot: Mapping[str, Any] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     check_cancellation: Callable[[], None] | None = None,
+    batch_execution: BatchExecution | None = None,
 ) -> int:
     check_cancellation = check_cancellation or (lambda: None)
     claim_process_registry = process_registry
@@ -476,6 +482,7 @@ def run(
     transport_for_payload = codex_transport or roster.codex_transport
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     lock_workspace = lock_workspace.expanduser().resolve() if lock_workspace is not None else cwd
+    drift_workspace = canonical_workspace.expanduser().resolve() if canonical_workspace is not None else lock_workspace
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
@@ -493,7 +500,7 @@ def run(
     transport_routing_payload: dict[str, object] | None = None
     quarantine_state = seat_health_policy.SeatQuarantineState()
     active_health_probe = seat_health.SeatHealthProbe(collect_executable_version=False)
-    model_policy = resolve_fleet_model_policy(
+    model_policy = (batch_execution.resolve_model_policy if batch_execution else resolve_fleet_model_policy)(
         roster,
         worker=worker,
         model_override=model_override,
@@ -705,16 +712,12 @@ def run(
     # rather than running without isolation attribution.
     try:
         pre_run_snapshot = runguard.capture_pre_run_snapshot(cwd)
-        # Branch/HEAD drift is checked against the resolved lock workspace, which
-        # may be a separate canonical checkout from the assigned cwd worktree.
-        # The cwd snapshot stays the ground-truth baseline for worker change
-        # attribution; a separate drift snapshot is captured from lock_workspace
-        # before dispatch when it differs, so movement of the canonical checkout
-        # is detected even though the assigned worktree never moved. When they
-        # are the same path, reuse the cwd snapshot to preserve explicit
-        # canonical-write behavior.
-        if lock_workspace != cwd:
-            drift_snapshot = runguard.capture_pre_run_snapshot(lock_workspace)
+        if drift_workspace != cwd:
+            drift_snapshot = runguard.capture_pre_run_snapshot(drift_workspace)
+        elif defer_artifact_collection:
+            # The CLI owns this checkout's patch and cleanup. Workers may
+            # branch or commit here while the parent checkout advances.
+            drift_snapshot = None
         else:
             drift_snapshot = pre_run_snapshot
     except runguard.RunGuardError as exc:
@@ -727,12 +730,12 @@ def run(
         """Centralized branch/HEAD drift check across every return path.
 
         Returns 2 (and records a run-isolation failure) when branch or HEAD
-        moved since the drift snapshot taken from the lock workspace, else
+        moved since the drift snapshot taken from the monitored checkout, else
         None so the caller can proceed. Call this after planning, before any
         dry-run return, after worker dispatch, after synthesis, and
         immediately before finalization.
         """
-        detail = runguard.detect_branch_head_drift(lock_workspace, drift_snapshot)
+        detail = runguard.detect_branch_head_drift(drift_workspace, drift_snapshot)
         if detail is None:
             return None
         if output_dir is not None:
@@ -746,30 +749,6 @@ def run(
             )
         print(f"error: {detail}", file=sys.stderr)
         return 2
-
-    def _run_isolation_check() -> str | None:
-        """Detect canonical-checkout escapes after dispatch without per-worker attribution."""
-
-        if lock_workspace == cwd or drift_snapshot is None:
-            return None
-        # Preserve the existing branch/HEAD drift classification. Working-tree
-        # mutations are what this post-dispatch check adds; committed or
-        # branch-moving interference remains caught by the run-level drift
-        # checkpoints.
-        if runguard.detect_branch_head_drift(lock_workspace, drift_snapshot) is not None:
-            return None
-        try:
-            changed, untracked = runguard.changes_relative_to_snapshot(lock_workspace, drift_snapshot)
-        except runguard.RunGuardError as exc:
-            runguard.raise_if_retained_run_lock(exc)
-            return f"isolation breach: could not verify canonical checkout: {exc}"
-        escaped = sorted(set(changed + untracked))
-        if not escaped:
-            return None
-        shown = ", ".join(escaped[:10])
-        if len(escaped) > 10:
-            shown += f", and {len(escaped) - 10} more"
-        return f"isolation breach: modified files outside assigned worktree: {shown}"
 
     if worker is not None:
         worker_error = artifacts._direct_worker_error(worker, roster, read_only=read_only)
@@ -864,7 +843,7 @@ def run(
             require_hard_isolation=read_only,
             sandbox=effective_sandbox,
         )
-        routing = resolve_orchestrator_health_routing(
+        routing = (batch_execution.resolve_health_routing if batch_execution else resolve_orchestrator_health_routing)(
             roster,
             health_results,
             pinned_seats=frozenset({worker}) if worker is not None else frozenset(),
@@ -982,14 +961,11 @@ def run(
         if bind_error is not None:
             print(f"error: {bind_error}", file=sys.stderr)
             return 2
-        assignments = [
-            Assignment(
-                worker=worker,
-                task=task,
-                stage=1,
-                selected_skill_ids=selected_skill_ids,
-            )
-        ]
+        assignments = (
+            batch_execution.assignments(roster)
+            if batch_execution
+            else [Assignment(worker=worker, task=task, stage=1, selected_skill_ids=selected_skill_ids)]
+        )
     else:
         if output_dir is not None:
             run_io._write_json(
@@ -1480,18 +1456,17 @@ def run(
         recorded_attempt = event.payload.get("attempt")
         return recorded_attempt if isinstance(recorded_attempt, int) else None
 
-    def dispatch_requested(agent: Agent) -> int | None:
+    def dispatch_requested(agent: Agent, assignment: Any = None) -> int | None:
         check_cancellation()
-        # Enforce wall-clock / worker-dispatch ceilings before new work starts (#593).
-        # Attempt allocation and reservation share one lock; retries reclaim an
-        # open pending identity while concurrent same-seat callers mint anew.
+        # Enforce ceilings (#593); a batch task claims its launch inside the reservation (docs/run-batch.md).
         if budget_coordinator is None or output_dir is None:
-            return dispatch_fact("run.dispatch.requested", agent)
+            return run_batch_launch.unbudgeted(batch_execution, agent, assignment, dispatch_fact)
         try:
             return budget_coordinator.reserve_and_record_dispatch(
                 seat=agent.name,
                 allocate_attempt=lambda: run_lifecycle.allocate_next_dispatch_attempt(output_dir, agent.name),
-                record_requested=lambda attempt: dispatch_fact("run.dispatch.requested", agent, attempt),
+                record_requested=run_batch_launch.recorder_for(batch_execution, agent, assignment, dispatch_fact),
+                reclaim_pending=batch_execution is None,
             )
         except run_budget.BudgetPolicyError as exc:
             runguard.raise_if_retained_run_lock(exc)
@@ -1574,11 +1549,12 @@ def run(
         )
         try:
             worker_results = planning._call_with_process_registry(
-                planning.dispatch,
+                batch_execution.dispatch if batch_execution is not None else planning.dispatch,
                 assignments,
                 roster,
                 cwd=cwd,
                 policy_workspace=lock_workspace,
+                recording_policy_workspace=recording_policy_workspace,
                 read_only=read_only,
                 sandbox_read_only=sandbox_read_only,
                 sandbox=sandbox,
@@ -1737,7 +1713,9 @@ def run(
                 producer_run_id=output_dir.name,
             ),
         )
-    isolation_detail = _run_isolation_check()
+    isolation_detail = isolation.parent_worktree_breach(
+        drift_workspace if drift_workspace != cwd else None, drift_snapshot, output_dir
+    )
     if isolation_detail is not None:
         if output_dir is not None:
             artifacts.record_run_termination(
@@ -1757,7 +1735,10 @@ def run(
             print(f"  -> {roster.orchestrator}")
 
     synth_captured = None
-    if direct_worker:
+    if batch_execution is not None:
+        final = batch_execution.finish(worker_results)
+        direct_worker = False
+    elif direct_worker:
         direct_result = (
             worker_results[0]
             if worker_results
@@ -1855,9 +1836,7 @@ def run(
                     failure_kind=final.failure_kind or "unclassified",
                 )
         final = replace(final, duration_seconds=max(0.0, round(time.monotonic() - synthesis_started, 3)))
-    # Drift checkpoint: after synthesis. A concurrent commit or branch switch
-    # during synthesis must fail the run before the synthesized answer is
-    # finalized on top of drifted state.
+    # Check drift after synthesis or batch result processing, before finalization.
     drift_rc = _drift_failure_rc()
     if drift_rc is not None:
         return drift_rc

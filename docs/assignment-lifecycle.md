@@ -61,11 +61,15 @@ and provider failure. It derives cleanup identity from that handle and never
 uses tokenless cleanup. A swallowed registration-observer error leaves any
 replacement intact. If a later callback fails after an earlier registration
 succeeded, cleanup uses the earlier handle and its original identity.
-Main dispatch and the transport runner
-protocol currently supply no assignment IDs. Until the owning integration
-adds those IDs, ordinary dispatch uses legacy worker slots. Journals, durable
-results, acceptance deduplication, parent delivery, wait semantics, T3 children,
-and cancellation containment remain integration work under #2046/#2049.
+Ordinary dispatch supplies no assignment IDs and uses legacy worker slots.
+An explicit batch assignment carries `task_id` and `attempt_id`, and the
+transport passes both to the appserver runner, so a batch turn registers under
+`("task", task_id, attempt_id)`. `brigade runs interrupt --task-id` then reaches
+one of two same-seat tasks, and a worker-name request for that seat reports
+`ambiguous-target` with the task IDs. Direct CLI workers have no per-task
+control path yet: the process registry still cancels as a whole. Durable
+results, parent delivery, wait semantics, T3 children, and cancellation
+containment remain integration work under #2046/#2049.
 
 
 ## Durable task control requests

@@ -24,7 +24,7 @@ def _ollama_listing(*ids: str) -> str:
 
 
 def _patch_cursor_inventory(monkeypatch, result) -> None:
-    monkeypatch.setattr(model_inventory, "_run_cursor_inventory", lambda: result, raising=False)
+    monkeypatch.setattr(model_inventory, "_run_cursor_inventory", lambda *args, **kwargs: result, raising=False)
 
 
 def test_cursor_inventory_exact_match(monkeypatch):
@@ -126,7 +126,7 @@ def test_cursor_inventory_accepts_parameterized_exact_model(monkeypatch):
 def test_cursor_inventory_is_loaded_once_for_repeated_seats(monkeypatch):
     calls = []
 
-    def fake_run():
+    def fake_run(*args, **kwargs):
         calls.append(["cursor-agent", "models"])
         return agents.proc.Result(0, _cursor_listing("composer-2.5", "gpt-5.5-high"), "")
 
@@ -142,7 +142,7 @@ def test_cursor_inventory_uses_command_prefix(monkeypatch):
     command = ("C:/Cursor/versions/current/node.exe", "C:/Cursor/versions/current/index.js")
     calls = []
 
-    def fake_run(argv):
+    def fake_run(argv, **kwargs):
         calls.append(argv)
         return agents.proc.Result(0, _cursor_listing("composer-2.5"), "")
 
@@ -258,6 +258,47 @@ def test_grok_inventory_parses_exact_and_fuzzy_models(monkeypatch):
     fuzzy = inspector.inspect("grok", "grok-4.5-xhigh")
     assert fuzzy.state == "fuzzy-resolved"
     assert fuzzy.matches == ("grok-4.5",)
+
+
+def test_grok_inventory_uses_command_prefix(monkeypatch):
+    command = ("C:/Grok/grok.exe",)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return agents.proc.Result(0, _grok_listing("grok-4.5"), "")
+
+    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+
+    result = model_inventory.ModelInventoryInspector().inspect("grok", "grok-4.5", command)
+
+    assert result is not None
+    assert result.state == "exact"
+    assert calls == [[*command, "models"]]
+
+
+def test_inventory_timeouts_shrink_with_the_remaining_budget(monkeypatch):
+    ticks = iter([0.0, 0.5, 1.5])
+    monkeypatch.setattr(model_inventory.time, "monotonic", lambda: next(ticks))
+    timeouts = []
+
+    def fake_run(argv, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        if argv == ["ollama", "list"]:
+            return agents.proc.Result(0, _ollama_listing("kimi-k2.7-code:cloud"), "")
+        return agents.proc.Result(0, "", "")
+
+    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+
+    result = model_inventory.ModelInventoryInspector().inspect(
+        "ollama:kimi-k2.7-code:cloud",
+        "kimi-k2.7-code:cloud",
+        timeout_seconds=2.0,
+    )
+
+    assert result is not None
+    assert result.state == "exact"
+    assert timeouts == [1.5, 0.5]
 
 
 def test_ollama_local_model_exact_match(monkeypatch):

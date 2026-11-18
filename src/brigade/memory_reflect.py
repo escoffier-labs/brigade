@@ -84,7 +84,7 @@ def _prune_runs(target: Path, now: datetime) -> None:
                     names = os.listdir(run)
                     if "receipt.json" not in names and started >= cutoff:
                         continue  # Leave recent in-progress runs to publish their receipts.
-                    if set(names) - {"receipt.json", "candidates.jsonl"}:
+                    if set(names) - {"receipt.json", "candidates.jsonl", "automatic.json"}:
                         raise OSError("unexpected files in reflect run; retention stopped")
                     for name in names:
                         metadata = os.stat(name, dir_fd=run, follow_symlinks=False)
@@ -135,21 +135,27 @@ def _evidence_log(target: Path) -> EvidenceLog:
 def register(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("reflect", help="Derive cited memory candidates without editing cards.")
     commands = parser.add_subparsers(dest="memory_reflect_command", required=True)
-    for name in ("run", "status", "candidates", "show", "propose", "preflight", "rollback"):
+    for name in ("run", "status", "candidates", "show", "propose", "preflight", "rollback", "auto-apply"):
         command = commands.add_parser(name, help=f"{name.capitalize()} deterministic memory reflection candidates.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-        if name == "run":
+        if name == "auto-apply":
+            command.add_argument("mode", choices=("on", "off"))
+        elif name == "run":
             command.add_argument(
                 "--hub", action="store_true", help="Require hub memory, never fall back to local cards."
             )
             command.add_argument("--scheduled", action="store_true", help="Skip a hub run paused after three failures.")
             command.add_argument("--scope", help="Exact card frontmatter scope (missing scope means repo).")
             command.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Candidate limit from 1 to 100.")
+            command.add_argument("--apply", action="store_true", help="Attempt policy-gated Tier 0 application.")
             command.add_argument("--dry-run", action="store_true", help="Print metadata diffs and duplicate summaries.")
         elif name == "rollback":
-            command.add_argument("proposal_id", help="Applied hub proposal to compensate. Requires separate review.")
-        elif name in ("show", "propose", "preflight", "rollback"):
+            command.add_argument(
+                "proposal_id",
+                help="Applied hub proposal to compensate. Exact policy-actor reversals can apply automatically.",
+            )
+        elif name in ("show", "propose", "preflight"):
             command.add_argument("candidate_id")
             if name == "preflight":
                 command.add_argument("--policy", help="Target-relative diagnostic policy JSON.")
@@ -279,9 +285,12 @@ def inspect_payload(*, target: Path, command: str, candidate_id: str | None = No
     if command == "status":
         from .memory_reflect_hub import schedule_summary
 
+        from .memory_reflect_anchors import status
+
         schedule = schedule_summary(target)
         return {
             "schedule": schedule,
+            "anchoring": status(target),
             "status": "ok",
             "run_count": len(runs),
             "invalid_runs": invalid,
@@ -327,15 +336,31 @@ def dispatch(args: argparse.Namespace) -> int:
     try:
         with io.directory(target):
             pass
-        if args.memory_reflect_command == "run":
+        if args.memory_reflect_command == "auto-apply":
+            from .memory_reflect_policy import set_enabled
+
+            payload = {"status": "ok", "policy": set_enabled(target, args.mode == "on")}
+        elif args.memory_reflect_command == "run":
             from . import memory_reflect_hub
 
-            if args.hub or args.scheduled or hubc.hub_mode(target) != "off":
+            if args.hub or hubc.hub_mode(target) != "off":
                 payload = memory_reflect_hub.run_payload(
-                    target=target, scope=args.scope, limit=args.limit, dry_run=args.dry_run, scheduled=args.scheduled
+                    target=target,
+                    scope=args.scope,
+                    limit=args.limit,
+                    dry_run=args.dry_run,
+                    scheduled=args.scheduled,
+                    apply=args.apply or args.scheduled,
                 )
             else:
                 payload = run_payload(target=target, scope=args.scope, limit=args.limit, dry_run=args.dry_run)
+                if (args.apply or args.scheduled) and not args.dry_run:
+                    from .memory_reflect_policy import local_fallback
+
+                    payload["automatic"] = local_fallback(target, payload["candidates"])
+                    io.write_exclusive(
+                        target / f"{ROOT}/{payload['run_id']}/automatic.json", io.json_bytes(payload["automatic"])
+                    )
         elif args.memory_reflect_command == "rollback":
             from .memory_reflect_hub import rollback_payload
 
@@ -374,13 +399,20 @@ def dispatch(args: argparse.Namespace) -> int:
             for reason, count in sorted(payload.get("skipped_reasons", {}).items()):
                 print(_terminal_text(f"skipped: {reason}={count}"))
             for proposal in payload["proposals"]:
-                print(_terminal_text(f"proposal: {proposal['proposal_id']} (separate decision required)"))
+                print(
+                    _terminal_text(
+                        f"proposal: {proposal['proposal_id']} {proposal.get('automatic', {'state': 'pending'})}"
+                    )
+                )
         if payload.get("status") == "paused":
             print("scheduled reflection is paused. Run memory reflect run --hub manually to resume after a success.")
-        if args.memory_reflect_command == "rollback" and "proposal" in payload:
+        if args.memory_reflect_command == "rollback" and "proposal" in payload and payload.get("status") == "failed":
+            print(_terminal_text(f"compensation failed: {payload['proposal'].get('reason', 'unknown')}"))
+        elif args.memory_reflect_command == "rollback" and "proposal" in payload:
             print(
                 _terminal_text(
-                    f"compensating proposal: {payload['proposal'].get('proposal_id')} (separate decision required)"
+                    f"compensating proposal: {payload['proposal'].get('proposal_id')} "
+                    f"({payload['proposal'].get('state', 'pending')})"
                 )
             )
         if "latest_run" in payload:

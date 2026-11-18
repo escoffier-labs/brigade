@@ -144,10 +144,19 @@ fn number(v: &Value) -> i64 {
     if let Value::Integer(n) = v { *n } else { 0 }
 }
 pub fn admit(tx: &dyn WriteTx, body: &Json, limits: &Limits) -> rusqlite::Result<Option<Reply>> {
+    admit_excluding(tx, body, limits, None)
+}
+/// Only an exact compensation may exclude its validated review referral.
+pub(super) fn admit_excluding(
+    tx: &dyn WriteTx,
+    body: &Json,
+    limits: &Limits,
+    referral: Option<&str>,
+) -> rusqlite::Result<Option<Reply>> {
     let d = digest(body);
     let rows = tx.query(
-        "SELECT proposal_id,json_extract(body,'$.tier') FROM memory_proposals WHERE digest=?1 AND state='pending' LIMIT 1",
-        &[ops::t(&d)],
+        "SELECT proposal_id,json_extract(body,'$.tier') FROM memory_proposals WHERE digest=?1 AND state='pending' AND (?2 IS NULL OR proposal_id<>?2) LIMIT 1",
+        &[ops::t(&d), referral.map(ops::t).unwrap_or(Value::Null)],
     )?;
     if let Some(row) = rows.first() {
         let mut reply = ops::error(
@@ -275,6 +284,14 @@ pub fn cheap<T: ReadTx + ?Sized>(
     {
         return Ok(Some("auto_apply_killed"));
     }
+    if super::compensation::class_held(tx, body)? {
+        return Ok(Some("compensation_class_held"));
+    }
+    // Named apart from the generic tier hold, so the reflect client leaves a
+    // lineage proposal open for review instead of withdrawing and retrying it.
+    if body["rollback_of"].is_null() && super::proposal_tiers::lineage_review(tx, body)? {
+        return Ok(Some("lineage_requires_review"));
+    }
     Ok((body["opened_tier"] != 0 || !body["rollback_of"].is_null())
         .then_some("tier_requires_review"))
 }
@@ -307,8 +324,8 @@ impl ReadTx for Budget<'_> {
 /// Conservative global high water marks make a post-snapshot write hold the gate.
 /// sqlite_sequence survives vector-log retention, so deletion cannot restore a token.
 pub fn token<T: ReadTx + ?Sized>(tx: &T) -> rusqlite::Result<Json> {
-    let mut token = json!({"epoch":ops::epoch(tx)?,"memory_events":0,"memory_vector_log":0});
-    for row in tx.query("SELECT name,seq FROM sqlite_sequence WHERE name IN ('memory_events','memory_vector_log') ORDER BY name",&[])? {
+    let mut token = json!({"epoch":ops::epoch(tx)?,"memory_events":0,"memory_vector_log":0,"memory_retrieval_history":0});
+    for row in tx.query("SELECT name,seq FROM sqlite_sequence WHERE name IN ('memory_events','memory_vector_log','memory_retrieval_history') ORDER BY name",&[])? {
         token[ops::s(&row[0])]=json!(number(&row[1]));
     }
     Ok(token)

@@ -63,6 +63,10 @@ fn ranking(adapter: &Json) -> Option<&str> {
     Some(digest)
 }
 pub(super) fn passed(body: &Json, mode: &str) -> bool {
+    if body["gate"]["name"] == "Live-R0" {
+        // A diagnostic live report can never supply authorization.
+        return false;
+    }
     let lexical = mode == "lexical";
     let before = &body["adapters"]["bm25"];
     let after = &body["adapters"][if lexical { "hub-lexical" } else { "hub-hybrid" }];

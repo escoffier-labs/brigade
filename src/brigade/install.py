@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from .config import Config, load_config, write_config
+from .skill_wiring import BLOCKED, SYMLINKED, SkillWirer
 from .selection import Selection, SurfaceInstallRefusal, SurfaceRecord, WRITER_INBOXES
 from .templates import (
     canonical_template_bytes,
@@ -33,6 +34,12 @@ LEGACY_GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
 LEGACY_GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
 DEFAULT_WIRED_SKILLS = ("brigade-work", "ultra-work-scout")
 SURFACE_EVIDENCE_REL_PATH = ".brigade/surface-evidence.json"
+
+
+def is_skill_md(dst: str) -> bool:
+    """True for a `<dir>/SKILL.md` template destination (never overwritten once installed)."""
+    parts = Path(dst).parts
+    return len(parts) >= 2 and parts[-1] == "SKILL.md"
 
 
 def _writer_inbox_gitignore_lines(inbox: str) -> list[str]:
@@ -408,6 +415,9 @@ def install_selection(
                 print(f"  file  {dst}")
         return 0
 
+    new_workspace = not any(
+        (target / name).exists() or (target / name).is_symlink() for name in (".brigade", ".solo-mise")
+    )
     target.mkdir(parents=True, exist_ok=True)
 
     for d in dirs:
@@ -417,12 +427,19 @@ def install_selection(
 
     root = template_root()
     kept_files: list[Path] = []
+    # A SKILL.md is never overwritten, `force` included (#1844): defer these to the
+    # never-overwrite wiring pass below instead of the force-aware copy.
+    skill_md_entries: list[tuple[tuple[str, ...], Path, str]] = []
     for entry in files:
         src = root / entry["src"]
         dst = target / entry["dst"]
         if not src.is_file():
             print(f"error: template missing: {src}", file=sys.stderr)
             return 4
+        if is_skill_md(entry["dst"]):
+            rel_parts = tuple(Path(entry["dst"]).parts)
+            skill_md_entries.append((rel_parts, src, render(src.read_text(encoding="utf-8"), context)))
+            continue
         if dst.exists() and not force:
             # Never clobber an existing file without --force. Keep it; the
             # additive brigade-work skill wiring below still runs, so an upgrade
@@ -441,32 +458,48 @@ def install_selection(
     # Persist config.json. Keep settings an operator already recorded (verify
     # retention, run-lock wait, recall target, ...); only the selection changes.
     write_config(target, _merged_config(target, selection, work_mode=work_mode))
+    if new_workspace and not projection_only:
+        from .memory_reflect_policy import initialize
+
+        initialize(target)
     _write_surface_evidence(target, selection, projection_only=projection_only)
 
     # Wire Brigade's built-in skills into each harness's skills directory so
     # agents actually USE Brigade and can scout large work before editing.
     # Skipped with --no-wire.
     wired_skills: list[tuple[str, str]] = []
-    if wire_skills:
-        from .skills_cmd import HARNESS_ADAPTERS
+    wirer = SkillWirer(target)
+    # finish() always runs, so the records of files already written survive a failure partway through.
+    try:
+        for rel_parts, src, text in skill_md_entries:
+            wirer.place(rel_parts, src.parent, text, skill_id=rel_parts[-2], harness="workspace")
+        if wire_skills:
+            from .skills_cmd import HARNESS_ADAPTERS
 
-        for skill_id in DEFAULT_WIRED_SKILLS:
-            skill_src = root / "skills" / skill_id / "SKILL.md"
-            if not skill_src.is_file():
-                print(f"warning: built-in skill template missing: {skill_src}", file=sys.stderr)
-                continue
-            for h in selection.harnesses:
-                adapter = HARNESS_ADAPTERS.get(h)
-                if not adapter:
+            for skill_id in DEFAULT_WIRED_SKILLS:
+                skill_src = root / "skills" / skill_id / "SKILL.md"
+                if not skill_src.is_file():
+                    print(f"warning: built-in skill template missing: {skill_src}", file=sys.stderr)
                     continue
-                rel = str(adapter.get("install_path", "")).format(skill_id=skill_id)
-                if not rel.startswith("."):
-                    # user-scoped/absolute adapters (e.g. hermes): use `brigade skills install`.
-                    continue
-                dst = target / rel / "SKILL.md"
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_text(skill_src.read_text(encoding="utf-8"), encoding="utf-8")
-                wired_skills.append((h, skill_id))
+                for h in selection.harnesses:
+                    adapter = HARNESS_ADAPTERS.get(h)
+                    if not adapter:
+                        continue
+                    rel = str(adapter.get("install_path", "")).format(skill_id=skill_id)
+                    if not rel.startswith("."):
+                        # user-scoped/absolute adapters (e.g. hermes): use `brigade skills install`.
+                        continue
+                    status = wirer.place(
+                        (*Path(rel).parts, "SKILL.md"),
+                        skill_src.parent,
+                        skill_src.read_text(encoding="utf-8"),
+                        skill_id=skill_id,
+                        harness=h,
+                    )
+                    if status not in (SYMLINKED, BLOCKED):
+                        wired_skills.append((h, skill_id))
+    finally:
+        wirer.finish()
 
     # Claude Code project hooks enforce the same work loop described by the
     # managed skill. The merge helper owns only Brigade handlers and preserves

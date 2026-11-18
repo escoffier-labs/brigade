@@ -14,6 +14,7 @@ mod attestation_review_tests;
 #[cfg(test)]
 mod attestation_tests;
 pub mod auth;
+mod compensation;
 pub mod dense;
 pub mod embedder;
 pub mod embedding;
@@ -23,6 +24,7 @@ mod hardening;
 pub mod ids;
 pub mod index;
 mod manifest_binding;
+mod merge_gate;
 pub mod ops;
 mod preflight;
 mod proposal_blocks;
@@ -51,6 +53,7 @@ pub mod retrieval_eval;
 mod retrieval_eval_gates;
 #[cfg(test)]
 mod retrieval_eval_tests;
+mod retrieval_history;
 pub mod scan;
 pub mod schema;
 pub mod search;
@@ -58,10 +61,15 @@ pub mod text;
 pub mod verifier;
 #[cfg(test)]
 mod verifier_tests;
+mod verify_eval;
+#[cfg(test)]
+mod verify_eval_tests;
 pub mod writer;
 
 #[cfg(test)]
 mod collection_tests;
+#[cfg(test)]
+mod compensation_tests;
 #[cfg(test)]
 mod embedder_tests;
 #[cfg(test)]
@@ -999,9 +1007,13 @@ impl Store {
         };
         let action = map.get("action").and_then(Json::as_str).unwrap_or("");
         match action {
-            "card" | "log" | "status" | "proposal_list" | "proposal_show" | "read_stats" => {
-                self.read(credential, action, map).await
-            }
+            "card"
+            | "log"
+            | "status"
+            | "proposal_list"
+            | "proposal_show"
+            | "read_stats"
+            | "retrieval_judgments" => self.read(credential, action, map).await,
             // S23: unsolicited connector push hits are not reads. A
             // connector's explicit search (`query_source: "connector"`) gets
             // the same filter from `search::parse` and is counted below.
@@ -1013,9 +1025,8 @@ impl Store {
             "reindex" | "embed_lease" | "embed_submit" | "embed_failed" => {
                 self.embedding_request(credential, action, &raw).await
             }
-            "propose" | "decide" | "rollback" | "auto_apply" => {
-                self.proposal_request(credential, action, map, &raw).await
-            }
+            "propose" | "decide" | "rollback" | "auto_apply" | "verify_auto_apply"
+            | "compensation_watch" => self.proposal_request(credential, action, map, &raw).await,
             "put"
             | "import"
             | "retire"
@@ -1026,7 +1037,10 @@ impl Store {
             | "evidence.attach"
             | "evidence.purge"
             | "auto_apply_switch"
-            | "retrieval_eval.record" => match self.prepare(credential, action, map, &raw) {
+            | "retrieval_history_rotate"
+            | "retrieval_use"
+            | "retrieval_eval.record"
+            | "verify_eval.record" => match self.prepare(credential, action, map, &raw) {
                 Ok(prepared) => self.write(prepared).await,
                 Err(reply) => reply,
             },
@@ -1057,8 +1071,12 @@ impl Store {
             Ok(a) => a,
             Err(_) => return error(503, "memory_action_unavailable", "policy read unavailable"),
         };
+        let snapshot = self.index.current();
         authority.retrieval = Some(retrieval_eval::Live {
-            indexed_seq: self.index.current().indexed_seq,
+            applier: credential.class(),
+            principal: credential.principal().into(),
+            indexed_seq: snapshot.indexed_seq,
+            snapshot: Some(snapshot),
             embedder_id: self.dense.active_id(),
             weights: self.rrf.json(),
         });
@@ -1164,14 +1182,40 @@ impl Store {
                 "tier",
                 "workspace_id",
             ],
+            "verify_auto_apply" => &[
+                "action",
+                "proposal_id",
+                "base_epoch",
+                "client_event_id",
+                "binding_sha256",
+                "policy_sha256",
+                "expected_op_types",
+            ],
+            "verify_eval.record" => &[
+                "action",
+                "principal",
+                "record",
+                "policy",
+                "base_epoch",
+                "client_event_id",
+            ],
             "auto_apply" => &["action", "proposal_id", "base_epoch", "client_event_id"],
-            "auto_apply_switch" => &["action", "enabled", "client_event_id"],
+            "auto_apply_switch" => &["action", "enabled", "scope", "op_type", "client_event_id"],
             "verifier" => &["action", "principal", "verifier", "client_event_id"],
             "verifier_resync" => &["action", "client_event_id"],
             "evidence.purge" => &["action", "evidence_id", "client_event_id"],
             "retrieval_eval.record" => {
                 &["action", "report_json", "report_sha256", "client_event_id"]
             }
+            "retrieval_history_rotate" => &["action", "limit", "client_event_id"],
+            "retrieval_use" => &[
+                "action",
+                "session_id",
+                "session_kind",
+                "card_id",
+                "content_hash",
+                "client_event_id",
+            ],
             "evidence.attach" => &[
                 "action",
                 "scope",
@@ -1192,6 +1236,14 @@ impl Store {
                 "decision",
                 "client_event_id",
                 "expected_policy_digest",
+            ],
+            "compensation_watch" => &[
+                "action",
+                "scope",
+                "base_epoch",
+                "client_event_id",
+                "negative_outcomes",
+                "after",
             ],
             "rollback" => &["action", "proposal_id", "base_epoch", "client_event_id"],
             "put" | "import" => &[
@@ -1243,6 +1295,8 @@ impl Store {
                 | "auto_apply_switch"
                 | "evidence.purge"
                 | "retrieval_eval.record"
+                | "retrieval_history_rotate"
+                | "verify_eval.record"
         ) && *credential != Credential::Admin
         {
             return Err(error(
@@ -1327,7 +1381,16 @@ impl Store {
             }
         };
         let action = match action {
+            "verify_eval.record" => Action::VerifyEval(raw.clone()),
             "retrieval_eval.record" => Action::RetrievalEval(retrieval_eval::prepare(raw)?),
+            "retrieval_use" => Action::RetrievalUse(raw.clone()),
+            "retrieval_history_rotate" => Action::RetrievalHistoryRotate(
+                map.get("limit")
+                    .and_then(Json::as_u64)
+                    .filter(|n| (1..=500).contains(n))
+                    .ok_or_else(|| invalid("limit must be from 1 through 500"))?
+                    as usize,
+            ),
             "evidence.purge" => Action::EvidencePurge(short("evidence_id", 1024, true)?.unwrap()),
             "verifier_resync" => Action::VerifierResync { generation: 0 },
             "verifier" => Action::Verifier {
@@ -1341,11 +1404,34 @@ impl Store {
                     .ok_or_else(|| invalid("verifier must be a boolean"))?,
                 generation: 0,
             },
-            "auto_apply_switch" => Action::AutoApplySwitch(
-                map.get("enabled")
+            "auto_apply_switch" => {
+                let enabled = map
+                    .get("enabled")
                     .and_then(Json::as_bool)
-                    .ok_or_else(|| invalid("enabled must be a boolean"))?,
-            ),
+                    .ok_or_else(|| invalid("enabled must be a boolean"))?;
+                let release = if map.contains_key("scope") || map.contains_key("op_type") {
+                    let scope = str_field("scope")
+                        .filter(|s| ids::valid_scope(s))
+                        .ok_or_else(|| invalid("hold release requires scope and op_type"))?;
+                    let op = str_field("op_type")
+                        .filter(|s| {
+                            matches!(
+                                *s,
+                                "append_evidence"
+                                    | "replace_block"
+                                    | "remove_block"
+                                    | "add_previously"
+                                    | "supersede_card"
+                                    | "merge_exact_duplicates"
+                            )
+                        })
+                        .ok_or_else(|| invalid("hold release requires scope and op_type"))?;
+                    Some((scope.to_string(), op.to_string()))
+                } else {
+                    None
+                };
+                Action::AutoApplySwitch(enabled, release)
+            }
             "evidence.attach" => Action::Evidence(attestation::prepare(raw, credential, now_ms)?),
             "rescan" => {
                 let limit = match map.get("limit") {
@@ -1379,13 +1465,30 @@ impl Store {
                     after,
                 }
             }
-            "propose" | "decide" | "rollback" | "auto_apply" => {
-                if action != "propose"
+            "propose" | "decide" | "rollback" | "auto_apply" | "verify_auto_apply"
+            | "compensation_watch" => {
+                if !matches!(action, "propose" | "compensation_watch")
                     && str_field("proposal_id")
                         .and_then(ids::parse_event_id)
                         .is_none()
                 {
                     return Err(invalid("proposal_id must be a time-ordered id"));
+                }
+                if action == "compensation_watch"
+                    && (str_field("scope").is_none_or(|s| !ids::valid_scope(s))
+                        || map
+                            .get("after")
+                            .is_some_and(|v| v.as_str().and_then(ids::parse_event_id).is_none())
+                        || map.get("negative_outcomes").is_some_and(|v| {
+                            v.as_array().is_none_or(|rows| {
+                                rows.len() > 64
+                                    || rows.iter().any(|r| {
+                                        r.as_str().is_none_or(|s| s.is_empty() || s.len() > 1024)
+                                    })
+                            })
+                        }))
+                {
+                    return Err(invalid("invalid compensation watch scope or signals"));
                 }
                 if action == "decide" && !matches!(str_field("decision"), Some("accept" | "reject"))
                 {
@@ -1581,6 +1684,19 @@ impl Store {
                 reply.body["policy_digest"] = json!(authority.policy.as_ref().map(|p| &p.1));
             }
         }
+        if reply.status == 200 && !eval && !push {
+            if let Some(prepared) = retrieval_history::search(
+                credential,
+                &Json::Object(map.clone()),
+                &reply.body,
+                self.clock.now_ms(),
+            ) {
+                let recorded = self.write(prepared).await;
+                if recorded.status == 201 {
+                    reply.body["search_id"] = recorded.body["search_id"].clone();
+                }
+            }
+        }
         reply
     }
 
@@ -1761,6 +1877,7 @@ impl Store {
         let first_chunk =
             action == "card" && map.get("offset").is_none_or(|o| o.is_null() || o == 0);
         let proposal_cursors = self.proposal_cursors.clone();
+        let pending_limit = self.proposal_limits.read().unwrap().pending_per_principal;
         match self
             .readers
             .submit(move |c| {
@@ -1773,7 +1890,31 @@ impl Store {
                         &proposal_cursors,
                     );
                 }
-                reads(
+                if action == "retrieval_judgments" {
+                    if credential != Credential::Admin {
+                        return Ok(error(
+                            403,
+                            "memory_admin_required",
+                            "judgment export requires evaluation authority",
+                        ));
+                    }
+                    let high = map.get("history_seq").and_then(Json::as_i64);
+                    if map.get("history_seq").is_some() && high.is_none() {
+                        return Ok(invalid("invalid history watermark"));
+                    }
+                    return Ok(
+                        match retrieval_history::derive(
+                            &Conn(c),
+                            map.get("scope").and_then(Json::as_str).unwrap_or(""),
+                            high,
+                            now_ms,
+                        )? {
+                            Ok(judged) => Reply::new(200, judged),
+                            Err(r) => r,
+                        },
+                    );
+                }
+                let mut reply = reads(
                     &Conn(c),
                     &credential,
                     &action,
@@ -1781,7 +1922,12 @@ impl Store {
                     now_ms,
                     scan,
                     indexed_seq,
-                )
+                )?;
+                if action == "status" && reply.status == 200 {
+                    let rows = Conn(c).query("SELECT count(*) FROM memory_proposals WHERE principal=?1 AND state IN ('pending','held')", &[Value::Text(credential.principal().into())])?;
+                    reply.body["proposal_quota"] = json!({"pending": num(&rows[0][0]).unwrap_or(0), "pending_per_principal": pending_limit});
+                }
+                Ok(reply)
             })
             .await
         {
@@ -1974,8 +2120,9 @@ fn reads<T: ReadTx + ?Sized>(
                     "principal": credential.principal(),
                     "credential": credential.class(),
                     "verifier": verifier::flagged(tx, credential.principal())?,
+                    "verify_evaluation": verify_eval::latest(tx, credential.principal())?,
                     "verifier_generation": {"memory": verifier::db_generation(tx)?},
-                    "capabilities": [verifier::CAPABILITY, manifest_binding::CAPABILITY],
+                    "capabilities": [verifier::CAPABILITY, manifest_binding::CAPABILITY, compensation::CAPABILITY],
                 }),
             );
             if let Some(names) = readable_scopes {
@@ -2209,6 +2356,7 @@ fn reads<T: ReadTx + ?Sized>(
                     "state": text(&row[3]),
                     "scan_state": text(&row[5]),
                     "writer": text(&row[6]),
+                    "auto_authored": proposal_tiers::auto_authored(tx, &scope, card_id, revision)?,
                     "updated_at": text(&row[7]),
                     "seq": revision,
                 }, "log_epoch": epoch}),
@@ -2216,3 +2364,10 @@ fn reads<T: ReadTx + ?Sized>(
         }
     }
 }
+
+#[cfg(test)]
+mod anchor_tests;
+#[cfg(test)]
+mod merge_drift_tests;
+#[cfg(test)]
+mod ranking_gate_tests;

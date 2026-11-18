@@ -78,11 +78,171 @@ fn merge_metadata<'a>(text: &'a str, excluded: &[&str]) -> Option<Vec<&'a str>> 
     )
 }
 
+/// Proof is reconstructed from the current hub blob and writer provenance.
+/// No candidate-supplied evidence, text or provenance can establish it.
+// This is a derived read fact, never a caller-provided authorization input.
+pub(super) fn auto_authored<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    id: &str,
+    revision: i64,
+) -> rusqlite::Result<bool> {
+    let rows = tx.query("SELECT e.payload FROM memory_cards c JOIN memory_events e ON e.scope=c.scope AND e.card_id=c.card_id AND e.revision=c.revision AND e.content_hash=c.content_hash AND e.principal=c.writer WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND e.kind='proposal.apply'", &[ops::t(scope), ops::t(id), rusqlite::types::Value::Integer(revision)])?;
+    Ok(rows.iter().any(|row| {
+        serde_json::from_str::<Json>(&ops::s(&row[0]))
+            .is_ok_and(|payload| payload["decision_mode"] == "automatic")
+    }))
+}
+
+pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
+    let Some(operations) = body["ops"].as_array().filter(|o| !o.is_empty()) else {
+        return Ok(false);
+    };
+    let cards = super::proposals::cards(body);
+    if cards.len() != operations.len()
+        || operations.iter().any(|op| {
+            string(op, "type") != "anchor_blocks" || super::proposals::op_schema(op).is_err()
+        })
+    {
+        return Ok(false);
+    }
+    for card in cards {
+        let scope = string(card, "scope");
+        let id = string(card, "card_id");
+        if operations
+            .iter()
+            .filter(|op| {
+                string(op, "scope") == scope
+                    && string(op, "card_id") == id
+                    && op["base_revision"] == card["base_revision"]
+            })
+            .count()
+            != 1
+        {
+            return Ok(false);
+        }
+        let Some(head) = ops::head(tx, scope, id)? else {
+            return Ok(false);
+        };
+        if card["base_revision"] != head.revision
+            || string(card, "before_hash") != head.hash
+            || card["before_state"] != "live"
+            || card["after_state"] != "live"
+            || head.state != "live"
+        {
+            return Ok(false);
+        }
+        // No existing credential class is automation-only. Only a head made
+        // by the hub's gated automatic apply path establishes authorship.
+        // Bind the exact event, never an older put/import or caller origin.
+        let rows = tx.query("SELECT e.kind, e.payload, b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash JOIN memory_events e ON e.scope=c.scope AND e.card_id=c.card_id AND e.revision=c.revision AND e.content_hash=c.content_hash AND e.principal=c.writer WHERE c.scope=?1 AND c.card_id=?2", &[ops::t(scope), ops::t(id)])?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let payload = serde_json::from_str::<Json>(&ops::s(&row[1])).unwrap_or(Json::Null);
+        if ops::s(&row[0]) != "proposal.apply"
+            || payload["decision_mode"] != "automatic"
+            || !auto_authored(tx, scope, id, head.revision)?
+        {
+            return Ok(false);
+        }
+        let rusqlite::types::Value::Blob(bytes) = &row[2] else {
+            return Ok(false);
+        };
+        let Ok(before) = std::str::from_utf8(bytes) else {
+            return Ok(false);
+        };
+        if before != string(card, "before_text") || super::ids::sha256_hex(bytes) != head.hash {
+            return Ok(false);
+        }
+        let Ok(after) = super::proposal_blocks::anchor_blocks(before, id) else {
+            return Ok(false);
+        };
+        if after == before || after != string(card, "after_text") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether another live card in `scope` names `id`, as `names` judges its text.
+/// With `scan_all` false the prefilter reads the lineage key names
+/// `Links::parse` acts on, never the target id. Values go through
+/// `literal_eval`, so escapes and implicit concatenation can spell an id that
+/// no byte search finds. A key cannot be escaped, because `front_matter`
+/// splits on the raw colon. A caller whose `names` reads wiki and markdown
+/// links or keys beyond the lineage list passes `scan_all`, which parses every
+/// live card in the scope, since no byte or key filter can promise to see them.
+pub(super) fn named_by<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    id: &str,
+    scan_all: bool,
+    names: impl Fn(&str) -> bool,
+) -> rusqlite::Result<bool> {
+    let filter = if scan_all {
+        String::new()
+    } else {
+        let mentions: Vec<String> = super::ranking::LINEAGE_KEYS
+            .iter()
+            .map(|key| format!("instr(b.bytes,CAST('{key}' AS BLOB))>0"))
+            .collect();
+        format!(" AND ({})", mentions.join(" OR "))
+    };
+    let rows = tx.query(&format!("SELECT b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' AND c.card_id<>?2{filter}"), &[ops::t(scope), ops::t(id)])?;
+    Ok(rows.iter().any(|row| {
+        let rusqlite::types::Value::Blob(bytes) = &row[0] else {
+            return false;
+        };
+        names(&String::from_utf8_lossy(bytes))
+    }))
+}
+
+/// A trusted card that declares lineage links, or that another live card in
+/// its scope names, can change search order when its revision moves. Lineage
+/// recency compares head revisions, so any apply there needs a human decision.
+/// The reserved fixture scope keeps its report-bound gate.
+pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
+    for card in super::proposals::cards(body) {
+        let (scope, id) = (string(card, "scope"), string(card, "card_id"));
+        if scope == super::retrieval_eval::FIXTURE_SCOPE {
+            continue;
+        }
+        let Some(head) = ops::head(tx, scope, id)? else {
+            continue;
+        };
+        if !super::ranking::trusted(&head.trust) {
+            continue;
+        }
+        let declares = [string(card, "before_text"), string(card, "after_text")]
+            .iter()
+            .any(|text| {
+                let links = super::ranking::Links::parse(text, scope);
+                links.successor.is_some() || !links.predecessors.is_empty()
+            });
+        let named = named_by(tx, scope, id, false, |text| {
+            let links = super::ranking::Links::parse(text, scope);
+            links.successor.as_deref() == Some(id) || links.predecessors.iter().any(|p| p == id)
+        })?;
+        if declares || named {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn classify<T: ReadTx + ?Sized>(
     tx: &T,
     body: &Json,
     scanner: &dyn Scanner,
 ) -> rusqlite::Result<u8> {
+    if !body["rollback_of"].is_null() {
+        return Ok(if super::compensation::exact(tx, body)? {
+            0
+        } else {
+            2
+        });
+    }
     // D4: a proposal recorded from a verifier principal is Tier 2 at submit,
     // preflight and every decision, whatever its ops or the policy lists.
     if body["verifier"] == true {
@@ -152,7 +312,7 @@ pub fn classify<T: ReadTx + ?Sized>(
             return Ok(2);
         }
     }
-    if scopes.len() != 1 || trusts.len() != 1 {
+    if scopes.len() != 1 || trusts.len() != 1 || lineage_review(tx, body)? {
         return Ok(2);
     }
     let mut tier = 0;
@@ -169,6 +329,11 @@ pub fn classify<T: ReadTx + ?Sized>(
             return Ok(2);
         };
         match string(op, "type") {
+            "anchor_blocks" => {
+                if !anchor_proof(tx, body)? {
+                    return Ok(2);
+                }
+            }
             "append_evidence" => (),
             "merge_exact_duplicates" => {
                 let Some(other) = cards.iter().find(|c| {

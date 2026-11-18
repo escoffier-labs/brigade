@@ -17,6 +17,21 @@ class ArchiveRefused(ValueError):
     """A protected, missing or changed card cannot be moved."""
 
 
+class ArchiveRecoveryUnverified(ArchiveRefused):
+    """The move committed but its stored recovery decision cannot be verified."""
+
+    def __init__(self, decision_id: str):
+        self.decision_id = decision_id
+        super().__init__(f"recovery_unverified: {decision_id}")
+
+
+def _reload_committed(target: Path, decision: journal.Decision) -> journal.Decision:
+    try:
+        return journal.load(target, decision.decision_id)
+    except (OSError, ValueError, KeyError, journal.kernel.ProjectionError) as exc:
+        raise ArchiveRecoveryUnverified(decision.decision_id) from exc
+
+
 def archive_rel(card_rel: str) -> str:
     journal.safe_path(Path("."), card_rel)
     return f"{ARCHIVE_ROOT}/{card_rel.removeprefix('memory/')}"
@@ -66,7 +81,16 @@ def frontmatter_refusal(text: str) -> str | None:
 
 
 @journal.serialized
-def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd.MemoryCareConfig) -> journal.Decision:
+def archive_card(
+    target: Path,
+    card_rel: str,
+    *,
+    reason: str,
+    config: memory_cmd.MemoryCareConfig,
+    policy_metadata: dict[str, Any] | None = None,
+    state_change: journal.Change | None = None,
+    expected_before: bytes | None = None,
+) -> journal.Decision:
     try:
         if PurePosixPath(card_rel).as_posix() != card_rel or "." in card_rel.split("/") or "//" in card_rel:
             raise ArchiveRefused(f"{card_rel}: non-canonical path")
@@ -80,6 +104,8 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
         before = journal.current(target, card_rel)
         if before is None:
             raise ArchiveRefused(f"{card_rel}: missing card")
+        if expected_before is not None and before != expected_before:
+            raise ArchiveRefused(f"{card_rel}: changed since lifecycle planning")
         text = before.decode("utf-8")
         refusal = frontmatter_refusal(text)
         if refusal:
@@ -92,6 +118,8 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
             journal.Change(dest, None, before, journal.safe_path(target, card_rel).stat().st_mode & 0o777),
             journal.Change(card_rel, before, None),
         ]
+        if state_change is not None:
+            changes.append(state_change)
         index_lines: list[dict[str, Any]] = []
         index_warnings: list[dict[str, Any]] = []
         for index in config.index_paths:
@@ -130,13 +158,30 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
             hub={"status": "pending", "action": "retire", "path": card_rel},
             prepared_paths=[dest],
             metadata={
+                **(policy_metadata or {}),
+                "state_paths": [state_change.path] if state_change else [],
                 "index_paths": sorted({row["path"] for row in index_lines}),
                 "index_lines": index_lines,
                 "index_warnings": index_warnings,
             },
         )
-        if journal._payload(target, d.decision_id)["phase"] == "abandoned":
-            raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
+    except (
+        OSError,
+        UnicodeError,
+        journal.JournalConflict,
+        journal.ReadOnlyPath,
+        journal.kernel.ProjectionError,
+    ) as exc:
+        raise ArchiveRefused(str(exc)) from exc
+    # The commit already persisted a pending hub action. Annotation failures
+    # must retain its decision id so recovery can retry the committed archive.
+    try:
+        abandoned = journal._payload(target, d.decision_id)["phase"] == "abandoned"
+    except (OSError, ValueError, KeyError):
+        return _reload_committed(target, d)
+    if abandoned:
+        raise ArchiveRefused(f"{card_rel}: decision abandoned after card changed")
+    try:
         return journal.update_hub(
             target,
             d.decision_id,
@@ -149,14 +194,8 @@ def archive_card(target: Path, card_rel: str, *, reason: str, config: memory_cmd
                 decision=d,
             ),
         )
-    except (
-        OSError,
-        UnicodeError,
-        journal.JournalConflict,
-        journal.ReadOnlyPath,
-        journal.kernel.ProjectionError,
-    ) as exc:
-        raise ArchiveRefused(str(exc)) from exc
+    except (OSError, ValueError, journal.kernel.ProjectionError):
+        return _reload_committed(target, d)
 
 
 @journal.serialized
@@ -181,7 +220,7 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
                 raise ArchiveRefused(f"{path}: changed after archive")
             before = journal.before_bytes(target, d, path)
             changes.append(journal.Change(path, live, before, metadata.get("modes", {}).get(path)))
-            if before is not None:
+            if before is not None and path not in metadata.get("state_paths", []):
                 card_rel, original = path, before
         config = memory_cmd._config_or_default(target)
         for index in sorted(indices):
@@ -228,6 +267,9 @@ def restore(target: Path, decision: journal.Decision) -> journal.Decision:
         )
         if journal._payload(target, undo.decision_id).get("phase") == "abandoned":
             return journal.update_hub(target, undo.decision_id, {"status": "skipped", "reason": "undo abandoned"})
+        from .memory_card_reads import record_content
+
+        record_content(target, original.decode("utf-8"), card_rel)
         withheld = memory_hub_sync.withheld(original.decode("utf-8"))
         if withheld:
             return journal.update_hub(target, undo.decision_id, {"status": "skipped", "reason": withheld})

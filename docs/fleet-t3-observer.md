@@ -69,9 +69,14 @@ fsmonitor disabled. No dirty paths are attributed to a thread. Non-repository
 workspaces use the existing node-scoped `local:` path-hash identity.
 `dirty_paths=()` and `dirty_truncated=True` mean dirty-file ownership is unknown.
 
-A poll has a total 15-second work budget, native timeout at most eight seconds,
-and up to 50 publication attempts while time permits. The caller should allow five
-additional seconds for process cleanup with an outer 20-second hard timeout.
+A poll has a total 15-second work budget. The first native snapshot may use the
+rest of it minus a reserve for publishing (the session call timeout plus the policy
+call timeout, plus one safety margin, so about 10 seconds), and the optional detail
+pass keeps its eight-second cap, less the policy call timeout. Up to 50 publication
+attempts while time permits, leaving the policy call timeout free after the loop for
+the health post. The observer finishes inside its own 15-second budget. The per-host
+telemetry script that runs it applies a subprocess timeout of its own (17 seconds in
+the reference script), which must stay above 15 seconds.
 Every native/Git call uses the remaining deadline. Publication starts only when
 the public client's fixed two-second call plus 250 ms fits. A fast Hub can
 refresh all 13 active threads in one pass. Slow calls or the 50-row cap leave
@@ -100,6 +105,222 @@ contents, and native identifiers are never copied to the count report.
 
 Live inspection does not publish or prove Hub visibility. The integration owner
 must review and explicitly wire publishing into the existing telemetry path.
+
+## Repository inventory for placement
+
+With `--publish`, the observer also reports which repositories this node can
+run as T3 projects, so the Hub can answer which machine has a repository as a T3
+project, with which T3 environment id and project id. The inventory is a
+separate key in the same native read. It never changes the session `projects`
+list that path mapping relies on.
+
+It holds the local T3 environment id from the t3-fleet agent descriptor, and for
+each project that is neither archived nor deleted and has a repository identity,
+the T3 project id and its canonical repository key. It never carries workspace
+roots, titles, paths or remote URLs. A canonical key is lowercase
+`host.tld/segment/segment...` with at least two segments after a dotted host,
+segments of `a-z`, `0-9`, `.`, `_` and `-`, and no scheme, userinfo, leading
+slash or tilde, backslash, whitespace or `..`. A trailing `.git` is stripped.
+A project id must be an opaque token of at most 128 characters
+(`[A-Za-z0-9][A-Za-z0-9:_.-]*`, no `..`), such as a UUID with an optional `mcp:`
+style prefix, so a path, URL or credential cannot reach the Hub. The observer
+applies the Hub's exact row predicate and limits (512 for the repo key),
+drops invalid or repeated rows individually, and reports the count as
+`inventory_dropped`. If every row is invalid the set is unknown, not empty.
+The Hub itself stays strict and rejects a whole body that contains a bad row.
+The environment id is read first, from a worker bounded to about one second,
+and is skipped in the second-pass detail read, so a stalled descriptor cannot
+cost session publishing. If the environment id is unavailable, the
+inventory does not exist for that run, which means unknown and never empty.
+An unavailable or failed inventory never erases a stored one. A result that
+would exceed the 256 KiB bound drops the inventory rather than the sessions.
+
+The report adds `inventory` with `ok`, `error` or `skipped`. It is sent once per
+publish run, after sessions and inside the same deadline, as the node-token
+`projects-observe` policy action. A failure is reported there and never changes
+`ok`, the exit code or session publishing. The Hub keeps each node's latest full
+set (900 second TTL), ignores an older snapshot than the stored one, and raises
+a conflict for two same-instant snapshots that disagree. A node can only write
+its own inventory.
+
+A node token proves the node id, not its T3 environment. The operator binds each
+machine's environment in the policy document with the optional machine field
+`t3_environment_id` (letters, digits and hyphens, unique across machines,
+admin token only). The environment id is compared case-insensitively, in the
+uniqueness check, the binding check and the stored value. A report whose
+environment id differs from the machine's binding is rejected with `environment-binding-mismatch`, and in the same
+transaction that node's stored project rows and snapshot are deleted, so
+placement stops using a stale environment at once. A node can only clear its own
+rows. A mismatched report older than the stored snapshot changes nothing.
+A machine without a binding is stored but read as unbound. Reads recompute the
+binding from the current policy, so a policy change applies without a
+republish, and placement must skip unbound rows.
+
+## Observer health
+
+Presence rows expire after 300 seconds, so a node whose observer is failing looks
+like a node with no sessions. Each `--publish` run therefore also sends the
+node-token `t3-observe` policy action, after sessions and before the inventory:
+`ok: true` only when the snapshot parsed, the session publication returned
+without an error and no active thread was skipped as invalid (rotation truncation
+and the inventory outcome do not matter),
+and `ok: false` when the observation failed and time remains. The report adds
+`health` with `ok`, `error` or `skipped` (the post outcome). A failed post never
+changes `ok`, the exit code or session publishing.
+
+The Hub stamps its own clock when it receives the report, never a node-supplied
+time, in the optional `fleet_t3_observations` table (created on the first
+report). A node with a row whose last success is missing or at least 300 seconds
+old, the same as the session TTL, has unknown T3 sessions. With a 120-second
+timer a node is still known after two missed cycles (age 240 seconds) and unknown
+on the third (age 360 seconds). `GET /sessions` adds `nodes_unknown`, and
+`brigade fleet sessions` prints a footer naming those nodes (with `--json`,
+stdout stays the bare session list and one warning line goes to stderr). If the
+health table cannot be read, `nodes_unknown_error` is set. Session views leave a
+node with no row alone.
+
+Placement is stricter: it trusts a session count only for a node whose observer
+succeeded within 300 seconds. A stale node, a node that only ever failed, a node
+with no health row (every host runs the observer, so a missing row means the node
+is not reporting) and an unreadable health table all make the machine ineligible.
+A node with no row at all gets its own reason, `t3-health-missing`, so it can be
+told apart from a failing or stale node, which gets `sessions-unknown`. A node can
+only write its own row.
+
+Rollout order: upgrade the Hub first, then each node's observer. Until a node
+posts its first health report, placement has `t3-health-missing` for it, so
+placement recommends nothing until every candidate machine has reported once
+(about one observer cycle after its upgrade).
+
+### Memory reading
+
+The same health report carries an optional `memory_used`: this node's memory-used
+fraction, `1 - available / total`, rounded to four decimals in 0 to 1. Linux
+reads `MemTotal` and `MemAvailable` from `/proc/meminfo`. Windows calls
+`GlobalMemoryStatusEx`. Any other platform, or any read error, sends no key at
+all, so an unreadable machine reads as unknown, never idle. The Hub refuses a
+value that is not a finite number in 0 to 1 (a boolean is not a number) with a
+400 and stores nothing. An explicit `"memory_used": null` behaves like an
+omitted key.
+
+The reading is only as good as `MemAvailable`. On a ZFS host, ARC cache does not
+count as available, so the reading can sit well above the memory a process could
+actually get. A container without lxcfs sees the host's `/proc/meminfo`, not its
+own cgroup limit. Compare a node's readings with its real headroom before relying
+on memory to shed it.
+
+The Hub keeps the reading in a `memory_used` column of `fleet_t3_observations`,
+written only when `ok` is true, so a failed attempt keeps the last good reading,
+and a success without memory clears it. A reading counts only while the node's
+last success is under 300 seconds old, the same rule as the session count, so it
+never outlives the session count beside it. A Hub whose table predates this
+column adds it on the first report that arrives, and `required.json` lists the
+pre-memory shape as a reviewed variant, so the Rust engine stays ready before
+and after that upgrade.
+
+Placement takes the maximum of CPU load, the session ratio and memory. A machine
+with no fresh reading is left out of that maximum and gets the informational
+reason `memory-unknown`, which never changes `eligible`. A machine over the
+threshold on memory alone is shed with `machine-load-shed`. The recommendation's
+`load_inputs.memory` is null when unknown.
+
+Rollout order: upgrade the Hub first, then each node's observer. An old Hub
+rejects the unknown `memory_used` field. If a node does run ahead of its Hub, the
+observer sees that exact refusal and resends the health report once without
+memory, so the node stays placeable on CPU and sessions instead of dropping out.
+
+Causes that keep a node unknown until fixed: an active thread that stays invalid
+(its `invalid_rows` count is non-zero every run, so `ok: true` is never posted), a
+`rotation_state_unavailable` error from an unreadable cursor file, and a host that
+has no T3 install or cannot reach the native client, because its observer fails
+every run and posts `ok: false`. Read the observer's JSON (`error`, `invalid_rows`,
+`health`) on that host to tell which.
+
+## Placement
+
+`brigade fleet place --repo <canonical key> [--threshold 0.70] [--json]` asks the
+Hub which machine should run a new child agent for a repository. It prints one
+line: the recommended machine, its T3 environment id and project id, and the
+reason, or why no machine qualifies. Run it on an enrolled node with a node
+token; it exits 1 when nothing is recommended.
+
+The answer is advice, never admission. Trust statement: node-reported telemetry
+and inventory; advisory only, never admission. The Hub does not reserve a slot,
+store a decision, or write anything while answering (one read snapshot with
+writes refused, and the quota and routing schemas are never created on a Hub
+that lacks them). A caller that wants a slot still goes through `route`, which
+re-checks every gate.
+
+Placement reuses the routing candidate evaluator and adds three checks:
+
+- The repository must be a bound, fresh T3 project on the machine. A machine
+  with no row is `repo-not-placeable`, an unbound row is `inventory-unbound`,
+  an expired row is `inventory-stale`, and a stored row whose ids fail the shared
+  project and environment id rules is `inventory-invalid`. A repository with no usable row
+  anywhere is denied as `repo-not-placeable`. A policy
+  `repositories.<id>.eligible_machines` list narrows the set further
+  (`repo-machine-not-eligible`). The policy entry is found by the normalized
+  key only (casefolded, one trailing `.git` removed), never by the caller's
+  spelling, so its patches, privacy and machine list apply together for every
+  spelling. A policy save whose `repositories` keys collide after that
+  normalization is refused, and a stored document that already has such a pair
+  makes placement fail closed with `repo-policy-ambiguous` and no
+  recommendation. When one machine has several usable projects
+  for the repository, the lowest project id is chosen, the recommendation
+  carries `project_choices`, and that candidate gets the informational reason
+  `multiple-projects` (it never changes `eligible`).
+- Effective load is the higher of the node-reported CPU `load` and the
+  Hub-counted live sessions on the node divided by the machine's policy
+  `concurrency`. Missing or stale telemetry, or a null `load`, excludes the
+  machine (`machine-unknown-telemetry`, `machine-stale-telemetry`,
+  `machine-load-unknown`). If the Hub cannot read its live session counts, no
+  machine is eligible (`sessions-unknown`) rather than reading as zero. A node's
+  reported memory-used fraction is a third input to the maximum (see Memory
+  reading above); a missing reading adds only the informational `memory-unknown`.
+- A machine at or over the threshold (default 0.70, range 0 to 1) is shed
+  (`machine-load-shed`).
+
+If the caller's own machine is eligible and under the threshold it wins
+(`local-under-threshold`). Otherwise the remaining machines are ordered by the
+existing routing rank (preferred and discouraged workloads, then priority) and
+then by lower effective load (`peer-ranked`). Machine preference stays in the
+existing policy fields, so a low-weight machine is configured with
+`discouraged_workloads`, `priority` or `os`, not a placement setting.
+
+Inventory privacy: for every candidate other than the caller's own machine, the
+inventory reasons (`repo-not-placeable`, `inventory-unbound`, `inventory-stale`,
+`inventory-invalid`) collapse into one opaque `not-placeable`. The caller's own
+machine keeps the detailed reason, and the top-level `repo-not-placeable`
+denial stays explicit. Any enrolled node can still learn whether some bound
+machine has a repository, and which one is recommended, with that machine's
+environment and project id. That is accepted: the query needs a node token, so
+only enrolled fleet nodes can ask. A machine with no usable load (missing,
+stale or null telemetry) is never placeable, and `place` returns the named error
+`placement-unavailable: <class>` for a storage failure, never row data.
+
+The response schema is `brigade.fleet_placement.v1`. Only the recommended
+machine carries its `environment_id` and `project_id`, and the block has no node
+id: a caller launching a child agent needs the machine, `environment_id`,
+`project_id` and `expires_at`. Every candidate carries its eligibility,
+effective load and reasons only. `expires_at` is the earliest of the telemetry
+expiry, the inventory expiry and two minutes after `decided_at`. A caller that
+already holds an open database transaction gets
+`placement-unavailable: open-transaction`, because the read snapshot is rolled
+back and must not be the caller's. The HTTP path never has one.
+
+```mermaid
+flowchart TD
+    A[place request: repo, threshold] --> B[One read snapshot, writes refused]
+    B --> C{Routing enabled and repo has a bound fresh project?}
+    C -- no --> N[status none: repo-not-placeable or routing reason]
+    C -- yes --> D[Routing evaluator per machine: telemetry, capacity, quota read]
+    D --> E[Placement checks: inventory, repo policy, effective load vs threshold]
+    E --> F{Caller machine eligible and under threshold?}
+    F -- yes --> L[Recommend local machine]
+    F -- no --> G{Any peer eligible?}
+    G -- no --> N2[status none: no-eligible-candidate]
+    G -- yes --> P[Recommend best peer by rank, then lower load]
+```
 
 ## Keeping local Claude Code and Codex sessions open
 

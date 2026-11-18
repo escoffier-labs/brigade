@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+import sys
 import threading
 from datetime import date
 
 import pytest
 
-from brigade import ingest, memory_care_tend, memory_inbox_retry
+from tests._handoff_origin_fixtures import requires_automatic_filing, windows_draft_review
+from brigade import handoff_origin, ingest, memory_care_tend, memory_inbox_retry
 from brigade import memory_care_journal as journal
 from brigade import memory_inbox_drain as drain
 from tests._home import set_home
@@ -20,8 +22,13 @@ CARD = "memory/cards/instructions/user-md--overflow-preference.md"
 
 
 def _held(ws, content=NOTE, *, flags=False, number=0):
-    """A draft held by an earlier release, built the way tests/test_memory_inbox_drain.py builds one."""
-    source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
+    """An authorized review draft, optionally without legacy retry flags in its header."""
+    if sys.platform == "win32":
+        source = ws / ".claude/memory-handoffs" / f"2026-10-01-{number}.md"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(handoff_text("USER.md", content, type_="preference"), encoding="utf-8")
+    else:
+        source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
     ingest._execute(
         ingest.Outcome("inboxed", code="bootstrap-budget-exceeded"),
         source,
@@ -34,7 +41,12 @@ def _held(ws, content=NOTE, *, flags=False, number=0):
         promote_cards=True if flags else None,
         route_documents=True if flags else None,
     )
-    return sorted((ws / drain.INBOX_REL).glob("*.md"))[-1]
+    draft = sorted((ws / drain.INBOX_REL).glob("*.md"))[-1]
+    stamped = handoff_origin.stamp_review_draft(
+        ws, draft, draft.read_bytes(), handoff_origin.ReviewDraft("bootstrap-budget-exceeded", flags, True)
+    )
+    assert stamped == (sys.platform != "win32")
+    return draft
 
 
 def test_retry_flags_route_old_budget_holds():
@@ -49,6 +61,7 @@ def test_the_new_success_code_is_a_hold_and_needs_no_evidence_proof():
     assert "bootstrap-budget-exceeded" in drain.RETRY_CODES and "bootstrap-budget-exceeded" not in drain.HOLD_CODES
 
 
+@requires_automatic_filing
 @pytest.mark.parametrize("flags", [False, True])
 def test_old_budget_hold_lands_in_the_overflow_card_on_the_next_drain(tmp_path, monkeypatch, flags):
     ws, home, env = field_workspace(tmp_path)
@@ -60,6 +73,7 @@ def test_old_budget_hold_lands_in_the_overflow_card_on_the_next_drain(tmp_path, 
     assert not draft.exists() and (ws / "USER.md").stat().st_size == 8241
 
 
+@requires_automatic_filing
 def test_second_retry_appends_to_the_existing_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -71,6 +85,7 @@ def test_second_retry_appends_to_the_existing_card(tmp_path, monkeypatch):
     assert "archive: never" in card and NOTE in card and card.endswith("\n\nPrefer UTC timestamps.\n")
 
 
+@requires_automatic_filing
 def test_held_copy_of_published_content_resolves_without_a_second_card(tmp_path, monkeypatch):  # Review Focus 6
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -85,6 +100,7 @@ def test_held_copy_of_published_content_resolves_without_a_second_card(tmp_path,
     assert [p.name for p in (ws / "memory/cards/instructions").iterdir()] == ["user-md--overflow-preference.md"]
 
 
+@requires_automatic_filing
 def test_old_budget_hold_with_an_injection_marker_stays_for_a_person(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -94,6 +110,7 @@ def test_old_budget_hold_with_an_injection_marker_stays_for_a_person(tmp_path, m
     assert draft.exists() and not (ws / "memory/cards/instructions").exists()
 
 
+@requires_automatic_filing
 def test_retry_waits_when_the_document_lock_is_busy(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -116,6 +133,7 @@ def test_retry_waits_when_the_document_lock_is_busy(tmp_path, monkeypatch):
     assert not (ws / "memory/cards/instructions").exists()
 
 
+@requires_automatic_filing
 def test_retry_decision_undoes_by_exact_block(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -125,6 +143,34 @@ def test_retry_decision_undoes_by_exact_block(tmp_path, monkeypatch):
     assert not (ws / CARD).exists()
 
 
+@requires_automatic_filing
+def test_retry_claim_failure_abandons_without_writing_card(tmp_path, monkeypatch):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    data = draft.read_bytes()
+    finish = journal.finish_prepared
+    prepared = []
+
+    def block_claim(target, decision_id):
+        prepared.append(decision_id)
+        # Verification succeeds, but the durable claim cannot be written.
+        (ws / ".brigade/handoffs/consumed-stamps").write_text("not a directory")
+        return finish(target, decision_id)
+
+    monkeypatch.setattr(journal, "finish_prepared", block_claim)
+    with pytest.raises(journal.JournalConflict, match="retry abandoned"):
+        memory_inbox_retry.reprocess(ws, draft)
+    assert not (ws / CARD).exists()
+    assert draft.read_bytes() == data
+    (decision_id,) = prepared
+    payload = journal._payload(ws, decision_id)
+    assert payload["phase"] == payload["status"] == "abandoned"
+    assert payload["abandoned_reason"] == "review origin stamp missing or unavailable"
+    assert journal.resolve_prepared(ws) == []
+
+
+@requires_automatic_filing
 def test_retry_journals_a_card_append_and_dry_run_writes_nothing(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -137,6 +183,7 @@ def test_retry_journals_a_card_append_and_dry_run_writes_nothing(tmp_path, monke
     assert payload["appends"][0]["created"] is True and payload["appends"][0]["header_bytes"] > 0
 
 
+@requires_automatic_filing
 def test_retry_of_a_card_append_keeps_the_card_private(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -145,6 +192,7 @@ def test_retry_of_a_card_append_keeps_the_card_private(tmp_path, monkeypatch):
     assert "visibility: private\n" in head + "\n" and "archive: never" in head
 
 
+@requires_automatic_filing
 def test_retry_with_an_invalid_instructions_table_still_routes_the_handoff(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -156,6 +204,7 @@ def test_retry_with_an_invalid_instructions_table_still_routes_the_handoff(tmp_p
     assert (ws / "USER.md").stat().st_size == 100
 
 
+@requires_automatic_filing
 def test_a_committed_retry_is_not_reported_skipped_when_the_card_id_index_cannot_read_the_card(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -168,6 +217,42 @@ def test_a_committed_retry_is_not_reported_skipped_when_the_card_id_index_cannot
     result = drain.drain(ws, today=TODAY, deadline_days=14)
     assert result["retried"] == 1 and not result.get("skipped"), result
     assert (ws / CARD).read_text().endswith("\n" + NOTE + "\n") and not draft.exists()
+
+
+@pytest.mark.parametrize("flags", [False, True])
+def test_unsigned_budget_hold_stays_for_a_person(tmp_path, monkeypatch, flags):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws, flags=flags)
+    if windows_draft_review(ws, draft):
+        return
+    handoff_origin.stamp_path(ws, draft).unlink()
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+    assert result["kept_for_person"] == 1 and result["retried"] == 0
+    assert draft.exists() and not (ws / CARD).exists()
+
+
+@pytest.mark.parametrize("move", [False, True])
+def test_manually_removed_review_draft_loses_retry_authority(tmp_path, monkeypatch, move):
+    ws, home, env = field_workspace(tmp_path)
+    set_home(monkeypatch, home)
+    draft = _held(ws)
+    if windows_draft_review(ws, draft):
+        return
+    data = draft.read_bytes()
+    sidecar = handoff_origin.stamp_path(ws, draft)
+    if move:
+        draft.rename(draft.with_suffix(".removed"))
+    else:
+        draft.unlink()
+    preview = drain.drain(ws, today=TODAY, deadline_days=14, dry_run=True)
+    assert preview["retried"] == 0 and sidecar.exists()
+    drain.drain(ws, today=TODAY, deadline_days=14)
+    assert not sidecar.exists()
+    draft.write_bytes(data)
+    result = drain.drain(ws, today=TODAY, deadline_days=14)
+    assert result["kept_for_person"] == 1 and result["retried"] == 0
+    assert draft.exists() and not (ws / CARD).exists()
 
 
 def _refuse_retry_at_write(ws, monkeypatch, before_write=None):
@@ -183,6 +268,7 @@ def _refuse_retry_at_write(ws, monkeypatch, before_write=None):
     monkeypatch.setattr(ingest, "_append_document_nofollow", refuse)
 
 
+@requires_automatic_filing
 def test_refused_retry_removes_resolved_copy_and_restores_inbox(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -197,6 +283,7 @@ def test_refused_retry_removes_resolved_copy_and_restores_inbox(tmp_path, monkey
     assert not list((ws / drain.RESOLVED_REL).glob("*.md"))
 
 
+@requires_automatic_filing
 def test_refused_retry_keeps_changed_resolved_copy_and_reports_reason(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -217,6 +304,7 @@ def test_refused_retry_keeps_changed_resolved_copy_and_reports_reason(tmp_path, 
     assert re.search(r"\(cause: \S.*\)$", refused), refused
 
 
+@requires_automatic_filing
 def test_refused_retry_does_not_overwrite_occupied_inbox_and_cleanup_undoes(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -239,6 +327,7 @@ def test_refused_retry_does_not_overwrite_occupied_inbox_and_cleanup_undoes(tmp_
     assert len(list((ws / drain.RESOLVED_REL).glob("*.md"))) == 1
 
 
+@requires_automatic_filing
 def test_refused_cited_retry_keeps_one_pending_draft(tmp_path, monkeypatch):
     from brigade import memory_evidence_log
 
@@ -262,6 +351,7 @@ def test_refused_cited_retry_keeps_one_pending_draft(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("step", ["finish", "annotation"])
+@requires_automatic_filing
 def test_refused_retry_cleanup_recovers_once_after_interruption(tmp_path, monkeypatch, step):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -290,8 +380,14 @@ def test_refused_retry_cleanup_recovers_once_after_interruption(tmp_path, monkey
         with pytest.raises(Interrupted):
             memory_inbox_retry.reprocess(ws, draft)
 
+    cleanup = next(
+        journal._payload(ws, path.parent.name)
+        for path in (ws / journal.JOURNAL_REL).glob("*/decision.json")
+        if journal._payload(ws, path.parent.name).get("refusal_of")
+    )
+    journal.resolve_prepared(ws, decision_id=cleanup["decision_id"])
     for _ in range(2):
-        journal.resolve_prepared(ws)
+        journal.resolve_prepared(ws, decision_id=cleanup["refusal_of"])
     assert draft.read_bytes() == original
     assert drain.pending(ws) == [draft]
     assert not list((ws / drain.RESOLVED_REL).glob("*.md"))
@@ -302,6 +398,7 @@ def test_refused_retry_cleanup_recovers_once_after_interruption(tmp_path, monkey
     assert [path.read_bytes() for path in (ws / drain.RESOLVED_REL).glob("*.md")] == [original]
 
 
+@requires_automatic_filing
 def test_recovery_reports_resolved_copy_digest_mismatch(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -329,6 +426,7 @@ def test_recovery_reports_resolved_copy_digest_mismatch(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("record_id", ["20000101T000000Z-inbox-00000000", "not-a-decision"])
+@requires_automatic_filing
 def test_refused_retry_recovers_with_unrelated_unreadable_record(tmp_path, monkeypatch, record_id):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
@@ -358,6 +456,7 @@ def test_refused_retry_recovers_with_unrelated_unreadable_record(tmp_path, monke
     assert drain.pending(ws) == [draft]
 
 
+@requires_automatic_filing
 def test_refused_retry_recovers_with_read_only_resolved_copy_and_undo(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)

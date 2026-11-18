@@ -278,7 +278,11 @@ def test_a_hub_without_the_floor_or_a_wrong_principal_fails_before_any_model_cal
 @pytest.mark.parametrize("flags", [["--scheduled"], [], ["--dry-run"]])
 def test_a_disabled_pass_makes_no_model_call_no_hub_request_and_no_state_write(verify_hub, capsys, tmp_path, flags):
     target, hub, fake, _ = verify_hub
-    configure(target, tmp_path / "bound", extra='propose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n')
+    configure(
+        target,
+        tmp_path / "bound",
+        extra='enabled = false\npropose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n',
+    )
     status, report = verify(target, capsys, *flags)
     assert status == 1 and report["code"] == run_mod.DISABLED and report["reason"] == run_mod.DISABLED_REASON
     assert fake.calls == [] and fake.ready_calls == 0 and hub.calls == []
@@ -604,7 +608,11 @@ def test_a_correction_after_a_quota_stop_is_checked_again_next_run(verify_hub, c
 
 def test_a_disabled_doctor_probes_no_seat(verify_hub, capsys, tmp_path, monkeypatch):
     target, hub, fake, _ = verify_hub
-    configure(target, tmp_path / "bound", extra='propose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n')
+    configure(
+        target,
+        tmp_path / "bound",
+        extra='enabled = false\npropose_seat = "propose-seat"\nconfirm_seat = "confirm-seat"\n',
+    )
     probed = []
     monkeypatch.setattr(seats, "doctor_payload", lambda *args, **kwargs: probed.append(args) or {"status": "ok"})
     monkeypatch.setattr(seats, "probe", lambda *args, **kwargs: probed.append(args))
@@ -856,7 +864,8 @@ def test_the_temporary_file_is_owner_only_inside_the_packet_directory(verify_hub
     assert verify(target, capsys)[0] == 0
     # The stage, the stage again with its attach time, then the packet and manifest: each through its own
     # temporary file in the packet directory.
-    assert len(seen) == 4 and set(seen) == {(target / pk.PACKETS, 0o600)}
+    assert seen == [(target / pk.PACKETS, 0o600)] * 4
+    assert not (target / vstate.ROOT / "decision.json").exists()  # Scheduled runs cannot publish admission.
     assert not list(target.rglob(".packet-*.tmp"))
 
 

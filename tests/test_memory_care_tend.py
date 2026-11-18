@@ -1,3 +1,4 @@
+from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 import json
 
 from brigade import memory_care_tend as tend

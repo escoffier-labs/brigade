@@ -7,7 +7,10 @@ import time
 
 import pytest
 
+from tests.memory_read_fixtures import signed_memory_authority as signed_memory_authority
+
 from brigade import memory_card_reads, memory_fairness, memory_hooks, memory_hub_store, memory_review
+from tests.memory_read_fixtures import signing_key
 from brigade import memory_verify_state
 from brigade.claude_hooks import hub_recall
 from brigade.cli import main
@@ -21,6 +24,7 @@ needs_dir_fd = pytest.mark.skipif(
 
 
 def card(target, name, *, trust="agent-unreviewed", scope=None):
+    signing_key(target)
     path = target / "memory/cards" / f"{name}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     scope_line = f"scope: {scope}\n" if scope else ""
@@ -31,7 +35,12 @@ def card(target, name, *, trust="agent-unreviewed", scope=None):
 def opened(target, session, name, days):
     def change(ledger):
         ledger["opened"] = [name]
-        ledger["interactive_open_days"] = {name: days}
+        ledger["interactive_open_days"] = {name: sorted(set(days))}
+        ledger["interactive_open_auth"] = memory_card_reads.authenticate(
+            target,
+            hub_recall.ledger_path(target, session).relative_to(target).as_posix(),
+            ledger["interactive_open_days"],
+        )
 
     hub_recall.update(hub_recall.ledger_path(target, session), change)
 

@@ -11,6 +11,9 @@ use rusqlite::types::Value;
 use serde_json::{Value as Json, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Reserved synthetic scope. Fixture reports carry no authority elsewhere.
+pub const FIXTURE_SCOPE: &str = "repo:brigade/retrieval-eval-fixture";
+
 /// The harness evaluation id expires after 24 hours even with no corpus drift.
 pub const MAX_AGE_MS: i64 = 86_400_000;
 /// Match event-id admission: tolerate five minutes of client clock skew.
@@ -110,6 +113,13 @@ fn drift_budget(member_count: usize) -> usize {
 
 #[derive(Clone, Debug)]
 pub struct Live {
+    /// Credential class that will apply the proposal, which sets writer class.
+    pub applier: &'static str,
+    /// Credential principal that will apply it, which sets the head's writer.
+    pub principal: String,
+    /// The published index the gate is judged against. Search answers from it,
+    /// so its trusted lineage graph is read here beside the live store.
+    pub snapshot: Option<std::sync::Arc<super::index::Snapshot>>,
     pub indexed_seq: i64,
     pub embedder_id: Option<String>,
     pub weights: Json,
@@ -140,6 +150,9 @@ fn positive_string(v: &Json) -> bool {
         .is_some_and(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
 }
 fn binding(r: &Report) -> &Json {
+    if r.body["gate"]["name"] == "Live-R0" {
+        return &r.body["live"]["binding"];
+    }
     &r.body["adapters"][if r.mode == "lexical" {
         "hub-lexical"
     } else {
@@ -174,11 +187,22 @@ pub fn prepare(request: &Json) -> Result<Report, Reply> {
         ));
     }
     let body: Json = serde_json::from_str(raw).map_err(|_| invalid())?;
-    if !body.is_object() || body.get("digest").is_some() || !hex(&body["fixture_digest"]) {
+    if !body.is_object()
+        || body.get("digest").is_some()
+        || !(if body["gate"]["name"] == "Live-R0" {
+            hex(&body["query_set_digest"])
+                && ids::parse_event_id(string(&body["live"], "proposal_id")).is_some()
+                && body["live"]["targets"]
+                    .as_array()
+                    .is_some_and(|t| !t.is_empty())
+        } else {
+            hex(&body["fixture_digest"])
+        })
+    {
         return Err(invalid());
     }
     let mode = match body["gate"]["name"].as_str() {
-        Some("R0") => "lexical",
+        Some("R0" | "Live-R0") => "lexical",
         Some("R1-public") => "hybrid",
         _ => return Err(invalid()),
     };
@@ -194,14 +218,19 @@ pub fn prepare(request: &Json) -> Result<Report, Reply> {
         passed,
     };
     let b = binding(&report);
-    let available = report.body["adapters"][if mode == "lexical" {
-        "hub-lexical"
+    let available = if report.body["gate"]["name"] == "Live-R0" {
+        report.body["adapters"]["before"]["available"] == true
+            && report.body["adapters"]["candidate"]["available"] == true
     } else {
-        "hub-hybrid"
-    }]["available"]
-        .as_bool()
-        == Some(true)
-        && report.body["adapters"]["bm25"]["available"].as_bool() == Some(true);
+        report.body["adapters"][if mode == "lexical" {
+            "hub-lexical"
+        } else {
+            "hub-hybrid"
+        }]["available"]
+            .as_bool()
+            == Some(true)
+            && report.body["adapters"]["bm25"]["available"].as_bool() == Some(true)
+    };
     let passed = report.body["gate"]["passed"]
         .as_bool()
         .ok_or_else(invalid)?;
@@ -278,6 +307,15 @@ pub fn record(
             "evaluation time is more than 24 hours old",
         ));
     }
+    if r.body["gate"]["name"] == "Live-R0"
+        && !super::retrieval_history::valid(tx, &r.body, p.now_ms)?
+    {
+        return Ok(ops::error(
+            409,
+            "memory_retrieval_history_insufficient",
+            "judged history does not match the report",
+        ));
+    }
     let snapshot = members(tx, string(binding(r), "scope"))?;
     if binding(r)["corpus_identity"] != identity(&snapshot) {
         return Ok(ops::error(
@@ -339,6 +377,14 @@ pub fn hold<T: ReadTx + ?Sized>(
     } else {
         "lexical"
     };
+    // Fixture reports have authority only in this reserved test/CI scope.
+    // On real scopes history can veto, but can never supply permission.
+    if super::proposals::cards(proposal)
+        .iter()
+        .any(|c| c["scope"] != FIXTURE_SCOPE)
+    {
+        return real_scope_hold(tx, proposal, mode, live, now);
+    }
     let rows=tx.query("SELECT report_json,report_sha256,corpus_members,dense_identity FROM memory_retrieval_evals WHERE mode=?1 ORDER BY record_seq DESC LIMIT 1",&[ops::t(mode)])?;
     let Some(row) = rows.first() else {
         return Ok(Some("retrieval_eval_unbound"));
@@ -363,6 +409,15 @@ pub fn hold<T: ReadTx + ?Sized>(
                 return Ok(Some("retrieval_eval_fixture_mismatch"));
             }
         }
+    }
+    if r.body["gate"]["name"] == "Live-R0"
+        && (r.body["live"]["proposal_id"] != proposal["proposal_id"]
+            || r.body["live"]["targets"] != live_targets(proposal, false))
+    {
+        return Ok(Some("retrieval_eval_candidate_mismatch"));
+    }
+    if r.body["gate"]["name"] == "Live-R0" && !super::retrieval_history::valid(tx, &r.body, now)? {
+        return Ok(Some("retrieval_eval_judgments_changed"));
     }
     let reason = if r.mode != mode {
         Some("retrieval_eval_mode_mismatch")
@@ -461,6 +516,114 @@ pub fn hold<T: ReadTx + ?Sized>(
     )
 }
 
+/// Recomputed at preflight and apply from current hub heads, never report metrics.
+/// `append_evidence` and `anchor_blocks` change bytes search never reads, so each
+/// target's ranking projection must come out identical. An exact-duplicate merge
+/// cannot, so `merge_gate` admits it under bounded drift instead.
+fn real_scope_hold<T: ReadTx + ?Sized>(
+    tx: &T,
+    proposal: &Json,
+    mode: &str,
+    live: &Live,
+    now: i64,
+) -> rusqlite::Result<Option<&'static str>> {
+    let applier = live.applier;
+    if mode != "lexical" {
+        return Ok(Some("retrieval_eval_projection_changed"));
+    }
+    if let Some(reason) = super::retrieval_history::veto(tx, proposal, now)? {
+        return Ok(Some(reason));
+    }
+    if proposal["tier"] != 0 {
+        return Ok(Some("retrieval_eval_projection_changed"));
+    }
+    let ops = proposal["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let merging = ops.iter().any(super::merge_gate::is_merge);
+    if merging && !ops.iter().all(super::merge_gate::is_merge) {
+        return Ok(Some(super::merge_gate::MIXED_OPS));
+    }
+    if ops.is_empty()
+        || (!merging
+            && ops
+                .iter()
+                .any(|op| !matches!(string(op, "type"), "append_evidence" | "anchor_blocks")))
+    {
+        return Ok(Some("retrieval_eval_projection_changed"));
+    }
+    let cards = super::proposals::cards(proposal);
+    if cards.is_empty() {
+        return Ok(Some("retrieval_eval_projection_changed"));
+    }
+    // Backstop for a card that gained a lineage link after tiering.
+    if super::proposal_tiers::lineage_review(tx, proposal)? {
+        return Ok(Some("retrieval_eval_lineage_exposed"));
+    }
+    // Search answers from the published graph. The scan above reads the live
+    // store, which no longer shows an edge its owner has since dropped.
+    let published_lineage = |target: &Json| {
+        live.snapshot
+            .as_ref()
+            .is_some_and(|s| s.in_lineage(string(target, "scope"), string(target, "card_id")))
+    };
+    if merging {
+        if cards.iter().any(&published_lineage) {
+            return Ok(Some("retrieval_eval_lineage_exposed"));
+        }
+        return super::merge_gate::hold(tx, proposal, live);
+    }
+    for target in cards {
+        let scope = string(target, "scope");
+        let id = string(target, "card_id");
+        if published_lineage(target) {
+            return Ok(Some("retrieval_eval_lineage_exposed"));
+        }
+        let rows = tx.query(&format!("SELECT c.revision,c.content_hash,c.trust,b.bytes,c.writer_class,{},c.state,c.writer FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", super::index::ORIGIN_AUTOMATED_SQL), &[ops::t(scope),ops::t(id)])?;
+        let Some(row) = rows.first() else {
+            return Ok(Some("retrieval_eval_target_drifted"));
+        };
+        let (Value::Integer(revision), Value::Blob(bytes)) = (&row[0], &row[3]) else {
+            return Ok(Some("retrieval_eval_projection_changed"));
+        };
+        if target["base_revision"] != *revision || target["before_hash"] != ops::s(&row[1]) {
+            return Ok(Some("retrieval_eval_target_drifted"));
+        }
+        // An apply also rewrites the head's writer and writer class to the
+        // applier's. Push and connector search admit an agent-unreviewed head
+        // only for the credential that wrote it, so a different applier would
+        // move the card in or out of a connector's results. The digest cannot
+        // see that, so it is held here.
+        if ops::s(&row[2]) == "agent-unreviewed"
+            && (ops::s(&row[7]) != live.principal || ops::s(&row[4]) != applier)
+        {
+            return Ok(Some("retrieval_eval_writer_changed"));
+        }
+        // An apply rewrites the card's writer class to the applier's. Source
+        // demotion reads the result, so project it as it will be afterwards.
+        let origin = matches!(row[5], Value::Integer(n) if n != 0);
+        let before = super::index::Card {
+            scope: scope.into(),
+            card_id: id.into(),
+            revision: *revision,
+            content_hash: ops::s(&row[1]),
+            trust: ops::s(&row[2]),
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            automated: ops::s(&row[4]) == "principal" || origin,
+        };
+        let after = super::index::Card {
+            content_hash: string(target, "after_hash").into(),
+            text: string(target, "after_text").into(),
+            automated: applier == "principal" || origin,
+            ..before.clone()
+        };
+        if super::index::ranking_digest(&before, ops::s(&row[6]) == "live")
+            != super::index::ranking_digest(&after, target["after_state"] == "live")
+        {
+            return Ok(Some("retrieval_eval_projection_changed"));
+        }
+    }
+    Ok(None)
+}
+
 /// Only review-capable diagnostics expose the selected trust-bearing record.
 pub fn summary<T: ReadTx + ?Sized>(tx: &T, a: &Authority) -> rusqlite::Result<Json> {
     let Some(live) = &a.retrieval else {
@@ -493,4 +656,14 @@ pub(super) fn expires<T: ReadTx + ?Sized>(tx: &T, a: &Authority) -> rusqlite::Re
             None
         }
     }))
+}
+
+/// Exact candidate binding shared by review-readable inputs and apply checks.
+pub(super) fn live_targets(proposal: &Json, include_text: bool) -> Json {
+    json!(super::proposals::cards(proposal).iter().map(|c| {
+        let mut target = json!({"scope":c["scope"],"card_id":c["card_id"],
+            "before_hash":c["before_hash"],"after_hash":c["after_hash"],"after_state":c["after_state"]});
+        if include_text { target["after_text"] = c["after_text"].clone(); }
+        target
+    }).collect::<Vec<_>>())
 }

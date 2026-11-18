@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 
@@ -24,7 +25,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_explain.set_defaults(func=_dispatch_explain)
 
     p_capture = outcome_sub.add_parser("capture", help="Record a receipt outcome for a learned artifact.")
-    p_capture.add_argument("artifact_id", help="Artifact id (card or skill) the run exercised.")
+    p_capture.add_argument(
+        "artifact_id",
+        help="Artifact id (card or skill) the run exercised, or `auto` to resolve skills read in this session "
+        "(session-observed, veto only).",
+    )
     p_capture.add_argument("--kind", default="skill", choices=["skill", "card"], help="Artifact kind.")
     p_capture.add_argument("--task-id", default=None, help="Task id to correlate the signal with.")
     p_capture.add_argument("--run-id", default=None, help="Verify run id to read (default: latest).")
@@ -41,9 +46,29 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_reconcile.add_argument(
         "--apply", action="store_true", help="Write decisions and advance status (default: dry-run)."
     )
+    p_reconcile.add_argument(
+        "--report",
+        action="store_true",
+        help="Also write the advisory .brigade/memory-care/outcome/ratchet-report.json summary.",
+    )
+    p_reconcile.add_argument(
+        "--proposals",
+        action="store_true",
+        help=(
+            "File one skills inbox review request (requires_revision, with a behavioral contract) per "
+            "regression on a Brigade-bundled skill. Files in a dry run too; never changes the exit code."
+        ),
+    )
     p_reconcile.add_argument("--target", "-t", type=Path, default=Path("."))
     p_reconcile.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_reconcile.set_defaults(func=_dispatch_reconcile)
+
+    p_ratchet = outcome_sub.add_parser(
+        "ratchet", help="Print the last advisory outcome ratchet report (read-only, no recompute)."
+    )
+    p_ratchet.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_ratchet.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_ratchet.set_defaults(func=_dispatch_ratchet)
 
     p_rank = outcome_sub.add_parser("rank", help="Rank learned skills by verified outcome, most-proven first.")
     p_rank.add_argument("--target", "-t", type=Path, default=Path("."))
@@ -102,6 +127,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_fork.add_argument("--install-min-helped", type=int, default=None, help="Override install_min_helped.")
     p_fork.add_argument("--revert-min-hurt", type=int, default=None, help="Override revert_min_hurt.")
     p_fork.add_argument("--bump-min-helped", type=int, default=None, help="Override bump_min_helped.")
+    p_fork.add_argument(
+        "--observed-hurt-window-days", type=int, default=None, help="Override observed_hurt_window_days."
+    )
+    p_fork.add_argument(
+        "--observed-hurt-min-sessions", type=int, default=None, help="Override observed_hurt_min_sessions."
+    )
     p_fork.add_argument("--z", type=float, default=None, help="Override the Wilson z score.")
     p_fork.add_argument(
         "--effective-wilson-min",
@@ -173,8 +204,12 @@ def _dispatch_explain(args) -> int:
 
 
 def _dispatch_capture(args) -> int:
-    from .. import outcome_cmd
+    from .. import outcome_attribution, outcome_cmd
 
+    if args.artifact_id == outcome_attribution.AUTO_CAPTURE:
+        return outcome_attribution.capture_auto(
+            target=args.target, artifact_kind=args.kind, run_id=args.run_id, run_receipt=args.run_receipt
+        )
     return outcome_cmd.capture(
         target=args.target,
         artifact_id=args.artifact_id,
@@ -189,7 +224,69 @@ def _dispatch_capture(args) -> int:
 def _dispatch_reconcile(args) -> int:
     from .. import outcome_cmd
 
-    return outcome_cmd.reconcile(target=args.target, apply=args.apply, json_output=args.json)
+    return outcome_cmd.reconcile(
+        target=args.target,
+        apply=args.apply,
+        json_output=args.json,
+        report=args.report,
+        proposals=args.proposals,
+    )
+
+
+def _dispatch_ratchet(args) -> int:
+    from datetime import datetime, timezone
+
+    from .. import outcome_ratchet_report, outcome_skill_exec
+
+    report = outcome_ratchet_report.load_report(args.target)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    print(f"outcome ratchet: {args.target.expanduser().resolve()}")
+    if not report:
+        print("report: none (run `brigade outcome reconcile --report`)")
+        return 0
+    summary_raw = report.get("summary")
+    summary = summary_raw if isinstance(summary_raw, dict) else {}
+    mode = outcome_ratchet_report.mode_label(report.get("apply"))
+    print(f"generated_at: {report.get('generated_at')} mode={mode}")
+    print(
+        "decisions: "
+        f"total={summary.get('decisions')} "
+        f"regression_holds={summary.get('regression_holds')} "
+        f"regression_rollbacks={summary.get('regression_rollbacks')}"
+    )
+    proposals = outcome_ratchet_report.proposal_counts(summary)
+    if proposals is not None:
+        print("outcome_proposals: " + " ".join(f"{key}={value}" for key, value in proposals.items()))
+    print(f"pending_physical_actions: {summary.get('pending_physical_actions') or 0}")
+    if summary.get("stale_physical_actions"):
+        print(f"stale_physical_actions: {summary['stale_physical_actions']} (status older than the pending window)")
+    now = datetime.now(timezone.utc)
+    for key, prefix in (("pending_physical", "operator: "), ("stale_physical", "")):
+        if key == "stale_physical" and report.get(key):
+            print("stale: older rollbacks, not pending actions (review before running any)")
+        for row in report.get(key) or []:
+            if isinstance(row, dict):
+                age = outcome_skill_exec.age_label(
+                    str(row.get("status") or "status"), row.get("status_changed_at"), now
+                )
+                for command in row.get("commands") or []:
+                    print(f"  {prefix}{command} ({age})")
+    print(f"ineligibility_rate: {report.get('ineligibility_rate')}")
+    if report.get("leading_ineligibility_reason"):
+        print(f"leading_ineligibility_reason: {report['leading_ineligibility_reason']}")
+    regressions_raw = report.get("regressions")
+    regressions = regressions_raw if isinstance(regressions_raw, list) else []
+    for row in regressions:
+        if not isinstance(row, dict):
+            continue
+        print(
+            f"- {row.get('artifact_id')} {row.get('prior_state')} "
+            f"[{row.get('reason_code')}] {row.get('reason')} "
+            f"helped={row.get('helped')} hurt={row.get('hurt')}"
+        )
+    return 0
 
 
 def _dispatch_rank(args) -> int:
@@ -246,6 +343,12 @@ def _dispatch_fork(args) -> int:
         utility_min_passing_units=args.utility_min_passing_units
         if args.utility_min_passing_units is not None
         else defaults.utility_min_passing_units,
+        observed_hurt_window_days=args.observed_hurt_window_days
+        if args.observed_hurt_window_days is not None
+        else defaults.observed_hurt_window_days,
+        observed_hurt_min_sessions=args.observed_hurt_min_sessions
+        if args.observed_hurt_min_sessions is not None
+        else defaults.observed_hurt_min_sessions,
     )
     return outcome_cmd.fork(target=args.target, out=args.out, config=config, json_output=args.json)
 

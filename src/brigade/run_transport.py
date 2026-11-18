@@ -55,6 +55,18 @@ class Assignment:
     capabilities: tuple[str, ...] = ()
     max_risk_class: str | None = None
     admissible_tool_ids: tuple[str, ...] = ()
+    # Explicit batches name the exact task and its attempt. Both stay None for
+    # ordinary runs, where the seat and task text remain the only identity.
+    task_id: str | None = None
+    attempt_id: str | None = None
+
+
+class LaunchRefused(Exception):
+    """A dispatch-requested callback refuses this launch.
+
+    Raised before route resolution, model lease or provider execution. The
+    worker is recorded as refused and nothing falls back to another seat or route.
+    """
 
 
 @dataclass(frozen=True)
@@ -378,6 +390,12 @@ class WorkerResult:
     # another machine. ``None`` for ordinary local work. Carries the target
     # provenance and pending-handoff facts; never implies a local edit.
     remote: dict[str, Any] | None = None
+    # Exact batch task identity, set by the dispatcher from the assignment.
+    task_id: str | None = None
+    # Provider correlation, populated only where a transport documents a value.
+    provider_task_id: str | None = None
+    original_run_id: str | None = None
+    provider_result_id: str | None = None
 
 
 def _metadata_provenance(result: agents.AgentResult) -> dict[str, object] | None:
@@ -453,6 +471,8 @@ class AppserverRunner(Protocol):
         sandbox: str | None,
         registry: run_control.LiveTurnRegistry | None,
         on_event: Any = None,
+        task_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> agents.AgentResult: ...
 
 
@@ -558,6 +578,7 @@ def dispatch(
     event_writer: EventWriter,
     cwd: Path | None = None,
     read_only: bool = False,
+    read_only_for: Callable[[Assignment], bool] | None = None,
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     direct: bool = False,
@@ -576,7 +597,7 @@ def dispatch(
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
     on_scheduler_resolved: Callable[[str, str | None], None] | None = None,
-    on_dispatch_requested: Callable[[Agent], int | None] | None = None,
+    on_dispatch_requested: Callable[..., int | None] | None = None,
     on_dispatch_observed: Callable[[Agent, int], None] | None = None,
     on_dispatch_completed: Callable[[Agent, int], None] | None = None,
     on_dispatch_failed: Callable[[Agent, int], None] | None = None,
@@ -590,9 +611,19 @@ def dispatch(
     remote_transport: RemoteTransport | None = None,
     coordinator_prompt_sha256: str | None = None,
     codex_transport: str | None = None,
+    on_result: Callable[[WorkerResult], None] | None = None,
+    allow_reinvocation: bool = True,
     policy_workspace: Path | None = None,
+    recording_policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
+
+    ``allow_reinvocation=False`` preserves the first result without retries,
+    continuations, or fallback invocations. Explicit batches require this bound.
+
+    ``read_only_for`` overrides the run-level ``read_only`` per assignment, so
+    one dispatcher can enforce a mixed batch where only some tasks declared
+    read-only. ``sandbox_read_only`` still wins when it is set for the run.
 
     ``on_scheduler_resolved`` receives the scheduler that actually ran and the
     fallback reason, so a receipt can distinguish a real DAG dispatch from a
@@ -733,11 +764,13 @@ def dispatch(
         preflight = _cloudflare_preflight_failure(agent, assignment, appserver=appserver)
         if preflight is not None:
             return preflight
+        # A batch task may declare read-only independently of the run-level flag.
+        worker_read_only = read_only if read_only_for is None else bool(read_only_for(assignment))
         prompt = build_prompt(
             agent,
             assignment,
             prior_results=prior_results,
-            read_only=read_only,
+            read_only=worker_read_only,
             direct=direct,
             code_graph=code_graph,
             drift_impact=drift_impact,
@@ -778,7 +811,7 @@ def dispatch(
                 provenance=request.envelope,
             )
         started = time.monotonic()
-        effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
+        effective_read_only = worker_read_only if sandbox_read_only is None else sandbox_read_only
         approval_correlation_marker = secrets.token_urlsafe(32)
         # invoke() and finish() share remote routing facts only for the current attempt.
         remote_disposition: list[dict[str, Any] | None] = [None]
@@ -913,6 +946,12 @@ def dispatch(
                     sandbox=sandbox,
                     registry=control_registry,
                     on_event=on_event,
+                    # A batch turn registers under its exact task, so same-seat siblings stay separately controllable.
+                    **(
+                        {"task_id": assignment.task_id, "attempt_id": assignment.attempt_id}
+                        if assignment.task_id is not None
+                        else {}
+                    ),
                 )
                 return replace(
                     result,
@@ -1062,7 +1101,27 @@ def dispatch(
             remote_disposition[0] = None
             if resume_session_id is None:
                 recording.prompt = selected_prompt
-            attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
+            attempt = None
+            if on_dispatch_requested is not None:
+                try:
+                    # Only an explicit batch task passes its assignment; other callers keep the one-argument form.
+                    attempt = (
+                        on_dispatch_requested(selected_agent, assignment)
+                        if assignment.task_id is not None
+                        else on_dispatch_requested(selected_agent)
+                    )
+                except LaunchRefused as exc:
+                    # Refused before routing, lease or provider: none of that runs, and no fallback follows.
+                    return agents.AgentResult(
+                        text="",
+                        ok=False,
+                        detail=str(exc),
+                        status="refused",
+                        failure_phase="dispatch",
+                        failure_kind="launch-refused",
+                        transport=_receipt_transport(selected_agent, appserver=appserver),
+                        requested_model=selected_agent.model,
+                    )
             try:
                 # The fleet route is resolved before the model lease is entered.
                 # A remote or blocked route returns from here, so the source
@@ -1181,11 +1240,16 @@ def dispatch(
                 output_bytes=result.output_bytes,
                 output_cap_bytes=result.output_cap_bytes,
                 remote=remote_disposition[0],
+                # codex-cloud documents its provider task ID as the result thread_id (codex_cloud.run_cloud_task).
+                # No transport documents an original run or result ID, so those stay None.
+                provider_task_id=result.thread_id if result.cloud_environment is not None else None,
             )
 
         initial_started = _attempt_timestamp()
         result = invoke(agent, prompt)
         initial_finished = _attempt_timestamp()
+        if not allow_reinvocation or result.failure_kind == "launch-refused":
+            return finish(result, agent)
         recovery_candidate = direct and effective_read_only and agent.cli == "grok" and agent.transport == "direct"
         if not recovery_candidate:
             if result.ok:
@@ -1313,12 +1377,28 @@ def dispatch(
         roster=roster,
         run_dir=output_dir,
         workspace=policy_workspace or cwd,
+        policy_workspace=recording_policy_workspace,
         codex_transport=codex_transport or roster.codex_transport,
         read_only=read_only,
         sandbox=sandbox or ("read-only" if (read_only if sandbox_read_only is None else sandbox_read_only) else None),
         transport=lambda agent: _receipt_transport(agent, appserver=appserver),
         coordinator_prompt_sha256=coordinator_prompt_sha256,
     )
+
+    recorded_run_one = run_one
+
+    def observed_run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
+        result = recorded_run_one(assignment, prior_results)
+        if assignment.task_id is not None:
+            result = replace(result, task_id=assignment.task_id)
+        if on_result is not None:
+            try:
+                on_result(result)
+            except Exception as exc:
+                print(f"warning: worker result observation failed: {exc}", file=sys.stderr)
+        return result
+
+    run_one = observed_run_one
 
     if not assignments:
         return []
@@ -1363,6 +1443,7 @@ def dispatch(
                     ok=False,
                     status="skipped",
                     detail=f"skipped: stage {abort_after_stage} prerequisite failed",
+                    task_id=assignment.task_id,
                 )
                 for assignment in stage_assignments
             )
@@ -1392,6 +1473,7 @@ def dispatch(
                         text="",
                         ok=False,
                         detail=str(exc)[:200],
+                        task_id=assignment.task_id,
                     )
         except KeyboardInterrupt as exc:
             try:

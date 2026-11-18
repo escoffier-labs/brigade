@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -585,7 +586,7 @@ def test_roster_doctor_reuses_inventory_for_repeated_harness_seats(monkeypatch, 
     monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
     calls = []
 
-    def fake_run():
+    def fake_run(*args, **kwargs):
         calls.append(["cursor-agent", "models"])
         return agents.proc.Result(
             0,
@@ -1110,7 +1111,15 @@ def test_packaged_presets_remain_byte_identical_after_suggest_and_stats(tmp_targ
     assert preset.read_bytes() == original
 
 
-def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, capsys):
+def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, monkeypatch, capsys):
+    from brigade import fleet_client, roster_readiness_brigade
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": ""})
+    monkeypatch.setattr(
+        roster_readiness_brigade,
+        "brigade_route_readiness",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("blocked orchestrator selection must not call producer")),
+    )
     assert roster_cmd.init(tmp_target) == 0
     capsys.readouterr()
     assert cli.main(["roster", "ready", "--target", str(tmp_target), "--worker", "orchestrator", "--json"]) == 2
@@ -1118,3 +1127,85 @@ def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, capsy
     assert report["status"] == "blocked"
     assert report["selected_seats"][0]["selection_role"] == "orchestrator"
     assert any(item["reason"] == "orchestrator-selected" for item in report["evidence"])
+
+
+def test_roster_ready_text_includes_scope_and_observed_at(tmp_target, monkeypatch, capsys):
+    from brigade import fleet_client, fleet_client_policy, fleet_model_admission, seat_health
+
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        "[agents.chef]\n"
+        'cli = "codex"\n'
+        'role = "plan"\n'
+        "[agents.worker]\n"
+        'cli = "codex"\n'
+        'model = "example-model"\n'
+        'role = "implement"\n',
+    )
+
+    class HealthyProbe:
+        def probe_roster(self, selected, **kwargs):
+            return [
+                seat_health.SeatHealthResult(
+                    "test",
+                    name,
+                    seat_health.seat_fingerprint(agent, selected),
+                    "healthy",
+                    {},
+                    tuple(seat_health.SeatHealthCheck(check, "passed") for check in seat_health.CHECK_NAMES),
+                    0,
+                    0,
+                    time.time(),
+                    time.time(),
+                )
+                for name, agent in selected.agents.items()
+            ]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("readiness attempted a network call")
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": ""})
+    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda **_: False)
+    monkeypatch.setattr(fleet_model_admission, "fetch_versioned_roster", forbidden)
+    monkeypatch.setattr(fleet_client, "inspect_claim", forbidden)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", forbidden)
+
+    assert roster_cmd.ready(tmp_target, workers=("worker",), health_probe=HealthyProbe()) == 0
+    out = capsys.readouterr().out
+    assert "readiness: ready (exit 0)" in out
+    assert "scope: sha256:" in out
+    assert "observed_at: " in out
+
+    # The CLI can only express writable operations, so it declares read_only
+    # explicitly rather than leaving the isolation check unverified.
+    assert roster_cmd.ready(tmp_target, workers=("worker",), health_probe=HealthyProbe(), json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["request"]["read_only"] is False
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "status", "detail"),
+    [
+        ("medium", "[warn]", "applies only when memory verify runs this seat"),
+        ("extreme", "[fail]", "claude does not support reasoning pins"),
+    ],
+)
+def test_roster_doctor_treats_a_claude_effort_pin_as_verify_only(
+    monkeypatch, tmp_target, capsys, reasoning, status, detail
+):
+    roster = tmp_target / ".brigade" / "roster.toml"
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    roster.write_text(
+        'orchestrator = "verify"\n'
+        "[agents.verify]\n"
+        'cli = "claude"\n'
+        'model = "claude-fable-5-2"\n'
+        f'reasoning = "{reasoning}"\n'
+        'role = "reviewer"\n'
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: None)
+    roster_cmd.doctor(tmp_target)
+    line = next(row for row in capsys.readouterr().out.splitlines() if "agent: verify reasoning" in row)
+    assert status in line
+    assert detail in line

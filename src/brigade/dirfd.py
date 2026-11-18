@@ -308,6 +308,18 @@ def open_directory_chain(path: Path, *, create: bool = False, writable: bool = T
         raise
 
 
+def reopen_directory_writable(descriptor: int, *, modify: bool = True) -> int:
+    """Reopen a held directory handle with mutation rights; Windows only.
+
+    A Windows rename or create under a held parent needs write access on that
+    parent handle. POSIX descriptors already carry what ``dir_fd`` operations
+    need, so there is nothing to reopen and this fails closed there.
+    """
+    if nt_available():
+        return _nt_reopen_directory_writable(descriptor, modify=modify)
+    raise unavailable("directory reopening")
+
+
 def open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
     """Open a file path without following a final symlink or reparse point."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -458,6 +470,21 @@ def rename_child(source_parent: int, source: str, destination_parent: int, desti
         )
         return
     raise unavailable("directory moves")
+
+
+def rename_file_child(source_parent: int, source: str, destination_parent: int, destination: str) -> None:
+    """Move a regular child file between held parents without following links."""
+    _validate_child_component(source)
+    _validate_child_component(destination)
+    if posix_available():
+        os.rename(source, destination, src_dir_fd=source_parent, dst_dir_fd=destination_parent)
+        return
+    if nt_available():
+        _nt_dirfd().replace_children(
+            source_parent, source, destination, replace=False, destination_parent=destination_parent
+        )
+        return
+    raise unavailable("file moves")
 
 
 def fsync_directory(descriptor: int) -> None:

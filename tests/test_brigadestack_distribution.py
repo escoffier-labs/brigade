@@ -13,10 +13,38 @@ from pathlib import Path
 import pytest
 
 from tests._posix import requires_process_groups
+from tests.test_publish_workflow import _load_workflow_yaml
 
 import tomllib
 
-BRIDGE = Path(__file__).resolve().parents[1] / "distribution/brigadestack"
+ROOT = Path(__file__).resolve().parents[1]
+BRIDGE = ROOT / "distribution/brigadestack"
+MAIN_DISPATCH = (
+    "github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main'"
+    " && github.event_name == 'workflow_dispatch'"
+)
+
+
+@pytest.mark.parametrize(
+    ("workflow_file", "environment", "publish_permissions"),
+    [
+        ("brigadestack-publish.yml", "pypi", {"id-token": "write"}),
+        ("brigadestack-npm-publish.yml", "npm", {"contents": "read", "id-token": "write"}),
+    ],
+)
+def test_bridge_publication_keeps_oidc_in_the_main_only_publish_job(workflow_file, environment, publish_permissions):
+    # The registry trust entries name these files and environments.
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows" / workflow_file)
+    assert set(workflow.get("on", workflow.get(True))) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read"}
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"build", "publish"}
+    assert jobs["publish"]["needs"] == "build"
+    assert jobs["publish"]["environment"] == environment
+    assert jobs["publish"]["permissions"] == publish_permissions
+    assert "permissions" not in jobs["build"] and "environment" not in jobs["build"]
+    for job in jobs.values():
+        assert job["if"] == MAIN_DISPATCH
 
 
 def test_python_bridge_adds_only_an_alias_for_the_exact_stable_dependency():

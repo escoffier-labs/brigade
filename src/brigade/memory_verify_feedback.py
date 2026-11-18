@@ -101,3 +101,73 @@ def legacy_record(target: Path, proposal_id: str, scope: str, key: str, entry: d
         return record(io.json_bytes(bound), io.json_bytes(shown))
     except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return None
+
+
+MAX_CASES = 128
+# Readers load the feedback file through io.read_bytes, which refuses files over
+# MAX_INPUT_BYTES, so the written file must stay under that size.
+MAX_FEEDBACK_BYTES = io.MAX_INPUT_BYTES
+
+
+def bounded_feedback(values: list[dict[str, Any]], limit: int) -> bytes | None:
+    """Serialize feedback, evicting the oldest cases until it fits in ``limit`` bytes."""
+    values = list(values)
+    while values:
+        counts: dict[str, dict[str, int]] = {}
+        for row in values:
+            bucket = counts.setdefault(row["source_class"], {"accepted": 0, "rejected": 0})
+            bucket["accepted" if row["decision"] == "applied" else "rejected"] += 1
+        payload = io.json_bytes({"cases": values, "counts": counts})
+        if len(payload) <= limit:
+            return payload
+        values.pop(0)
+    return None
+
+
+def retain_case(target: Path, proposal_id: str, decision: str, shown: dict[str, Any]) -> None:
+    """Keep bounded private labels from authenticated packets, excluding self-decisions.
+
+    Legacy packets lack replayable inputs and supply counts only. The caller
+    excludes hub-recorded automatic decisions, preventing automatic corrections
+    from grading themselves.
+    """
+    from . import memory_verify_contract as contract
+    from . import memory_verify_eval as evaluation, memory_verify_gate as gate
+    from . import memory_verify_packets as packets, memory_verify_show as show
+
+    try:
+        manifest, raw = show._local(target, proposal_id)
+        listed = shown.get("verifier_manifests", [])
+        if not any(m.get("artifact_sha256") == io.sha256(manifest) for m in listed):
+            return
+        if json.loads(manifest)["packet_sha256"] != io.sha256(raw):
+            return
+        packet = json.loads(raw)
+        case = packet.get("evaluation_case")
+        if not case:
+            return
+        classes = {evaluation.OP_CLASS[op["type"]] for op in case["expected_ops"]}
+        if len(classes) != 1:
+            return
+        source_class = next(iter(classes))
+        case.update(
+            id=proposal_id,
+            expected=source_class if decision == "applied" else "no-change",
+            source_class=source_class,
+            decision=decision,
+        )
+        if decision == "rejected":
+            case["expected_ops"] = []
+        evaluation.inputs(case)
+        old = io.read_bytes(target / gate.FEEDBACK, absent=True, private=True)
+        values = json.loads(old)["cases"] if old else []
+        values = [v for v in values if v["id"] != proposal_id] + [case]
+        payload = bounded_feedback(values[-MAX_CASES:], MAX_FEEDBACK_BYTES)
+        if payload is None:
+            return  # One case alone exceeds what every feedback reader accepts.
+        with io.directory((target / gate.FEEDBACK).parent, create=True, private=True) as fd:
+            packets.atomic_write(fd, gate.FEEDBACK.name, payload)
+    except (OSError, ValueError, KeyError, TypeError, contract.Abstain):
+        # Packet retention, legacy data or a case that cannot be replayed on its
+        # own makes a label unavailable. Never let it stop the verification run.
+        return

@@ -9,7 +9,9 @@ databases without changing stored events or the item-scoped event primary key.
 
 Ownership grants authority to mutate this Hub metadata. It does not establish
 filesystem exclusivity, prove that a process stopped, authenticate a verification
-result, or complete an item. Every projection reports `liveness: "unknown"`.
+result, or complete an item. Every ownership read derives a liveness state from
+existing Hub facts at read time; the Hub stores no liveness value. See
+[owner liveness](#owner-liveness).
 New checkpoints record `conflict_check: "path-admission"`, a historical check of
 declared repository paths at that ownership revision. Older unchecked snapshots
 retain `not-performed`. See [checkpoint path admission](phase-worklore-path-scope-admission.md)
@@ -39,7 +41,8 @@ Person attribution and historical human attribution are `unrecorded`.
 This route adds no project isolation or person identity records.
 
 Checkpoint conflict admission is historical. Evidence stays reported and
-unverified, liveness is unknown, and report freshness is unassessed.
+unverified, liveness is derived on read, and report freshness is `recent`,
+`stale`, `future`, or `unknown` rather than `unassessed`.
 Checkpoint binding to the current item version and execution binding to the
 ownership generation are unavailable. Item edits and accepted handoffs may
 retain older checkpoint/report data. Report timestamps and session sequences
@@ -60,7 +63,12 @@ The existing `fleet work ownership show` command retains its separate reads.
 `GET /work/items/{id}/ownership` returns an `ownership` object for an existing
 item. With no ownership events, the state is `unowned`, revision 0, generation 0.
 The read uses the existing fleet authentication policy. An absent item returns
-`not-found`. Reads and writes never create an item.
+`not-found`. Reads and writes never create an item. A read that also sends
+`X-Worklore-Holder` asks to be treated as the holder: it succeeds only for the
+current holder node with the current capability at the current generation, and
+otherwise returns `holder-mismatch` (403). Admin cannot present a holder
+capability. Python callers pass `holder_nonce` to `worklore_client.get_ownership`,
+which sends it only under the node token.
 
 `POST /work/items/{id}/ownership` takes an action and the exact fields below.
 Every mutation requires `If-Match` with the current ownership revision and an
@@ -101,6 +109,63 @@ item status, item version, attempt count, or burn eligibility. For noncampaign
 items, attempt budget is operator-authenticated handoff metadata.
 Campaign node execution and attempt writes also enforce the current campaign grant
 and its budget. Existing attempt and burn rules remain authoritative.
+
+## Owner liveness
+
+The ownership read derives `liveness`, `liveness_basis`, and `liveness_freshness`
+from facts the Hub already stores. Derivation is read-only: no table, index,
+column, or fleet event, nothing stored, and no row written. The prepared handoff
+carries the same derived `liveness` value.
+
+Every fact is scoped to this item and this ownership, never to the owner node in
+general. A session or claim counts only for the snapshot's `repo_identity`, and
+only the newest session for that repository counts. A linked run counts only
+when the owner node itself linked it after the current ownership generation
+began. A previous owner's run, another node's run, and another repository's
+session or claim never decide this item's liveness. When the snapshot has no
+`repo_identity`, sessions and claims are not read at all.
+
+The facts are a bounded set of parameterized reads: the owner node's newest
+`interactive_sessions` row for this repository (excluding a finished v2 cloud
+report), unexpired `claims` rows whose target names this repository, the
+snapshot's explicit campaign lease deadline, and the terminality of the newest
+`events` row for the newest `execution-linked` run that this owner linked in the
+current generation. A missing sessions or claims table, a NULL, or a malformed
+timestamp yields no fact and never raises.
+
+| State | Exact meaning | Basis |
+| --- | --- | --- |
+| `live-owner` | The owner node has a live session or a live claim for this item's repository. It does not prove the owner is working on this item, only that the node is active in that repository. | `session` or `claim` |
+| `idle-owner` | The owner node's newest session for this repository ended after the ownership snapshot's last update, and the item is not terminal. Work may be unfinished, but nothing currently shows the owner running. | `session` |
+| `expired-observation` | The snapshot's own campaign lease deadline has lapsed. This wins over any session or claim: the rest of the system already treats the item as reclaimable. | `lease` |
+| `terminal-execution` | The newest run this owner linked in the current generation is terminal, with no live session or claim for this repository. | `run` |
+| `unknown` | No owner, a terminal item, or no scoped fact at all; also the fallback. | `none` |
+
+Precedence, first match wins: no `owner_node` or a terminal item is `unknown`
+(`none`); a lapsed lease is `expired-observation` (`lease`); a live session,
+then a live claim, for this repository is `live-owner` (`session`, then
+`claim`); a terminal linked run of this owner in this generation is
+`terminal-execution` (`run`); a counted session end on a non-terminal item is
+`idle-owner` (`session`); anything else is `unknown` (`none`). A live owner is
+therefore never reported as terminal or expired, and an abandoned item is never
+kept live by another node's or another repository's activity.
+
+`liveness_freshness` applies the deck's 1,800 second rule to the newest timestamp
+among the facts that survived that scoping (the scoped session heartbeat and
+counted end, scoped claim renewal, and the scoped run event): `recent`, `stale`,
+`future`, or `unknown`. Unrelated sessions and claims on the same node never
+contribute.
+
+The read is public within the fleet. The three fields reveal only the state,
+basis, and freshness words; a claim target, session id, process id, path, or
+another node's capability is never returned.
+
+Prepared handoff report freshness uses the same four words. An older reader
+accepts only `liveness: "unknown"` and freshness `"unassessed"` and refuses the
+new values, so it fails closed with an invalid-response refusal. A newer reader
+still accepts an older Hub's `unassessed`, but an older CLI cannot read a newer
+Hub's prepared handoff. Upgrade the Hub and the CLI together; the refusal is
+fail-closed rather than a silently wrong reading.
 
 ## Nonce and replay
 

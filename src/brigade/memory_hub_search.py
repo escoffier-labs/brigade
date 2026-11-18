@@ -208,6 +208,8 @@ def search_payload(
     try:
         client = hubc.client_for(settings, transport=transport)
         hub = client.identity
+        from .memory_retrieval_eval.live import interactive_session
+
         body = client.call(
             "search",
             timeout=hubc.SEARCH_BUDGET_SECONDS,
@@ -215,6 +217,7 @@ def search_payload(
             limit=hub_limit,
             query_source=query_source,
             scopes=list(settings.read_scopes),
+            **interactive_session(),
         )
         lists["hub"] = [
             {**m, "path": m.get("path") or f"cards/{m.get('card_id')}.md"}
@@ -288,7 +291,9 @@ def search(*, target: Path, query: str, limit: int = 20, json_output: bool = Fal
     except OSError as exc:
         print(f"error: hub memory state under .brigade/memory/hub is unusable: {exc}", file=sys.stderr)
         return 2
-    memory_cmd._record_search_log(target.expanduser().resolve(), query=query, matches=payload["matches"])
+    memory_cmd._record_search_log(
+        target.expanduser().resolve(), query=query, matches=payload["matches"], private_query=True
+    )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

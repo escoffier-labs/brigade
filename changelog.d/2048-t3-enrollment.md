@@ -1,0 +1,3 @@
+- `brigade t3 open` enrolls a validated `brigade.run_batch.v1` batch for a T3 parent session by retaining each task's delegation input and native target, without launching work.
+- Roster seats declare an eligible native T3 target under `[t3_targets.<seat>]`, and a seat without a declaration refuses the whole batch.
+- An enrolled task refuses the generic `prepare_attempt` and `claim_task_launch` path, and `brigade t3 open` refuses on Windows until owner-only asset custody exists there.

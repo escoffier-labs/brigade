@@ -514,10 +514,19 @@ Use `brigade runs show <run>` or `brigade runs watch <run>` for inspection. Use
 `brigade.work-run` archive (`work-run.json` + `payload/`),
 `brigade runs validate-archive <archive-dir>` to check the envelope and digests,
 and `brigade runs import <archive-dir>` to copy a validated payload into
-`.brigade/runs/`. Export strips private recovery-checkpoint bodies; v1 import is
-inspection-oriented and does not claim resume support. See
+`.brigade/runs/`. Export strips private recovery-checkpoint bodies and applies a
+closed file set plus closed receipt shapes: prompt and generated text become
+keyed HMAC digests, and every non-enum string such as a seat, model, id, label,
+relative path, or log name also becomes a keyed digest. Export omits the
+lifecycle journal because its exception `detail` text
+cannot be scrubbed without breaking the hash chain. The manifest records
+`journal_withheld` with the chain head and event count, and an imported run
+reports `journal-withheld` instead of a lifecycle audit match. Import is
+inspection-oriented and does not claim resume support. Local run files keep raw
+prompts and paths because resume needs them. Evidence packages and remote
+execution transport are outside this guarantee. See
 `docs/receipt-schemas.md` (`brigade.work-run`) and
-`schemas/work-run.v1.schema.json`. Use
+`schemas/work-run.v3.schema.json`. Use
 `brigade runs recover <run>` when the snapshot is missing, corrupt, or behind a
 verified journal checkpoint. Recovery validates the bounded event chain and
 checkpoint before replacing `run.json`. If rollback leaves an older Brigade Stack
@@ -1739,7 +1748,11 @@ brigade security scan --target . --import-findings
 
 `brigade runs serve` is a foreground loopback Run View over the versioned
 runs JSON contracts. It is read-only, never installed as a service, and is
-not started by `run`, `doctor`, or `brief`.
+not started by `run`, `doctor`, or `brief`. The Run View, `runs list --json`,
+and `runs show --json` replace prompt and generated text with a keyed digest
+object and never carry an absolute path. Pass `--show-task` to `runs list` or
+`runs show` for a bounded 80-character task preview in JSON output. The Run
+View has no preview mode.
 
 When `.brigade/code-graph/code-graph.db` is present, `brigade run` can attach bounded brigade-code-graph context. If pending upstream drift state is available, it can also attach a drift impact brief. `run.json` records the shared brief budget, attached brief names, byte counts, and truncation flags.
 

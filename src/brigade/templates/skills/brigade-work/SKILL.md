@@ -29,10 +29,11 @@ brigade work verify run --target . --command "<your test command>"   # e.g. "pyt
 ```
 This writes an audit receipt under `.brigade/work/verify-runs/<run-id>/` with the real status. Running tests raw produces no Brigade receipt. Neither a raw test result nor an ad hoc receipt scores an artifact.
 
-To do steps 2 and 3 in one command (so the capture is never forgotten), pass `--capture`:
+To do steps 2 and 3 in one command (so the capture is never forgotten), pass `--capture`. Use `--capture auto` so you never hand-type an artifact id: Brigade reads this session's hook state and captures against each skill whose `SKILL.md` you read:
 ```bash
-brigade work verify run --target . --command "<test command>" --capture <id>
+brigade work verify run --target . --command "<test command>" --capture auto
 ```
+`auto` rows are marked `session_observed`. That attribution is caller-side and forgeable, so it can only lower a rank or hold a promotion, never raise or promote. If no skill was read (a Codex repo, a plain shell) it records against `brigade-work` as `caller_typed` and prints one note, so the loop never records nothing.
 
 For scoreable evidence, use an existing registered verifier manifest tracked under `verify/manifests/`:
 ```bash
@@ -51,6 +52,8 @@ Ad hoc `--command` and `--argv-json` receipts are audit-only evidence and cannot
 - the actual installed skill that guided the work;
 - a memory card under `memory/cards/` (use `--kind card`);
 - `brigade-work` itself - a fresh repo always has this one, so when nothing else applies, capture against `brigade-work`.
+
+Prefer `--capture auto` on the verify run; reach for a typed id only when you are recording after the fact with `brigade outcome capture`.
 
 Do not invent a skill name you are not running just to have something to capture against.
 

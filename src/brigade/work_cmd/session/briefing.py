@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from ... import dogfood_cmd, localio, memory_care_instructions
+from ... import dogfood_cmd, localio, memory_care_instructions, outcome_ratchet_report
 from ...config import load_config
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
@@ -260,6 +260,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     from ... import (
         aboyeur,
         care_cmd,
+        care_receipts,
         center_cmd,
         chat_cmd,
         context_cmd,
@@ -332,6 +333,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     daily_health = daily_cmd.health(target)
     phase_health = phases_cmd.health(target)
     outcome_health = outcome_cmd.health(target)
+    outcome_ratchet = outcome_ratchet_report.brief_payload(outcome_ratchet_report.load_report(target))
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -418,6 +420,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "autofix_plan": memory_health.get("autofix_plan"),
         },
         "scheduled_care": care_cmd.repeated_failure_summary(target),
+        "care_schedule_health": care_receipts.schedule_health(target),
         "instruction_budget": memory_care_instructions.brief_payload(target),
         "security_health": {
             "config_path": security_health["config_path"],
@@ -564,6 +567,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "issue_count": outcome_health["issue_count"],
             "top_issue": outcome_health["top_issue"],
         },
+        "outcome_ratchet": outcome_ratchet,
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
@@ -656,6 +660,47 @@ def _fleet_routing_for_brief() -> dict[str, Any] | None:
 
 def _print_bootstrap_line(level: str, name: str, detail: object) -> None:
     print(f"[{level}] {name}: {detail}")
+
+
+def _outcome_ratchet_line(ratchet: object) -> str:
+    """Return the one-line session-brief summary of the last advisory ratchet report."""
+    report = ratchet if isinstance(ratchet, dict) else {}
+    if not report.get("present"):
+        return "outcome_ratchet: no report yet"
+    ids = [str(item) for item in report.get("regression_hold_ids") or []]
+    raw_total = report.get("regression_holds")
+    total = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else len(ids)
+    if ids:
+        listed = ", ".join(ids)
+        if total > len(ids):
+            listed += f" +{total - len(ids)} more"
+    elif total > 0:
+        # The id list is bounded and the rows may be capped out; never say "none"
+        # beside a nonzero hold count.
+        listed = f"{total} not listed"
+    else:
+        listed = "none"
+    return (
+        f"outcome_ratchet: generated_at={report.get('generated_at')} "
+        f"mode={report.get('mode') or 'dry-run'} "
+        f"regression_holds={report.get('regression_holds')} ({listed}) "
+        f"ineligibility_rate={report.get('ineligibility_rate')} "
+        f"leading={report.get('leading_reason') or 'none'} "
+        f"pending_physical_actions={report.get('pending_physical_actions') or 0}"
+        + (f" stale={report['stale_physical_actions']}" if report.get("stale_physical_actions") else "")
+    )
+
+
+def _outcome_proposals_line(ratchet: object) -> str:
+    """Return the one-line brief summary of inbox proposals filed by the last ratchet run."""
+    report = ratchet if isinstance(ratchet, dict) else {}
+    if not report.get("present"):
+        return "outcome_proposals: no report yet"
+    counts = report.get("outcome_proposals")
+    if not isinstance(counts, dict):
+        return "outcome_proposals: not requested (run `brigade outcome reconcile --proposals --report`)"
+    keys = ("filed", "existing", "flagged", "skipped")
+    return "outcome_proposals: " + " ".join(f"{key}={counts.get(key, 0)}" for key in keys)
 
 
 def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
@@ -784,6 +829,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
         if top_outcome:
             print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")
+    print(_outcome_ratchet_line(payload.get("outcome_ratchet")))
+    print(_outcome_proposals_line(payload.get("outcome_ratchet")))
 
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:
@@ -1027,6 +1074,13 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if not isinstance(rec, dict):
                 continue
             print(f"care_repeated_failure: {rec.get('id')} consecutive={rec.get('consecutive_failures')}")
+
+    raw_schedule_health = payload.get("care_schedule_health")
+    schedule_health: dict[str, Any] = raw_schedule_health if isinstance(raw_schedule_health, dict) else {}
+    for warning in schedule_health.get("warnings") or []:
+        if not isinstance(warning, dict):
+            continue
+        print(f"care_schedule_warning: {warning.get('entry')} {warning.get('code')} fix={warning.get('fix_command')}")
 
     raw_instruction_budget = payload.get("instruction_budget")
     instruction_budget: dict[str, Any] = raw_instruction_budget if isinstance(raw_instruction_budget, dict) else {}

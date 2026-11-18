@@ -5,7 +5,9 @@ Each runbook run records step exit codes and log paths for later inspection. Cop
 one of the recipes below into your own crontab, user timer, or CI job after
 `brigade init` wires the target, or explicitly opt in with
 `brigade care install --target .`. With the default `auto` backend it installs
-systemd user timers on Linux or launchd agents on macOS. On Windows it prints
+systemd user timers on Linux or launchd agents on macOS. On Linux, install also
+links every timer it wrote into `timers.target.wants`, reloads systemd, and starts
+each newly linked timer; pass `--no-enable` to write unit files without the links. On Windows it prints
 a Task Scheduler plan without creating tasks and exits 3. Other platforms report
 an unsupported scheduler. Use the manual crontab recipes on this page
 when cron is your trigger.
@@ -52,6 +54,47 @@ receipt; nightly ops calls
 `.brigade/runbooks/nightly-maintenance.json` (operator-authored). Entries live
 inside a `# BEGIN BRIGADE CARE ... hash:...` managed block so status can detect
 drift and uninstall can remove only Brigade's span.
+
+On the systemd backend, install enables each timer it writes by creating a
+relative `timers.target.wants/<timer>` symlink to `../<timer>`. A new link only
+takes effect when `timers.target` next starts, so after linking, install runs
+`systemctl --user daemon-reload` and then `systemctl --user start <timer>` for each
+newly linked timer, best-effort. If `systemctl` is missing or fails, the link stays
+and the payload records `started: false` with the error per timer, and
+`next_commands` prints the exact `daemon-reload` and `start` commands to run.
+
+A timer is not linked when its unit was preserved, when the entry was adopted from
+an installed predecessor, when the unit is not a Brigade-owned managed block, when
+the timer file is absent, or under `--no-enable`. A timer that already has its link
+is reported as enabled in every one of those cases, and `--no-enable` does not
+remove an existing link. An existing foreign entry at the link path, or a
+`timers.target.wants` that is a symlink or resolves outside the unit directory, is
+reported as a conflict and nothing is written. Reinstalling an already-linked timer
+changes nothing and calls no `systemctl`. `--dry-run` reports the planned per-timer
+`enable` action and calls no `systemctl`. The JSON payload lists the result under
+`enable`, and `next_commands` adds `systemctl --user enable --now <timer>` for every
+timer that is still disabled.
+
+`brigade care uninstall` stops each timer it removes (`systemctl --user stop`,
+best-effort) and removes `timers.target.wants/<timer>` only when that entry is a
+symlink to the unit being removed, so a later `install --no-enable` does not
+silently re-enable it. Foreign entries are left alone and a symlinked
+`timers.target.wants` is not followed. The result is under `enable_links` in the
+payload, and `--dry-run` reports it without changing anything.
+
+`brigade care status`, `brigade work brief`, and `brigade doctor` report schedule
+health from installed unit files, LaunchAgents plists, and runbook receipts,
+without running `systemctl`. You get one warning per installed entry whose timer is
+disabled, one when an enabled timer or LaunchAgent has been enabled for longer
+than its schedule period and no run has ever written a receipt (with `brigade
+extras` on), and one when runbook-backed entries are enabled while `brigade extras`
+is off (those runs exit 2 without a receipt). A timer's age counts from its
+`timers.target.wants` link, so a long-installed timer that was just enabled does
+not warn. A crontab is read only when its spool file is readable
+without a subprocess; otherwise `brigade doctor` says crontab was not inspected
+instead of reporting it healthy, and with nothing installed it reports that no
+schedule was found. The status aggregate `enabled` is false while any installed
+timer is disabled. Each warning names the exact fix command.
 
 `--schedule JOB_ID=VALUE` is repeatable and applies only to entries selected by
 `--entry` (or to entries in the default set). Its value uses the selected
@@ -115,7 +158,9 @@ brigade runs patrol --target . --json --receipt --fail-on stalled,zombie,dead
 
 To enable repairs, review the generated runbook and add an explicit
 `--apply reap,release-claim` to its step. `escalate` can also be selected.
-`finalize-intent` is not implemented. Reinstall preserves an existing runbook.
+`finalize-intent` is not implemented. Reinstall preserves an existing runbook,
+except that a pristine copy of a past release is refreshed (see
+[Shipped runbooks and upgrades](#shipped-runbooks-and-upgrades)).
 Patrol retains the newest 144 receipts for at most 7 days, including under
 `--apply`. Compact action fences survive pruning in
 `.brigade/patrol/.action-fences/`, with one file per lane. Apply reads only the
@@ -170,7 +215,11 @@ User timers stop when you log out unless lingering is enabled. Run once per acco
 sudo loginctl enable-linger "$USER"
 ```
 
-Then `systemctl --user daemon-reload`, `systemctl --user enable --now <timer>.timer`, and `systemctl --user list-timers` to confirm the next fire time.
+Then `systemctl --user daemon-reload`, `systemctl --user list-timers` to confirm the
+next fire time, and `systemctl --user enable --now <timer>.timer` only for a timer
+you wrote by hand. Timers written by `brigade care install` already carry the
+`timers.target.wants` link and are started by install, so they need nothing more
+unless install printed a `start` or `daemon-reload` command for them.
 
 ### Tracked runbooks
 
@@ -408,14 +457,18 @@ jobs:
 
 ## Weekly outcome ratchet
 
-Rank verified-learning outcomes, then reconcile skill promotion state. `reconcile` is dry-run by default. Pass `--apply` only when you intend to install or roll back registry skills.
+Rank verified-learning outcomes, then reconcile skill promotion state. `reconcile` is dry-run by default. Pass `--apply` to record promotion and demotion status and route policy. `--apply` is routing only: it never installs or rolls back a skill file, and it lists the `brigade skills install` or `brigade skills rollback` commands an operator would run (also counted as `pending_physical_actions` in the ratchet report and the session brief).
 
 ```bash
 brigade outcome rank --target .
-brigade outcome reconcile --target .
+brigade outcome reconcile --target . --report
 ```
 
-Deliberate promotion or rollback:
+The shipped weekly runbook also passes `--proposals`, which files one skills inbox review request per verified regression on a Brigade-bundled skill (see [Outcome scoring](outcome-scoring.md#regression-proposals)). It is a review request only and never changes a status or a skill file.
+
+`--report` writes `.brigade/memory-care/outcome/ratchet-report.json`, a versioned summary of that run: decision counts by action, regression holds and rollbacks with their reason codes and helped/hurt counts, the receipt ineligibility rate, and the leading ineligibility reason. It stays a dry run; the flag adds an advisory file, never a status change. `brigade outcome ratchet --target .` prints the last report without ranking or reconciling, `brigade work brief` adds one `outcome_ratchet:` line, and the Center dashboard outcomes view shows the same summary below the ranking and marks a report older than seven days as stale. See [Outcome scoring](outcome-scoring.md#weekly-ratchet-report).
+
+Deliberate promotion or demotion (status and routing only):
 
 ```bash
 brigade outcome reconcile --apply --target .
@@ -428,7 +481,7 @@ Schedule rank first, then reconcile 30 to 60 minutes later so new verify receipt
 ```cron
 PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 7 * * 1 cd "WORKSPACE" && brigade outcome rank --target .
-30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target .
+30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target . --report
 ```
 
 To apply promotions automatically after review:
@@ -476,7 +529,7 @@ Description=Brigade weekly outcome reconcile
 Type=oneshot
 WorkingDirectory=WORKSPACE
 Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=brigade outcome reconcile --target .
+ExecStart=brigade outcome reconcile --target . --report
 ```
 
 `~/.config/systemd/user/brigade-outcome-reconcile.timer`:
@@ -493,7 +546,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Add `--apply` to the reconcile `ExecStart` line only after you accept automatic skill install and rollback.
+Add `--apply` to the reconcile `ExecStart` line only after you accept automatic status and route policy changes. It never installs or rolls back skill files.
 
 ### GitHub Actions
 
@@ -552,7 +605,7 @@ jobs:
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - run: brigade outcome reconcile --target .
+      - run: brigade outcome reconcile --target . --report
 ```
 
 The GitHub Actions recipe runs reconcile immediately after rank in the same workflow (`needs: outcome-rank`), not 30 to 60 minutes later. That is fine for CI: both jobs share the same restored `.brigade` cache and rank only reads receipts already on disk. On a laptop, keep the cron or timer gap so verify runs between rank and reconcile can finish first.
@@ -758,9 +811,15 @@ Add new sections here as adapters land. Future candidates include a beads reconc
 ### Hub memory reflection
 
 `brigade memory care install --entry memory-reflect --target <workspace>`
-installs an optional daily 10:00 hub reflection entry through the existing
-care scheduler. It runs `memory reflect run --hub --scheduled` and submits
-proposals only. A reviewer must decide each proposal separately.
+installs a daily 10:00 reflection entry through the existing care scheduler.
+The default care set now includes this entry. It runs
+`memory reflect run --scheduled --apply`, selecting configured hub memory or
+local candidates. A missing workspace reflect policy is created with Tier 0
+application enabled. Existing policies, including an off switch, are preserved.
+Hub authority gates decide whether each proposal can apply. Gate holds stay
+proposal-only without failing care. Local authority gates remain unbound.
+Use `brigade memory reflect auto-apply off --target .` to stop application
+before the next candidate. See [Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection).
 
 Three consecutive non-zero reflect runs pause the job in workspace state.
 Scheduled triggers then skip hub work. Inspect `memory reflect status`,
@@ -771,3 +830,27 @@ pause set. The timer sets only `PATH`, so configure user-level `[memory_hub]`
 settings or import the memory hub environment pair into the user service manager.
 See [Scheduled hub reflection](memory-operations.md#scheduled-hub-reflection-s19d)
 for grants, credentials, rollback and scheduler activation.
+
+## Shipped runbooks and upgrades
+
+`brigade care install` and `brigade memory care init --with-runbooks` place the
+shipped runbooks (`daily-care-pass`, `ingest-sweep`, `lesson-review`,
+`weekly-outcome-ratchet`, `daily-observability`, `memory-closeout`, and
+`run-patrol` when selected). An existing regular file is judged by its content
+without the top-level `pins` block (and only that block):
+
+| Installed copy | Result |
+| --- | --- |
+| Same as the bundled text | Left alone. A different `pins` block alone is not a difference. |
+| Same as a text a past release shipped for that runbook | Replaced with the current text and fresh pin hashes, no backup. An installed `version_cmd` on a pin is kept and its `version` re-observed. Printed as `refreshed (pristine): <path>`. A pin with any other field, or a `version_cmd` for a command the template no longer runs, would be lost, so such a copy is kept as `kept (drifted)`. |
+| Anything else (edited, unparseable, unknown) | Never overwritten. Printed once as `kept (drifted): <path>`. |
+
+The past-release record is `src/brigade/templates/shipped-file-history.json`,
+generated by `scripts/shipped_file_history.py` and checked by `scripts/verify`. A
+missing, linked or malformed record means nothing is refreshed. The copy is
+re-read without following a link right before the replace and kept if it changed
+meanwhile; a symlink or non-regular file at a runbook name is still refused with
+exit 2. With `--json` the two lines go to stderr so stdout stays one document. A
+dry run prints `would refresh (pristine)` and writes nothing. The explicit
+`memory care init --force --with-runbooks` keeps its own rule: any differing
+shipped file is copied to `<name>.bak-<UTC timestamp>` and replaced.

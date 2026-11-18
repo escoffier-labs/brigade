@@ -60,6 +60,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "codex_transport",
         "lifecycle_journal_requested",
         "run_journal_authority_requested",
+        "journal_withheld",
         "approval_reference",
         "approval",
         "requester_principal",
@@ -116,6 +117,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "transport_warning",
         "cloud_environment",
         "artifact_collection",
+        "worktree_removal",
         # Artifact references
         "artifacts",
         "handoff",
@@ -184,6 +186,12 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "task.launch-claimed",
         "task.observed",
         "task.acknowledged",
+        "task.native-enrolled",
+        # Governed native T3 claim, correlation and hold facts change task
+        # custody, not the aggregate run status.
+        "task.native-claimed",
+        "task.native-correlated",
+        "task.native-held",
         "control.requested",
         "control.observed",
         "control.failed",

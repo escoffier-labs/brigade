@@ -31,13 +31,14 @@ from . import fleet_investigation as investigation
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import fleet_command_deck, fleet_hub_model_roster, fleet_hub_policy, fleet_policy
+from . import fleet_command_deck, fleet_form_fields, fleet_hub_model_roster, fleet_hub_policy, fleet_policy
 from .fleet_hub import FleetHubConflict, FleetHubError
 from .ui_theme import empty_state
 from .fleet_policy_form import ACTIONS as ACTIONS
@@ -50,6 +51,14 @@ from .fleet_policy_form import SEAT_INT_FIELDS as SEAT_INT_FIELDS
 from .fleet_policy_form import SEAT_LIST_FIELDS as SEAT_LIST_FIELDS
 from .fleet_policy_form import SEAT_TEXT_FIELDS as SEAT_TEXT_FIELDS
 from .fleet_policy_form import KEEP_CURRENT as KEEP_CURRENT
+from .fleet_policy_form import (
+    CONSUMER_FORM,
+    DEFAULTS_FORM,
+    REASON,
+    REPOSITORY_FORM,
+    ROLLBACK_FORM,
+    SEAT_FORM,
+)
 from .fleet_policy_form import DocumentError as DocumentError
 from .fleet_policy_form import FormError as FormError
 from .fleet_policy_form import Submission as Submission
@@ -811,10 +820,12 @@ def _revision_document(conn: sqlite3.Connection, revision: int) -> Mapping[str, 
 
 def _rollback_target(submission: Submission) -> int:
     raw = submission.value("to_revision") or ""
+    if blank := fleet_form_fields.missing(ROLLBACK_FORM, {"to_revision": raw}):
+        raise DocumentError(blank[0].error)
     try:
         return int(raw)
     except ValueError as exc:
-        raise DocumentError("rollback needs an integer revision") from exc
+        raise DocumentError(ROLLBACK_FORM["to_revision"].error) from exc
 
 
 def plan_change(
@@ -1006,9 +1017,22 @@ def _input(name: str, value: object, *, editable: bool, kind: str = "text", extr
     return f'<input type="{kind}" name="field.{_esc(name)}" value="{_esc(shown)}" id="f-{_esc(name)}"{extra}{disabled}>'
 
 
-def _labelled(label: str, control: str, *, hint: str = "") -> str:
+_CONTROL_NAME = re.compile(r'name="field\.([^"]+)"')
+
+
+def _labelled(label: str, control: str, *, hint: str = "", form: fleet_form_fields.Form | None = None) -> str:
+    """A label around ``control``. With ``form``, the label carries that form's Required or Optional marker.
+
+    The field is found from the control's own ``field.<name>`` input name, so a control with no declaration in
+    ``form`` raises ``KeyError`` instead of rendering unmarked.
+    """
     hint_html = f'<span class="hint">{_esc(hint)}</span>' if hint else ""
-    return f"<label>{_esc(label)}{hint_html}{control}</label>"
+    if form is None:
+        return f"<label>{_esc(label)}{hint_html}{control}</label>"
+    name = _CONTROL_NAME.search(control)
+    if name is None:
+        raise KeyError("a marked control needs a field.<name> input name")
+    return f"<label>{fleet_form_fields.caption(label, form[name.group(1)])}{hint_html}{control}</label>"
 
 
 def _checkbox(name: str, checked: bool, *, editable: bool) -> str:
@@ -1074,7 +1098,7 @@ def _hidden(scope: str, target: str, revision: int, csrf: str) -> str:
 def _actions(reason: str) -> str:
     """Preview only. A save control appears after the server has shown the diff."""
     return (
-        f'<p class="roster-actions"><label>reason<input type="text" name="reason" maxlength="240" '
+        f'<p class="roster-actions"><label>{fleet_form_fields.caption("reason", REASON)}<input type="text" name="reason" maxlength="240" '
         f'value="{_esc(reason)}"></label> '
         '<button type="submit" name="action" value="preview">Preview change</button>'
         '<span class="hint">Preview shows the exact diff, the affected consumers and repositories, and every '
@@ -1425,7 +1449,7 @@ def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submis
             stored=stored,
             retired_seats=view.retired_seats.get("", ()),
         )
-        return _labelled(label, control, hint=hint)
+        return _labelled(label, control, hint=hint, form=DEFAULTS_FORM)
 
     role_cells = "".join(role_control(role) for role in POLICY_ROLES)
     training = values.get("data_allow_training", "yes" if data.get("allow_training") else "no")
@@ -1437,16 +1461,19 @@ def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submis
             "Allow contributor training",
             _enum_select("data_allow_training", training, ("yes", "no"), editable=editable, blank="(inherit)"),
             hint="policy key: data.allow_training",
+            form=DEFAULTS_FORM,
         )
         + _labelled(
             "Allow free models",
             _enum_select("data_allow_free", allow_free, ("yes", "no"), editable=editable, blank="(inherit)"),
             hint="policy key: data.allow_free",
+            form=DEFAULTS_FORM,
         )
         + _labelled(
             "Data retention",
             _input("data_retention", values.get("data_retention", data.get("retention") or ""), editable=editable),
             hint="policy key: data.retention",
+            form=DEFAULTS_FORM,
         )
         + _labelled(
             "Default machine",
@@ -1456,6 +1483,7 @@ def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submis
                 editable=editable,
             ),
             hint="policy key: execution.machine",
+            form=DEFAULTS_FORM,
         )
         + _labelled(
             "Maximum concurrent workers",
@@ -1468,6 +1496,7 @@ def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submis
                 editable=editable,
             ),
             hint="policy key: execution.concurrency",
+            form=DEFAULTS_FORM,
         )
         + _labelled(
             "Worker timeout (seconds)",
@@ -1480,6 +1509,7 @@ def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submis
                 editable=editable,
             ),
             hint="policy key: execution.timeout_seconds",
+            form=DEFAULTS_FORM,
         )
         + "</div>"
         '<p class="hint">Free-model eligibility and contributor training are configured in the data section '
@@ -1548,47 +1578,76 @@ def _seat_form(view: PolicyView, row: SeatRow, *, csrf: str, draft: Submission |
     )
     grid = "".join(
         [
-            _labelled("Provider", _input("provider", value("provider", row.provider), editable=True), hint="provider"),
-            _labelled("Exact model id", _input("model", value("model", row.model), editable=True), hint="model"),
-            _labelled("Reasoning effort", _input("effort", value("effort", row.effort), editable=True), hint="effort"),
+            _labelled(
+                "Provider",
+                _input(
+                    "provider",
+                    value("provider", row.provider),
+                    editable=True,
+                    extra=fleet_form_fields.attr(SEAT_FORM["provider"]),
+                ),
+                hint="provider",
+                form=SEAT_FORM,
+            ),
+            _labelled(
+                "Exact model id",
+                _input(
+                    "model", value("model", row.model), editable=True, extra=fleet_form_fields.attr(SEAT_FORM["model"])
+                ),
+                hint="model",
+                form=SEAT_FORM,
+            ),
+            _labelled(
+                "Reasoning effort",
+                _input("effort", value("effort", row.effort), editable=True),
+                hint="effort",
+                form=SEAT_FORM,
+            ),
             _labelled(
                 "Cost class",
                 _enum_select(
                     "cost_class", value("cost_class", row.cost_class), fleet_policy.COST_CLASS_VALUES, editable=True
                 ),
                 hint="cost_class (paid, subscription, free, unknown)",
+                form=SEAT_FORM,
             ),
             _labelled(
                 "Machines this seat may run on",
                 _input("eligible_machines", value("eligible_machines", " ".join(row.eligible_machines)), editable=True),
                 hint="eligible_machines",
+                form=SEAT_FORM,
             ),
             _labelled(
                 "Maximum concurrent workers",
                 _input("concurrency", value("concurrency", row.concurrency), editable=True),
                 hint="concurrency",
+                form=SEAT_FORM,
             ),
             _labelled(
                 "Worker timeout (seconds)",
                 _input("timeout_seconds", value("timeout_seconds", row.timeout_seconds), editable=True),
                 hint="timeout_seconds",
+                form=SEAT_FORM,
             ),
             _labelled(
                 "Fallback seats",
                 _input("fallback", value("fallback", " ".join(row.fallback)), editable=True),
                 hint="fallback",
+                form=SEAT_FORM,
             ),
             _labelled(
                 "Data retention",
                 _input("retention", value("retention", row.retention), editable=True),
                 hint="retention",
+                form=SEAT_FORM,
             ),
             _labelled(
                 "Quota pool",
                 _input("quota_pool", value("quota_pool", row.quota_pool), editable=True),
                 hint="quota_pool (a label, not a price)",
+                form=SEAT_FORM,
             ),
-            _labelled("Notes", _input("notes", value("notes", row.notes), editable=True), hint="notes"),
+            _labelled("Notes", _input("notes", value("notes", row.notes), editable=True), hint="notes", form=SEAT_FORM),
         ]
     )
     boxes = "".join(
@@ -1597,16 +1656,19 @@ def _seat_form(view: PolicyView, row: SeatRow, *, csrf: str, draft: Submission |
                 "Enabled",
                 _checkbox("enabled", _flag(values, "enabled", row.enabled), editable=True),
                 hint="enabled",
+                form=SEAT_FORM,
             ),
             _labelled(
                 "Pinned (identity changes need two saves)",
                 _checkbox("pinned", _flag(values, "pinned", row.pinned), editable=True),
                 hint="pinned",
+                form=SEAT_FORM,
             ),
             _labelled(
                 "Allow contributor training",
                 _checkbox("training_allowed", _flag(values, "training_allowed", row.training_allowed), editable=True),
                 hint="training_allowed",
+                form=SEAT_FORM,
             ),
         ]
     )
@@ -1621,6 +1683,7 @@ def _seat_form(view: PolicyView, row: SeatRow, *, csrf: str, draft: Submission |
         + _labelled(
             "bindings (exact JSON: brigade.cli, t3_fleet.instance_id/service_tier, native.instance_id/model)",
             f'<textarea name="field.bindings" rows="8">{_esc(bindings)}</textarea>',
+            form=SEAT_FORM,
         )
         + _actions(_reason_for(draft, "seat", row.name))
         + "</form></details>"
@@ -1669,6 +1732,7 @@ def _consumer_section(view: PolicyView, *, editable: bool, csrf: str, draft: Sub
                     retired_seats=view.retired_seats.get(row.name, ()),
                 ),
                 hint="policy role key: " + role,
+                form=CONSUMER_FORM,
             )
             for role in POLICY_ROLES
         )
@@ -1680,23 +1744,29 @@ def _consumer_section(view: PolicyView, *, editable: bool, csrf: str, draft: Sub
             + _labelled(
                 "reload",
                 _enum_select("reload", values.get("reload", row.reload), fleet_policy.RELOAD_VALUES, editable=True),
+                form=CONSUMER_FORM,
             )
             + _labelled(
                 "coverage",
                 _enum_select(
                     "coverage", values.get("coverage", row.coverage), fleet_policy.COVERAGE_VALUES, editable=True
                 ),
+                form=CONSUMER_FORM,
             )
             + _labelled(
                 "adapter_version",
                 _input("adapter_version", values.get("adapter_version", row.adapter_version or ""), editable=True),
+                form=CONSUMER_FORM,
             )
-            + _labelled("notes", _input("notes", values.get("notes", row.notes or ""), editable=True))
+            + _labelled(
+                "notes", _input("notes", values.get("notes", row.notes or ""), editable=True), form=CONSUMER_FORM
+            )
             + "</div>"
             + f'<div class="roster-grid">{role_cells}</div>'
             + _labelled(
                 "seat bindings for this consumer (exact JSON, seat -> binding group)",
                 f'<textarea name="field.seat_bindings" rows="8">{_esc(seat_bindings)}</textarea>',
+                form=CONSUMER_FORM,
             )
             + _actions(_reason_for(draft, "consumer", row.name))
             + "</form>"
@@ -1772,8 +1842,11 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
             + _labelled(
                 "privacy",
                 _enum_select("privacy", values.get("privacy", row.privacy), fleet_policy.PRIVACY_VALUES, editable=True),
+                form=REPOSITORY_FORM,
             )
-            + _labelled("owner", _input("owner", values.get("owner", row.owner or ""), editable=True))
+            + _labelled(
+                "owner", _input("owner", values.get("owner", row.owner or ""), editable=True), form=REPOSITORY_FORM
+            )
             + _labelled(
                 "eligible machines",
                 _input(
@@ -1781,8 +1854,11 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
                     values.get("eligible_machines", " ".join(row.eligible_machines)),
                     editable=True,
                 ),
+                form=REPOSITORY_FORM,
             )
-            + _labelled("notes", _input("notes", values.get("notes", row.notes or ""), editable=True))
+            + _labelled(
+                "notes", _input("notes", values.get("notes", row.notes or ""), editable=True), form=REPOSITORY_FORM
+            )
             + '</div><div class="roster-grid">'
             + _labelled(
                 "Override: allow contributor training",
@@ -1794,6 +1870,7 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
                     blank="(inherit)",
                 ),
                 hint="policy key: patches.data.allow_training",
+                form=REPOSITORY_FORM,
             )
             + _labelled(
                 "Override: allow free models",
@@ -1805,6 +1882,7 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
                     blank="(inherit)",
                 ),
                 hint="policy key: patches.data.allow_free",
+                form=REPOSITORY_FORM,
             )
             + _labelled(
                 "Override: data retention",
@@ -1814,6 +1892,7 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
                     editable=True,
                 ),
                 hint="policy key: patches.data.retention",
+                form=REPOSITORY_FORM,
             )
             + _labelled(
                 "Override: maximum concurrent workers",
@@ -1826,6 +1905,7 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
                     editable=True,
                 ),
                 hint="policy key: patches.execution.concurrency",
+                form=REPOSITORY_FORM,
             )
             + _labelled(
                 "Override: machine",
@@ -1835,6 +1915,7 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
                     editable=True,
                 ),
                 hint="policy key: patches.execution.machine",
+                form=REPOSITORY_FORM,
             )
             + "</div>"
             '<p class="hint">Only the leaves below are written for this repository. A blank leaf inherits; it is '

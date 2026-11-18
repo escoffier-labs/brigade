@@ -319,3 +319,32 @@ def assert_ready(item: Mapping[str, Any]) -> None:
 def can_transition(current: str, target: str) -> bool:
     """True when ``current`` may move to ``target`` on the Worklore lifecycle."""
     return target in TRANSITIONS.get(current, frozenset())
+
+
+TERMINAL_STATUSES = frozenset({"completed", "canceled", "archived"})
+
+
+def completion_path(current: str, target: str = "completed") -> list[str] | None:
+    """Shortest legal status path from ``current`` to ``target``, or None.
+
+    The list holds the statuses to pass through, excluding ``current`` and ending at
+    ``target``. The search only walks the existing ``TRANSITIONS`` edges: it adds none.
+    A terminal item, or one with no legal route, has no path.
+    """
+    if current in TERMINAL_STATUSES:
+        return None
+    queue: list[tuple[str, list[str]]] = [(current, [])]
+    seen = {current}
+    while queue:
+        status, path = queue.pop(0)
+        for step in sorted(TRANSITIONS.get(status, frozenset())):
+            if step in seen:
+                continue
+            route = [*path, step]
+            if step == target:
+                return route
+            if step in TERMINAL_STATUSES:
+                continue
+            seen.add(step)
+            queue.append((step, route))
+    return None

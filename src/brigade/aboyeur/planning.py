@@ -1223,6 +1223,7 @@ def dispatch(
     roster: Roster,
     cwd: Path | None = None,
     read_only: bool = False,
+    read_only_for: Callable[[Assignment], bool] | None = None,
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     direct: bool = False,
@@ -1255,7 +1256,10 @@ def dispatch(
     model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
     remote_transport: Any | None = None,
     codex_transport: str | None = None,
+    on_result: Callable[[WorkerResult], None] | None = None,
+    allow_reinvocation: bool = True,
     policy_workspace: Path | None = None,
+    recording_policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     from .. import run_transport
 
@@ -1275,6 +1279,7 @@ def dispatch(
         event_writer=_worker_event_writer,
         cwd=cwd,
         read_only=read_only,
+        read_only_for=read_only_for,
         sandbox_read_only=sandbox_read_only,
         sandbox=sandbox,
         direct=direct,
@@ -1306,5 +1311,8 @@ def dispatch(
         model_lease=model_lease,
         remote_transport=remote_transport,
         codex_transport=codex_transport,
+        on_result=on_result,
+        allow_reinvocation=allow_reinvocation,
         policy_workspace=policy_workspace,
+        recording_policy_workspace=recording_policy_workspace,
     )

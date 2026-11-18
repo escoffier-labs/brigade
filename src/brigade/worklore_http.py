@@ -54,6 +54,8 @@ _STATUS_BY_CODE = {
     "campaign-not-authorized": 403,
     "campaign-ineligible": 409,
     "campaign-concurrency-limit": 409,
+    "campaign-incomplete": 409,
+    "campaign-closed": 409,
     "adapter-owner-mismatch": 403,
     "execution-mismatch": 403,
     "attempt-forbidden": 403,
@@ -276,7 +278,15 @@ def _item_route(
         if query:
             raise WorkloreValidationError("unknown ownership query field", code="unknown-field")
         if method == "GET":
-            return 200, {"ownership": ownership.get_ownership(conn, work_id)}
+            return 200, {
+                "ownership": ownership.get_ownership(
+                    conn,
+                    work_id,
+                    actor_id=_actor_id(request),
+                    is_admin=request.is_admin,
+                    holder_nonce=_header(request, "X-Worklore-Holder"),
+                )
+            }
         return 200, {
             "ownership": ownership.ownership_action(
                 conn,
@@ -344,6 +354,8 @@ def _item_route(
         return 200, {"item": item}
     if tail == ["attempts"] and method == "POST":
         return _record_attempt(conn, request, work_id)
+    if tail == ["completions"] and method == "POST":
+        return _complete_item(conn, request, work_id)
     if tail == ["links"] and method == "POST":
         _require_operator(request)
         added = store.add_link(
@@ -371,6 +383,46 @@ def _item_route(
     if tail == ["execution"] and method == "POST":
         return _link_execution(conn, request, work_id)
     return _error("not-found")
+
+
+def _complete_item(
+    conn: sqlite3.Connection,
+    request: Request,
+    work_id: str,
+) -> tuple[int, dict[str, Any]]:
+    _require_operator(request)
+    expected_version = _if_match(request)
+    body = _object_body(request.body, allowed={"evidence_refs"})
+    # Any value the client sent other than an absent field or JSON null goes to the
+    # store as it is, so a wrong type is refused with the store's field-bound error
+    # instead of being read as "no evidence".
+    evidence = body.get("evidence_refs")
+
+    def _precondition() -> None:
+        # Runs under the completion's own write transaction. A campaign's members can
+        # grow through a re-create that does not change the campaign item's version, so
+        # only a read holding the write lock can be trusted to refuse the completion.
+        campaign_key = campaigns.campaign_for_work_id(conn, work_id)
+        if campaign_key is None:
+            return
+        summary = campaigns.show_campaign(conn, campaign_key)["campaign"]["summary"]
+        if summary["done"] is not True:
+            raise store.WorkloreConflict(
+                "campaign has members that are not terminal",
+                code="campaign-incomplete",
+            )
+
+    item = store.complete_item(
+        conn,
+        work_id,
+        expected_version=expected_version,
+        actor_id=_actor_id(request),
+        actor_type=_actor_type(request),
+        node_id=_event_node_id(request),
+        evidence_refs=() if evidence is None else evidence,
+        precondition=_precondition,
+    )
+    return 200, {"item": item}
 
 
 def _record_attempt(

@@ -56,7 +56,7 @@ def _spool_lock(path: Path, *, timeout: float | None = None) -> Iterator[int | N
         elif not client._SPOOL_PROCESS_LOCK.acquire(
             timeout=min(max(0.0, deadline - client.time.monotonic()), client.threading.TIMEOUT_MAX)
         ):
-            raise client.FleetClientError("fleet spool lock timed out")
+            raise client.FleetSpoolLockTimeout("fleet spool lock timed out")
         try:
             if dir_fd is not None:
                 fd = client.os.open(
@@ -91,7 +91,7 @@ def _spool_lock(path: Path, *, timeout: float | None = None) -> Iterator[int | N
                                 raise
                             remaining = deadline - client.time.monotonic()
                             if remaining <= 0:
-                                raise client.FleetClientError("fleet spool lock timed out") from None
+                                raise client.FleetSpoolLockTimeout("fleet spool lock timed out") from None
                             client.time.sleep(min(0.05, remaining))
                 elif client.fcntl is not None:
                     client.fcntl.flock(fd, client.fcntl.LOCK_EX)

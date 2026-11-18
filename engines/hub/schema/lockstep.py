@@ -224,6 +224,8 @@ def upgrade_inputs():
         "test_fleet_cloud.py": ["test_v4_migration_preserves_existing_rows"],
         "test_fleet_nodes.py": ["_pre_holder_token_db"],
         "test_fleet_events_schema_upgrade.py": [],
+        # The pre-memory optional table (#2710): a live hub keeps this shape until the first report upgrades it.
+        "test_fleet_t3_health.py": [],
         "test_fleet_claim_generations.py": [
             "test_schema33_migration_preserves_retirements_and_starts_conservative_horizon"
         ],

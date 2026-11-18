@@ -368,20 +368,29 @@ def _read_high_water(*, dir_fd: int | None) -> int:
     raise FleetClientError("high-water file is malformed")
 
 
-def _read_enrollment_high_water(*, dir_fd: int | None = None) -> dict[str, Any]:
+def _read_enrollment_high_water(*, dir_fd: int | None = None, lock_timeout: float | None = None) -> dict[str, Any]:
+    """Read the activation high-water record.
+
+    The caller's ``dir_fd`` is already under a held spool lock. Without one, a
+    short ``lock_timeout`` is honored, and its dedicated timeout error is
+    re-raised instead of reading as "not enrolled"; every other read error keeps
+    returning the empty record.
+    """
     if dir_fd is None:
         if not nofollow_supported():
             return {}
         try:
-            with _client._spool_lock(high_water_path()) as locked_fd:
+            with _client._spool_lock(high_water_path(), timeout=lock_timeout) as locked_fd:
                 return _read_high_water_record(dir_fd=locked_fd)
+        except _client.FleetSpoolLockTimeout:
+            raise
         except Exception:
             return {}
     return _read_high_water_record(dir_fd=dir_fd)
 
 
-def enrollment_activation_observed() -> bool:
-    record = _read_enrollment_high_water()
+def enrollment_activation_observed(*, lock_timeout: float | None = None) -> bool:
+    record = _read_enrollment_high_water(lock_timeout=lock_timeout)
     return record.get("authority_active") is True
 
 
@@ -421,11 +430,11 @@ def _write_cache_locked(envelope: Mapping[str, Any], *, revision: int, dir_fd: i
     _atomic_replace(high_water, _encode_record(high_water_record), dir_fd=dir_fd)
 
 
-def _load_lkg_record() -> dict[str, Any]:
+def _load_lkg_record(*, lock_timeout: float | None = None) -> dict[str, Any]:
     if not nofollow_supported():
         raise FleetClientError("cache-unsafe-platform")
     lkg = lkg_path()
-    with _client._spool_lock(lkg) as dir_fd:
+    with _client._spool_lock(lkg, timeout=lock_timeout) as dir_fd:
         raw = _read_leaf_bytes(lkg, dir_fd=dir_fd, missing_ok=False)
         high_water_record = _read_high_water_record(dir_fd=dir_fd)
     high_water = int(high_water_record["revision"]) if type(high_water_record.get("revision")) is int else 0
@@ -534,9 +543,11 @@ def _validate_inspection_roster(payload: Mapping[str, Any]) -> str | None:
     return fleet_model_roster.validate_roster_rows(payload)
 
 
-def _lkg_mac_valid(token: str) -> bool:
+def _lkg_mac_valid(token: str, *, lock_timeout: float | None = None) -> bool:
     try:
-        record = _load_lkg_record()
+        record = _load_lkg_record(lock_timeout=lock_timeout)
+    except _client.FleetSpoolLockTimeout:
+        raise
     except Exception:
         return False
     return _mac_valid(token, record["roster"])
@@ -548,9 +559,9 @@ def _safe_roster_payload(envelope: Mapping[str, Any], *, source: str) -> dict[st
     return payload
 
 
-def _accept_lkg(*, token: str, audience: str) -> ModelAdmissionDecision:
+def _accept_lkg(*, token: str, audience: str, lock_timeout: float | None = None) -> ModelAdmissionDecision:
     try:
-        record = _load_lkg_record()
+        record = _load_lkg_record(lock_timeout=lock_timeout)
         envelope = record["roster"]
         reason = _validate_envelope(envelope, token=token, audience=audience)
         if reason is not None:
@@ -570,6 +581,8 @@ def _accept_lkg(*, token: str, audience: str) -> ModelAdmissionDecision:
             return _fail("revision-rollback")
         payload = _safe_roster_payload(envelope, source="lkg")
         return ModelAdmissionDecision(True, 0, "lkg", payload)
+    except _client.FleetSpoolLockTimeout:
+        raise
     except FleetClientError as exc:
         text = str(exc)
         if "size limit" in text:
@@ -587,8 +600,13 @@ def fetch_versioned_roster(
     hub_url: str | None = None,
     cache_write: bool = True,
     inspect_only: bool = False,
+    lock_timeout: float | None = None,
 ) -> ModelAdmissionDecision:
-    """GET the node-audience roster, optionally cache it, or fall back to a valid LKG."""
+    """GET the node-audience roster, optionally cache it, or fall back to a valid LKG.
+
+    ``lock_timeout`` bounds the spool-lock waits for the LKG fallback and the
+    cache update. Readiness passes a short bound; admission keeps ``None``.
+    """
     cache_supported = nofollow_supported()
     config = _client.load_fleet_config()
     hub = hub_url or config["hub_url"]
@@ -617,17 +635,22 @@ def fetch_versioned_roster(
         )
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            if cache_supported and lkg_path().exists() and node_token and not _lkg_mac_valid(node_token):
+            if (
+                cache_supported
+                and lkg_path().exists()
+                and node_token
+                and not _lkg_mac_valid(node_token, lock_timeout=lock_timeout)
+            ):
                 return _fail("token-rotated")
             return _fail("auth-failed")
         if exc.code == 409:
             return _fail("revision-conflict", 4)
         if exc.code >= 500 and allow_lkg and cache_supported:
-            return _accept_lkg(token=node_token or token, audience=audience)
+            return _accept_lkg(token=node_token or token, audience=audience, lock_timeout=lock_timeout)
         return _fail("cache-unsafe-platform" if not cache_supported else "hub-unavailable")
     except (TimeoutError, urllib.error.URLError):
         if allow_lkg and cache_supported:
-            return _accept_lkg(token=node_token or token, audience=audience)
+            return _accept_lkg(token=node_token or token, audience=audience, lock_timeout=lock_timeout)
         return _fail("cache-unsafe-platform" if not cache_supported else "hub-unavailable")
     except FleetClientError:
         return _fail("hub-unavailable")
@@ -649,11 +672,13 @@ def fetch_versioned_roster(
         return _fail(reason, 2 if reason == "unsupported-schema" else 1)
     if cache_supported and not admin_read:
         try:
-            with _client._spool_lock(lkg_path()) as dir_fd:
+            with _client._spool_lock(lkg_path(), timeout=lock_timeout) as dir_fd:
                 if _enrollment_downgraded(payload, dir_fd=dir_fd):
                     return _fail("enrollment-downgrade")
                 if cache_write:
                     _write_cache_locked(payload, revision=int(payload["revision"]), dir_fd=dir_fd)
+        except _client.FleetSpoolLockTimeout:
+            raise
         except FleetClientError as exc:
             text = str(exc)
             if text == "revision-rollback":

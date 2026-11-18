@@ -10,11 +10,13 @@ or refused caller never gets the hub to read its body.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs
 
 from . import fleet_claim_display, fleet_hub as _hub, fleet_hub_grokbot, fleet_hub_identity, fleet_hub_messages
 from . import fleet_hub_model_roster, fleet_hub_policy_api, fleet_hub_sessions, fleet_model_inventory, fleet_owners
+from . import fleet_t3_health
 from .fleet_hub import FleetHubError, FleetHubUnsupportedSchema
 from .fleet_hub_claims import ClaimFenceError, status as claim_fencing_status
 from .fleet_hub_routes import HubContext, RouteTable
@@ -25,6 +27,7 @@ GET_PATHS = (
     "/nodes",
     "/cloud",
     "/models",
+    "/models/usage",
     "/preference",
     "/sessions",
     "/owners",
@@ -128,11 +131,33 @@ def serve_get(request: Any, hub: HubContext, path: str, query: str) -> None:
                 audience_node_id=None if is_admin else _node,
                 raw_node_bearer=None if is_admin else presented,
             )
+        elif path == "/models/usage":
+            # Occupancy reads alone: never admit, extend, or release a seat.
+            conn.execute("PRAGMA query_only=ON")
+            # One read snapshot, so the counts and the revision and digest
+            # they are reported against cannot straddle a concurrent write.
+            conn.execute("BEGIN")
+            try:
+                payload = fleet_hub_model_roster.seat_usage(conn)
+            finally:
+                conn.rollback()
         elif path == "/preference":
             pref = _hub.get_run_preference(conn)
             payload = {"preference": {key: value for key, value in pref.items() if value is not None}}
         elif path == "/sessions":
-            payload = {"sessions": fleet_hub_sessions.list_sessions(conn, include_all=include_all)}
+            # One read snapshot, so the rows and the unknown nodes cannot straddle a concurrent write.
+            prior_query_only = conn.execute("PRAGMA query_only").fetchone()[0]
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            try:
+                payload = {
+                    "sessions": fleet_hub_sessions.list_sessions(conn, include_all=include_all),
+                    # Nodes whose native T3 observer stopped reporting: absent sessions are unknown, not zero.
+                    **fleet_t3_health.unknown_view(conn, datetime.fromtimestamp(_hub._now_epoch(), timezone.utc)),
+                }
+            finally:
+                conn.rollback()
+                conn.execute("PRAGMA query_only=ON" if prior_query_only else "PRAGMA query_only=OFF")
         elif path == "/owners":
             conn.execute("PRAGMA query_only=ON")
             view = fleet_owners.load_view(conn, now_epoch=_hub._now_epoch(), include_grokbot=is_admin)

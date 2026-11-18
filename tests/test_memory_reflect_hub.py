@@ -141,8 +141,8 @@ def test_care_install_memory_reflect(setup, capsys):
     argv = shlex.split(
         next(line.removeprefix("ExecStart=") for line in body.splitlines() if line.startswith("ExecStart="))
     )
-    assert argv[-7:] == ["memory", "reflect", "run", "--hub", "--scheduled", "--target", str(target)]
-    assert "decide" not in body and "apply" not in body
+    assert argv[-6:] == ["memory", "reflect", "run", "--scheduled", "--target", str(target)]
+    assert "decide" not in body and "--apply" not in body
     environment = [line for line in body.splitlines() if line.startswith("Environment=")]
     assert len(environment) == 1 and "PATH=" in environment[0]
     assert "BRIGADE_MEMORY_HUB" not in body and "BRIGADE_HOME" not in body
@@ -247,11 +247,11 @@ def test_workspace_cannot_redirect_credentials(setup, capsys):
     assert hub.calls == []
 
 
-def test_no_valid_pins_is_successful_skip(setup, capsys):
+def test_unpinned_human_cards_are_not_proposed_for_anchoring(setup, capsys):
     target, hub, _ = setup
     for ident in ("a", "b"):
         hub._commit("card.put", "fleet", ident, "Same claim.\n", "live", hubc.event_id())
-    for _ in range(4):
+    for _attempt in range(4):
         code, report = run(target, capsys, "run")
         assert code == 0
         assert report["skipped_reasons"] == {"missing_pin": 1}
@@ -291,13 +291,13 @@ def test_other_scheduler_backends_pin_the_reflect_command(setup):
     entry = care_cmd._catalog_by_id()["memory-reflect"]
     plists = care_cmd._launchd_plists(workspace=target, home=home, entries=(entry,))
     argv = plistlib.loads(next(iter(plists.values())))["ProgramArguments"]
-    assert argv[-7:] == ["memory", "reflect", "run", "--hub", "--scheduled", "--target", str(target)]
+    assert argv[-6:] == ["memory", "reflect", "run", "--scheduled", "--target", str(target)]
     assert set(plistlib.loads(next(iter(plists.values())))["EnvironmentVariables"]) == {"PATH"}
     cron = care_cmd._cron_command(entry, workspace=target)
-    assert '"reflect" "run" "--hub" "--scheduled"' in cron
+    assert '"reflect" "run" "--scheduled"' in cron
     windows = care_cmd._schtasks_create_command(entry, workspace=target)
     decoded = base64.b64decode(windows.split("-EncodedCommand ")[1]).decode("utf-16le")
-    assert "reflect run --hub --scheduled" in decoded
+    assert "reflect run --scheduled" in decoded
 
 
 @pytest.mark.parametrize("source", ["env", "table"])
@@ -874,3 +874,177 @@ def test_changed_or_retired_card_prunes_submission(setup, capsys, state):
     hub._commit("card.put", "fleet", "a", text, state, hubc.event_id())
     assert run(target, capsys, "run")[0] == 0
     assert original not in json.loads(path.read_text())["submissions"]
+
+
+def test_scheduled_compensation_watch_runs_before_proposing(setup, capsys):
+    target, hub, _ = setup
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    hub.do_status = status
+    calls = []
+
+    def watch(body):
+        calls.append(body)
+        return 200, {"results": [{"result": "applied", "trigger": "retrieval-regression"}], "next_after": None}
+
+    hub.do_compensation_watch = watch
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code == 0
+    assert calls[0]["scope"] == "fleet"
+    assert payload["compensation_watch"][0]["result"] == "applied"
+    assert next(i for i, c in enumerate(hub.calls) if c["action"] == "compensation_watch") < next(
+        i for i, c in enumerate(hub.calls) if c["action"] == "propose"
+    )
+
+
+def _watching(hub, reply):
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    hub.do_status = status
+    watched = []
+
+    def watch(body):
+        watched.append(body["scope"])
+        return reply
+
+    hub.do_compensation_watch = watch
+    return watched
+
+
+def _two_scopes(target, hub, reflect):
+    (target / ".brigade/memory-care.toml").write_text(
+        f'[hub]\nmode="read"\nread_scopes=["fleet", "repo:acme/app"]\n[reflect]\nscopes={reflect}\n'
+    )
+    for ident, anchor in (("c", "c-123abc"), ("d", "c-321cba")):
+        hub._commit(
+            "card.put",
+            "repo:acme/app",
+            ident,
+            f"---\nevidence: []\n---\nOther claim. ^{anchor}\n",
+            "live",
+            hubc.event_id(),
+        )
+
+
+def test_reflect_scopes_limit_the_watch_and_every_proposal(setup, capsys):
+    target, hub, _ = setup
+    _two_scopes(target, hub, '["repo:acme/app"]')
+    watched = _watching(hub, (200, {"results": [], "next_after": None}))
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code == 0, payload
+    assert watched == ["repo:acme/app"]
+    assert payload["reflected_scopes"] == ["repo:acme/app"]
+    proposed = [op["scope"] for c in hub.calls if c["action"] == "propose" for op in c["ops"]]
+    assert proposed and set(proposed) == {"repo:acme/app"}
+
+
+def test_reflect_scopes_default_to_every_read_scope(setup, capsys):
+    target, hub, _ = setup
+    (target / ".brigade/memory-care.toml").write_text('[hub]\nmode="read"\nread_scopes=["fleet", "repo:acme/app"]\n')
+    watched = _watching(hub, (200, {"results": [], "next_after": None}))
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code == 0, payload
+    assert watched == ["fleet", "repo:acme/app"]
+    assert payload["reflected_scopes"] == ["fleet", "repo:acme/app"]
+
+
+def test_missing_reflect_grant_in_a_reflected_scope_still_fails(setup, capsys):
+    target, hub, _ = setup
+    _two_scopes(target, hub, '["repo:acme/app"]')
+    watched = _watching(hub, (403, {"code": "memory_grant_missing", "error": "reflect right required"}))
+    code, _ = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code != 0
+    assert watched == ["repo:acme/app"]
+    assert not any(c["action"] == "propose" for c in hub.calls)
+    assert run(target, capsys, "status")[1]["schedule"]["consecutive_failures"] == 1
+
+
+@pytest.mark.parametrize("value", ['["nope"]', "[]", '"repo:acme/app"', '["repo:acme/app", "repo:acme/app"]', "[1]"])
+def test_reflect_scopes_must_be_distinct_configured_read_scopes(setup, capsys, value):
+    target, hub, _ = setup
+    _two_scopes(target, hub, value)
+    code, payload = run(target, capsys, "run", "--hub", "--scheduled")
+    assert code != 0
+    assert payload["code"] == "hub_reflect_config"
+    assert writes(hub) == []
+
+
+def test_compensation_watch_dry_run_does_not_write(setup, capsys):
+    target, hub, _ = setup
+    run(target, capsys, "run", "--hub", "--scheduled", "--dry-run")
+    assert not any(c["action"] == "compensation_watch" for c in hub.calls)
+
+
+@pytest.mark.parametrize("window", [0, -1, True, 604801, "86400"])
+def test_compensation_watch_rejects_invalid_policy_windows(window):
+    from brigade.fleet_policy import FleetPolicyError, parse_memory
+
+    with pytest.raises(FleetPolicyError, match="rollback_watch_seconds"):
+        parse_memory({"rollback_watch_seconds": window})
+
+
+def test_compensation_watch_preserves_explicit_policy_window():
+    from brigade.fleet_policy import parse_memory
+
+    assert parse_memory({"rollback_watch_seconds": 3600})["rollback_watch_seconds"] == 3600
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("state", ["held", "stale", "pending"])
+def test_rollback_failure_reports_failed_without_missing_proposal(setup, capsys, monkeypatch, json_output, state):
+    target, hub, _ = setup
+    monkeypatch.setattr(
+        hub,
+        "do_rollback",
+        lambda body: (
+            200,
+            {
+                "state": state,
+                "reason": "scan_failed",
+                "compensation_result": "failed",
+                **({"proposal_id": hubc.event_id()} if state in {"stale", "pending"} else {"result": "failed"}),
+            },
+        ),
+    )
+    args = ["memory", "reflect", "rollback", hubc.event_id(), "--target", str(target)]
+    if json_output:
+        args.append("--json")
+    assert cli.main(args) == 1
+    output = capsys.readouterr().out
+    if json_output:
+        assert json.loads(output)["status"] == "failed"
+    else:
+        assert "compensation failed: scan_failed" in output
+        assert "None" not in output
+
+
+def test_healthy_watch_budget_does_not_pause_scheduled_reflection(setup, capsys):
+    target, hub, _ = setup
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload.setdefault("capabilities", []).append("automatic_compensation")
+        return code, payload
+
+    def watch(body):
+        return 200, {"results": [], "next_after": hubc.event_id()}
+
+    hub.do_status = status
+    hub.do_compensation_watch = watch
+    for _ in range(4):
+        assert run(target, capsys, "run", "--hub", "--scheduled")[0] == 0
+    schedule = run(target, capsys, "status")[1]["schedule"]
+    assert schedule["consecutive_failures"] == 0
+    assert not schedule["paused"]
+    assert any(c["action"] == "propose" for c in hub.calls)

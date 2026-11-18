@@ -1717,11 +1717,13 @@ def handle_cloud(
 def list_cloud_leases(conn: sqlite3.Connection, *, include_all: bool = False) -> list[dict[str, Any]]:
     """Safe lease rows. Fencing tokens and prompt hashes never leave SQLite."""
     now = _now_epoch()
+    # Active means unreleased and not yet expired, so the filter runs in SQLite.
+    where = "" if include_all else " WHERE released_at IS NULL AND expires_at > ?"
     rows = conn.execute(
-        f"SELECT {_CLOUD_LEASE_COLUMNS} FROM cloud_leases ORDER BY admitted_at DESC, lease_id"
+        f"SELECT {_CLOUD_LEASE_COLUMNS} FROM cloud_leases{where} ORDER BY admitted_at DESC, lease_id",
+        () if include_all else (now,),
     ).fetchall()
-    payloads = [_cloud_lease_payload(row, now=now) for row in rows]
-    return payloads if include_all else [row for row in payloads if not row["expired"] and row["released_at"] is None]
+    return [_cloud_lease_payload(row, now=now) for row in rows]
 
 
 def cloud_snapshot(

@@ -17,26 +17,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-_NONTERMINAL_STATUSES = frozenset(
-    {
-        "started",
-        "planning",
-        "dispatching",
-        "result-processing",
-        "synthesizing",
-        "handoff",
-        "artifact-collection",
-        "running",
-    }
+from . import run_export_projection, runs_privacy, runs_status
+from .runs_privacy import (
+    RUN_DETAIL_SCHEMA,
+    RUN_WATCH_SCHEMA,
+    RUNS_LIST_SCHEMA,
+    _allowlisted,
+    _clean_number,
+    _clean_str,
+    _clean_str_list,
+    _compact,
+    _merge_source,
+    _short,
 )
+
+# Status classification lives in ``runs_status`` so this frozen module does not
+# grow. External callers keep the historical attribute names.
+_NONTERMINAL_STATUSES = runs_status.NONTERMINAL_STATUSES
 _SUCCESS_STATUSES = frozenset({"ok", "dry-run", "completed"})
 
-# Versioned read contracts for higher-level surfaces (issue #631). These are
-# browser-safe allowlisted views over run artifacts; the CLI stays the single
-# source of behavior.
-RUNS_LIST_SCHEMA = "brigade.runs-list.v1"
-RUN_DETAIL_SCHEMA = "brigade.run-detail.v1"
-RUN_WATCH_SCHEMA = "brigade.run-watch.v1"
+# The versioned read contracts moved to ``runs_privacy`` with the closed privacy
+# projection (#2046). v2 carries keyed digest objects instead of raw task text.
 
 # Explicit field allowlists. Serializers copy only these keys; environment
 # values, auth/control tokens, secret references, full prompts, transcript
@@ -46,6 +47,7 @@ RUN_SUMMARY_FIELDS = frozenset(
         "run_id",
         "status",
         "task",
+        "task_preview",
         "started_at",
         "finished_at",
         "duration_seconds",
@@ -72,6 +74,7 @@ _RUN_DETAIL_RUN_FIELDS = frozenset(
         "run_id",
         "status",
         "task",
+        "task_preview",
         "mode",
         "started_at",
         "finished_at",
@@ -108,10 +111,8 @@ _SHARED_PREFIX_FIELDS = frozenset(
     }
 )
 
-_LIST_TASK_LIMIT = 160
 _DETAIL_TASK_LIMIT = 400
 _DETAIL_TEXT_LIMIT = 400
-_DETAIL_COMMAND_LIMIT = 200
 _APPROVAL_REFERENCE_FIELDS = (
     "approval_id",
     "source",
@@ -490,10 +491,7 @@ def _resolve_sibling_run_dir(runs_root: Path, run_id: str) -> Path | None:
 
 
 def _is_terminal(meta: dict[str, Any]) -> bool:
-    status = meta.get("status")
-    if meta.get("finished_at"):
-        return True
-    return isinstance(status, str) and status not in _NONTERMINAL_STATUSES
+    return runs_status.is_terminal(meta)
 
 
 def _run_display_is_terminal(run_dir: Path, meta: Mapping[str, Any]) -> bool:
@@ -1255,6 +1253,8 @@ def resume(run_dir: Path) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if meta is not None and runs_status.refuse_resume(meta):
+        return 2
     if meta is not None and _durable_child_lineage(meta) is not None:
         return _resume_durable_child(run_dir, meta)
     if meta is None or _approval_resume_state(meta) is None:
@@ -1406,7 +1406,11 @@ def _emit_watch_json(payload: dict[str, object]) -> None:
 
 
 def _watch_run_id(run_dir: Path) -> str:
-    """Directory name only — never an absolute operator path."""
+    """Directory name only — never an absolute operator path.
+
+    The CLI keeps the raw name so its ``inspect_command`` stays runnable. The
+    served stream normalizes it to a digest in ``watch_record_projector``.
+    """
     return _clean_str(run_dir.name) or "unknown"
 
 
@@ -1625,13 +1629,6 @@ def _poll_watch_artifacts(
     return run_meta, None
 
 
-def _short(text: object, limit: int = 72) -> str:
-    rendered = " ".join(str(text or "").split())
-    if len(rendered) <= limit:
-        return rendered
-    return rendered[: limit - 3].rstrip() + "..."
-
-
 def _run_sort_key(item: tuple[Path, dict[str, Any]]) -> str:
     path, meta = item
     value = meta.get("started_at")
@@ -1769,71 +1766,6 @@ def _stale_timeout(run_dir: Path, meta: dict[str, Any]) -> float | None:
     return timeout if time.time() - started.timestamp() > timeout else None
 
 
-# Windows alternative is first so `C:/Users/<name>` is not left as `C:~`.
-# `/+` and `[/\\]+` accept doubled separators; `[^/\\]+` keeps spaces and apostrophes.
-_HOME_PREFIX_RE = re.compile(
-    r"(?:[A-Za-z]:[/\\]+(?i:Users)[/\\]+|/(?:home|Users)/+)[^/\\]+",
-)
-
-
-def _redact_home_prefixes(text: str) -> str:
-    """Rewrite POSIX and Windows home prefixes to `~` for JSON contracts."""
-    return _HOME_PREFIX_RE.sub("~", text)
-
-
-def _clean_str(value: object, limit: int | None = None) -> str | None:
-    """Bound, then home-prefix-redact, every string that enters a JSON contract."""
-    if not isinstance(value, str) or not value:
-        return None
-    cleaned = _short(value, limit) if limit is not None else value
-    return _redact_home_prefixes(cleaned)
-
-
-def _clean_str_list(value: object) -> list[str] | None:
-    """Clean every string in a JSON-contract list; drop non-strings and empties."""
-    if not isinstance(value, list):
-        return None
-    return [item for raw in value if (item := _clean_str(raw)) is not None]
-
-
-def _clean_number(value: object) -> int | float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return value
-
-
-def _compact(payload: dict[str, object]) -> dict[str, object]:
-    return {key: value for key, value in payload.items() if value is not None}
-
-
-class _MergedSource(dict[str, object]):
-    """Source overlay that records which keys passed through the cleaner."""
-
-    cleaned_keys: frozenset[str]
-
-    def __init__(self, data: Mapping[str, Any] | None = None) -> None:
-        super().__init__(data or {})
-        self.cleaned_keys = frozenset()
-
-
-def _merge_source(source: Mapping[str, Any] | None, cleaned: Mapping[str, object]) -> dict[str, object]:
-    """Overlay cleaned fields on the source mapping so `_allowlisted` must drop extras."""
-    payload = _MergedSource(source)
-    payload.update(cleaned)
-    payload.cleaned_keys = frozenset(cleaned)
-    return payload
-
-
-def _allowlisted(payload: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
-    """Keep only explicitly allowlisted keys; drop None the same way as `_compact`."""
-    if not isinstance(payload, _MergedSource):
-        raise AssertionError("JSON contract allowlist requires _merge_source overlay")
-    missing = allowed - payload.cleaned_keys
-    if missing:
-        raise AssertionError("allowlist keys have no cleaned counterpart: " + ", ".join(sorted(missing)))
-    return {key: value for key, value in payload.items() if key in allowed and value is not None}
-
-
 def _mode_text(meta: Mapping[str, Any]) -> str:
     mode = "read-only" if meta.get("read_only") else "normal"
     if meta.get("dry_run"):
@@ -1848,9 +1780,9 @@ def _detail_children(run_dir: Path) -> list[dict[str, object]]:
             _merge_source(
                 child,
                 {
-                    "run_id": _clean_str(child.get("run_id")),
-                    "status": _clean_str(child.get("status"), _DETAIL_TEXT_LIMIT),
-                    "branch_point_event_id": _clean_str(child.get("branch_point_event_id"), _DETAIL_TEXT_LIMIT),
+                    "run_id": runs_privacy.view_run_id(child.get("run_id"), run_dir),
+                    "status": _clean_str(child.get("status")),
+                    "branch_point_event_id": _clean_str(child.get("branch_point_event_id")),
                 },
             ),
             _CHILD_SUMMARY_FIELDS,
@@ -1887,7 +1819,9 @@ def _detail_lineage_section(run_dir: Path, meta: Mapping[str, Any]) -> dict[str,
             lineage,
             {
                 "kind": _clean_str(lineage.get("kind")) if lineage is not None else None,
-                "parent_run_id": _clean_str(lineage.get("parent_run_id")) if lineage is not None else None,
+                "parent_run_id": (
+                    runs_privacy.view_run_id(lineage.get("parent_run_id"), run_dir) if lineage is not None else None
+                ),
                 "branch_point_event_id": (
                     _clean_str(lineage.get("branch_point_event_id")) if lineage is not None else None
                 ),
@@ -1913,27 +1847,29 @@ def _parent_run_id_from_meta(meta: Mapping[str, Any]) -> str | None:
     return _clean_str(lineage.get("parent_run_id"))
 
 
-def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
-    """Browser-safe run summary for brigade.runs-list.v1 (no absolute paths)."""
+def _run_summary_payload(run_dir: Path, meta: dict[str, Any], *, show_task: bool = False) -> dict[str, object]:
+    """Browser-safe run summary for brigade.runs-list.v2 (no absolute paths)."""
     phase, _, _ = _failure_fields(meta)
-    return _allowlisted(
+    payload = _allowlisted(
         _merge_source(
             meta,
             {
-                "run_id": _clean_str(run_dir.name),
+                "run_id": runs_privacy.view_run_id(run_dir.name, run_dir),
                 "status": _clean_str(meta.get("status")) or "unknown",
-                "task": _clean_str(meta.get("task"), _LIST_TASK_LIMIT),
+                "task": runs_privacy.text_value(meta.get("task")),
+                "task_preview": None,
                 "started_at": _clean_str(meta.get("started_at")),
                 "finished_at": _clean_str(meta.get("finished_at")),
                 "duration_seconds": _clean_number(meta.get("duration_seconds")),
                 "failure_phase": _clean_str(phase),
                 "mode": _clean_str(_mode_text(meta)),
                 "resume_available": _resume_available(run_dir),
-                "parent_run_id": _parent_run_id_from_meta(meta),
+                "parent_run_id": runs_privacy.view_run_id(_parent_run_id_from_meta(meta), run_dir),
             },
         ),
         RUN_SUMMARY_FIELDS,
     )
+    return runs_privacy.project_summary(payload, run_dir, task=meta.get("task"), show_task=show_task)
 
 
 def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
@@ -1942,22 +1878,23 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
         {
             "phase": _clean_str(phase),
             "kind": _clean_str(kind),
-            "detail": _clean_str(detail, _DETAIL_TEXT_LIMIT),
+            "detail": _clean_str(detail),
         }
     )
     return _allowlisted(
         _merge_source(
             meta,
             {
-                "run_id": _clean_str(run_dir.name),
+                "run_id": runs_privacy.view_run_id(run_dir.name, run_dir),
                 "status": _clean_str(meta.get("status")) or "unknown",
-                "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
+                "task": runs_privacy.text_value(meta.get("task")),
+                "task_preview": None,
                 "mode": _clean_str(_mode_text(meta)),
                 "started_at": _clean_str(meta.get("started_at")),
                 "finished_at": _clean_str(meta.get("finished_at")),
                 "duration_seconds": _clean_number(meta.get("duration_seconds")),
                 "failure": failure or None,
-                "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
+                "error": _clean_str(meta.get("error")),
                 "suspected_noop": True if meta.get("suspected_noop") is True else None,
                 "resume_available": _resume_available(run_dir),
                 "terminal": _terminal_label(meta),
@@ -1985,7 +1922,7 @@ def _detail_roster_section(roster: dict[str, Any] | None) -> dict[str, object]:
                     "cli": _clean_str(agent.get("cli")),
                     "model": _clean_str(agent.get("model")),
                     "reasoning": _clean_str(agent.get("reasoning")),
-                    "role": _clean_str(agent.get("role"), _DETAIL_TEXT_LIMIT),
+                    "role": _clean_str(agent.get("role")),
                     "timeout_seconds": _clean_number(agent.get("timeout_seconds")),
                 }
             )
@@ -2009,7 +1946,7 @@ def _detail_plan_section(plan: dict[str, Any] | None) -> dict[str, object]:
             {
                 "stage": _clean_number(assignment.get("stage")),
                 "worker": _clean_str(assignment.get("worker")),
-                "task": _clean_str(assignment.get("task"), _DETAIL_TASK_LIMIT),
+                "task": _clean_str(assignment.get("task")),
             }
         )
         for assignment in assignments
@@ -2025,7 +1962,7 @@ def _detail_worker_result(result: dict[str, Any]) -> dict[str, object]:
         failure_payload = _compact(
             {
                 "class": _clean_str(failure.get("class")),
-                "detail": _clean_str(failure.get("detail"), _DETAIL_TEXT_LIMIT),
+                "detail": _clean_str(failure.get("detail")),
             }
         )
     return _compact(
@@ -2033,8 +1970,8 @@ def _detail_worker_result(result: dict[str, Any]) -> dict[str, object]:
             "worker": _clean_str(result.get("worker")),
             "ok": result.get("ok") if isinstance(result.get("ok"), bool) else None,
             "status": _clean_str(result.get("status")),
-            "task": _clean_str(result.get("task"), _DETAIL_TASK_LIMIT),
-            "detail": _clean_str(result.get("detail"), _DETAIL_TEXT_LIMIT),
+            "task": _clean_str(result.get("task")),
+            "detail": _clean_str(result.get("detail")),
             "duration_seconds": _clean_number(result.get("duration_seconds")),
             "exit_code": _clean_number(result.get("exit_code")),
             "timed_out": result.get("timed_out") if isinstance(result.get("timed_out"), bool) else None,
@@ -2061,7 +1998,7 @@ def _detail_synthesis_section(synthesis: dict[str, Any] | None) -> dict[str, obj
         result_payload = _compact(
             {
                 "ok": result.get("ok") if isinstance(result.get("ok"), bool) else None,
-                "detail": _clean_str(result.get("detail"), _DETAIL_TEXT_LIMIT),
+                "detail": _clean_str(result.get("detail")),
                 "duration_seconds": _clean_number(result.get("duration_seconds")),
                 "exit_code": _clean_number(result.get("exit_code")),
                 "requested_model": _clean_str(result.get("requested_model")),
@@ -2079,6 +2016,7 @@ def _detail_synthesis_section(synthesis: dict[str, Any] | None) -> dict[str, obj
 def _detail_verification_section(
     worker_results: dict[str, Any] | None,
     synthesis: dict[str, Any] | None,
+    run_dir: Path,
 ) -> list[dict[str, object]]:
     receipts: list[object] = []
     for source in (worker_results, synthesis):
@@ -2094,7 +2032,7 @@ def _detail_verification_section(
         command_payload = [
             _compact(
                 {
-                    "command": _clean_str(command.get("command"), _DETAIL_COMMAND_LIMIT),
+                    "command": _clean_str(command.get("command")),
                     "exit_code": _clean_number(command.get("exit_code")),
                     "duration_seconds": _clean_number(command.get("duration_seconds")),
                 }
@@ -2105,7 +2043,7 @@ def _detail_verification_section(
         payload.append(
             _compact(
                 {
-                    "run_id": _clean_str(receipt.get("run_id")),
+                    "run_id": runs_privacy.view_run_id(receipt.get("run_id"), run_dir),
                     "status": _clean_str(receipt.get("status")),
                     "started_at": _clean_str(receipt.get("started_at")),
                     "duration_seconds": _clean_number(receipt.get("duration_seconds")),
@@ -2149,11 +2087,14 @@ def _run_detail_payload(
     plan: dict[str, Any] | None,
     worker_results: dict[str, Any] | None,
     synthesis: dict[str, Any] | None,
+    *,
+    show_task: bool = False,
 ) -> dict[str, object]:
-    """Allowlisted brigade.run-detail.v1 payload shared by show/latest --json.
+    """Allowlisted brigade.run-detail.v2 payload shared by show/latest --json.
 
     Excludes environment values, tokens, full prompts, transcript bodies,
-    log paths, raw stdout/stderr, and absolute workspace paths.
+    log paths, raw stdout/stderr, and absolute workspace paths. Prompt and
+    generated text are projected to keyed digests by ``runs_privacy``.
     """
     payload = {
         "schema": RUN_DETAIL_SCHEMA,
@@ -2162,10 +2103,11 @@ def _run_detail_payload(
         "plan": _detail_plan_section(plan),
         "workers": _detail_workers_section(worker_results),
         "synthesis": _detail_synthesis_section(synthesis),
-        "verification": _detail_verification_section(worker_results, synthesis),
+        "verification": _detail_verification_section(worker_results, synthesis, run_dir),
         "briefs": _detail_briefs_section(run_meta),
     }
-    return {key: payload[key] for key in RUN_DETAIL_KEYS}
+    ordered = {key: payload[key] for key in RUN_DETAIL_KEYS}
+    return runs_privacy.project_detail(ordered, run_dir, task=run_meta.get("task"), show_task=show_task)
 
 
 def runs_list_contract(
@@ -2173,12 +2115,14 @@ def runs_list_contract(
     cwd: Path,
     runs_dir: Path | None = None,
     limit: int = 10,
+    show_task: bool = False,
 ) -> tuple[dict[str, object] | None, str | None, int]:
-    """Return the brigade.runs-list.v1 payload used by ``runs list --json``.
+    """Return the brigade.runs-list.v2 payload used by ``runs list --json``.
 
     A missing runs directory is an empty list plus the CLI diagnostic (rc 2),
     so a higher-level surface can render the empty state without a second
-    artifact reader.
+    artifact reader. Task text is a keyed digest unless ``show_task`` asks for
+    a bounded preview, and the Run View never passes it.
     """
     if limit < 1:
         return None, "error: --limit must be a positive integer", 2
@@ -2194,10 +2138,16 @@ def runs_list_contract(
         }
         return payload, f"error: runs directory not found: {root}", 2
     runs, skipped = _collect_runs(root)
+    try:
+        summaries = [_run_summary_payload(path, meta, show_task=show_task) for path, meta in runs[:limit]]
+    except runs_privacy.DigestKeyUnavailable:
+        return None, runs_privacy.DIGEST_KEY_UNAVAILABLE, 3
+    except run_export_projection.RunExportProjectionError:
+        return None, runs_privacy.VIEW_UNAVAILABLE, 4
     return (
         {
             "schema": RUNS_LIST_SCHEMA,
-            "runs": [_run_summary_payload(path, meta) for path, meta in runs[:limit]],
+            "runs": summaries,
             "skipped_invalid": skipped,
         },
         None,
@@ -2205,8 +2155,8 @@ def runs_list_contract(
     )
 
 
-def run_detail_contract(run_dir: Path) -> tuple[dict[str, object] | None, str | None, int]:
-    """Return the brigade.run-detail.v1 payload used by ``runs show --json``."""
+def run_detail_contract(run_dir: Path, *, show_task: bool = False) -> tuple[dict[str, object] | None, str | None, int]:
+    """Return the brigade.run-detail.v2 payload used by ``runs show --json``."""
     run_dir = run_dir.expanduser()
     if not run_dir.is_dir():
         return None, f"error: run directory not found: {run_dir}", 2
@@ -2221,7 +2171,12 @@ def run_detail_contract(run_dir: Path) -> tuple[dict[str, object] | None, str | 
         synthesis = _read_json(run_dir / "synthesis.json")
     except ValueError as exc:
         return None, f"error: {exc}", 2
-    payload = _run_detail_payload(run_dir, run_meta, roster, plan, worker_results, synthesis)
+    try:
+        payload = _run_detail_payload(run_dir, run_meta, roster, plan, worker_results, synthesis, show_task=show_task)
+    except runs_privacy.DigestKeyUnavailable:
+        return None, runs_privacy.DIGEST_KEY_UNAVAILABLE, 3
+    except run_export_projection.RunExportProjectionError:
+        return None, runs_privacy.VIEW_UNAVAILABLE, 4
     rc = _watch_return_code(run_meta.get("status")) if _is_terminal(run_meta) else 0
     return payload, None, rc
 
@@ -2232,13 +2187,22 @@ def iter_watch_records(
     interval: float = 1.0,
     should_stop: Callable[[], bool] | None = None,
 ) -> Iterator[dict[str, object]]:
-    """Yield brigade.run-watch.v1 records using the same emitters as ``watch --json``."""
+    """Yield brigade.run-watch.v2 records using the same emitters as ``watch --json``.
+
+    Every record is projected through ``runs_privacy`` because this stream feeds
+    the loopback Run View ``/api/runs/<id>/events`` endpoint.
+    """
     if interval < 0:
         return
     records: list[dict[str, object]] = []
+    try:
+        project = runs_privacy.watch_record_projector(run_dir)
+    except runs_privacy.DigestKeyUnavailable:
+        yield runs_privacy.error_record("digest-key-unavailable")
+        return
 
     def _sink(record: dict[str, object]) -> None:
-        records.append(record)
+        records.append(project(record))
 
     with _watch_record_sink(_sink):
         _emit_watch_json({"type": "watch", "run_id": _watch_run_id(run_dir)})
@@ -2274,9 +2238,16 @@ def iter_watch_records(
                 time.sleep(interval)
 
 
-def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_output: bool = False) -> int:
+def list_runs(
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    limit: int = 10,
+    json_output: bool = False,
+    show_task: bool = False,
+) -> int:
     if json_output:
-        payload, diagnostic, rc = runs_list_contract(cwd=cwd, runs_dir=runs_dir, limit=limit)
+        payload, diagnostic, rc = runs_list_contract(cwd=cwd, runs_dir=runs_dir, limit=limit, show_task=show_task)
         if payload is None or rc != 0:
             if diagnostic:
                 print(diagnostic, file=sys.stderr)
@@ -2820,7 +2791,7 @@ def _resume_durable_child(run_dir: Path, meta: Mapping[str, Any]) -> int:
         return 2
 
 
-def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = False) -> int:
+def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = False, show_task: bool = False) -> int:
     cwd = cwd.expanduser().resolve()
     if not cwd.is_dir():
         print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
@@ -2836,7 +2807,7 @@ def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = 
     if not runs:
         print(f"error: no runs found in {root}", file=sys.stderr)
         return 1
-    return show(runs[0][0], json_output=json_output)
+    return show(runs[0][0], json_output=json_output, show_task=show_task)
 
 
 def _resume_available(run_dir: Path) -> bool:
@@ -3091,6 +3062,8 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
 
     # Terminal runs keep the legacy behavior: tolerate foreign locks and only
     # clear a matching stale lock when the failure phase is stale-lock-recovery.
+    if parseable and run_meta is not None and runs_status.refuse_recovery(run_meta):
+        return 2
     if parseable and run_meta is not None and _is_terminal(run_meta):
         return _recover_terminal(run_dir, run_meta, cwd)
 
@@ -3470,14 +3443,14 @@ def audit(
     return 1
 
 
-def show(run_dir: Path, *, json_output: bool = False) -> int:
+def show(run_dir: Path, *, json_output: bool = False, show_task: bool = False) -> int:
     run_dir = run_dir.expanduser()
     if json_output:
-        payload, diagnostic, rc = run_detail_contract(run_dir)
+        payload, diagnostic, rc = run_detail_contract(run_dir, show_task=show_task)
         if payload is None:
             if diagnostic:
                 print(diagnostic, file=sys.stderr)
-            return 2
+            return rc
         print(json.dumps(payload, indent=2, sort_keys=True))
         return rc
 

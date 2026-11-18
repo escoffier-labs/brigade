@@ -2,7 +2,7 @@
 
 Operator question answered here: what verification ran recently, did it pass, and what command was it?
 
-Renders Brigade orchestration runs from the versioned ``brigade.runs-list.v1``
+Renders Brigade orchestration runs from the versioned ``brigade.runs-list.v2``
 CLI contract (issue #631) alongside the existing verify-run receipts. Data
 access stays CLI-owned; this module never reads run artifacts directly.
 """
@@ -20,7 +20,8 @@ NAME = "runs"
 TITLE = "Runs"
 ORDER = 5
 
-RUNS_LIST_SCHEMA = "brigade.runs-list.v1"
+RUNS_LIST_SCHEMA = "brigade.runs-list.v2"
+_LEGACY_RUNS_LIST_SCHEMAS = frozenset({"brigade.runs-list.v1"})
 
 _RUNS_FETCH_LIMIT = 500
 _BRIGADE_RUNS_LIMIT = 50
@@ -129,6 +130,20 @@ def _summary_strip(brigade_payload: dict, verify_payload: dict) -> str:
     return f'<div class="mo-summary">{html.esc(summary)}</div>'
 
 
+def _privacy_text(value: object) -> str:
+    """Render a closed ``{digest, chars}`` object without exposing the raw mapping."""
+    if isinstance(value, dict):
+        digest = value.get("digest")
+        if isinstance(digest, str):
+            hex_part = digest.split(":", 1)[-1][:12]
+            chars = value.get("chars")
+            suffix = f" ({chars} chars)" if isinstance(chars, int) else ""
+            return f"digest {hex_part}{suffix}"
+    if value is None:
+        return "-"
+    return str(value)
+
+
 def _run_id_details(run_id: object) -> str:
     rendered = html.esc(str(run_id))
     return f"<details><summary>Run ID</summary><code>{rendered}</code></details>"
@@ -164,7 +179,7 @@ def _render_brigade_panel(payload: dict) -> str:
             continue
         rows.append(
             [
-                f"{_chip(run.get('status'))} {html.esc(_value(run, 'task'))}",
+                f"{_chip(run.get('status'))} {html.esc(_privacy_text(run.get('task')))}",
                 html.esc(_relative_time(run.get("started_at"))),
                 html.esc(_value(run, "duration_seconds")),
                 html.esc(_value(run, "failure_phase")),
@@ -192,7 +207,7 @@ def _render_brigade_panel(payload: dict) -> str:
     skipped = payload.get("skipped_invalid")
     if isinstance(skipped, int) and skipped > 0:
         notes.append(f"<p>{html.esc(f'Skipped {skipped} invalid run directories.')}</p>")
-    if payload.get("schema") != RUNS_LIST_SCHEMA:
+    if payload.get("schema") not in {RUNS_LIST_SCHEMA, *_LEGACY_RUNS_LIST_SCHEMAS}:
         notes.append(f"<p>{html.esc('Warning: unexpected runs list schema from CLI.')}</p>")
     body = '<div class="mo-scroll">' + table + "</div>" + "".join(notes)
     return html.panel(html.esc(title), body)

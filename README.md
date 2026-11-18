@@ -1,122 +1,184 @@
 <p align="center">
-  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade Stack by Escoffier Labs" width="640">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/brigade-wordmark-dark.svg">
+    <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/brigade-wordmark.svg" alt="BrigadeStack by Escoffier Labs" width="640">
+  </picture>
+</p>
+
+<h1 align="center">Run agents anywhere. Same memory everywhere.</h1>
+
+<p align="center">
+  <a href="https://brigadestack.com">Website</a> ·
+  <a href="https://brigadestack.com/docs">Docs</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/QUICKSTART.md">Quickstart</a> ·
+  <a href="https://brigadestack.com/compare">Compare</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
-  <strong>Coordinate your agents. Keep the tools you use.</strong>
-</p>
-
-Brigade Stack is an open-source coordination layer for AI coding agents. It sits beside Codex, Claude Code, Cursor, OpenCode, T3 Code, and the rest, and gives them shared tasks, shared memory, and verification records any agent can check.
-
-<p align="center">
-  <a href="https://brigade.tools">Website</a> ·
-  <a href="https://brigade.tools/docs">Docs</a> ·
-  <a href="QUICKSTART.md">Quickstart</a> ·
-  <a href="docs/comparison.md">Compare</a> ·
-  <a href="CHANGELOG.md">Changelog</a>
-</p>
-
-<p align="center">
-  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?workflow=ci.yml&branch=main&label=ci&size=xs" alt="CI status">
-  <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
+  <a href="https://github.com/escoffier-labs/brigade/actions/workflows/ci.yml?query=event%3Amerge_group"><img src="https://github.com/escoffier-labs/brigade/actions/workflows/ci.yml/badge.svg?event=merge_group" alt="CI status of the merge queue"></a>
+  <a href="https://pypi.org/project/brigadestack/"><img src="https://shieldcn.dev/pypi/v/brigadestack.svg?label=pypi&size=xs" alt="PyPI version of brigadestack"></a>
   <img src="https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json.svg?size=xs" alt="Combined PyPI and npm downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.11+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.11+">
   <img src="https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code graph engine">
   <img src="https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: evidence log engine">
-  <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/LICENSE"><img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license"></a>
 </p>
 
-**Stable:** v0.31.0 is on PyPI as `brigade-cli`, on npm as `@escoffier-labs/brigade`, and through the `brigadestack` bridge. **Beta:** main is the 0.32 preview line. [Channels](docs/update-channels.md)
+BrigadeStack gives the agent tools you already use one shared memory and one set of MCP servers and skills. It keeps a record of the work they check.
 
-## Why Brigade Stack
+Install with pipx (Python 3.11 or newer) or npm (Node.js `^22.15.0 || >=23.11.0`). The command is `brigadestack`. The `brigade-cli` and `@escoffier-labs/brigade` packages install the same CLI as `brigade`, so existing users keep their command.
 
-You run several agents at once. Sol in Codex takes one task, Opus manages another, and Argon takes a third here and there, whether they share one window in a multi-harness tool like T3 Code or each run in its own app. Your Grok Bot runs the rest of your life, and your Dots spin up work of their own. Every agent starts from its own conversation. None of them knows who owns which task, what the others already tried, or whether a fix was actually checked.
+```bash
+pipx install brigadestack
+npm install -g brigadestack
+```
 
-Brigade Stack holds that state outside any one tool. Agents read the same brief, claim the same tasks, and leave handoffs and evidence the next agent can inspect.
+Sections marked <sup>*</sup> describe the 0.32.0 beta. It is published as daily pre-release builds of `brigade-cli`, which install the `brigade` command: `pipx install --pip-args='--pre' brigade-cli`. Stable is 0.31.0.
 
-- **Keep your tools.** Works alongside the agents you already use. Start with one tool in one repository and add more when you need them.
-- **Work agents can pick up.** Tasks, dependencies, claims, and handoffs make the next action discoverable without replaying a conversation.
-- **Checkable results.** Verification records keep the command, exit code, logs, and Git state, so another agent can confirm "tests pass" for itself.
-- **You set the limits.** Model access, scopes, budgets, and approval gates apply to Brigade-managed work, and you can inspect or stop it.
+## Shared memory, shared tools
 
-## How it works
+Claude Code, Codex and Cursor each keep their own notes and MCP config, so what one agent learns on Monday is gone when another starts on Tuesday.
 
-1. **Start with context.** Agents begin from a work brief: relevant memory, open tasks, and existing evidence.
-2. **Claim the work.** Ownership is explicit, and conflicting or dependent work is visible.
-3. **Run within your rules.** Managed execution uses your configured models, scopes, budgets, and approvals.
-4. **Verify the result.** Checks run through Brigade and leave a record another agent can inspect.
-5. **Hand off.** The result, remaining blockers, and evidence stay where the next agent will find them.
+BrigadeStack keeps memory as markdown cards in your repository. An agent that learns something durable writes a handoff. A reviewer files it as a card. Commit the card, and any checkout finds it with `brigadestack memory search`.
 
-A local setup needs no server. Fleet Hub adds shared ownership, presence, messaging, and model policy across machines when you want it. See the [execution model](docs/execution-model.md).
+Claude Code also gets recall at session start. Codex gets memory through its handoff inbox and an agent-run `memory search`.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-memory.svg" alt="Claude Code, Codex, Cursor, OpenCode, ChatGPT dots and Claude Duet connect to BrigadeStack shared memory, and share memory, check records, MCP servers and skills through it." width="720">
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-handoff-flow.svg" alt="Three steps: one session drafts a handoff, a reviewer files it as the card payments-retry-policy.md, and brigade memory search in a second checkout finds that card." width="720">
+</p>
+
+<details>
+<summary>The commands behind that picture</summary>
+
+This is real output, with the home directory shortened to `~`.
+
+```console
+$ cd ~/api
+$ brigadestack handoff draft --type decision \
+    --title "Payments client retry policy" \
+    --summary "Retries stop after 3 attempts with jittered backoff." \
+    --fact "Backoff starts at 200 ms and doubles." \
+    --fact "A 4xx response is never retried." \
+    --action create-card --target-card payments-retry-policy.md \
+    --content-file card.md
+handoff draft: ~/api/.codex/memory-handoffs/20261118-014553-payments-client-retry-policy.md
+id: 20261118-014553-payments-client-retry-policy
+inbox: .codex/memory-handoffs
+action: create-card
+target_card: payments-retry-policy.md
+lint: ok
+$ cp card.md memory/cards/payments-retry-policy.md
+$ git add memory && git commit -qm "memory: payments retry policy"
+$ git worktree add -q ../api-2 -b second && cd ../api-2
+$ brigadestack memory search "retry backoff"
+memory search: retry backoff (1 match(es))
+- memory/cards/payments-retry-policy.md  [0.74]  payments-retry-policy
+```
+
+</details>
+
+### One list of MCP servers and skills
+
+MCP servers and skills follow the same rule as memory. List a server once in `.brigade/mcp.json`, and `brigadestack mcp sync` writes it into each set-up tool's config, through adapters for Claude Code, Codex, Cursor, OpenCode and Grok. Antigravity needs `--user-scope`, and VS Code is included when the repository has a `.vscode` folder. It previews until `--write` and keeps Codex and OpenCode native auth<sup>*</sup>. `brigadestack skills sync --target all` previews the same way for skills.
+
+<sup>*</sup> In the 0.32.0 beta, sync also keeps Claude Code's own auth helper and refuses to remove or re-point an entry that has one.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-tools.svg" alt="The MCP catalog .brigade/mcp.json and the skill registry are each kept once, then written to the config and skills folder of Claude Code, Codex, Cursor and OpenCode." width="720">
+</p>
+
+## Then prove it
+
+"Tests pass" is a claim. `brigadestack work verify run` turns it into a record. It runs the command and keeps the command, the exit code, the logs and a fingerprint of the tree that was tested. Another agent can open it and see what ran against which code.
+
+Records live under `.brigade/work/verify-runs/`, one folder per run. A failing command leaves a failed record too.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-check-record.svg" alt="A check record: the command python -m pytest -q, exit code 0, the two log files, and the fingerprint of the tree that was tested." width="720">
+</p>
+
+### Know what a change touches
+
+The code graph is a local index of your repository's symbols and the calls between them. `brigadestack setup` installs the optional engine, and `brigadestack code sync` builds the index. `brigadestack code callers <symbol>` shows who calls a function, `impact` adds callees, and `affected <files>` lists the tests that reach changed files. Below is a real answer for one function here.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-code-graph.svg" alt="Code graph for the function normalized_url in src/brigade/mcp_native_auth.py, lines 201 to 208. Its direct callers are merge_imported_native_auth and two tests. merge_imported_native_auth is called by import_servers and two more tests. In total 6 functions in 3 files call it, 4 of them tests." width="720">
+</p>
+
+## Modes<sup>*</sup>
+
+`strict` is the default. Checks run through `brigadestack work verify run`, and Claude Code's stop hook asks for a record before a session finishes. `observe` records checks and blocks nothing. `off` drops the check rules and keeps memory and briefs. Safety rails (secret scanning and pre-push checks) are a separate setting, on by default in every mode.
+
+<sup>*</sup> `observe` and the names `strict` and `off` are in the 0.32.0 beta, as the capture shows. Version 0.31.0 calls them `engineer` and `yolo` and has no `observe`. The beta still accepts the old names.
+
+```console
+$ brigade work mode show
+work mode: strict; safety rails: on (~/api)
+$ brigade work mode set observe
+work mode: observe; safety rails: on (~/api)
+$ brigade work mode set off
+work mode: off; safety rails: on (~/api)
+```
 
 ## Quick start
 
-Install the stable bridge with npm (Node.js `^22.15.0 || >=23.11.0`):
+Wire a repository, write a first handoff, and run a first check. Add `--dry-run` to the first command to preview it.
 
 ```bash
-npm install --global brigadestack@0.31.0
-brigadestack --version
+brigadestack operator quickstart --target . --harnesses codex,claude
+brigadestack handoff draft --type setup --title "Test command" \
+  --summary "Run pytest -q from the repo root before every push." \
+  --action no-card --target-document TOOLS.md \
+  --content "Run pytest -q from the repo root."
+brigadestack work verify run --command "git diff --check"
 ```
 
-In a Git repository you control, preview the setup, apply it, and read the brief:
-
-```bash
-brigadestack operator quickstart --target . --harnesses codex --dry-run
-brigadestack operator quickstart --target . --harnesses codex
-brigadestack work brief --target .
-```
-
-Replace `codex` with the harnesses you use, such as `codex,claude`. Record a first check:
-
-```bash
-brigadestack work verify run --target . --command "git diff --check" --capture brigade-work
-```
-
-This checks whitespace in your unstaged diff and records the command, exit code, and logs. Use your project's test command for subsequent checks. The [first 10 minutes](docs/first-10-minutes.md) walks through health checks and receipt inspection.
-
-The npm bridge exposes `brigadestack` and downloads a managed Python on first launch. Git is required for this walkthrough. For Python installs, platform limits, optional engine setup, and existing `brigade` installs, see [Quickstart](QUICKSTART.md#1-install). Existing commands, Python imports, and `.brigade/` data remain compatible.
-
-Generated agent instructions and CLI suggestions still use `brigade`. On a bridge-only install, run those commands as `brigadestack` and tell your agents to do the same. Existing `brigade` installs need no change.
+The first command writes `.brigade/`, a handoff inbox for each tool you name, and the MCP config. The second drafts a handoff, and lint refuses what the ingester would reject. The third records the command, exit code and logs. Keep `.brigade/` state out of commits unless you mean to share it. See the [first 10 minutes](https://github.com/escoffier-labs/brigade/blob/main/docs/first-10-minutes.md).
 
 ## Works with
 
-| Tool | Connection |
+| Tool | What you get |
 | --- | --- |
-| **Codex, Claude Code, Cursor, OpenCode** | Workspace instructions, handoff inboxes, and tool and skill configuration. Hooks vary by tool. |
-| **T3 Code** | Remote execution and session visibility. Full child-task governance is in progress. |
-| **OpenClaw, Hermes** | Memory-owner workflows, writer handoffs, and memory care. |
-| **Dot** | Memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
-| **Duet** | Memory, skills, Hub messaging, and read-only fleet views. |
+| Claude Code, Codex, Cursor, OpenCode | Workspace instructions, handoff inboxes, and MCP and skill config. |
+| ChatGPT Dot | Memory, skills, Hub messages and T3 fleet dispatch, through a connector you host. |
+| Claude Duet | Memory, skills, Hub messages and read-only fleet views, through a connector you host. |
+| T3 Code | Session presence only. |
 
-Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), [Duet guide](docs/duet-connector.md), and [generic connector guide](docs/duet-connector.md#generic-cloud-agent-profile).
+Setup guides: [Dot](https://github.com/escoffier-labs/brigade/blob/main/docs/grokbot-dot.md) and [Duet](https://github.com/escoffier-labs/brigade/blob/main/docs/duet-connector.md).
+
+## Across machines
+
+Agents on several machines share memory through a hub service you run on a network you control. A card pushed from a laptop turns up in a search on a desktop. Task ownership, messages and model policy live in the same place. The [fleet docs](https://github.com/escoffier-labs/brigade/blob/main/docs/fleet-sync.md) cover setup.
+
+## Limits
+
+A check record shows what ran. It does not show that the tests are good. A handoff is a draft until someone files it as a card. The packaged hub and the Dot listener are Linux only. Dot and Duet are not woken instantly: each checks for work when a session or scheduled run starts.
 
 ## MCP servers
 
-A memory server with bounded recall, work briefs, and handoff drafting, plus a read-only skills server:
-
-```bash
-brigadestack memory serve-mcp --stdio
-brigadestack skills serve-mcp --stdio
-```
-
-`write_handoff` drafts a handoff and never edits a canonical card. [Transport details](docs/technical-guide.md#streamable-http-for-the-mcp-servers)
+- `brigadestack memory serve-mcp --stdio` serves memory cards, the work brief and `write_handoff`, which drafts a handoff and never edits a card.
+- `brigadestack skills serve-mcp --stdio` serves the reviewed skill registry, read-only: search, read and lint skills.
 
 <!-- MCP Registry ownership markers; keep each on its own line. -->
 <!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
 <!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
 
-## New in 0.31
+<p align="center">
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/docs/command-inventory.md">Commands</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/docs/execution-model.md">Execution model</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/issues">Issues</a> ·
+  <a href="https://github.com/escoffier-labs/brigade/blob/main/LICENSE">MIT license</a>
+</p>
 
-- **Parallel workers.** Dispatch ready tasks into separate worktrees, supervise them, and keep results for review.
-- **Memory reflection.** Evidence-backed consolidation proposals for review. Automatic apply is off by default. A hub policy can turn it on, behind further gates, for two low-risk operations: appending evidence and merging exact duplicates.
-- **Run patrol.** Detects local lane states and offers explicit repair actions.
-- **In progress:** [fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121), [governed T3 delegation](https://github.com/escoffier-labs/brigade/issues/2046), [cross-repository campaigns](https://github.com/escoffier-labs/brigade/issues/1128).
+Questions and ideas: [Discussions](https://github.com/escoffier-labs/brigade/discussions).
 
-## Reference
-
-[Commands](docs/command-inventory.md) · [Execution model](docs/execution-model.md) · [Comparisons](docs/comparison.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/escoffier-labs/brigade/issues) · [MIT license](LICENSE)
-
-The Python CLI may send a passive version request. [Telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
+The Python CLI may send a passive version request. [Telemetry](https://github.com/escoffier-labs/brigade/blob/main/docs/telemetry.md) lists its fields and opt-outs.
 
 <details>
 <summary>About the downloads badge</summary>
@@ -124,5 +186,3 @@ The Python CLI may send a passive version request. [Telemetry](docs/telemetry.md
 The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
 
 </details>
-
-Brigade Stack by Escoffier Labs. Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigadestack`](https://pypi.org/project/brigadestack/), npm [`brigadestack`](https://www.npmjs.com/package/brigadestack), command `brigadestack`. The `brigade-cli` and `@escoffier-labs/brigade` packages and `brigade` command remain supported.

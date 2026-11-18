@@ -51,6 +51,12 @@ pub(super) fn read<T: ReadTx + ?Sized>(
         let mut response = proposals::reply(&body, 200);
         proposals::redact_auto_reply(tx, who, &body, &mut response.body)?;
         super::manifest_binding::reveal(tx, who, &body, &mut response.body)?;
+        // redact_auto_reply withholds diffs from callers without review on every
+        // target. Candidate text has the same authority boundary as that diff.
+        if !response.body["diff"].is_null() {
+            response.body["retrieval_eval_targets"] =
+                super::retrieval_eval::live_targets(&body, true);
+        }
         response.body["log_epoch"] = json!(epoch);
         return Ok(response);
     }

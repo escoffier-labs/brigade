@@ -156,6 +156,38 @@ def _register_hub_commands(commands: argparse._SubParsersAction, fleet_sub: argp
     show.add_argument("campaign_key", help="Campaign key.")
     show.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     show.set_defaults(func=_show)
+    complete = commands.add_parser(
+        "complete",
+        help="Complete a campaign, or one member, by explicit operator action.",
+        description=(
+            "Complete one campaign member, or the campaign item itself, through the Hub's operator-only "
+            "completion route. A campaign completes only when every member is terminal."
+        ),
+    )
+    complete.add_argument("campaign_key", help="Campaign key.")
+    complete.add_argument(
+        "--repo", default=None, help="Canonical member repository identity; omit to complete the campaign item."
+    )
+    complete.add_argument(
+        "--evidence", action="append", default=None, metavar="REF", help="Bounded evidence reference; repeatable."
+    )
+    complete.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    complete.set_defaults(func=_complete)
+    consume = commands.add_parser(
+        "consume",
+        help="Take the next eligible member on this node and work it through work dispatch.",
+        description=(
+            "Take one eligible member of a campaign through its generation-fenced ownership, run a local task for "
+            "that repository through work dispatch apply, then record the attempt and checkpoint the run. "
+            "A successful run never completes the member. --watch repeats until no member is eligible."
+        ),
+    )
+    consume.add_argument("campaign_key", help="Campaign key.")
+    consume.add_argument("--target", type=Path, default=Path.cwd(), help="Workspace containing .brigade/repos.toml.")
+    consume.add_argument("--worker", required=True, help="Roster seat that works each member.")
+    consume.add_argument("--watch", action="store_true", help="Repeat until no member is eligible.")
+    consume.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    consume.set_defaults(func=_consume)
     listing = fleet_sub.add_parser("campaigns", help="List campaigns on the Hub with rollup counts.")
     listing.add_argument("--limit", type=int, default=None, help="Campaigns to show (1-50, default 20).")
     listing.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
@@ -310,6 +342,7 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
                 "existing": [],
                 "spec_changed": False,
                 "offer_changed": False,
+                "status": None,
             }
         return {"checked": False, "error": _text(exc), **({"code": exc.code} if exc.code else {})}
     except worklore_client.FleetClientError as exc:
@@ -335,7 +368,15 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
         "existing": sorted(str(m.get("repo")) for m in members if isinstance(m, dict)),
         "spec_changed": stored.get("spec_fingerprint") != wanted,
         "offer_changed": offer_changed,
+        "status": stored.get("status"),
     }
+
+
+def _campaign_closed(hub: dict[str, Any]) -> bool:
+    """True when the Hub read found a terminal campaign, which refuses any re-create."""
+    from ..worklore_campaigns import TERMINAL_BUCKETS
+
+    return hub.get("status") in TERMINAL_BUCKETS
 
 
 def _create_acknowledged(result: object, body: dict[str, Any]) -> bool:
@@ -381,6 +422,8 @@ def _create(args: argparse.Namespace) -> int:
         if not hub.get("checked"):
             print(f"hub not checked: {_text(hub.get('error') or hub.get('reason'))}")
         else:
+            if _campaign_closed(hub):
+                print(f"warning: campaign is {_text(hub.get('status'))}; create would be refused (campaign-closed)")
             if hub.get("spec_changed"):
                 print("warning: spec differs from the stored campaign; create would be refused (campaign-spec-changed)")
             if hub.get("offer_changed"):
@@ -507,3 +550,119 @@ def _show(args: argparse.Namespace) -> int:
             f"  {'drifted' if member.get('drifted') else 'in-spec'}"
         )
     return 0
+
+
+def _complete(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+    from ..worklore_campaigns import canonical_identity
+
+    try:
+        repo = None
+        if args.repo is not None:
+            repo = canonical_identity(args.repo)
+            if repo is None:
+                return _refuse(args, "repository_identity_unresolved")
+        shown = worklore_client.get_campaign(args.campaign_key)
+    except worklore_client.FleetClientError as exc:
+        return _hub_failure(args, exc)
+    stored = _dict(shown.get("campaign"))
+    if repo is None:
+        work_id, expected_version, what, label = (
+            stored.get("work_id"),
+            stored.get("version"),
+            "campaign",
+            _text(stored.get("campaign_key") or args.campaign_key),
+        )
+    else:
+        member = next(
+            (m for m in (_dict(raw) for raw in _list_of(shown.get("members"))) if m.get("repo") == repo),
+            None,
+        )
+        if member is None:
+            return _refuse(args, "campaign-member-not-found")
+        work_id, expected_version, what, label = member.get("work_id"), member.get("version"), "member", repo
+    if not isinstance(work_id, str) or not isinstance(expected_version, int) or isinstance(expected_version, bool):
+        return _refuse(args, "unexpected-hub-response")
+    try:
+        payload = worklore_client.complete_item(
+            work_id,
+            evidence_refs=tuple(args.evidence or ()),
+            if_match=expected_version,
+        )
+    except worklore_client.FleetClientError as exc:
+        return _hub_failure(args, exc)
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2))
+        return 0
+    item = _dict(payload.get("item"))
+    print(
+        f"completed {what} {label}: {_text(item.get('work_id') or work_id)}"
+        f" status {_text(item.get('status'))}, version {_count(item.get('version'))}"
+    )
+    return 0
+
+
+def _local_repos(target: Path) -> dict[str, Path]:
+    """Canonical identity to checkout for every repos.toml entry this node can resolve."""
+    entries, errors, loaded = _select_sweep_entries(target, repo_ids=None)
+    if not loaded or errors:
+        raise campaign.PreviewError("repository_selection_refused")
+    repos: dict[str, Path] = {}
+    for entry in entries:
+        try:
+            repos.setdefault(_identity(entry), entry.path)
+        except campaign.PreviewError:
+            continue
+    return repos
+
+
+def _consume(args: argparse.Namespace) -> int:
+    from functools import partial
+
+    from .. import fleet_client, worklore_client
+    from .. import fleet_campaign_consume as consumer
+
+    target = args.target.expanduser().resolve()
+    try:
+        key = campaign.opaque_key(args.campaign_key)
+        repos = _local_repos(target)
+    except campaign.PreviewError as exc:
+        return _refuse(args, str(exc))
+    except (OSError, ValueError, TypeError, IndexError, RecursionError, RuntimeError):
+        return _refuse(args, "input_refused")
+    if not repos:
+        return _refuse(args, "no_local_repositories")
+    try:
+        passes = consumer.consume(
+            worklore_client,
+            watch=args.watch,
+            campaign_key=key,
+            node_id=fleet_client.resolve_node_id(target),
+            repos=repos,
+            launcher=partial(consumer.launch_local, worker=args.worker),
+            emit=consumer.receipt_writer(target, key),
+            holds=consumer.Holds(consumer.holds_path(target, key)),
+        )
+    except worklore_client.FleetClientError as exc:
+        return _hub_failure(args, exc)
+    except consumer.HoldsUnreadable:
+        return _refuse(args, "campaign_holds_unreadable")
+    rows = [
+        {
+            "outcome": p.outcome,
+            "repo": p.repo,
+            "work_id": p.work_id,
+            "generation": p.generation,
+            "run_id": p.run_id,
+            "detail": p.detail,
+        }
+        for p in passes
+    ]
+    code = 1 if any(p.outcome in consumer.FAILING for p in passes) else 0
+    if args.json:
+        print(json.dumps({"passes": rows}, sort_keys=True, indent=2))
+        return code
+    for row in rows:
+        line = f"{_text(row['outcome'])}  {_text(row['repo'])}  generation {_text(row['generation'])}  run {_text(row['run_id'])}"
+        print(f"{line}  {_text(row['detail'])}" if row["detail"] else line)
+    return code

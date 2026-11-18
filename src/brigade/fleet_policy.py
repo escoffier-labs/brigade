@@ -46,6 +46,8 @@ MAX_TIMEOUT_SECONDS = 86400
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,255}$")
+# A T3 environment id: letters, digits and hyphens only.
+T3_ENVIRONMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,127}$")
 
 PRIVACY_VALUES = ("public", "private", "unknown")
 COST_CLASS_VALUES = ("paid", "subscription", "free", "unknown")
@@ -120,6 +122,17 @@ def reject_json_tree(value: Any, where: str = "document") -> None:
             raise FleetPolicyError(f"fleet policy {where} must be a finite number")
         return
     raise FleetPolicyError(f"fleet policy {where} is not a JSON value")
+
+
+def normalize_repository_key(identity: str) -> str:
+    """The comparison form of a repository identity: casefolded, one trailing ``.git`` removed.
+
+    Placement and the node project inventory key repositories the same way
+    (``fleet_node_projects.normalize_repo_key``, which adds a shape check), so a policy
+    entry and an inventory row for one repository always meet on one key.
+    """
+    key = identity.casefold()
+    return key[: -len(".git")] if key.endswith(".git") else key
 
 
 def parse_json_object(raw: bytes | str, *, limit: int = MAX_DOCUMENT_BYTES) -> dict[str, Any]:
@@ -217,6 +230,14 @@ def _identity(raw: Any, where: str) -> str:
     assert value is not None
     if not IDENTITY_PATTERN.match(value):
         raise FleetPolicyError(f"fleet policy {where} must match {IDENTITY_PATTERN.pattern}")
+    return value
+
+
+def _t3_environment_id(raw: Any, where: str) -> str:
+    value = _text(raw, where, optional=False)
+    assert value is not None
+    if not T3_ENVIRONMENT_ID_PATTERN.match(value):
+        raise FleetPolicyError(f"fleet policy {where} must match {T3_ENVIRONMENT_ID_PATTERN.pattern}")
     return value
 
 
@@ -449,11 +470,12 @@ def _parse_machine(name: str, raw: Any) -> dict[str, Any]:
             "fallback",
             "allowed_overrides",
             "node_id",
+            "t3_environment_id",
             "notes",
         ),
         where,
     )
-    return {
+    parsed = {
         "os": _enum(body.get("os"), f"{where} field 'os'", OS_VALUES, default="unknown"),
         "capabilities": _name_list(body.get("capabilities"), f"{where} field 'capabilities'"),
         "preferred_workloads": _name_list(body.get("preferred_workloads"), f"{where} field 'preferred_workloads'"),
@@ -472,6 +494,12 @@ def _parse_machine(name: str, raw: Any) -> dict[str, Any]:
         "node_id": None if body.get("node_id") is None else _identity(body.get("node_id"), f"{where} field 'node_id'"),
         "notes": _text(body.get("notes"), f"{where} field 'notes'"),
     }
+    # Present only when bound, so existing documents keep their digests.
+    if body.get("t3_environment_id") is not None:
+        parsed["t3_environment_id"] = _t3_environment_id(
+            body.get("t3_environment_id"), f"{where} field 't3_environment_id'"
+        )
+    return parsed
 
 
 def _is_opencode_contributor_free(provider: str | None, model: str | None) -> bool:
@@ -799,6 +827,7 @@ def parse_memory(raw: Any) -> dict[str, Any]:
             "curation_owner",
             "evidence_freshness_seconds",
             "retrieval_eval",
+            "rollback_watch_seconds",
         ),
         "memory",
     )
@@ -806,6 +835,11 @@ def parse_memory(raw: Any) -> dict[str, Any]:
         raise FleetPolicyError("fleet policy memory.auto_apply must be a boolean")
     parsed: dict[str, Any] = {"auto_apply": body.get("auto_apply", False)}
     # Do not add defaults to older documents, preserving their canonical digest.
+    if "rollback_watch_seconds" in body:
+        window = body["rollback_watch_seconds"]
+        if type(window) is not int or not 1 <= window <= 604800:
+            raise FleetPolicyError("fleet policy memory.rollback_watch_seconds must be 1 through 604800")
+        parsed["rollback_watch_seconds"] = window
     if "curation_owner" in body:
         owner = body["curation_owner"]
         if owner not in ("hub", "external", "handoff-only"):
@@ -871,6 +905,30 @@ def parse_document(raw: Any) -> dict[str, Any]:
                 f"fleet policy machine node_id {node_id!r} is mapped to both {previous!r} and {machine_name!r}"
             )
         seen_nodes[str(node_id)] = machine_name
+    seen_environments: dict[str, str] = {}
+    for machine_name, machine in parsed_machines.items():
+        environment_id = machine.get("t3_environment_id")
+        if not environment_id:
+            continue
+        # Environment ids compare case-insensitively, so a case variant is a duplicate.
+        previous = seen_environments.get(str(environment_id).casefold())
+        if previous is not None:
+            raise FleetPolicyError(
+                f"fleet policy machine t3_environment_id {environment_id!r} is mapped to both "
+                f"{previous!r} and {machine_name!r}"
+            )
+        seen_environments[str(environment_id).casefold()] = machine_name
+    seen_repositories: dict[str, str] = {}
+    for identity in sorted(repositories):
+        name = _identity(identity, "repository identity")
+        normalized = normalize_repository_key(name)
+        previous = seen_repositories.get(normalized)
+        if previous is not None:
+            # Two records for one repository would let a caller pick the weaker one by spelling it differently.
+            raise FleetPolicyError(
+                f"fleet policy repository identities {previous!r} and {name!r} collide after normalization"
+            )
+        seen_repositories[normalized] = name
     document: dict[str, Any] = {
         "schema": POLICY_SCHEMA,
         "defaults": parse_settings(body.get("defaults") or {}, "defaults"),

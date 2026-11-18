@@ -166,7 +166,7 @@ it:
 |---|---|---|
 | `search` with `query_source: "push"` or `"connector"` and `card` with `push: true` (connector push, Dot and Duet `memory_search` and `memory_card`, S23) | Connector | Excluded. Only a clean scan receipt is eligible |
 | Push prompt-load scan | Connector | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` |
-| Search with `query_source: "prompt"` (local recall in Claude Code and Codex hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
+| Search with `query_source: "prompt"` (local recall in Claude Code hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
 | Grok Bot, Dot and Duet `memory_search` and `memory_card` | Connector | Placeholder with `code: "memory_content_private"` |
 | `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding, including a hub placeholder |
 | Embedder (S15a query, document and probe sends) | Loopback only | Sent only when the pinned address is loopback. Any other endpoint, a private-network one included, refuses with reason `content-private` before any lookup or connection. A stored `private` version embeds only for a loopback endpoint |
@@ -1148,6 +1148,114 @@ future sequence, target drift, excess corpus drift, missing snapshot, epoch,
 format, scorer, policy, embedder, weights, scope or corpus mismatches. Missing
 records retain `retrieval_eval_unbound`.
 
+Real scopes have no report to bind. There the gate admits only Tier 0
+proposals made entirely of `append_evidence` and `anchor_blocks`, and only when
+each target's ranking digest is unchanged by the apply. Search indexes the card
+without its `evidence:` front-matter line and without ` ^c-xxxxxx` anchor
+suffixes, so evidence refs and anchor ids are stored and shown but never
+searchable. Index format `2` and scorer `lineage-source-v4` introduced this.
+The hub rebuilds its index on the next start, and an older retrieval
+evaluation record holds with `retrieval_eval_index_format_mismatch` or
+`retrieval_eval_scorer_mismatch` until a new run is recorded. The local card
+search ranks the same text. Hybrid scopes, mixed op lists, stale base
+revisions and any apply that would flip a card's `automated` value hold with
+`retrieval_eval_projection_changed` or `retrieval_eval_target_drifted`. A trusted card that declares lineage links, or
+that another live card in its scope names, is Tier 2 and stays a pending
+proposal held with `lineage_requires_review` for a reviewer to decide. The scan
+for a naming card looks at the lineage key names, never at the target id,
+because values can spell an id with escapes or implicit concatenation. The
+gate also holds a target that is an end of a trusted edge in the published
+index, with `retrieval_eval_lineage_exposed`, since search answers from that
+graph. A target with `agent-unreviewed` trust holds with
+`retrieval_eval_writer_changed` when the applier is not the head's writer,
+because an apply rewrites the writer and push search shows such a head only to
+its writer. An admitted automatic apply, like any write, removes the card from
+push and connector search until the next index snapshot publishes, because push
+requires the live revision and content hash to match the snapshot and the new
+content to be scanned clean. The reflect client asks for a proposal held for
+lineage review again after seven days.
+
+An exact-duplicate merge cannot keep a ranking digest, because retiring a card
+changes the scope's document count, token total and document frequencies. The
+gate admits a merge instead under bounded drift, and only when every invariant
+below holds at preflight and again inside the apply transaction. The proposal
+must hold `merge_exact_duplicates` ops and nothing else
+(`retrieval_eval_merge_mixed_ops`), in one scope, with each retired card named
+once (`retrieval_eval_merge_shape`). Each retired card then needs:
+
+- To be newer than the keeper (`retrieval_eval_merge_retires_older`). The gate
+  dates each card by when its current claim body first appeared, which is the
+  log sequence of the earliest revision in the unbroken run of live revisions
+  ending at the head that all hold that same claim body. The claim body is the
+  text below the front matter, without anchor suffixes. So a rewrite of
+  aliases, evidence or any other front-matter line keeps a card's date, while a
+  claim edit, a retirement, a revival, or an edit away from the text and back
+  starts a new run dated from that write. A card revived or edited into a copy
+  of another card is therefore as new as that write, and it cannot retire the
+  card it copied. The retired card's date must be strictly later than the
+  keeper's. A card whose history does not date it is held: a head with no live
+  revision row, a missing or unreadable revision text, or a run of more than 256
+  revisions.
+- The same trust class as the keeper (`retrieval_eval_merge_trust_mismatch`)
+  and the same `automated` value after the apply
+  (`retrieval_eval_merge_automated_mismatch`). When trust is
+  `agent-unreviewed`, its writer and class must also be the applier's
+  (`retrieval_eval_writer_changed`), the same rule the keeper meets.
+- No other live card that names its id as a front-matter value, wiki link,
+  markdown link or reference definition (`retrieval_eval_merge_inbound_link`),
+  because a retired card leaves the index and a link to it would dangle. One
+  pass parses every live card in the scope once and tests every retired id in
+  the proposal, in any front-matter key and at any list position, decoding
+  escapes and implicit concatenation the way search does. It ignores a leading
+  `./`, `../` or `/`, angle brackets and a `#fragment`. Names compare the way
+  the broken-link resolver compares them, folded for case with every run of
+  spaces or hyphens read as one space, so `[[Dup-Retired]]` and `[[dup retired]]`
+  both name `dup-retired`. A folder prefix, a scope prefix and a trailing `.md`
+  are ignored in any case.
+- At most eight retired cards per keeper (`retrieval_eval_merge_group_too_large`),
+  so the work for one proposal stays bounded.
+- Title tokens (`retrieval_eval_merge_title_uncovered`) and every search token
+  (`retrieval_eval_merge_tokens_lost`) held by the keeper's after text, counted
+  as a multiset. An untitled card's title is its id, which the alias the merge
+  adds carries.
+- Every punctuation substring literal search can match
+  (`retrieval_eval_merge_literal_lost`). Token counts do not carry those, so
+  each front-matter line of the retired card, except `aliases` and `evidence`,
+  must appear as a line of the keeper's text after the merge, and the retired
+  card's title, tags and summary must appear in the keeper's lowercased
+  indexed text.
+
+The retired card's own text must be unchanged by the proposal, and the keeper's
+`after_hash` must be the hash of its after text. Either forgery holds the merge.
+The keeper may then change only by the `aliases` and `evidence` fields the merge
+writes. The hub recomputes the merge from the live cards, and the keeper's
+ranking projection must match its old one once the `aliases` line is set aside
+(`retrieval_eval_merge_keeper_changed`). A principal applier flips `automated`
+on a keeper that was not automated, and that holds with
+`retrieval_eval_merge_automated_mismatch`. The history veto, the lineage rule
+and the published-index lineage check apply to both cards as before. The
+keeper's `aliases` line names the retired id as a predecessor. Only trusted
+cards form lineage edges, and the keeper of a merge that can apply today is not
+trusted, so no edge appears even when a new card later reuses the retired id.
+
+This bounds what a merge may remove from search. It does not freeze ranking.
+The retired card's matches move to the keeper, whose searchable content is a
+superset of the retired card's. Every other card's score shifts with the
+scope-wide statistics, because retiring a card changes the document count, each
+term's document frequency and the average document length, and the alias line
+lengthens the keeper's document. Near-ties between other cards can reorder, and
+a top-k cutoff can admit a card it excluded before, since the retired card
+frees a slot. Hybrid mode is out of scope. The gate holds any scope that is not
+lexical with `retrieval_eval_projection_changed`. The compensation watch
+reverses an automatic merge with its exact inverse.
+
+Three older gates still hold every merge before this one is the deciding hold.
+The one-card blast cap counts the keeper and the retired card
+(`blast_cap_exceeded`). The evidence floors need attested proof a merge does not
+carry. `card_trust` refuses `agent-unreviewed` cards, and a trusted keeper is
+Tier 2 because the merge adds an alias to a lineage-trusted card. Until a later
+change reconsiders those, a merge opens and waits for a reviewer.
+
 Operator procedure:
 
 1. Explicitly switch automatic apply off before enabling policy:
@@ -1290,7 +1398,9 @@ near its cap, then resume as described below.
 This pass does not invent anchors or evidence. Local reflection still derives
 its existing evidence and review candidates when hub mode is off. S19e-1 adds
 attestation and the gated automatic route. Automatic apply requires a separate call with every gate satisfied.
-Scheduled reflection only proposes.
+Scheduled reflection proposes and can attempt gated Tier 0 application when
+the workspace policy explicitly enables it. New-workspace initialization records
+that intent. Care reinstall preserves a missing policy as off.
 
 #### Near-duplicate pass
 
@@ -1636,8 +1746,27 @@ requirement and refuses to run where those operations are unavailable.
 `--schedule memory-reflect=<value>` uses the selected backend's existing
 schedule syntax. The isolated launcher pins the installed Brigade package,
 passes an absolute workspace target, and invokes `memory reflect run --hub
---scheduled`. It never invokes a decision or apply command. `--hub` refuses
-disabled hub settings rather than switching to local cards.
+--scheduled`. The scheduled run also polls the automatic compensation watch,
+which can reverse the policy actor's own unchanged applies. `--hub` refuses
+disabled hub settings.
+
+Every pass and the compensation watch run in the reflected scopes, which
+default to every configured read scope. The watch and `propose` both need the
+hub's `reflect` right in each of them. When the workspace credential reads more
+scopes than it may reflect, list only the reflectable ones:
+
+```toml
+[reflect]
+scopes = ["repo:owner/name"]
+```
+
+Unlisted read scopes are still read, but no candidate is proposed and no
+watch is polled there. Each entry
+must be a distinct configured read scope, or the run fails with
+`hub_reflect_config` before any hub call. A missing grant in a listed scope
+still fails the run, so a revoked right cannot silently stop the watch over
+applies it already made. `--scope` must name a listed scope. The report lists
+the scopes in `reflected_scopes`.
 
 A failure means a non-dry reflect run exits non-zero. For runs that can safely write
 workspace state, `.brigade/memory/reflect/schedule.json` records consecutive
@@ -1746,11 +1875,12 @@ Without `--scope`, partial `reflect` grants across configured `read_scopes` will
 after repeated authorization failures.
 
 `brigade memory reflect rollback <proposal-id> --target <workspace>` requests
-the hub's compensating proposal. This separate operator action requires `read`
-plus `review` on every original target scope. It sends the observed log epoch
-and never restores card text directly. The compensation waits for another
-explicit decision, with the same hub scope, self-review, revision and pin
-checks as S19a.
+the hub's compensating proposal and sends the observed log epoch. An exact
+policy-actor reversal requires `read` plus `reflect` on every original target
+scope and applies automatically at the hub. Other compensations require `read`
+plus `review` and wait for another explicit decision, with the existing scope,
+self-review, revision and pin checks. The client does not restore card text
+locally.
 
 
 ## Hub proposal resource limits
@@ -2207,7 +2337,7 @@ mode = "read"
 read_scopes = ["repo:example"]
 
 [verify]
-enabled = false
+enabled = true
 propose_seat = "verify-propose"
 confirm_seat = "verify-confirm"
 cards_per_run = 12        # 1 to 64
@@ -2435,7 +2565,7 @@ A seat is refused before any prompt is written when:
 | `verify_seat_unconfigured` | `[verify]` is missing either seat |
 | `verify_seat_unknown` | The seat is not in the local roster. Seats the hub synthesizes for other fleet nodes are never used in v1 |
 | `verify_seat_connector` | The seat's audience is `connector`: a `codex-cloud:` seat, a hosted chat session (`oracle`), an endpoint outside loopback, or an Ollama cloud model |
-| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a reasoning pin, its CLI is a script or launcher rather than a native binary, it is an `ollama:` seat (below), or it has no passing probe for its current fingerprint |
+| `verify_seat_not_isolated` | The adapter has no isolation profile, the seat sets a custom `command`, `env`, a non-direct transport or a `reasoning` level outside `low`, `medium`, `high`, `xhigh` and `max`, its CLI is a script or launcher rather than a native binary, it is an `ollama:` seat (below), or it has no passing probe for its current fingerprint |
 | `verify_seat_disallowed` | `limits.allow_models` does not allow the seat |
 | `verify_seat_unpinned` | The seat pins no exact model id. A Claude seat needs a full `claude-...` id, not an alias such as `opus` |
 | `verify_seat_same_model` | Both seats resolve to one model, ignoring a bracketed context suffix such as `[1m]` |
@@ -2458,6 +2588,8 @@ reports, never on what the model says. One adapter has a profile in v1:
   event later in the stream refuses the call too. The init event does not list
   loaded instruction files, so the working directory is placed where no
   parent holds any (below).
+
+A claude seat may set `reasoning` to one of those levels. Verify passes it as `--effort` and the seat fingerprint covers it, so changing it needs a fresh probe and gate record. The init event does not report effort, so the probe shows the CLI accepted the flag, not the level it applied. `brigade run` does not pass reasoning to claude and refuses such a seat, and `brigade roster doctor` reports it as a verify-only warning. Use a seat dedicated to verify.
 
 `ollama:<model>` seats are refused with `verify_seat_not_isolated` ("ollama
 tags are mutable, and v1 has no immutable launch"). Ollama names a model only
@@ -2803,3 +2935,96 @@ recover`. No byte of the file is printed. `status` shows such a file as
 paused with the same reason. A card field that is present must hold a value of
 its type, so an explicit `null` is malformed. Only a scope's `since_day` and
 `never_read` may be `null`, meaning not counted yet and unknown.
+
+### Automatic compensation watch
+
+A policy actor listed in `memory.reflect_principals`, under hub curation
+ownership, can automatically compensate its own automatic apply. The hub
+constructs the inverse from its retained snapshots. The actor, applied revision,
+content hash, restored bytes, trust and state must all match. An intervening
+edit, including an edit followed by a content revert, prevents automatic
+compensation. The hub permits up to 128 intervening revisions only when each
+is an applied evidence-only append to that card. It replays those operations
+and checks every revision, hash, state and trust against retained snapshots.
+Compensation restores the original snapshot, including its evidence list.
+Later evidence artifacts remain in the immutable hub store. Other compensations
+retain Tier 2. Ordinary verifier proposals retain their existing review floor.
+
+Scheduled `memory reflect run --hub --scheduled` polls the hub's
+`automatic_compensation` capability before proposing new work. Set
+`memory.rollback_watch_seconds` in fleet policy to change the watch window
+from 86400 seconds. Supported values are 1 through 604800. A manual reflect
+run and a dry run do not poll the watch.
+
+The watch compares post-apply admin-attested retrieval records against the
+pre-apply record for the same fixture, scope, epoch and ranking configuration.
+A drop greater than 0.01 in `hit_rate`, `mrr`, `precision_at_k` or `recall_at_k`,
+overall or by category, is a regression. Automatic reversal requires every
+corpus revision between the baseline evaluation and the later evaluation to
+belong to the watched proposal. An unrelated edit, including an edit followed
+by a revert, sends the compensation to Tier 2 review. Hybrid regressions also
+require review until a counterfactual evaluator can attribute vector changes.
+The hub retains scan progress, so later evaluations remain reachable after the
+first page of 128 records.
+
+Scheduled reflection sends no local receipt paths or receipt batches. Local
+failed receipts have no hub upload or mapping route and cannot trip a watch.
+Only hub-attested verifier failures count. The hub discovers these directly.
+API callers may optionally narrow negative outcomes with at most 64 immutable
+hub evidence IDs.
+
+A failed effectiveness signal must be an active `memory-verify-manifest`
+binding for the applied card revision or a later evidence-only revision.
+Its `card.content_hash` must match that attested revision's retained bytes.
+The manifest's `effectiveness` object must contain `status: "failed"`,
+`verifier_credential` matching the attesting credential ID, and `observed_ms`
+matching the immutable attachment time in the watch window. The credential
+must still be live, flagged as a verifier, and authorized to reflect on that
+scope. Pending and inert bindings have no authority.
+
+Active verifier manifests can also report `contradicted` on a block touched by
+the proposal. The hub resolves the manifest's revision and requires that
+block's hash to match the block in the applied snapshot. Each verifier can
+propose an evidence append against the current revision and obtain review
+before the next verifier attests. Pending and inert bindings never trip the
+watch. Two independent verifier principals are required for automatic reversal from verifier signals.
+Multiple records or credentials from one principal still count once. A signal
+from one principal opens a Tier 2 compensation for review and leaves card bytes
+unchanged. A canary-miss resolver remains deferred until canaries have an
+attested evidence contract.
+
+Trips and compensation results are retained in proposal decision events.
+Failures retain every card's bytes and record `compensation_result: failed`.
+The CLI reports failure with a failing exit status, including when a savepoint
+rollback leaves no compensating proposal. A hub watch journal retains the
+original proposal ID and successful trip so scheduled runs cannot repeat an
+applied compensation or an identical review referral. A later independent
+active verifier can upgrade a referral. Failed attempts leave the watch and
+retrieval cursor retryable. Journal entries and retrieval cursors are pruned
+on a later watch poll after the maximum seven-day window or proposal
+compaction. Decision events
+include `watch_trip` with the signal.
+
+Only a successful automatic compensation installs a hold for each original
+`(scope, operation type)` pair. Failed attempts and review referrals install no
+holds. Reviewer-approved compensations also install no hold. Holds survive
+policy revisions. An admin `auto_apply_switch` request with
+`scope` and `op_type` releases only that pair. Set `enabled: false` to clear
+the hold while keeping automatic apply disabled. Set `enabled: true` to clear
+the hold and enable automatic apply. A switch request without the pair changes
+the kill switch without releasing any hold.
+
+Automatic compensations obey both `memory.auto_apply` and the hub kill switch.
+Recovery compensations remain available while an operation class is held, but
+automatic actor-initiated rollbacks use the same watch window and install the
+same scoped holds on success. A rollback outside that window requires review.
+
+Watch requests require read and reflect on their scope. The hub supplies
+retrieval and verifier signals and checks all negative evidence itself. Watch
+replies contain decision metadata. A request inspects at
+most 32 applied proposals with a continuation. Reflection bounds polling to
+32 pages per scope. Local evidence logs do not authorize watch signals.
+
+## Verify evaluation and automatic admission
+
+The [model-backed admission workflow](memory-care.md#model-backed-verification-admission) documents `memory verify eval`, `memory verify gate`, the unattended care path, policy thresholds, off switches and rollback. Existing verify configurations require explicit enablement. Classes apply automatically only with current hub admin-authenticated admission through the dedicated verifier automatic action. Deferred history and supersede classes remain proposal-only until the contract can meet their recall bars.

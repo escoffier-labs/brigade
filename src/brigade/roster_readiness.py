@@ -32,6 +32,7 @@ class ReadinessRequest:
     route: str = "brigade"
     isolation: str = "shared"
     capability: str | None = None
+    read_only: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,36 @@ def operation_scope(roster: roster_mod.Roster, request: ReadinessRequest, worksp
     return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
+# A fresh degraded health check is not always "unknown". Two checks have no
+# subject for some adapters or operations, so readiness counts them as passed
+# for this operation while keeping the original detail:
+# - version-gates: only an adapter that seat_health reports as having no
+#   reviewed gate (``no-reviewed-gate``) has no gate to satisfy. ACPX transport
+#   version and antigravity have declared gates, so a generic incomplete probe
+#   for those adapters stays unknown.
+# - isolation-compatibility: the health check tests read-only enforcement. Only
+#   an operation that explicitly declares ``read_only=False`` does not depend on
+#   it; a writable ACPX plus shared isolation combination is still blocked per
+#   seat. A roster sandbox never decides operation writability.
+# Everything else that could apply but was not verified, including missing
+# authentication evidence and an adapter without prompt-free model inventory,
+# stays unknown. A failed check never becomes passed.
+def _not_applicable_reason(check: seat_health.SeatHealthCheck, agent: Any, request: ReadinessRequest) -> str | None:
+    if check.status != "degraded":
+        return None
+    if check.name == "version-gates":
+        if check.cause_code != "no-reviewed-gate":
+            return None
+        if agent.transport == "acpx" or agent.cli == "antigravity":
+            return None
+        return "adapter declares no reviewed version gate"
+    if check.name == "isolation-compatibility":
+        if request.read_only is not False or check.cause_code != "probe-incomplete":
+            return None
+        return "health check tests read-only enforcement; this operation is writable"
+    return None
+
+
 def _request_error(request: ReadinessRequest) -> str | None:
     if (
         not isinstance(request.workers, (tuple, list))
@@ -124,6 +155,8 @@ def _request_error(request: ReadinessRequest) -> str | None:
         or not re.fullmatch(r"[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+", request.capability)
     ):
         return "Capability must be a dotted capability name, such as research.plan."
+    if request.read_only is not None and not isinstance(request.read_only, bool):
+        return "Read-only must be true, false, or unset."
     return None
 
 
@@ -139,8 +172,10 @@ def evaluate_readiness(
 ) -> dict[str, Any]:
     """Evaluate facts supplied by selected-seat health and route integrations.
 
-    Injected observations are useful to embedding callers; the CLI currently
-    has no producer for admission, capacity, or T3 governance support.
+    ``inspect_readiness`` produces live read-only ``admission``, ``capacity``,
+    and, for worktree requests, ``isolation`` observations for
+    ``route == "brigade"``. Embedding callers may still inject explicit
+    observations; T3 governance support remains unproduced here.
     """
     now = time.time() if now is None else now
     evidence: list[dict[str, Any]] = []
@@ -290,15 +325,20 @@ def evaluate_readiness(
         # shared/worktree isolation. Do not confuse the two contracts.
         for check_name in seat_health.CHECK_NAMES:
             check = by_name.get(check_name)
-            status = (
-                "unknown"
-                if not fresh or check is None
-                else {"passed": "passed", "failed": "failed"}.get(check.status, "unknown")
-            )
+            not_applicable = _not_applicable_reason(check, agent, request) if fresh and check is not None else None
+            if not fresh or check is None:
+                status, reason, detail = "unknown", "health-unobserved", ""
+            elif not_applicable is not None:
+                status, reason = "passed", "not-applicable"
+                detail = safe_detail(f"not-applicable: {not_applicable}; {check.detail}")[:240]
+            else:
+                status = {"passed": "passed", "failed": "failed"}.get(check.status, "unknown")
+                reason = check.cause_code or check.status
+                detail = safe_detail(check.detail)[:240]
             add(
                 check_name,
                 status,
-                check.cause_code or check.status if fresh and check else "health-unobserved",
+                reason,
                 "Refresh selected-seat health evidence."
                 if status == "unknown"
                 else "Inspect the selected seat health failure."
@@ -309,7 +349,7 @@ def evaluate_readiness(
                 age_seconds=age if age is not None and math.isfinite(age) else None,
                 ttl_seconds=ttl,
                 observed_at=observed_at,
-                detail=safe_detail(check.detail)[:240] if check else "",
+                detail=detail,
             )
 
     scope = operation_scope(roster, request, workspace)
@@ -436,6 +476,25 @@ def evaluate_readiness(
     }
 
 
+def brigade_route_observations(
+    roster: roster_mod.Roster,
+    request: ReadinessRequest,
+    *,
+    workspace: Path,
+    scope: str | None = None,
+    now: float | None = None,
+) -> dict[str, Observation]:
+    """Produce authoritative, strictly read-only operation observations.
+
+    Produces ``admission`` and ``capacity`` for ``route == "brigade"`` and, for
+    worktree isolation requests, an ``isolation`` observation. Delegates to
+    :func:`brigade.roster_readiness_brigade.brigade_route_observations`.
+    """
+    from .roster_readiness_brigade import brigade_route_observations as _impl
+
+    return _impl(roster, request, workspace=workspace, scope=scope, now=now)
+
+
 def inspect_readiness(
     roster: roster_mod.Roster,
     request: ReadinessRequest,
@@ -453,12 +512,9 @@ def inspect_readiness(
     ):
         return initial
     request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
-    selected_roster = replace(
-        roster, agents={name: replace(roster.agents[name], fallback=()) for name in request.workers}
-    )
     # A separate checkout is not a read-only sandbox. Confirm only Git
     # eligibility here, without creating a worktree or asserting disk capacity.
-    if request.isolation == "worktree" and not runguard.is_git_worktree(workspace):
+    if request.isolation == "worktree" and not runguard.is_git_checkout_with_commit(workspace):
         scope = operation_scope(roster, request, workspace)
         return evaluate_readiness(
             roster,
@@ -466,15 +522,30 @@ def inspect_readiness(
             workspace=workspace,
             hub_discovery_possible=hub_discovery_possible,
             observations={
-                "isolation": Observation("failed", time.time(), scope, "Worktree isolation requires a Git checkout.")
+                "isolation": Observation(
+                    "failed",
+                    time.time(),
+                    scope,
+                    "Worktree isolation requires a Git checkout with a committed HEAD.",
+                )
             },
         )
+    from .roster_readiness_brigade import brigade_route_readiness
+
+    effective_roster, observations = brigade_route_readiness(roster, request, workspace=workspace)
+    selected_roster = replace(
+        effective_roster,
+        agents={name: replace(effective_roster.agents[name], fallback=()) for name in request.workers},
+    )
     probe = health_probe or seat_health.SeatHealthProbe(collect_executable_version=False)
     results = probe.probe_roster(selected_roster, workspace=workspace, allow_model_smoke=False)
+    observed_now = max([time.time(), *(obs.observed_at for obs in observations.values())])
     return evaluate_readiness(
-        roster,
+        effective_roster,
         request,
         workspace=workspace,
         health={result.seat: result for result in results},
+        observations=observations,
+        now=observed_now,
         hub_discovery_possible=hub_discovery_possible,
     )

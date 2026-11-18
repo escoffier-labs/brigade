@@ -884,7 +884,7 @@ def test_enrollment_downgrade_from_omitted_authority_is_denied(monkeypatch):
         "fleet_policy": {"active": True, "version": 1, "digest": DIGEST},
     }
     assert fleet_session_bootstrap.classify_enrollment(enrolled) == "enrolled"
-    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda: True)
+    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda **_: True)
     legacy = {
         "state": "authoritative",
         "schema": fleet_model_roster.ROSTER_SCHEMA,

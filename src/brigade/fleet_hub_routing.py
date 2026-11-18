@@ -38,6 +38,8 @@ MAX_JSON = 65536
 MAX_TEXT = fleet_policy.MAX_TEXT
 MAX_FUTURE_SECONDS = 300
 WorkItemLookup = Callable[[sqlite3.Connection, str], Mapping[str, Any] | None]
+# (machine name, policy machine record, telemetry row or None) -> extra rejection reasons.
+MachineReasons = Callable[[str, Mapping[str, Any], Mapping[str, Any] | None], list[str]]
 
 _work_item_lookup: WorkItemLookup | None = None
 
@@ -145,6 +147,7 @@ def set_work_item_lookup(callback: WorkItemLookup | None) -> None:
 
 def _default_work_lookup(conn: sqlite3.Connection, work_id: str) -> Mapping[str, Any] | None:
     try:
+        from .worklore_campaigns import member_excluded
         from .worklore_store import WorkloreNotFound, _link_summary, _source_policies, get_item
     except Exception:
         return None
@@ -154,6 +157,10 @@ def _default_work_lookup(conn: sqlite3.Connection, work_id: str) -> Mapping[str,
             item["source_policies"] = _source_policies(_link_summary(conn, work_id))
         except Exception:
             item["source_policies"] = ["stale-source"]
+        try:
+            item["campaign_excluded"] = member_excluded(conn, work_id)
+        except Exception:
+            item["campaign_excluded"] = True  # fail closed, like the source-policy read above
         return item
     except WorkloreNotFound:
         return None
@@ -193,7 +200,9 @@ def evaluate_work_item(item: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(source_policies, list):
         return {"ok": False, "reason": "work-held", "detail": "source-policy"}
     try:
-        bucket = exclusion_bucket(item, source_policies, now=_now())
+        bucket = exclusion_bucket(
+            item, source_policies, now=_now(), campaign_excluded=item.get("campaign_excluded") is True
+        )
     except Exception:
         return {"ok": False, "reason": "work-held", "detail": "worklore-unavailable"}
     if bucket is not None:
@@ -669,6 +678,8 @@ def _evaluate_pair(
     resolution: Mapping[str, Any],
     now: datetime,
     exclude_reservation_id: str | None = None,
+    quota_read_only: bool = False,
+    extra_reasons: MachineReasons | None = None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     machine = document["machines"].get(machine_name)
@@ -698,6 +709,8 @@ def _evaluate_pair(
     if eligible_machines and machine_name not in eligible_machines:
         reasons.append("machine-not-eligible")
     reasons.extend(_machine_wide_reasons(machine, telemetry, routing=routing, seats=[seat_name], now=now))
+    if extra_reasons is not None:
+        reasons.extend(extra_reasons(machine_name, machine, telemetry))
     occupancy, tokens = _occupancy(
         conn,
         machine=machine_name,
@@ -729,7 +742,7 @@ def _evaluate_pair(
         reasons.append("machine-capacity")
     pool_id = seat.get("quota_pool")
     if pool_id:
-        quota = fleet_quota.admit_pool(conn, pool_id, routing=routing, now=now)
+        quota = fleet_quota.admit_pool(conn, pool_id, routing=routing, now=now, read_only=quota_read_only)
         if not quota["admitted"]:
             if "quota-exhausted" in quota["reasons"]:
                 reasons.append("seat-quota-exhausted")
@@ -1035,8 +1048,15 @@ def _collect_candidates(
     now: datetime,
     machine: str | None = None,
     seat: str | None = None,
+    quota_read_only: bool = False,
+    extra_reasons: MachineReasons | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, str | None]:
-    """Evaluate every seat/machine pair. Never writes; shared by ``route`` and dry-run previews."""
+    """Evaluate every seat/machine pair. Never writes; shared by ``route`` and dry-run previews.
+
+    ``quota_read_only`` and ``extra_reasons`` are for the advisory placement query: the first
+    keeps the quota evaluator from creating its store, the second adds machine-level rejection
+    reasons. Both default to the original behavior.
+    """
     role = task_roles.role_for_workload(workload)
     start_seat = seat or (resolution.get("effective", {}).get("roles", {}) or {}).get(role)
     if seat is None and role != "impl":
@@ -1088,6 +1108,8 @@ def _collect_candidates(
                 requirements=requirements,
                 resolution=resolution,
                 now=now,
+                quota_read_only=quota_read_only,
+                extra_reasons=extra_reasons,
             )
             candidates.append(row)
             if row["eligible"]:

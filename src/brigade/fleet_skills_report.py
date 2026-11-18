@@ -19,6 +19,14 @@ SCHEMA_VERSION = 2
 MAX_ROWS = 500
 MAX_TEXT = 120
 SHA256 = re.compile(r"[0-9a-f]{64}")
+# Local CLI output keeps the precise copy state (``symlink``, ``unusable``).
+# A deployed Hub rejects the whole node report for a status it does not know,
+# and nodes upgrade before the Hub, so the report maps them onto the closed set
+# the Hub already accepts: a linked copy is outside Brigade's control
+# (``external``) and an unreadable one is simply ``unknown``. A hand-edited copy
+# is still behind its source, so it reports ``stale``; the install guard, not
+# the status, keeps the edit from being overwritten.
+_REPORT_STATUS = {"symlink": "external", "unusable": "unknown", "edited": "stale"}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -72,7 +80,7 @@ def build_copies(target: Path) -> list[dict[str, Any]]:
                 "binding": binding,
                 "skill_id": _text(skill_id),
                 "harness": _text(harness),
-                "status": _text(copy["status"]),
+                "status": _text(_REPORT_STATUS.get(str(copy["status"]), copy["status"])),
                 "installed_sha256": _hash(installed.get("skill_fingerprint")),
                 "registry_sha256": _hash(source.get("fingerprint")),
                 "rollback_available": _rollback_available(receipt),
@@ -124,7 +132,7 @@ def find_conflicts(copies: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_scores(target: Path, now: dt.datetime) -> list[dict[str, Any]]:
     """Per-skill outcome numbers from ``outcome`` (the same path as ``brigade outcome reconcile``, dry-run)."""
-    from . import localio, outcome as core, outcome_cmd, scorecard as scorecard_mod
+    from . import localio, outcome as core, outcome_attribution, outcome_cmd, scorecard as scorecard_mod
 
     records = outcome_cmd.load_scoring_records(target)
     cohorts = outcome_cmd._fingerprint_cohorts_by_artifact(target, records)
@@ -133,6 +141,7 @@ def build_scores(target: Path, now: dt.datetime) -> list[dict[str, Any]]:
     status_map = outcome_cmd.load_status(target)
     kinds = outcome_cmd._artifact_kinds(records, status_map, scorecards)
     config = core.ReconcileConfig()
+    observed_sessions = outcome_attribution.observed_hurt_sessions(target, records, cohorts, now=now, config=config)
     half_life = core.DEFAULT_RECENCY_HALF_LIFE_DAYS * 86400.0
     rows: list[dict[str, Any]] = []
     for artifact_id in outcome_cmd._reconcile_artifact_ids(kinds, status_map, scorecards, cohorts):
@@ -140,14 +149,19 @@ def build_scores(target: Path, now: dt.datetime) -> list[dict[str, Any]]:
             continue
         entry = status_map.get(artifact_id) or {}
         prior = str(entry.get("status", "candidate"))
-        decision = outcome_cmd._decide_reconcile_item(
-            artifact_id,
-            "skill",
-            cohorts=cohorts.get(artifact_id),
-            card=scorecards.get(artifact_id),
+        decision = outcome_attribution.apply_observed_veto(
+            outcome_cmd._decide_reconcile_item(
+                artifact_id,
+                "skill",
+                cohorts=cohorts.get(artifact_id),
+                card=scorecards.get(artifact_id),
+                prior_status=prior,
+                last_action_ts=localio.parse_iso_datetime(entry.get("last_action_ts")),
+                now=now,
+                config=config,
+            ),
+            observed_sessions.get(artifact_id, 0),
             prior_status=prior,
-            last_action_ts=localio.parse_iso_datetime(entry.get("last_action_ts")),
-            now=now,
             config=config,
         )
         cohort = cohorts.get(artifact_id)

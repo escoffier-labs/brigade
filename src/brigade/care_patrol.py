@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import localio, runbook_cmd
+from . import care_runbooks
 
 if TYPE_CHECKING:
     from .care_cmd import CareEntry
@@ -41,35 +40,16 @@ def select(
     return entries
 
 
-def ensure_selected(target: Path, entries: tuple[CareEntry, ...]) -> int:
+def selected_specs(entries: tuple[CareEntry, ...]) -> list[care_runbooks.RunbookSpec]:
+    """The patrol runbook spec when run-patrol is among the entries, else nothing."""
     if any(item.entry_id == "run-patrol" for item in entries):
-        return write_runbook(target, RUNBOOK_REL, RUNBOOK_PAYLOAD)
-    return 0
+        return [care_runbooks.RunbookSpec(RUNBOOK_REL, RUNBOOK_PAYLOAD)]
+    return []
 
 
 def write_runbook(target: Path, relative: str, payload: dict[str, Any]) -> int:
-    """Materialize a validated, binary-pinned runbook only when missing."""
-    dest = target / relative
-    if dest.is_file():
-        return 0
-    temp = dest.parent / f".{dest.name}.init-tmp"
-    try:
-        temp.parent.mkdir(parents=True, exist_ok=True)
-        localio.write_json(temp, dict(payload))
-        validated, error = runbook_cmd._read_runbook(temp, require_pin_hashes=False)
-        if validated is None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-        pins, error = runbook_cmd._pin_payload_from_runbook(target, validated)
-        if pins is None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-        validated["pins"] = pins
-        localio.write_json(dest, validated)
-        return 0
-    finally:
-        if temp.is_file():
-            temp.unlink()
+    """Materialize a validated, binary-pinned runbook only when missing; never replace one."""
+    return care_runbooks.ensure(target, [care_runbooks.RunbookSpec(relative, payload)])
 
 
 def receipt_fields(target: Path, entry: CareEntry, last_runbook: dict[str, Any] | None) -> dict[str, Any]:

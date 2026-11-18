@@ -119,6 +119,13 @@ def _normalize_review_finding(
     safe_excerpt = _review_safe_text(value.get("safe_excerpt") or value.get("excerpt"), limit=400)
     if not rationale:
         errors.append(f"{label}: rationale must be a non-empty string")
+    from ..dispatch_memory import validate_refs
+
+    try:
+        memory_refs = validate_refs(value.get("memory_refs", []))
+    except ValueError:
+        errors.append(f"{label}: invalid memory_refs")
+        memory_refs = []
     if errors:
         return None, errors
     normalized: dict[str, Any] = {
@@ -133,6 +140,8 @@ def _normalize_review_finding(
         "suggested_fix": suggested_fix,
         "confidence": confidence,
     }
+    if memory_refs:
+        normalized["memory_refs"] = memory_refs
     finding_id = value.get("finding_id") or value.get("id")
     if isinstance(finding_id, str) and finding_id.strip():
         normalized["finding_id"] = finding_id.strip()
@@ -193,6 +202,7 @@ def _review_import_record(finding: dict[str, Any]) -> dict[str, Any]:
         "reviewer_id": finding.get("reviewer_id"),
         "review_run_id": finding.get("run_id"),
         "review_finding_id": finding.get("finding_id"),
+        "memory_refs": finding.get("memory_refs", []),
         "severity": finding.get("severity"),
         "category": finding.get("category"),
         "path": finding.get("path"),
@@ -373,6 +383,19 @@ def _review_run_one(target: Path, reviewer: dict[str, Any]) -> dict[str, Any]:
     if receipt.get("status") == "completed":
         receipt["completed_task_ids_reviewed"] = _review_stamp_completed_tasks(target, run_id)
     helpers._write_json(receipt_path, receipt)
+    if (
+        receipt.get("status") == "completed"
+        and findings_path is not None
+        and receipt.get("findings_after") != receipt.get("findings_before")
+    ):
+        findings, errors = _load_review_findings(findings_path, reviewer_id=reviewer_id, run_id=run_id, run=receipt)
+        if not errors:
+            from .. import memory_lesson_rows as lessons
+
+            try:
+                lessons.log_review_findings(target, receipt, findings)
+            except (OSError, ValueError, TimeoutError):
+                lessons.warn_append_failed()
     return receipt
 
 
@@ -1214,6 +1237,13 @@ def review_import_findings(*, target: Path, run_id: str, json_output: bool = Fal
     imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(
         target, records, dry_run=dry_run
     )
+    if not dry_run:
+        from .. import memory_lesson_rows as lessons
+
+        try:
+            lessons.log_review_findings(target, run, findings)
+        except (OSError, ValueError, TimeoutError):
+            lessons.warn_append_failed()
     payload = {
         "target": str(target),
         "run_id": run.get("run_id"),

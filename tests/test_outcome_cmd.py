@@ -603,17 +603,7 @@ def test_reconcile_dry_run_reports_install_without_writing(tmp_path, capsys):
     assert not _decisions_dir(tmp_path).exists()
 
 
-def _stub_execute(monkeypatch, *, install="installed"):
-    """Isolate the status state machine from the physical skills side effect."""
-
-    def _fake(target, artifact_id, action):
-        return install if action == "install" else "reverted:claude:uninstall"
-
-    monkeypatch.setattr(outcome_cmd, "_execute_skill_decision", _fake)
-
-
 def test_reconcile_apply_installs_and_persists_status_and_receipt(tmp_path, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
     _write_registry_skill(tmp_path, "skill-x")
     seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
@@ -624,26 +614,21 @@ def test_reconcile_apply_installs_and_persists_status_and_receipt(tmp_path, caps
     assert list(_decisions_dir(tmp_path).glob("*.json"))
 
 
-def test_reconcile_apply_does_not_promote_when_install_fails(tmp_path, capsys, monkeypatch):
-    # A skill that crosses the threshold but cannot physically install must NOT be
-    # marked promoted (the forward-only ratchet would hide the failure forever).
-    _stub_execute(monkeypatch, install="install-skipped: not in registry")
+def test_reconcile_apply_promotes_on_scorecard_evidence_without_any_install(tmp_path, capsys):
+    # Routing only (#2589): promotion rests on the scorecard, never on a physical install.
     _write_registry_skill(tmp_path, "skill-x")
     seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    # not counted as applied, and the surfaced status stays candidate
-    assert payload["applied"] == []
+    assert payload["applied"] == ["skill-x"]
     decision = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
-    assert decision["new_status"] == "candidate"
-    assert decision["decided_status"] == "promoted"
-    assert decision["execution"] == "install-skipped: not in registry"
+    assert decision["new_status"] == decision["decided_status"] == "promoted"
+    assert decision["execution"] == "routing-only"
     status = json.loads(_status_file(tmp_path).read_text())
-    assert status["artifacts"]["skill-x"]["status"] == "candidate"
+    assert status["artifacts"]["skill-x"]["status"] == "promoted"
 
 
 def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
     _write_registry_skill(tmp_path, "skill-x")
     seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
@@ -654,7 +639,6 @@ def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys, monkeypat
 
 
 def test_reconcile_rolls_back_promoted_artifact_on_regression(tmp_path, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
     cfg = outcome.ReconcileConfig(cooldown_seconds=0)
     _write_registry_skill(tmp_path, "skill-x")
     seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
@@ -1708,7 +1692,6 @@ def test_reconcile_human_output_notes_a_fingerprint_narrowed_decision(tmp_path, 
 
 
 def test_reconcile_output_byte_identical_for_unedited_skill(tmp_path, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
     _write_registry_skill(tmp_path, "skill-x")
     seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=False) == 0

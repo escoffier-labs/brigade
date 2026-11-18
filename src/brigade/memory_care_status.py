@@ -25,6 +25,9 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"config_path: {payload['config_path']}")
     print(f"scan_path: {payload['scan_path']}")
     print(f"queue_path: {payload['queue_path']}")
+    for check in payload.get("checks", []):
+        if check["name"] == "memory_lifecycle_authority":
+            print(f"lifecycle: {check['detail']}")
     if payload.get("read_only_paths"):
         print(f"read_only_paths: {', '.join(payload['read_only_paths'])}")
     issue_count = payload["issue_count"]

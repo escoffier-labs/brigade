@@ -193,12 +193,16 @@ class SeatHealthProbe:
         wall_clock: Callable[[], float] = time.time,
         model_smoke: Callable[[Any, Any, Path, float], SeatHealthCheck] | None = None,
         collect_executable_version: bool = True,
+        collect_model_inventory: bool = True,
     ) -> None:
         self._adapter = adapter
         self._clock = clock
         self._wall_clock = wall_clock
         self._model_smoke = model_smoke
         self._collect_executable_version = collect_executable_version
+        # Roster doctor renders model inventory separately, so it can turn this
+        # off to avoid a duplicate provider listing. Readiness leaves it on.
+        self._collect_model_inventory = collect_model_inventory
         self._cache: dict[str, _CacheEntry] = {}
         self._cache_lock = threading.Lock()
 
@@ -479,7 +483,7 @@ class SeatHealthProbe:
             if seat.cli == "antigravity":
                 return self._antigravity_version_check(seat, timeout_seconds)
             return SeatHealthCheck(
-                name, "degraded", "adapter has no reviewed version gate", cause_code="probe-incomplete"
+                name, "degraded", "adapter has no reviewed version gate", cause_code="no-reviewed-gate"
             )
         if name == "model-reachability":
             return self._model_check(seat, roster, workspace, timeout_seconds, allow_model_smoke)
@@ -551,22 +555,23 @@ class SeatHealthProbe:
                 "degraded",
                 "cloud seats validate via `brigade run cloud canary`; model smoke is not provider-safe",
             )
-        if seat.model is None:
+        requested = seat.model
+        if requested is None and isinstance(seat.cli, str) and seat.cli.startswith("ollama:"):
+            # Ollama names its model in the cli ref, the same way `roster
+            # doctor` reads it. Resolve that before treating a missing `model`
+            # as unknown.
+            requested = seat.cli[len("ollama:") :]
+        if requested is None:
             return SeatHealthCheck("model-reachability", "degraded", "seat has no exact model declaration")
-        # Roster doctor retains its established inventory rendering below.  It
-        # asks the shared coordinator for all other facts without duplicating a
-        # provider inventory call, and it deliberately never sends a smoke
-        # request while merely inspecting a workspace.
-        if not allow_model_smoke:
-            return SeatHealthCheck(
-                "model-reachability",
-                "degraded",
-                "model check is owned by roster doctor inventory",
-                cause_code="probe-incomplete",
-            )
-        if seat.transport == "direct" and seat.cli is not None:
+        # Prompt-free inventory is safe in every mode.  Roster doctor retains
+        # its established rendering below; readiness relies on this listing
+        # when model smoke is disabled so it never sends an inference request.
+        if self._collect_model_inventory and seat.transport == "direct" and seat.cli is not None:
             inspected = model_inventory.ModelInventoryInspector().inspect(
-                seat.cli, seat.model, getattr(seat, "command", None)
+                seat.cli,
+                requested,
+                getattr(seat, "command", None),
+                timeout_seconds=timeout_seconds,
             )
             if inspected is not None:
                 if inspected.state == "exact":
@@ -576,6 +581,15 @@ class SeatHealthProbe:
                         "model-reachability", "failed", inspected.detail, cause_code="model-unavailable"
                     )
                 return SeatHealthCheck("model-reachability", "degraded", inspected.detail, cause_code=inspected.state)
+        if seat.model is None:
+            return SeatHealthCheck("model-reachability", "degraded", "seat has no exact model declaration")
+        if not allow_model_smoke:
+            return SeatHealthCheck(
+                "model-reachability",
+                "degraded",
+                "model smoke is disabled and no prompt-free model inventory is available for this adapter",
+                cause_code="probe-incomplete",
+            )
         root = _temporary_git_repo()
         try:
             if self._model_smoke is not None:

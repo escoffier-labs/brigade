@@ -6,9 +6,11 @@ readiness, capacity, admission, isolation eligibility or permission to launch.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 from brigade import fleet_model_admission, roster_readiness, run_task_journal, run_tasks
@@ -327,8 +329,60 @@ class AuthorityReference:
 
 
 @dataclass(frozen=True)
+class NativeIntentTemplate:
+    """Everything known at enrollment, without an attempt or dispatch ordinal.
+
+    A template is a durable custody record, never a launch grant. Attempt and
+    dispatch identity arrive only with a later claimed intent.
+    """
+
+    run_id: str
+    task_id: str
+    seat: str
+    target: NativeTarget
+    payload_digest: str
+    source_revision: str
+    work: WorkBinding | None = None
+
+    def __post_init__(self) -> None:
+        _require(type(self.target) is NativeTarget)
+        _require(run_task_journal.token(self.run_id) and run_task_journal.task_id(self.task_id))
+        _require(run_task_journal.token(self.seat))
+        _require(run_task_journal.digest(self.payload_digest))
+        _require(type(self.source_revision) is str and re.fullmatch(r"[0-9a-f]{40}", self.source_revision) is not None)
+        _require(self.source_revision == self.target.source_revision)
+        _require(self.work is None or type(self.work) is WorkBinding)
+
+    @property
+    def template_digest(self) -> str:
+        """Stable digest over the immutable enrollment values only."""
+        material = {
+            "domain": "brigade.native-t3.intent-template.v1",
+            "run_id": self.run_id,
+            "task_id": self.task_id,
+            "seat": self.seat,
+            "payload_digest": self.payload_digest,
+            "source_revision": self.source_revision,
+            "target": asdict(self.target),
+            "work": None if self.work is None else asdict(self.work),
+        }
+        try:
+            # run_events.canonical_bytes rejects booleans, and native option
+            # values may legitimately be booleans. JSON true/false stay
+            # distinct from the strings "true"/"false".
+            encoded = json.dumps(
+                material, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+            ).encode("utf-8")
+        except (TypeError, ValueError, RecursionError):
+            raise ValueError("invalid native T3 contract") from None
+        return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
 class NativeIntent:
-    work: WorkBinding
+    # A native enrolled batch has no Worklore binding. ``None`` states that
+    # absence; it never stands for an unverified holder.
+    work: WorkBinding | None
     handle: run_tasks.TaskHandle
     dispatch_attempt: int
     target: NativeTarget
@@ -338,7 +392,8 @@ class NativeIntent:
     authority_refs: tuple[AuthorityReference, ...]
 
     def __post_init__(self) -> None:
-        _require(type(self.work) is WorkBinding and type(self.target) is NativeTarget)
+        _require(self.work is None or type(self.work) is WorkBinding)
+        _require(type(self.target) is NativeTarget)
         _require(type(self.handle) is run_tasks.TaskHandle and type(self.handle.spec) is run_tasks.TaskSpec)
         handle = self.handle
         _require(run_task_journal.token(handle.run_id) and run_task_journal.token(handle.request_id))

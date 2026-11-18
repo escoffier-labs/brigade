@@ -422,3 +422,170 @@ def test_skill_lock_refuses_symlink_without_touching_victim(tmp_path):
     (tmp_path / ".brigade/skills.mutation.lock").symlink_to(victim)
     assert skills_cmd.import_skill(target=tmp_path, source=source) == 2
     assert victim.read_bytes() == b"preserve"
+
+
+def test_inbox_add_dedupe_key_is_idempotent_across_statuses(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    key = "init:security-review:" + "a" * 64
+
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["dedupe_key"] == key
+
+    # Pending: the same key returns the existing proposal and writes nothing new.
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["proposal_id"] == first["proposal_id"]
+
+    # Rejected proposals still count, so a repeat run does not re-file them.
+    assert skills_cmd.inbox_reject(target=tmp_path, proposal_id=first["proposal_id"], reason="not wanted") == 0
+    capsys.readouterr()
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key) == 0
+    assert f"skill_proposal: {first['proposal_id']}" in capsys.readouterr().out
+    assert len(list((tmp_path / ".brigade" / "skills" / "inbox").glob("*/proposal.json"))) == 1
+
+    # A different key (or none) still files a new proposal.
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key + "b", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["proposal_id"] != first["proposal_id"]
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, json_output=True) == 0
+    assert "dedupe_key" not in json.loads(capsys.readouterr().out)
+
+
+def test_inbox_add_dedupe_return_keeps_the_exit_code_of_a_failed_lint(tmp_path, capsys):
+    source = tmp_path / "source" / "bad-skill"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("   \n")  # lint error: SKILL.md is empty
+    key = "init:bad-skill:x:" + "b" * 64
+
+    first = skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True)
+    capsys.readouterr()
+    again = skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True)
+
+    assert first == 1, "the fixture must fail lint for this test to mean anything"
+    assert again == first
+
+
+def test_accept_refuses_an_unrevised_requires_revision_proposal(tmp_path, capsys):
+    from brigade.skills_cmd import registry
+
+    source = _write_skill(tmp_path / "source")
+    key = "outcome:security-review:regression_hold:" + "c" * 64
+    assert (
+        skills_cmd.inbox_add(
+            target=tmp_path,
+            source=source,
+            behavioral_contract=contract(),
+            dedupe_key=key,
+            requires_revision=True,
+            json_output=True,
+        )
+        == 0
+    )
+    proposal = json.loads(capsys.readouterr().out)
+    assert proposal["requires_revision"] is True
+    assert proposal["unrevised_identity"] == proposal["candidate_identity"]
+    assert skills_cmd.inbox_show(target=tmp_path, proposal_id=proposal["proposal_id"]) == 0
+    assert "requires_revision: yes" in capsys.readouterr().out
+
+    for force in (False, True):
+        assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal["proposal_id"], force=force) == 2
+        assert "needs a revised candidate" in capsys.readouterr().err
+
+    assert not (tmp_path / ".brigade/skills/registry/security-review").exists()
+    with registry._held_state_root(tmp_path, writable=False) as anchor:
+        assert registry._baseline_identity(anchor, "security-review") is None
+    stored = json.loads((tmp_path / ".brigade/skills/inbox" / proposal["proposal_id"] / "proposal.json").read_text())
+    assert stored["status"] == "pending"
+
+    # A revised candidate is a separate proposal and accepts normally.
+    (source / "SKILL.md").write_text((source / "SKILL.md").read_text() + "\nRevised after the regression.\n")
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, behavioral_contract=contract(), json_output=True) == 0
+    revised = json.loads(capsys.readouterr().out)
+    assert "requires_revision" not in revised
+    assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=revised["proposal_id"]) == 0
+
+
+def _file_review_request(tmp_path, capsys, source):
+    key = "outcome:security-review:regression_hold:" + "c" * 64
+    assert (
+        skills_cmd.inbox_add(
+            target=tmp_path,
+            source=source,
+            behavioral_contract=contract(),
+            dedupe_key=key,
+            requires_revision=True,
+            json_output=True,
+        )
+        == 0
+    )
+    return json.loads(capsys.readouterr().out)
+
+
+def test_identical_files_with_a_different_contract_cannot_bypass_the_review_request(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    request = _file_review_request(tmp_path, capsys, source)
+    assert request["unrevised_fingerprint"] == request["fingerprint"]
+
+    # A different contract changes skill.json, so the package identity differs; the files do not.
+    other = {**contract(), "reason": "A different reason over the same unrevised files"}
+    rc = skills_cmd.inbox_add(target=tmp_path, source=source, behavioral_contract=other, json_output=True)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "needs a revised candidate" in captured.err
+    assert [p["proposal_id"] for p in _inbox_ids(tmp_path, capsys)] == [request["proposal_id"]]
+
+
+def test_accept_refuses_a_plain_candidate_matching_an_open_unrevised_request(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    # A plain proposal with a different contract was filed before the review request existed.
+    other = {**contract(), "reason": "A different reason over the same unrevised files"}
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, behavioral_contract=other, json_output=True) == 0
+    plain = json.loads(capsys.readouterr().out)
+    request = _file_review_request(tmp_path, capsys, source)
+    assert plain["candidate_identity"] != request["candidate_identity"]
+    assert plain["fingerprint"] == request["fingerprint"]
+
+    assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=plain["proposal_id"]) == 2
+    assert "needs a revised candidate" in capsys.readouterr().err
+    assert not (tmp_path / ".brigade/skills/registry/security-review").exists()
+
+
+def test_a_rejected_request_no_longer_blocks_the_same_files(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    request = _file_review_request(tmp_path, capsys, source)
+    assert (
+        skills_cmd.inbox_reject(target=tmp_path, proposal_id=request["proposal_id"], reason="no", json_output=True) == 0
+    )
+    capsys.readouterr()
+
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, behavioral_contract=contract(), json_output=True) == 0
+
+
+def test_accept_fails_closed_when_the_unrevised_identity_is_missing(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    request = _file_review_request(tmp_path, capsys, source)
+    path = tmp_path / ".brigade/skills/inbox" / request["proposal_id"] / "proposal.json"
+    stored = json.loads(path.read_text())
+    del stored["unrevised_identity"]
+    path.write_text(json.dumps(stored))
+
+    for force in (False, True):
+        assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=request["proposal_id"], force=force) == 2
+        assert "records no unrevised identity" in capsys.readouterr().err
+    assert not (tmp_path / ".brigade/skills/registry/security-review").exists()
+
+
+def test_inbox_add_marks_a_dedupe_hit_as_deduped(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    first = _file_review_request(tmp_path, capsys, source)
+    assert "deduped" not in first
+    key = first["dedupe_key"]
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, dedupe_key=key, json_output=True) == 0
+    again = json.loads(capsys.readouterr().out)
+    assert again["deduped"] is True and again["proposal_id"] == first["proposal_id"]
+    stored = json.loads((tmp_path / ".brigade/skills/inbox" / first["proposal_id"] / "proposal.json").read_text())
+    assert "deduped" not in stored
+
+
+def _inbox_ids(tmp_path, capsys):
+    assert skills_cmd.inbox_list(target=tmp_path, json_output=True) == 0
+    return json.loads(capsys.readouterr().out)["proposals"]

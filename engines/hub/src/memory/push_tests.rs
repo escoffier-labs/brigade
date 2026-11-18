@@ -1,10 +1,12 @@
 //! S23: connector push over `search` with `query_source: "push"`. The trust
 //! filter, per-principal grants, head revalidation, the egress scan and the
 //! response bound with a 2,000-card corpus, and push-safe `card` reads.
+use super::Reply;
 use super::scan;
 use super::tests::{ADMIN_TOKEN, AGENT_TOKEN, Hub, NODE_TOKEN, code};
 use rusqlite::Connection;
 use serde_json::{Value as Json, json};
+use std::time::Duration;
 
 fn card(title: &str, summary: &str) -> String {
     format!("---\ntitle: {title}\ndescription: {summary}\n---\nrelease checklist body\n")
@@ -21,13 +23,35 @@ fn ids(reply: &super::Reply) -> Vec<String> {
     out
 }
 
+/// Bounded retry for the one refusal that is an admission artifact of a busy
+/// runner, not a verdict on the card: a 503 `authority-lock-timeout`. Any other
+/// reply is returned untouched so the caller's status assertion still fails it.
+const SEED_ATTEMPTS: usize = 3;
+const SEED_BACKOFF: Duration = Duration::from_millis(50);
+
+fn is_lock_timeout(r: &Reply) -> bool {
+    r.status == 503 && r.body["reason"] == "authority-lock-timeout"
+}
+
+async fn seed_with<F, Fut>(mut call: F) -> Reply
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Reply>,
+{
+    let mut r = call().await;
+    for _ in 1..SEED_ATTEMPTS {
+        if !is_lock_timeout(&r) {
+            break;
+        }
+        tokio::time::sleep(SEED_BACKOFF).await;
+        r = call().await;
+    }
+    r
+}
+
 async fn write(h: &Hub, token: &str, action: &str, card_id: &str, text: &str) -> i64 {
-    let r = h
-        .call(
-            token,
-            json!({"action":action,"scope":"fleet","card_id":card_id,"text":text,"client_event_id":h.id()}),
-        )
-        .await;
+    let body = json!({"action":action,"scope":"fleet","card_id":card_id,"text":text,"client_event_id":h.id()});
+    let r = seed_with(|| h.call(token, body.clone())).await;
     assert_eq!(r.status, 201, "{action} {card_id}: {:?}", r.body);
     r.body["event"]["seq"].as_i64().unwrap()
 }
@@ -231,6 +255,81 @@ async fn push_takes_the_default_ranking_and_bounds_a_2000_card_corpus() {
         assert!(r.body.to_string().len() < 4096 * limit, "{}", r.body);
         assert!(!r.body.to_string().contains("release checklist body"));
     }
+}
+
+#[cfg(feature = "memory-scan")]
+#[tokio::test]
+async fn seed_with_retries_only_the_authority_lock_timeout() {
+    let busy = Reply::new(
+        503,
+        json!({"error":"hub busy","reason":"authority-lock-timeout"}),
+    );
+    let committed = Reply::new(201, json!({"event":{"seq":7}}));
+
+    // A single lock timeout is retried and the committed reply is returned.
+    let mut calls = 0;
+    let r = seed_with(|| {
+        calls += 1;
+        let reply = if calls == 1 {
+            busy.clone()
+        } else {
+            committed.clone()
+        };
+        std::future::ready(reply)
+    })
+    .await;
+    assert_eq!(r, committed);
+    assert_eq!(calls, 2);
+
+    // Any other refusal is left untouched: the caller's 201 assertion fails it.
+    let other = Reply::new(503, json!({"reason":"storage-error"}));
+    let mut calls = 0;
+    let r = seed_with(|| {
+        calls += 1;
+        std::future::ready(other.clone())
+    })
+    .await;
+    assert_eq!(r, other);
+    assert_eq!(calls, 1);
+
+    // A permanent lock timeout gives up after the bounded number of attempts.
+    let mut calls = 0;
+    let r = seed_with(|| {
+        calls += 1;
+        std::future::ready(busy.clone())
+    })
+    .await;
+    assert_eq!(r.status, 503);
+    assert_eq!(calls, SEED_ATTEMPTS);
+}
+
+/// Reproduces the CI flake from #2516: a single seed import refused with the
+/// retryable `authority-lock-timeout` while the hub lock is held. The seed
+/// helper must retry that one refusal; the ranking and bound assertions in
+/// the corpus test above stay untouched.
+#[cfg(feature = "memory-scan")]
+#[tokio::test]
+async fn seed_retries_a_single_authority_lock_timeout() {
+    let h = Hub::with(scan::bundled(), None);
+    // Hold the hub write lock so the first import waits out the 2 s bound and
+    // refuses with authority-lock-timeout instead of committing.
+    let python = Connection::open(&h.hub).unwrap();
+    python.execute_batch("BEGIN IMMEDIATE").unwrap();
+    // Release just after that first attempt times out so the retry commits.
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(2_400));
+        let _ = python.execute_batch("ROLLBACK");
+    });
+    let seq = write(
+        &h,
+        ADMIN_TOKEN,
+        "import",
+        "retried",
+        &card("Release checklist", "steps"),
+    )
+    .await;
+    releaser.join().unwrap();
+    assert!(seq > 0);
 }
 
 /// `card` with `push: true` serves only what push could send this credential.

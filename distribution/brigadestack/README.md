@@ -52,4 +52,45 @@ Publication runs are serialized. Before dispatch or retry, inspect PyPI for
 `brigadestack==0.31.0` and stop if it already exists. Duplicate uploads fail.
 After a successful run, the controller must download and install the published
 artifacts in a fresh environment and check identity, hashes and CLI behavior.
-The npm bridge has a separate manual publication step owned by the controller.
+
+## Publishing the npm bridge
+
+The npm bridge publishes through npm trusted publishing (GitHub OIDC) and needs
+no npm token. Its npm trust entry uses these exact fields:
+
+| npm trust field | Value |
+| --- | --- |
+| Package | `brigadestack` |
+| Repository | `escoffier-labs/brigade` |
+| Workflow file | `brigadestack-npm-publish.yml` |
+| Environment | `npm` |
+
+`npm trust list brigadestack` shows the entry. Recreate it from a logged-in
+maintainer session with:
+
+```sh
+npm trust github brigadestack --repo escoffier-labs/brigade \
+  --file brigadestack-npm-publish.yml --env npm --allow-publish
+```
+
+After the stable `@escoffier-labs/brigade` release is on npm and the bridge
+`package.json` pins that same exact version, select **Brigade Stack npm
+publication** in GitHub Actions and run it on `main`. The workflow reads the
+version from `distribution/brigadestack/npm/package.json`, so a release needs no
+workflow edit. It stops before any registry write when the dependency version is
+not on npm, the bridge version already exists, or the bridge version is not above
+the current `latest`, since publishing would otherwise move `latest` backwards.
+The build job runs the launcher tests, checks that the
+tarball holds only `LICENSE`, `README.md`, `launcher.cjs` and `package.json`,
+installs it with the real dependency and checks `brigadestack --version` and
+`--help`. Only the publish job, in the `npm` environment, can request an OIDC
+token. It publishes that checked tarball with provenance and waits up to five
+minutes until `latest` points at the new version.
+
+If only that final confirmation fails, the package may already be published.
+Check `npm view brigadestack dist-tags` before dispatching again; a second run
+stops at the "already on npm" check once the version exists.
+
+Like the PyPI bridge, this workflow publishes the `main` commit current at
+dispatch and takes no reviewed-SHA input, unlike `npm-publish.yml`. The bridge is
+four files with an exact dependency, so review the `main` head before dispatch.

@@ -462,6 +462,41 @@ def project_roster(
     return payload
 
 
+SEAT_USAGE_SCHEMA = "brigade.fleet_hub_seat_usage.v1"
+
+
+def seat_usage(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[str, Any]:
+    """Read-only occupancy per seat, with the revision and policy digest it reflects.
+
+    Under policy authority this counts active reservations and deduplicated
+    leases through :func:`fleet_hub_capacity.capacity_usage`. A legacy hub counts
+    unexpired, unreleased ``model_leases``. Nothing is acquired or written.
+    """
+    from . import fleet_hub_capacity, fleet_hub_policy
+
+    current = utc_now() if now is None else now
+    seats: dict[str, dict[str, int]] = {}
+    if _authority_active(conn):
+        policy = fleet_hub_policy.current_policy(conn)
+        document = policy["document"]
+        for name in sorted(document.get("seats") or {}):
+            usage = fleet_hub_capacity.capacity_usage(conn, document=document, seat=name, now=current)
+            seats[name] = {"occupied": int(usage["used"]["seat"])}
+        revision, digest = int(policy["revision"]), str(policy["digest"])
+    else:
+        counts = fleet_hub_capacity.lease_usage(conn, now=current)
+        for row in raw_seats(conn):
+            name = str(row["seat"])
+            seats[name] = {"occupied": counts.get(name, 0)}
+        revision, digest = _revision(conn), None
+    return {
+        "schema": SEAT_USAGE_SCHEMA,
+        "roster_revision": revision,
+        "policy_digest": digest,
+        "seats": seats,
+    }
+
+
 def project_consumer_launch_bindings(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, dict[str, Any]]]]:
     """Configured consumer -> seat -> effective binding groups. Never Cartesian expansion."""
     from . import fleet_hub_policy, fleet_policy

@@ -12,10 +12,11 @@ import json
 import os
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence, cast
 
-from . import fleet_client, proc
+from . import fleet_client, fleet_client_policy, fleet_node_memory, proc
 from .fleet_openclaw_observer import (
     OBSERVATION_BUDGET_SECONDS,
     PUBLISH_LIMIT,
@@ -23,6 +24,7 @@ from .fleet_openclaw_observer import (
     ObservationError,
     RecentSession,
     _PublicationBatch,
+    _MARGIN_SECONDS,
     _absolute_workspace,
     _bounded_json,
     _opaque_id,
@@ -34,7 +36,12 @@ from .fleet_openclaw_observer import (
 
 from .fleet_session_presence import ProviderLinkState
 
+# The detail pass keeps this fixed cap. The first snapshot instead gets the rest of the observation
+# budget minus PUBLISH_RESERVE_SECONDS, so a slow shell read under load still fits.
 NATIVE_TIMEOUT_SECONDS = 8
+# Held back for the session publish and the health post that follow the snapshot.
+PUBLISH_RESERVE_SECONDS = fleet_client.REPORT_TIMEOUT_SECONDS + fleet_client_policy.POLICY_TIMEOUT_SECONDS
+INVENTORY_TTL_SECONDS = 900
 DETAIL_RESERVE_SECONDS = 1.5
 MAX_THREADS = 10_000
 MAX_PROJECTS = 2_000
@@ -47,12 +54,21 @@ _TERMINAL = frozenset({"completed", "interrupted", "failed", "cancelled", "rolle
 # target store or raw shell data are serialized here. Native auth may issue its
 # own local grant; no grant values are exposed by this helper.
 _NATIVE_PROGRAM = r"""
-import json, os, time
+import json, os, re, sys, time
 from concurrent.futures import ThreadPoolExecutor, wait
 STARTED = time.monotonic()
+def emit(text):
+    # Raw bytes with no trailing newline: Windows text mode would write CRLF and grow the output.
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.buffer.flush()
 try:
     from t3_fleet.agent import _build_agent
     client = _build_agent(os.environ).t3
+    # The optional environment id starts first and gets at most about a second, so a
+    # stalled descriptor cannot use the budget. A detail pass never asks for it.
+    descriptor_future = None
+    if DETAIL_THREAD_IDS is None:
+        descriptor_future = ThreadPoolExecutor(max_workers=1).submit(lambda: client.descriptor().get("environmentId"))
     shell = client.shell_snapshot()
     if not isinstance(shell, dict) or type(shell.get("schemaVersion")) is not int or shell["schemaVersion"] != 2:
         raise ValueError()
@@ -110,6 +126,11 @@ try:
         except Exception:
             return UNKNOWN  # Failed lookups cannot invalidate cached enrichment.
         return None
+    environment_id = None
+    if descriptor_future is not None:
+        descriptor_done, _ = wait([descriptor_future], timeout=max(0.0, min(1.0, BUDGET_SECONDS - RESERVE_SECONDS - (time.monotonic() - STARTED))))
+        if descriptor_done and descriptor_future.exception() is None:
+            environment_id = descriptor_future.result()
     # Optional links get at most 4s, and never the slack reserved to print the snapshot.
     detail_wait = min(4.0, BUDGET_SECONDS - RESERVE_SECONDS - (time.monotonic() - STARTED))
     pool = ThreadPoolExecutor(max_workers=8)
@@ -130,17 +151,66 @@ try:
         "archived_count": len(archived),
     }
     output = json.dumps(result)
+    # The exact bytes are written below with no newline, so this cap is the parent's byte cap.
     if len(output.encode("utf-8")) > 262144:
         raise ValueError()
-    print(output)
+    # Separate repository inventory: never workspace roots, titles, paths or URLs. The row
+    # predicate is the Hub's, injected above. Any failure, or a result over the size cap,
+    # leaves the inventory out, meaning unknown.
+    try:
+        def clean_id(value, limit):
+            if isinstance(value, str) and 0 < len(value) <= limit and all(not c.isspace() and c.isprintable() for c in value):
+                return value
+            return None
+        def project_id_ok(value):
+            return isinstance(value, str) and len(value) <= MAX_PROJECT_ID_CHARS and re.fullmatch(PROJECT_ID_PATTERN, value) is not None
+        def normal_key(value):
+            if not isinstance(value, str) or len(value) > MAX_ID_CHARS:
+                return None
+            key = value.casefold()
+            if key.endswith(".git"):
+                key = key[:-4]
+            if len(key) > MAX_ID_CHARS or re.fullmatch(REPO_KEY_PATTERN, key) is None:
+                return None
+            return key
+        if clean_id(environment_id, MAX_ENVIRONMENT_ID_CHARS) is not None:
+            inventory_rows, seen_ids, dropped = [], set(), 0
+            for row in projects:
+                identity = row.get("repositoryIdentity")
+                raw_key = identity.get("canonicalKey") if isinstance(identity, dict) else None
+                if raw_key is None or row.get("archivedAt") is not None or row.get("deletedAt") is not None:
+                    continue
+                project_id, key = row.get("id"), normal_key(raw_key)
+                if not project_id_ok(project_id) or key is None or project_id in seen_ids:
+                    dropped += 1
+                    continue
+                seen_ids.add(project_id)
+                inventory_rows.append({"project_id": project_id, "repo_key": key})
+            candidate = json.dumps({**result, "inventory": {"environment_id": environment_id, "projects": inventory_rows[:MAX_INVENTORY_PROJECTS], "dropped": dropped}})
+            if len(candidate.encode("utf-8")) <= 262144:
+                output = candidate
+    except Exception:
+        pass
+    emit(output)
 except Exception:
-    print('{"error":"native_metadata_failed"}')
+    emit('{"error":"native_metadata_failed"}')
 # Exit without joining detail workers: a stalled optional lookup must not
 # hold the subprocess past its budget after the snapshot is printed.
-import sys
 sys.stdout.flush()
 os._exit(0)
 """
+
+
+def _native_timeout(deadline: float, *, detail: bool) -> float:
+    """Seconds the native subprocess may run. Raises observation_timeout when none is left."""
+    if detail:
+        # A failed optional phase must leave time to publish the metadata batch.
+        reserve = (
+            fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS + fleet_client_policy.POLICY_TIMEOUT_SECONDS
+        )
+        return _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
+    # One extra margin, because the publish loop's first check needs its own margin on top of the reserve.
+    return _remaining(deadline, cap=float("inf"), reserve=PUBLISH_RESERVE_SECONDS + _MARGIN_SECONDS)
 
 
 def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: list[str] | None = None) -> object:
@@ -151,12 +221,17 @@ def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: li
         if len(detail_thread_ids) > PUBLISH_LIMIT:
             raise ObservationError("native_metadata_invalid")
         detail_thread_ids = [_native_id(value) for value in detail_thread_ids]
-    # A failed optional phase must leave time to publish the metadata batch.
-    reserve = fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS if detail_thread_ids is not None else 0
-    timeout = _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
+    timeout = _native_timeout(deadline, detail=detail_thread_ids is not None)
+    from . import fleet_node_projects as inventory_rules
+
     program = (
         f"BUDGET_SECONDS = {float(timeout)!r}\nRESERVE_SECONDS = {DETAIL_RESERVE_SECONDS!r}\n"
-        f"PUBLISH_LIMIT = {PUBLISH_LIMIT!r}\nDETAIL_THREAD_IDS = {detail_thread_ids!r}\n" + _NATIVE_PROGRAM
+        f"PUBLISH_LIMIT = {PUBLISH_LIMIT!r}\nDETAIL_THREAD_IDS = {detail_thread_ids!r}\n"
+        f"REPO_KEY_PATTERN = {inventory_rules.REPO_KEY_PATTERN!r}\nMAX_ID_CHARS = {inventory_rules.MAX_ID_CHARS!r}\n"
+        f"MAX_ENVIRONMENT_ID_CHARS = {inventory_rules.MAX_ENVIRONMENT_ID_CHARS!r}\n"
+        f"PROJECT_ID_PATTERN = {inventory_rules.PROJECT_ID_PATTERN!r}\n"
+        f"MAX_PROJECT_ID_CHARS = {inventory_rules.MAX_PROJECT_ID_CHARS!r}\n"
+        f"MAX_INVENTORY_PROJECTS = {inventory_rules.MAX_PROJECTS!r}\n" + _NATIVE_PROGRAM
     )
     result = proc.run(
         [str(path), "-c", program],
@@ -277,6 +352,67 @@ def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
     return active, total, invalid
 
 
+def _inventory(payload: object) -> tuple[str, list[dict[str, str]], int] | None:
+    """The optional repository inventory with its dropped-row count. Absent means unknown, never empty."""
+    from . import fleet_node_projects as rules
+
+    raw = cast(dict[str, object], payload).get("inventory")
+    if not isinstance(raw, dict):
+        return None
+    environment_id = rules.clean_id(raw.get("environment_id"), rules.MAX_ENVIRONMENT_ID_CHARS)
+    projects = raw.get("projects")
+    native_dropped = raw.get("dropped", 0)
+    if (
+        environment_id is None
+        or not isinstance(projects, list)
+        or len(projects) > rules.MAX_PROJECTS
+        or type(native_dropped) is not int
+        or native_dropped < 0
+    ):
+        return None
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    dropped = native_dropped
+    for item in projects:
+        row = rules.project_row(item)
+        if row is None or row[0] in seen:
+            dropped += 1
+            continue
+        seen.add(row[0])
+        rows.append({"project_id": row[0], "repo_key": row[1]})
+    return environment_id, rows, dropped
+
+
+def _publish_inventory(payload: object, *, deadline: float) -> tuple[str, int]:
+    """Send the inventory once. Returns (ok|error|skipped, dropped rows) and never raises."""
+    try:
+        inventory = _inventory(payload)
+    except Exception:
+        return "skipped", 0
+    if inventory is None:
+        return "skipped", 0
+    if not inventory[1] and inventory[2]:
+        # Every reported row was invalid, so the set is unknown rather than empty.
+        return "skipped", inventory[2]
+    try:
+        _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
+        node_id = fleet_client.resolve_node_id()
+        if node_id == "unknown":
+            return "error", inventory[2]
+        fleet_client_policy.observe_projects(
+            {
+                "node_id": node_id,
+                "environment_id": inventory[0],
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "ttl_seconds": INVENTORY_TTL_SECONDS,
+                "projects": inventory[1],
+            }
+        )
+    except Exception:
+        return "error", inventory[2]
+    return "ok", inventory[2]
+
+
 def _link_publication_batch(
     batch: _PublicationBatch, payload: object, *, interpreter: str, deadline: float
 ) -> _PublicationBatch:
@@ -306,13 +442,65 @@ def _link_publication_batch(
         return batch
 
 
+class _ObservationFailed(ObservationError):
+    """An observation error that also carries the outcome of the best-effort failure health post."""
+
+    def __init__(self, code: str, health: str) -> None:
+        super().__init__(code)
+        self.health = health
+
+
+def _publish_health(ok: bool, *, deadline: float) -> str:
+    """Tell the Hub whether this observation succeeded: (ok|error|skipped) is the post outcome. Never raises.
+
+    The Hub stamps its own receipt time, so no timestamp is sent. Success means the Hub accepted
+    current presence, so a caller sends ok=True only after the session publication returned cleanly.
+    """
+    try:
+        _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
+    except ObservationError:
+        return "skipped"
+    try:
+        node_id = fleet_client.resolve_node_id()
+        if node_id == "unknown":
+            return "error"
+        body: dict[str, object] = {"node_id": node_id, "ok": ok}
+        # Memory rides the health report so placement can treat it as a load input. A node that cannot
+        # read it omits the key; the Hub then records the reading as unknown, never as zero.
+        memory = fleet_node_memory.memory_used()
+        if memory is not None:
+            body["memory_used"] = memory
+        try:
+            fleet_client_policy.observe_t3(body)
+        except fleet_client_policy.FleetPolicyClientError as exc:
+            # A Hub older than this node refuses the unknown field and would otherwise reject every
+            # health report, dropping this node out of placement. Resend once without memory.
+            if "memory_used" not in body or "unknown field 'memory_used'" not in str(exc.message):
+                raise
+            body.pop("memory_used")
+            _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
+            fleet_client_policy.observe_t3(body)
+    except ObservationError:
+        return "skipped"
+    except Exception:
+        return "error"
+    return "ok"
+
+
 def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
     deadline = time.monotonic() + OBSERVATION_BUDGET_SECONDS
     if publish:
         _require_node_auth()
-    payload = _native_metadata(t3_python, deadline)
-    recent, total, invalid = _active_threads(payload)
-    _remaining(deadline, cap=1)
+    try:
+        payload = _native_metadata(t3_python, deadline)
+        recent, total, invalid = _active_threads(payload)
+        _remaining(deadline, cap=1)
+    except Exception as exc:
+        if not publish:
+            raise
+        # A failing observer reports so; a missing report is just as unknown, once the TTL passes.
+        code = str(exc) if isinstance(exc, ObservationError) else "observation_failed"
+        raise _ObservationFailed(code, _publish_health(False, deadline=deadline)) from exc
     report: dict[str, object] = {
         "ok": not invalid,
         "mode": "publish" if publish else "inspect",
@@ -331,9 +519,24 @@ def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
         batch = _select_publication_batch(recent, harness="t3", deadline=deadline)
         if len(cast(dict[str, list[object]], payload)["threads"]) > PUBLISH_LIMIT:
             batch = _link_publication_batch(batch, payload, interpreter=t3_python, deadline=deadline)
-        report.update(_publish_recent(recent, harness="t3", deadline=deadline, batch=batch))
+        report.update(
+            _publish_recent(
+                recent,
+                harness="t3",
+                deadline=deadline,
+                batch=batch,
+                # Leave room for the health post, so a full-cap snapshot still reports health.
+                tail_reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS,
+            )
+        )
         report["skipped"] = cast(int, report["skipped"]) + invalid
         report["ok"] = not (report["truncated"] or invalid or report.get("error"))
+        # Never changes ok or the exit code. Rotation truncation and the inventory do not matter:
+        # only a clean session publication over a fully valid snapshot counts as current presence,
+        # so an invalid (skipped) active thread means the count may be low and is not reported healthy.
+        report["health"] = _publish_health(not (report.get("error") or invalid), deadline=deadline)
+        # After sessions, within the same deadline. Never changes ok or the exit code.
+        report["inventory"], report["inventory_dropped"] = _publish_inventory(payload, deadline=deadline)
     return report
 
 
@@ -344,6 +547,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         report = observe(t3_python=args.t3_python, publish=args.publish)
+    except _ObservationFailed as exc:
+        report = {
+            "ok": False,
+            "error": str(exc),
+            "observed": 0,
+            "published": 0,
+            "skipped": 0,
+            "health": exc.health,
+        }
     except ObservationError as exc:
         report = {"ok": False, "error": str(exc), "observed": 0, "published": 0, "skipped": 0}
     except Exception:

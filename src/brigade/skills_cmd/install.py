@@ -33,13 +33,24 @@ from . import registry
 from . import search_validate
 from . import sync_history
 from . import packs as _packs_mod
+from . import quarantine as _quarantine_mod
 
 
-def _evaluate_install_dir(workspace: Path, harness: str, skill_id: str) -> tuple[Path, bool]:
+def _evaluate_install_dir(
+    workspace: Path, harness: str, skill_id: str, *, leaf_link_is_local: bool = False
+) -> tuple[Path, bool]:
     """Return ``(projected_install_dir, escapes_workspace)`` without raising.
 
     Read-only callers (fleet status) use this to describe a copy that resolves
     outside the workspace instead of treating it as a writable destination.
+
+    ``leaf_link_is_local`` is for callers that classify the leaf themselves
+    (``_installed_path_state``) and refuse or skip every non-plain state: a leaf
+    that is a link (or a Windows reparse point) is then judged by where the
+    link lives, never by where it points, so an outside-pointing link is
+    reported and skipped like an in-workspace one instead of raising. A real
+    (non-link) leaf resolves exactly as before, and a symlinked parent
+    directory is still followed and judged by ``resolve()``.
     """
     if harness == "hermes":
         # Real Hermes reads skills from its own data dir (auto-discovered as a
@@ -54,15 +65,18 @@ def _evaluate_install_dir(workspace: Path, harness: str, skill_id: str) -> tuple
         # before those callers can refuse it.
         return install_dir, not parts or ".." in install_dir.parts
     workspace_resolved = workspace.resolve()
-    resolved = install_dir.resolve()
+    if leaf_link_is_local and (install_dir.is_symlink() or registry._is_reparse_point(install_dir)):
+        resolved = install_dir.parent.resolve() / install_dir.name
+    else:
+        resolved = install_dir.resolve()
     escapes = (
         ".." in install_dir.parts or resolved == workspace_resolved or not resolved.is_relative_to(workspace_resolved)
     )
     return install_dir, escapes
 
 
-def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
-    install_dir, escapes = _evaluate_install_dir(workspace, harness, skill_id)
+def _install_dir(workspace: Path, harness: str, skill_id: str, *, leaf_link_is_local: bool = False) -> Path:
+    install_dir, escapes = _evaluate_install_dir(workspace, harness, skill_id, leaf_link_is_local=leaf_link_is_local)
     if escapes:
         raise ValueError(f"skill install path escapes workspace: {install_dir}")
     parts = _packs_mod._lexical_state_root_parts(workspace, install_dir)
@@ -73,8 +87,13 @@ def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
             with registry._held_state_root(workspace, writable=False) as anchor:
                 registry._state_entry_kind(anchor, *parts)
         except registry.SkillsStatePathError as exc:
-            if not isinstance(exc.__context__, FileNotFoundError):
-                raise
+            if isinstance(exc.__context__, FileNotFoundError):
+                return install_dir
+            if leaf_link_is_local and install_dir.is_symlink():
+                # The caller classifies the linked leaf and skips it; nothing
+                # reads or writes through it.
+                return install_dir
+            raise
     return install_dir
 
 
@@ -311,40 +330,316 @@ def _anchor_subtree_is_plain(anchor: registry._StateRootAnchor, *relative: str) 
             os.close(held)
 
 
+def _plain_link_target(target: str) -> str:
+    r"""Drop the Windows extended-length prefix so a target reads the same everywhere.
+
+    ``os.readlink`` returns ``\\?\D:\x`` for an absolute Windows link and
+    ``\\?\UNC\srv\share`` for a network one; report ``D:\x`` and ``\\srv\share``.
+    The result is display text only: nothing opens, resolves, or compares it.
+    """
+    if target[:8].upper() == "\\\\?\\UNC\\":
+        return "\\\\" + target[8:]
+    if target.startswith("\\\\?\\"):
+        return target[4:]
+    return target
+
+
+def _link_target(installed_dir: Path) -> str | None:
+    """Read one symlink's target string without following the link."""
+    try:
+        return _plain_link_target(os.readlink(installed_dir))
+    except OSError:
+        return None
+
+
+def _installed_path_state(
+    workspace: Path, installed_dir: Path, anchor: registry._StateRootAnchor | None = None
+) -> tuple[str, str | None]:
+    """Classify an installed copy path and return ``(state, link_target)``.
+
+    States are ``dir``, ``missing``, ``symlink``, ``file``, ``other``, and
+    ``unreadable``. The leaf is never followed: ``lstat``/``readlink`` and the
+    anchored state-root walk classify it, so callers can report a symlinked or
+    otherwise non-plain install instead of walking through it. A symlinked
+    PARENT directory outside the state root is still followed by the OS; only
+    the leaf is classified here.
+    """
+    parts = _packs_mod._lexical_state_root_parts(workspace, installed_dir)
+    if parts is not None:
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            return "other", None
+        try:
+            if anchor is not None:
+                kind = registry._state_entry_kind(anchor, *parts)
+            else:
+                with registry._held_state_root(workspace, writable=False) as held:
+                    kind = registry._state_entry_kind(held, *parts)
+        except registry.SkillsStatePathError as exc:
+            if isinstance(exc.__context__, FileNotFoundError):
+                # No state root yet, so nothing is installed there (same
+                # distinction _install_dir makes); nothing to look up by path.
+                return "missing", None
+            if installed_dir.is_symlink():
+                # The anchored walk refused: a redirected leaf is never
+                # followed, it is the non-plain entry it is. This runs only
+                # after that refusal, to report the link and where it points.
+                return "symlink", _link_target(installed_dir)
+            return "unreadable", None
+        # No pathname probe here: the anchored lookup already reports a link or
+        # reparse point at the leaf as a refusal (handled above), and a lookup
+        # by path under the state root is what the containment tests forbid.
+        return kind if kind in {"missing", "dir", "file"} else "other", None
+    try:
+        info = os.lstat(installed_dir)
+    except FileNotFoundError:
+        return "missing", None
+    except OSError:
+        return "other", None
+    if stat_module.S_ISLNK(info.st_mode):
+        return "symlink", _link_target(installed_dir)
+    if registry._is_reparse_point(installed_dir):
+        # An NTFS junction reads as a directory to lstat; it is still a link.
+        return "other", None
+    if stat_module.S_ISDIR(info.st_mode):
+        return "dir", None
+    if stat_module.S_ISREG(info.st_mode):
+        return "file", None
+    return "other", None
+
+
+def _remove_plain_install_dir(dest: Path) -> None:
+    """Remove one installed directory, refusing a link or reparse point at the leaf.
+
+    Callers classify the leaf first; this repeats the check immediately before
+    the removal so a link planted after the classification is refused, never
+    followed or deleted.
+    """
+    if dest.is_symlink() or registry._is_reparse_point(dest):
+        raise registry.SkillsStatePathError(f"installed copy changed to a link while writing; left untouched: {dest}")
+    shutil.rmtree(dest)
+
+
+_STATE_PHRASES = {
+    "symlink": "a symlink",
+    "file": "a regular file",
+    "other": "not a plain directory",
+    "unreadable": "not readable as a plain directory",
+}
+
+
+def _installed_state_reason(state: str, link_target: str | None, installed_dir: Path) -> str:
+    """One human-readable line explaining why an installed copy was skipped."""
+    phrase = _STATE_PHRASES.get(state, "not a plain directory")
+    target = f" to {link_target}" if state == "symlink" and link_target else ""
+    return f"installed copy is {phrase}{target} ({installed_dir}); left untouched"
+
+
+@dataclass(frozen=True)
+class InstalledTreeInspection:
+    """Read-only view of one installed copy; a link at the leaf is reported, not followed."""
+
+    state: str
+    link_target: str | None
+    dirs: list[tuple[str, ...]]
+    files: dict[tuple[str, ...], bytes]
+
+
+def _inspect_installed_tree(
+    workspace: Path, installed_dir: Path, anchor: registry._StateRootAnchor | None = None
+) -> InstalledTreeInspection:
+    """Inspect an installed copy, reporting a non-plain path as its own state.
+
+    Copies located inside ``.brigade`` (e.g. the built-in ``mcp`` target's
+    ``mcp-resources``) are state-root content: they are read through the held
+    state-root descriptor, so a planted symlink is skipped or refuses instead
+    of dragging outside bytes into diffs, drift, or rollback material. Trusted
+    harness directories outside the state root keep the plain descriptor walk.
+    A symlinked, dangling, regular-file, or otherwise refused leaf yields an
+    empty snapshot and the state that explains it, so read-only callers never
+    raise and never follow a link at the leaf (a symlinked parent directory is
+    still followed outside the state root).
+    """
+    state, link_target = _installed_path_state(workspace, installed_dir, anchor=anchor)
+    if state != "dir":
+        return InstalledTreeInspection(state, link_target, [], {})
+    parts = _packs_mod._lexical_state_root_parts(workspace, installed_dir)
+    if parts is None:
+        try:
+            dirs, files = registry._collect_source_tree(installed_dir)
+        except registry.SkillsStatePathError:
+            return InstalledTreeInspection("unreadable", link_target, [], {})
+        return InstalledTreeInspection("dir", link_target, dirs, files)
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return InstalledTreeInspection("unreadable", link_target, [], {})
+    try:
+        if anchor is not None:
+            dirs, files = registry._read_tree_from_anchor(anchor, *parts)
+        else:
+            with registry._held_state_root(workspace, writable=False) as held:
+                dirs, files = registry._read_tree_from_anchor(held, *parts)
+    except registry.SkillsStatePathError:
+        return InstalledTreeInspection("unreadable", link_target, [], {})
+    return InstalledTreeInspection("dir", link_target, dirs, files)
+
+
 def _installed_tree_snapshot(
     workspace: Path, installed_dir: Path, anchor: registry._StateRootAnchor | None = None
 ) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
     """Collect an installed copy's plain files for inspection.
 
-    Copies located inside ``.brigade`` (e.g. the built-in ``mcp`` target's
-    ``mcp-resources``) are state-root content: they are read through the held
-    state-root descriptor, so a planted symlink is skipped or refuses instead
-    of dragging outside bytes into diffs, drift, or rollback material.
-    Trusted harness directories outside the state root keep the plain
-    descriptor walk.
+    A non-plain installed path (symlink, dangling link, regular file, refused
+    subtree) contributes an empty snapshot; use ``_inspect_installed_tree``
+    when the caller also needs the state that explains the absence.
     """
-    parts = _packs_mod._lexical_state_root_parts(workspace, installed_dir)
-    if parts is None:
-        if not installed_dir.is_dir():
-            return [], {}
-        return registry._collect_source_tree(installed_dir)
-    if any(part in {"", ".", ".."} for part in parts):
-        return [], {}
+    inspection = _inspect_installed_tree(workspace, installed_dir, anchor=anchor)
+    return inspection.dirs, inspection.files
 
-    def _collect(held: registry._StateRootAnchor) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
-        if registry._state_entry_kind(held, *parts) != "dir":
-            return [], {}
-        return registry._read_tree_from_anchor(held, *parts)
 
-    if anchor is not None:
-        return _collect(anchor)
+def _local_edit_state(
+    receipt: dict[str, Any], files: dict[tuple[str, ...], bytes], *, skill_id: str, harness: str
+) -> str:
+    """Compare installed bytes with the receipt: ``current``, ``changed`` or ``unknown``.
+
+    ``unknown`` means the bytes cannot be judged: no SKILL.md on disk, no
+    receipt satisfying the contract to prove what was installed, or a receipt
+    from before ``installed.edit_fingerprint`` that cannot vouch for a nested
+    ``skill.json``. Callers that protect hand edits treat only ``current`` as
+    safe to replace; ``changed`` is a proven edit.
+    """
+    installed_raw = files.get(("SKILL.md",))
+    if installed_raw is None or not receipt or not _valid_receipt_contract(receipt, skill_id=skill_id, harness=harness):
+        return "unknown"
+    installed = receipt["installed"]
+    if installed.get("skill_fingerprint") != registry._text_fingerprint(
+        installed_raw.decode("utf-8", errors="replace")
+    ) or installed.get("metadata_fingerprint") != registry._bytes_fingerprint(files.get(("skill.json",))):
+        return "changed"
+    edit_fingerprint = installed.get("edit_fingerprint")
+    if isinstance(edit_fingerprint, str) and edit_fingerprint:
+        return "current" if edit_fingerprint == registry._edit_fingerprint(files) else "changed"
+    # The receipt predates the edit digest, whose bundle digest ignored every
+    # skill.json. A difference elsewhere is a real edit; matching bytes are only
+    # provable pristine when no nested skill.json exists to have been skipped.
+    if installed.get("bundle_fingerprint") != registry._files_fingerprint(files):
+        return "changed"
+    nested_metadata = any(parts[-1] == "skill.json" and parts != ("skill.json",) for parts in files)
+    return "unknown" if nested_metadata else "current"
+
+
+TreeIdentity = _quarantine_mod.TreeIdentity
+
+
+def _tree_identity(installed_dir: Path, inspection: InstalledTreeInspection) -> TreeIdentity | None:
+    """Identity of the directory that was just inspected, or ``None`` when it is not a plain directory."""
+    if inspection.state != "dir":
+        return None
     try:
-        with registry._held_state_root(workspace, writable=False) as fresh_anchor:
-            return _collect(fresh_anchor)
-    except registry.SkillsStatePathError:
-        # A redirected or planted component contributes nothing rather than
-        # being followed; callers report absence instead of outside content.
-        return [], {}
+        info = os.lstat(installed_dir)
+    except OSError:
+        return None
+    return TreeIdentity(info.st_dev, info.st_ino, _quarantine_mod.tree_digest(inspection.dirs, inspection.files))
+
+
+def _require_tree_unchanged(
+    expected: TreeIdentity | None,
+    workspace: Path,
+    installed_dir: Path,
+    *,
+    anchor: registry._StateRootAnchor | None = None,
+) -> None:
+    """Refuse the mutation unless the copy is still exactly what the drift check saw.
+
+    The edit check and the removal it protects are separated by snapshots,
+    lints and binding checks, so a hand edit or a swapped directory can land in
+    between. Callers run this immediately before each removal or replacement.
+    """
+    actual = _tree_identity(installed_dir, _inspect_installed_tree(workspace, installed_dir, anchor=anchor))
+    if expected is None or actual != expected:
+        raise registry.SkillsStatePathError(
+            f"installed copy changed after it was checked: {installed_dir}; left untouched, run again"
+        )
+
+
+def _local_edit_diff_command(*, workspace: Path, selector: str, harness: str, against: str) -> str:
+    return shlex.join(
+        ["brigade", "skills", "diff", selector, "--target", str(workspace), "--harness", harness, "--against", against]
+    )
+
+
+def _local_edit_selector(receipt: dict[str, Any], *, skill_id: str, fallback: str) -> tuple[str, str]:
+    """Selector and ``--against`` baseline for the diff and discard commands.
+
+    Derived from the receipt's recorded source so the printed commands name the
+    same source the copy was installed from; ``fallback`` is the caller's own
+    selector when the receipt records none that can be named.
+    """
+    from .adapters import _fleet_source_selector
+
+    selector = _fleet_source_selector(skill_id, receipt) or fallback
+    return selector, "registry" if selector.startswith("registry:") else "bundled"
+
+
+def _local_edit_discard_command(*, workspace: Path, selector: str, harness: str) -> str:
+    """The explicit override: reinstall over the edit; a rollback snapshot is taken first."""
+    return shlex.join(
+        [
+            "brigade",
+            "skills",
+            "install",
+            selector,
+            "--workspace",
+            str(workspace),
+            "--target",
+            harness,
+            "--force",
+            "--discard-local-edits",
+        ]
+    )
+
+
+def _local_edit_rollback_discard_command(*, workspace: Path, skill_id: str, harness: str) -> str:
+    """The explicit override for a rollback: the edit is snapshotted, then replaced."""
+    return shlex.join(
+        [
+            "brigade",
+            "skills",
+            "rollback",
+            skill_id,
+            "--workspace",
+            str(workspace),
+            "--target",
+            harness,
+            "--discard-local-edits",
+        ]
+    )
+
+
+def installed_local_edit(workspace: Path, skill_id: str, harness: str) -> str:
+    """Read-only edit state of an installed copy against its receipt.
+
+    ``current``, ``changed`` or ``unknown``, plus ``missing`` when no copy exists.
+    Autonomous callers (outcome reconcile) use it to leave a hand-edited or
+    unverifiable copy alone before they roll back or uninstall; they never see
+    the bytes. ``unknown`` is a veto exactly like ``changed``: a receipt the
+    agent's own user can delete or rewrite may stop a write, never authorize it.
+    """
+    try:
+        dest = _install_dir(workspace, harness, skill_id, leaf_link_is_local=True)
+    except (ValueError, registry.SkillsStatePathError):
+        return "unknown"
+    inspection = _inspect_installed_tree(workspace, dest)
+    if inspection.state == "missing":
+        return "missing"
+    receipt = _latest_install_receipt(workspace, skill_id, harness)
+    return _local_edit_state(receipt, inspection.files, skill_id=skill_id, harness=harness)
+
+
+def _local_edit_reason(*, installed_dir: Path, diff_command: str, discard_command: str) -> str:
+    return (
+        f"installed copy {installed_dir} has local edits and was kept; "
+        f"review with `{diff_command}`, or overwrite with `{discard_command}` "
+        "(a rollback snapshot is taken first)"
+    )
 
 
 def _drift_payload(
@@ -355,9 +650,13 @@ def _drift_payload(
     lint_payload: dict[str, Any],
     rendered: str,
     installed_dir: Path,
+    inspection: InstalledTreeInspection | None = None,
 ) -> dict[str, Any]:
     receipt = _latest_install_receipt(target, skill_id, harness)
-    snapshot_dirs, snapshot_files = _installed_tree_snapshot(target, installed_dir)
+    if inspection is None:
+        inspection = _inspect_installed_tree(target, installed_dir)
+    path_state = inspection.state
+    snapshot_files = inspection.files
     installed_raw = snapshot_files.get(("SKILL.md",))
     installed_present = installed_raw is not None
     installed_text = installed_raw.decode("utf-8", errors="replace") if installed_raw is not None else ""
@@ -368,7 +667,21 @@ def _drift_payload(
     installed_bundle_fingerprint = registry._files_fingerprint(snapshot_files) if snapshot_files else None
     installed_metadata_fingerprint = registry._bytes_fingerprint(snapshot_files.get(("skill.json",)))
     known = _valid_receipt_contract(receipt, skill_id=skill_id, harness=harness)
-    if not installed_present and receipt and not known:
+    if path_state == "symlink":
+        # A linked installed copy is reported, never followed or diffed (leaf only).
+        overall = "symlink"
+        source_state = "unknown"
+        render_state = "unknown"
+        local_state = "unknown"
+    elif path_state != "dir" and path_state != "missing":
+        overall = "unusable"
+        source_state = "unknown"
+        render_state = "unknown"
+        local_state = "unknown"
+    elif not installed_present and (snapshot_files or (receipt and not known)):
+        # Leftover files without SKILL.md are neither missing nor current: a
+        # write would have to guess what to overwrite, so every reader reports
+        # unknown and ``install --force`` is the only way to repair it.
         overall = "unknown"
         source_state = "unknown"
         render_state = "unknown"
@@ -386,7 +699,6 @@ def _drift_payload(
     else:
         receipt_source = receipt["source"]
         receipt_render = receipt["render"]
-        receipt_installed = receipt["installed"]
         source_state = (
             "current"
             if receipt_source.get("identity") == current_source.get("identity")
@@ -395,13 +707,7 @@ def _drift_payload(
             else "changed"
         )
         render_state = "current" if receipt_render.get("identity") == current_render.get("identity") else "changed"
-        local_state = (
-            "current"
-            if receipt_installed.get("bundle_fingerprint") == installed_bundle_fingerprint
-            and receipt_installed.get("skill_fingerprint") == installed_skill_fingerprint
-            and receipt_installed.get("metadata_fingerprint") == installed_metadata_fingerprint
-            else "changed"
-        )
+        local_state = _local_edit_state(receipt, snapshot_files, skill_id=skill_id, harness=harness)
         overall = "changed" if "changed" in {source_state, render_state, local_state} else "current"
     return {
         "overall": overall,
@@ -411,6 +717,8 @@ def _drift_payload(
         "receipt_known": known,
         "content_changed": installed_text != rendered,
         "installed": installed_present,
+        "path_state": path_state,
+        "link_target": inspection.link_target,
         "installed_skill_fingerprint": installed_skill_fingerprint,
         "installed_bundle_fingerprint": installed_bundle_fingerprint,
         "installed_metadata_fingerprint": installed_metadata_fingerprint,
@@ -469,7 +777,13 @@ def _review_binding(
             _dirs, source_files = registry._collect_source_tree(registry._bundled_skill_path(skill_id))
     dest = _install_dir(workspace, harness, skill_id)
     if installed_files is None:
-        _dirs, installed_files = _installed_tree_snapshot(workspace, dest, anchor=anchor)
+        inspection = _inspect_installed_tree(workspace, dest, anchor=anchor)
+        if inspection.state not in {"dir", "missing"}:
+            # A link, regular file, or a directory the no-follow collector
+            # refuses (hardlink, unreadable entry) has no honest installed
+            # identity; refuse instead of binding an empty one.
+            raise registry.SkillsStatePathError(_installed_state_reason(inspection.state, inspection.link_target, dest))
+        installed_files = inspection.files
     rollback = None
     snapshot = receipt.get("rollback_snapshot")
     if snapshot is not None:
@@ -533,9 +847,11 @@ def install(
     skill: str,
     harness: str,
     force: bool = False,
+    discard_local_edits: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
+    """Install a skill."""
     workspace = workspace.expanduser().resolve()
     install_targets = _install_targets(workspace)
     if harness not in (*install_targets, "all"):
@@ -692,9 +1008,19 @@ def install(
         for install_target in targets:
             if install_target == "hermes" and not registry._hermes_home().exists():
                 # Do not create ~/.hermes for someone who does not run Hermes.
-                skipped.append({"target": "hermes", "reason": "Hermes home not found (is Hermes installed?)"})
+                skipped.append(
+                    {
+                        "target": "hermes",
+                        "reason": "Hermes home not found (is Hermes installed?)",
+                        "not_applicable": True,
+                    }
+                )
                 continue
-            dest = _install_dir(workspace, install_target, skill_id)
+            try:
+                dest = _install_dir(workspace, install_target, skill_id, leaf_link_is_local=True)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
             source_text = source_skill_md.decode("utf-8", errors="replace")
             rendered_text = registry._render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
             render_fingerprint = registry._text_fingerprint(rendered_text)
@@ -721,15 +1047,22 @@ def install(
                 return 1
             install_files = dict(snapshot_files)
             install_files[("SKILL.md",)] = rendered_text.encode("utf-8")
+            dest_state, dest_link_target = _installed_path_state(workspace, dest, anchor=state_anchor)
+            if dest_state not in {"dir", "missing"}:
+                # A symlinked, dangling, or otherwise non-plain destination is
+                # never replaced, followed, or cleaned up, with or without --force.
+                # An explicit single harness without --force keeps the old
+                # non-zero exit; --force or --harness all records the skip.
+                reason = _installed_state_reason(dest_state, dest_link_target, dest)
+                if harness != "all" and not force:
+                    print(f"error: installed skill already exists and was not replaced: {reason}", file=sys.stderr)
+                    return 2
+                skipped.append({"target": install_target, "reason": reason})
+                continue
             install_rel = str(_adapter_map(workspace)[install_target]["install_path"]).format(skill_id=skill_id)
             under_state_root = install_rel.startswith(".brigade/")
             state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
-            if under_state_root:
-                dest_kind = registry._state_entry_kind(state_anchor, *state_parts)
-                dest_present = dest_kind != "missing"
-            else:
-                dest_kind = "dir" if dest.exists() else "missing"
-                dest_present = dest.exists()
+            dest_present = dest_state == "dir"
             if dest_present and not force:
                 print(f"error: installed skill already exists: {dest}", file=sys.stderr)
                 return 2
@@ -751,9 +1084,55 @@ def install(
                     source_files=snapshot_files,
                     target_files=install_files,
                 )
+            # Classify again immediately before anything is written: a link
+            # planted since the first check is skipped here, before any
+            # rollback snapshot exists.
+            recheck_state, recheck_link_target = _installed_path_state(workspace, dest, anchor=state_anchor)
+            if recheck_state not in {"dir", "missing"}:
+                reason = _installed_state_reason(recheck_state, recheck_link_target, dest)
+                if harness != "all" and not force:
+                    print(
+                        f"error: installed skill changed while installing and was not replaced: {reason}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                skipped.append({"target": install_target, "reason": reason})
+                continue
+            if recheck_state != dest_state:
+                raise registry.SkillsStatePathError(f"installed copy changed while installing: {dest}; run again")
             previous_receipt = _previous_install_receipt(state_anchor, skill_id=skill_id, harness=install_target)
+            checked_identity: TreeIdentity | None = None
+            if dest_present:
+                inspected = _inspect_installed_tree(workspace, dest, anchor=state_anchor)
+                checked_identity = _tree_identity(dest, inspected)
+            if dest_present and not discard_local_edits:
+                # A hand-edited copy is never replaced by --force alone: the
+                # receipt proves what was installed, so bytes that differ are
+                # an edit. Without a receipt a manual --force (operator-driven)
+                # may repair a legacy copy. This runs before any snapshot or
+                # removal.
+                edit_state = _local_edit_state(
+                    previous_receipt, inspected.files, skill_id=skill_id, harness=install_target
+                )
+                if edit_state == "changed":
+                    selector, against = _local_edit_selector(previous_receipt, skill_id=skill_id, fallback=skill)
+                    reason = _local_edit_reason(
+                        installed_dir=dest,
+                        diff_command=_local_edit_diff_command(
+                            workspace=workspace, selector=selector, harness=install_target, against=against
+                        ),
+                        discard_command=_local_edit_discard_command(
+                            workspace=workspace, selector=selector, harness=install_target
+                        ),
+                    )
+                    if harness != "all":
+                        print(f"error: {reason}", file=sys.stderr)
+                        return 2
+                    skipped.append({"target": install_target, "reason": reason, "local_edit": True})
+                    continue
             rollback_snapshot: str | None = None
             rollback_snapshot_fingerprint: str | None = None
+            quarantine: _quarantine_mod.TreeQuarantine | None = None
             if dest_present:
                 stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-")
                 rollback_dir = registry._rollback_root(workspace, skill_id, install_target) / stamp
@@ -762,7 +1141,7 @@ def install(
                 # directory symlink is refused before dest.exists() can
                 # follow it; a non-plain subtree is not copied into rollback.
                 if under_state_root:
-                    if dest_kind == "dir" and _anchor_subtree_is_plain(state_anchor, *state_parts):
+                    if dest_state == "dir" and _anchor_subtree_is_plain(state_anchor, *state_parts):
                         replaced_dirs, replaced_files = _installed_tree_snapshot(workspace, dest, anchor=state_anchor)
                     else:
                         replaced_dirs, replaced_files = [], {}
@@ -784,17 +1163,44 @@ def install(
                 )
                 rollback_snapshot = str(rollback_dir)
                 rollback_snapshot_fingerprint = registry._files_fingerprint(replaced_files)
-                if expected_binding is not None:
-                    _check_review_binding(expected_binding, workspace, skill_id, install_target, anchor=state_anchor)
+                try:
+                    if expected_binding is not None:
+                        _check_review_binding(
+                            expected_binding, workspace, skill_id, install_target, anchor=state_anchor
+                        )
+                    # Bind the removal to the bytes the edit check and snapshot saw:
+                    # the cheap re-check first, then move the copy aside and verify
+                    # what was actually moved, so a write after the check lands on
+                    # the quarantined object and is caught, never deleted.
+                    _require_tree_unchanged(checked_identity, workspace, dest, anchor=state_anchor)
+                    quarantine = _quarantine_mod.quarantine_checked_tree(
+                        dest,
+                        checked_identity,
+                        anchor=state_anchor if under_state_root else None,
+                        state_parts=state_parts if under_state_root else None,
+                    )
+                except registry.SkillsStatePathError:
+                    # Nothing was replaced yet, so the snapshot just written
+                    # must not outlive the refusal.
+                    with contextlib.suppress(registry.SkillsStatePathError, OSError):
+                        registry._remove_tree_in_anchor(
+                            state_anchor, "skills", "rollback", skill_id, install_target, stamp
+                        )
+                    raise
+            try:
                 if under_state_root:
-                    registry._remove_tree_in_anchor(state_anchor, *state_parts)
+                    registry._write_collected_tree_into_anchor(
+                        snapshot_dirs, install_files, state_anchor, *state_parts, replace=quarantine is None
+                    )
                 else:
-                    shutil.rmtree(dest)
-            if under_state_root:
-                registry._write_collected_tree_into_anchor(snapshot_dirs, install_files, state_anchor, *state_parts)
-            else:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                registry._write_snapshot_tree(snapshot_dirs, install_files, dest)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    registry._write_snapshot_tree(snapshot_dirs, install_files, dest, fresh=quarantine is not None)
+            except BaseException:
+                if quarantine is not None:
+                    quarantine.abort_publish()
+                raise
+            if quarantine is not None:
+                quarantine.discard()
             # Fingerprints are computed from the same bytes that were written;
             # nothing is read back through a pathname.
             installed_fingerprint = registry._files_fingerprint(install_files)
@@ -815,6 +1221,7 @@ def install(
                 "render": {**render_contract, "fingerprint": render_fingerprint},
                 "installed": {
                     "bundle_fingerprint": installed_fingerprint,
+                    "edit_fingerprint": registry._edit_fingerprint(install_files),
                     "skill_fingerprint": installed_skill_fingerprint,
                     "metadata_fingerprint": installed_metadata_fingerprint,
                 },
@@ -847,7 +1254,7 @@ def install(
                 data=(json.dumps(history_receipt, sort_keys=True) + "\n").encode("utf-8"),
             )
             receipts.append(receipt)
-    except registry.SkillsStatePathError as exc:
+    except (registry.SkillsStatePathError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     finally:
@@ -863,7 +1270,8 @@ def install(
         "receipts": receipts,
         "skipped": skipped,
     }
-    payload = {"installed": True, "receipt": receipt}
+    # Honest result: nothing is reported installed when every target was skipped.
+    payload = {"installed": bool(receipts), "receipt": receipt}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -874,6 +1282,8 @@ def install(
         print(f"  receipt: {item['receipt_path']}")
     for item in skipped:
         print(f"- {item['target']}: skipped ({item['reason']})")
+    if not receipts:
+        print("installed: no (every target was skipped)")
     return 0
 
 

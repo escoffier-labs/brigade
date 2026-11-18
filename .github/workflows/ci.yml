@@ -728,6 +728,18 @@ jobs:
         run: python scripts/managed_snapshot.py --check
       - name: Template profile snapshot
         run: python scripts/template_profile_snapshot.py --check
+      - name: Fetch release tags
+        # The shipped-file history check verifies each recorded digest against the tag that
+        # shipped it; the checkout above is shallow and carries no tags.
+        run: git fetch --force --depth=1 origin 'refs/tags/v*:refs/tags/v*'
+      - name: Fetch shipped file history base
+        # The append-only comparison reads the manifest on the base branch; fetch that ref here
+        # instead of relying on an earlier step's side effect.
+        run: git fetch --no-tags --depth=1 origin '+refs/heads/${{ github.base_ref || 'main' }}:refs/remotes/origin/${{ github.base_ref || 'main' }}'
+      - name: Shipped file history
+        env:
+          BRIGADE_SHIPPED_HISTORY_BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: python scripts/shipped_file_history.py --check --require-provenance
 
   test-shards:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
@@ -1156,6 +1168,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+      # README.md is documentation, so a README-only diff skips every test
+      # suite. These tests assert the top-level README header and the wordmark
+      # asset, so they run here, where documentation-only diffs still reach
+      # Python. Keep the list limited to README content assertions.
+      - name: README content tests
+        run: |
+          python -m pytest \
+            tests/test_readme_brand_header.py \
+            tests/test_retired_connector_review.py::test_current_setup_references \
+            -q
       - name: Command Inventory
         run: |
           set +e

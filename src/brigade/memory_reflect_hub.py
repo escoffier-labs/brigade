@@ -1,4 +1,4 @@
-"""Scheduled hub reflection opens proposals and never decides or applies them."""
+"""Scheduled hub reflection with optional Tier 0 application and a watch over policy-actor applies."""
 
 from __future__ import annotations
 
@@ -13,12 +13,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from . import memory_claim_blocks as claim_blocks
 from . import memory_fairness as fairness
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
 from . import memory_hub_sync as sync
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
+from . import memory_reflect_anchors as anchors
 from . import memory_reflect_candidates as derive
 from . import memory_reflect_ledger as ledger
 from . import memory_reflect_links as links
@@ -75,6 +77,10 @@ def _code(value: object) -> bool:
 # Optional ledger fields kept beside the request id by reflection and other jobs.
 LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
+    "attempted_ms": lambda value: type(value) is int and value >= 0,
+    "anchor_review_only": lambda value: type(value) is int and value >= 0,
+    # The time the hub left the proposal open for review. Older state wrote `True`.
+    "lineage_review": lambda value: value is True or (type(value) is int and value >= 0),
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -117,7 +123,12 @@ def schedule_status(target: Path) -> dict[str, Any]:
         submissions = state.get("submissions", {})
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
-        if not all(valid_submission(digest, pending, frozenset({"pins"})) for digest, pending in submissions.items()):
+        if not all(
+            valid_submission(
+                digest, pending, frozenset({"pins", "attempted_ms", "anchor_review_only", "lineage_review"})
+            )
+            for digest, pending in submissions.items()
+        ):
             raise ValueError(STATE_ERROR)
         for lane in LANES:
             schedule = state.get(lane, {})
@@ -178,8 +189,37 @@ def _save(target: Path, state: dict[str, Any]) -> None:
                 pass
 
 
+# Hub holds that leave a proposal open for a human, because applying it could change lineage order.
+LINEAGE_REVIEW_CODES = frozenset({"lineage_requires_review", "retrieval_eval_lineage_exposed"})
+
+
+def _awaits_lineage_review(automatic: object) -> bool:
+    checks = automatic.get("checks") if isinstance(automatic, dict) else None
+    return isinstance(checks, list) and any(
+        isinstance(check, dict) and check.get("code") in LINEAGE_REVIEW_CODES for check in checks
+    )
+
+
+# A withdrawn anchoring proposal waits this long before reflection proposes the same anchor again.
+ANCHOR_WITHDRAWN_RETRY_MS = 7 * 24 * 60 * 60 * 1000
+
+
+# A proposal left open for lineage review waits this long before reflection proposes it again.
+LINEAGE_REVIEW_RETRY_MS = 7 * 24 * 60 * 60 * 1000
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _lineage_review_expired(reviewed_ms: object) -> bool:
+    """A future time counts as expired, so local state cannot stretch the window.
+
+    The first version of this field was a bare `True` with no time, which counts as expired too.
+    """
+    if type(reviewed_ms) is not int:
+        return True
+    return not 0 <= _now_ms() - reviewed_ms < LINEAGE_REVIEW_RETRY_MS
 
 
 def _submission_digest(ops: list[dict[str, Any]]) -> str:
@@ -263,7 +303,8 @@ def _ops(heads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, i
         reason = "missing_pin"
         try:
             blocks = delta.blocks(keeper["text"])
-            block = next((b for b in blocks if b.block_id), None)
+            pins = claim_blocks.hub_pins(keeper["text"])
+            block = next((b for b in blocks if claim_blocks.hub_addressable(keeper["text"], b, pins)), None)
             if block is None:
                 raise ValueError("duplicate keeper has no pinned block")
             reason = "invalid_metadata"
@@ -328,6 +369,7 @@ class Submitted:
     code: str | None = None
     # Hub codes of the refusals this submission met, in order. Never hub text.
     refusals: tuple[str, ...] = ()
+    anchor_no_delta: bool = False
 
 
 def submit(
@@ -384,7 +426,12 @@ def submit(
             elif 400 <= exc.status < 500 and exc.status not in (408, 429) and exc.body.get("retryable") is not True:
                 pending["refused"] = code
                 save()
-            return Submitted(FAILED, code=code, refusals=tuple(refusals))
+            return Submitted(
+                FAILED,
+                code=code,
+                refusals=tuple(refusals),
+                anchor_no_delta=(code == "memory_anchor_no_delta"),
+            )
         except hubc.HubUnavailable:
             return Submitted(UNAVAILABLE, code="hub_unavailable", refusals=tuple(refusals))
         if not _event_id(opened.get("proposal_id")) or opened.get("state") not in ("pending", "held"):
@@ -434,6 +481,8 @@ def _reflect(
     scope: str | None,
     limit: int,
     dry_run: bool,
+    watch: bool = False,
+    apply: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= limit <= 100:
         raise ReflectError("hub_reflect_limit_invalid", "--limit must be from 1 to 100")
@@ -442,11 +491,16 @@ def _reflect(
     try:
         near_limit, near_cap = near.settings(target)
         link_cap = links.settings(target)
+        reflected = near.reflected_scopes(target, settings.read_scopes)
     except near.ThresholdError as exc:
         raise ReflectConfigError(str(exc)) from None
     with store.locked(target):
         _check_replica_files(target, scope=scope, dry_run=dry_run)
     configured_scopes = settings.read_scopes
+    if scope:
+        if scope not in reflected:
+            raise ReflectError("hub_reflect_scope_invalid", "--scope must be listed in [reflect] scopes")
+        reflected = (scope,)
     settings = replace(
         settings,
         read_scopes=(scope,) if scope else configured_scopes,
@@ -502,6 +556,20 @@ def _reflect(
         sync.refresh_scan_metadata(target, client, settings)
         heads = read_heads()
         check_bounds()
+    watched = []
+    if watch and not dry_run:
+        from . import memory_compensation_watch
+
+        # Only reflected scopes can hold this principal's automatic applies. A
+        # missing grant in one of them still fails the run, so revocation stays visible.
+        watched = memory_compensation_watch.run(client, reflected, report["log_epoch"])
+        if watched:
+            # Rollbacks invalidate the inputs for proposing. Pull their committed heads first.
+            report = sync.pull(target, client, settings)
+            if report.get("warnings") or report.get("seq") is None:
+                raise ReflectError("hub_reflect_replica_incomplete", "compensation watch requires a fresh replica")
+            heads = read_heads()
+            check_bounds()
     # Each submission is one propose request. Exact merges stay one op each and
     # always come before every near-duplicate and link-repair submission, so they get the quota first.
     exact: list[list[dict[str, Any]]] = []
@@ -511,7 +579,7 @@ def _reflect(
     budget = near.Budget()
     link_stats = {"links": 0, "broken": 0, "repairs": 0}
     link_index = links.Index(heads)
-    for name in settings.read_scopes:
+    for name in reflected:
         scoped = [head for head in heads if head["scope"] == name]
         scope_ops, scope_skips = _ops(scoped)
         exact.extend([op] for op in scope_ops)
@@ -531,12 +599,43 @@ def _reflect(
     live = {(head["scope"], head["card_id"]): head["revision"] for head in heads}
     previous = {d: p for d, p in previous.items() if ledger.current(p, live, _now_ms(), settings.read_scopes)}
 
+    retries: list[tuple[str, list[dict[str, Any]]]] = []
+    # Digests whose lineage review window ran out, so a duplicate answer can re-arm the flag.
+    lapsed_reviews: set[str] = set()
+
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []
         for ops in submissions:
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
-            if remembered.get("proposal_id"):
+            withdrawn_ms = remembered.get("anchor_review_only")
+            reviewed_ms = remembered.get("lineage_review")
+            if reviewed_ms is not None and not _lineage_review_expired(reviewed_ms):
+                # The hub kept it open for review. A retry would be held the same way.
+                skipped["lineage_review"] = skipped.get("lineage_review", 0) + 1
+            elif reviewed_ms is not None:
+                # The link may be gone and the proposal decided by now. Forget it so a later
+                # run proposes the card again. The hub reports a still-open copy as a duplicate.
+                previous.pop(digest, None)
+                lapsed_reviews.add(digest)
+                fresh.append((digest, ops))
+            elif type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
+                # A future timestamp counts as expired, so local state cannot stretch the window.
+                if 0 <= _now_ms() - withdrawn_ms < ANCHOR_WITHDRAWN_RETRY_MS:
+                    skipped["anchor_review_only"] = skipped.get("anchor_review_only", 0) + 1
+                else:
+                    # The withdrawal only delays this anchor. Forget the rejected proposal so a
+                    # later run proposes it again, even if local state named the wrong proposal.
+                    previous.pop(digest, None)
+                    fresh.append((digest, ops))
+            elif remembered.get("proposal_id") and apply and not dry_run:
+                from .memory_reflect_policy import allowed
+
+                if allowed(target, ops) is None:
+                    retries.append((digest, ops))
+                else:
+                    skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
+            elif remembered.get("proposal_id"):
                 skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
             elif remembered.get("refused"):
                 skipped["refused"] = skipped.get("refused", 0) + 1
@@ -591,17 +690,37 @@ def _reflect(
     if first == LINK_LANE:
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
-    remaining = unremembered(exact) + alternating
-    selected = remaining[:limit]
+    pending_anchors = unremembered(anchors.ops([head for head in heads if head["scope"] in reflected]))
+    remaining = unremembered(exact) + alternating + pending_anchors[: anchors.MAX_PROPOSALS]
+    # Retry budget is separate so held proposals cannot consume new-work slots.
+    # Retries reuse an opened proposal and never submit, so they run first and a
+    # full new-proposal quota cannot block them.
+    retries.sort(key=lambda item: (previous[item[0]].get("attempted_ms", 0), item[0]))
+    # Held anchoring proposals share the same per-run card budget as new ones.
+    selected = []
+    anchored_count = 0
+    for digest, ops in retries[:limit] + remaining[:limit]:
+        anchoring = ops[0]["type"] == "anchor_blocks"
+        if anchoring and anchored_count >= anchors.MAX_PROPOSALS:
+            continue
+        anchored_count += anchoring
+        selected.append((digest, ops))
+    anchor_candidates = sum(ops[0]["type"] == "anchor_blocks" for _, ops in retries) + len(pending_anchors)
+    if anchor_candidates > anchored_count:
+        skipped["anchor_deferred"] = anchor_candidates - anchored_count
     proposals = []
     refused: list[dict[str, str]] = []
     error = None
     failed_ops = 0
+    no_delta_ops = 0
     attempted = len(selected)
     if not dry_run:
         # Preserve unprocessed submissions under this binding across scope and limit changes.
         state.update(binding=binding, submissions=previous, **tables)
 
+        from .memory_reflect_policy import AutoApplyPacer
+
+        pacer = AutoApplyPacer()
         served_any = False
 
         def served(digest: str) -> None:
@@ -612,14 +731,26 @@ def _reflect(
                 tables[lane][name][key][1] = now
 
         for position, (digest, ops) in enumerate(selected):
-            sent = submit(
-                client,
-                previous,
-                digest,
-                ops,
-                base_epoch=report["log_epoch"],
-                save=lambda: _save(target, state),
-                fields={"pins": ledger.pins(ops)},
+            anchoring = all(op["type"] == "anchor_blocks" for op in ops)
+            remembered_id = previous.get(digest, {}).get("proposal_id")
+            if anchoring and not remembered_id:
+                quota = client.call("status").get("proposal_quota", {})
+                pending, cap = quota.get("pending"), quota.get("pending_per_principal")
+                if type(pending) is not int or type(cap) is not int or pending >= max(0, cap - 4):
+                    skipped["anchor_quota_reserve"] = skipped.get("anchor_quota_reserve", 0) + 1
+                    continue
+            sent = (
+                Submitted(OPENED, proposal_id=remembered_id)
+                if remembered_id and apply
+                else submit(
+                    client,
+                    previous,
+                    digest,
+                    ops,
+                    base_epoch=report["log_epoch"],
+                    save=lambda: _save(target, state),
+                    fields={"pins": ledger.pins(ops)},
+                )
             )
             refused.extend({"op_digest": digest, "code": code} for code in sent.refusals)
             if sent.outcome == QUOTA:
@@ -631,19 +762,64 @@ def _reflect(
                 error = sent.code
                 break
             if sent.outcome == FAILED:
-                failed_ops += 1
+                if sent.anchor_no_delta:
+                    no_delta_ops += 1
+                    skipped["anchor_no_delta"] = skipped.get("anchor_no_delta", 0) + 1
+                else:
+                    failed_ops += 1
                 continue
             if sent.proposal_id is not None:
                 served(digest)
                 _save(target, state)
             if sent.outcome == DUPLICATE:
                 skipped["duplicate_pending"] = skipped.get("duplicate_pending", 0) + 1
+                if digest in lapsed_reviews and sent.proposal_id is not None and digest in previous:
+                    # The hub still holds the proposal for review. Arm the window again so later
+                    # runs skip it instead of retrying an automatic apply that stays held.
+                    previous[digest]["lineage_review"] = _now_ms()
+                    _save(target, state)
             else:
-                proposals.append({"proposal_id": sent.proposal_id})
+                proposal: dict[str, Any] = {"proposal_id": sent.proposal_id}
+                if apply and sent.proposal_id is not None:
+                    from .memory_reflect_policy import attempt
+
+                    # Persist before attempting so a lost response also rotates the retry lane.
+                    # Advance beyond the previous maximum even if the wall clock stalls or regresses.
+                    previous[digest]["attempted_ms"] = max(
+                        _now_ms(), max((p.get("attempted_ms", 0) for p in previous.values()), default=0) + 1
+                    )
+                    _save(target, state)
+                    proposal["automatic"] = attempt(
+                        target, client, sent.proposal_id, ops, report["log_epoch"], pacer=pacer
+                    )
+                review = _awaits_lineage_review(proposal.get("automatic"))
+                if review and sent.proposal_id is not None:
+                    # A lineage target needs a human decision, so the proposal stays open and is not retried.
+                    previous[digest]["lineage_review"] = _now_ms()
+                    _save(target, state)
+                if (
+                    anchoring
+                    and not review
+                    and sent.proposal_id is not None
+                    and proposal.get("automatic", {}).get("state") != "applied"
+                ):
+                    closed = client.call(
+                        "decide",
+                        proposal_id=sent.proposal_id,
+                        decision="reject",
+                        base_epoch=report["log_epoch"],
+                        client_event_id=hubc.event_id(),
+                    )
+                    if closed.get("state") != "rejected":
+                        raise ReflectError("hub_anchor_withdraw_failed", "anchoring proposal was not closed")
+                    proposal["withdrawal"] = {"state": "rejected", "reason": "anchor_withdrawn"}
+                    previous[digest]["anchor_review_only"] = _now_ms()
+                    _save(target, state)
+                proposals.append(proposal)
         if served_any:
             state[FIRST_LANE] = NEAR_LANE if first == LINK_LANE else LINK_LANE
         # Only final refusals of ops attempted this run count, never cached skips, recovered ids or quota stops.
-        if attempted and failed_ops == attempted and error is None:
+        if failed_ops and failed_ops == attempted - no_delta_ops and error is None:
             error = "all_ops_refused"
     payload = {
         "status": "failed" if error else "completed",
@@ -656,15 +832,20 @@ def _reflect(
         "proposals": proposals,
         "refused_ops": refused,
         "seq": report["seq"],
+        "compensation_watch": watched,
+        "reflected_scopes": list(reflected),
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
         "link_repair": {"max_proposals": link_cap, **link_stats},
+        "anchoring": {"max_proposals": anchors.MAX_PROPOSALS, **anchors.coverage(heads)},
     }
     if error:
         payload["error"] = error
     return payload
 
 
-def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, scheduled: bool) -> dict[str, Any]:
+def run_payload(
+    *, target: Path, scope: str | None, limit: int, dry_run: bool, scheduled: bool, apply: bool = False
+) -> dict[str, Any]:
     derive.configuration(target)  # Refuse state overlapping a canonical card root.
     lock = target / ".brigade/memory/reflect/schedule.lock"
     io.protect_file(lock)
@@ -675,7 +856,17 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
         try:
             settings, client = _client(target)
             with store.limits.bounded(max_cards=MAX_SCOPE_CARDS, max_bytes=MAX_REPLICA_BYTES + REPLICA_FILE_SLACK):
-                payload = _reflect(target, settings, client, state, scope=scope, limit=limit, dry_run=dry_run)
+                payload = _reflect(
+                    target,
+                    settings,
+                    client,
+                    state,
+                    scope=scope,
+                    limit=limit,
+                    dry_run=dry_run,
+                    watch=scheduled,
+                    apply=apply,
+                )
         except (hubc.HubConfigError, hubc.HubUnavailable, hubc.HubRefusal, OSError, ValueError) as exc:
             # Never retain hub-supplied text, card bytes or credential-bearing errors.
             if isinstance(exc, store.limits.ReplicaLimitError):
@@ -710,6 +901,9 @@ def run_payload(*, target: Path, scope: str | None, limit: int, dry_run: bool, s
             count = state["consecutive_failures"] + 1 if payload["status"] == "failed" else 0
             state.update(consecutive_failures=count, paused=count >= FAILURES, last_status=payload["status"])
             _save(target, state)
+        if not dry_run:
+            state["last_automatic"] = payload.get("proposals", [])
+            _save(target, state)
         payload["schedule"] = {k: state[k] for k in ("consecutive_failures", "paused")}
         return payload
 
@@ -720,4 +914,13 @@ def rollback_payload(*, target: Path, proposal_id: str) -> dict[str, Any]:
     result = client.call(
         "rollback", proposal_id=proposal_id, base_epoch=status["log_epoch"], client_event_id=hubc.event_id()
     )
-    return {"status": "proposed", "proposal": result}
+    failed = (
+        result.get("compensation_result") == "failed"
+        or result.get("result") == "failed"
+        or result.get("state") in {"held", "stale", "rejected"}
+        or not result.get("proposal_id")
+    )
+    return {
+        "status": "failed" if failed else "applied" if result.get("state") == "applied" else "proposed",
+        "proposal": result,
+    }

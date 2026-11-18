@@ -1028,7 +1028,10 @@ def test_accept_vs_withdraw_serializes_to_one_complete_result(ledger):
     loser = "withdraw" if winner == "accept" else "accept"
     assert results[loser][1]["code"] == "version-conflict"
     final = request(conn, work_id, method="GET")[1]["ownership"]
-    assert final == results[winner][1]["ownership"]
+    # The read derives liveness fields; the completed mutation snapshot does not.
+    assert {key: value for key, value in final.items() if key not in {"liveness_basis", "liveness_freshness"}} == (
+        results[winner][1]["ownership"]
+    )
     assert final["state"] == ("owned" if winner == "accept" else "unowned")
     assert final["revision"] == 2 and event_count(conn, work_id) == 2
     assert offered["state"] == "offered" and offered["revision"] == 1

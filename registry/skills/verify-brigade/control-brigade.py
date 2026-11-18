@@ -1499,6 +1499,11 @@ def build_parser() -> argparse.ArgumentParser:
     except ImportError:
         pass
 
+    try:  # Copies used for path-guard probes may omit sibling drives.
+        load_sibling("t3_enrollment").add_parser(sub, sys.modules[__name__])
+    except ImportError:
+        pass
+
     p = sub.add_parser("audit", help="Read-only: compare the feature map against the live CLI command tree.")
     p.add_argument("--features-dir", default=None, help="Feature map to audit (default: this skill's features/).")
     p.add_argument(

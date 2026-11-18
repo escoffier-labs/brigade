@@ -1,0 +1,3 @@
+- Bound compensation watch cycles with a hub-owned high-water mark so sustained arrivals cannot starve older proposals that become eligible behind the cursor.
+- Refresh refused compensation inverses after evidence-only head changes while preserving the proposal ID and all apply safety checks.
+- Prefer a later card with an automatic compensation quorum over an earlier card that only qualifies for review.

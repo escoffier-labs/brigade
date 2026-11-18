@@ -153,6 +153,13 @@ def show_policy() -> dict[str, Any]:
     return _checked(status, payload)
 
 
+def read_seat_usage() -> dict[str, Any]:
+    """Read-only per-seat occupancy, never acquiring, extending, or releasing a lease."""
+    hub, token = _hub_and_token(admin=False)
+    status, payload = _request("GET", "/models/usage", token=token, hub_url=hub)
+    return _checked(status, payload)
+
+
 def show_owners() -> dict[str, Any]:
     hub, token = _hub_and_token(admin=False)
     status, payload = _request("GET", "/owners", token=token, hub_url=hub)
@@ -352,6 +359,14 @@ def work_next(*, consumer: str = "brigade-run", workload: str = "general") -> di
     )
 
 
+def place(*, repo: str, threshold: float | None = None) -> dict[str, Any]:
+    """Advisory, read-only: which machine should a new child agent for ``repo`` run on."""
+    body: dict[str, Any] = {"action": "place", "repo": repo}
+    if threshold is not None:
+        body["threshold"] = threshold
+    return post_policy(body, admin=False)
+
+
 def accept_reservation(*, reservation_id: str, decision_id: str, session_id: str) -> dict[str, Any]:
     return post_policy(
         {
@@ -391,6 +406,18 @@ def release_reservation(*, reservation_id: str, decision_id: str, session_id: st
 def observe_telemetry(body: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(body)
     payload["action"] = "telemetry-observe"
+    return post_policy(payload, admin=False)
+
+
+def observe_projects(body: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(body)
+    payload["action"] = "projects-observe"
+    return post_policy(payload, admin=False)
+
+
+def observe_t3(body: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(body)
+    payload["action"] = "t3-observe"
     return post_policy(payload, admin=False)
 
 

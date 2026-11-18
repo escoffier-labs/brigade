@@ -747,6 +747,14 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   is refused with the two ways out named in the error, and so is a
   same-node claim with no dead lock to vouch for it (a sibling run, or a run
   already recovered with `brigade runs recover`).
+- Automatic worktree runs claim `<repo>@<checkout>` so sibling checkouts
+  can run concurrently. Claim listings also show the parent repo. A run
+  releases its claim when it exits, including a refusal after acquiring
+  the claim during startup. If the process is killed or the hub cannot
+  confirm release, the claim expires at the end of its TTL (900 seconds
+  by default). You can also use the fenced release below with the full
+  worktree claim key.
+
 - `brigade fleet claims --release <key> [--path] [--node NODE_ID] [--force] [--json]`
   frees a claim without its holder token (`POST /claims` `release` with
   `scope: "node"`): the hub deletes the row only if the given node owns it;
@@ -757,8 +765,9 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   `POST /claims` `inspect` returns the recorded run directory to the owner
   node only, the CLI maps it to a workspace on this machine through
   `runguard.resolve_run_lock_workspace` (`run.json` `lock_workspace`, the
-  `.brigade/runs/<id>` layout, then `cwd`; a resolved path that is not a
-  directory here is refused; with `--path` it must be the workspace given)
+  `.brigade/runs/<id>` layout, then `cwd`; an unavailable workspace is
+  refused unless Brigade stores its worktree lease outside the checkout.
+  With `--path` the workspace must be the directory given)
   and refuses while that `run.lock` has a live owner or is malformed, or
   when it cannot resolve the run at all, or when the probe finds no claim
   owned by this node.
@@ -789,7 +798,7 @@ Bodies above 8 MiB return HTTP 413. Missing, ambiguous, or invalid body framing
 returns HTTP 400 and closes the connection, except that a Worklore DELETE with
 no body still succeeds. Transfer-Encoding and duplicate
 Content-Length headers are refused. Worklore retains its smaller 256 KiB body
-limit and 1 MiB import limit. Dashboard enrollment retains its 16 KiB body limit.
+limit and 5 MiB import limit. Dashboard enrollment retains its 16 KiB body limit.
 
 Before JSON decoding, regex scans check nesting and aggregate complexity.
 A document accepts at most 32 levels of containers, 32768 objects and arrays in
@@ -819,9 +828,10 @@ fenced to the original holder token. CLI JSON includes the decision reason.
 A heartbeat quota refusal terminates the lease through the existing claim
 loss channel. The default policy cancels guarded work.
 
-The 1 MiB Worklore import ceiling predates these changes. A contract-shaped batch
-of 500 observations can serialize to about 4.27 MB and exceed it. This
-incompatibility still needs a follow-up. The import ceiling remains 1 MiB.
+The Worklore import ceiling is 5 MiB. A contract-shaped batch of 500
+observations serializes to about 4.27 MB and fits. The Rust front applies only
+its 8 MiB global limit to `/work/imports` and forwards the route, so the
+Python ceiling is the effective one.
 
 These request bounds leave GET payloads and fleet list clients unchanged.
 Claim fencing failures still return HTTP 503 on read paths, including `/status`.

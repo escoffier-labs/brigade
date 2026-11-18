@@ -6,10 +6,11 @@ import base64
 import json
 import re
 import secrets
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .fleet_client import (
     FleetClientError,
@@ -28,6 +29,12 @@ LIST_MAX_ITEMS = 20000
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_ERROR_RESPONSE_BYTES = 64 * 1024
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9-]{0,127}$")
+# A path-scope refusal carries at most this many conflicts, each field capped, however
+# large a hostile or buggy hub makes the body. The Hub bounds its own output more tightly.
+MAX_CONFLICT_DETAILS = 8
+MAX_CONFLICT_TEXT = 256
+_CONFLICT_FIELDS = ("work_id", "owner_node", "requested_path", "held_path", "resolution")
+_PRINCIPAL_FIELDS = ("kind", "id")
 
 __all__ = [
     "FleetClientError",
@@ -37,6 +44,7 @@ __all__ = [
     "WorkloreClientError",
     "add_link",
     "burn_queue",
+    "complete_item",
     "create_campaign",
     "create_item",
     "delete_link",
@@ -72,22 +80,85 @@ class WorkloreListingError(FleetClientError):
 
 
 class WorkloreClientError(FleetClientError):
-    """A Worklore hub refusal with its stable machine-readable code, when supplied."""
+    """A Worklore hub refusal with its stable machine-readable code, when supplied.
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    ``details`` holds the bounded, terminal-safe ``resolution``, ``conflicts`` and
+    ``truncated`` fields of a ``path-scope-*`` refusal, and is empty for every other refusal.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None, details: Mapping[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.details: dict[str, Any] = dict(details or {})
 
 
 def _safe_terminal_text(value: object) -> str:
-    """Return displayable plain text without C0 or C1 terminal controls."""
+    """Return displayable plain text without C0 or C1 controls or Unicode format characters (bidi, zero-width)."""
     text = str(value)
-    without_controls = "".join(" " if ord(char) < 32 or 127 <= ord(char) <= 159 else char for char in text)
+    without_controls = "".join(
+        " " if ord(char) < 32 or 127 <= ord(char) <= 159 or unicodedata.category(char) == "Cf" else char
+        for char in text
+    )
     return " ".join(without_controls.split())
 
 
 def _error_code(value: object) -> str | None:
     return value if isinstance(value, str) and _ERROR_CODE_RE.fullmatch(value) else None
+
+
+def _bounded_text(value: object) -> str | None:
+    return _safe_terminal_text(value)[:MAX_CONFLICT_TEXT] if isinstance(value, str) and value else None
+
+
+def _conflict_record(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    record: dict[str, Any] = {}
+    for field in _CONFLICT_FIELDS:
+        text = _bounded_text(raw.get(field))
+        if text is not None:
+            record[field] = text
+    principal = raw.get("owner_principal")
+    if isinstance(principal, dict):
+        fields = {name: _bounded_text(principal.get(name)) for name in _PRINCIPAL_FIELDS}
+        record["owner_principal"] = {name: text for name, text in fields.items() if text is not None}
+    return record or None
+
+
+def _refusal_details(refusal: Mapping[str, Any], code: str | None) -> dict[str, Any]:
+    """Keep only the fixed, bounded path-scope conflict fields the Hub already returned."""
+    if code is None or not code.startswith("path-scope-"):
+        return {}
+    details: dict[str, Any] = {}
+    resolution = _error_code(refusal.get("resolution"))
+    if resolution is not None:
+        details["resolution"] = resolution
+    conflicts = refusal.get("conflicts")
+    if isinstance(conflicts, list):
+        records = (_conflict_record(raw) for raw in conflicts[:MAX_CONFLICT_DETAILS])
+        details["conflicts"] = [record for record in records if record is not None]
+        details["truncated"] = refusal.get("truncated") is True or len(conflicts) > MAX_CONFLICT_DETAILS
+    return details
+
+
+def describe_refusal_details(exc: object) -> list[str]:
+    """One terminal-safe line per conflict, then the resolution, for a path-scope refusal."""
+    details = getattr(exc, "details", None)
+    if not isinstance(details, dict):
+        return []
+    lines: list[str] = []
+    for record in details.get("conflicts", []):
+        principal = record.get("owner_principal") or {}
+        owner = record.get("owner_node") or principal.get("id") or "unknown owner"
+        lines.append(
+            f"conflict: {record.get('requested_path', '?')} overlaps {record.get('held_path', '?')} "
+            f"held by {record.get('work_id', '?')} (owner {owner})"
+        )
+    if details.get("truncated"):
+        lines.append("conflict list truncated: more overlaps exist than are shown")
+    if details.get("resolution"):
+        lines.append(f"resolution: {details['resolution']}")
+    return lines
 
 
 def _hub_url() -> str:
@@ -157,8 +228,11 @@ def _http_error(exc: urllib.error.HTTPError) -> FleetClientError:
             return WorkloreClientError(
                 f"fleet hub work failed: HTTP {exc.code}: {_safe_terminal_text(detail)}",
                 code=code,
+                details=_refusal_details(refusal, code),
             )
-        return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}", code=code)
+        return WorkloreClientError(
+            f"fleet hub work failed: HTTP {exc.code}", code=code, details=_refusal_details(refusal, code)
+        )
     return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}", code=code)
 
 
@@ -270,9 +344,14 @@ def new_ownership_nonce() -> str:
     return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
 
 
-def get_ownership(work_id: str) -> dict[str, Any]:
-    """Read metadata using the same authentication preference as item reads."""
-    return _request("GET", _item_path(work_id, "ownership"), token=_token())
+def get_ownership(work_id: str, *, holder_nonce: str | None = None) -> dict[str, Any]:
+    """Read metadata using the same authentication preference as item reads.
+
+    Presenting ``holder_nonce`` asks the Hub to confirm the caller is the current holder.
+    That needs the node token, so the capability is never sent under an admin token.
+    """
+    token = _token(admin=False) if holder_nonce is not None else _token()
+    return _request("GET", _item_path(work_id, "ownership"), token=token, holder_nonce=holder_nonce)
 
 
 def get_prepared_handoff(work_id: str) -> dict[str, Any]:
@@ -460,6 +539,25 @@ def transition(work_id: str, body: Mapping[str, Any], *, if_match: object = None
     return _request(
         "POST",
         _item_path(work_id, "transitions"),
+        token=_token(admin=False),
+        body=body,
+        if_match=if_match,
+    )
+
+
+def complete_item(
+    work_id: str,
+    *,
+    evidence_refs: Sequence[str] = (),
+    if_match: object = None,
+) -> dict[str, Any]:
+    """Complete one item through the Hub's operator-only completion route."""
+    body: dict[str, Any] = {}
+    if evidence_refs:
+        body["evidence_refs"] = list(evidence_refs)
+    return _request(
+        "POST",
+        _item_path(work_id, "completions"),
         token=_token(admin=False),
         body=body,
         if_match=if_match,

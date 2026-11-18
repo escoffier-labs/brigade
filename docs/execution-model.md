@@ -39,6 +39,121 @@ since 0.31.0. Remaining work is tracked in
 [#1850](https://github.com/escoffier-labs/brigade/issues/1850) and
 [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
+## Kinds of delegated work
+
+Five mechanisms hand work to another actor. They differ in who owns execution,
+where the record lives, and how much Brigade governance covers the far side.
+Only the ledger, run-lineage, and batch rows are Brigade-owned today. The ledger
+and batch rows launch workers. The run-lineage row creates a branched run record
+for later use.
+
+| Mechanism | Who creates it | Who owns execution | Where identity and results are recorded | Started by | Current status |
+| --- | --- | --- | --- | --- | --- |
+| T3 app-owned child task | A parent T3 session | The T3 app: selected environment, app-owned worktree, provider run, cancellation, and completion wake | Native T3 task, thread, and run identifiers plus the completion wake. Brigade records no governed task or result. The optional [thread-presence observer](fleet-t3-observer.md) publishes operational metadata only. | Native `delegate_task` tool in the parent session | Available natively. Brigade governance is not wired. The [native T3 design](phase-2046-native-t3-app-hosted-design.md) and [governed-child contract](phase-2046-governed-native-child-contract.md) keep production dispatch unwired, and closeout is operator-assisted per [the closeout runbook](runbooks/native-t3-assisted-closeout.md). |
+| Remote fleet request | An operator, an agent, or `brigade run` routing a seat to another machine | The target machine's T3. The source keeps the orchestration receipt and takes no model lease. | `t3-fleet` request id and delegation id, the source `WorkerResult.remote` handoff, and Hub lifecycle observations through [`brigade fleet events report`](fleet-t3-events.md). | `t3-fleet submit`, directly or through the source transport in [fleet_t3_transport.py](../src/brigade/fleet_t3_transport.py) | Separate supported path. Remote `brigade run` routing needs an enrolled fleet, routing enabled, and the [deployment prerequisites](phase-fleet-remote-transport.md#deployment-prerequisites). There is no local fallback. |
+| Ledger task | `brigade work task add` or a work import | Brigade: one `brigade run` child per task, in a linked worktree | Task id and claim generation in the work ledger, session and chained intent receipts under `.brigade/dispatch/<dispatch-id>/`, and child run artifacts | `brigade work dispatch` | Shipped. Successful children stay claimed and `in_progress` until the operator lands them. |
+| Durable run-lineage child | An operator or agent branching a checkpoint-covered parent lifecycle event | Brigade, under the new child run identity | New run id and the `run.json` `lineage` block (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`), plus child artifacts and lifecycle journal, as defined in [run receipt schemas](receipt-schemas.md) | `brigade runs child <parent> <event-id>` | Shipped. It creates the branched run record and journal and does not launch workers. |
+| Explicit batch task | A caller or agent supplying a batch file | The Brigade run orchestrator, with no planner or synthesis call | `request_id` and `task_id` under `.brigade/runs/batch-<request-hash>/`, with the lifecycle journal and per-task result references, per [explicit task batches](run-batch.md) | `brigade run batch batch.json` | Shipped for 1 through 8 tasks. Synthesis is refused with `synthesis-not-implemented`. It does not dispatch ledger tasks or use the T3 route. |
+
+The Grok Bot `t3-dispatch` pack, an earlier front end for `t3-fleet`, is retired
+in 0.32.0 ([retirement notice](grokbot-t3-dispatch.md)).
+
+## Scheduled memory application
+
+Two optional memory jobs can run on a schedule. Both need a care install to
+activate OS timers.
+
+`memory-reflect` runs `memory reflect run --scheduled` and is part of the
+default care set. A scheduled hub run also attempts policy-gated application.
+Without a hub it derives local candidates only.
+
+`memory-verify` is a separate entry, installed with
+`--entry memory-verify`. It runs `memory verify run --scheduled`.
+
+### Proposals and tiers
+
+Reflection opens pinned proposals for exact duplicates, near-duplicates and
+broken links. Exact duplicate cards merge and can be Tier 0. Near-duplicate
+supersedes and broken-link repairs are always Tier 2. Reflection also proposes
+block anchoring. The seeded workspace policy names `anchor_blocks`, but the
+fleet policy writer rejects it in `tier0_op_classes`, so the hub never admits
+an automatic anchor. Each anchor proposal is withdrawn in the same run, then
+retried after seven days.
+
+A proposal pins card revisions and block hashes. A proposal the run leaves open
+stays `pending` until a reviewer accepts or rejects it with `brigade memory
+proposals decide`.
+
+Tier 1 covers a replacement that only changes ASCII spaces. Tier 2 covers claim
+edits, supersedes, link repairs, retirements and non-exact compensations. Tier 1
+and Tier 2 proposals wait for a person, except verify classes admitted by an
+admin `go` record.
+
+### What applies without a person
+
+Automatic apply needs workspace intent and hub policy. New workspaces seed
+`.brigade/memory/reflect/policy.json` with `auto_apply` on. Care install leaves
+a missing policy off and preserves an existing one. The fleet policy must also
+enable auto apply, list the proposer and list the op class. The supported policy
+writer accepts evidence appends and exact duplicate merges for this route.
+
+The hub rechecks the Tier 0 class, cited evidence, ownership, retrieval
+evaluation, one-card blast cap, 24-hour cooldown, card heads, pins, trust, scans
+and the admin kill switch in one transaction.
+
+On a real scope, the retrieval evaluation holds every automatic reflection
+apply. It admits only all-`append_evidence` Tier 0 proposals and then requires
+each target card's search projection to stay unchanged. Any applied edit
+changes it, including an evidence append, so reflection's Tier 0 applies happen
+only on the evaluation fixture scope. An exact-duplicate merge is the one
+exception. It is admitted under the retrieval gate's bounded-drift checks, and
+the blast cap and evidence gates still hold it for a reviewer today. Verifier
+applies and automatic compensations take their own gates instead.
+
+External and handoff-only curation
+policies never pass the ownership gate. Local repository candidates stay
+proposal-only because their authority contracts are unbound.
+
+`memory reflect auto-apply off --target .` sets the workspace policy to false.
+An in-flight run reads it before its next candidate. `memory reflect
+auto-apply on --target .` opts an existing workspace in.
+
+### Scopes and rollback
+
+`[reflect] scopes` in `.brigade/memory-care.toml` limits where reflection
+proposes, applies and watches. Unlisted read scopes are still read, but no
+candidate is proposed and no watch is polled there. Each listed entry must be a
+configured read scope, and the credential needs `reflect` in it.
+
+A scheduled hub run polls the compensation watch in its reflected scopes. The
+watch covers only the polling credential's own automatic applies, within 24
+hours by default. A contradiction or failed verification, or an attributable
+lexical retrieval regression, opens a compensating proposal. Two independent
+verifier signals, or an attributable lexical regression, can allow that
+reversal to apply without a person. Otherwise it waits for review. A watch
+attempt that is not exact or is blocked ends `held`, or `stale` when a target
+no longer matches its pins.
+
+`memory reflect rollback <proposal-id>` also opens a compensating proposal. It
+applies at once only when `auto_apply` is enabled, the kill switch is off, the
+original apply was automatic, the same policy actor asks, the inverse is exact
+and the window has not expired. An automatic in-window attempt that is not
+exact, or that hits a blocker, ends `rejected` or `held` with
+`compensation_result: failed`. A non-automatic, different-actor or expired
+rollback waits for a reviewer.
+
+### Verification pass
+
+The verify pass checks cards against cited evidence with two seats, one
+proposing and one confirming. It opens pinned correction proposals. Per-class go
+or no-go records decide whether `verify_auto_apply` may apply a class without a
+person. Without a current admin `go` record on the hub, `verify_auto_apply`
+applies nothing. A scheduled run still opens correction proposals, because only
+their application is gated.
+
+See [memory care](memory-care.md#automatic-tier-0-reflection) for the boundaries
+and the separate care-install step that activates OS timers.
+
 ## Long-running modes
 
 The operator starts these processes and chooses any service manager and restart

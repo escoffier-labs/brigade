@@ -22,10 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
+from . import care_enable, care_patrol, care_receipts, care_runbooks, care_schedules, managed_block, memory_cmd
 from .care_launchers import entry_argv, explicit_workspace, install_refusal, persisted_scope
 from .care_launchers import hub_job_status as hub_job_status
 from .care_launchers import runbook_argv, scoped_entries, verify_entry
+from .care_render import print_payload as _print_payload
 from .care_windows import create_command as _windows_create_command, task_run as _schtasks_task_run
 from .care_receipts import (
     _latest_runbook_receipt as _latest_runbook_receipt,
@@ -168,11 +169,23 @@ MEMORY_REFLECT_ENTRY = CareEntry(
     entry_id="memory-reflect",
     schedule="0 10 * * *",
     on_calendar="*-*-* 10:00:00",
-    description="Brigade hub memory reflection proposals",
+    description="Brigade policy-gated memory reflection",
     kind="reflect",
 )
 
+CARE_ENTRIES = (*CARE_ENTRIES, MEMORY_REFLECT_ENTRY)
+
 MEMORY_VERIFY_ENTRY = verify_entry(CareEntry)
+
+LESSON_REVIEW_ENTRY = CareEntry(
+    entry_id="lesson-review",
+    schedule="*/5 * * * *",
+    on_calendar="*:0/5",
+    description="Brigade automatic work-session lesson review",
+    kind="runbook",
+    runbook_rel=".brigade/memory-care/runbooks/lesson-review.json",
+    runbook_id="lesson-review",
+)
 
 MEMORY_JOB_ENTRIES: tuple[CareEntry, ...] = (
     CareEntry(
@@ -234,7 +247,14 @@ def _catalog_by_id() -> dict[str, CareEntry]:
     patrol_entry = care_patrol.entry(CareEntry)
     return {
         entry.entry_id: entry
-        for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, MEMORY_REFLECT_ENTRY, MEMORY_VERIFY_ENTRY, patrol_entry)
+        for entry in (
+            *CARE_ENTRIES,
+            *MEMORY_JOB_ENTRIES,
+            MEMORY_REFLECT_ENTRY,
+            MEMORY_VERIFY_ENTRY,
+            LESSON_REVIEW_ENTRY,
+            patrol_entry,
+        )
     }
 
 
@@ -639,52 +659,55 @@ def _write_crontab(text: str) -> str | None:
 
 
 def _ensure_memory_care_runbooks(target: Path) -> int:
-    """Write shipped memory-care runbooks when any are missing."""
-    runbook_dir = memory_cmd._memory_care_runbooks_dir(target)
-    missing = [name for name in memory_cmd.MEMORY_CARE_RUNBOOK_NAMES if not (runbook_dir / name).is_file()]
-    if not missing:
-        return 0
-    return memory_cmd._write_memory_care_runbooks(target)
+    """Write the shipped memory-care runbooks that are missing; keep every existing file."""
+    specs, rc = memory_cmd.memory_care_runbook_specs()
+    return rc if specs is None else care_runbooks.ensure(target, specs)
+
+
+def _daily_observability_spec() -> care_runbooks.RunbookSpec:
+    return care_runbooks.RunbookSpec(
+        MEMORY_CARE_RUNBOOK_REL["daily-observability"], DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD
+    )
+
+
+def _memory_closeout_spec() -> care_runbooks.RunbookSpec:
+    return care_runbooks.RunbookSpec(
+        f"{memory_cmd.MEMORY_CARE_RUNBOOKS_REL}/{MEMORY_CLOSEOUT_RUNBOOK_NAME}", MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD
+    )
 
 
 def _write_daily_observability_runbook(target: Path) -> int:
-    return care_patrol.write_runbook(
-        target, MEMORY_CARE_RUNBOOK_REL["daily-observability"], DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD
-    )
+    return care_runbooks.ensure(target, [_daily_observability_spec()])
 
 
 def _write_memory_closeout_runbook(target: Path) -> int:
     """Materialize the shipped memory-closeout runbook when missing."""
-    dest = memory_cmd._memory_care_runbooks_dir(target) / MEMORY_CLOSEOUT_RUNBOOK_NAME
-    if dest.is_file():
-        return 0
-    temp = dest.parent / f".{MEMORY_CLOSEOUT_RUNBOOK_NAME}.init-tmp"
-    try:
-        from .localio import write_json as _write_json
-
-        temp.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(temp, dict(MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD))
-        validated, error = runbook_cmd._read_runbook(temp, require_pin_hashes=False)
-        if validated is None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-        pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
-        if pins is None:
-            print(f"error: {pin_error}", file=sys.stderr)
-            return 2
-        validated["pins"] = pins
-        _write_json(dest, validated)
-        return 0
-    finally:
-        if temp.is_file():
-            temp.unlink()
+    return care_runbooks.ensure(target, [_memory_closeout_spec()])
 
 
-def _ensure_care_runbooks(target: Path) -> int:
-    rc = _ensure_memory_care_runbooks(target)
-    if rc != 0:
-        return rc
-    return _write_daily_observability_runbook(target)
+def _install_shipped_specs() -> tuple[list[care_runbooks.RunbookSpec] | None, int]:
+    """The shipped memory-care runbooks plus daily-observability, as publishable specs."""
+    specs, rc = memory_cmd.memory_care_runbook_specs()
+    if specs is None:
+        return None, rc
+    return [*specs, _daily_observability_spec()], 0
+
+
+def _install_runbook_specs(
+    entries: tuple[CareEntry, ...], *, shipped: bool
+) -> tuple[list[care_runbooks.RunbookSpec] | None, int]:
+    """Every runbook this install may publish, so they can be checked and published as one batch."""
+    specs: list[care_runbooks.RunbookSpec] = []
+    if shipped:
+        shipped_specs, rc = _install_shipped_specs()
+        if shipped_specs is None:
+            return None, rc
+        specs = shipped_specs
+    extra = care_patrol.selected_specs(entries)
+    if shipped and any(entry.entry_id == "memory-closeout" for entry in entries):
+        extra.append(_memory_closeout_spec())
+    known = {spec.rel for spec in specs}
+    return [*specs, *(spec for spec in extra if spec.rel not in known)], 0
 
 
 def _windows_plan_tasks(*, workspace: Path, entries: tuple[CareEntry, ...]) -> list[dict[str, Any]]:
@@ -794,77 +817,14 @@ def _windows_uninstall(
     return 3
 
 
-def _print_payload(payload: dict[str, Any], *, json_output: bool) -> None:
+def _print_status(payload: dict[str, Any], *, target: Path, home: Path | None, json_output: bool) -> None:
+    """Print a backend status payload with its schedule-health warnings (#2589)."""
+    health = care_receipts.status_schedule_health(payload, target=target, home=home)
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return
-    for key, value in payload.items():
-        if key == "repeated_failures" and isinstance(value, list):
-            print(f"repeated_failures: {len(value)}")
-            for rec in value:
-                if not isinstance(rec, dict):
-                    continue
-                print(f"  - {rec.get('id')}: {rec.get('consecutive_failures')} consecutive failed receipts")
-            continue
-        if key == "adopted" and isinstance(value, list):
-            print(f"adopted: {len(value)}")
-            for rec in value:
-                if not isinstance(rec, dict):
-                    continue
-                print(
-                    f"  - {rec.get('requested')} -> {rec.get('using')} "
-                    f"(runbook {rec.get('runbook_id') or rec.get('runbook')})"
-                )
-            continue
-        if key == "entries" and isinstance(value, list):
-            print(f"entries: {len(value)}")
-            for entry in value:
-                if not isinstance(entry, dict):
-                    continue
-                receipt = entry.get("last_receipt")
-                receipt_bit = "none"
-                if isinstance(receipt, dict):
-                    receipt_bit = f"{receipt.get('status')}@{receipt.get('started_at')}"
-                present = entry.get("runbook_present")
-                present_bit = ""
-                if present is False:
-                    present_bit = " runbook=missing"
-                elif present is True:
-                    present_bit = " runbook=present"
-                fail_bit = ""
-                consecutive = entry.get("consecutive_failures")
-                if isinstance(consecutive, int) and consecutive >= REPEATED_FAILURE_THRESHOLD:
-                    fail_bit = f" repeated_failure={consecutive}"
-                print(
-                    f"  - {entry.get('id')}: schedule={entry.get('schedule')} "
-                    f"last_receipt={receipt_bit}{present_bit}{fail_bit}"
-                    + (" paused=true" if entry.get("paused") else "")
-                )
-            continue
-        if key == "units" and isinstance(value, list):
-            print(f"units: {len(value)}")
-            for unit in value:
-                if isinstance(unit, dict):
-                    print(f"  - {unit.get('name')}: {unit.get('path')} ({unit.get('status')})")
-            continue
-        if key == "tasks" and isinstance(value, list):
-            print(f"tasks: {len(value)}")
-            for task in value:
-                if not isinstance(task, dict):
-                    continue
-                if "exists" in task:
-                    last_run = task.get("last_run") or "none"
-                    print(
-                        f"  - {task.get('id')}: exists={task.get('exists')} "
-                        f"last_run={last_run} schedule={task.get('schedule')}"
-                    )
-                    continue
-                print(f"  - {task.get('id')}: {task.get('command')}")
-            continue
-        if isinstance(value, (dict, list)):
-            print(f"{key}: {json.dumps(value, sort_keys=True)}")
-        else:
-            print(f"{key}: {value}")
+        payload["schedule_health"] = health
+    _print_payload(payload, json_output=json_output)
+    if not json_output and health["warnings"]:
+        print("\n".join(care_receipts.schedule_warning_lines(health)))
 
 
 def _launchd_dir(home: Path | None = None) -> Path:
@@ -975,7 +935,7 @@ def _launchd_status(
     elif any(item["status"] == "missing" for item in states):
         state = "missing"
     entry_payloads = [_entry_status(target, entry) for entry in entries]
-    _print_payload(
+    _print_status(
         {
             "target": str(target),
             "backend": "launchd",
@@ -984,6 +944,8 @@ def _launchd_status(
             "entries": entry_payloads,
             "repeated_failures": _repeated_failure_records(entry_payloads),
         },
+        target=target,
+        home=home,
         json_output=json_output,
     )
     return 1 if state == "tampered" else 0
@@ -1035,6 +997,8 @@ def install(
     entry_ids: list[str] | None = None,
     schedule_specs: list[str] | None = None,
     scope: str | None = None,
+    reflect_auto_apply: bool = False,
+    enable: bool = True,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1101,20 +1065,22 @@ def install(
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if _uses_schtasks(backend):
-        if not dry_run:
-            rc = care_patrol.ensure_selected(target, entries)
-            if rc != 0:
-                return rc
-        return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
+    if not dry_run and reflect_auto_apply and any(entry.kind == "reflect" for entry in entries):
+        from .memory_reflect_policy import set_enabled
 
-    rc = _ensure_care_runbooks(target) or care_patrol.ensure_selected(target, entries)
+        set_enabled(target, True)
+
+    specs, rc = _install_runbook_specs(entries, shipped=not _uses_schtasks(backend))
+    if specs is None:
+        return rc
+    # One batch: every destination is checked before the first file is published,
+    # and a dry run writes nothing but reports what it would write.
+    rc = care_runbooks.ensure(target, specs, dry_run=dry_run, quiet=json_output)
     if rc != 0:
         return rc
-    if any(entry.entry_id == "memory-closeout" for entry in entries):
-        rc = _write_memory_closeout_runbook(target)
-        if rc != 0:
-            return rc
+
+    if _uses_schtasks(backend):
+        return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
     if backend == "launchd":
         return _launchd_install(
@@ -1143,6 +1109,7 @@ def install(
         home=home,
         entries=entries,
         adopted=adopted,
+        enable=enable,
     )
 
 
@@ -1330,6 +1297,7 @@ def _install_systemd(
     home: Path | None,
     entries: tuple[CareEntry, ...],
     adopted: list[dict[str, Any]] | None = None,
+    enable: bool = True,
 ) -> int:
     unit_dir = _systemd_user_dir(home)
     identity = _target_identity(target)
@@ -1410,6 +1378,15 @@ def _install_systemd(
                 "detail": outcome.detail or plan.detail,
             }
             continue
+    timer_enable = care_enable.enable_timers(
+        unit_dir=unit_dir,
+        results=results,
+        identity=identity,
+        adopted=adopted,
+        enable=enable,
+        dry_run=dry_run,
+        blocked=blocked,
+    )
     payload: dict[str, Any] = {
         "target": str(target),
         "backend": "systemd",
@@ -1417,18 +1394,9 @@ def _install_systemd(
         "dry_run": dry_run,
         "blocked": blocked,
         "units": results,
+        "enable": timer_enable,
         "entries": [_entry_status(target, entry) for entry in entries],
-        "next_commands": [
-            "systemctl --user daemon-reload",
-            *(
-                [
-                    f"systemctl --user enable --now brigade-care-{identity}-{entries[0].entry_id}.timer",
-                    f"systemctl --user list-timers 'brigade-care-{identity}-*.timer'",
-                ]
-                if entries
-                else [f"systemctl --user list-timers 'brigade-care-{identity}-*.timer'"]
-            ),
-        ],
+        "next_commands": care_enable.next_commands(identity=identity, enable=timer_enable),
     }
     if adopted:
         payload["adopted"] = adopted
@@ -1441,18 +1409,12 @@ def _install_systemd(
             print("error: one or more systemd units were hand-edited; refusing without --adopt", file=sys.stderr)
         return 1
     if not json_output and not dry_run:
-        print("note: Brigade wrote unit files only; enable timers with systemctl --user.")
+        print("\n".join(care_enable.install_notes(enable=timer_enable)))
         print("note: scheduled runbook entries require `brigade extras on` (or BRIGADE_EXTRAS=1).")
     return 0
 
 
-_INSTALLED_CARE_STATUSES = frozenset(
-    {
-        managed_block.STATUS_CURRENT,
-        managed_block.STATUS_STALE,
-        "tampered",
-    }
-)
+_INSTALLED_CARE_STATUSES = frozenset({managed_block.STATUS_CURRENT, managed_block.STATUS_STALE, "tampered"})
 
 _SYSTEMD_STATUS_RANK: dict[str, int] = {
     managed_block.STATUS_MALFORMED: 0,
@@ -1535,14 +1497,7 @@ def _installed_systemd_entries(*, target: Path, home: Path | None) -> tuple[Care
 
 
 def _systemd_timer_is_enabled(*, unit_dir: Path, timer_name: str) -> bool:
-    enabled_link = unit_dir / "timers.target.wants" / timer_name
-    timer = unit_dir / timer_name
-    if not enabled_link.is_symlink() or not timer.is_file():
-        return False
-    try:
-        return enabled_link.resolve() == timer.resolve()
-    except OSError:
-        return False
+    return care_enable.links_to_timer(unit_dir=unit_dir, timer_name=timer_name)
 
 
 def _crontab_backend_status(
@@ -1741,10 +1696,15 @@ def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
         selected_entries = CARE_ENTRIES
     selected_entries = care_patrol.select(selected_entries, None, "crontab" if crontab_enabled else "", CareEntry)
     entry_payloads = [_entry_status(target, entry) for entry in selected_entries]
+    installed = [unit for unit in systemd.get("units") or [] if unit.get("status") in _INSTALLED_CARE_STATUSES]
+    disabled_timers = [
+        str(unit["name"]) for unit in installed if str(unit["name"]).endswith(".timer") and not unit.get("enabled")
+    ]
     return {
-        "enabled": crontab_enabled or systemd_enabled,
+        "enabled": (crontab_enabled or systemd_enabled) and not disabled_timers,
         "target_match": bool(crontab.get("target_match")) or bool(systemd.get("target_match")),
         "backends": {"crontab": crontab, "systemd": systemd},
+        "installed_disabled_timers": disabled_timers,
         "entries": entry_payloads,
         "repeated_failures": _repeated_failure_records(entry_payloads),
     }
@@ -1805,7 +1765,7 @@ def status(
             "repeated_failures": _repeated_failure_records(entry_payloads),
         }
         public_status = str(crontab_payload.get("status"))
-        _print_payload(crontab_payload, json_output=json_output)
+        _print_status(crontab_payload, target=target, home=home, json_output=json_output)
         return 0 if public_status in {"current", managed_block.STATUS_MISSING} else 1
 
     if not entry_ids:
@@ -1819,7 +1779,7 @@ def status(
         "repeated_failures": _repeated_failure_records(entry_payloads),
     }
     worst = str(payload.get("status"))
-    _print_payload(payload, json_output=json_output)
+    _print_status(payload, target=target, home=home, json_output=json_output)
     return 0 if worst in {"current", managed_block.STATUS_MISSING} else 1
 
 
@@ -1954,6 +1914,7 @@ def uninstall(
             if path.exists() and not managed_block.read_text_nofollow(path).strip():
                 path.unlink()
             removed.append(name)
+    links = care_enable.finish_uninstall(unit_dir=unit_dir, removed=removed, skipped=skipped, dry_run=dry_run)
     payload = {
         "target": str(target),
         "backend": "systemd",
@@ -1961,10 +1922,11 @@ def uninstall(
         "removed": removed,
         "skipped": skipped,
         "refused": refused,
-        "next_commands": ["systemctl --user daemon-reload"],
+        "enable_links": links,
+        "next_commands": [care_enable.DAEMON_RELOAD_COMMAND],
     }
     _print_payload(payload, json_output=json_output)
-    if not removed and not refused:
+    if not removed and not refused and not links["removed"]:
         print(f"no scheduler registration found for target: {target}")
     if blocked:
         print(

@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -15,14 +14,13 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from . import engine_paths, memory_bm25
+from . import care_runbooks, engine_paths, memory_bm25
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .frontmatter_literal import bounded_literal_list
 from .install import apply_gitignore
 from .selection import Selection
 from .localio import (
     read_jsonl_dicts as _read_jsonl_dicts,
-    write_json as _write_json,
     write_text_atomic as _write_text_atomic,
     utc_now_iso_z as _utc_iso,
 )
@@ -50,6 +48,7 @@ CONFIG_REL_PATH = ".brigade/memory-care.toml"
 DEFAULT_OUTPUT_PATH = ".brigade/memory-care/decay"
 MEMORY_CARE_RUNBOOKS_REL = ".brigade/memory-care/runbooks"
 MEMORY_CARE_RUNBOOK_NAMES = (
+    "lesson-review.json",
     "daily-care-pass.json",
     "ingest-sweep.json",
     "weekly-outcome-ratchet.json",
@@ -267,61 +266,30 @@ def _memory_care_runbooks_dir(target: Path) -> Path:
     return target / MEMORY_CARE_RUNBOOKS_REL
 
 
-def _write_memory_care_runbooks(target: Path) -> int:
-    """Copy pinned mechanical memory-care runbook templates into the target.
+def memory_care_runbook_specs() -> tuple[list[care_runbooks.RunbookSpec] | None, int]:
+    """The shipped memory-care runbook templates as publishable specs."""
+    return care_runbooks.shipped_specs(
+        template_root() / "memory-care" / "runbooks", MEMORY_CARE_RUNBOOKS_REL, MEMORY_CARE_RUNBOOK_NAMES
+    )
 
-    Templates ship without pins; pins are materialized from the resolved
-    ``brigade`` binary at write time so ``brigade runbook run --approved``
-    can enforce the binary hash without a separate pin step.
 
-    Writes into a sibling temp directory first so pin-resolution failures do
-    not leave a partial runbook tree behind.
+def _write_memory_care_runbooks(target: Path, *, refresh: bool = False) -> int:
+    """Publish the pinned mechanical memory-care runbook templates into the target.
+
+    Pins are materialized from the resolved ``brigade`` binary at write time so
+    ``brigade runbook run --approved`` can enforce the binary hash without a
+    separate pin step. Only the shipped names are ever touched; other runbooks
+    in the directory are never deleted (see ``care_runbooks`` for the rules).
+
+    By default only missing shipped files are written and every existing file is
+    kept as is. ``memory care init --force --with-runbooks`` passes *refresh*:
+    shipped files that differ from the templates are then replaced, each one
+    printed and first copied to ``<name>.bak-<UTC timestamp>``.
     """
-    from . import runbook_cmd
-
-    template_dir = template_root() / "memory-care" / "runbooks"
-    dest_dir = _memory_care_runbooks_dir(target)
-    temp_dir = dest_dir.parent / f".{dest_dir.name}.init-tmp"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True)
-    try:
-        for name in MEMORY_CARE_RUNBOOK_NAMES:
-            src = template_dir / name
-            if not src.is_file():
-                print(f"error: memory-care runbook template missing: {src}", file=sys.stderr)
-                return 4
-            try:
-                payload = json.loads(src.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                print(f"error: invalid memory-care runbook template {src}: {exc}", file=sys.stderr)
-                return 2
-            if not isinstance(payload, dict):
-                print(f"error: memory-care runbook template must be a JSON object: {src}", file=sys.stderr)
-                return 2
-            # Validate shape through the same reader runbook execution uses, then
-            # materialize pins without echoing pin() stdout into care init output.
-            dest = temp_dir / name
-            _write_json(dest, payload)
-            validated, error = runbook_cmd._read_runbook(dest, require_pin_hashes=False)
-            if validated is None:
-                print(f"error: {error}", file=sys.stderr)
-                return 2
-            pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
-            if pins is None:
-                print(f"error: {pin_error}", file=sys.stderr)
-                return 2
-            validated["pins"] = pins
-            _write_json(dest, validated)
-        # Narrow crash window: after rmtree the old tree is gone; if replace fails
-        # before publishing temp_dir, neither directory remains at dest_dir.
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir)
-        temp_dir.replace(dest_dir)
-        return 0
-    finally:
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir)
+    specs, rc = memory_care_runbook_specs()
+    if specs is None:
+        return rc
+    return care_runbooks.ensure(target, specs, refresh=refresh)
 
 
 def init(
@@ -340,11 +308,12 @@ def init(
         print(f"error: memory-care config already exists: {path}", file=sys.stderr)
         return 1
     if with_runbooks:
-        rc = _write_memory_care_runbooks(target)
+        rc = _write_memory_care_runbooks(target, refresh=force)
         if rc != 0:
             return rc
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, _format_config())
+    fresh = not path.exists()
+    atomic_write_text(path, _format_config() + ("\n[verify]\nnew_workspace_version = 1\n" if fresh else ""))
     if update_gitignore:
         apply_gitignore(target, Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]))
     print(f"memory_care_config: {path}")
@@ -1162,6 +1131,16 @@ def health(target: Path) -> dict[str, Any]:
                     "detail": (f"{explicit_ids} cards have explicit IDs" if explicit_ids else "no cards"),
                 }
             )
+    from . import receipt_signing
+
+    if receipt_signing.workspace_key(target) is None:
+        checks.append(
+            {
+                "status": "warn",
+                "name": "memory_lifecycle_authority",
+                "detail": "workspace key unavailable, lifecycle and expiry disabled",
+            }
+        )
     issues = [check for check in checks if check["status"] != "ok"]
     metadata = (
         scan_payload.get("metadata")
@@ -1741,13 +1720,15 @@ def _record_search_log(
     query: str,
     matches: list[dict[str, Any]],
     ts: str | None = None,
+    private_query: bool = False,
 ) -> None:
     """Append one search event; fail-open so logging never breaks search."""
-    from .memory_card_reads import record
+    # Hub query text belongs only in private hub evaluation history.
+    if private_query:
+        from .memory_recall_log import record_recall
 
-    # The read ledger counts every returned card, whatever the search log caps or skips.
-    shown = [m for m in matches if isinstance(m, dict)] if isinstance(matches, list) else []
-    record(target, _search_log_card_ids(shown, top_k=len(shown)) + _search_log_aliases(shown, top_k=len(shown)))
+        record_recall(target, query=query, query_source="explicit", matches=matches, ts=ts)
+        return
     if not _should_log_search(query):
         return
     entry = {
@@ -1813,12 +1794,51 @@ def card_fields_from_text(text: str, rel: str, *, stem: str) -> dict[str, Any]:
 
 
 def search_card_fields(
-    target: Path, config: MemoryCareConfig | None = None, *, keep: Callable[[Path], bool] | None = None
+    target: Path,
+    config: MemoryCareConfig | None = None,
+    *,
+    keep: Callable[[Path], bool] | None = None,
+    include_archived: bool = False,
 ) -> list[dict[str, Any]]:
     """Searchable fields for every card under a resolved ``target``; ``keep`` filters paths before any read."""
     if config is None:
         config = load_config(target) or MemoryCareConfig()
     paths = [path for path in _iter_cards(target, config) if keep is None or keep(path)]
+    if include_archived:
+        from .memory_care_journal import safe_path
+        from .memory_archive import archive_rel
+
+        def original_paths(path: Path) -> tuple[str, ...]:
+            suffix = path.relative_to(target / "memory/archive").as_posix()
+            candidates = (suffix, "memory/" + suffix)
+            return tuple(
+                rel
+                for rel in candidates
+                if any(_path_matches(rel, (root,)) for root in config.card_roots)
+                and archive_rel(rel) == path.relative_to(target).as_posix()
+            )
+
+        root = safe_path(target, "memory/archive")
+        if root.is_dir():
+            paths.extend(
+                p
+                for p in sorted(root.rglob("*.md"))
+                if not p.is_symlink()
+                and (keep is None or keep(p))
+                and (
+                    not config.include_paths
+                    or any(_path_matches(rel, config.include_paths) for rel in original_paths(p))
+                    or _path_matches(p.relative_to(target).as_posix(), config.include_paths)
+                )
+                and (
+                    not config.exclude_paths
+                    or not (
+                        any(_path_matches(rel, config.exclude_paths) for rel in original_paths(p))
+                        or _path_matches(p.relative_to(target).as_posix(), config.exclude_paths)
+                    )
+                )
+                and safe_path(target, p.relative_to(target).as_posix()).is_file()
+            )
     return [fields for path in paths if (fields := _card_search_fields(path, target))]
 
 
@@ -1829,12 +1849,12 @@ def card_search_match(fields: dict[str, Any], score: float) -> dict[str, Any]:
 
 
 def search_cards_payload(
-    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None
+    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None, include_archived: bool = False
 ) -> dict[str, Any]:
     target = target.expanduser().resolve()
     # BM25 over one field per card, rebuilt per call (no cache, no index file).
     # Scores are floats rounded to 4 decimals; ties break by path.
-    cards = search_card_fields(target, config)
+    cards = search_card_fields(target, config, include_archived=include_archived)
     ranked = memory_bm25.rank([memory_bm25.card_text(fields) for fields in cards], query)
     matches = [card_search_match(cards[index], score) for index, score in ranked]
     matches.sort(key=lambda item: (-item["score"], item["path"]))
@@ -1846,12 +1866,17 @@ def search_cards_payload(
     }
 
 
-def search(*, target: Path, query: str, limit: int = 20, json_output: bool = False) -> int:
+def search(
+    *, target: Path, query: str, limit: int = 20, json_output: bool = False, include_archived: bool = False
+) -> int:
     try:
-        payload = search_cards_payload(target, query, limit=limit)
+        payload = search_cards_payload(target, query, limit=limit, include_archived=include_archived)
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
+    if include_archived:
+        payload["search_scope"] = "local-only"
+        print("memory search: --include-archived uses local-only search", file=sys.stderr)
     # Side-effect only on the CLI path so search_cards_payload (and the
     # retrieval eval harness that calls it) stay pure.
     _record_search_log(target, query=query, matches=payload.get("matches") or [])

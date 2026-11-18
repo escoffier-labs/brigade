@@ -864,6 +864,7 @@ transport env path. See `docs/skill-registry.md`.
 | `route` | object | no | Route manifest |
 | `route_fingerprint` | string | no | |
 | `reused_evidence_ref` | string | no | Reused verify receipt path when `evidence_ref` was canonicalized through `reused_from` (#650) |
+| `attribution_source` | string | no | `caller_typed` (explicit id) or `session_observed` (`--capture auto`). Absent on older rows, which read as `caller_typed`. `session_observed` counts toward hurt only and can only hold; see [attribution sources](outcome-scoring.md#attribution-sources) |
 
 ---
 
@@ -890,17 +891,45 @@ transport env path. See `docs/skill-registry.md`.
 
 ---
 
-## `brigade.work-run`: `schema_version: 1`
+## `brigade.work-run`: `schema_version: 3`
 
 Portable multi-file archive for one Brigade run directory. The archive root is a
 directory containing `work-run.json` (this envelope) and a `payload/` tree with
 the exported run files. Published JSON Schema artifact:
-[`schemas/work-run.v1.schema.json`](../schemas/work-run.v1.schema.json).
+[`schemas/work-run.v3.schema.json`](../schemas/work-run.v3.schema.json).
 
 Following the Agent Client Protocol pattern, the schema **artifact** version
-(the `work-run.v1` filename / `$id`) is separate from archive **wire**
+(the `work-run.v3` filename / `$id`) is separate from archive **wire**
 compatibility (`schema` + `schema_version` on `work-run.json`). Consumers must
 not infer import acceptance from the artifact filename alone.
+
+**Privacy guarantee:** exported archives contain no prompt text, generated text
+or absolute paths. Export applies a closed file set and closed receipt shapes.
+Only fixed enums, ISO timestamps, hex digests, Brigade run ids, numeric
+versions, numbers, booleans, and fixed path tokens remain readable. Every other
+string, including seat names, model names, ids, labels, relative paths, and log
+names, becomes a per-host HMAC-SHA256 keyed digest. Only receipt JSON, scrubbed
+worker streams, and checkpoint references are exported. Raw artifacts
+such as `final.txt`, `summary.md`, logs, and `changes.patch` stay local. Local
+run files are unchanged and keep raw prompts and paths so resume still works.
+Evidence packages (`brigade evidence package`) and remote execution transport
+are outside this guarantee.
+
+The guarantee covers text from the exporting machine. A hand-built archive can
+still hide data in fields that hold hex digests by design, such as `sha256`
+values or digest-shaped names, because any 64 hex characters pass. That
+includes scrubbed worker stream file names in a current-format archive, which
+must be hex-shaped. Export and legacy import rename every stream to a keyed
+digest, so seat names never become file names. Scrubbed streams keep bounded public
+identifiers such as thread, turn, item and tool names and method values, as the
+worker event scrubber defines.
+
+The lifecycle journal is deliberately omitted. Its `detail` fields carry
+exception text, and the hash chain cannot be scrubbed in place. Export records
+the journal chain head and event count in `journal_withheld`. An imported run
+therefore cannot be audited against the lifecycle journal. `brigade runs audit`
+reports `journal-withheld` with a clear reason instead of `match` or the legacy
+missing-journal message.
 
 **Commands:** `brigade runs export`, `brigade runs import`,
 `brigade runs validate-archive`.
@@ -914,9 +943,7 @@ not infer import acceptance from the artifact filename alone.
     run.json
     roster.json
     ...
-    events/lifecycle.jsonl
-    events/<worker>.scrubbed.json            # scrubbed worker streams (#592)
-    events/**/<worker>.scrubbed.json         # nested worker streams also scrubbed
+    events/<hmac-sha256>.scrubbed.json       # scrubbed worker streams, keyed names (#592)
     events/recovery-checkpoints/<sha256>.json   # artifact references only
 ```
 
@@ -925,7 +952,7 @@ not infer import acceptance from the artifact filename alone.
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `schema` | string | yes | Always `brigade.work-run` |
-| `schema_version` | integer | yes | `1` |
+| `schema_version` | integer | yes | `3` |
 | `run_id` | string | yes | `YYYYMMDD-HHMMSS-<8 hex>` |
 | `exported_at` | string | yes | ISO-8601 UTC (`Z`) |
 | `exporter_brigade_version` | string | yes | Brigade version that wrote the archive |
@@ -933,9 +960,17 @@ not infer import acceptance from the artifact filename alone.
 | `payload_dir` | string | yes | Always `payload` |
 | `compatibility` | object | yes | Closed import/export rules (below) |
 | `files` | array | yes | Declared payload entries with digests |
-| `run` | object | no | Compact summary projected from `run.json` |
-| `source_run_dir` | string | no | Absolute source path at export time |
+| `run` | object | no | Compact summary projected from `run.json`. Prompt text is replaced by `task_digest` |
+| `journal_withheld` | object | no | `{chain_head, event_count}` for a lifecycle journal omitted at export |
+| `source_run_dir` | string | no | Fixed `<run-dir>` token, never an absolute path |
 | `schema_artifact` | string | no | Repo-relative published schema path |
+
+**`journal_withheld` object**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `chain_head` | string \| null | yes | Final `event_digest` of the withheld chain, or `null` for an empty journal |
+| `event_count` | integer | yes | Number of complete events in the withheld journal |
 
 **`files[]` entry**
 
@@ -952,23 +987,34 @@ not infer import acceptance from the artifact filename alone.
 
 ### Compatibility rules (import / export)
 
-| Rule | v1 behavior |
+| Rule | v3 behavior |
 | --- | --- |
-| Unsupported `schema` / `schema_version` | **Refuse** hard |
+| Unsupported `schema` / `schema_version` | **Refuse** hard. Import accepts legacy v1 and v2 only by projecting them first |
 | Unknown manifest keys | **Refuse** (closed envelope) |
-| Nested receipt unknown keys | **Ignore** (receipt-family additive evolution) |
+| Payload files outside the closed export set | **Drop** on export, **refuse** on import |
+| Receipt keys outside the per-kind allowlist | **Drop** on export, **refuse** on import |
+| Prompt and generated text fields | **Replace** with a keyed `{digest, chars}` object. A raw string fails validation |
+| Paths and log names | **Keep** only the fixed tokens `.`, `<run-dir>`, `<external-path>`, or `<home>`. Every other path becomes a keyed digest |
 | Symlinks / special files | **Refuse** |
 | Recovery-checkpoint bodies | **Strip** to closed artifact references on export (#636). Validate refuses bodies |
 | Raw worker event streams (`events/**/*.jsonl` except authenticated lifecycle) | **Refuse** as portable public support. Export replaces with scrubbed sidecars (`events/**/<worker>.scrubbed.json`, `privacy_class=redacted`) or fails closed (#592). Nested smuggling paths are rejected |
-| Reserved `events/lifecycle.jsonl` | **Authenticate** as `brigade.run_event.v1` chain (or empty). Reject raw JSON-RPC worker envelopes disguised as the journal (#592) |
-| Resume after import | **Not supported** in v1 (`resume_supported: false`). Import is inspection/audit oriented |
+| `events/lifecycle.jsonl` | **Withhold** from export. The manifest records `journal_withheld`. Import refuses an archive that contains the journal |
+| Resume after import | **Not supported** (`resume_supported: false`). Import is inspection oriented |
+| Audit after import | Returns `journal-withheld` because the lifecycle chain is not present |
 | Digest mismatch | **Refuse** |
 
-`compatibility` object fields are closed for v1: reader window pinned to
-`schema_version` 1, `private_checkpoint_bodies` =
+`compatibility` object fields are closed for v3: reader window pinned to
+`schema_version` 3, `private_checkpoint_bodies` =
 `strip_to_artifact_reference`, `unsupported_archive_version` = `refuse`,
 `nested_receipt_unknown_keys` = `ignore`, `symlinks_and_special_files` =
-`refuse`, and `journal_authority` one of `none` / `present` / `authoritative`.
+`refuse`, and `journal_authority` one of `none` / `present` / `authoritative` /
+`withheld`. `withheld` is distinct from `none`, which still means a legacy run
+never had a lifecycle journal.
+
+Legacy v1 and v2 archives are structurally validated, projected through the same
+closed shapes and privacy assertion, and installed only when the projection is
+compliant. A legacy archive that still carries a lifecycle journal has it
+dropped during import, and the run is marked `journal_withheld`.
 
 ---
 
@@ -1091,52 +1137,102 @@ when more results exist. Receipts must match the requested subject kind and ID.
 Verify receipts and parent manifests use their IDs for direct lookup.
 Text output includes diagnostics and a notice when a walk limit is reached.
 
-## Run View read contracts (#631)
+## Run View read contracts (#631, #2046)
 
 Versioned, read-only CLI JSON contracts for higher-level surfaces (the Center
 Runs view). Each payload is an explicit allowlist over run artifacts: it never
-includes environment values, auth or control tokens, secret references, full
-prompts, transcript bodies, raw stdout/stderr, log paths, or absolute
-workspace paths. Every string that enters a list, detail, or watch JSON
-contract passes through one `_clean_str` chokepoint: the value is bounded,
-then home-directory prefixes are rewritten to `~` as the last transform.
-That rewrite is universal. It is not limited to `failure.detail` or
-`commands[].command`. Matched prefixes are POSIX `/home/<user>` and
-`/Users/<user>` (including a doubled slash such as `/home//<user>`, and
-usernames that contain a space or an apostrophe) and Windows
-`C:\Users\<name>\` plus `C:/Users/<name>/`. The authoritative artifacts
-and human CLI output are never modified.
+includes environment values, auth or control tokens, secret references,
+transcript bodies, raw stdout/stderr, log paths, or absolute workspace paths.
+
+These contracts are **v2** as of #2046. In v1 `task` was a bounded string. In v2
+`task` is a closed digest object, so a reader distinguishes the forms by schema
+name, and a bare v1 reader must not assume a string. The three view contracts
+bumped together.
+
+The projection applies the same closed rule as the run export. A string stays
+readable only when it is a known enum value for that field (`status`, failure
+`phase`, `mode`, `transport`, worker `status`, lineage `kind`, synthesis `mode`,
+brief `name`, and the other fixed sets below), an ISO timestamp, pure hex or
+`sha256:<hex>`, a Brigade run or event id, a plain numeric version, or a fixed
+path token. Unknown enum values become `<other>`. Every other string becomes
+the keyed digest object `{"digest": "hmac-sha256:<hex>", "chars": N}`, and that
+includes mapping keys such as roster agent names.
+
+Prompt and generated text is always a digest: `task`, assignment text, worker
+and agent `detail`, failure `detail` and `kind`, synthesis text, verify
+`command` text, roster `role`, and the watch stream's `inspect_command`. A value
+that looks like a path is digested rather than mapped, so a served payload never
+carries a filesystem location. The key is the per-host HMAC key the run export
+uses, so a digest is not portable across hosts and a short prompt cannot be
+reversed by guessing. The first projected read creates the key at
+`.brigade/memory/search-log-key` in the owning workspace when it is missing.
+
+`brigade runs list --show-task` and `brigade runs show --show-task` add a
+bounded 80-character `task_preview` for a human at the local terminal. The
+preview is the only raw text in a v2 JSON payload, and it appears only when the
+flag is passed. `brigade runs serve` never passes that flag, so the Run View and
+its watch stream stay digest-only.
+
+Remaining readable strings in a view payload still pass through one
+`_clean_str` chokepoint: the value is bounded, then home-directory prefixes are
+rewritten to `~`. Matched prefixes are POSIX `/home/<user>` and `/Users/<user>`
+(including a doubled slash such as `/home//<user>`, and usernames that contain a
+space or an apostrophe) and Windows `C:\Users\<name>\` plus
+`C:/Users/<name>/`. The authoritative local artifacts, `brigade runs watch
+--json`, and human `runs list`/`runs show` output are not projected, because
+resume and local operation need the raw values.
+
+If the per-host key is refused or cannot be created, the view fails closed. CLI
+JSON exits 3 with `error: run digest key unavailable`, the HTTP JSON endpoints
+return `503` with a fixed `error: run view unavailable` body, and SSE sends one
+closed `{"type": "error", "error": "digest-key-unavailable"}` record and ends.
+No path falls back to raw text.
+
+A run directory name is user-controlled because `brigade run --output-dir`
+accepts any path. A run id stays readable only when Brigade minted it: the
+legacy and node-namespaced forms from `brigade.run_id`, `batch-` plus 64 hex,
+and `t3-` plus 64 hex. Any other name becomes a keyed digest, and so does any
+event id built from that name. The Run View list returns the digest as the run
+id, and the detail and events routes resolve the digest by matching every
+directory name server-side. The raw name never appears in a URL, header or
+body, and an unknown route id is refused rather than reflected. The memory
+handoff note applies the same rule, so a custom run id never enters the note.
 
 `brigade runs serve` exposes the same three contracts on loopback as
 `GET /api/runs`, `GET /api/runs/<run-id>`, and `GET /api/runs/<run-id>/events`
-(SSE of watch records). It does not add a second artifact reader.
+(SSE of watch records). It does not add a second artifact reader, and it calls
+the same projection as the CLI JSON contract. An unreadable run returns a fixed
+`502` body with a closed `X-Brigade-Diagnostic: run-unreadable` header, and a
+missing runs directory sends the closed `runs-directory-missing` code instead of
+the absolute runs path.
 
-<a id="brigaderuns-listv1--brigade-runs-list---json"></a>
+<a id="brigaderuns-listv2--brigade-runs-list---json"></a>
 
-### `brigade.runs-list.v1`: `brigade runs list --json`
+### `brigade.runs-list.v2`: `brigade runs list --json`
 
 ```json
-{"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0}
+{"schema": "brigade.runs-list.v2", "runs": [], "skipped_invalid": 0}
 ```
 
 Each entry in `runs` carries browser-safe summary fields only: `run_id` (the
-run directory name, never an absolute path), `status`, bounded `task`,
-`started_at`, `finished_at`, `duration_seconds`, `failure_phase`, `mode`
+run directory name, never an absolute path), `status`, `task` (a keyed digest
+object), optional `task_preview` when `--show-task` was passed, `started_at`,
+`finished_at`, `duration_seconds`, `failure_phase`, `mode`
 (`normal` / `read-only`, with `, dry-run` appended), `resume_available`, and
 optional `parent_run_id` when the run is a durable child of another run.
 Invalid run directories are counted in `skipped_invalid` and skipped.
 That includes a child that is a symlink and a directory whose resolved
 path leaves the runs root, so list JSON cannot enumerate an alternate tree.
 
-<a id="brigaderun-detailv1--brigade-runs-show-run---json-brigade-runs-latest---json"></a>
+<a id="brigaderun-detailv2--brigade-runs-show-run---json-brigade-runs-latest---json"></a>
 
-### `brigade.run-detail.v1`: `brigade runs show <run> --json`, `brigade runs latest --json`
+### `brigade.run-detail.v2`: `brigade runs show <run> --json`, `brigade runs latest --json`
 
 Both commands share one serializer:
 
 ```json
 {
-  "schema": "brigade.run-detail.v1",
+  "schema": "brigade.run-detail.v2",
   "run": {},
   "roster": {},
   "plan": {},
@@ -1147,44 +1243,53 @@ Both commands share one serializer:
 }
 ```
 
-- `run`: identifier, status, bounded task, mode, timestamps, duration,
-  `failure` (`phase` / `kind` / bounded `detail`), bounded `error`,
+- `run`: identifier, status, `task` digest object, optional `task_preview`,
+  mode, timestamps, duration,
+  `failure` (`phase` / `kind` / digested `detail`), digested `error`,
   `suspected_noop`, `resume_available`, and optional `lineage`
   (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`,
   and `children` discovered from sibling receipts the same way as
   human `runs show`) when the run is a durable parent or child.
-  Child `status` and `branch_point_event_id` are bounded.
-- `roster`: orchestrator, worker limits, allowed models, and per-seat `cli`,
-  `model`, `reasoning`, bounded `role`, and `timeout_seconds`.
-- `plan`: worker `assignments` with stage, worker, and bounded task.
-- `workers`: per-result state (ok/status, bounded detail, duration, exit code,
-  timeout flag, requested model, transport, failure class).
-- `verification`: verify receipt summaries (receipt run id, status, duration,
-  `command`, and exit code) from recorded ground truth.
+  Child `status` is an enum with `<other>` for an unknown value, and
+  `branch_point_event_id` is readable only in the event id form.
+- `roster`: digested orchestrator, worker limits, digested allowed models, and
+  per-seat digested `cli`, `model`, `reasoning` and `role`. Agent names are
+  digests used as mapping keys.
+- `plan`: worker `assignments` with stage, digested worker, and digested task.
+- `workers`: per-result state (ok, worker status enum, digested detail, duration,
+  exit code, timeout flag, digested requested model, transport enum, digested
+  failure class and detail).
+- `verification`: verify receipt summaries (run id, status enum, duration,
+  digested `command`, and exit code) from recorded ground truth.
 - `briefs`: attachment markers for the Code Intelligence (`code-graph`),
   drift (`drift-impact`), and Evidence Ledger (`evidence`) briefs.
 
-<a id="brigaderun-watchv1--brigade-runs-watch-run---json"></a>
+<a id="brigaderun-watchv2--brigade-runs-watch-run---json"></a>
 
-### `brigade.run-watch.v1`: `brigade runs watch <run> --json`
+### `brigade.run-watch.v2`: `brigade runs watch <run> --json`
 
 Every newline-delimited watch record (`watch`, `run`, `plan`, `event`,
 `workers`, `synthesis`, `final`, `summary`) carries
-`"schema": "brigade.run-watch.v1"` and is filtered through the same
+`"schema": "brigade.run-watch.v2"` and is filtered through the same
 allowlist / one-line helpers as list and detail. Consumers must ignore
 unknown future record types. `brigade runs events` keeps its own
 `brigade.run_event.v1` lifecycle contract and is unchanged.
 
 - `watch` and `summary` identify the run as `run_id` (directory name,
-  never an absolute path). The stale-lock `inspect_command` is
-  `brigade runs show <run_id>`.
+  never an absolute path). The stale-lock `inspect_command` is a digest.
 - `run`, `plan`, `workers`, and `synthesis` reuse the detail-contract
-  field allowlists and bounded strings.
-- `event` records emit only `method` and `item_type`. Auth tokens,
+  field allowlists and the same digest projection. The SSE stream that
+  `brigade runs serve` exposes uses this contract, so it carries no raw
+  prompt or generated text.
+- `event` records emit only digested `method` and `item_type`. Auth tokens,
   prompts, transcript bodies, raw stdout/stderr, log paths, and
   absolute paths in `params` are omitted.
-- `final` text is one-lined and bounded through the same `_clean_str`
-  chokepoint. A value that cannot be rendered safely is omitted.
+- `final` text is replaced by a keyed digest object. The one-line text
+  itself is never streamed.
+
+`brigade runs watch --json` writes the same record shapes for a local terminal
+and keeps bounded raw text, so it is not a privacy surface. Only the Run View
+SSE stream projects the records.
 
 
 

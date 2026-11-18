@@ -88,6 +88,7 @@ COMMANDS: tuple[CommandEntry, ...] = (
     CommandEntry("route", "route", "Show the deterministic route a task composes: signals, stages, waves, holds."),
     CommandEntry("roster", "roster", "Create and check agent rosters."),
     CommandEntry("runs", "runs", "Inspect Brigade run artifacts."),
+    CommandEntry("t3", "t3", "Enroll and govern native T3 delegation for a parent session."),
     CommandEntry("node", "node", "Show or initialize this machine's Brigade node identity."),
     CommandEntry("fleet", "fleet", "Fleet sync: report run events to a central hub over Tailscale."),
     CommandEntry("guard", "guard", "Run the embedded content guard."),
