@@ -5,6 +5,8 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 from brigade.native_t3_contract import (
+    INTERACTION_MODES,
+    RUNTIME_MODES,
     AuthorityReference,
     BindingEvidence,
     DiscoveryEvidence,
@@ -31,7 +33,7 @@ def target(**changes):
             driver="codex",
             launch_model="launch-model",
             options=(("reasoningEffort", "high"),),
-            runtime_mode="app-server",
+            runtime_mode="auto",
             interaction_mode="default",
             isolation="worktree",
             source_revision="a" * 40,
@@ -50,7 +52,7 @@ def discovery(**changes):
             observed_at=100.0,
             expires_at=125.0,
             child_enabled=True,
-            runtime_modes=("app-server",),
+            runtime_modes=("auto",),
             models=(ModelDeclaration("launch-model", (("reasoningEffort", ("high", "low")),)),),
         ),
         **changes,
@@ -188,7 +190,7 @@ def test_canonical_model_match_does_not_replace_launch_model_binding():
         (target(launch_model="other-model"), discovery(), "model-undeclared"),
         (target(options=(("unknownOption", "high"),)), discovery(), "option-undeclared"),
         (target(options=(("reasoningEffort", "medium"),)), discovery(), "option-value-undeclared"),
-        (target(runtime_mode="other-runtime"), discovery(), "runtime-undeclared"),
+        (target(runtime_mode="full-access"), discovery(), "runtime-undeclared"),
         (target(), discovery(models=()), "model-undeclared"),
         (target(), discovery(runtime_modes=()), "runtime-undeclared"),
     ],
@@ -277,7 +279,7 @@ def test_changed_task_spec_and_repeated_seat_assignment_are_distinct(field, valu
         ("driver", "driver-other"),
         ("launch_model", "model-other"),
         ("options", (("reasoningEffort", "low"),)),
-        ("runtime_mode", "runtime-other"),
+        ("runtime_mode", "full-access"),
         ("interaction_mode", "plan"),
         ("isolation", "shared"),
         ("source_revision", "b" * 40),
@@ -311,7 +313,7 @@ def test_mutating_supplied_containers_cannot_change_frozen_values():
     values = ["high"]
     declarations = [["reasoningEffort", values]]
     models = [ModelDeclaration("launch-model", declarations)]
-    modes = ["app-server"]
+    modes = ["auto"]
     refs = [AuthorityReference("policy", "policy-test", None)]
     selected = target(options=options)
     evidence = discovery(models=models, runtime_modes=modes)
@@ -324,7 +326,7 @@ def test_mutating_supplied_containers_cannot_change_frozen_values():
     refs.clear()
     assert selected.options == (("reasoningEffort", "high"),)
     assert evidence.models[0].options == (("reasoningEffort", ("high",)),)
-    assert evidence.runtime_modes == ("app-server",)
+    assert evidence.runtime_modes == ("auto",)
     assert original.authority_refs == (AuthorityReference("policy", "policy-test", None),)
     with pytest.raises(FrozenInstanceError):
         original.dispatch_attempt = 2
@@ -337,7 +339,8 @@ def test_mutating_supplied_containers_cannot_change_frozen_values():
         (target, {"source_revision": "A" * 40}),
         (target, {"source_revision": "a" * 39}),
         (target, {"isolation": "unknown"}),
-        (target, {"interaction_mode": "auto"}),
+        (target, {"runtime_mode": ""}),
+        (target, {"interaction_mode": ""}),
         (target, {"target_environment": ""}),
         (discovery, {"project": ""}),
         (discovery, {"child_enabled": 1}),
@@ -360,6 +363,18 @@ def test_mutating_supplied_containers_cannot_change_frozen_values():
 def test_malformed_identity_and_boolean_ordinals_are_bounded_refusals(factory, changes):
     with pytest.raises(ValueError, match="^invalid native T3 contract$"):
         factory(**changes)
+
+
+@pytest.mark.parametrize("runtime_mode", [*sorted(RUNTIME_MODES), "inherit"])
+@pytest.mark.parametrize("interaction_mode", [*sorted(INTERACTION_MODES), "inherit"])
+def test_native_modes_accept_only_t3_literals_and_inherit(runtime_mode, interaction_mode):
+    selected = target(runtime_mode=runtime_mode, interaction_mode=interaction_mode)
+    assert selected.runtime_mode == runtime_mode and selected.interaction_mode == interaction_mode
+
+
+def test_inherit_runtime_mode_skips_discovery_membership():
+    # Capabilities never advertise `inherit`, so it cannot be a membership miss.
+    assert qualify(target(runtime_mode="inherit"), discovery=discovery(runtime_modes=("auto",))).status == "declared"
 
 
 @pytest.mark.parametrize(

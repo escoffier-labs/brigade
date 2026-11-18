@@ -14,7 +14,7 @@ cli = "codex"
 role = "coder"
 
 [t3_targets.coder]
-origin_environment = "env-origin"
+origin_environment = "env-target"
 origin_thread = "thread-parent"
 target_environment = "env-target"
 target_project = "project-example"

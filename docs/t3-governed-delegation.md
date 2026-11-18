@@ -39,9 +39,9 @@ Declarations grant no readiness, admission or launch authority.
 
 ```toml
 [t3_targets.coder]
-origin_environment = "env-origin"
+origin_environment = "env-local"
 origin_thread = "thread-parent"
-target_environment = "env-target"
+target_environment = "env-local"
 target_project = "project-example"
 provider_instance = "codex-example"
 driver = "codex"
@@ -53,8 +53,23 @@ max_live = 2
 reasoningEffort = "high"
 ```
 
-The eight identity fields above are required. `runtime_mode` defaults to
-`app-server` and `interaction_mode` to `default`. `isolation` must be
+The eight identity fields above are required. `runtime_mode` and
+`interaction_mode` both default to `inherit`. `runtime_mode` also accepts only
+`approval-required`, `auto-accept-edits`, `auto` and `full-access`, the literals
+the pinned T3 Code delegate schema accepts. `interaction_mode` also accepts only
+`default` and `plan`. A target that still declares `app-server`, or any other
+mode T3 does not accept, refuses at `t3 open` and at claim admission with
+`target-mode-invalid`. Set `inherit` and let the parent thread's mode apply. A
+retained target from an older release is still read back unchanged, so an
+attempt that was already claimed can finish its verbs. A new claim re-applies
+these rules and refuses with `admission-denied` and reason
+`target-mode-invalid`.
+
+`target_environment` must equal `origin_environment`, because a governed child
+must run locally. A different value refuses with `target-remote-unsupported` at
+`t3 open` and at claim admission. Cross-machine governed targets are
+unsupported. Remote editing children belong to `t3_thread_launch` with a
+worktree `workspaceStrategy`, which needs its own design. `isolation` must be
 `worktree`, unknown fields refuse the whole batch, and a seat without a
 declaration refuses the whole batch. `max_live` is optional and must be a
 positive integer. It caps how many governed native tasks that one seat may hold
@@ -118,10 +133,24 @@ the native tool.
 7. `t3 hold-resolve` records an operator assertion or abandons an attempt that
    will never be correlated. It never re-grants launch.
 
-The claim output names the task text once, the exact target (`provider
-instance`, `model`, `options`), `isolation` `worktree`, and the
-`clientRequestId` derived from `request_key(run, task, attempt)`. The same
-arguments are not printed again for that attempt.
+The claim output names the task text once, the exact target
+(`providerInstanceId`, `driverKind`, `model`, `projectId`, `options`),
+`isolation` `worktree`, and the `clientRequestId` derived from
+`request_key(run, task, attempt)`. It never sends `target.environmentId`,
+because naming a linked environment selects T3's remote path, which rejects
+worktree isolation. `runtimeMode` and `interactionMode` are sent only when the
+target declares one instead of `inherit`. The same arguments are not printed
+again for that attempt.
+
+### The local project precondition
+
+`target.projectId` is the declared `target_project`. T3's local `delegate_task`
+path refuses a child whose `projectId` differs from the parent thread's project
+with `invalid_request`, after Brigade has consumed the launch. The roster
+`target_project` must therefore equal the T3 project of the parent thread that
+calls `delegate_task`. A mismatch is a held lost launch. Resolve it with
+`t3 hold-resolve` and never resubmit. The hold keeps its capacity slot until a
+reviewed release operation exists.
 
 ### The lost-reply hold
 
@@ -182,6 +211,16 @@ claim once a Hub applies. Refusals are fixed tokens on stderr with empty
 stdout. A granted claim records digests-only evidence on its
 `task.native-claimed` fact: the admission code, the roster digest and, when
 enrolled, the live policy digest.
+
+### Native mode ceilings
+
+T3 rejects an explicit runtime or interaction mode broader than the parent
+thread's own mode, and Brigade cannot see the parent ceiling when it prints a
+claim. A target that declares a broader mode therefore makes T3 refuse
+`delegate_task` after Brigade has already consumed launch permission. That is a
+lost-launch case and it is handled by the existing hold. The task is never
+resubmitted. Leave both modes at `inherit` unless the operator knows the parent
+ceiling allows the declared mode.
 
 ### Occupancy and the capacity rule
 
@@ -329,9 +368,10 @@ only `task_id`, `seat`, `state` and the target summary (`provider_instance`,
 `model`). Refusals print one bounded `error [<code>]: <diagnostic>` line to
 stderr and exit non-zero. Refusal codes include `source-dirty`,
 `roster-missing`, `unknown-seat`, `seat-unbound`, `invalid-target`,
-`target-isolation`, `isolation-required`, `synthesis-unsupported`, `run-busy`,
-`request-conflict`, `asset-conflict`, `asset-custody`, `asset-digest`,
-`unsupported-platform` and `journal-refused`.
+`target-mode-invalid`, `target-isolation`, `target-remote-unsupported`,
+`isolation-required`, `synthesis-unsupported`, `run-busy`, `request-conflict`,
+`asset-conflict`, `asset-custody`, `asset-digest`, `unsupported-platform` and
+`journal-refused`.
 
 Claim and correlation refusals use the same one-line form. Codes include
 `run-missing`, `run-state`, `run-held`, `not-native-run`, `source-dirty`,
@@ -355,8 +395,9 @@ Claim and correlation refusals use the same one-line form. Codes include
 - A projection that names a linked-environment `remoteChild` is refused,
   because the enrolled target is local. That lane is not supported here.
 - The finalized intent keeps the roster target's runtime and interaction modes,
-  but the delegate arguments do not send `runtimeMode`, because the declared
-  default `app-server` is not one of the native runtime mode literals. The
+  and the claim sends them only when they are explicit. T3 refuses an explicit
+  mode broader than the parent thread's, which Brigade cannot check at claim
+  time. That refusal is a lost launch and stays with the existing hold. The
   result projection does not echo those fields, so acceptance validates
   provider, model and options only.
 - Windows is supported with an owner-only DACL that grants the current user
