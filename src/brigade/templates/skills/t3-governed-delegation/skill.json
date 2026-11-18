@@ -2,11 +2,12 @@
   "id": "t3-governed-delegation",
   "title": "t3-governed-delegation",
   "version": "0.1.0",
-  "description": "Exact call order for a T3 Code parent session delegating child tasks under Brigade governance, including the separation between T3 task_status delivery and Brigade acknowledgement and why a lost delegate reply is held instead of resubmitted.",
+  "description": "Exact call order for a T3 Code parent session delegating child tasks under Brigade governance, including the parent-reported readiness step before claim, the separation between T3 task_status delivery and Brigade acknowledgement, and why a lost delegate reply is held instead of resubmitted.",
   "required_tools": [
     "Read",
     "Grep",
-    "Bash(brigade t3:*)"
+    "Bash(brigade t3:*)",
+    "Bash(brigade roster:*)"
   ],
   "tests": ["brigade skills lint t3-governed-delegation"]
 }

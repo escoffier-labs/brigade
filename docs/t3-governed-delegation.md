@@ -109,7 +109,13 @@ the native tool.
 
 1. `t3 open` retains the exact delegation input and the reference-only
    enrollment facts.
-2. `t3 claim` takes the workspace native capacity lock and then the
+2. Before claiming, call your own `orchestrator_capabilities` tool and pass
+   its result to `brigade roster ready --route t3 --isolation worktree
+   --worker <seat> --t3-capabilities <file|->`. A ready result means the
+   selected target matches the parent-reported route support and Brigade
+   governance. It is parent-reported, non-reserving and never proves that the
+   parent is still active.
+3. `t3 claim` takes the workspace native capacity lock and then the
    per-invocation run lock. Under both locks it checks live governed
    occupancy, re-applies seat admission, checks the run-wide barrier and the
    asset, template, source and run-state bindings, then makes one coordinator
@@ -119,18 +125,18 @@ the native tool.
    claim and records the durable dispatch request. Only a granted claim prints
    the delegate arguments, and only after every mutation committed. The parent
    submits that exact input through its own `delegate_task` call.
-3. `t3 accepted` validates the full returned projection against the durable
+4. `t3 accepted` validates the full returned projection against the durable
    claim and intent and records it as parent-reported correlation. It never
    proves that T3 created or accepted the task.
-4. On a completion wake the parent calls its own `task_status`, saves the
+5. On a completion wake the parent calls its own `task_status`, saves the
    projection and calls `t3 observe`. Observation requires an existing
    correlation and refuses any handle mismatch.
-5. `t3 cancel` records a digests-only request and prints the native
+6. `t3 cancel` records a digests-only request and prints the native
    `task_cancel` arguments. `t3 ack` consumes exactly one terminal result id.
-6. `t3 finalize` is explicit and writes `completed` only when every task
+7. `t3 finalize` is explicit and writes `completed` only when every task
    completed and was acknowledged. `t3 status` is read-only and stays readable
    after finalization.
-7. `t3 hold-resolve` records an operator assertion or abandons an attempt that
+8. `t3 hold-resolve` records an operator assertion or abandons an attempt that
    will never be correlated. It never re-grants launch.
 
 The claim output names the task text once, the exact target
@@ -141,6 +147,45 @@ because naming a linked environment selects T3's remote path, which rejects
 worktree isolation. `runtimeMode` and `interactionMode` are sent only when the
 target declares one instead of `inherit`. The same arguments are not printed
 again for that attempt.
+
+### Readiness before claim
+
+T3 Code keeps no admission ledger and no child concurrency limit, and only the
+parent session can call its own `orchestrator_capabilities` tool. Brigade never
+calls T3, never mints a T3 session and never calls MCP. Before `t3 claim`, the
+parent builds a `brigade.t3_capabilities_report.v1` envelope around the
+unmodified capabilities result and runs:
+
+```console
+brigade roster ready --route t3 --isolation worktree --worker <seat> --t3-capabilities <file|->
+```
+
+The envelope carries `schema`, `origin_environment`, `origin_project`,
+`reported_at` in ISO UTC, and `capabilities`. The report checks the envelope
+origin environment and project against the selected target, `parentThreadId`
+against `origin_thread`, the provider instance and driver, child-task and
+cross-provider permission, empty provider constraints, the listed model and
+its option values, the provider runtime modes when present, and the
+`appOwnedSubagents` and `cancellation` features. A model the provider omitted
+is unknown when `omittedModels` is positive and blocked when it is zero or
+missing. A listed model without option descriptors passes with reason
+`options-unchecked-by-t3` because T3 skips validation then. `reported_at` must
+be fresh within the shared 30-second operation TTL.
+
+Brigade supplies isolation, admission and capacity evidence. Isolation passes
+only with worktree isolation declared on every selected target. Admission
+reuses the same predicates `t3 claim` applies, including live Hub policy when
+the node is enrolled. Capacity reads governed occupancy without taking the
+capacity lock or a run lock.
+
+A ready result always carries `assurance: parent-reported`,
+`launch_guaranteed: false`, `capacity_reserved: false` and
+`parent_active: unverified`. It is a snapshot, not a reservation. It cannot
+prove the parent thread is still active, that worktree preparation will
+succeed, or that an explicit runtime or interaction mode is within the parent
+thread's ceiling. A later claim still applies every gate. Without the
+envelope, every route-support row is unknown with reason
+`t3-caller-context-unavailable`.
 
 ### The local project precondition
 

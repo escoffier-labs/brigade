@@ -42,7 +42,13 @@ def health_for(declared, name="worker", *, status="passed", at=NOW):
 def observed(declared, request, tmp_path, **changes):
     scope = readiness.operation_scope(declared, request, tmp_path)
     evidence = {
-        category: readiness.Observation("passed", NOW, scope, capacity=2 if category == "capacity" else None)
+        category: readiness.Observation(
+            "passed",
+            NOW,
+            scope,
+            capacity=2 if category == "capacity" else None,
+            source="brigade-governance",
+        )
         for category in ("route-support", "isolation", "admission", "capacity")
     }
     evidence.update(changes)
@@ -127,7 +133,7 @@ def test_missing_t3_contract_stays_unverified(declared, tmp_path):
     result = evaluate(declared, readiness.ReadinessRequest(("worker",), route="t3"), tmp_path)
     assert result["status"] == "unverified"
     support = next(item for item in result["evidence"] if item["category"] == "route-support")
-    assert support["reason"] == "t3-contract-unavailable"
+    assert support["reason"] == "t3-caller-context-unavailable"
     assert support["action"]
 
 
@@ -1303,21 +1309,26 @@ def test_produced_brigade_observations_invalidate_on_staleness_and_scope_change(
     assert changed_eval["limiting_reason"] == "observation-stale-or-scope-mismatch"
 
 
-def test_t3_route_remains_untouched_by_brigade_producer(declared, tmp_path, monkeypatch):
-    from brigade import fleet_client, roster_readiness_brigade
+def test_t3_route_uses_t3_producer_without_the_brigade_producer(declared, tmp_path, monkeypatch):
+    from brigade import native_t3_admission, roster_readiness_brigade
 
     def _forbidden(*args, **kwargs):
-        raise AssertionError("T3 must not call brigade producer or fleet settings")
+        raise AssertionError("T3 readiness must not call the brigade route producer")
 
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", _forbidden)
+    monkeypatch.setattr(
+        native_t3_admission,
+        "read_hub_authority",
+        lambda _workspace: native_t3_admission.HubAuthority(state="unenrolled"),
+    )
     monkeypatch.setattr(readiness, "brigade_route_observations", _forbidden)
     monkeypatch.setattr(roster_readiness_brigade, "brigade_route_readiness", _forbidden)
     result = readiness.inspect_readiness(
         declared, readiness.ReadinessRequest(("worker",), route="t3"), workspace=tmp_path
     )
-    assert result["status"] == "unverified"
     support = next(item for item in result["evidence"] if item["category"] == "route-support")
-    assert support["reason"] == "t3-contract-unavailable"
+    assert support["reason"] == "t3-caller-context-unavailable"
+    assert support["source"] == "parent-reported"
+    assert result["assurance"] == "parent-reported"
 
 
 def test_brigade_roster_ready_cli_end_to_end(tmp_path, monkeypatch, capsys):

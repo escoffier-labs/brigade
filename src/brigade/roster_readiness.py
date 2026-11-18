@@ -12,7 +12,7 @@ import json
 import math
 import re
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
@@ -23,6 +23,17 @@ from .worker_failure import safe_detail
 
 SCHEMA = "brigade.roster_readiness.v1"
 OPERATION_TTL_SECONDS = 30.0
+SOURCE_BRIGADE_GOVERNANCE = "brigade-governance"
+SOURCE_PARENT_REPORTED = "parent-reported"
+# Route t3 never proves that the parent is active, that a launch happened, or
+# that capacity is reserved. The evaluator attaches these qualifiers and refuses
+# ready when any of them is missing.
+T3_QUALIFIERS = {
+    "assurance": SOURCE_PARENT_REPORTED,
+    "launch_guaranteed": False,
+    "capacity_reserved": False,
+    "parent_active": "unverified",
+}
 
 
 @dataclass(frozen=True)
@@ -41,7 +52,9 @@ class Observation:
 
     ``observed_at`` is Unix time; ``scope`` comes from operation_scope.
     Status is passed, failed, denied, unsupported, or unknown. Capacity is
-    required only for a passed capacity observation. No admission is reserved.
+    required only for a passed capacity observation. ``source`` is required:
+    route support may be ``parent-reported``, while isolation, admission and
+    capacity must be ``brigade-governance``. No admission is reserved.
     """
 
     status: str
@@ -49,6 +62,17 @@ class Observation:
     scope: str
     detail: str = ""
     capacity: int | None = None
+    seat: str | None = None
+    reason: str = ""
+    source: str = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        if type(self.source) is not str or self.source not in {SOURCE_BRIGADE_GOVERNANCE, SOURCE_PARENT_REPORTED}:
+            raise ValueError("invalid observation source")
+        if self.seat is not None and (type(self.seat) is not str or not self.seat):
+            raise ValueError("invalid observation seat")
+        if self.reason and (type(self.reason) is not str or re.fullmatch(r"[a-z][a-z0-9-]*", self.reason) is None):
+            raise ValueError("invalid observation reason")
 
 
 def _finite_real(value: Any) -> bool:
@@ -83,12 +107,18 @@ def _health_check_valid(check: Any) -> bool:
     )
 
 
-def operation_scope(roster: roster_mod.Roster, request: ReadinessRequest, workspace: Path) -> str:
+def operation_scope(
+    roster: roster_mod.Roster,
+    request: ReadinessRequest,
+    workspace: Path,
+    *,
+    t3_context: Mapping[str, Any] | None = None,
+) -> str:
     error = _request_error(request)
     if error:
         raise ValueError(error)
     request = replace(request, workers=tuple(sorted(set(request.workers))))
-    inputs = {
+    inputs: dict[str, Any] = {
         "request": asdict(request),
         "workspace": str(workspace.expanduser().resolve()),
         "orchestrator": roster.orchestrator,
@@ -104,6 +134,14 @@ def operation_scope(roster: roster_mod.Roster, request: ReadinessRequest, worksp
             if name in roster.agents
         },
     }
+    if request.route == "t3":
+        from .roster_readiness_t3 import scope_projection
+
+        material = (
+            dict(t3_context) if t3_context is not None else scope_projection(roster, request, workspace, report=None)
+        )
+        material.pop("received_at", None)
+        inputs["t3"] = material
     return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
@@ -166,31 +204,37 @@ def evaluate_readiness(
     *,
     workspace: Path,
     health: Mapping[str, seat_health.SeatHealthResult] | None = None,
-    observations: Mapping[str, Observation] | None = None,
+    observations: Mapping[str, Observation | tuple[Observation, ...] | list[Observation]] | None = None,
     now: float | None = None,
     hub_discovery_possible: bool = False,
+    t3_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate facts supplied by selected-seat health and route integrations.
 
     ``inspect_readiness`` produces live read-only ``admission``, ``capacity``,
-    and, for worktree requests, ``isolation`` observations for
-    ``route == "brigade"``. Embedding callers may still inject explicit
-    observations; T3 governance support remains unproduced here.
+    and ``isolation`` observations for ``route == "brigade"``, and
+    parent-reported route support plus Brigade governance for
+    ``route == "t3"``. Embedding callers may still inject explicit
+    observations.
     """
     now = time.time() if now is None else now
     evidence: list[dict[str, Any]] = []
     health = health or {}
     observations = observations or {}
 
-    def add(category: str, status: str, reason: str, action: str = "", **fields: Any) -> None:
-        evidence.append({"category": category, "status": status, "reason": reason, "action": action, **fields})
+    def add(
+        category: str, status: str, reason: str, action: str = "", *, source: str = "roster", **fields: Any
+    ) -> None:
+        evidence.append(
+            {"category": category, "status": status, "reason": reason, "action": action, "source": source, **fields}
+        )
 
     error = _request_error(request)
     if error:
         add("request", "failed", "malformed-request", error, freshness="current")
         # Malformed programmatic values must never reach hashing, selection,
         # capability checks, or providers, and may not be JSON serializable.
-        return {
+        malformed = {
             "schema": SCHEMA,
             "status": "blocked",
             "exit_code": 2,
@@ -212,6 +256,9 @@ def evaluate_readiness(
             "fallback": {"automatic": False, "admitted": False, "action": None},
             "evidence": evidence,
         }
+        if getattr(request, "route", None) == "t3":
+            malformed.update(T3_QUALIFIERS)
+        return malformed
     request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
     if request.concurrency > roster.max_workers:
         add(
@@ -291,75 +338,77 @@ def evaluate_readiness(
                 freshness="current",
             )
 
-        result = health.get(name)
-        if not _health_result_valid(result):
-            result = None
-        observed_at = None
-        if result is not None:
-            cache_age = result.cache_age_seconds if result.cache_age_seconds is not None else 0.0
-            if (
-                math.isfinite(result.finished_wall_at)
-                and result.finished_wall_at <= now
-                and math.isfinite(cache_age)
-                and cache_age >= 0
-            ):
-                retained_at = result.finished_wall_at - cache_age
-                if math.isfinite(retained_at):
-                    observed_at = retained_at
-        age = None if observed_at is None else now - observed_at
-        ttl = (
-            seat_health.HEALTHY_CACHE_TTL_SECONDS
-            if result and result.status == "healthy"
-            else seat_health.UNHEALTHY_CACHE_TTL_SECONDS
-        )
-        fresh = (
-            result is not None
-            and result.seat == name
-            and age is not None
-            and math.isfinite(age)
-            and 0 <= age <= ttl
-            and result.fingerprint == seat_health.seat_fingerprint(agent, roster)
-        )
-        by_name = {check.name: check for check in result.checks if _health_check_valid(check)} if result else {}
-        # Read-only enforcement is a separate health fact from the requested
-        # shared/worktree isolation. Do not confuse the two contracts.
-        for check_name in seat_health.CHECK_NAMES:
-            check = by_name.get(check_name)
-            not_applicable = _not_applicable_reason(check, agent, request) if fresh and check is not None else None
-            if not fresh or check is None:
-                status, reason, detail = "unknown", "health-unobserved", ""
-            elif not_applicable is not None:
-                status, reason = "passed", "not-applicable"
-                detail = safe_detail(f"not-applicable: {not_applicable}; {check.detail}")[:240]
-            else:
-                status = {"passed": "passed", "failed": "failed"}.get(check.status, "unknown")
-                reason = check.cause_code or check.status
-                detail = safe_detail(check.detail)[:240]
-            add(
-                check_name,
-                status,
-                reason,
-                "Refresh selected-seat health evidence."
-                if status == "unknown"
-                else "Inspect the selected seat health failure."
-                if status == "failed"
-                else "",
-                seat=name,
-                freshness="fresh" if fresh else "missing" if result is None else "stale",
-                age_seconds=age if age is not None and math.isfinite(age) else None,
-                ttl_seconds=ttl,
-                observed_at=observed_at,
-                detail=detail,
+        if request.route != "t3":
+            result = health.get(name)
+            if not _health_result_valid(result):
+                result = None
+            observed_at = None
+            if result is not None:
+                cache_age = result.cache_age_seconds if result.cache_age_seconds is not None else 0.0
+                if (
+                    math.isfinite(result.finished_wall_at)
+                    and result.finished_wall_at <= now
+                    and math.isfinite(cache_age)
+                    and cache_age >= 0
+                ):
+                    retained_at = result.finished_wall_at - cache_age
+                    if math.isfinite(retained_at):
+                        observed_at = retained_at
+            age = None if observed_at is None else now - observed_at
+            ttl = (
+                seat_health.HEALTHY_CACHE_TTL_SECONDS
+                if result and result.status == "healthy"
+                else seat_health.UNHEALTHY_CACHE_TTL_SECONDS
             )
+            fresh = (
+                result is not None
+                and result.seat == name
+                and age is not None
+                and math.isfinite(age)
+                and 0 <= age <= ttl
+                and result.fingerprint == seat_health.seat_fingerprint(agent, roster)
+            )
+            by_name = {check.name: check for check in result.checks if _health_check_valid(check)} if result else {}
+            # Read-only enforcement is a separate health fact from the requested
+            # shared/worktree isolation. Do not confuse the two contracts.
+            for check_name in seat_health.CHECK_NAMES:
+                check = by_name.get(check_name)
+                not_applicable = _not_applicable_reason(check, agent, request) if fresh and check is not None else None
+                if not fresh or check is None:
+                    status, reason, detail = "unknown", "health-unobserved", ""
+                elif not_applicable is not None:
+                    status, reason = "passed", "not-applicable"
+                    detail = safe_detail(f"not-applicable: {not_applicable}; {check.detail}")[:240]
+                else:
+                    status = {"passed": "passed", "failed": "failed"}.get(check.status, "unknown")
+                    reason = check.cause_code or check.status
+                    detail = safe_detail(check.detail)[:240]
+                add(
+                    check_name,
+                    status,
+                    reason,
+                    "Refresh selected-seat health evidence."
+                    if status == "unknown"
+                    else "Inspect the selected seat health failure."
+                    if status == "failed"
+                    else "",
+                    source="seat-health",
+                    seat=name,
+                    freshness="fresh" if fresh else "missing" if result is None else "stale",
+                    age_seconds=age if age is not None and math.isfinite(age) else None,
+                    ttl_seconds=ttl,
+                    observed_at=observed_at,
+                    detail=detail,
+                )
 
-    scope = operation_scope(roster, request, workspace)
-    admitted_capacity = None
+    scope = operation_scope(roster, request, workspace, t3_context=t3_context)
+    admitted_capacities: list[int] = []
     isolation_incompatible = any(item["category"] == "isolation" and item["status"] == "failed" for item in evidence)
     for category in ("route-support", "isolation", "admission", "capacity"):
-        observation = observations.get(category)
-        if observation is None:
+        raw = observations.get(category)
+        if raw is None:
             if category == "route-support" and request.route == "brigade":
-                add(category, "passed", "brigade-route-declared", freshness="current")
+                add(category, "passed", "brigade-route-declared", freshness="current", source=SOURCE_BRIGADE_GOVERNANCE)
             elif category == "isolation" and request.route == "brigade" and request.isolation == "shared":
                 add(
                     category,
@@ -367,72 +416,86 @@ def evaluate_readiness(
                     "isolation-incompatible" if isolation_incompatible else "shared-isolation-requested",
                     "Select workers compatible with the requested isolation." if isolation_incompatible else "",
                     freshness="current",
+                    source=SOURCE_BRIGADE_GOVERNANCE,
                 )
             else:
-                reason = "t3-contract-unavailable" if category == "route-support" else "observation-missing"
+                reason = "t3-caller-context-unavailable" if category == "route-support" else "observation-missing"
                 action = (
-                    "T3 capability and Brigade governance support evidence is unavailable; connect an authoritative readiness integration. "
+                    "The parent session must report its own orchestrator capabilities; Brigade has no caller context. "
                     "Brigade fallback requires separate admission and an explicit route request."
-                    if reason == "t3-contract-unavailable"
+                    if reason == "t3-caller-context-unavailable"
                     else f"Obtain fresh operation-scoped {category} evidence from the execution route."
                 )
-                add(category, "unknown", reason, action, freshness="missing")
+                add(category, "unknown", reason, action, freshness="missing", source=SOURCE_BRIGADE_GOVERNANCE)
             continue
-        if (
-            not isinstance(observation, Observation)
-            or not isinstance(observation.status, str)
-            or not _finite_real(observation.observed_at)
-            or not isinstance(observation.scope, str)
-            or not isinstance(observation.detail, str)
-        ):
+        items = tuple(raw) if isinstance(raw, (tuple, list)) else (raw,)
+        for observation in items:
+            if (
+                not isinstance(observation, Observation)
+                or not isinstance(observation.status, str)
+                or not _finite_real(observation.observed_at)
+                or not isinstance(observation.scope, str)
+                or not isinstance(observation.detail, str)
+                or (
+                    observation.source != SOURCE_BRIGADE_GOVERNANCE
+                    and not (category == "route-support" and observation.source == SOURCE_PARENT_REPORTED)
+                )
+            ):
+                add(
+                    category,
+                    "unknown",
+                    "observation-malformed",
+                    "Obtain well-formed evidence for this exact operation.",
+                    freshness="missing",
+                    source="unknown",
+                )
+                continue
+            age = now - observation.observed_at
+            fresh = math.isfinite(age) and 0 <= age <= OPERATION_TTL_SECONDS and observation.scope == scope
+            status = (
+                observation.status
+                if fresh and observation.status in {"passed", "failed", "denied", "unsupported"}
+                else "unknown"
+            )
+            if not fresh:
+                reason = "observation-stale-or-scope-mismatch"
+            elif status in {"failed", "denied", "unsupported"}:
+                reason = observation.reason or f"{category}-{status}"
+            elif status == "unknown":
+                reason = observation.reason or "observation-incomplete"
+            else:
+                reason = observation.reason or "observed"
+            isolation_refused = category == "isolation" and status == "passed" and isolation_incompatible
+            if isolation_refused:
+                status, reason = "failed", "isolation-incompatible"
+            if category == "capacity" and status == "passed":
+                if type(observation.capacity) is not int or observation.capacity < 0:
+                    status, reason = "unknown", "capacity-unobserved"
+                else:
+                    admitted_capacities.append(observation.capacity)
+                    if observation.capacity < request.concurrency:
+                        status, reason = "failed", "insufficient-capacity"
             add(
                 category,
-                "unknown",
-                "observation-malformed",
-                "Obtain well-formed evidence for this exact operation.",
-                freshness="missing",
+                status,
+                reason,
+                "Wait for admitted capacity or reduce concurrency."
+                if reason == "insufficient-capacity"
+                else "Obtain fresh evidence for this exact operation."
+                if status == "unknown"
+                else "Resolve the route refusal; no automatic fallback is authorized."
+                if status != "passed"
+                else "",
+                freshness="fresh" if fresh else "stale",
+                source=observation.source,
+                **({"seat": observation.seat} if observation.seat is not None else {}),
+                age_seconds=age if age is not None and math.isfinite(age) else None,
+                observed_at=observation.observed_at if math.isfinite(observation.observed_at) else None,
+                ttl_seconds=OPERATION_TTL_SECONDS,
+                detail=safe_detail(observation.detail)[:240],
+                **({"observed_status": observation.status} if isolation_refused else {}),
             )
-            continue
-        age = now - observation.observed_at
-        fresh = math.isfinite(age) and 0 <= age <= OPERATION_TTL_SECONDS and observation.scope == scope
-        status = (
-            observation.status
-            if fresh and observation.status in {"passed", "failed", "denied", "unsupported"}
-            else "unknown"
-        )
-        reason = "observed" if fresh else "observation-stale-or-scope-mismatch"
-        if fresh and status in {"failed", "denied", "unsupported"}:
-            reason = f"{category}-{status}"
-        elif fresh and status == "unknown":
-            reason = "observation-incomplete"
-        isolation_refused = category == "isolation" and status == "passed" and isolation_incompatible
-        if isolation_refused:
-            status, reason = "failed", "isolation-incompatible"
-        if category == "capacity" and status == "passed":
-            if type(observation.capacity) is not int or observation.capacity < 0:
-                status, reason = "unknown", "capacity-unobserved"
-            else:
-                admitted_capacity = observation.capacity
-                if admitted_capacity < request.concurrency:
-                    status, reason = "failed", "insufficient-capacity"
-        add(
-            category,
-            status,
-            reason,
-            "Wait for admitted capacity or reduce concurrency."
-            if reason == "insufficient-capacity"
-            else "Obtain fresh evidence for this exact operation."
-            if status == "unknown"
-            else "Resolve the route refusal; no automatic fallback is authorized."
-            if status != "passed"
-            else "",
-            freshness="fresh" if fresh else "stale",
-            age_seconds=age if age is not None and math.isfinite(age) else None,
-            observed_at=observation.observed_at if math.isfinite(observation.observed_at) else None,
-            ttl_seconds=OPERATION_TTL_SECONDS,
-            detail=safe_detail(observation.detail)[:240],
-            **({"observed_status": observation.status} if isolation_refused else {}),
-        )
+    admitted_capacity = min(admitted_capacities) if admitted_capacities else None
 
     blocked = any(item["status"] in {"failed", "denied", "unsupported"} for item in evidence)
     status = (
@@ -441,7 +504,7 @@ def evaluate_readiness(
     limiting = next((item for item in evidence if item["status"] in {"failed", "denied", "unsupported"}), None)
     if limiting is None:
         limiting = next((item for item in evidence if item["status"] == "unknown"), None)
-    return {
+    report = {
         "schema": SCHEMA,
         "status": status,
         "exit_code": {"ready": 0, "blocked": 2, "unverified": 3}[status],
@@ -474,6 +537,16 @@ def evaluate_readiness(
         },
         "evidence": evidence,
     }
+    if request.route == "t3":
+        report.update(T3_QUALIFIERS)
+        if isinstance(t3_context, Mapping):
+            envelope = t3_context.get("envelope")
+            if isinstance(envelope, Mapping) and envelope.get("state") == "ok":
+                report["t3_reported_at"] = envelope.get("reported_at")
+                report["t3_received_at"] = t3_context.get("received_at")
+        if report["status"] == "ready" and any(report.get(key) != value for key, value in T3_QUALIFIERS.items()):
+            report["status"], report["exit_code"], report["limiting_reason"] = "unverified", 3, "t3-qualifier-missing"
+    return report
 
 
 def brigade_route_observations(
@@ -502,8 +575,32 @@ def inspect_readiness(
     workspace: Path,
     health_probe: seat_health.SeatHealthProbe | None = None,
     hub_discovery_possible: bool = False,
+    t3_report: Any | None = None,
 ) -> dict[str, Any]:
     """Inspect only structurally eligible selected seats, without model smoke."""
+    if request.route == "t3":
+        if _request_error(request):
+            return evaluate_readiness(
+                roster, request, workspace=workspace, hub_discovery_possible=hub_discovery_possible
+            )
+        from .roster_readiness_t3 import t3_route_readiness
+
+        if any(seat not in roster.agents and hub_discovery_possible for seat in request.workers):
+            return evaluate_readiness(
+                roster, request, workspace=workspace, hub_discovery_possible=hub_discovery_possible
+            )
+        context, t3_observations = t3_route_readiness(
+            roster, request, workspace=workspace, report=t3_report, now=time.time()
+        )
+        return evaluate_readiness(
+            roster,
+            request,
+            workspace=workspace,
+            observations=t3_observations,
+            now=time.time(),
+            hub_discovery_possible=hub_discovery_possible,
+            t3_context=context,
+        )
     initial = evaluate_readiness(roster, request, workspace=workspace, hub_discovery_possible=hub_discovery_possible)
     if (
         initial["status"] == "blocked"
@@ -527,6 +624,7 @@ def inspect_readiness(
                     time.time(),
                     scope,
                     "Worktree isolation requires a Git checkout with a committed HEAD.",
+                    source=SOURCE_BRIGADE_GOVERNANCE,
                 )
             },
         )

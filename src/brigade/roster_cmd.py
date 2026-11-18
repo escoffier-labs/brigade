@@ -360,14 +360,33 @@ def ready(
     capability: str | None = None,
     roster_path: Path | None = None,
     json_output: bool = False,
+    t3_capabilities: str | Path | None = None,
     health_probe: seat_health.SeatHealthProbe | None = None,
 ) -> int:
     """Operation inspection does not dispatch, reserve capacity, or apply fallbacks."""
-    from . import fleet_client, roster_readiness, run_preference
+    from . import fleet_client, roster_readiness, roster_readiness_t3, run_preference
 
     target = target.expanduser()
-    if not target.is_dir():
+    if t3_capabilities is not None and route != "t3":
         report: dict[str, Any] = {
+            "schema": roster_readiness.SCHEMA,
+            "status": "blocked",
+            "exit_code": 2,
+            "limiting_reason": roster_readiness_t3.CAPABILITIES_ROUTE_MISMATCH,
+            "evidence": [
+                {
+                    "category": "request",
+                    "status": "failed",
+                    "reason": roster_readiness_t3.CAPABILITIES_ROUTE_MISMATCH,
+                    "detail": "parent-reported T3 capabilities apply only to --route t3",
+                    "freshness": "current",
+                    "source": "roster",
+                    "action": "Pass --route t3, or omit --t3-capabilities.",
+                }
+            ],
+        }
+    elif not target.is_dir():
+        report = {
             "schema": roster_readiness.SCHEMA,
             "status": "blocked",
             "exit_code": 2,
@@ -395,12 +414,18 @@ def ready(
                 hub_discovery_possible = bool(fleet_client.load_fleet_settings()["hub_url"])
             except (fleet_client.FleetClientError, OSError, ValueError):
                 hub_discovery_possible = False
+            t3_report = (
+                roster_readiness_t3.load_capabilities(t3_capabilities)
+                if route == "t3" and t3_capabilities is not None
+                else None
+            )
             report = roster_readiness.inspect_readiness(
                 loaded,
                 request,
                 workspace=target,
                 health_probe=health_probe,
                 hub_discovery_possible=hub_discovery_possible,
+                t3_report=t3_report,
             )
         except (OSError, ValueError) as exc:
             report = {
@@ -422,7 +447,11 @@ def ready(
     if json_output:
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     else:
-        print(f"readiness: {report['status']} (exit {report['exit_code']})")
+        t3_ready = report["status"] == "ready" and (report.get("request") or {}).get("route") == "t3"
+        if t3_ready:
+            print("ready (parent-reported route support; non-reserving snapshot)")
+        else:
+            print(f"readiness: {report['status']} (exit {report['exit_code']})")
         print(f"scope: {report.get('scope')}")
         print(f"observed_at: {report.get('observed_at')}")
         if "roster" in report:

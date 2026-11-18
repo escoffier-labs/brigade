@@ -190,11 +190,91 @@ timeout into an `unknown` admission or capacity observation, so a timeout never
 reads as "not enrolled". `brigade run` admission keeps its blocking acquisition
 and its existing empty-record fallback.
 
-T3 capability and governance observation production remains unimplemented, so
-T3 requests still skip local provider probes and remain unverified (or blocked
-on structural or refusal evidence). No claim of T3 integration with Brigade
-budgets follows from this command. Active inference probing is not offered by
-this subcommand.
+## Route t3: parent-reported support and Brigade governance
+
+T3 Code keeps no admission ledger and no child concurrency limit, so Brigade is
+the admission and capacity authority for governed T3. Route support is a
+different question. Only the T3 parent session can call its own
+`orchestrator_capabilities` MCP tool, so Brigade never calls T3, never mints a
+T3 session and never calls MCP. The parent reports the result through
+`--t3-capabilities <file|->` on `brigade roster ready --route t3`.
+
+The envelope is `brigade.t3_capabilities_report.v1`:
+
+```json
+{
+  "schema": "brigade.t3_capabilities_report.v1",
+  "origin_environment": "env-local",
+  "origin_project": "project-example",
+  "reported_at": "2026-01-01T00:00:00+00:00",
+  "capabilities": { "parentThreadId": "...", "providers": [], "features": {} }
+}
+```
+
+`capabilities` is the unmodified `orchestrator_capabilities` result for the
+pinned T3 Code contract revision `c52df24d28`. Parsing is strict and closed.
+It bounds bytes, nesting depth, total nodes, provider count, models per
+provider, option descriptors per model, allowed values per option and every
+string, rejects duplicate JSON keys and duplicate provider, model, option or
+allowed-value ids with type-aware equality, validates every boolean and
+requires finite bounded numbers. Any violation is blocked with reason
+`t3-capabilities-malformed`. No input value, provider constraint prose, display
+name, file path or raw JSON is echoed.
+
+Without the flag every T3 route-support row is `unknown` with reason
+`t3-caller-context-unavailable`. The flag is refused outside `--route t3` with
+reason `t3-capabilities-route-mismatch`.
+
+Each selected seat resolves through the enrollment mapping. A target change
+invalidates earlier evidence. Route support then requires all of these:
+
+- Envelope `origin_environment` equals the target origin and target
+  environment, envelope `origin_project` equals the target project, and
+  `parentThreadId` equals the target origin thread. A mismatch is
+  `unsupported`.
+- A provider entry with the target `providerInstanceId` and `driverKind`, with
+  `canRunChildTask` true, empty `constraints` and, when the target provider
+  differs from `inheritedProviderInstanceId`, `canRunCrossProviderChildTask`
+  true. These refusals are blocked.
+- The target model is listed. A model that is absent while `omittedModels` is
+  zero or missing is blocked `model-unavailable`. An absent model with a
+  positive `omittedModels` is `unknown` `model-not-observed`.
+- When the listed model has option descriptors, each declared target option id
+  exists and its value is one of the allowed values. A listed model without
+  descriptors passes with reason `options-unchecked-by-t3` because T3 skips
+  validation in that case.
+- An explicit non-inherit runtime mode appears in the provider `runtimeModes`
+  list when that list is present. An explicit mode broader than the parent
+  thread's mode cannot be checked here, so the evidence detail says
+  `mode-ceiling-unchecked`.
+- `features.appOwnedSubagents` and `features.cancellation` are true.
+
+`reported_at` is the parent's claim, recorded with the local `received_at`.
+It must be finite, not in the future and no more than the shared 30-second
+operation TTL old. File mtime never establishes freshness. Stale or future
+reports are `unknown`.
+
+Isolation, admission and capacity come from Brigade governance, not the
+parent. Isolation passes only for `--isolation worktree` when every selected
+target declares worktree isolation. Shared isolation is `unsupported`.
+Admission reuses `native_t3_admission.evaluate` read-only, so an enrolled node
+with unreadable live Hub policy is `unknown`. Capacity reuses
+`native_t3_capacity.governed_occupancy` and the min of the global limit and any
+seat `max_live`. Non-authoritative occupancy is `unknown` and zero free
+capacity is blocked. Readiness never takes the native capacity lock or a run
+lock.
+
+Route t3 output always carries `assurance: parent-reported`,
+`launch_guaranteed: false`, `capacity_reserved: false` and
+`parent_active: unverified`. A ready result without every qualifier becomes
+`unverified`. A ready human result reads exactly `ready (parent-reported route
+support; non-reserving snapshot)`.
+
+What this evidence cannot prove: the parent thread is still active, worktree
+preparation will succeed, an explicit runtime or interaction mode is within the
+parent thread's ceiling, or that a later claim will be granted. No claim of T3
+integration with Brigade budgets follows, and no automatic Brigade fallback is
+authorized. Fleet placement is not included in this report.
 
 ## Integration interface
 
@@ -205,10 +285,11 @@ execution integration:
 ReadinessRequest(workers: tuple[str, ...], concurrency=1,
                  route="brigade", isolation="shared", capability=None,
                  read_only=None)
-Observation(status, observed_at, scope, detail="", capacity=None)
-operation_scope(roster, request, workspace) -> str
+Observation(status, observed_at, scope, detail="", capacity=None,
+            seat=None, reason="", *, source)
+operation_scope(roster, request, workspace, *, t3_context=None) -> str
 evaluate_readiness(roster, request, *, workspace, health=None,
-                   observations=None, now=None,
+                   observations=None, now=None, t3_context=None,
                    hub_discovery_possible=False) -> dict
 inspect_readiness(roster, request, *, workspace, health_probe=None,
                   hub_discovery_possible=False) -> dict
@@ -238,7 +319,10 @@ does not authorize network discovery or admit a seat. The Python evaluator
 uses the roster supplied by its caller, including any preference overlay.
 
 `observations` maps `route-support`, `isolation`, `admission`, and `capacity`
-to `Observation` instances. Their status is `passed`, `failed`, `denied`,
+to `Observation` instances, or to a tuple of per-seat instances. Every
+observation requires a `source`. Route support may be `parent-reported`, while
+isolation, admission, and capacity must be `brigade-governance`. A malformed or
+wrong-source observation is `unknown`. Their status is `passed`, `failed`, `denied`,
 `unsupported`, or `unknown`. An observation must have the exact scope returned
 by `operation_scope` and be no more than 30 seconds old. Observation timestamps
 must be finite `int` or `float` values, excluding booleans. Status, scope, and
