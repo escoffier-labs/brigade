@@ -1,0 +1,1 @@
+- The memory hub no longer links or collapses a new card under a keeper because the keeper's `aliases` names an id the card reused. An `aliases` lineage edge forms only when the named card's current incarnation began before the keeper revision that wrote the alias. Scorer version is now `lineage-source-v5`.

@@ -35,7 +35,7 @@ use super::text::{self, Fields};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
@@ -536,6 +536,11 @@ pub struct Builder {
     heads: HashMap<(u32, Arc<str>), u32>,
     scope_ids: HashMap<String, u32>,
     lineage_sources: HashSet<u32>,
+    /// The incarnation start of each document an alias names, and the dates
+    /// each trusted keeper's aliases were written. See `alias_dating`. A
+    /// document is immutable, so an entry holds until the document is dropped.
+    born: HashMap<u32, Option<i64>>,
+    alias_since: HashMap<u32, HashMap<String, i64>>,
     /// [`MERGE_FAN_IN`]; tests raise it to reach the segment cap.
     pub(super) fan_in: usize,
 }
@@ -546,18 +551,41 @@ impl Builder {
             heads: HashMap::new(),
             scope_ids: HashMap::new(),
             lineage_sources: HashSet::new(),
+            born: HashMap::new(),
+            alias_since: HashMap::new(),
             fan_in: MERGE_FAN_IN,
         }
     }
     /// A new main segment over `cards`, covering the log up to `watermark`.
+    ///
+    /// No store is read, so no alias edge is dated and each one forms. The hub
+    /// builds with [`Builder::from_cards_dated`].
     pub fn from_cards(cards: impl IntoIterator<Item = Card>, watermark: i64) -> Self {
+        Self::build(cards, watermark, None).expect("an undated build reads no store")
+    }
+    /// [`Builder::from_cards`], with each alias edge dated from `db`.
+    pub fn from_cards_dated(
+        cards: impl IntoIterator<Item = Card>,
+        watermark: i64,
+        db: &Connection,
+    ) -> rusqlite::Result<Self> {
+        Self::build(cards, watermark, Some(db))
+    }
+    fn build(
+        cards: impl IntoIterator<Item = Card>,
+        watermark: i64,
+        db: Option<&Connection>,
+    ) -> rusqlite::Result<Self> {
         let mut b = Self::empty();
         let (postings, added) = b.add(cards);
         b.snap.segments = vec![Arc::new(postings.finish())];
         b.snap.main_docs = added;
         b.snap.indexed_seq = watermark;
+        if let Some(db) = db {
+            b.date_aliases(db)?;
+        }
         b.resolve_lineage();
-        b
+        Ok(b)
     }
     fn scope_id(&mut self, scope: &str) -> u32 {
         if let Some(id) = self.scope_ids.get(scope) {
@@ -574,6 +602,8 @@ impl Builder {
             let length = self.snap.docs.get(old).length as u64;
             self.snap.docs.kill(old);
             self.lineage_sources.remove(&old);
+            self.born.remove(&old);
+            self.alias_since.remove(&old);
             let s = &mut Arc::make_mut(&mut self.snap.stats)[scope as usize];
             s.docs -= 1;
             s.tokens -= length;
@@ -621,7 +651,28 @@ impl Builder {
         (postings, added)
     }
     /// Applies one replayed tail as one delta segment, then moves `indexed_seq`.
+    ///
+    /// No store is read, so no alias edge is dated. The hub applies with
+    /// [`Builder::apply_dated`].
     pub fn apply(&mut self, changes: Vec<Change>, seq: i64) {
+        self.replay(changes, seq, None)
+            .expect("an undated apply reads no store");
+    }
+    /// [`Builder::apply`], with each alias edge dated from `db`.
+    pub fn apply_dated(
+        &mut self,
+        changes: Vec<Change>,
+        seq: i64,
+        db: &Connection,
+    ) -> rusqlite::Result<()> {
+        self.replay(changes, seq, Some(db))
+    }
+    fn replay(
+        &mut self,
+        changes: Vec<Change>,
+        seq: i64,
+        db: Option<&Connection>,
+    ) -> rusqlite::Result<()> {
         let mut live = Vec::new();
         for change in changes {
             match change {
@@ -640,7 +691,55 @@ impl Builder {
             self.merge_deltas();
         }
         self.snap.indexed_seq = seq;
+        if let Some(db) = db {
+            self.date_aliases(db)?;
+        }
         self.resolve_lineage();
+        Ok(())
+    }
+    /// Reads, once per document, what an alias edge is dated by: when each
+    /// trusted keeper's aliases were written, and when each card they name
+    /// began its current incarnation. An id nothing live holds forms no edge,
+    /// so it is not dated.
+    fn date_aliases(&mut self, db: &Connection) -> rusqlite::Result<()> {
+        let owners: Vec<u32> = self.lineage_sources.iter().copied().collect();
+        for owner in owners {
+            let d = self.snap.doc(owner);
+            if d.links.aliased.is_empty() {
+                continue;
+            }
+            let scope = self.snap.scopes[d.scope as usize].clone();
+            let (key, revision, aliased) = (d.scope, d.revision, d.links.aliased.clone());
+            if let Entry::Vacant(slot) = self.alias_since.entry(owner) {
+                slot.insert(super::alias_dating::alias_since(
+                    db, &scope, &d.card_id, revision,
+                )?);
+            }
+            for id in aliased {
+                let Some(&target) = self.heads.get(&(key, Arc::from(id.as_str()))) else {
+                    continue;
+                };
+                if let Entry::Vacant(slot) = self.born.entry(target) {
+                    let t = self.snap.doc(target);
+                    slot.insert(super::alias_dating::incarnation_start(
+                        db, &scope, &id, t.revision,
+                    )?);
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Whether the alias `id`, written by `owner`, may link `target`. A keeper
+    /// the store dated needs both dates and the target's incarnation to begin
+    /// earlier. An undated keeper, which only an undated build holds, links.
+    fn alias_predates(&self, owner: u32, target: u32, id: &str) -> bool {
+        let Some(since) = self.alias_since.get(&owner) else {
+            return true;
+        };
+        matches!(
+            (self.born.get(&target), since.get(id)),
+            (Some(Some(born)), Some(written)) if born < written
+        )
     }
     /// Resolve trusted assertions once per publication. Ordinary cards require
     /// no graph work. Old snapshots retain their own immutable adjacency lists.
@@ -674,9 +773,15 @@ impl Builder {
                 link(owner, *to);
             }
             for id in &d.links.predecessors {
-                if let Some(from) = self.heads.get(&(d.scope, Arc::from(id.as_str()))) {
-                    link(*from, owner);
+                let Some(from) = self.heads.get(&(d.scope, Arc::from(id.as_str()))) else {
+                    continue;
+                };
+                // An alias outlives the card it names, so a card that took the
+                // id after the alias was written is not its predecessor.
+                if d.links.aliased.contains(id) && !self.alias_predates(owner, *from, id) {
+                    continue;
                 }
+                link(*from, owner);
             }
         }
         self.snap.forward = Arc::new(forward);
@@ -762,10 +867,10 @@ pub fn load(db: &Connection) -> rusqlite::Result<Builder> {
         let rows = s
             .query_map([], card_row)?
             .map_while(|row| row.map_err(|e| failed = Some(e)).ok());
-        let builder = Builder::from_cards(rows, watermark);
+        let builder = Builder::from_cards_dated(rows, watermark, db);
         match failed {
             Some(e) => Err(e),
-            None => Ok(builder),
+            None => builder,
         }
     })();
     let _ = db.execute_batch("COMMIT");
@@ -1024,8 +1129,7 @@ impl Publisher {
             return Ok(());
         }
         let changes = heads(db, keys)?;
-        self.builder.apply(changes, last);
-        Ok(())
+        self.builder.apply_dated(changes, last, db)
     }
     /// After every committed batch, once its commands have been answered.
     pub fn after_commit(&mut self, db: &Connection) {

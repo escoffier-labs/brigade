@@ -269,7 +269,9 @@ async fn proposal_generated_scoped_links_collapse_after_decide_and_push_falls_ba
         apply_relation(&h, kind, "x", rev(&a), "y", rev(&b)).await;
         if kind == "merge_exact_duplicates" {
             // Merge retires Y. First verify the real post-decision search,
-            // then revive Y to prove the stored scoped alias resolves it.
+            // then revive Y. The alias predates that new incarnation, so it
+            // links nothing (#2671). A genuine scoped alias is covered in
+            // `merge_drift_tests`.
             let merged = h
                 .call(
                     ADMIN_TOKEN,
@@ -292,6 +294,22 @@ async fn proposal_generated_scoped_links_collapse_after_decide_and_push_falls_ba
             // A revived duplicate must regain trust before it can participate.
             let restored=h.call(ADMIN_TOKEN,json!({"action":"import","scope":"fleet","card_id":"y","base_revision":rev(&revived),"base_epoch":h.epoch().await,"text":"needle claim. ^c-abcdef","client_event_id":h.id()})).await;
             assert_eq!(restored.status, 201);
+            let both = h
+                .call(
+                    ADMIN_TOKEN,
+                    json!({"action":"search","query":"needle","min_seq":h.events()}),
+                )
+                .await;
+            let matches = both.body["matches"].as_array().unwrap();
+            assert_eq!(matches.len(), 2, "{both:?}");
+            // Each chain holds only its own card.
+            assert!(
+                matches
+                    .iter()
+                    .all(|m| m["lineage"].as_array().is_none_or(|l| l.len() <= 1)),
+                "{both:?}"
+            );
+            continue;
         }
         let q = json!({"action":"search","query":"needle","min_seq":h.events()});
         let r = h.call(ADMIN_TOKEN, q.clone()).await;

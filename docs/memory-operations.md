@@ -1248,10 +1248,17 @@ on a keeper that was not automated, and that holds with
 `retrieval_eval_merge_automated_mismatch`. The history veto, the lineage rule
 and the published-index lineage check apply to both cards as before. The
 keeper's `aliases` line names the retired id as a predecessor. Only trusted
-cards form lineage edges, and a trusted keeper can now apply a merge, so a
-later write that reuses the retired id gains a lineage edge to the keeper. No
-edge exists at merge time, because the retired id is not live, and the merge
-gate does not look ahead to that write.
+cards form lineage edges, and an `aliases` edge also needs the named card to be
+older than the alias. The index forms it only when the target's current
+incarnation began before the keeper revision that first wrote the alias. An
+incarnation starts at the first live revision after the card's latest retired
+revision. A new card that takes the retired id, a revival of that id, and a card
+created under an id an alias already named all start after the alias, so none is
+linked or collapsed under the keeper. An alias whose history the index cannot
+read to its start forms no edge. `supersedes`, `superseded_by` and `merged_from`
+are not dated. Scorer `lineage-source-v5` introduced the dating, so an older
+retrieval evaluation record holds with `retrieval_eval_scorer_mismatch` until a
+new run is recorded.
 
 This bounds what a merge may remove from search. It does not freeze ranking.
 The retired card's matches move to the keeper, whose searchable content is a

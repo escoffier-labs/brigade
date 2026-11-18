@@ -8,6 +8,7 @@
 //! Writes and prompt loads use the versioned guard scanner (S18).
 //! Embedding and dense retrieval use the S18 scan gate (S15).
 //! Reviewed proposals, atomic decisions and rollback use [`proposals`] (S19a).
+mod alias_dating;
 mod attestation;
 #[cfg(test)]
 mod attestation_review_tests;

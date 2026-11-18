@@ -1663,6 +1663,132 @@ async fn the_keepers_alias_makes_no_edge_to_a_card_that_reuses_the_retired_id() 
     assert_eq!(edges("reviewed"), (true, true));
 }
 
+/// The index a hub restart would build from the store once every card is
+/// trusted, with the alias edges dated from the real revision history.
+fn trusted_index(r: &Real) -> std::sync::Arc<index::Snapshot> {
+    r.db.execute("UPDATE memory_cards SET trust='reviewed'", [])
+        .unwrap();
+    index::load(&r.db).unwrap().snapshot()
+}
+/// The card ids a search for `query` shows once lineage has collapsed its hits.
+fn visible(snap: &index::Snapshot, query: &str) -> Vec<String> {
+    let allowed = vec![true; snap.scopes().len()];
+    let hits = snap.top(snap.score(&allowed, &text::tokenize(query)), index::TOP);
+    let mut ids: Vec<_> = ranking::collapse(snap, &allowed, hits)
+        .hits
+        .iter()
+        .map(|(n, _)| snap.doc(*n).card_id.to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+/// Puts `text` over the retired card `id`, as a new incarnation of the id.
+async fn reuse(r: &Real, id: &str, text: &str) {
+    let revision = card(&r.h, "fleet", id).await["revision"].as_i64();
+    let put = r.h.put(ADMIN_TOKEN, "fleet", id, revision, text).await;
+    assert_eq!(put.status, 201, "{put:?}");
+}
+
+/// The same reuse as above, read from the store. The keeper's alias was written
+/// before the new card took the id, so the index forms no edge and collapse
+/// leaves both cards in the results (#2671).
+#[tokio::test]
+async fn a_new_card_under_the_merged_id_is_not_linked_or_collapsed() {
+    let r = pair().await;
+    apply_merge(&r).await;
+    reuse(&r, GONE, "A new card that reuses the retired id.\n").await;
+    let snap = trusted_index(&r);
+    assert!(!snap.in_lineage("fleet", KEEP));
+    assert!(!snap.in_lineage("fleet", GONE));
+    assert_eq!(visible(&snap, "claim reuses"), [KEEP, GONE]);
+}
+
+/// The hub replays later writes onto a built index. A card that takes the
+/// merged id after that build is dated on the replay, not only on a restart.
+#[tokio::test]
+async fn a_replayed_reuse_of_the_merged_id_forms_no_edge() {
+    let r = pair().await;
+    apply_merge(&r).await;
+    r.db.execute("UPDATE memory_cards SET trust='reviewed'", [])
+        .unwrap();
+    let mut builder = index::load(&r.db).unwrap();
+    assert!(!builder.snapshot().in_lineage("fleet", GONE), "retired");
+    reuse(&r, GONE, "A new card that reuses the retired id.\n").await;
+    r.db.execute("UPDATE memory_cards SET trust='reviewed'", [])
+        .unwrap();
+    let reused = live_cards(&r)
+        .await
+        .into_iter()
+        .find(|c| c.card_id == GONE)
+        .unwrap();
+    let seq = reused.revision;
+    builder
+        .apply_dated(vec![index::Change::Live(reused)], seq, &r.db)
+        .unwrap();
+    let snap = builder.snapshot();
+    assert!(!snap.in_lineage("fleet", KEEP));
+    assert!(!snap.in_lineage("fleet", GONE));
+}
+
+/// Control: an alias written after its target existed is a real predecessor,
+/// and collapse shows only the keeper.
+#[tokio::test]
+async fn an_alias_written_after_its_target_existed_still_links() {
+    let r = Real::untrusted(&[("old-name", "Old topic claim. ^c-111111\n")]).await;
+    // The scoped spelling is the one a merge writes.
+    let keeper = "---\naliases: [\"fleet/old-name\"]\n---\nCurrent topic claim. ^c-222222\n";
+    assert_eq!(
+        r.h.put(ADMIN_TOKEN, "fleet", "new-name", None, keeper)
+            .await
+            .status,
+        201
+    );
+    let snap = trusted_index(&r);
+    assert!(snap.in_lineage("fleet", "new-name"));
+    assert!(snap.in_lineage("fleet", "old-name"));
+    assert_eq!(visible(&snap, "claim"), ["new-name"]);
+}
+
+/// Reviving the retired card with its own old text is still a new incarnation
+/// that postdates the alias.
+#[tokio::test]
+async fn reviving_the_merged_id_forms_no_edge() {
+    let r = pair().await;
+    apply_merge(&r).await;
+    reuse(&r, GONE, &dup("", "bbbbbb")).await;
+    assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live");
+    let snap = trusted_index(&r);
+    assert!(!snap.in_lineage("fleet", KEEP));
+    assert!(!snap.in_lineage("fleet", GONE));
+    assert_eq!(visible(&snap, "claim"), [KEEP, GONE]);
+}
+
+/// An alias may name an id nothing holds yet. A card created under it later is
+/// not that alias's predecessor.
+#[tokio::test]
+async fn a_card_created_after_an_alias_to_an_unused_id_is_not_linked() {
+    let r = Real::untrusted(&[(
+        "keeper",
+        "---\naliases: [\"later\"]\n---\nKeeper claim. ^c-333333\n",
+    )])
+    .await;
+    assert_eq!(
+        r.h.put(
+            ADMIN_TOKEN,
+            "fleet",
+            "later",
+            None,
+            "Later claim. ^c-444444\n"
+        )
+        .await
+        .status,
+        201
+    );
+    let snap = trusted_index(&r);
+    assert!(!snap.in_lineage("fleet", "keeper"));
+    assert_eq!(visible(&snap, "claim"), ["keeper", "later"]);
+}
+
 const QUERIES: [&str; 14] = [
     "gate",
     "claim",
