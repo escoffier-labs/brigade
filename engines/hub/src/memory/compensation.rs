@@ -62,7 +62,8 @@ fn evidence_head<T: ReadTx + ?Sized>(tx: &T, card: &Json) -> rusqlite::Result<Op
             if op["type"] != "append_evidence" || op["scope"] != scope || op["card_id"] != id {
                 return Ok(None);
             }
-            let Ok(next) = super::proposal_metadata::apply(&text, op, None) else {
+            let Ok(next) = super::proposal_metadata::apply(&text, op, None, &Default::default())
+            else {
                 return Ok(None);
             };
             text = next;

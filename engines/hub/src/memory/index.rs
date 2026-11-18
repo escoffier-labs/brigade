@@ -541,6 +541,9 @@ pub struct Builder {
     /// document is immutable, so an entry holds until the document is dropped.
     born: HashMap<u32, Option<i64>>,
     alias_since: HashMap<u32, HashMap<String, i64>>,
+    /// Whether the last build or replay read the store. Only a dated builder
+    /// holds alias dates, so only an undated one lets an undated alias link.
+    dated: bool,
     /// [`MERGE_FAN_IN`]; tests raise it to reach the segment cap.
     pub(super) fan_in: usize,
 }
@@ -553,6 +556,7 @@ impl Builder {
             lineage_sources: HashSet::new(),
             born: HashMap::new(),
             alias_since: HashMap::new(),
+            dated: false,
             fan_in: MERGE_FAN_IN,
         }
     }
@@ -581,6 +585,7 @@ impl Builder {
         b.snap.segments = vec![Arc::new(postings.finish())];
         b.snap.main_docs = added;
         b.snap.indexed_seq = watermark;
+        b.dated = db.is_some();
         if let Some(db) = db {
             b.date_aliases(db)?;
         }
@@ -691,6 +696,7 @@ impl Builder {
             self.merge_deltas();
         }
         self.snap.indexed_seq = seq;
+        self.dated = db.is_some();
         if let Some(db) = db {
             self.date_aliases(db)?;
         }
@@ -700,7 +706,8 @@ impl Builder {
     /// Reads, once per document, what an alias edge is dated by: when each
     /// trusted keeper's aliases were written, and when each card they name
     /// began its current incarnation. An id nothing live holds forms no edge,
-    /// so it is not dated.
+    /// so it is not dated, and a keeper none of whose ids is live is not read
+    /// at all. Its history is fixed, so it is read when the first id appears.
     fn date_aliases(&mut self, db: &Connection) -> rusqlite::Result<()> {
         let owners: Vec<u32> = self.lineage_sources.iter().copied().collect();
         for owner in owners {
@@ -708,8 +715,13 @@ impl Builder {
             if d.links.aliased.is_empty() {
                 continue;
             }
-            let scope = self.snap.scopes[d.scope as usize].clone();
-            let (key, revision, aliased) = (d.scope, d.revision, d.links.aliased.clone());
+            let key = d.scope;
+            let live = |id: &String| self.heads.contains_key(&(key, Arc::from(id.as_str())));
+            if !d.links.aliased.iter().any(live) {
+                continue;
+            }
+            let scope = self.snap.scopes[key as usize].clone();
+            let (revision, aliased) = (d.revision, d.links.aliased.clone());
             if let Entry::Vacant(slot) = self.alias_since.entry(owner) {
                 slot.insert(super::alias_dating::alias_since(
                     db, &scope, &d.card_id, revision,
@@ -729,22 +741,44 @@ impl Builder {
         }
         Ok(())
     }
+    /// How many keepers hold alias dates. Tests read it to see which keepers
+    /// the store was asked about.
+    #[cfg(test)]
+    pub(super) fn dated_keepers(&self) -> usize {
+        self.alias_since.len()
+    }
     /// Whether the alias `id`, written by `owner`, may link `target`. A keeper
     /// the store dated needs both dates and the target's incarnation to begin
-    /// earlier. An undated keeper, which only an undated build holds, links.
+    /// earlier. An undated builder, which only a test or the retrieval history
+    /// veto holds, reads no store and links. A dated builder that holds no
+    /// dates for the keeper forms no edge: an unknown date never links.
     fn alias_predates(&self, owner: u32, target: u32, id: &str) -> bool {
         let Some(since) = self.alias_since.get(&owner) else {
-            return true;
+            return !self.dated;
         };
         matches!(
             (self.born.get(&target), since.get(id)),
             (Some(Some(born)), Some(written)) if born < written
         )
     }
+    /// Every keeper with an alias naming a live card holds its dates once the
+    /// builder is dated, because `date_aliases` reads exactly those keepers.
+    fn aliases_dated(&self) -> bool {
+        !self.dated
+            || self.lineage_sources.iter().all(|&owner| {
+                let d = self.snap.doc(owner);
+                d.links
+                    .aliased
+                    .iter()
+                    .all(|id| !self.heads.contains_key(&(d.scope, Arc::from(id.as_str()))))
+                    || self.alias_since.contains_key(&owner)
+            })
+    }
     /// Resolve trusted assertions once per publication. Ordinary cards require
     /// no graph work. Old snapshots retain their own immutable adjacency lists.
     // Switch to incremental key patching if trusted-owner rebuilds dominate publication cost.
     fn resolve_lineage(&mut self) {
+        debug_assert!(self.aliases_dated(), "a keeper's aliases are undated");
         let mut forward: HashMap<u32, Vec<super::ranking::Neighbour>> = HashMap::new();
         let mut reverse: HashMap<u32, Vec<super::ranking::Neighbour>> = HashMap::new();
         for &owner in &self.lineage_sources {
@@ -1424,5 +1458,71 @@ mod projection_tests {
         );
         b.apply(vec![Change::Live(one)], 2);
         assert_eq!(replay(&b.snapshot()), before);
+    }
+}
+
+#[cfg(test)]
+mod alias_fail_closed_tests {
+    use super::*;
+    fn trusted(id: &str, text: &str, revision: i64) -> Card {
+        Card {
+            scope: "fleet".into(),
+            card_id: id.into(),
+            revision,
+            content_hash: super::super::ids::sha256_hex(text.as_bytes()),
+            trust: "reviewed".into(),
+            text: text.into(),
+            automated: false,
+        }
+    }
+    fn pair() -> Builder {
+        let keeper = "---\naliases: [\"target\"]\n---\nKeeper claim.\n";
+        Builder::from_cards(
+            [
+                trusted("keeper", keeper, 2),
+                trusted("target", "Target claim.\n", 1),
+            ],
+            2,
+        )
+    }
+    fn docs(b: &Builder) -> (u32, u32) {
+        (
+            b.heads[&(0, Arc::from("keeper"))],
+            b.heads[&(0, Arc::from("target"))],
+        )
+    }
+    /// An undated builder reads no store, so it holds no dates and every alias
+    /// forms. Only a test or the retrieval history veto builds one.
+    #[test]
+    fn an_undated_builder_links_every_alias() {
+        let b = pair();
+        let (owner, target) = docs(&b);
+        assert!(b.alias_predates(owner, target, "target"));
+        assert!(b.snapshot().in_lineage("fleet", "target"));
+    }
+    /// A dated builder with no date for the keeper never links: an unknown date
+    /// is not proof that the alias is older.
+    #[test]
+    fn a_dated_builder_without_the_keepers_date_forms_no_edge() {
+        let mut b = pair();
+        b.dated = true;
+        let (owner, target) = docs(&b);
+        assert!(!b.alias_predates(owner, target, "target"));
+        // With the keeper's date but not the target's, it still forms none.
+        b.alias_since
+            .insert(owner, HashMap::from([("target".to_string(), 2)]));
+        assert!(!b.alias_predates(owner, target, "target"));
+        b.born.insert(target, Some(1));
+        assert!(b.alias_predates(owner, target, "target"));
+    }
+    /// The builder checks its own invariant when it resolves lineage: a dated
+    /// keeper whose alias names a live card must hold its dates.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "aliases are undated")]
+    fn a_dated_builder_that_skipped_a_keeper_fails_its_assertion() {
+        let mut b = pair();
+        b.dated = true;
+        b.resolve_lineage();
     }
 }

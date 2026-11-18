@@ -2367,6 +2367,8 @@ fn reads<T: ReadTx + ?Sized>(
 }
 
 #[cfg(test)]
+mod alias_dating_tests;
+#[cfg(test)]
 mod anchor_tests;
 #[cfg(test)]
 mod merge_drift_tests;

@@ -149,7 +149,15 @@ pub(super) fn claims(text: &str) -> Result<String, &'static str> {
 pub(super) fn same_claims(a: &str, b: &str) -> bool {
     matches!((claims(a), claims(b)), (Ok(x), Ok(y)) if x == y)
 }
-pub fn apply(text: &str, op: &Json, other: Option<(&str, &str)>) -> Result<String, &'static str> {
+/// `stale` names the aliases a merge must not inherit from the retired card, as
+/// `alias_dating::stale_inherited` computes them from the store. Only a merge
+/// reads it.
+pub fn apply(
+    text: &str,
+    op: &Json,
+    other: Option<(&str, &str)>,
+    stale: &BTreeSet<String>,
+) -> Result<String, &'static str> {
     match op["type"].as_str() {
         Some("append_evidence") => {
             let refs = op["evidence_ids"]
@@ -194,7 +202,11 @@ pub fn apply(text: &str, op: &Json, other: Option<(&str, &str)>) -> Result<Strin
                 return Err("merge requires exact duplicate claims");
             }
             let mut aliases = list(text, "aliases")?;
-            aliases.extend(list(other, "aliases")?);
+            aliases.extend(
+                list(other, "aliases")?
+                    .into_iter()
+                    .filter(|a| !stale.contains(a)),
+            );
             aliases.insert(name.into());
             let mut refs = list(text, "evidence")?;
             refs.extend(list(other, "evidence")?);

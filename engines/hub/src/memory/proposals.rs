@@ -402,12 +402,28 @@ fn submit<T: ReadTx + ?Sized>(
                     Err(r) => return Ok(Err(r.into())),
                 }
             } else {
+                // The aliases the keeper must not inherit, from the same call
+                // the merge gate makes against the live heads.
+                let stale = match (&other, op["type"] == "merge_exact_duplicates") {
+                    (Some((c, _)), true) => super::alias_dating::stale_inherited(
+                        tx,
+                        string(card, "scope"),
+                        string(card, "after_text"),
+                        (
+                            string(c, "card_id"),
+                            c["base_revision"].as_i64().unwrap_or(0),
+                            string(c, "after_text"),
+                        ),
+                    )?,
+                    _ => Default::default(),
+                };
                 match super::proposal_metadata::apply(
                     string(card, "after_text"),
                     op,
                     other
                         .as_ref()
                         .map(|(c, n)| (string(c, "after_text"), n.as_str())),
+                    &stale,
                 ) {
                     Ok(r) => r,
                     Err(r) => return Ok(Err(r.into())),
