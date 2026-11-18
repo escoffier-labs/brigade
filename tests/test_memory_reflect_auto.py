@@ -94,13 +94,19 @@ def test_held_exact_merge_stays_a_pending_proposal_for_review(setup, capsys, cod
     assert hub.cards == before
 
 
-def test_scheduled_run_opens_a_merge_and_the_hub_applies_it_without_a_reviewer(setup, capsys):
+def test_scheduled_run_opens_a_merge_and_makes_one_automatic_attempt_with_no_reviewer(setup, capsys):
+    # Client behavior only. The fake hub's `do_auto_apply` is a stub that
+    # models what a clean apply writes, so this test proves the client opens one
+    # proposal, asks for one automatic apply and never decides it. That the real
+    # hub passes the gates for a clean merge is proved on the Rust side by
+    # `a_clean_merge_of_trusted_duplicates_applies_automatically` in
+    # engines/hub/src/memory/merge_drift_tests.rs.
     target, hub, _ = setup
     policy.set_enabled(target, True)
     applied = []
 
     def apply_merge(body):
-        # The hub decides. Model what its automatic apply writes for a clean merge.
+        # Stub for the hub's decision, not the hub's gates.
         applied.append(body)
         keeper, retired = hub.cards[("fleet", "a")], hub.cards[("fleet", "b")]
         alias = 'aliases: ["fleet/b"]\n'
