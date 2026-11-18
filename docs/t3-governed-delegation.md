@@ -167,14 +167,18 @@ A claim is admitted only when all of these hold.
   retained target in every `NativeTarget` field, including canonical options.
   A declaration edited after `t3 open` refuses the claim.
 - The seat adapter passes `limits.allow_models`, and neither the target launch
-  model nor the seat model is retired.
+  model nor the seat model is retired. The target driver is mapped through a
+  closed table onto the Brigade adapter whose allow patterns and
+  retired-model policy apply, and an unknown driver refuses.
 - When this node is enrolled with a Hub, `fleet_policy.admissible_seat` passes
   against the live Hub policy for the `brigade-run` consumer.
 
-An enrolled node requires live policy authority. A policy read that fails, or a
-last-known-good roster used without live policy, refuses with
-`admission-unavailable`. Local roster rules alone never authorize a claim once
-active enrollment is observed. Refusals are fixed tokens on stderr with empty
+A node with a configured Hub URL must reach live policy to claim governed T3,
+and so must a node with observed enrollment. A missing or corrupt enrollment
+high-water file never reads as unenrolled while a Hub URL is configured. A
+policy read that fails, or a last-known-good roster used without live policy,
+refuses with `admission-unavailable`. Local roster rules never authorize a
+claim once a Hub applies. Refusals are fixed tokens on stderr with empty
 stdout. A granted claim records digests-only evidence on its
 `task.native-claimed` fact: the admission code, the roster digest and, when
 enrolled, the live policy digest.
@@ -192,11 +196,14 @@ acknowledged. These all occupy:
 - a task abandoned after its launch claim.
 
 A binding abandoned before any launch claim occupies nothing, because it never
-charged or launched. The scanner never takes a run lock. It uses bounded
-no-follow reads, caps the run entries and bytes it reads, and marks its answer
-non-authoritative on any malformed, unreadable, replaced or unverifiable run.
-A claim then refuses with `capacity-unknown` rather than reading an unreadable
-run as zero live work.
+charged or launched. The scanner never takes a run lock. It reads every run
+through a held no-follow run-directory handle, caps the run entries and bytes
+it reads, and marks its answer non-authoritative on any malformed, unreadable,
+replaced or unverifiable run. A native run whose kind was rewritten, whose
+journal was deleted, or whose events directory is a link is unverifiable, not
+an empty run. Enrollment publishes `run.json` before its first journal fact, so
+a claim racing an open also refuses rather than reading the run as zero. A
+claim refuses with `capacity-unknown` in every one of those cases.
 
 The capacity rule is `min(global_free, seat_free)`.
 

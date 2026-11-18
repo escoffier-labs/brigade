@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -13,8 +14,10 @@ import pytest
 
 from brigade import (
     cli,
+    fleet_client,
     fleet_client_policy,
     fleet_model_admission,
+    fleet_session_presence,
     native_t3_admission as admission,
     native_t3_capacity as capacity,
     native_t3_dispatch as dispatch,
@@ -49,6 +52,8 @@ def _roster_text(
     targets: tuple[str, ...] | None = None,
     max_workers: int = 4,
     model: str = "launch-model",
+    driver: str = "codex",
+    agent_cli: str = "codex",
     max_live: dict[str, int] | int | None = None,
     allow_models: tuple[str, ...] | None = None,
 ) -> str:
@@ -58,7 +63,7 @@ def _roster_text(
         lines.append("allow_models = [" + ", ".join(json.dumps(item) for item in allow_models) + "]")
     lines.append("")
     for name in sorted({orchestrator, *seats, *declared}):
-        lines += [f"[agents.{name}]", 'cli = "codex"', f'role = "{name}"', ""]
+        lines += [f"[agents.{name}]", f'cli = "{agent_cli}"', f'role = "{name}"', ""]
     for name in sorted(declared):
         limit = max_live.get(name) if isinstance(max_live, dict) else max_live
         lines += [
@@ -68,7 +73,7 @@ def _roster_text(
             'target_environment = "env-target"',
             'target_project = "project-test"',
             'provider_instance = "codex-test"',
-            'driver = "codex"',
+            f'driver = "{driver}"',
             f'model = "{model}"',
             'isolation = "worktree"',
         ]
@@ -136,6 +141,29 @@ def _run(workspace: Path, run_id: str) -> Path:
     return _run_dir(workspace, run_id)
 
 
+def _write_hub_config() -> Path:
+    path = fleet_client.brigade_home() / "fleet.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[fleet]\nhub_url = "https://hub.example.invalid"\n', encoding="utf-8")
+    return path
+
+
+def _policy_document(*, enabled: bool = True) -> dict:
+    return {
+        "schema": "brigade.fleet_policy.v1",
+        "defaults": {},
+        "machines": {},
+        "seats": {"coder": {"provider": "openai", "model": "launch-model", "enabled": enabled}},
+        "consumers": {"brigade-run": {}},
+        "repositories": {},
+        "routing": {"enabled": False},
+    }
+
+
+def _unreadable_policy() -> dict:
+    raise fleet_client_policy.FleetPolicyClientError("network", "unreadable")
+
+
 @POSIX_ONLY
 def test_orchestrator_seat_refuses_a_claim(tmp_path):
     workspace = _workspace(tmp_path, seats=("lead", "coder"), targets=("lead", "coder"))
@@ -167,6 +195,50 @@ def test_retired_model_refuses_a_claim(tmp_path):
     assert "model-retired" in str(refused.value)
 
 
+@POSIX_ONLY
+def test_uppercase_retired_launch_model_refuses_a_claim(tmp_path):
+    workspace, run_id = _enroll(tmp_path, model="GPT-5.4")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _claim(workspace, run_id, "one")
+    assert refused.value.code == "admission-denied"
+    assert "model-retired" in str(refused.value)
+
+
+@POSIX_ONLY
+def test_target_driver_adapter_must_be_allowed(tmp_path):
+    workspace, run_id = _enroll(tmp_path, agent_cli="claude", allow_models=("claude",), driver="codex")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _claim(workspace, run_id, "one")
+    assert refused.value.code == "admission-denied"
+    assert "adapter-not-allowed" in str(refused.value)
+
+
+@POSIX_ONLY
+def test_target_driver_must_match_the_seat_provider(tmp_path):
+    workspace, run_id = _enroll(tmp_path, agent_cli="claude", allow_models=("claude", "codex"), driver="codex")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _claim(workspace, run_id, "one")
+    assert refused.value.code == "admission-denied"
+    assert "driver-mismatch" in str(refused.value)
+
+
+@POSIX_ONLY
+def test_unknown_target_driver_refuses_a_claim(tmp_path):
+    workspace, run_id = _enroll(tmp_path, driver="cursor")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _claim(workspace, run_id, "one")
+    assert refused.value.code == "admission-denied"
+    assert "driver-unknown" in str(refused.value)
+
+
+def test_last_known_good_authority_refuses_in_the_pure_predicate():
+    text = _roster_text()
+    roster = roster_mod.load_roster(Path("/nonexistent/roster.toml"), text=text)
+    target = enrollment.target_for_seat(roster, "coder", source_revision="a" * 40)
+    verdict = admission.evaluate(roster, "coder", target, hub=admission.HubAuthority(state="lkg-only"))
+    assert verdict.code == "admission-unavailable" and verdict.reason == "policy-unavailable"
+
+
 def test_disallowed_adapter_refuses_in_the_pure_predicate():
     text = _roster_text()
     allowed = roster_mod.load_roster(Path("/nonexistent/roster.toml"), text=text)
@@ -183,11 +255,7 @@ def test_disallowed_adapter_refuses_in_the_pure_predicate():
 def test_enrolled_node_with_unreadable_hub_policy_refuses(tmp_path, monkeypatch):
     workspace, run_id = _enroll(tmp_path)
     monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda **_: True)
-    monkeypatch.setattr(
-        fleet_client_policy,
-        "show_policy",
-        lambda: (_ for _ in ()).throw(fleet_client_policy.FleetPolicyClientError("network", "unreadable")),
-    )
+    monkeypatch.setattr(fleet_client_policy, "show_policy", _unreadable_policy)
     with pytest.raises(dispatch.DispatchError) as refused:
         _claim(workspace, run_id, "one")
     assert refused.value.code == "admission-unavailable"
@@ -195,17 +263,47 @@ def test_enrolled_node_with_unreadable_hub_policy_refuses(tmp_path, monkeypatch)
 
 
 @POSIX_ONLY
+def test_configured_hub_without_enrollment_high_water_requires_live_policy(tmp_path, monkeypatch):
+    _write_hub_config()
+    workspace, run_id = _enroll(tmp_path)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", _unreadable_policy)
+    assert admission.read_hub_authority(workspace).state == "unavailable"
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _claim(workspace, run_id, "one")
+    assert refused.value.code == "admission-unavailable"
+    assert "policy-unavailable" in str(refused.value)
+
+
+@POSIX_ONLY
+def test_hub_url_environment_without_high_water_requires_live_policy(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.invalid")
+    workspace, run_id = _enroll(tmp_path)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", _unreadable_policy)
+    assert admission.read_hub_authority(workspace).state == "unavailable"
+    assert _claim_code(workspace, run_id) == "admission-unavailable"
+
+
+@POSIX_ONLY
+def test_repository_identity_timeout_refuses_with_fixed_tokens(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.invalid")
+    workspace, run_id = _enroll(tmp_path)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda: {"document": _policy_document()})
+
+    def timeout(_target: Path) -> None:
+        raise subprocess.TimeoutExpired(cmd=["git", "remote"], timeout=5)
+
+    monkeypatch.setattr(fleet_session_presence, "repository_identity", timeout)
+    capsys.readouterr()
+    assert cli.main(["t3", "claim", run_id, "one", "--parent-thread", THREAD, "--target", str(workspace)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[admission-unavailable]" in captured.err and TASK_TEXT not in captured.err
+
+
+@POSIX_ONLY
 def test_enrolled_node_requires_the_live_hub_seat_verdict(tmp_path, monkeypatch):
     workspace, run_id = _enroll(tmp_path)
-    document = {
-        "schema": "brigade.fleet_policy.v1",
-        "defaults": {},
-        "machines": {},
-        "seats": {"coder": {"provider": "openai", "model": "launch-model", "enabled": False}},
-        "consumers": {"brigade-run": {}},
-        "repositories": {},
-        "routing": {"enabled": False},
-    }
+    document = _policy_document(enabled=False)
     monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", lambda **_: True)
     monkeypatch.setattr(fleet_client_policy, "show_policy", lambda: {"document": document})
     with pytest.raises(dispatch.DispatchError) as refused:
@@ -313,22 +411,38 @@ def test_nonterminal_correlated_task_keeps_occupying(tmp_path):
     assert capacity.governed_occupancy(workspace).live == 1
 
 
-@pytest.mark.parametrize("kind", ["corrupt", "symlink"])
+@pytest.mark.parametrize("kind", ["corrupt", "symlink", "journal-deleted", "events-symlink", "kind-rewritten"])
 @POSIX_ONLY
 def test_unverifiable_run_makes_occupancy_non_authoritative(tmp_path, kind):
     workspace, run_id = _enroll(tmp_path)
     runs = runguard.lock_path(workspace).parent / "runs"
+    run_dir = _run(workspace, run_id)
     if kind == "corrupt":
         broken = runs / ("t3-" + "f" * 64)
         broken.mkdir()
         (broken / "run.json").write_text("{not json", encoding="utf-8")
-    else:
+    elif kind == "symlink":
         target = tmp_path / "outside-run"
         target.mkdir()
         try:
             os.symlink(target, runs / ("t3-" + "e" * 64))
         except (OSError, NotImplementedError):
             pytest.skip("symlink creation is unavailable on this platform")
+    elif kind == "journal-deleted":
+        (run_dir / "events" / "lifecycle.jsonl").unlink()
+    elif kind == "events-symlink":
+        (run_dir / "events").rename(tmp_path / "events-real")
+        empty = tmp_path / "empty-events"
+        empty.mkdir()
+        try:
+            os.symlink(empty, run_dir / "events")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation is unavailable on this platform")
+    else:
+        receipt = run_dir / "run.json"
+        meta = json.loads(receipt.read_text(encoding="utf-8"))
+        meta["kind"] = "ordinary-run"
+        receipt.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     occupancy = capacity.governed_occupancy(workspace)
     assert occupancy.authoritative is False and occupancy.live == 0
     assert _claim_code(workspace, run_id) == "capacity-unknown"
@@ -361,6 +475,7 @@ def test_capacity_lock_is_acquired_before_the_run_lock(tmp_path, monkeypatch):
     order: list[str] = []
     original_capacity = capacity.capacity_lock
     original_owned = enrollment.owned_run
+    original_roster = admission.load_roster
 
     @contextmanager
     def tracked_capacity(*args: object, **kwargs: object):
@@ -374,10 +489,15 @@ def test_capacity_lock_is_acquired_before_the_run_lock(tmp_path, monkeypatch):
         with original_owned(*args, **kwargs):  # type: ignore[arg-type]
             yield
 
+    def tracked_roster(*args: object, **kwargs: object):
+        order.append("roster")
+        return original_roster(*args, **kwargs)  # type: ignore[arg-type]
+
     monkeypatch.setattr(capacity, "capacity_lock", tracked_capacity)
     monkeypatch.setattr(enrollment, "owned_run", tracked_owned)
+    monkeypatch.setattr(admission, "load_roster", tracked_roster)
     _claim(workspace, run_id, "one")
-    assert order == ["capacity", "run"]
+    assert order == ["capacity", "run", "roster"]
 
 
 @POSIX_ONLY

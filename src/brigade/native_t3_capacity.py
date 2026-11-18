@@ -25,12 +25,13 @@ from pathlib import Path
 from typing import Iterator, Mapping
 
 from . import roster as roster_mod
-from . import run_journal, run_lifecycle, runguard, worktree_lease
+from . import run_dirfd, run_journal, run_lifecycle, runguard, worktree_lease
 from . import run_task_journal as journal
 
 MAX_RUN_ENTRIES = 512
 MAX_RUN_RECEIPT_BYTES = 262_144
 MAX_TOTAL_JOURNAL_BYTES = 67_108_864
+NATIVE_RUN_PREFIX = "t3-"
 CAPACITY_LOCK_NAME = "native-capacity.lock"
 CAPACITY_WAIT_SECONDS = 10.0
 CAPACITY_POLL_SECONDS = 0.05
@@ -102,45 +103,33 @@ def capacity_lock_path(workspace: Path) -> Path:
     return runguard.lock_path(workspace).with_name(CAPACITY_LOCK_NAME)
 
 
-def _read_bounded_no_follow(path: Path, max_bytes: int) -> bytes:
-    """Read one regular file without following links and without unbounded allocation."""
-    info = os.lstat(path)
-    if stat.S_ISLNK(info.st_mode):
-        raise _Unverified("replaced")
-    if not stat.S_ISREG(info.st_mode):
-        raise _Unverified("not-regular")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(path, flags)
+def _run_receipt(bound: run_dirfd.BoundRunDir) -> Mapping[str, object]:
     try:
-        opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-            raise _Unverified("replaced")
-        if opened.st_size > max_bytes:
-            raise _Unverified("oversize")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, 62_500)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise _Unverified("oversize")
-            chunks.append(chunk)
-        return b"".join(chunks)
-    finally:
-        os.close(descriptor)
-
-
-def _run_receipt(run_dir: Path) -> Mapping[str, object]:
+        raw = bound.read_bytes("run.json", max_bytes=MAX_RUN_RECEIPT_BYTES)
+    except OSError:
+        raise _Unverified("receipt") from None
+    if raw is None:
+        raise _Unverified("receipt")
     try:
-        raw = _read_bounded_no_follow(run_dir / "run.json", MAX_RUN_RECEIPT_BYTES)
         receipt = json.loads(raw)
-    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         raise _Unverified("receipt") from None
     if not isinstance(receipt, dict):
         raise _Unverified("receipt")
     return receipt
+
+
+def _journal_size(run_dir: Path) -> int | None:
+    """Size the lifecycle journal under the bound run, ``None`` when absent."""
+    try:
+        info = run_journal.bound_lstat(run_lifecycle._journal_path(run_dir), strict=True)
+    except (OSError, run_journal.RunJournalError):
+        raise _Unverified("journal") from None
+    if info is None:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise _Unverified("journal")
+    return int(info.st_size)
 
 
 def _journal_events(run_dir: Path) -> tuple[list[run_journal.RunEvent], bool]:
@@ -153,17 +142,32 @@ def _journal_events(run_dir: Path) -> tuple[list[run_journal.RunEvent], bool]:
     return list(report.events), trusted
 
 
-def _journal_bytes(run_dir: Path) -> int:
-    """Size one lifecycle journal with a no-follow lstat; absent reads as zero."""
+def _scan_run(run_dir: Path, name: str, workspace: Path) -> tuple[Counter[str], int, bool]:
+    """Scan one run entry and report units, journal bytes and trust."""
     try:
-        info = os.lstat(run_lifecycle._journal_path(run_dir))
-    except FileNotFoundError:
-        return 0
+        with run_dirfd.bound_run_dir(run_dir) as bound:
+            receipt = _run_receipt(bound)
+            native = receipt.get("kind") == "native-t3"
+            if not native and name.startswith(NATIVE_RUN_PREFIX):
+                # A native run whose kind was rewritten away from native-t3 is
+                # unverifiable, not an ordinary run to skip.
+                raise _Unverified("kind")
+            if not native and receipt.get("lifecycle_journal_requested") is not True:
+                return Counter(), 0, True
+            size = _journal_size(run_dir)
+            if size is None:
+                # Enrollment publishes run.json before the first journal fact.
+                # A run that requested journaling but has none is unverifiable,
+                # never zero live work, so a claim racing an open fails closed.
+                raise _Unverified("journal-missing")
+            if not native:
+                return Counter(), size, True
+            if receipt.get("lock_workspace") != str(workspace):
+                raise _Unverified("workspace")
+            events, trusted = _journal_events(run_dir)
+            return _scan_units(events), size, trusted
     except OSError:
-        raise _Unverified("journal") from None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise _Unverified("journal")
-    return int(info.st_size)
+        raise _Unverified("run-dir") from None
 
 
 def _scan_units(events: list[run_journal.RunEvent]) -> Counter[str]:
@@ -254,19 +258,15 @@ def governed_occupancy(workspace: Path) -> Occupancy:
             continue
         run_dir = Path(entry.path)
         try:
-            receipt = _run_receipt(run_dir)
-            if receipt.get("kind") != "native-t3":
-                continue
-            if receipt.get("lock_workspace") != str(workspace):
-                raise _Unverified("workspace")
-            total_bytes += _journal_bytes(run_dir)
-            if total_bytes > MAX_TOTAL_JOURNAL_BYTES:
-                return Occupancy(0, (), False, "runs-truncated")
-            events, trusted = _journal_events(run_dir)
-            authoritative = authoritative and trusted
-            live.update(_scan_units(events))
+            units, size, trusted = _scan_run(run_dir, entry.name, workspace)
         except _Unverified:
             authoritative = False
+            continue
+        total_bytes += size
+        if total_bytes > MAX_TOTAL_JOURNAL_BYTES:
+            return Occupancy(0, (), False, "runs-truncated")
+        authoritative = authoritative and trusted
+        live.update(units)
     return Occupancy(
         sum(live.values()),
         tuple(sorted(live.items())),

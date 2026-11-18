@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -34,22 +35,29 @@ TARGET_MISSING = "target-missing"
 TARGET_INVALID = "target-invalid"
 TARGET_CHANGED = "target-changed"
 ADAPTER_NOT_ALLOWED = "adapter-not-allowed"
+DRIVER_UNKNOWN = "driver-unknown"
+DRIVER_MISMATCH = "driver-mismatch"
 MODEL_RETIRED = "model-retired"
 POLICY_UNAVAILABLE = "policy-unavailable"
 POLICY_CONSUMER_MISSING = "policy-consumer-missing"
 POLICY_DENIED = "policy-denied"
 
 _ROSTER_DOMAIN = "brigade.native-t3.roster-digest.v1"
+# The launch uses the T3 target driver, not the seat's Brigade adapter. Map the
+# closed set of T3 driver literals onto the Brigade adapter whose provider and
+# model policy apply, and refuse anything outside it.
+_TARGET_DRIVER_ADAPTERS = {"codex": "codex", "claudeAgent": "claude"}
 
 
 @dataclass(frozen=True)
 class HubAuthority:
     """One reading of the live Hub policy, or why it is not usable.
 
-    ``state`` is ``unenrolled`` when no active enrollment is observed,
-    ``live`` for a readable policy document, and ``unavailable``,
-    ``lkg-only`` or ``consumer-missing`` when a required authority is absent.
-    A last-known-good roster is never substituted for live policy.
+    ``state`` is ``unenrolled`` only when no Hub URL is configured and no
+    activation was observed, ``live`` for a readable policy document, and
+    ``unavailable`` or ``consumer-missing`` when a required authority is
+    absent. A last-known-good roster is never substituted for live policy, so
+    every non-live state refuses a claim.
     """
 
     state: str
@@ -112,13 +120,29 @@ def _target_refusal(roster: roster_mod.Roster, seat: str, retained: NativeTarget
 
 def _model_refusal(roster: roster_mod.Roster, seat: str, retained: NativeTarget) -> str | None:
     agent = roster.agents[seat]
-    if agent.cli is None or not roster_mod.is_cli_allowed(agent.cli, roster):
+    adapter = _TARGET_DRIVER_ADAPTERS.get(retained.driver)
+    if adapter is None:
+        return DRIVER_UNKNOWN
+    if (
+        agent.cli is None
+        or not roster_mod.is_cli_allowed(agent.cli, roster)
+        or not roster_mod.is_cli_allowed(adapter, roster)
+    ):
         return ADAPTER_NOT_ALLOWED
-    provider = agents_mod.model_policy_provider(agent.cli)
-    models = [retained.launch_model, agents_mod.model_policy_model(agent.cli, agent.model)]
-    # The retired-model policy applies to the model the target would launch and
-    # to the seat's roster model, exactly as the brigade route checks its seat.
-    return MODEL_RETIRED if any(fleet_model_roster.retired_reason(provider, model) for model in models) else None
+    driver_provider = agents_mod.model_policy_provider(adapter)
+    seat_provider = agents_mod.model_policy_provider(agent.cli)
+    if seat_provider != driver_provider:
+        # The launch provider comes from the target driver. A seat bound to a
+        # different provider family must not claim with this target.
+        return DRIVER_MISMATCH
+    # Normalize the launch model through the adapter that will run it, so a
+    # case variant cannot escape the retired-model families. Keep the seat
+    # model check as well.
+    models = (
+        agents_mod.model_policy_model(adapter, retained.launch_model),
+        agents_mod.model_policy_model(agent.cli, agent.model),
+    )
+    return MODEL_RETIRED if any(fleet_model_roster.retired_reason(driver_provider, model) for model in models) else None
 
 
 def evaluate(
@@ -141,12 +165,10 @@ def evaluate(
         return _verdict(DENIED, model_refusal, roster, hub)
     if hub.state == "unenrolled":
         return _verdict(ADMITTED, "local-roster", roster, hub)
-    if hub.state == "unavailable":
-        return _verdict(UNAVAILABLE, POLICY_UNAVAILABLE, roster, hub)
-    if hub.state == "lkg-only":
-        return _verdict(UNAVAILABLE, POLICY_UNAVAILABLE, roster, hub)
     if hub.state == "consumer-missing":
         return _verdict(DENIED, POLICY_CONSUMER_MISSING, roster, hub)
+    # Only live policy authorizes a claim. Any other state, including a
+    # last-known-good reading, refuses as unavailable.
     if hub.state != "live" or hub.document is None or hub.resolution is None:
         return _verdict(UNAVAILABLE, POLICY_UNAVAILABLE, roster, hub)
     from . import fleet_policy
@@ -168,10 +190,12 @@ def load_roster(workspace: Path) -> roster_mod.Roster:
 def read_hub_authority(workspace: Path) -> HubAuthority:
     """Read live Hub policy authority, or a fixed reason it is not usable.
 
-    The activation high-water is the same enrollment signal the brigade route's
-    local path uses. An enrolled node requires a live ``/policy`` document.
-    The cached roster is deliberately never consulted, so a last-known-good
-    reading cannot authorize a governed claim.
+    A configured Hub URL is enough to require live policy, even when no
+    enrollment high-water file exists. A missing or corrupt high-water file
+    collapses to no observed activation, so it can never unenroll a node that
+    points at a Hub. Only no Hub URL and no observed activation is
+    ``unenrolled``. The cached roster is deliberately never consulted, so a
+    last-known-good reading cannot authorize a governed claim.
     """
     from . import (
         fleet_client,
@@ -183,25 +207,23 @@ def read_hub_authority(workspace: Path) -> HubAuthority:
     )
 
     try:
-        enrolled = fleet_model_admission.enrollment_activation_observed(lock_timeout=fleet_client.CLOUD_TIMEOUT_SECONDS)
-    except (fleet_client.FleetSpoolLockTimeout, OSError, RuntimeError, ValueError):
+        settings = fleet_client.load_fleet_settings(strict=True)
+    except (fleet_client.FleetClientError, OSError, ValueError):
         return HubAuthority(state="unavailable")
-    if not enrolled:
+    hub_url = settings.get("hub_url", "").strip()
+    try:
+        activated = fleet_model_admission.enrollment_activation_observed(
+            lock_timeout=fleet_client.CLOUD_TIMEOUT_SECONDS
+        )
+    except (fleet_client.FleetClientError, OSError, RuntimeError, ValueError):
+        return HubAuthority(state="unavailable")
+    if not hub_url and not activated:
         return HubAuthority(state="unenrolled")
     try:
         payload = fleet_client_policy.show_policy()
-    except (
-        fleet_client_policy.FleetPolicyClientError,
-        fleet_client.FleetClientError,
-        OSError,
-        RuntimeError,
-        ValueError,
-    ):
-        return HubAuthority(state="unavailable")
-    raw = payload.get("document") if isinstance(payload, Mapping) else None
-    if not isinstance(raw, Mapping):
-        return HubAuthority(state="unavailable")
-    try:
+        raw = payload.get("document") if isinstance(payload, Mapping) else None
+        if not isinstance(raw, Mapping):
+            raise ValueError("fleet policy response is missing document")
         parsed = fleet_policy.parse_document(raw)
         if fleet_session_bootstrap.CONSUMER_BRIGADE_RUN not in parsed["consumers"]:
             return HubAuthority(state="consumer-missing")
@@ -213,6 +235,7 @@ def read_hub_authority(workspace: Path) -> HubAuthority:
     except (
         fleet_policy.FleetPolicyError,
         fleet_client.FleetClientError,
+        subprocess.SubprocessError,
         OSError,
         RuntimeError,
         ValueError,

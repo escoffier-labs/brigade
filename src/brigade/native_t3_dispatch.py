@@ -872,18 +872,25 @@ def claim(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) -> 
     if not journal.provider_reference(parent_thread):
         raise _refuse("invalid-identity", "the parent thread identity is not valid")
     run_dir = _context(workspace, run_id, task_id)
-    try:
-        roster = admission.load_roster(workspace)
-    except enrollment.EnrollmentError as exc:
-        raise _refuse(exc.code, _bound(str(exc))) from None
-    # Live policy and roster reads happen outside the capacity lock so the
-    # bounded lock wait is never stretched by Hub latency. Admission itself is
-    # applied under both locks, before this claim reserves any dispatch unit.
+    # The Hub read is network I/O, so it stays outside the capacity lock and
+    # never stretches the bounded wait. The roster is re-read inside the locks
+    # because an edit while waiting must not be evaluated stale.
     hub = admission.read_hub_authority(workspace)
     try:
         lock = capacity.capacity_lock(workspace)
         with lock:
+            # Occupancy is read and trusted before the run lock. The capacity
+            # lock serializes every claim that can add a unit, so this snapshot
+            # stays valid through the existing claim path. Other verbs can only
+            # free a unit, which keeps this snapshot conservative.
+            occupancy = capacity.governed_occupancy(workspace)
+            if not occupancy.authoritative:
+                raise _refuse("capacity-unknown", "live governed native capacity cannot be verified")
             with enrollment.owned_run(workspace, run_dir):
+                try:
+                    roster = admission.load_roster(workspace)
+                except enrollment.EnrollmentError as exc:
+                    raise _refuse(exc.code, _bound(str(exc))) from None
                 meta = _run_meta(workspace, run_dir)
                 events = _read(run_dir)
                 _barrier(events)
@@ -897,10 +904,7 @@ def claim(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) -> 
                 if current.result.launch_claim is not None:
                     raise _refuse("already-claimed", "the task already consumed its launch claim")
                 seat = current.result.handle.spec.seat
-                occupancy = capacity.governed_occupancy(workspace)
                 decision = capacity.assess(roster, seat, occupancy)
-                if decision.code == capacity.CAPACITY_UNKNOWN:
-                    raise _refuse("capacity-unknown", "live governed native capacity cannot be verified")
                 if not decision.granted:
                     raise _refuse("capacity-denied", "no governed native capacity remains for this claim")
                 evidence = admission.evaluate(roster, seat, current.retained.target, hub=hub)
