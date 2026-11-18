@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import shlex
+import shutil
 from pathlib import Path
+
+import pytest
 
 from brigade import cli, skills_cmd
 from brigade.skills_cmd import sync_history
@@ -675,3 +679,236 @@ def test_every_fleet_row_carries_diff_and_discard_keys(tmp_path, capsys):
     for row in rows:
         assert "diff_command" in row and "discard_command" in row
         assert row["diff_command"] is None and row["discard_command"] is None
+
+
+# ---- unknown is a veto on unattended paths ------------------------------------
+
+
+def _receipt_path(workspace: Path) -> Path:
+    return workspace / ".brigade" / "skills" / "installs" / f"{SKILL}-{HARNESS}.json"
+
+
+def _lose_receipt(workspace: Path, how: str) -> None:
+    if how == "deleted":
+        _receipt_path(workspace).unlink()
+    else:
+        _receipt_path(workspace).write_text("{not json")
+
+
+@pytest.mark.parametrize("how", ["deleted", "corrupt"])
+def test_unattended_install_all_skips_a_copy_with_no_valid_receipt(tmp_path, capsys, how):
+    installed = _edited_workspace(tmp_path, capsys)
+    _lose_receipt(tmp_path, how)
+    before = installed.parent.joinpath("SKILL.md").read_bytes()
+
+    rc = skills_cmd.install(
+        workspace=tmp_path, skill=f"registry:{SKILL}", harness="all", force=True, unattended=True, json_output=True
+    )
+
+    assert rc == 0
+    skipped = {row["target"]: row for row in json.loads(capsys.readouterr().out)["receipt"]["skipped"]}
+    assert skipped[HARNESS].get("unverified") is True
+    assert "no valid receipt" in skipped[HARNESS]["reason"]
+    assert installed.read_bytes() == before
+    assert not _rollback_snapshots(tmp_path)
+
+
+def test_manual_install_force_still_replaces_a_copy_with_no_valid_receipt(tmp_path, capsys):
+    installed = _edited_workspace(tmp_path, capsys)
+    _lose_receipt(tmp_path, "deleted")
+
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, force=True) == 0
+    assert "hand edit" not in installed.read_text()
+
+
+def test_unattended_rollback_refuses_a_copy_it_cannot_prove_pristine(tmp_path, capsys):
+    installed, _first = _rollbackable_edited_workspace(tmp_path, capsys)
+    # Reinstall pristine so the only thing wrong is a receipt that cannot vouch for the copy.
+    assert (
+        skills_cmd.install(
+            workspace=tmp_path,
+            skill=f"registry:{SKILL}",
+            harness=HARNESS,
+            force=True,
+            discard_local_edits=True,
+        )
+        == 0
+    )
+    skill_dir = installed.parent
+    (skill_dir / "SKILL.md").unlink()
+    (skill_dir / "stray.md").write_text("leftover\n")
+    capsys.readouterr()
+    before = _state_bytes(tmp_path)
+
+    rc = skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS, unattended=True)
+
+    assert rc == 2
+    assert "unverified" in capsys.readouterr().err
+    assert _state_bytes(tmp_path) == before
+
+
+def test_unattended_uninstall_refuses_a_copy_it_cannot_prove_pristine(tmp_path, capsys):
+    installed = _edited_workspace(tmp_path, capsys)
+    _lose_receipt(tmp_path, "corrupt")
+    before = _state_bytes(tmp_path)
+
+    rc = skills_cmd.uninstall(workspace=tmp_path, skill=SKILL, harness=HARNESS, unattended=True, json_output=True)
+
+    assert rc == 2
+    capsys.readouterr()
+    assert installed.exists()
+    assert _state_bytes(tmp_path) == before
+
+
+# ---- the final mutation is bound to the bytes the check saw -------------------
+
+
+def _edit_after_first_edit_check(monkeypatch, mutate) -> None:
+    """Run ``mutate`` once, right after the first drift check returns and before any write."""
+    install_mod = importlib.import_module("brigade.skills_cmd.install")
+    real = install_mod._local_edit_state
+    seen: list[int] = []
+
+    def checked_then_changed(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if not seen:
+            seen.append(1)
+            mutate()
+        return result
+
+    monkeypatch.setattr(install_mod, "_local_edit_state", checked_then_changed)
+
+
+def _late_edit(installed: Path):
+    def mutate() -> None:
+        installed.write_text(installed.read_text() + "\nedit after the check\n")
+
+    return mutate
+
+
+def _swap_directory(installed: Path):
+    """Replace the installed directory by an identical copy: same bytes, new inode."""
+
+    def mutate() -> None:
+        skill_dir = installed.parent
+        aside = skill_dir.with_name("swapped-aside")
+        skill_dir.rename(aside)
+        shutil.copytree(aside, skill_dir)
+
+    return mutate
+
+
+def _pristine_stale_workspace(workspace: Path, capsys) -> Path:
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(workspace / "src1"), json_output=True) == 0
+    assert skills_cmd.install(workspace=workspace, skill=f"registry:{SKILL}", harness=HARNESS, json_output=True) == 0
+    updated = _write_skill(workspace / "src2", body="registry moved on")
+    assert skills_cmd.import_skill(target=workspace, source=updated, force=True, json_output=True) == 0
+    capsys.readouterr()
+    return _installed(workspace)
+
+
+@pytest.mark.parametrize("mutator", [_late_edit, _swap_directory], ids=["file-edit", "directory-swap"])
+def test_install_force_aborts_when_the_copy_changes_after_the_edit_check(tmp_path, capsys, monkeypatch, mutator):
+    installed = _pristine_stale_workspace(tmp_path, capsys)
+    receipt_before = _receipt_path(tmp_path).read_bytes()
+    history_before = _history_rows(tmp_path, HARNESS)
+    _edit_after_first_edit_check(monkeypatch, mutator(installed))
+
+    rc = skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, force=True)
+
+    assert rc == 2
+    assert "changed" in capsys.readouterr().err
+    assert "registry moved on" not in installed.read_text()
+    assert _receipt_path(tmp_path).read_bytes() == receipt_before
+    assert _history_rows(tmp_path, HARNESS) == history_before
+    # The snapshot taken before the aborted removal must not outlive the refusal.
+    assert _rollback_snapshots(tmp_path) == []
+
+
+def test_install_discard_aborts_when_the_copy_changes_after_its_snapshot(tmp_path, capsys, monkeypatch):
+    installed = _edited_workspace(tmp_path, capsys)
+    registry_mod = importlib.import_module("brigade.skills_cmd.registry")
+    real_write = registry_mod._write_collected_tree_into_anchor
+
+    def write_then_edit(*args, **kwargs):
+        real_write(*args, **kwargs)
+        installed.write_text(installed.read_text() + "\nedit after the snapshot\n")
+
+    monkeypatch.setattr(registry_mod, "_write_collected_tree_into_anchor", write_then_edit)
+
+    rc = skills_cmd.install(
+        workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, force=True, discard_local_edits=True
+    )
+
+    assert rc == 2
+    assert "edit after the snapshot" in installed.read_text()
+    assert "registry moved on" not in installed.read_text()
+
+
+def _pristine_rollbackable_workspace(workspace: Path, capsys) -> Path:
+    installed, _first = _rollbackable_edited_workspace(workspace, capsys)
+    assert (
+        skills_cmd.install(
+            workspace=workspace, skill=f"registry:{SKILL}", harness=HARNESS, force=True, discard_local_edits=True
+        )
+        == 0
+    )
+    capsys.readouterr()
+    return installed
+
+
+@pytest.mark.parametrize("mutator", [_late_edit, _swap_directory], ids=["file-edit", "directory-swap"])
+def test_rollback_aborts_when_the_copy_changes_after_the_edit_check(tmp_path, capsys, monkeypatch, mutator):
+    installed = _pristine_rollbackable_workspace(tmp_path, capsys)
+    state_before = {k: v for k, v in _state_bytes(tmp_path).items() if k.startswith("state/")}
+    _edit_after_first_edit_check(monkeypatch, mutator(installed))
+
+    rc = skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS)
+
+    assert rc == 2
+    assert "changed" in capsys.readouterr().err
+    assert {k: v for k, v in _state_bytes(tmp_path).items() if k.startswith("state/")} == state_before
+    assert "registry moved on" in installed.read_text()
+
+
+def test_rollback_discard_aborts_when_the_copy_changes_after_the_edit_snapshot(tmp_path, capsys, monkeypatch):
+    installed, _first = _rollbackable_edited_workspace(tmp_path, capsys)
+    state_before = {k: v for k, v in _state_bytes(tmp_path).items() if k.startswith("state/")}
+    registry_mod = importlib.import_module("brigade.skills_cmd.registry")
+    real_write = registry_mod._write_collected_tree_into_anchor
+
+    def write_then_edit(*args, **kwargs):
+        real_write(*args, **kwargs)
+        installed.write_text(installed.read_text() + "\nedit after the snapshot\n")
+
+    monkeypatch.setattr(registry_mod, "_write_collected_tree_into_anchor", write_then_edit)
+
+    rc = skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS, discard_local_edits=True)
+
+    assert rc == 2
+    assert "edit after the snapshot" in installed.read_text()
+    assert {k: v for k, v in _state_bytes(tmp_path).items() if k.startswith("state/")} == state_before
+
+
+def test_sync_write_aborts_when_a_file_is_edited_after_the_prepare_check(tmp_path, capsys, monkeypatch):
+    installed = _pristine_stale_workspace(tmp_path, capsys)
+    receipt_before = _receipt_path(tmp_path).read_bytes()
+    history_before = _history_rows(tmp_path, HARNESS)
+    kernel = importlib.import_module("brigade.projection.kernel")
+    real_at = kernel.FailureInjector.at
+
+    def edit_before_the_first_apply(self, boundary):
+        real_at(self, boundary)
+        if boundary == "commit:0:before":
+            installed.write_text(installed.read_text() + "\nedit after the prepare check\n")
+
+    monkeypatch.setattr(kernel.FailureInjector, "at", edit_before_the_first_apply)
+
+    rc, payload = _sync(tmp_path, capsys, write=True)
+
+    assert rc == 1
+    assert payload["projection"]["terminal_state"] == "restored"
+    assert "edit after the prepare check" in installed.read_text()
+    assert "registry moved on" not in installed.read_text()
+    assert _receipt_path(tmp_path).read_bytes() == receipt_before
+    assert _history_rows(tmp_path, HARNESS) == history_before

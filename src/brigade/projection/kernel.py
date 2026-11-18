@@ -430,6 +430,11 @@ def _prepare_and_commit(
                 )
                 return crash_receipt
             inject.at(f"commit:{index}:before")
+            # The digest checks at plan and prepare time are older than this
+            # write by now (before-images, validators, earlier mutations). Check
+            # the destination once more immediately before the change, so a
+            # file edited in the meantime is never overwritten or removed.
+            _assert_unchanged_since_plan(spec)
             _apply_mutation(spec)
             committed.append(index)
             _write_journal(op_dir, {**journal, "committed_indexes": committed})
@@ -439,7 +444,7 @@ def _prepare_and_commit(
             op_dir, receipt, journal_update={**journal, "status": "committed", "committed_indexes": committed}
         )
         return receipt
-    except (InjectedFailure, OSError) as error:
+    except (InjectedFailure, DriftError, OSError) as error:
         receipt = _restore_after_failure(
             plan,
             op_dir=op_dir,
@@ -842,12 +847,27 @@ def _index_for(op_dir: Path, spec: MutationSpec) -> int:
     raise ProjectionError("before-image index missing")
 
 
+def _assert_unchanged_since_plan(spec: MutationSpec) -> None:
+    """Raise ``DriftError`` unless the destination still holds the planned before-state."""
+    try:
+        live = _live_digest(spec.destination)
+    except (PlanError, OSError) as error:
+        raise DriftError("destination drift between prepare and commit") from error
+    if live != spec.expected_before:
+        raise DriftError("destination drift between prepare and commit")
+
+
 def _capture_before(before_dir: Path, index: int, spec: MutationSpec) -> None:
     meta: dict[str, Any] = {"mode": None, "absent": spec.expected_before == ABSENT}
     if spec.expected_before == ABSENT:
         (before_dir / f"{index}.absent").write_text("absent\n", encoding="utf-8")
     else:
-        (before_dir / f"{index}.bin").write_bytes(spec.destination.read_bytes())
+        before = spec.destination.read_bytes()
+        # The before-image is what a failure restores: it must be the planned
+        # bytes, never an edit made after the plan-time check.
+        if content_digest(before) != spec.expected_before:
+            raise DriftError("destination drift between plan and prepare")
+        (before_dir / f"{index}.bin").write_bytes(before)
         meta["mode"] = spec.destination.stat().st_mode & 0o777
     localio.write_json(before_dir / f"{index}.meta.json", meta)
 

@@ -94,7 +94,8 @@ unless you say so:
   the rollback tree (named in the rollback receipt as `edit_snapshot`) before the
   copy is rolled back, so the edit stays recoverable.
 - `brigade outcome reconcile --apply` never rolls back, uninstalls or promotes
-  over an edited copy. See `docs/outcome-scoring.md`.
+  over an edited or unverifiable copy, and a partial `--target all` install
+  (some harnesses skipped) is not a promotion. See `docs/outcome-scoring.md`.
 - The edit check compares every installed file except the root `skill.json`
   provenance file, which its own metadata fingerprint covers. A nested
   `skill.json` (for example `assets/skill.json`) is ordinary content, so an edit
@@ -108,8 +109,25 @@ unless you say so:
 - `sync --write` binds every installed file of an updated copy, unchanged ones
   included, to the bytes it planned against. An edit made between planning and
   writing aborts the write with exit 1 before any receipt or snapshot is
-  written. `fleet status` rows always carry `diff_command` and
+  written. The projection kernel checks each destination's digest once more
+  immediately before it applies that mutation (and the before-image it captures
+  must match the plan), so an edit made after the prepare-time check is never
+  overwritten: the operation restores the mutations already applied and reports
+  `restored` with exit 1. `fleet status` rows always carry `diff_command` and
   `discard_command` (null unless the copy is edited).
+- `install --force`, `rollback` and the uninstall fallback bind their removal to
+  the bytes the edit check saw. Immediately before each removal or replacement
+  they re-verify the copy (directory inode and device plus a digest of every
+  byte); a hand edit or a swapped directory that lands after the check aborts the
+  command with exit 2 and changes nothing. The snapshot written for the aborted
+  command is dropped.
+- Unknown is a veto on unattended paths. The receipt sits in the workspace the
+  agent's own user can write, so it may stop a write but never authorize one. A
+  copy with a missing, corrupt or digest-less receipt reads as `unknown`, and an
+  unattended caller (`outcome reconcile --apply`, through `install --target all`,
+  `rollback` and `uninstall` with `unattended`) skips it exactly like an edited
+  copy: `<harness>:skipped: unverified (no valid receipt)`. A manual
+  `install --force` on such a copy stays operator-driven and still repairs it.
 
 Every copy that is replaced, edited or not, still gets its rollback snapshot.
 

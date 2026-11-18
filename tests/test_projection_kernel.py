@@ -119,6 +119,31 @@ def test_destination_drift_between_plan_and_prepare_fails_closed(tmp_path: Path)
     assert _snapshot(workspace)["c-remove.txt"] == before["c-remove.txt"]
 
 
+@pytest.mark.parametrize("victim", ["b-replace.txt", "c-remove.txt"])
+def test_edit_after_prepare_check_is_never_overwritten_and_earlier_mutations_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, victim: str
+) -> None:
+    workspace, plan = mixed_workspace(tmp_path)
+    real_at = projection.FailureInjector.at
+
+    def edit_between_check_and_apply(self: projection.FailureInjector, boundary: str) -> None:
+        real_at(self, boundary)
+        # b-replace is index 1 and c-remove index 2: an edit lands after the
+        # plan-time and prepare-time digest checks, right before that mutation.
+        index = 1 if victim == "b-replace.txt" else 2
+        if boundary == f"commit:{index}:before":
+            (workspace / victim).write_bytes(b"operator edit\n")
+
+    monkeypatch.setattr(projection.FailureInjector, "at", edit_between_check_and_apply)
+
+    receipt = projection.execute(plan, target=workspace)
+
+    assert receipt.terminal_state == "restored"
+    assert (workspace / victim).read_bytes() == b"operator edit\n"
+    # Mutations committed before the drift was seen are rolled back.
+    assert not (workspace / "a-create.txt").exists()
+
+
 def test_crash_state_restart_detects_and_recovers(tmp_path: Path) -> None:
     workspace, plan = mixed_workspace(tmp_path)
     before = _snapshot(workspace)

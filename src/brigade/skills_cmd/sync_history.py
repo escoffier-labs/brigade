@@ -696,10 +696,15 @@ def uninstall(
     workspace: Path,
     skill: str,
     harness: str,
+    unattended: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
-    """Remove an installed skill from one or all harnesses, the inverse of install."""
+    """Remove an installed skill from one or all harnesses, the inverse of install.
+
+    ``unattended`` (autonomous callers) removes only a copy its receipt proves
+    pristine; an edited or unverifiable copy is kept and the command exits 2.
+    """
     workspace = workspace.expanduser().resolve()
     install_targets = _install_mod._install_targets(workspace)
     if harness not in (*install_targets, "all"):
@@ -712,6 +717,7 @@ def uninstall(
     targets = install_targets if harness == "all" else (harness,)
     removed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    vetoed: list[str] = []
     try:
         state_anchor = _registry_mod._hold_state_root(workspace)
     except _registry_mod.SkillsStatePathError as exc:
@@ -753,7 +759,23 @@ def uninstall(
                 continue
             if dest_state == "missing" and not has_receipt:
                 continue
+            checked_identity: _install_mod.TreeIdentity | None = None
+            if dest_state == "dir" and unattended:
+                inspected = _install_mod._inspect_installed_tree(workspace, dest, anchor=state_anchor)
+                checked_identity = _install_mod._tree_identity(dest, inspected)
+                receipt = _install_mod._previous_install_receipt(
+                    state_anchor, skill_id=skill_id, harness=install_target
+                )
+                if (
+                    _install_mod._local_edit_state(receipt, inspected.files, skill_id=skill_id, harness=install_target)
+                    != "current"
+                ):
+                    # Edited or unverifiable: the copy and its receipt stay as they are.
+                    vetoed.append(install_target)
+                    continue
             if dest_state == "dir":
+                if checked_identity is not None:
+                    _install_mod._require_tree_unchanged(checked_identity, workspace, dest, anchor=state_anchor)
                 if under_state_root:
                     _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 else:
@@ -793,6 +815,13 @@ def uninstall(
         return 2
     finally:
         state_anchor.close()
+    if vetoed and not removed:
+        print(
+            f"error: unattended uninstall kept {skill_id} on {', '.join(vetoed)}: "
+            "the copy is edited or unverified (no valid receipt for its bytes)",
+            file=sys.stderr,
+        )
+        return 2
     if not removed and not skipped:
         print(f"error: skill not installed: {skill} ({harness})", file=sys.stderr)
         return 1
@@ -821,9 +850,11 @@ def rollback(
     skill: str,
     harness: str,
     discard_local_edits: bool = False,
+    unattended: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
+    """Restore the last snapshot. ``unattended`` (autonomous callers) also refuses a copy no receipt can vouch for."""
     workspace = workspace.expanduser().resolve()
     skill_id = _registry_mod._slug(skill)
     if harness not in _install_mod._install_targets(workspace):
@@ -940,36 +971,71 @@ def rollback(
             }
             if expected_binding is not None:
                 _install_mod._check_review_binding(expected_binding, workspace, skill_id, harness, anchor=state_anchor)
+            live_identity: _install_mod.TreeIdentity | None = None
+            edit_snapshot_stamp: str | None = None
             if dest_state == "dir":
                 # Read the live bytes now, right before anything is deleted, so an
                 # edit made after validation is still seen. A hand edit is never
                 # discarded unless asked, and then it is snapshotted first.
                 live = _install_mod._inspect_installed_tree(workspace, dest, anchor=state_anchor)
-                if (
-                    _install_mod._local_edit_state(current_receipt, live.files, skill_id=skill_id, harness=harness)
-                    == "changed"
-                ):
-                    if not discard_local_edits:
-                        selector, against = _install_mod._local_edit_selector(
-                            current_receipt, skill_id=skill_id, fallback=f"registry:{skill_id}"
-                        )
-                        reason = _install_mod._local_edit_reason(
-                            installed_dir=dest,
-                            diff_command=_install_mod._local_edit_diff_command(
-                                workspace=workspace, selector=selector, harness=harness, against=against
-                            ),
-                            discard_command=_install_mod._local_edit_rollback_discard_command(
-                                workspace=workspace, skill_id=skill_id, harness=harness
-                            ),
-                        )
-                        print(f"error: {reason}", file=sys.stderr)
-                        return 2
-                    stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-") + "-local-edits"
-                    _registry_mod._write_collected_tree_into_anchor(
-                        live.dirs, live.files, state_anchor, "skills", "rollback", skill_id, harness, stamp
+                live_identity = _install_mod._tree_identity(dest, live)
+                edit_state = _install_mod._local_edit_state(
+                    current_receipt, live.files, skill_id=skill_id, harness=harness
+                )
+                if edit_state == "changed" and not discard_local_edits:
+                    selector, against = _install_mod._local_edit_selector(
+                        current_receipt, skill_id=skill_id, fallback=f"registry:{skill_id}"
                     )
-                    payload["edit_snapshot"] = str(_registry_mod._rollback_root(workspace, skill_id, harness) / stamp)
+                    reason = _install_mod._local_edit_reason(
+                        installed_dir=dest,
+                        diff_command=_install_mod._local_edit_diff_command(
+                            workspace=workspace, selector=selector, harness=harness, against=against
+                        ),
+                        discard_command=_install_mod._local_edit_rollback_discard_command(
+                            workspace=workspace, skill_id=skill_id, harness=harness
+                        ),
+                    )
+                    print(f"error: {reason}", file=sys.stderr)
+                    return 2
+                if unattended and edit_state != "current":
+                    print(
+                        f"error: installed copy {dest} is unverified (no valid receipt for its bytes); "
+                        "an unattended rollback never replaces it",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if edit_state == "changed":
+                    edit_snapshot_stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-") + "-local-edits"
+                    _registry_mod._write_collected_tree_into_anchor(
+                        live.dirs,
+                        live.files,
+                        state_anchor,
+                        "skills",
+                        "rollback",
+                        skill_id,
+                        harness,
+                        edit_snapshot_stamp,
+                    )
+                    payload["edit_snapshot"] = str(
+                        _registry_mod._rollback_root(workspace, skill_id, harness) / edit_snapshot_stamp
+                    )
+
+            def require_checked_bytes() -> None:
+                """Bind the removal to the bytes the edit check saw; an edit snapshot of stale bytes is dropped."""
+                if dest_state != "dir":
+                    return
+                try:
+                    _install_mod._require_tree_unchanged(live_identity, workspace, dest, anchor=state_anchor)
+                except _registry_mod.SkillsStatePathError:
+                    if edit_snapshot_stamp is not None:
+                        with contextlib.suppress(_registry_mod.SkillsStatePathError, OSError):
+                            _registry_mod._remove_tree_in_anchor(
+                                state_anchor, "skills", "rollback", skill_id, harness, edit_snapshot_stamp
+                            )
+                    raise
+
             if under_state_root:
+                require_checked_bytes()
                 _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 _registry_mod._write_collected_tree_into_anchor(dirs, files, state_anchor, *state_parts)
             else:
@@ -988,6 +1054,7 @@ def rollback(
                     )
                     return 2
                 if dest_state == "dir":
+                    require_checked_bytes()
                     _install_mod._remove_plain_install_dir(dest)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 os.mkdir(dest)

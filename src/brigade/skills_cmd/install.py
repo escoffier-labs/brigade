@@ -525,6 +525,52 @@ def _local_edit_state(
     return "unknown" if nested_metadata else "current"
 
 
+@dataclass(frozen=True)
+class TreeIdentity:
+    """What a drift check saw of an installed copy: its directory inode and a digest of every byte."""
+
+    device: int
+    inode: int
+    digest: str
+
+
+def _tree_identity(installed_dir: Path, inspection: InstalledTreeInspection) -> TreeIdentity | None:
+    """Identity of the directory that was just inspected, or ``None`` when it is not a plain directory."""
+    if inspection.state != "dir":
+        return None
+    try:
+        info = os.lstat(installed_dir)
+    except OSError:
+        return None
+    digest = hashlib.sha256()
+    for parts in sorted(inspection.dirs):
+        digest.update(b"d\0" + "/".join(parts).encode("utf-8") + b"\0")
+    for parts in sorted(inspection.files):
+        digest.update(b"f\0" + "/".join(parts).encode("utf-8") + b"\0")
+        digest.update(inspection.files[parts] + b"\0")
+    return TreeIdentity(info.st_dev, info.st_ino, digest.hexdigest())
+
+
+def _require_tree_unchanged(
+    expected: TreeIdentity | None,
+    workspace: Path,
+    installed_dir: Path,
+    *,
+    anchor: registry._StateRootAnchor | None = None,
+) -> None:
+    """Refuse the mutation unless the copy is still exactly what the drift check saw.
+
+    The edit check and the removal it protects are separated by snapshots,
+    lints and binding checks, so a hand edit or a swapped directory can land in
+    between. Callers run this immediately before each removal or replacement.
+    """
+    actual = _tree_identity(installed_dir, _inspect_installed_tree(workspace, installed_dir, anchor=anchor))
+    if expected is None or actual != expected:
+        raise registry.SkillsStatePathError(
+            f"installed copy changed after it was checked: {installed_dir}; left untouched, run again"
+        )
+
+
 def _local_edit_diff_command(*, workspace: Path, selector: str, harness: str, against: str) -> str:
     return shlex.join(
         ["brigade", "skills", "diff", selector, "--target", str(workspace), "--harness", harness, "--against", against]
@@ -580,18 +626,23 @@ def _local_edit_rollback_discard_command(*, workspace: Path, skill_id: str, harn
 
 
 def installed_local_edit(workspace: Path, skill_id: str, harness: str) -> str:
-    """Read-only edit state of an installed copy against its receipt (``current``/``changed``/``unknown``).
+    """Read-only edit state of an installed copy against its receipt.
 
-    Autonomous callers (outcome reconcile) use it to leave a hand-edited copy
-    alone before they roll back or uninstall; they never see the bytes.
+    ``current``, ``changed`` or ``unknown``, plus ``missing`` when no copy exists.
+    Autonomous callers (outcome reconcile) use it to leave a hand-edited or
+    unverifiable copy alone before they roll back or uninstall; they never see
+    the bytes. ``unknown`` is a veto exactly like ``changed``: a receipt the
+    agent's own user can delete or rewrite may stop a write, never authorize it.
     """
     try:
         dest = _install_dir(workspace, harness, skill_id, leaf_link_is_local=True)
     except (ValueError, registry.SkillsStatePathError):
         return "unknown"
-    files = _inspect_installed_tree(workspace, dest).files
+    inspection = _inspect_installed_tree(workspace, dest)
+    if inspection.state == "missing":
+        return "missing"
     receipt = _latest_install_receipt(workspace, skill_id, harness)
-    return _local_edit_state(receipt, files, skill_id=skill_id, harness=harness)
+    return _local_edit_state(receipt, inspection.files, skill_id=skill_id, harness=harness)
 
 
 def _local_edit_reason(*, installed_dir: Path, diff_command: str, discard_command: str) -> str:
@@ -599,6 +650,13 @@ def _local_edit_reason(*, installed_dir: Path, diff_command: str, discard_comman
         f"installed copy {installed_dir} has local edits and was kept; "
         f"review with `{diff_command}`, or overwrite with `{discard_command}` "
         "(a rollback snapshot is taken first)"
+    )
+
+
+def _unverified_copy_reason(*, installed_dir: Path, discard_command: str) -> str:
+    return (
+        f"installed copy {installed_dir} is unverified (no valid receipt for its bytes) and was kept; "
+        f"an unattended run never writes over it, repair it by hand with `{discard_command}`"
     )
 
 
@@ -808,9 +866,11 @@ def install(
     harness: str,
     force: bool = False,
     discard_local_edits: bool = False,
+    unattended: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
+    """Install a skill. ``unattended`` (autonomous callers) also vetoes a copy no receipt can vouch for."""
     workspace = workspace.expanduser().resolve()
     install_targets = _install_targets(workspace)
     if harness not in (*install_targets, "all"):
@@ -967,7 +1027,13 @@ def install(
         for install_target in targets:
             if install_target == "hermes" and not registry._hermes_home().exists():
                 # Do not create ~/.hermes for someone who does not run Hermes.
-                skipped.append({"target": "hermes", "reason": "Hermes home not found (is Hermes installed?)"})
+                skipped.append(
+                    {
+                        "target": "hermes",
+                        "reason": "Hermes home not found (is Hermes installed?)",
+                        "not_applicable": True,
+                    }
+                )
                 continue
             try:
                 dest = _install_dir(workspace, install_target, skill_id, leaf_link_is_local=True)
@@ -1054,30 +1120,42 @@ def install(
             if recheck_state != dest_state:
                 raise registry.SkillsStatePathError(f"installed copy changed while installing: {dest}; run again")
             previous_receipt = _previous_install_receipt(state_anchor, skill_id=skill_id, harness=install_target)
+            checked_identity: TreeIdentity | None = None
+            if dest_present:
+                inspected = _inspect_installed_tree(workspace, dest, anchor=state_anchor)
+                checked_identity = _tree_identity(dest, inspected)
             if dest_present and not discard_local_edits:
                 # A hand-edited copy is never replaced by --force alone: the
                 # receipt proves what was installed, so bytes that differ are
-                # an edit. No receipt (legacy copy) cannot prove an edit and
-                # stays replaceable. This runs before any snapshot or removal.
-                edited_files = _inspect_installed_tree(workspace, dest, anchor=state_anchor).files
-                if (
-                    _local_edit_state(previous_receipt, edited_files, skill_id=skill_id, harness=install_target)
-                    == "changed"
-                ):
+                # an edit. Without a receipt a manual --force (operator-driven)
+                # may repair a legacy copy, but an unattended caller never
+                # writes over bytes it cannot prove pristine. This runs before
+                # any snapshot or removal.
+                edit_state = _local_edit_state(
+                    previous_receipt, inspected.files, skill_id=skill_id, harness=install_target
+                )
+                if edit_state == "changed" or (unattended and edit_state != "current"):
                     selector, against = _local_edit_selector(previous_receipt, skill_id=skill_id, fallback=skill)
-                    reason = _local_edit_reason(
-                        installed_dir=dest,
-                        diff_command=_local_edit_diff_command(
-                            workspace=workspace, selector=selector, harness=install_target, against=against
-                        ),
-                        discard_command=_local_edit_discard_command(
-                            workspace=workspace, selector=selector, harness=install_target
-                        ),
+                    discard_command = _local_edit_discard_command(
+                        workspace=workspace, selector=selector, harness=install_target
                     )
+                    if edit_state == "changed":
+                        reason = _local_edit_reason(
+                            installed_dir=dest,
+                            diff_command=_local_edit_diff_command(
+                                workspace=workspace, selector=selector, harness=install_target, against=against
+                            ),
+                            discard_command=discard_command,
+                        )
+                    else:
+                        reason = _unverified_copy_reason(installed_dir=dest, discard_command=discard_command)
                     if harness != "all":
                         print(f"error: {reason}", file=sys.stderr)
                         return 2
-                    skipped.append({"target": install_target, "reason": reason, "local_edit": True})
+                    skipped.append(
+                        {"target": install_target, "reason": reason}
+                        | ({"local_edit": True} if edit_state == "changed" else {"unverified": True})
+                    )
                     continue
             rollback_snapshot: str | None = None
             rollback_snapshot_fingerprint: str | None = None
@@ -1116,6 +1194,8 @@ def install(
                         _check_review_binding(
                             expected_binding, workspace, skill_id, install_target, anchor=state_anchor
                         )
+                    # Bind the removal to the bytes the edit check and snapshot saw.
+                    _require_tree_unchanged(checked_identity, workspace, dest, anchor=state_anchor)
                     if not under_state_root:
                         _remove_plain_install_dir(dest)
                 except registry.SkillsStatePathError:
