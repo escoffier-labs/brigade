@@ -21,7 +21,12 @@ import pytest
 
 from brigade import dirfd as dirfd_mod
 from brigade.projection import kernel as projection
+from tests._posix import requires_dirfd
 from tests.projection_fixture import mixed_workspace
+
+# These tests drive the kernel's Windows branch with POSIX descriptors standing
+# in for NT handles, so they need the POSIX descriptor primitives.
+pytestmark = requires_dirfd
 
 
 class _Refused(OSError):
