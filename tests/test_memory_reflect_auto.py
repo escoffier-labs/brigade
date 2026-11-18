@@ -66,6 +66,8 @@ MERGE_HOLDS = [
     "retrieval_eval_merge_inbound_link",
     "retrieval_eval_merge_title_uncovered",
     "retrieval_eval_merge_keeper_changed",
+    "retrieval_eval_merge_retires_older",
+    "retrieval_eval_merge_literal_lost",
 ]
 
 

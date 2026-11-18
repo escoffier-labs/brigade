@@ -166,27 +166,30 @@ pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite:
 }
 
 /// Whether another live card in `scope` names `id`, as `names` judges its text.
-/// The prefilter reads the lineage key names `Links::parse` acts on, never the
-/// target id. Values go through `literal_eval`, so escapes and implicit
-/// concatenation can spell an id that no byte search finds. A key cannot be
-/// escaped, because `front_matter` splits on the raw colon. `with_id_bytes`
-/// also keeps cards that spell `id` unescaped, which a caller needs when
-/// `names` reads wiki and markdown links or keys beyond the lineage list.
+/// With `scan_all` false the prefilter reads the lineage key names
+/// `Links::parse` acts on, never the target id. Values go through
+/// `literal_eval`, so escapes and implicit concatenation can spell an id that
+/// no byte search finds. A key cannot be escaped, because `front_matter`
+/// splits on the raw colon. A caller whose `names` reads wiki and markdown
+/// links or keys beyond the lineage list passes `scan_all`, which parses every
+/// live card in the scope, since no byte or key filter can promise to see them.
 pub(super) fn named_by<T: ReadTx + ?Sized>(
     tx: &T,
     scope: &str,
     id: &str,
-    with_id_bytes: bool,
+    scan_all: bool,
     names: impl Fn(&str) -> bool,
 ) -> rusqlite::Result<bool> {
-    let mut mentions: Vec<String> = super::ranking::LINEAGE_KEYS
-        .iter()
-        .map(|key| format!("instr(b.bytes,CAST('{key}' AS BLOB))>0"))
-        .collect();
-    if with_id_bytes {
-        mentions.push("instr(b.bytes,CAST(?2 AS BLOB))>0".into());
-    }
-    let rows = tx.query(&format!("SELECT b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' AND c.card_id<>?2 AND ({})", mentions.join(" OR ")), &[ops::t(scope), ops::t(id)])?;
+    let filter = if scan_all {
+        String::new()
+    } else {
+        let mentions: Vec<String> = super::ranking::LINEAGE_KEYS
+            .iter()
+            .map(|key| format!("instr(b.bytes,CAST('{key}' AS BLOB))>0"))
+            .collect();
+        format!(" AND ({})", mentions.join(" OR "))
+    };
+    let rows = tx.query(&format!("SELECT b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' AND c.card_id<>?2{filter}"), &[ops::t(scope), ops::t(id)])?;
     Ok(rows.iter().any(|row| {
         let rusqlite::types::Value::Blob(bytes) = &row[0] else {
             return false;

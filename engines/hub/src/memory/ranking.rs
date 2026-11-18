@@ -84,6 +84,20 @@ pub(super) fn front_targets(
     scope: &str,
     keep: impl Fn(&str) -> bool,
 ) -> Vec<(String, String)> {
+    front_values(body, keep, 256)
+        .into_iter()
+        .filter_map(|(key, value)| link_id(&value, scope).map(|id| (key, id.to_string())))
+        .collect()
+}
+
+/// Every front-matter value, with its key, for the keys `keep` accepts. A list
+/// yields its first `cap` items. Search reads the same literal syntax, so an
+/// escaped or concatenated id decodes here as it does there.
+pub(super) fn front_values(
+    body: &str,
+    keep: impl Fn(&str) -> bool,
+    cap: usize,
+) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (key, value) in text::front_matter(body) {
         if !keep(&key) {
@@ -102,11 +116,7 @@ pub(super) fn front_targets(
             }
             _ => continue,
         };
-        for value in values.into_iter().take(256) {
-            if let Some(id) = link_id(&value, scope) {
-                out.push((key.clone(), id.to_string()));
-            }
-        }
+        out.extend(values.into_iter().take(cap).map(|v| (key.clone(), v)));
     }
     out
 }
@@ -121,6 +131,25 @@ pub(super) fn link_id<'a>(value: &'a str, scope: &str) -> Option<&'a str> {
         None => value.strip_prefix(&format!("{scope}/")).unwrap_or(value),
     };
     super::ids::valid_card_id(id).then_some(id)
+}
+
+/// [`link_id`] for a scan that must not miss a link a reader could follow. It
+/// also drops angle brackets, a `#fragment` and leading `./`, `../` and `/`,
+/// and accepts a trailing `.md` on a bare id. Lineage parsing keeps the strict
+/// form, because it decides ranking.
+pub(super) fn mentioned_id<'a>(value: &'a str, scope: &str) -> Option<&'a str> {
+    let mut path = value.trim();
+    if let Some(inner) = path.strip_prefix('<') {
+        path = inner.strip_suffix('>').unwrap_or(inner);
+    }
+    path = path.split('#').next().unwrap_or("");
+    while let Some(rest) = ["./", "../", "/"]
+        .iter()
+        .find_map(|prefix| path.strip_prefix(prefix))
+    {
+        path = rest;
+    }
+    link_id(path, scope).or_else(|| link_id(path.trim_end_matches(".md"), scope))
 }
 
 /// Only reviewed relations may change another card's search identity.

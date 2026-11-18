@@ -105,6 +105,16 @@ pub fn without_key(text: &str, key: &str) -> String {
     }
     format!("---\n{}\n---\n{body}", kept.join("\n"))
 }
+/// The non-blank front-matter lines the writer's parser reads, except any line
+/// [`set`] would treat as `key`. Empty when the card has no front matter.
+pub fn lines_without_key<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
+    let Ok((meta, _)) = front(text) else {
+        return Vec::new();
+    };
+    meta.into_iter()
+        .filter(|l| !l.trim().is_empty() && !is_key(l, key))
+        .collect()
+}
 pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str> {
     let (meta, body) = front(text)?;
     for (key, _) in updates {
