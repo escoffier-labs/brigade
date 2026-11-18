@@ -152,7 +152,8 @@ CLAUDE_BUILTIN_PLUGINS = (
     "cc-plugin-tips",
     "cc-plugin-you-should-know",
 )
-CLAUDE_BUILTIN_AGENTS = frozenset({"claude", "Explore", "general-purpose", "Plan"})
+# Agents compiled into the CLI. 2.1.327 also reports statusline-setup in every init event.
+CLAUDE_BUILTIN_AGENTS = frozenset({"claude", "Explore", "general-purpose", "Plan", "statusline-setup"})
 CLAUDE_SETTINGS = json.dumps(
     {"enabledPlugins": {f"{name}@builtin": False for name in CLAUDE_BUILTIN_PLUGINS}},
     sort_keys=True,

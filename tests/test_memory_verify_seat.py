@@ -122,7 +122,7 @@ def init_event(cwd, argv, /, **overrides):
         "slash_commands": [],
         "skills": [],
         "plugins": [],
-        "agents": ["claude", "Explore", "general-purpose", "Plan"],
+        "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"],
         "additional_directories": [],
         "model": model,
     }
