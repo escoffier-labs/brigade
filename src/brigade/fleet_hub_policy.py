@@ -18,6 +18,11 @@ Every mutation validates a bounded JSON document, runs inside one
 transaction, and refuses on a version mismatch rather than merging. Rollback
 appends a *new* revision holding an older document; revisions never rewind.
 
+Session state is pruned, the audit trail is not: a write sweeps sessions idle
+past ``SESSION_RETENTION`` from the session, pending and acknowledged tables
+(see :func:`sweep_idle_sessions`) and never touches the revision or the
+acknowledged-history tables.
+
 Policy revisions carry no telemetry. Capacity and quota observations are a
 separate, separately versioned stream, so a heartbeat can never make a
 session's policy look stale.
@@ -166,6 +171,10 @@ _ACK_COLUMNS = (
 MAX_PENDING_JSON = 262144
 MAX_ORIGIN = 256
 LOADED_AT_FUTURE_SECONDS = 300
+# Policy sessions idle longer than this are swept. Add a policy knob later if someone needs a different value.
+SESSION_RETENTION = timedelta(days=14)
+# Most sessions one write may sweep, so a save or a receipt never stalls on a large backlog.
+SESSION_SWEEP_LIMIT = 500
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -210,6 +219,103 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "INSERT INTO fleet_policy_meta (singleton, current_revision, updated_at, updated_by) VALUES (1, 1, ?, ?)",
         (now, "schema"),
     )
+
+
+def _stamp(raw: Any) -> datetime | None:
+    """An aware UTC instant, or ``None`` when the stored text cannot be trusted as one."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return None if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def sweep_idle_sessions(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime | None = None,
+    retention: timedelta = SESSION_RETENTION,
+    limit: int | None = None,
+) -> int:
+    """Delete dead policy sessions from the session, pending and acknowledged tables.
+
+    A session is every row that shares an identity key: the receipt row id, its
+    derived ``session_key``, a pending key, or an acknowledged receipt key. Its
+    activity is the latest timestamp any of those rows carries. It is removed
+    only when that latest stamp is older than ``retention``; a session with one
+    recent stamp, or one stamp that does not parse, is kept. A removed session
+    is gone from every table at once, so a consumer presenting it is refused
+    exactly like an unknown session and must prepare again.
+
+    ``fleet_policy_acknowledged_history`` and ``fleet_policy_revisions`` are the
+    audit trail and are never read or written here. Runs inside the caller's
+    transaction and removes at most ``limit`` sessions, oldest first. Returns
+    the number of sessions removed.
+    """
+    cutoff = (now or datetime.now(timezone.utc)) - retention
+    batch = SESSION_SWEEP_LIMIT if limit is None else limit
+    # (table, primary key, identity keys, timestamp columns) for every candidate row.
+    entries: list[tuple[str, str, list[str], list[Any]]] = []
+    for sid, consumer, owner, repo, *stamps in conn.execute(
+        "SELECT session_id, consumer, owner_node, repo_identity, loaded_at, refresh_requested_at, "
+        "refresh_updated_at, updated_at FROM fleet_policy_sessions"
+    ):
+        entries.append(("sessions", sid, [sid, session_key(owner, consumer, repo, sid)], stamps))
+    for key, *stamps in conn.execute("SELECT pending_key, created_at, updated_at FROM fleet_policy_pending"):
+        entries.append(("pending", key, [key], stamps))
+    for key, *stamps in conn.execute("SELECT receipt_key, loaded_at, acknowledged_at FROM fleet_policy_acknowledged"):
+        entries.append(("acknowledged", key, [key], stamps))
+
+    parent: dict[str, str] = {}
+
+    def find(item: str) -> str:
+        parent.setdefault(item, item)
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    for _table, _pk, keys, _stamps in entries:
+        root = find(keys[0])
+        for other in keys[1:]:
+            parent[find(other)] = root
+
+    latest: dict[str, datetime] = {}
+    kept: set[str] = set()
+    for _table, _pk, keys, stamps in entries:
+        root = find(keys[0])
+        for raw in stamps:
+            if raw is None:
+                continue
+            parsed = _stamp(raw)
+            if parsed is None:
+                kept.add(root)  # never delete on doubt
+            elif root not in latest or parsed > latest[root]:
+                latest[root] = parsed
+    idle = sorted((when, root) for root, when in latest.items() if root not in kept and when < cutoff)
+    doomed = {root for _when, root in idle[: max(batch, 0)]}
+    if not doomed:
+        return 0
+    for table, column, name in (
+        ("fleet_policy_sessions", "session_id", "sessions"),
+        ("fleet_policy_pending", "pending_key", "pending"),
+        ("fleet_policy_acknowledged", "receipt_key", "acknowledged"),
+    ):
+        conn.executemany(
+            f"DELETE FROM {table} WHERE {column}=?",
+            [(pk,) for kind, pk, keys, _stamps in entries if kind == name and find(keys[0]) in doomed],
+        )
+    return len(doomed)
+
+
+def _sweep_best_effort(conn: sqlite3.Connection) -> None:
+    """Retention must never fail the write that triggered it."""
+    try:
+        sweep_idle_sessions(conn, now=_stamp(fleet_hub._utc_now()))
+    except sqlite3.Error:
+        pass
 
 
 def _bounded(raw: Any, field: str, limit: int, *, required: bool = True, allow_newlines: bool = False) -> str | None:
@@ -577,6 +683,7 @@ def _write_revision(
             "UPDATE fleet_policy_meta SET current_revision=?, updated_at=?, updated_by=? WHERE singleton=1",
             (revision, now, actor),
         )
+        _sweep_best_effort(conn)
         if opened:
             conn.commit()
         return {
@@ -729,6 +836,7 @@ def record_session_policy(
             "refresh_updated_at=NULL, refresh_detail=NULL, updated_at=excluded.updated_at",
             (session, consumer_value, owner, repo, revision, digest, source_value, loaded, now),
         )
+        _sweep_best_effort(conn)
         payload = _session_payload(conn, session)
         if opened:
             conn.commit()

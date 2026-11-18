@@ -1,0 +1,1 @@
+- Fleet Hub policy sessions idle for more than 14 days are now swept from the session, pending, and acknowledged tables on the next policy save or session receipt, so dead sessions stop accumulating policy copies. The acknowledged history and revision audit trail are never touched, and a swept session is refused like an unknown one until it prepares again. Part of #2710.
