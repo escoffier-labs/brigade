@@ -121,8 +121,13 @@ def validated_runs(runs_root: Path) -> list[tuple[float, str, dict[str, Any]]]:
                 )
             ):
                 started = metadata.get("started_at")
-                # Keep only the bounded sort field rather than every run body.
-                summary = {"started_at": started} if isinstance(started, str) and len(started) <= 128 else {}
+                # Keep the sort field and lease location without retaining run bodies.
+                summary: dict[str, Any] = (
+                    {"started_at": started} if isinstance(started, str) and len(started) <= 128 else {}
+                )
+                if "lock_workspace" in metadata:
+                    lease = metadata["lock_workspace"]
+                    summary["lock_workspace"] = lease if isinstance(lease, str) and 0 < len(lease) <= 4096 else None
                 runs.append((modified, name, summary))
         return runs
     finally:
@@ -264,11 +269,7 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
 
 
 def purge_inactive(run_dir: Path, *, workspace: Path, private_only: bool = False) -> int:
-    """Fence maintenance against publication; caller excludes new run owners.
-
-    CLI callers hold the workspace run lock. Retention runs inside that lock
-    for the current run, so other runs in the workspace cannot start meanwhile.
-    """
+    """Fence maintenance against publication and check the candidate's lease."""
     from . import run_journal, run_lifecycle, runguard
 
     journal = run_dir / "events" / "lifecycle.jsonl"
@@ -377,8 +378,8 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
     runs.sort(key=lambda item: (item[0], item[1]), reverse=True)
     cutoff = time.time() - KEEP_DAYS * 86400
     candidates = [
-        runs_root / name
-        for index, (modified, name, _) in enumerate(runs)
+        (runs_root / name, summary)
+        for index, (modified, name, summary) in enumerate(runs)
         if runs_root / name != current and (index >= KEEP_RUNS or modified < cutoff)
     ]
     # Still report unreadable evidence when there is currently nothing to prune.
@@ -394,9 +395,19 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
             return 0
         from . import runguard
 
-        for path in candidates:
-            if path.name not in pinned and not runguard.has_active_run_owner(workspace, path):
-                removed += purge_inactive(path, workspace=workspace, private_only=True)
+        for path, summary in candidates:
+            if path.name in pinned:
+                continue
+            lock_workspace = workspace
+            if "lock_workspace" in summary:
+                if summary["lock_workspace"] is None:
+                    continue
+                try:
+                    lock_workspace = runguard.resolve_run_lock_workspace(summary, path) or workspace
+                except (OSError, RuntimeError, ValueError):
+                    continue
+            if not runguard.has_active_run_owner(lock_workspace, path):
+                removed += purge_inactive(path, workspace=lock_workspace, private_only=True)
     return removed
 
 

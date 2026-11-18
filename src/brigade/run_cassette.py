@@ -295,8 +295,9 @@ def record_result(
     policy_workspace: Path | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort recording. Failure stops recording, never the worker run."""
+    policy_workspace = policy_workspace or workspace
     try:
-        cfg = config.load_config(policy_workspace or workspace)
+        cfg = config.load_config(policy_workspace)
     except Exception:
         print("cassette recording skipped: configuration unavailable", file=sys.stderr)
         return None
@@ -323,7 +324,7 @@ def record_result(
         _stop(run_dir, workspace)
         return None
     if ref is not None:
-        store.retain_private_once(workspace, run_dir)
+        store.retain_private_once(policy_workspace, run_dir)
     return ref
 
 
