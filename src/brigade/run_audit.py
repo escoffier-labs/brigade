@@ -40,6 +40,7 @@ ROSTER_JSON_NAME = "roster.json"
 RESULT_MATCH = "match"
 RESULT_DIVERGE = "diverge"
 RESULT_NOT_AUDITABLE = "not_auditable"
+RESULT_JOURNAL_WITHHELD = "journal-withheld"
 RESULT_ERROR = "error"
 
 # Initial divergence classes from issue #595.
@@ -901,6 +902,27 @@ def audit_run(
         )
 
     if not journal_path.exists():
+        withheld = run_meta.get("journal_withheld")
+        if isinstance(withheld, Mapping):
+            return AuditReport(
+                result=RESULT_JOURNAL_WITHHELD,
+                source_run_id=source_run_id,
+                projector_version=run_projector.PROJECTOR_VERSION,
+                code_revision=revision,
+                normalization_version=AUDIT_NORMALIZATION_VERSION,
+                audit_schema_version=AUDIT_SCHEMA_VERSION,
+                not_auditable_reason=_bound("lifecycle journal withheld from export for privacy"),
+                first_divergence=Divergence(
+                    divergence_class=CLASS_MISSING_OR_CORRUPT_FIXTURE,
+                    sequence=None,
+                    event_type=None,
+                    expected={"artifact": str(JOURNAL_REL)},
+                    observed={"journal_withheld": dict(withheld)},
+                    detail=_bound("audit cannot verify a lifecycle journal omitted at export"),
+                ),
+                transport_coverage=_transport_coverage(run_meta.get("codex_transport")),
+                evidence_digests=_safe_digests(run_dir, journal_present=False),
+            )
         return AuditReport(
             result=RESULT_NOT_AUDITABLE,
             source_run_id=source_run_id,

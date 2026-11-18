@@ -359,6 +359,14 @@ def work_next(*, consumer: str = "brigade-run", workload: str = "general") -> di
     )
 
 
+def place(*, repo: str, threshold: float | None = None) -> dict[str, Any]:
+    """Advisory, read-only: which machine should a new child agent for ``repo`` run on."""
+    body: dict[str, Any] = {"action": "place", "repo": repo}
+    if threshold is not None:
+        body["threshold"] = threshold
+    return post_policy(body, admin=False)
+
+
 def accept_reservation(*, reservation_id: str, decision_id: str, session_id: str) -> dict[str, Any]:
     return post_policy(
         {
