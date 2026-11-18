@@ -851,9 +851,16 @@ async fn s19b_security_merge_requires_identical_non_union_metadata() {
         ("status: active\n", "status:  active\n", 2),
         ("status: active\n", "status: active\n", 0),
         (
-            "status: active\naliases: [\"fleet/old-a\"]\nevidence: []\n",
+            "status: active\nevidence: []\n",
             "evidence: [\"node/workspace/receipt\"]\nstatus: active\naliases: []\n",
             0,
+        ),
+        // The union fields still match, but a keeper alias is lineage, which
+        // every merge card sends to a reviewer at any trust.
+        (
+            "status: active\naliases: [\"fleet/old-a\"]\nevidence: []\n",
+            "evidence: [\"node/workspace/receipt\"]\nstatus: active\naliases: []\n",
+            2,
         ),
     ] {
         let h = Hub::with(clean(), None);

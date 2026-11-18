@@ -416,7 +416,8 @@ async fn each_unsafe_merge_is_held_with_its_own_reason() {
         .unwrap()
         .push(json!({"type":"append_evidence","scope":"fleet","card_id":KEEP}));
     assert_eq!(held(&r, &mixed), Some(MIXED));
-    let mut lone = body.clone();
+    // Without the alias the merge would add, so lineage review has nothing to name.
+    let mut lone = retext(&body, KEEP, &dup(ALPHA, "aaaaaa"));
     lone["ops"][0].as_object_mut().unwrap().remove("other_card");
     assert_eq!(held(&r, &lone), Some(SHAPE));
     let mut stale = body.clone();
@@ -519,7 +520,13 @@ async fn a_card_naming_the_retired_id_holds_the_merge() {
         ),
     ];
     for (name, text) in forms {
-        assert_eq!(naming_card_holds(text).await, Some(INBOUND), "{name}");
+        // A card that names the retired id in a lineage key is lineage, which
+        // review reads before the merge gate's own inbound-link rule.
+        let lineage = ["superseded_by", "supersedes", "aliases"]
+            .iter()
+            .any(|key| text.contains(key));
+        let expected = if lineage { LINEAGE } else { INBOUND };
+        assert_eq!(naming_card_holds(text).await, Some(expected), "{name}");
     }
     // A link to the keeper leaves the retired id alone.
     assert_eq!(naming_card_holds("See [[dup-keeper]].\n").await, None);
@@ -1270,6 +1277,15 @@ async fn an_original_that_gained_aliases_and_evidence_is_still_older() {
         "aaaaaa",
     );
     rewrite(&r, KEEP, &both).await;
+    // A keeper alias is lineage, so a reviewer decides. The merge gate's own
+    // age rule must still not be what holds it.
+    let opened = submit(&r.h, ADMIN_TOKEN, vec![merge_op(&r, KEEP, GONE).await]).await;
+    assert_eq!(opened.body["tier"], 2, "{opened:?}");
+    assert_ne!(held(&r, &r.body(&opened)), Some(RETIRES_OLDER));
+    // Evidence alone is no lineage, so the same history applies untouched.
+    let r = Real::untrusted(&[(KEEP, &first), (GONE, &second)]).await;
+    let evidence = dup("---\nevidence: [\"ns/kind/one\"]\n---\n", "aaaaaa");
+    rewrite(&r, KEEP, &evidence).await;
     assert_eq!(held(&r, &r.body(&open(&r).await)), None);
 }
 
@@ -1611,8 +1627,12 @@ async fn the_retired_cards_own_aliases_do_not_count_as_lost_literal_text() {
 async fn a_front_matter_fence_the_readers_disagree_on_is_not_admitted() {
     let split = "---\ntitle: Alpha\n--- \nnote: x\n---\n";
     let r = Real::untrusted(&[(KEEP, &dup(split, "aaaaaa")), (GONE, &dup(split, "bbbbbb"))]).await;
-    let opened = open(&r).await;
-    assert_eq!(held(&r, &r.body(&opened)), Some(KEEPER));
+    // The merge cannot read this front matter, so lineage review reads it as
+    // ambiguous before the merge gate sees it, at any trust.
+    let opened = submit(&r.h, ADMIN_TOKEN, vec![merge_op(&r, KEEP, GONE).await]).await;
+    assert_eq!(opened.body["tier"], 2, "{opened:?}");
+    assert!(held(&r, &r.body(&opened)).is_some());
+    assert_not_applied(&r, &opened, "fence disagreement").await;
 }
 
 /// The alias the merge writes names the retired id as a predecessor of the

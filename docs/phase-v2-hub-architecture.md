@@ -2516,7 +2516,9 @@ requires `decide: accept` for every tier. S19e-1 adds a separate `auto_apply`
 action that requires every gate, including retrieval evaluation, to pass.
 A failed automatic attempt returns its held report without rewriting the
 proposal or appending a decision event. It changes no card or vector. Automatic writes preserve the existing trusted class and reject
-`agent-unreviewed`, flagged and non-clean inputs. Tier 1 and Tier 2 remain
+`agent-unreviewed`, flagged and non-clean inputs, with one carve-out: a single
+`merge_exact_duplicates` pair of `agent-unreviewed` cards that one credential
+wrote and is applying (see `memory-operations.md`). Tier 1 and Tier 2 remain
 review-only. Calibration records are outside S19e-1.
 
 Evidence attestation (S19e-1). The `evidence.attach` memory action requires

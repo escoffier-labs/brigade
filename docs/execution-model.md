@@ -127,10 +127,13 @@ written by different credentials is still proposed, and it waits for a reviewer
 as an ordinary open proposal. It holds with
 `retrieval_eval_merge_cross_writer` (`retrieval_eval_writer_changed` when the
 cards are `agent-unreviewed`), the reflect client leaves it pending, and a
-reviewer can accept it. A flagged card, a pair of mixed trust, earlier lineage,
-several pairs in one proposal, a group of more than eight and a pair beside
-other ops also wait for a reviewer, and `append_evidence` or `anchor_blocks` on
-`agent-unreviewed` cards stays denied. The drift is bounded, not
+reviewer can accept it. A flagged card, a pair of mixed trust, several pairs in
+one proposal, a keeper retiring more than one card and a pair beside other ops
+also wait for a reviewer, and so does earlier lineage, an escaped lineage value
+or a live card naming the keeper, which lineage review checks on every card of
+a merge, `agent-unreviewed` or not. A proposal over eight cards is refused at
+submit. `append_evidence` or `anchor_blocks` on `agent-unreviewed` cards stays
+denied. The drift is bounded, not
 zero: the same cards answer each query, but the keeper's own position can move
 because the added alias lengthens it, and scope statistics shift every score.
 Verifier
