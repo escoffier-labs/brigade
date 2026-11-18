@@ -141,9 +141,9 @@ class PendingPhysical:
 def age_label(status: str, changed_at: Any, now: datetime) -> str:
     """Human age of a status, such as ``demoted 3 days ago``; ``unknown age`` without a timestamp."""
     changed = localio.parse_iso_datetime(changed_at)
-    if changed is None:
+    if changed is None or changed > now:
         return f"{status}, unknown age"
-    days = max(0, (now - changed).days)
+    days = (now - changed).days
     if days == 0:
         return f"{status} today"
     return f"{status} {days} day{'' if days == 1 else 's'} ago"
@@ -203,7 +203,10 @@ def pending_by_artifact(
         changed = localio.parse_iso_datetime(changed_at)
         in_run = artifact_id in current_run_ids
         action = PendingAction(status, changed_at if isinstance(changed_at, str) else None, commands, in_run)
-        if status == "promoted" or in_run or (changed is not None and now - changed <= window):
+        # A future timestamp (clock skew, a copied or hand-edited status file) cannot
+        # prove recency either, so it is stale like a missing one.
+        provably_recent = changed is not None and changed <= now and now - changed <= window
+        if status == "promoted" or in_run or provably_recent:
             recent[artifact_id] = action
         else:
             stale[artifact_id] = action

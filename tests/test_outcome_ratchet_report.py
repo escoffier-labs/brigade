@@ -503,3 +503,22 @@ def test_a_report_without_pending_data_briefs_zero(tmp_path):
         ]
         == 0
     )
+
+
+def test_the_size_cap_drops_the_stale_list_before_any_regression_row():
+    stale = [
+        {"artifact_id": f"s{n}", "status": "demoted", "status_changed_at": None, "commands": ["x" * 4000]}
+        for n in range(20)
+    ]
+    report = {
+        "version": 1,
+        "summary": {"stale_physical_actions": 20},
+        "stale_physical": stale,
+        "regressions": [{"artifact_id": "r"}],
+    }
+
+    fitted = report_mod._fit(report)
+
+    assert fitted["stale_physical"] == [] and fitted["stale_physical_truncated"] is True
+    assert fitted["regressions"] == [{"artifact_id": "r"}]
+    assert fitted["summary"]["stale_physical_actions"] == 20

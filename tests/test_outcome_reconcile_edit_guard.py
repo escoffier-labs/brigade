@@ -495,6 +495,18 @@ def test_the_window_compares_exact_time_not_whole_days(tmp_path, monkeypatch):
     assert set(pending.stale) == {"over"}
 
 
+def test_a_future_timestamp_cannot_prove_a_demotion_is_recent(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
+    future = (now + timedelta(days=30)).isoformat()
+    status_map = _status_map(now, future=("demoted", future))
+    _fake_commands(monkeypatch, ["future"])
+
+    pending = outcome_skill_exec.pending_by_artifact(tmp_path, status_map, {}, now=now, window_days=14)
+
+    assert set(pending.stale) == {"future"} and pending.recent == {}
+    assert outcome_skill_exec.age_label("demoted", future, now) == "demoted, unknown age"
+
+
 def test_a_promoted_install_is_listed_whatever_its_age_or_timestamp(tmp_path, monkeypatch):
     now = datetime(2026, 11, 17, tzinfo=timezone.utc)
     status_map = _status_map(

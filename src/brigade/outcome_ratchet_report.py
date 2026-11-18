@@ -320,6 +320,12 @@ def _fit(report: dict[str, Any]) -> dict[str, Any]:
     """
     if len(_encode(report)) <= REPORT_MAX_BYTES:
         return report
+    # Stale rows are listed only for reference and their count stays in
+    # ``stale_physical_actions``, so drop them before any regression row.
+    if report.get("stale_physical"):
+        report = {**report, "stale_physical": [], "stale_physical_truncated": True}
+        if len(_encode(report)) <= REPORT_MAX_BYTES:
+            return report
     regressions = report.get("regressions")
     if not isinstance(regressions, list) or not regressions:
         return report
