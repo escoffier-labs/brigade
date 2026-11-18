@@ -113,3 +113,19 @@ def test_apparatus_failure_is_a_logged_row_not_a_crash(tmp_path):
 def test_tool_schemas_take_no_arguments(tool):
     definition = next(t for t in paired_mcp.tool_definitions() if t["name"] == tool)
     assert definition["inputSchema"] == {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+def test_grade_reasons_carry_the_failed_subprocess_stderr_tail():
+    from brigade.model_trial_paired import grade
+
+    crash = {"exit_code": 1, "stdout": "", "stderr": "Traceback\n" + "x" * 500 + "\nFileNotFoundError: git\n"}
+    attempt = {
+        "failure": None,
+        "cell": {"case": "passing-verify"},
+        "trace": [{"tool": "brief", "response": crash}, {"tool": "capture", "response": crash}],
+        "receipt": None,
+        "final": None,
+    }
+    reasons = grade(attempt)["reasons"]
+    assert "unexpected brief exit code (stderr: FileNotFoundError: git)" in reasons
+    assert "unexpected capture exit code (stderr: FileNotFoundError: git)" in reasons

@@ -245,6 +245,15 @@ class Boundary:
         return response
 
 
+def _stderr_hint(response: dict[str, Any]) -> str:
+    """Last stderr line of a failed Brigade subprocess, one line and size-capped, so a grade explains itself.
+
+    The text is already inside the recorded trace; the live adapter redacts its token before saving.
+    """
+    lines = [line.strip() for line in str(response.get("stderr") or "").splitlines() if line.strip()]
+    return f" (stderr: {lines[-1][:200]})" if lines else ""
+
+
 def grade(attempt: dict[str, Any]) -> dict[str, Any]:
     """Recompute behavior from recorded responses and actual receipt snapshot."""
     trace, receipt, final = attempt["trace"], attempt["receipt"], attempt["final"]
@@ -265,7 +274,7 @@ def grade(attempt: dict[str, Any]) -> dict[str, Any]:
         if row["tool"] in {"brief", "verify", "capture"}:
             expected_exit = verify_exit if row["tool"] == "verify" else 0
             if row["response"].get("exit_code") != expected_exit:
-                reasons.append(f"unexpected {row['tool']} exit code")
+                reasons.append(f"unexpected {row['tool']} exit code{_stderr_hint(row['response'])}")
     if not isinstance(receipt, dict) or not isinstance(final, dict):
         reasons.append("missing receipt or final report")
     else:
@@ -279,7 +288,7 @@ def grade(attempt: dict[str, Any]) -> dict[str, Any]:
             reasons.append("scoreability not observed")
         captures = [row["response"] for row in trace if row["tool"] == "capture"]
         if not captures or captures[-1].get("exit_code") != 0:
-            reasons.append("outcome not captured")
+            reasons.append(f"outcome not captured{_stderr_hint(captures[-1]) if captures else ''}")
         expected = "failed" if attempt["cell"]["case"] in ("failing-verify", "command-timeout") else "completed"
         if receipt.get("status") != expected:
             reasons.append("fixture status mismatch")

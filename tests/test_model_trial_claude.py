@@ -45,7 +45,8 @@ WINDOWS_BASICS = {
 }
 ENVIRON = {
     **WINDOWS_BASICS,
-    "PATH": "/usr/bin:/bin",
+    # The Boundary's `work brief` and `outcome capture` call git by name, so the arm PATH must reach it.
+    "PATH": os.environ["PATH"] if os.name == "nt" else "/usr/bin:/bin",
     "CLAUDE_CODE_OAUTH_TOKEN": SECRET_TOKEN,
     "ANTHROPIC_API_KEY": "sentinel-api-key",
     "ANTHROPIC_AUTH_TOKEN": "sentinel-auth",
