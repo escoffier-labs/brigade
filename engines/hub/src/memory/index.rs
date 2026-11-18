@@ -50,7 +50,10 @@ pub const B: f64 = 0.75;
 /// Lexical candidates kept before the page is cut (pipeline step 3).
 pub const TOP: usize = 200;
 /// Index format, recorded beside scorer goldens and eval records.
-pub const FORMAT_VERSION: &str = "1";
+///
+/// "2": the `evidence` front-matter line and anchor suffixes left the indexed
+/// text. A hub restart rebuilds the index, and older eval records stop binding.
+pub const FORMAT_VERSION: &str = "2";
 /// Delta documents below this never start a rebuild, so a small index is not
 /// rebuilt on every write.
 pub const REBUILD_FLOOR: usize = 256;
@@ -245,6 +248,14 @@ pub struct Snapshot {
     forward: Arc<HashMap<u32, Vec<super::ranking::Neighbour>>>,
     reverse: Arc<HashMap<u32, Vec<super::ranking::Neighbour>>>,
 }
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snapshot")
+            .field("indexed_seq", &self.indexed_seq)
+            .field("documents", &self.docs.len)
+            .finish()
+    }
+}
 impl Snapshot {
     pub fn forward(&self, n: u32) -> &[super::ranking::Neighbour] {
         self.forward.get(&n).map(Vec::as_slice).unwrap_or_default()
@@ -254,6 +265,20 @@ impl Snapshot {
     }
     pub fn scopes(&self) -> &[String] {
         &self.scopes
+    }
+    /// True when the live document for this card is an end of a trusted
+    /// lineage edge in this publication. A gate asks it because the store can
+    /// no longer show an edge that an owner has since dropped, while search
+    /// still answers from the published graph until the next publication.
+    pub fn in_lineage(&self, scope: &str, card_id: &str) -> bool {
+        let Some(scope) = self.scopes.iter().position(|s| s == scope) else {
+            return false;
+        };
+        self.forward
+            .keys()
+            .chain(self.reverse.keys())
+            .map(|n| self.docs.get(*n))
+            .any(|d| d.live && d.scope as usize == scope && &*d.card_id == card_id)
     }
     pub fn doc(&self, n: u32) -> &Doc {
         self.docs.get(n)
@@ -440,6 +465,8 @@ pub struct Projection {
     pub fields: Fields,
     pub tokens: Vec<String>,
     pub links: super::ranking::Links,
+    /// The text the indexer tokenizes. Literal search reads it lowercased.
+    pub indexed: String,
     pub digest: String,
 }
 pub fn projection(card: &Card, live: bool) -> Projection {
@@ -447,20 +474,53 @@ pub fn projection(card: &Card, live: bool) -> Projection {
     let indexed = text::card_text(&fields, &card.text);
     let tokens = text::tokenize(&indexed);
     let links = super::ranking::Links::parse(&card.text, &card.scope);
-    let body = serde_json::json!({
+    let digest_of =
+        |body: serde_json::Value| super::ids::sha256_hex(super::ids::canonical(&body).as_bytes());
+    let digest = digest_of(serde_json::json!({
         "scope":card.scope,"card_id":card.card_id,"live":live,
         "indexed_text":indexed,"text":card.text,"tokens":tokens,
         "title":fields.title,"summary":fields.summary,"tags":fields.tags,
         "trust":card.trust,"revision":card.revision,"head_seq":card.revision,
         "content_hash":card.content_hash,"automated":card.automated,
         "successor":links.successor,"predecessors":links.predecessors
-    });
+    }));
     Projection {
         fields,
         tokens,
         links,
-        digest: super::ids::sha256_hex(super::ids::canonical(&body).as_bytes()),
+        indexed,
+        digest,
     }
+}
+
+/// A digest of the inputs ranking and literal search read from one card, and
+/// nothing else. It hashes the fields, tokens, links and literal text that
+/// [`projection`] builds, so a search-visible input added there reaches the
+/// gate with no second list to update. It leaves out the raw text, revision,
+/// head sequence and content hash. It covers ranking and literal search only.
+/// `writer` and `writer_class` decide push and connector visibility, and the
+/// revision moves lineage recency. Neither is in the digest, so the gate
+/// guards both apart. Lineage recency is the one ranking input left out, so a
+/// gate must exclude lineage targets. Only the gate computes it. Indexing
+/// never pays for it.
+pub fn ranking_digest(card: &Card, live: bool) -> String {
+    let Projection {
+        fields,
+        tokens,
+        links,
+        indexed,
+        ..
+    } = projection(card, live);
+    super::ids::sha256_hex(
+        super::ids::canonical(&serde_json::json!({
+            "scope":card.scope,"card_id":card.card_id,"live":live,
+            "tokens":tokens,"literal":text::py_lower(&indexed),
+            "title":fields.title,"summary":fields.summary,"tags":fields.tags,
+            "trust":card.trust,"automated":card.automated,
+            "successor":links.successor,"predecessors":links.predecessors
+        }))
+        .as_bytes(),
+    )
 }
 
 /// What the tail replay found for one changed card.
@@ -662,7 +722,16 @@ impl Builder {
     }
 }
 
-pub(super) const AUTOMATED_SQL: &str = "(c.writer_class='principal' OR COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0))";
+macro_rules! origin_automated {
+    () => {
+        "COALESCE((SELECT e.origin IN ('scheduled','worker') FROM memory_events e WHERE e.scope=c.scope AND e.card_id=c.card_id AND e.revision<=c.revision AND e.kind IN ('card.put','card.import') ORDER BY e.seq DESC LIMIT 1),0)"
+    };
+}
+/// The latest put or import came from a scheduled or worker origin. An apply
+/// writes neither event kind, so it never changes this.
+pub(super) const ORIGIN_AUTOMATED_SQL: &str = origin_automated!();
+pub(super) const AUTOMATED_SQL: &str =
+    concat!("(c.writer_class='principal' OR ", origin_automated!(), ")");
 
 fn card_row(r: &rusqlite::Row) -> rusqlite::Result<Card> {
     let bytes: Vec<u8> = r.get(5)?;
@@ -1179,6 +1248,39 @@ mod projection_tests {
             assert_ne!(projection(&changed, true).digest, digest, "{field}");
         }
         assert_ne!(projection(&before, false).digest, digest, "live status");
+    }
+    #[test]
+    fn ranking_digest_ignores_only_what_search_never_reads() {
+        let before = card();
+        let digest = ranking_digest(&before, true);
+        for (what, text) in [
+            ("anchor suffix", "needle ^c-abcdef\n"),
+            ("evidence line", "---\nevidence: [\"a/b/c\"]\n---\nneedle\n"),
+        ] {
+            let mut same = before.clone();
+            same.text = text.into();
+            assert_eq!(ranking_digest(&same, true), digest, "{what}");
+        }
+        let mut same = before.clone();
+        same.revision += 1;
+        same.content_hash = "different".into();
+        assert_eq!(ranking_digest(&same, true), digest, "stored");
+        for (field, text) in [
+            ("body", "another token\n"),
+            ("title", "---\ntitle: two\n---\nneedle\n"),
+            ("link", "---\nsuperseded_by: two\n---\nneedle\n"),
+        ] {
+            let mut changed = before.clone();
+            changed.text = text.into();
+            assert_ne!(ranking_digest(&changed, true), digest, "{field}");
+        }
+        let mut changed = before.clone();
+        changed.automated = true;
+        assert_ne!(ranking_digest(&changed, true), digest, "automated");
+        changed = before.clone();
+        changed.trust = "flagged".into();
+        assert_ne!(ranking_digest(&changed, true), digest, "trust");
+        assert_ne!(ranking_digest(&before, false), digest, "live");
     }
     #[test]
     fn projection_invariant_index_replay_is_byte_equal() {

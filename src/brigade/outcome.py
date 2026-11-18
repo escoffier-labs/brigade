@@ -123,12 +123,24 @@ class ReconcileConfig:
     utility_min_passing_units: int = 2
 
 
+REGRESSION_HOLD = "regression_hold"
+"""Decision code: a candidate stays down because verified regressions are present."""
+REGRESSION_ROLLBACK = "regression_rollback"
+"""Decision code: a promoted artifact is demoted because a verified regression was measured."""
+
+
 @dataclass(frozen=True)
 class Decision:
     artifact_id: str
     action: str  # "install" | "bump" | "rollback" | "hold"
     new_status: str  # "candidate" | "promoted" | "demoted"
     reason: str
+    code: str | None = None
+    """Machine-readable decision code, set at construction.
+
+    Advisory surfaces read this instead of parsing ``reason`` prose, so wording
+    changes never silently recategorize a decision.
+    """
 
 
 def wilson_lower_bound(helped: float, total: float, z: float = 1.96) -> float:
@@ -496,7 +508,13 @@ def decide(
 
     if current_status == "candidate":
         if candidate_regression_withheld(score.helped, score.hurt):
-            return Decision(score.artifact_id, "hold", "candidate", "withheld: verified regression present")
+            return Decision(
+                score.artifact_id,
+                "hold",
+                "candidate",
+                "withheld: verified regression present",
+                code=REGRESSION_HOLD,
+            )
         if score.helped >= config.install_min_helped and not candidate_install_margin_met(
             score.helped, score.hurt, install_min_helped=config.install_min_helped
         ):
@@ -517,7 +535,13 @@ def decide(
 
     if current_status == "promoted":
         if score.hurt >= config.revert_min_hurt:
-            return Decision(score.artifact_id, "rollback", "demoted", "verified regression measured")
+            return Decision(
+                score.artifact_id,
+                "rollback",
+                "demoted",
+                "verified regression measured",
+                code=REGRESSION_ROLLBACK,
+            )
         if score.helped >= config.bump_min_helped:
             return Decision(score.artifact_id, "bump", "promoted", "sustained verified helped")
         return Decision(score.artifact_id, "hold", "promoted", "no change")

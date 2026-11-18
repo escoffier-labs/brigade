@@ -34,10 +34,12 @@ NODE_ACTIONS = frozenset(
         "acknowledge",
         "route",
         "work-next",
+        "place",
         "reservation-accept",
         "reservation-renew",
         "reservation-release",
         "telemetry-observe",
+        "projects-observe",
         "delegation-create",
         "delegation-show",
     }
@@ -641,6 +643,18 @@ def _work_next(conn: Any, body: Mapping[str, Any]) -> dict[str, Any]:
     return fleet_hub_routing.work_next(conn, consumer=consumer, workload=workload)
 
 
+def _place(conn: Any, body: Mapping[str, Any], caller_node: str) -> tuple[int, dict[str, Any]]:
+    """Advisory placement. Read-only, so it runs before handle_policy's write transaction opens."""
+    from . import fleet_hub_placement
+
+    try:
+        return 200, fleet_hub_placement.place(conn, body, caller_node)
+    except FleetHubForbidden as exc:
+        raise _error("auth-failed", str(exc), status=403) from exc
+    except FleetHubError as exc:
+        raise _error("invalid-request", str(exc)) from exc
+
+
 def handle_policy(
     conn: Any,
     raw: Any,
@@ -662,6 +676,9 @@ def handle_policy(
             "enroll this node with 'brigade fleet nodes add' and configure its node token",
             status=403,
         )
+    if action == "place":
+        assert caller_node is not None
+        return _place(conn, body, caller_node)
     opened = False
     if conn.in_transaction is False:
         conn.execute("BEGIN IMMEDIATE")
@@ -821,6 +838,13 @@ def handle_policy(
                 raise _error("auth-failed", "a node token is required to observe telemetry", status=403)
             observed = {key: value for key, value in body.items() if key != "action"}
             status_payload = (200, fleet_hub_routing.observe_machine(conn, observed, caller_node))
+        elif action == "projects-observe":
+            if caller_node is None:
+                raise _error("auth-failed", "a node token is required to observe projects", status=403)
+            from . import fleet_node_projects
+
+            observed_projects = {key: value for key, value in body.items() if key != "action"}
+            status_payload = (200, fleet_node_projects.observe_projects(conn, observed_projects, caller_node))
         elif action == "quota-ingest":
             status_payload = (200, _ingest_quota(conn, body, caller_node=caller_node, is_admin=is_admin))
         elif action == "inventory-ingest":

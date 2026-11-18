@@ -38,6 +38,8 @@ MAX_JSON = 65536
 MAX_TEXT = fleet_policy.MAX_TEXT
 MAX_FUTURE_SECONDS = 300
 WorkItemLookup = Callable[[sqlite3.Connection, str], Mapping[str, Any] | None]
+# (machine name, policy machine record, telemetry row or None) -> extra rejection reasons.
+MachineReasons = Callable[[str, Mapping[str, Any], Mapping[str, Any] | None], list[str]]
 
 _work_item_lookup: WorkItemLookup | None = None
 
@@ -676,6 +678,8 @@ def _evaluate_pair(
     resolution: Mapping[str, Any],
     now: datetime,
     exclude_reservation_id: str | None = None,
+    quota_read_only: bool = False,
+    extra_reasons: MachineReasons | None = None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     machine = document["machines"].get(machine_name)
@@ -705,6 +709,8 @@ def _evaluate_pair(
     if eligible_machines and machine_name not in eligible_machines:
         reasons.append("machine-not-eligible")
     reasons.extend(_machine_wide_reasons(machine, telemetry, routing=routing, seats=[seat_name], now=now))
+    if extra_reasons is not None:
+        reasons.extend(extra_reasons(machine_name, machine, telemetry))
     occupancy, tokens = _occupancy(
         conn,
         machine=machine_name,
@@ -736,7 +742,7 @@ def _evaluate_pair(
         reasons.append("machine-capacity")
     pool_id = seat.get("quota_pool")
     if pool_id:
-        quota = fleet_quota.admit_pool(conn, pool_id, routing=routing, now=now)
+        quota = fleet_quota.admit_pool(conn, pool_id, routing=routing, now=now, read_only=quota_read_only)
         if not quota["admitted"]:
             if "quota-exhausted" in quota["reasons"]:
                 reasons.append("seat-quota-exhausted")
@@ -1042,8 +1048,15 @@ def _collect_candidates(
     now: datetime,
     machine: str | None = None,
     seat: str | None = None,
+    quota_read_only: bool = False,
+    extra_reasons: MachineReasons | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, str | None]:
-    """Evaluate every seat/machine pair. Never writes; shared by ``route`` and dry-run previews."""
+    """Evaluate every seat/machine pair. Never writes; shared by ``route`` and dry-run previews.
+
+    ``quota_read_only`` and ``extra_reasons`` are for the advisory placement query: the first
+    keeps the quota evaluator from creating its store, the second adds machine-level rejection
+    reasons. Both default to the original behavior.
+    """
     role = task_roles.role_for_workload(workload)
     start_seat = seat or (resolution.get("effective", {}).get("roles", {}) or {}).get(role)
     if seat is None and role != "impl":
@@ -1095,6 +1108,8 @@ def _collect_candidates(
                 requirements=requirements,
                 resolution=resolution,
                 now=now,
+                quota_read_only=quota_read_only,
+                extra_reasons=extra_reasons,
             )
             candidates.append(row)
             if row["eligible"]:

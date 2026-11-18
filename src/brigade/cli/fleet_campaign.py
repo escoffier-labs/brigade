@@ -156,6 +156,23 @@ def _register_hub_commands(commands: argparse._SubParsersAction, fleet_sub: argp
     show.add_argument("campaign_key", help="Campaign key.")
     show.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     show.set_defaults(func=_show)
+    complete = commands.add_parser(
+        "complete",
+        help="Complete a campaign, or one member, by explicit operator action.",
+        description=(
+            "Complete one campaign member, or the campaign item itself, through the Hub's operator-only "
+            "completion route. A campaign completes only when every member is terminal."
+        ),
+    )
+    complete.add_argument("campaign_key", help="Campaign key.")
+    complete.add_argument(
+        "--repo", default=None, help="Canonical member repository identity; omit to complete the campaign item."
+    )
+    complete.add_argument(
+        "--evidence", action="append", default=None, metavar="REF", help="Bounded evidence reference; repeatable."
+    )
+    complete.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    complete.set_defaults(func=_complete)
     consume = commands.add_parser(
         "consume",
         help="Take the next eligible member on this node and work it through work dispatch.",
@@ -325,6 +342,7 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
                 "existing": [],
                 "spec_changed": False,
                 "offer_changed": False,
+                "status": None,
             }
         return {"checked": False, "error": _text(exc), **({"code": exc.code} if exc.code else {})}
     except worklore_client.FleetClientError as exc:
@@ -350,7 +368,15 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
         "existing": sorted(str(m.get("repo")) for m in members if isinstance(m, dict)),
         "spec_changed": stored.get("spec_fingerprint") != wanted,
         "offer_changed": offer_changed,
+        "status": stored.get("status"),
     }
+
+
+def _campaign_closed(hub: dict[str, Any]) -> bool:
+    """True when the Hub read found a terminal campaign, which refuses any re-create."""
+    from ..worklore_campaigns import TERMINAL_BUCKETS
+
+    return hub.get("status") in TERMINAL_BUCKETS
 
 
 def _create_acknowledged(result: object, body: dict[str, Any]) -> bool:
@@ -396,6 +422,8 @@ def _create(args: argparse.Namespace) -> int:
         if not hub.get("checked"):
             print(f"hub not checked: {_text(hub.get('error') or hub.get('reason'))}")
         else:
+            if _campaign_closed(hub):
+                print(f"warning: campaign is {_text(hub.get('status'))}; create would be refused (campaign-closed)")
             if hub.get("spec_changed"):
                 print("warning: spec differs from the stored campaign; create would be refused (campaign-spec-changed)")
             if hub.get("offer_changed"):
@@ -521,6 +549,56 @@ def _show(args: argparse.Namespace) -> int:
             f"  run {_text(fleet_run.get('display_ref')) if fleet_run else '-'}  pr {pr}"
             f"  {'drifted' if member.get('drifted') else 'in-spec'}"
         )
+    return 0
+
+
+def _complete(args: argparse.Namespace) -> int:
+    from .. import worklore_client
+    from ..worklore_campaigns import canonical_identity
+
+    try:
+        repo = None
+        if args.repo is not None:
+            repo = canonical_identity(args.repo)
+            if repo is None:
+                return _refuse(args, "repository_identity_unresolved")
+        shown = worklore_client.get_campaign(args.campaign_key)
+    except worklore_client.FleetClientError as exc:
+        return _hub_failure(args, exc)
+    stored = _dict(shown.get("campaign"))
+    if repo is None:
+        work_id, expected_version, what, label = (
+            stored.get("work_id"),
+            stored.get("version"),
+            "campaign",
+            _text(stored.get("campaign_key") or args.campaign_key),
+        )
+    else:
+        member = next(
+            (m for m in (_dict(raw) for raw in _list_of(shown.get("members"))) if m.get("repo") == repo),
+            None,
+        )
+        if member is None:
+            return _refuse(args, "campaign-member-not-found")
+        work_id, expected_version, what, label = member.get("work_id"), member.get("version"), "member", repo
+    if not isinstance(work_id, str) or not isinstance(expected_version, int) or isinstance(expected_version, bool):
+        return _refuse(args, "unexpected-hub-response")
+    try:
+        payload = worklore_client.complete_item(
+            work_id,
+            evidence_refs=tuple(args.evidence or ()),
+            if_match=expected_version,
+        )
+    except worklore_client.FleetClientError as exc:
+        return _hub_failure(args, exc)
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, indent=2))
+        return 0
+    item = _dict(payload.get("item"))
+    print(
+        f"completed {what} {label}: {_text(item.get('work_id') or work_id)}"
+        f" status {_text(item.get('status'))}, version {_count(item.get('version'))}"
+    )
     return 0
 
 

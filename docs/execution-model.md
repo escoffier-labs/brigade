@@ -60,19 +60,95 @@ in 0.32.0 ([retirement notice](grokbot-t3-dispatch.md)).
 
 ## Scheduled memory application
 
-New workspaces enable Tier 0 reflect intent by default. Care installation
-includes `memory-reflect`, running `memory reflect run --scheduled --apply`.
-Hub candidates apply automatically only when the hub's evidence, ownership,
-retrieval, policy, blast-cap and cooldown gates all pass. A gate hold leaves a
-pending proposal without failing the care entry. External owners and handoff-only
-hosts never apply. Local repository candidates retain authority holds and stay
-proposal-only. Existing workspace policies are preserved.
+Two optional memory jobs can run on a schedule. Both need a care install to
+activate OS timers.
 
-`memory reflect auto-apply off --target .` sets the workspace policy's
-`auto_apply` field to false. An in-flight run reads it before its next candidate.
-`memory reflect auto-apply on --target .` opts an existing workspace in.
-Automatic hub decisions retain the policy actor and digest in the decision
-ledger and can be compensated with `memory reflect rollback`.
+`memory-reflect` runs `memory reflect run --scheduled` and is part of the
+default care set. A scheduled hub run also attempts policy-gated application.
+Without a hub it derives local candidates only.
+
+`memory-verify` is a separate entry, installed with
+`--entry memory-verify`. It runs `memory verify run --scheduled`.
+
+### Proposals and tiers
+
+Reflection opens pinned proposals for exact duplicates, near-duplicates and
+broken links. Exact duplicate cards merge and can be Tier 0. Near-duplicate
+supersedes and broken-link repairs are always Tier 2. Reflection also proposes
+block anchoring. The seeded workspace policy names `anchor_blocks`, but the
+fleet policy writer rejects it in `tier0_op_classes`, so the hub never admits
+an automatic anchor. Each anchor proposal is withdrawn in the same run, then
+retried after seven days.
+
+A proposal pins card revisions and block hashes. A proposal the run leaves open
+stays `pending` until a reviewer accepts or rejects it with `brigade memory
+proposals decide`.
+
+Tier 1 covers a replacement that only changes ASCII spaces. Tier 2 covers claim
+edits, supersedes, link repairs, retirements and non-exact compensations. Tier 1
+and Tier 2 proposals wait for a person, except verify classes admitted by an
+admin `go` record.
+
+### What applies without a person
+
+Automatic apply needs workspace intent and hub policy. New workspaces seed
+`.brigade/memory/reflect/policy.json` with `auto_apply` on. Care install leaves
+a missing policy off and preserves an existing one. The fleet policy must also
+enable auto apply, list the proposer and list the op class. The supported policy
+writer accepts evidence appends and exact duplicate merges for this route.
+
+The hub rechecks the Tier 0 class, cited evidence, ownership, retrieval
+evaluation, one-card blast cap, 24-hour cooldown, card heads, pins, trust, scans
+and the admin kill switch in one transaction.
+
+On a real scope, the retrieval evaluation holds every automatic reflection
+apply. It admits only all-`append_evidence` Tier 0 proposals and then requires
+each target card's search projection to stay unchanged. Any applied edit
+changes it, including an evidence append, so reflection's Tier 0 applies happen
+only on the evaluation fixture scope. Verifier applies and automatic
+compensations take their own gates instead.
+
+External and handoff-only curation
+policies never pass the ownership gate. Local repository candidates stay
+proposal-only because their authority contracts are unbound.
+
+`memory reflect auto-apply off --target .` sets the workspace policy to false.
+An in-flight run reads it before its next candidate. `memory reflect
+auto-apply on --target .` opts an existing workspace in.
+
+### Scopes and rollback
+
+`[reflect] scopes` in `.brigade/memory-care.toml` limits where reflection
+proposes, applies and watches. Unlisted read scopes are still read, but no
+candidate is proposed and no watch is polled there. Each listed entry must be a
+configured read scope, and the credential needs `reflect` in it.
+
+A scheduled hub run polls the compensation watch in its reflected scopes. The
+watch covers only the polling credential's own automatic applies, within 24
+hours by default. A contradiction or failed verification, or an attributable
+lexical retrieval regression, opens a compensating proposal. Two independent
+verifier signals, or an attributable lexical regression, can allow that
+reversal to apply without a person. Otherwise it waits for review. A watch
+attempt that is not exact or is blocked ends `held`, or `stale` when a target
+no longer matches its pins.
+
+`memory reflect rollback <proposal-id>` also opens a compensating proposal. It
+applies at once only when `auto_apply` is enabled, the kill switch is off, the
+original apply was automatic, the same policy actor asks, the inverse is exact
+and the window has not expired. An automatic in-window attempt that is not
+exact, or that hits a blocker, ends `rejected` or `held` with
+`compensation_result: failed`. A non-automatic, different-actor or expired
+rollback waits for a reviewer.
+
+### Verification pass
+
+The verify pass checks cards against cited evidence with two seats, one
+proposing and one confirming. It opens pinned correction proposals. Per-class go
+or no-go records decide whether `verify_auto_apply` may apply a class without a
+person. Without a current admin `go` record on the hub, `verify_auto_apply`
+applies nothing. A scheduled run still opens correction proposals, because only
+their application is gated.
+
 See [memory care](memory-care.md#automatic-tier-0-reflection) for the boundaries
 and the separate care-install step that activates OS timers.
 

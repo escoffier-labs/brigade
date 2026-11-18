@@ -565,3 +565,36 @@ def test_cli_rerun_replaces_config_with_wrong_typed_field(tmp_path: Path, capsys
     assert main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "codex"]) == 0
     assert "unreadable" in capsys.readouterr().err
     assert json.loads(cfg_path.read_text())["includes"] == []
+
+
+def test_init_force_keeps_edited_workspace_skill_md_and_proposes(tmp_path: Path, capsys):
+    import json
+
+    from brigade.cli import main
+
+    target = tmp_path / "ws"
+    assert main(["init", "--target", str(target), "--depth", "workspace", "--harnesses", "claude"]) == 0
+    note = target / "skills" / "note" / "SKILL.md"
+    note.write_bytes(b"# my note skill\n")
+    capsys.readouterr()
+
+    assert main(["init", "--target", str(target), "--depth", "workspace", "--harnesses", "claude", "--force"]) == 0
+
+    assert note.read_bytes() == b"# my note skill\n"
+    assert f"kept (edited): {note}" in capsys.readouterr().out
+    inbox = target / ".brigade" / "skills" / "inbox"
+    proposals = [json.loads(p.read_text()) for p in inbox.glob("*/proposal.json")]
+    assert [p["skill_id"] for p in proposals] == ["note"]
+
+
+def test_init_never_writes_through_symlinked_workspace_skill_dir(tmp_path: Path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    target = tmp_path / "ws"
+    (target / "skills").mkdir(parents=True)
+    (target / "skills" / "note").symlink_to(outside, target_is_directory=True)
+
+    assert install_selection(target, _workspace_sel(), force=True) == 0
+
+    assert list(outside.iterdir()) == []
+    assert (target / "skills" / "note").is_symlink()

@@ -4,11 +4,33 @@ Outcome capture classifies runs when it reads stored receipts and persists the r
 ([capture and ranking](../src/brigade/outcome_cmd.py), [scorecard projection](../src/brigade/scorecard.py)).
 
 This is outcome-based skill scoring, promotion, and rollback from verification evidence.
-Scheduled memory reflection separately attempts automatic Tier 0 hub changes
-for opted-in workspaces, including new installs. Every automatic change must
-pass the hub authority gates. Unsupported retrieval scopes and local repository
-authority gaps remain proposal-only. See [Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
-for the `auto_apply` policy field and `memory reflect auto-apply off` switch.
+Scheduled memory work runs separately from this scoring loop.
+
+Hub reflection opens pinned proposals for exact duplicate merges, near-duplicate
+supersedes, broken-link repairs and anchors. Stale-newer-evidence and
+opposite-polarity candidates are local only, and a contradicted card is a verify
+verdict. Of the reflection lanes, only evidence appends and exact duplicate
+merges are eligible for automatic apply under the supported policy writer, and
+only when workspace and fleet policies enable it and every hub gate passes. On a
+real scope the retrieval evaluation holds every automatic reflection apply,
+including all-`append_evidence` Tier 0 proposals and exact merges, so
+reflection applies nothing automatically outside the fixture scope
+`repo:brigade/retrieval-eval-fixture`. Verifier applies and automatic
+compensations take their own gates. Near-duplicate supersedes and broken-link repairs are Tier 2, so they
+wait for a reviewer. Local repository candidates stay proposal-only. The
+`[reflect] scopes` setting limits where the job proposes, applies and watches.
+Unlisted read scopes are still read, never changed.
+
+The verify pass uses two seats and opens correction proposals. Per-class go or
+no-go records gate `verify_auto_apply`, and without a current admin `go` record
+on the hub it applies nothing. A scheduled run still opens correction proposals
+because only their application is gated. Scheduled reflection also polls the
+compensation watch over its own automatic applies. Automatic reversal needs two
+independent verifier signals, or an attributable lexical regression. A watch
+attempt that is not exact or is blocked ends `held`, or `stale` when a target
+no longer matches its pins. See
+[Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
+for the `auto_apply` policy field, the switch and rollback.
 
 ## Workflow
 
@@ -35,9 +57,38 @@ brigade outcome explain <skill-or-card-id> --target .
 | `outcome rank` | Order artifacts by current score (Wilson lower bound) |
 | `outcome score` | Recompute and show scores from stored receipts |
 | `outcome reconcile` | Dry-run by default. `--apply` promotes a proven registry skill or rolls a regressed one back across harnesses |
+| `outcome reconcile --report` | Also write the advisory `.brigade/memory-care/outcome/ratchet-report.json` summary of this run |
+| `outcome ratchet` | Print the last written ratchet report, read-only, without ranking or reconciling |
 | `outcome explain` | Print the signal trail behind a score or reconcile decision |
 
 Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
+
+## Weekly ratchet report
+
+`outcome reconcile` prints its decisions and then forgets them. The weekly memory-care ratchet runs it as a dry run, so a skill held for "withheld: verified regression present" left no structured trace. `--report` writes one small file per run:
+
+```bash
+brigade outcome reconcile --target . --report
+brigade outcome ratchet --target . --json
+```
+
+`.brigade/memory-care/outcome/ratchet-report.json` is versioned (`"version": 1`), written atomically, capped at 64 KiB, and written at most once per reconcile call. It holds `generated_at`, the `apply` flag, summary counts (`decisions`, `regression_holds`, `regression_rollbacks`, plus the first `regression_hold_ids`), decision counts by action, a `regressions` list of `{artifact_id, prior_state, reason_code, reason, helped, hurt}`, the receipt ineligibility rate, and the leading ineligibility reason. Only counts, ids and decision reasons are stored: no card body, handoff text or receipt payload. If a run produces more regression rows than the cap allows, trailing rows are dropped and `truncated` plus `regressions_omitted` say how many; the counts and the hold ids still describe the whole run. A `helped`/`hurt` pair in a row is the one the decision used: a skill reports its scorecard effectiveness counts, a card its fingerprint cohorts.
+
+Two counts read differently from `reconcile --json`. The report's `decisions` counts every artifact the run evaluated, including `no change` and `cooldown active` holds, while the reconcile JSON lists only changes and reported holds. A candidate inside its cooldown window reports `cooldown active` even when it has verified hurt, so a zero `regression_holds` count does not by itself mean no regressions. When a write is skipped (an unwritable or symlinked path, or a report still over the cap), reconcile prints a warning and the previous report stays in place. Its `generated_at` shows how old it is.
+
+`reason_code` comes from the decision itself (`regression_hold` or `regression_rollback`), never from reason prose, so rewording a reason cannot silently recategorize a decision.
+
+The report is advisory:
+
+- `--apply` never reads it. Promotions and rollbacks come from receipts and status, exactly as before. A report path that cannot be written (read-only directory, full disk, a directory in place of the file) warns once on stderr and leaves the reconcile run's own exit code and output alone.
+- An absent, unreadable, oversized, wrong-version or symlinked file is a normal empty state. The loader refuses a symlinked path rather than following it, including between its check and its open.
+- Readers never recompute `rank` or `reconcile`, so an old file reads as old instead of being silently refreshed.
+
+Three surfaces read it, all read-only:
+
+- `brigade work brief` prints one bounded line: `outcome_ratchet: generated_at=... mode=dry-run regression_holds=4 (a, b, c, d) ineligibility_rate=1.0 leading=unattributed`, or `outcome_ratchet: no report yet`. The mode comes from the report's `apply` flag, so a dry-run rollback row never reads as a completed rollback. When the hold count exceeds the listed ids the line ends `+N more`.
+- `brigade outcome ratchet` prints the file with the same `mode=` stamp and row counts, or `report: none` when the ratchet has not run with `--report`.
+- The Center dashboard outcomes view adds a panel below the ranking with the report age, mode, summary counts, ineligibility rate and the regression rows. A report older than seven days is labeled stale.
 
 ## Which receipts are scoreable
 

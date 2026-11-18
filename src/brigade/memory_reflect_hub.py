@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from . import memory_claim_blocks as claim_blocks
 from . import memory_fairness as fairness
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
@@ -78,6 +79,8 @@ LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
     "attempted_ms": lambda value: type(value) is int and value >= 0,
     "anchor_review_only": lambda value: type(value) is int and value >= 0,
+    # The time the hub left the proposal open for review. Older state wrote `True`.
+    "lineage_review": lambda value: value is True or (type(value) is int and value >= 0),
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -121,7 +124,9 @@ def schedule_status(target: Path) -> dict[str, Any]:
         if not isinstance(submissions, dict) or (submissions and "binding" not in state):
             raise ValueError(STATE_ERROR)
         if not all(
-            valid_submission(digest, pending, frozenset({"pins", "attempted_ms", "anchor_review_only"}))
+            valid_submission(
+                digest, pending, frozenset({"pins", "attempted_ms", "anchor_review_only", "lineage_review"})
+            )
             for digest, pending in submissions.items()
         ):
             raise ValueError(STATE_ERROR)
@@ -184,12 +189,37 @@ def _save(target: Path, state: dict[str, Any]) -> None:
                 pass
 
 
+# Hub holds that leave a proposal open for a human, because applying it could change lineage order.
+LINEAGE_REVIEW_CODES = frozenset({"lineage_requires_review", "retrieval_eval_lineage_exposed"})
+
+
+def _awaits_lineage_review(automatic: object) -> bool:
+    checks = automatic.get("checks") if isinstance(automatic, dict) else None
+    return isinstance(checks, list) and any(
+        isinstance(check, dict) and check.get("code") in LINEAGE_REVIEW_CODES for check in checks
+    )
+
+
 # A withdrawn anchoring proposal waits this long before reflection proposes the same anchor again.
 ANCHOR_WITHDRAWN_RETRY_MS = 7 * 24 * 60 * 60 * 1000
 
 
+# A proposal left open for lineage review waits this long before reflection proposes it again.
+LINEAGE_REVIEW_RETRY_MS = 7 * 24 * 60 * 60 * 1000
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _lineage_review_expired(reviewed_ms: object) -> bool:
+    """A future time counts as expired, so local state cannot stretch the window.
+
+    The first version of this field was a bare `True` with no time, which counts as expired too.
+    """
+    if type(reviewed_ms) is not int:
+        return True
+    return not 0 <= _now_ms() - reviewed_ms < LINEAGE_REVIEW_RETRY_MS
 
 
 def _submission_digest(ops: list[dict[str, Any]]) -> str:
@@ -273,7 +303,8 @@ def _ops(heads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, i
         reason = "missing_pin"
         try:
             blocks = delta.blocks(keeper["text"])
-            block = next((b for b in blocks if b.block_id), None)
+            pins = claim_blocks.hub_pins(keeper["text"])
+            block = next((b for b in blocks if claim_blocks.hub_addressable(keeper["text"], b, pins)), None)
             if block is None:
                 raise ValueError("duplicate keeper has no pinned block")
             reason = "invalid_metadata"
@@ -460,11 +491,16 @@ def _reflect(
     try:
         near_limit, near_cap = near.settings(target)
         link_cap = links.settings(target)
+        reflected = near.reflected_scopes(target, settings.read_scopes)
     except near.ThresholdError as exc:
         raise ReflectConfigError(str(exc)) from None
     with store.locked(target):
         _check_replica_files(target, scope=scope, dry_run=dry_run)
     configured_scopes = settings.read_scopes
+    if scope:
+        if scope not in reflected:
+            raise ReflectError("hub_reflect_scope_invalid", "--scope must be listed in [reflect] scopes")
+        reflected = (scope,)
     settings = replace(
         settings,
         read_scopes=(scope,) if scope else configured_scopes,
@@ -524,7 +560,9 @@ def _reflect(
     if watch and not dry_run:
         from . import memory_compensation_watch
 
-        watched = memory_compensation_watch.run(client, settings.read_scopes, report["log_epoch"])
+        # Only reflected scopes can hold this principal's automatic applies. A
+        # missing grant in one of them still fails the run, so revocation stays visible.
+        watched = memory_compensation_watch.run(client, reflected, report["log_epoch"])
         if watched:
             # Rollbacks invalidate the inputs for proposing. Pull their committed heads first.
             report = sync.pull(target, client, settings)
@@ -541,7 +579,7 @@ def _reflect(
     budget = near.Budget()
     link_stats = {"links": 0, "broken": 0, "repairs": 0}
     link_index = links.Index(heads)
-    for name in settings.read_scopes:
+    for name in reflected:
         scoped = [head for head in heads if head["scope"] == name]
         scope_ops, scope_skips = _ops(scoped)
         exact.extend([op] for op in scope_ops)
@@ -562,6 +600,8 @@ def _reflect(
     previous = {d: p for d, p in previous.items() if ledger.current(p, live, _now_ms(), settings.read_scopes)}
 
     retries: list[tuple[str, list[dict[str, Any]]]] = []
+    # Digests whose lineage review window ran out, so a duplicate answer can re-arm the flag.
+    lapsed_reviews: set[str] = set()
 
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []
@@ -569,7 +609,17 @@ def _reflect(
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
             withdrawn_ms = remembered.get("anchor_review_only")
-            if type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
+            reviewed_ms = remembered.get("lineage_review")
+            if reviewed_ms is not None and not _lineage_review_expired(reviewed_ms):
+                # The hub kept it open for review. A retry would be held the same way.
+                skipped["lineage_review"] = skipped.get("lineage_review", 0) + 1
+            elif reviewed_ms is not None:
+                # The link may be gone and the proposal decided by now. Forget it so a later
+                # run proposes the card again. The hub reports a still-open copy as a duplicate.
+                previous.pop(digest, None)
+                lapsed_reviews.add(digest)
+                fresh.append((digest, ops))
+            elif type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
                 # A future timestamp counts as expired, so local state cannot stretch the window.
                 if 0 <= _now_ms() - withdrawn_ms < ANCHOR_WITHDRAWN_RETRY_MS:
                     skipped["anchor_review_only"] = skipped.get("anchor_review_only", 0) + 1
@@ -640,7 +690,7 @@ def _reflect(
     if first == LINK_LANE:
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
-    pending_anchors = unremembered(anchors.ops(heads))
+    pending_anchors = unremembered(anchors.ops([head for head in heads if head["scope"] in reflected]))
     remaining = unremembered(exact) + alternating + pending_anchors[: anchors.MAX_PROPOSALS]
     # Retry budget is separate so held proposals cannot consume new-work slots.
     # Retries reuse an opened proposal and never submit, so they run first and a
@@ -723,6 +773,11 @@ def _reflect(
                 _save(target, state)
             if sent.outcome == DUPLICATE:
                 skipped["duplicate_pending"] = skipped.get("duplicate_pending", 0) + 1
+                if digest in lapsed_reviews and sent.proposal_id is not None and digest in previous:
+                    # The hub still holds the proposal for review. Arm the window again so later
+                    # runs skip it instead of retrying an automatic apply that stays held.
+                    previous[digest]["lineage_review"] = _now_ms()
+                    _save(target, state)
             else:
                 proposal: dict[str, Any] = {"proposal_id": sent.proposal_id}
                 if apply and sent.proposal_id is not None:
@@ -737,8 +792,14 @@ def _reflect(
                     proposal["automatic"] = attempt(
                         target, client, sent.proposal_id, ops, report["log_epoch"], pacer=pacer
                     )
+                review = _awaits_lineage_review(proposal.get("automatic"))
+                if review and sent.proposal_id is not None:
+                    # A lineage target needs a human decision, so the proposal stays open and is not retried.
+                    previous[digest]["lineage_review"] = _now_ms()
+                    _save(target, state)
                 if (
                     anchoring
+                    and not review
                     and sent.proposal_id is not None
                     and proposal.get("automatic", {}).get("state") != "applied"
                 ):
@@ -772,6 +833,7 @@ def _reflect(
         "refused_ops": refused,
         "seq": report["seq"],
         "compensation_watch": watched,
+        "reflected_scopes": list(reflected),
         "near_duplicate": {"threshold": near_limit, "max_proposals": near_cap, **budget.stats},
         "link_repair": {"max_proposals": link_cap, **link_stats},
         "anchoring": {"max_proposals": anchors.MAX_PROPOSALS, **anchors.coverage(heads)},

@@ -845,6 +845,10 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
             f"{detail}; {legacy_count} legacy hook handler(s) in .claude/settings.json - "
             f"run `brigade work hooks install --target {target}` to reconcile"
         )
+    if "stale skill" in (payload.get("issues") or []):
+        from .skills_cmd.inbox import stale_skill_hint
+
+        detail += stale_skill_hint(target, ".claude/skills/brigade-work/SKILL.md")
     return (status, "claude work loop", detail)
 
 
@@ -855,6 +859,7 @@ def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_memory_cards(ctx.target))
     checks.extend(_check_memory_index(ctx.target))
     checks.extend(_check_memory_care(ctx.target))
+    checks.extend(_check_care_schedule_health(ctx.target))
     checks.extend(_check_memory_care_producer_collision(ctx.target))
     return checks
 
@@ -1560,6 +1565,23 @@ def _check_memory_care_producer_collision(target: Path) -> List[CheckResult]:
         )
         results.append((WARN, "memory-care: producer collision", detail))
     return results
+
+
+def _check_care_schedule_health(target: Path) -> List[CheckResult]:
+    from . import care_receipts
+
+    health = care_receipts.schedule_health(target)
+    if health["warnings"]:
+        return [
+            (WARN, f"care: schedule health ({item['entry']})", f"{item['detail']}; run `{item['fix_command']}`")
+            for item in health["warnings"]
+        ]
+    skipped = f" ({', '.join(health['not_inspected'])} not inspected)" if health["not_inspected"] else ""
+    if not health["installed"]:
+        return [(INFO, "care: schedule health", f"no installed care schedule found{skipped}")]
+    return [
+        (OK, "care: schedule health", f"{health['installed']} installed schedule(s) enabled and reporting{skipped}")
+    ]
 
 
 def _check_memory_care_scan_freshness(scan: Path, scan_date: object) -> CheckResult:

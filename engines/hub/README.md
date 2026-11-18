@@ -139,12 +139,15 @@ registry/skills/verify-brigade/control-brigade.py hub-contract --hub-cmd \
 ### Route modes and observations (S9)
 
 Repeat `--route-mode family=native|shadow|proxy` to override a family. The last
-value wins. `health` defaults to native and supports proxy and shadow on
-`GET /health`. `/ready` always stays local. `metrics` requires native mode.
-`registration`, `claims` and `messages` accept native or proxy. `memory` accepts native or proxy (see below).
-`heartbeat`, `cold` and `browser` currently accept proxy only. Selecting an unavailable native or shadow handler refuses
-startup. Native handlers and housekeeping audits for those families land in
-S5 to S8 and S12. Long-poll requests cannot be shadowed by this slice.
+value wins. `health` defaults to native and accepts `native`, `proxy` and
+`shadow` on `GET /health`. `/ready` always stays local. `metrics` defaults to
+native and accepts `native` only. `registration`, `heartbeat`, `claims`,
+`messages` and `memory` accept `native` or `proxy`, with memory's own rule
+below. `cold` and `browser` accept `proxy` only. Every family except `health`
+and `metrics` defaults to `proxy`. `health` is the only family that has a
+shadow read audit, so `shadow` is refused for the rest. Selecting an
+unavailable native or shadow handler refuses startup. Long-poll requests
+cannot be shadowed.
 
 `GET /metrics` requires the admin bearer token. Node, principal, cookie and
 query credentials do not grant access. It serves metrics text version 0.0.4.
@@ -153,10 +156,12 @@ batches read the writer's atomics when the process starts a writer and passes
 `Writer::stats()` to `Telemetry::attach_writer`. They are gauges for the last batch
 the writer finished, except aborted batches, a counter. Lock wait runs from taking a
 command off the queue to holding the hub write lock, the arbiter turn included, and
-is recorded when the wait fails too. The front runs as a pure proxy and starts no
-writer, because the Python upstream commits every write, so these six stay `NaN`
-with a help line that says so. Reader queue depth sums the jobs waiting in the
-front's reader pools, and CPU queue depth reads the CPU pool. Both are 0 when idle,
+is recorded when the wait fails too. With every family proxied, the front starts
+no writer, because the Python upstream commits every write, so these six stay
+`NaN` with a help line that says so. A native `registration`, `heartbeat`,
+`claims` or `messages` family starts that writer, and the six read it. Reader
+queue depth sums the jobs waiting in the front's reader pools, and CPU queue
+depth reads the CPU pool. Both are 0 when idle,
 and `NaN` only where no pool is attached. Each is a single unlabeled sample with no
 `# TYPE` line, as S9 published it. Checkpoint metrics use S4b's samples when this
 front owns maintenance, including busy results, failures, WAL frames,

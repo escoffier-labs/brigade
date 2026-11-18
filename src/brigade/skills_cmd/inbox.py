@@ -228,7 +228,19 @@ def inbox_add(
     behavioral_contract: dict[str, Any] | None = None,
     force: bool = False,
     json_output: bool = False,
+    dedupe_key: str | None = None,
+    provenance: str | None = None,
 ) -> int:
+    """File a skill proposal in the inbox.
+
+    ``dedupe_key`` makes filing idempotent: when any proposal in the inbox
+    (pending, accepted or rejected) already carries the key, that proposal is
+    reported and nothing new is written. Callers that re-file the same text on
+    every run (``brigade init``) rely on it so repeats do not pile up.
+
+    ``provenance`` replaces the recorded ``source`` when the staged ``source``
+    directory is temporary and will not outlive the call.
+    """
     try:
         if behavioral_contract is not None:
             _validate_contract(behavioral_contract)
@@ -264,6 +276,15 @@ def inbox_add(
             # Refuse a redirected inbox before anything is copied, replaced,
             # or deleted; a symlinked component never reaches the disk outside.
             _registry_mod._require_plain_state_dirs(state_anchor, "skills", "inbox")
+            if dedupe_key is not None:
+                prior = _find_proposal_by_dedupe_key(state_anchor, dedupe_key)
+                if prior is not None:
+                    return _report_proposal(
+                        prior,
+                        json_output=json_output,
+                        valid=bool((prior.get("lint") or {}).get("valid")),
+                        deduped=True,
+                    )
             baseline = _registry_mod._baseline_identity(state_anchor, resolved_skill_id)
             if behavioral_contract is not None and behavioral_contract["baseline_fingerprint"] != baseline:
                 print("error: behavioral_contract baseline does not match current registry", file=sys.stderr)
@@ -294,7 +315,7 @@ def inbox_add(
                 "skill_id": resolved_skill_id,
                 "status": "pending",
                 "summary": summary or "",
-                "source": str(source.expanduser().resolve()),
+                "source": provenance or str(source.expanduser().resolve()),
                 "created_at": created,
                 "path": str(proposal_dir),
                 "skill_path": str(skill_dest),
@@ -306,19 +327,37 @@ def inbox_add(
                 "contract_status": "complete" if behavioral_contract is not None else "incomplete",
                 "lint": lint_payload,
             }
+            if dedupe_key is not None:
+                proposal["dedupe_key"] = dedupe_key
             _registry_mod._write_state_file(
                 state_anchor, *proposal_rel, "proposal.json", data=_registry_mod._json_bytes(proposal)
             )
     except _registry_mod.SkillsStatePathError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    return _report_proposal(proposal, json_output=json_output, valid=bool(lint_payload["valid"]))
+
+
+def _find_proposal_by_dedupe_key(state_anchor: Any, dedupe_key: str) -> dict[str, Any] | None:
+    """Return the first inbox proposal, in any status, recorded under ``dedupe_key``."""
+    for name in _registry_mod._plain_subdirs_under_anchor(state_anchor, "skills", "inbox") or []:
+        try:
+            meta = _load_anchored_proposal(state_anchor, name)
+        except _registry_mod.SkillsStatePathError:
+            continue
+        if meta is not None and meta.get("dedupe_key") == dedupe_key:
+            return meta
+    return None
+
+
+def _report_proposal(proposal: dict[str, Any], *, json_output: bool, valid: bool = True, deduped: bool = False) -> int:
     if json_output:
         print(json.dumps(proposal, indent=2, sort_keys=True))
-        return 0 if lint_payload["valid"] else 1
-    print(f"skill_proposal: {proposal['proposal_id']}")
-    print(f"skill_id: {resolved_skill_id}")
-    print("status: pending")
-    return 0 if lint_payload["valid"] else 1
+    else:
+        print(f"skill_proposal: {proposal['proposal_id']}")
+        print(f"skill_id: {proposal.get('skill_id')}")
+        print(f"status: {proposal.get('status')}" if deduped else "status: pending")
+    return 0 if valid else 1
 
 
 def inbox_list(*, target: Path, json_output: bool = False) -> int:
@@ -519,3 +558,21 @@ def inbox_reject(*, target: Path, proposal_id: str, reason: str, json_output: bo
     print("status: rejected")
     print(f"reason: {reason}")
     return 0
+
+
+def stale_skill_hint(target: Path, rel: str) -> str:
+    """Doctor suffix pointing at the inbox when init filed a proposal for *rel*.
+
+    Lives here, not in doctor.py, to keep doctor under its size cap.
+    """
+    prefix = f"init:brigade-work:{rel}:"
+    try:
+        filed = any(str(meta.get("dedupe_key") or "").startswith(prefix) for _name, meta in _anchored_proposals(target))
+    except OSError:
+        return ""
+    if not filed:
+        return ""
+    return (
+        "; the bundled brigade-work skill differs from the kept copy, "
+        f"review it with `brigade skills inbox list --target {target}`"
+    )

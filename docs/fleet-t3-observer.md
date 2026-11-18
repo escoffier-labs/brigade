@@ -101,6 +101,141 @@ contents, and native identifiers are never copied to the count report.
 Live inspection does not publish or prove Hub visibility. The integration owner
 must review and explicitly wire publishing into the existing telemetry path.
 
+## Repository inventory for placement
+
+With `--publish`, the observer also reports which repositories this node can
+run as T3 projects, so the Hub can answer which machine has a repository as a T3
+project, with which T3 environment id and project id. The inventory is a
+separate key in the same native read. It never changes the session `projects`
+list that path mapping relies on.
+
+It holds the local T3 environment id from the t3-fleet agent descriptor, and for
+each project that is neither archived nor deleted and has a repository identity,
+the T3 project id and its canonical repository key. It never carries workspace
+roots, titles, paths or remote URLs. A canonical key is lowercase
+`host.tld/segment/segment...` with at least two segments after a dotted host,
+segments of `a-z`, `0-9`, `.`, `_` and `-`, and no scheme, userinfo, leading
+slash or tilde, backslash, whitespace or `..`. A trailing `.git` is stripped.
+A project id must be an opaque token of at most 128 characters
+(`[A-Za-z0-9][A-Za-z0-9:_.-]*`, no `..`), such as a UUID with an optional `mcp:`
+style prefix, so a path, URL or credential cannot reach the Hub. The observer
+applies the Hub's exact row predicate and limits (512 for the repo key),
+drops invalid or repeated rows individually, and reports the count as
+`inventory_dropped`. If every row is invalid the set is unknown, not empty.
+The Hub itself stays strict and rejects a whole body that contains a bad row.
+The environment id is read first, from a worker bounded to about one second,
+and is skipped in the second-pass detail read, so a stalled descriptor cannot
+cost session publishing. If the environment id is unavailable, the
+inventory does not exist for that run, which means unknown and never empty.
+An unavailable or failed inventory never erases a stored one. A result that
+would exceed the 256 KiB bound drops the inventory rather than the sessions.
+
+The report adds `inventory` with `ok`, `error` or `skipped`. It is sent once per
+publish run, after sessions and inside the same deadline, as the node-token
+`projects-observe` policy action. A failure is reported there and never changes
+`ok`, the exit code or session publishing. The Hub keeps each node's latest full
+set (900 second TTL), ignores an older snapshot than the stored one, and raises
+a conflict for two same-instant snapshots that disagree. A node can only write
+its own inventory.
+
+A node token proves the node id, not its T3 environment. The operator binds each
+machine's environment in the policy document with the optional machine field
+`t3_environment_id` (letters, digits and hyphens, unique across machines,
+admin token only). The environment id is compared case-insensitively, in the
+uniqueness check, the binding check and the stored value. A report whose
+environment id differs from the machine's binding is rejected with `environment-binding-mismatch`, and in the same
+transaction that node's stored project rows and snapshot are deleted, so
+placement stops using a stale environment at once. A node can only clear its own
+rows. A mismatched report older than the stored snapshot changes nothing.
+A machine without a binding is stored but read as unbound. Reads recompute the
+binding from the current policy, so a policy change applies without a
+republish, and placement must skip unbound rows.
+
+## Placement
+
+`brigade fleet place --repo <canonical key> [--threshold 0.70] [--json]` asks the
+Hub which machine should run a new child agent for a repository. It prints one
+line: the recommended machine, its T3 environment id and project id, and the
+reason, or why no machine qualifies. Run it on an enrolled node with a node
+token; it exits 1 when nothing is recommended.
+
+The answer is advice, never admission. Trust statement: node-reported telemetry
+and inventory; advisory only, never admission. The Hub does not reserve a slot,
+store a decision, or write anything while answering (one read snapshot with
+writes refused, and the quota and routing schemas are never created on a Hub
+that lacks them). A caller that wants a slot still goes through `route`, which
+re-checks every gate.
+
+Placement reuses the routing candidate evaluator and adds three checks:
+
+- The repository must be a bound, fresh T3 project on the machine. A machine
+  with no row is `repo-not-placeable`, an unbound row is `inventory-unbound`,
+  an expired row is `inventory-stale`, and a stored row whose ids fail the shared
+  project and environment id rules is `inventory-invalid`. A repository with no usable row
+  anywhere is denied as `repo-not-placeable`. A policy
+  `repositories.<id>.eligible_machines` list narrows the set further
+  (`repo-machine-not-eligible`). The policy entry is found by the normalized
+  key only (casefolded, one trailing `.git` removed), never by the caller's
+  spelling, so its patches, privacy and machine list apply together for every
+  spelling. A policy save whose `repositories` keys collide after that
+  normalization is refused, and a stored document that already has such a pair
+  makes placement fail closed with `repo-policy-ambiguous` and no
+  recommendation. When one machine has several usable projects
+  for the repository, the lowest project id is chosen, the recommendation
+  carries `project_choices`, and that candidate gets the informational reason
+  `multiple-projects` (it never changes `eligible`).
+- Effective load is the higher of the node-reported CPU `load` and the
+  Hub-counted live sessions on the node divided by the machine's policy
+  `concurrency`. Missing or stale telemetry, or a null `load`, excludes the
+  machine (`machine-unknown-telemetry`, `machine-stale-telemetry`,
+  `machine-load-unknown`). If the Hub cannot read its live session counts, no
+  machine is eligible (`sessions-unknown`) rather than reading as zero. Node memory joins this maximum
+  once nodes report it.
+- A machine at or over the threshold (default 0.70, range 0 to 1) is shed
+  (`machine-load-shed`).
+
+If the caller's own machine is eligible and under the threshold it wins
+(`local-under-threshold`). Otherwise the remaining machines are ordered by the
+existing routing rank (preferred and discouraged workloads, then priority) and
+then by lower effective load (`peer-ranked`). Machine preference stays in the
+existing policy fields, so a low-weight machine is configured with
+`discouraged_workloads`, `priority` or `os`, not a placement setting.
+
+Inventory privacy: for every candidate other than the caller's own machine, the
+inventory reasons (`repo-not-placeable`, `inventory-unbound`, `inventory-stale`,
+`inventory-invalid`) collapse into one opaque `not-placeable`. The caller's own
+machine keeps the detailed reason, and the top-level `repo-not-placeable`
+denial stays explicit. Any enrolled node can still learn whether some bound
+machine has a repository, and which one is recommended, with that machine's
+environment and project id. That is accepted: the query needs a node token, so
+only enrolled fleet nodes can ask. A machine with no usable load (missing,
+stale or null telemetry) is never placeable, and `place` returns the named error
+`placement-unavailable: <class>` for a storage failure, never row data.
+
+The response schema is `brigade.fleet_placement.v1`. Only the recommended
+machine carries its `environment_id` and `project_id`, and the block has no node
+id: a caller launching a child agent needs the machine, `environment_id`,
+`project_id` and `expires_at`. Every candidate carries its eligibility,
+effective load and reasons only. `expires_at` is the earliest of the telemetry
+expiry, the inventory expiry and two minutes after `decided_at`. A caller that
+already holds an open database transaction gets
+`placement-unavailable: open-transaction`, because the read snapshot is rolled
+back and must not be the caller's. The HTTP path never has one.
+
+```mermaid
+flowchart TD
+    A[place request: repo, threshold] --> B[One read snapshot, writes refused]
+    B --> C{Routing enabled and repo has a bound fresh project?}
+    C -- no --> N[status none: repo-not-placeable or routing reason]
+    C -- yes --> D[Routing evaluator per machine: telemetry, capacity, quota read]
+    D --> E[Placement checks: inventory, repo policy, effective load vs threshold]
+    E --> F{Caller machine eligible and under threshold?}
+    F -- yes --> L[Recommend local machine]
+    F -- no --> G{Any peer eligible?}
+    G -- no --> N2[status none: no-eligible-candidate]
+    G -- yes --> P[Recommend best peer by rank, then lower load]
+```
+
 ## Keeping local Claude Code and Codex sessions open
 
 The optional session heartbeat renews the exact snapshot last published by a

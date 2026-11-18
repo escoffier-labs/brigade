@@ -165,6 +165,47 @@ pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite:
     Ok(true)
 }
 
+/// A trusted card that declares lineage links, or that another live card in
+/// its scope names, can change search order when its revision moves. Lineage
+/// recency compares head revisions, so any apply there needs a human decision.
+/// The reserved fixture scope keeps its report-bound gate.
+pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
+    for card in super::proposals::cards(body) {
+        let (scope, id) = (string(card, "scope"), string(card, "card_id"));
+        if scope == super::retrieval_eval::FIXTURE_SCOPE {
+            continue;
+        }
+        let Some(head) = ops::head(tx, scope, id)? else {
+            continue;
+        };
+        if !super::ranking::trusted(&head.trust) {
+            continue;
+        }
+        let declares = [string(card, "before_text"), string(card, "after_text")]
+            .iter()
+            .any(|text| {
+                let links = super::ranking::Links::parse(text, scope);
+                links.successor.is_some() || !links.predecessors.is_empty()
+            });
+        // The prefilter reads the lineage key names `Links::parse` acts on, never
+        // the target id. Values go through `literal_eval`, so escapes and
+        // implicit concatenation can spell an id that no byte search finds.
+        // A key cannot be escaped, because `front_matter` splits on the raw colon.
+        let rows = tx.query(&format!("SELECT b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' AND c.card_id<>?2 AND ({})", super::ranking::LINEAGE_KEYS.iter().map(|key| format!("instr(b.bytes,CAST('{key}' AS BLOB))>0")).collect::<Vec<_>>().join(" OR ")), &[ops::t(scope), ops::t(id)])?;
+        let named = rows.iter().any(|row| {
+            let rusqlite::types::Value::Blob(bytes) = &row[0] else {
+                return false;
+            };
+            let links = super::ranking::Links::parse(&String::from_utf8_lossy(bytes), scope);
+            links.successor.as_deref() == Some(id) || links.predecessors.iter().any(|p| p == id)
+        });
+        if declares || named {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn classify<T: ReadTx + ?Sized>(
     tx: &T,
     body: &Json,
@@ -246,7 +287,7 @@ pub fn classify<T: ReadTx + ?Sized>(
             return Ok(2);
         }
     }
-    if scopes.len() != 1 || trusts.len() != 1 {
+    if scopes.len() != 1 || trusts.len() != 1 || lineage_review(tx, body)? {
         return Ok(2);
     }
     let mut tier = 0;

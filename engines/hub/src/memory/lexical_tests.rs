@@ -63,6 +63,18 @@ fn search_fields_match_python() {
 }
 
 #[test]
+fn ranking_text_matches_python() {
+    for case in golden()["ranking"].as_array().unwrap() {
+        assert_eq!(
+            text::ranking_text(s(&case["text"])),
+            s(&case["ranking_text"]),
+            "{}",
+            s(&case["card_id"])
+        );
+    }
+}
+
+#[test]
 fn rounding_matches_python_round() {
     for pair in golden()["round"].as_array().unwrap() {
         let (x, want) = (pair[0].as_f64().unwrap(), pair[1].as_f64().unwrap());
@@ -652,6 +664,18 @@ async fn a_deeply_nested_card_indexes_and_survives_restart() {
     let put = h.put(NODE_TOKEN, "fleet", "deep", None, &text).await;
     assert_eq!(put.status, 201, "{:?}", put.body);
     let seq = put.body["event"]["seq"].as_i64().unwrap();
+    // Indexing this card costs a few hundred milliseconds in a debug build, so
+    // on a loaded CI runner it can outlast the 500 ms a `min_seq` search waits.
+    // This test is about correctness, not latency, so it waits for the index
+    // itself. A card that never indexes still fails it after a minute.
+    let snap = h
+        .store
+        .as_ref()
+        .unwrap()
+        .index
+        .wait(seq, Duration::from_secs(60))
+        .await;
+    assert!(snap.indexed_seq >= seq && !snap.stale);
     let found = search(&h, NODE_TOKEN, json!({"query":"survivor","min_seq":seq})).await;
     assert_eq!(found.body["retrieval"]["stale"], json!(false));
     assert_eq!(ids(&found), vec![pair("fleet", "deep")]);

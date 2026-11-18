@@ -253,8 +253,12 @@ pub fn literal_within(
         let Some(body) = body(&doc.content_hash)? else {
             continue;
         };
-        bytes += body.len();
-        let field = text::py_lower(&text::card_text(&doc.fields, &body));
+        // Charge the text this scan reads, not the stored bytes. An admitted
+        // evidence or anchor append grows the blob but not the searched text,
+        // so it must not push later matching cards past the budget.
+        let searched = text::card_text(&doc.fields, &body);
+        bytes += searched.len();
+        let field = text::py_lower(&searched);
         if needles.iter().any(|needle| field.contains(needle)) {
             out.hits.push((n, 0.0));
         }

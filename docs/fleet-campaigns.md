@@ -102,6 +102,46 @@ terminal control characters. The Hub routes are `POST /work/campaigns` (operator
 201 when created, 200 otherwise), `GET /work/campaigns` and
 `GET /work/campaigns/<key>`. The key in the path may be percent-encoded.
 
+## Complete a member or the campaign
+
+```
+brigade fleet campaign complete KEY [--repo R] [--evidence REF ...] [--json]
+```
+
+Only an operator may complete, through the same authorization check the transition route
+uses (a configured operator node, or the admin token). A node token without operator
+authority is refused as `forbidden`, whether or not it holds the member. Without `--repo`
+the campaign item completes; with `--repo` the member for that canonical repository
+identity completes. `campaign show` and `campaigns --json` include each item's `version`,
+which is the `If-Match` value the CLI sends.
+
+Completion walks the existing lifecycle edges from the item's current status to
+`completed` in one transaction, running the ordinary per-step rule for every edge. A step
+the store refuses rolls the whole operation back and leaves the item unchanged, and a
+wrong `If-Match` is the usual `version-conflict`. The item history records one
+`completion-recorded` event naming the path it took and the bounded `evidence_refs` the
+operator supplied. The item's version advances once per step, as ordinary transitions do.
+An already terminal item is refused.
+
+Completing a member does not release or modify its ownership record. The record is left
+to expire on its own. Completing a campaign never completes its members as a side effect:
+the campaign item is refused with `campaign-incomplete` (409) until every member is
+terminal, and an accepted completion changes only the campaign item. The route is
+`POST /work/items/<id>/completions`, operator only, and requires `If-Match`.
+
+The membership check runs inside the same write transaction as the walk, after `If-Match`
+and the terminal check, so a member added concurrently cannot slip in: re-creating a
+campaign also takes that write lock, so the two writers serialize. A client holding the
+campaign's earlier `version` therefore gets `version-conflict` after a completion, as it
+would after any other transition.
+
+## A closed campaign refuses a re-create
+
+A campaign whose item is `completed`, `canceled` or `archived` accepts no members. A
+re-create of its key is refused with `campaign-closed` (HTTP 409) whether or not it names
+a new repository, and writes nothing. `create --dry-run` reports the same refusal when
+the Hub read finds the stored campaign closed.
+
 ## Buckets
 
 Each member falls in exactly one bucket, checked in this order:

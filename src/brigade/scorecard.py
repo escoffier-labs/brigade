@@ -826,14 +826,26 @@ def decide_scorecard(
     # Any trusted current-cohort hurt on a promoted skill demotes immediately,
     # before cooldown and regardless of revert_min_hurt.
     if current_status == "promoted" and hurt > 0:
-        return outcome_core.Decision(artifact_id, "rollback", "demoted", "verified regression measured")
+        return outcome_core.Decision(
+            artifact_id,
+            "rollback",
+            "demoted",
+            "verified regression measured",
+            code=outcome_core.REGRESSION_ROLLBACK,
+        )
 
     if last_action_ts is not None and (now - last_action_ts).total_seconds() < config.cooldown_seconds:
         return outcome_core.Decision(artifact_id, "hold", current_status, "cooldown active")
 
     if current_status == "candidate":
         if outcome_core.candidate_regression_withheld(helped, hurt):
-            return outcome_core.Decision(artifact_id, "hold", "candidate", "withheld: verified regression present")
+            return outcome_core.Decision(
+                artifact_id,
+                "hold",
+                "candidate",
+                "withheld: verified regression present",
+                code=outcome_core.REGRESSION_HOLD,
+            )
         passes, reason = dual_gate_passes(card, config=config)
         if passes:
             return outcome_core.Decision(artifact_id, "install", "promoted", reason)

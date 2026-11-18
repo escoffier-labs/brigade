@@ -268,15 +268,16 @@ def _memory_care_runbooks_dir(target: Path) -> Path:
     return target / MEMORY_CARE_RUNBOOKS_REL
 
 
-def _write_memory_care_runbooks(target: Path) -> int:
-    """Copy pinned mechanical memory-care runbook templates into the target.
+def _write_memory_care_runbooks(target: Path, names: tuple[str, ...] = MEMORY_CARE_RUNBOOK_NAMES) -> int:
+    """Add only the pinned memory-care runbooks missing from the target.
 
-    Templates ship without pins; pins are materialized from the resolved
+    Templates ship without pins. Pins are materialized from the resolved
     ``brigade`` binary at write time so ``brigade runbook run --approved``
     can enforce the binary hash without a separate pin step.
 
-    Writes into a sibling temp directory first so pin-resolution failures do
-    not leave a partial runbook tree behind.
+    Templates are validated in a sibling temp directory first, so a pin failure
+    writes nothing. Existing names, including symlinks, are never replaced, and
+    a partial publish is finished by a rerun. Nothing is ever removed.
     """
     from . import runbook_cmd
 
@@ -287,7 +288,7 @@ def _write_memory_care_runbooks(target: Path) -> int:
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True)
     try:
-        for name in MEMORY_CARE_RUNBOOK_NAMES:
+        for name in names:
             src = template_dir / name
             if not src.is_file():
                 print(f"error: memory-care runbook template missing: {src}", file=sys.stderr)
@@ -314,11 +315,17 @@ def _write_memory_care_runbooks(target: Path) -> int:
                 return 2
             validated["pins"] = pins
             _write_json(dest, validated)
-        # Narrow crash window: after rmtree the old tree is gone; if replace fails
-        # before publishing temp_dir, neither directory remains at dest_dir.
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir)
-        temp_dir.replace(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            dest = dest_dir / name
+            # A directory at the name falls through so the move fails and is reported.
+            if os.path.lexists(dest) and (not os.path.isdir(dest) or os.path.islink(dest)):
+                continue
+            try:
+                (temp_dir / name).replace(dest)
+            except OSError as exc:
+                print(f"error: could not write memory-care runbook {name}: {exc}", file=sys.stderr)
+                return 2
         return 0
     finally:
         if temp_dir.exists():

@@ -1148,6 +1148,34 @@ future sequence, target drift, excess corpus drift, missing snapshot, epoch,
 format, scorer, policy, embedder, weights, scope or corpus mismatches. Missing
 records retain `retrieval_eval_unbound`.
 
+Real scopes have no report to bind. There the gate admits only Tier 0
+proposals made entirely of `append_evidence` and `anchor_blocks`, and only when
+each target's ranking digest is unchanged by the apply. Search indexes the card
+without its `evidence:` front-matter line and without ` ^c-xxxxxx` anchor
+suffixes, so evidence refs and anchor ids are stored and shown but never
+searchable. Index format `2` and scorer `lineage-source-v4` introduced this.
+The hub rebuilds its index on the next start, and an older retrieval
+evaluation record holds with `retrieval_eval_index_format_mismatch` or
+`retrieval_eval_scorer_mismatch` until a new run is recorded. The local card
+search ranks the same text. Hybrid scopes, mixed op lists, stale base
+revisions, `merge_exact_duplicates` and any apply that would flip a card's
+`automated` value hold with `retrieval_eval_projection_changed` or
+`retrieval_eval_target_drifted`. A trusted card that declares lineage links, or
+that another live card in its scope names, is Tier 2 and stays a pending
+proposal held with `lineage_requires_review` for a reviewer to decide. The scan
+for a naming card looks at the lineage key names, never at the target id,
+because values can spell an id with escapes or implicit concatenation. The
+gate also holds a target that is an end of a trusted edge in the published
+index, with `retrieval_eval_lineage_exposed`, since search answers from that
+graph. A target with `agent-unreviewed` trust holds with
+`retrieval_eval_writer_changed` when the applier is not the head's writer,
+because an apply rewrites the writer and push search shows such a head only to
+its writer. An admitted automatic apply, like any write, removes the card from
+push and connector search until the next index snapshot publishes, because push
+requires the live revision and content hash to match the snapshot and the new
+content to be scanned clean. The reflect client asks for a proposal held for
+lineage review again after seven days.
+
 Operator procedure:
 
 1. Explicitly switch automatic apply off before enabling policy:
@@ -1641,6 +1669,24 @@ passes an absolute workspace target, and invokes `memory reflect run --hub
 --scheduled`. The scheduled run also polls the automatic compensation watch,
 which can reverse the policy actor's own unchanged applies. `--hub` refuses
 disabled hub settings.
+
+Every pass and the compensation watch run in the reflected scopes, which
+default to every configured read scope. The watch and `propose` both need the
+hub's `reflect` right in each of them. When the workspace credential reads more
+scopes than it may reflect, list only the reflectable ones:
+
+```toml
+[reflect]
+scopes = ["repo:owner/name"]
+```
+
+Unlisted read scopes are still read, but no candidate is proposed and no
+watch is polled there. Each entry
+must be a distinct configured read scope, or the run fails with
+`hub_reflect_config` before any hub call. A missing grant in a listed scope
+still fails the run, so a revoked right cannot silently stop the watch over
+applies it already made. `--scope` must name a listed scope. The report lists
+the scopes in `reflected_scopes`.
 
 A failure means a non-dry reflect run exits non-zero. For runs that can safely write
 workspace state, `.brigade/memory/reflect/schedule.json` records consecutive
