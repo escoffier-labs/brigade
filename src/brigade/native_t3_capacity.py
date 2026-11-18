@@ -165,6 +165,11 @@ def _scan_run(run_dir: Path, name: str, workspace: Path) -> tuple[Counter[str], 
             if receipt.get("lock_workspace") != str(workspace):
                 raise _Unverified("workspace")
             events, trusted = _journal_events(run_dir)
+            # The journal is read by path, so a run directory replaced during
+            # the scan could hide live claims. Fail closed unless the bound
+            # directory is still the one at this path.
+            if not bound.still_bound():
+                raise _Unverified("run-dir")
             return _scan_units(events), size, trusted
     except OSError:
         raise _Unverified("run-dir") from None

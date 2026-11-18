@@ -25,6 +25,7 @@ from brigade import (
     native_t3_lifecycle as lifecycle,
     proc,
     roster as roster_mod,
+    run_dirfd,
     run_journal,
     run_tasks,
     runguard,
@@ -446,6 +447,16 @@ def test_unverifiable_run_makes_occupancy_non_authoritative(tmp_path, kind):
     occupancy = capacity.governed_occupancy(workspace)
     assert occupancy.authoritative is False and occupancy.live == 0
     assert _claim_code(workspace, run_id) == "capacity-unknown"
+
+
+@POSIX_ONLY
+def test_run_dir_replaced_during_scan_makes_occupancy_non_authoritative(tmp_path, monkeypatch):
+    workspace, run_id = _enroll(tmp_path)
+    _claim(workspace, run_id, "one")
+    assert capacity.governed_occupancy(workspace).live == 1
+    monkeypatch.setattr(run_dirfd.BoundRunDir, "still_bound", lambda self: False)
+    occupancy = capacity.governed_occupancy(workspace)
+    assert occupancy.authoritative is False and occupancy.live == 0
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "true", '"2"'])
