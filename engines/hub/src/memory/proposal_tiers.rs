@@ -165,6 +165,39 @@ pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite:
     Ok(true)
 }
 
+/// Whether another live card in `scope` names `id`, as `names` judges its text.
+/// With `scan_all` false the prefilter reads the lineage key names
+/// `Links::parse` acts on, never the target id. Values go through
+/// `literal_eval`, so escapes and implicit concatenation can spell an id that
+/// no byte search finds. A key cannot be escaped, because `front_matter`
+/// splits on the raw colon. A caller whose `names` reads wiki and markdown
+/// links or keys beyond the lineage list passes `scan_all`, which parses every
+/// live card in the scope, since no byte or key filter can promise to see them.
+pub(super) fn named_by<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    id: &str,
+    scan_all: bool,
+    names: impl Fn(&str) -> bool,
+) -> rusqlite::Result<bool> {
+    let filter = if scan_all {
+        String::new()
+    } else {
+        let mentions: Vec<String> = super::ranking::LINEAGE_KEYS
+            .iter()
+            .map(|key| format!("instr(b.bytes,CAST('{key}' AS BLOB))>0"))
+            .collect();
+        format!(" AND ({})", mentions.join(" OR "))
+    };
+    let rows = tx.query(&format!("SELECT b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' AND c.card_id<>?2{filter}"), &[ops::t(scope), ops::t(id)])?;
+    Ok(rows.iter().any(|row| {
+        let rusqlite::types::Value::Blob(bytes) = &row[0] else {
+            return false;
+        };
+        names(&String::from_utf8_lossy(bytes))
+    }))
+}
+
 /// A trusted card that declares lineage links, or that another live card in
 /// its scope names, can change search order when its revision moves. Lineage
 /// recency compares head revisions, so any apply there needs a human decision.
@@ -187,18 +220,10 @@ pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlit
                 let links = super::ranking::Links::parse(text, scope);
                 links.successor.is_some() || !links.predecessors.is_empty()
             });
-        // The prefilter reads the lineage key names `Links::parse` acts on, never
-        // the target id. Values go through `literal_eval`, so escapes and
-        // implicit concatenation can spell an id that no byte search finds.
-        // A key cannot be escaped, because `front_matter` splits on the raw colon.
-        let rows = tx.query(&format!("SELECT b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' AND c.card_id<>?2 AND ({})", super::ranking::LINEAGE_KEYS.iter().map(|key| format!("instr(b.bytes,CAST('{key}' AS BLOB))>0")).collect::<Vec<_>>().join(" OR ")), &[ops::t(scope), ops::t(id)])?;
-        let named = rows.iter().any(|row| {
-            let rusqlite::types::Value::Blob(bytes) = &row[0] else {
-                return false;
-            };
-            let links = super::ranking::Links::parse(&String::from_utf8_lossy(bytes), scope);
+        let named = named_by(tx, scope, id, false, |text| {
+            let links = super::ranking::Links::parse(text, scope);
             links.successor.as_deref() == Some(id) || links.predecessors.iter().any(|p| p == id)
-        });
+        })?;
         if declares || named {
             return Ok(true);
         }

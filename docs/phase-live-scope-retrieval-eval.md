@@ -68,10 +68,16 @@ is searchable. So only an op list made entirely of `append_evidence` and
 `anchor_blocks` is admitted, and each must leave `ranking_text` and every other
 ranking input equal. An apply rewrites the card's writer class to the applier's,
 so a target whose `automated` value would flip holds. A mixed op list, a stale
-base revision and `merge_exact_duplicates` hold. Removing a document changes
-BM25 document counts and average length, so duplicate merges stay held until
-they have their own drift bound. Cosmetic `replace_block` is Tier 1 and stays
-outside this authorizer.
+base revision hold. Removing a document changes BM25 document counts and
+average length, so a duplicate merge is admitted under a bounded drift instead
+of a digest: the retired card is newer than the keeper, the keeper keeps every
+search token and literal front-matter line of the retired card, trust and
+`automated` match, no live card links to the retired id, and the keeper changes
+only by the aliases and evidence the merge writes. The retired card's matches
+move to the keeper. Other cards' scores shift with the scope-wide statistics and
+near-ties can reorder, so ranking is not frozen. See
+[memory operations](memory-operations.md) for the reason codes. Cosmetic
+`replace_block` is Tier 1 and stays outside this authorizer.
 
 The one ranking input the digest cannot see is lineage recency, because every
 apply gives the target a new revision. A trusted target that declares
