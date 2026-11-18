@@ -73,11 +73,47 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Mark the attempt terminal-unknown. The dispatch unit stays charged.",
     )
+    p_observe = t3_sub.add_parser(
+        "observe",
+        help="Record a status projection for an already-correlated task. Never creates a correlation.",
+    )
+    _run_arguments(p_observe)
+    p_observe.add_argument("--parent-thread", required=True, help="Same declared parent thread as the claim.")
+    p_observe.add_argument(
+        "--native-json",
+        required=True,
+        help="task_status result projection as a JSON file, or `-` for standard input.",
+    )
+    p_cancel = t3_sub.add_parser(
+        "cancel",
+        help="Record a digests-only cancel request and print the task_cancel arguments.",
+    )
+    _run_arguments(p_cancel)
+    p_cancel.add_argument("--parent-thread", required=True, help="Same declared parent thread as the claim.")
+    p_ack = t3_sub.add_parser(
+        "ack",
+        help="Acknowledge one exact terminal result. Idempotent and safe after finalization.",
+    )
+    _run_arguments(p_ack)
+    p_ack.add_argument("--result-id", required=True, help="Terminal result identity from `t3 observe`.")
+    p_finalize = t3_sub.add_parser(
+        "finalize",
+        help="Explicitly close the run: completed only when every task completed and was acknowledged.",
+    )
+    p_finalize.add_argument("run_id", help="Run identity reported by `brigade t3 open`.")
+    p_finalize.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace that owns the run.")
+    p_status = t3_sub.add_parser(
+        "status",
+        help="Read-only per-task state tokens without task text, options values or child ids.",
+    )
+    p_status.add_argument("run_id", help="Run identity reported by `brigade t3 open`.")
+    p_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace that owns the run.")
+    p_status.add_argument("--json", action="store_true", help="Print the machine-readable report.")
     p_t3.set_defaults(func=dispatch)
 
 
 def dispatch(args) -> int:
-    from .. import native_t3_dispatch, native_t3_enrollment
+    from .. import native_t3_dispatch, native_t3_enrollment, native_t3_lifecycle
 
     if args.t3_command == "open":
         return native_t3_enrollment.open_cli(args)
@@ -87,4 +123,14 @@ def dispatch(args) -> int:
         return native_t3_dispatch.accepted_cli(args)
     if args.t3_command == "hold-resolve":
         return native_t3_dispatch.hold_resolve_cli(args)
+    if args.t3_command == "observe":
+        return native_t3_lifecycle.observe_cli(args)
+    if args.t3_command == "cancel":
+        return native_t3_lifecycle.cancel_cli(args)
+    if args.t3_command == "ack":
+        return native_t3_lifecycle.ack_cli(args)
+    if args.t3_command == "finalize":
+        return native_t3_lifecycle.finalize_cli(args)
+    if args.t3_command == "status":
+        return native_t3_lifecycle.status_cli(args)
     return 2

@@ -165,6 +165,7 @@ def _full_base_snapshot() -> dict:
         },
         "artifact_collection": None,
         "worktree_removal": {"status": "removed", "path": "/tmp/worktree", "reason": "clean and branch-backed"},
+        "native_finalize": {"schema": "brigade.t3_finalize.v1", "decision": "completed", "tasks": 2, "acknowledged": 2},
         "artifacts": [],
         "handoff": None,
         "handoff_inbox": "/tmp/memory-handoffs",
@@ -558,7 +559,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 72
+    assert len(PRESERVED_FIELDS) == 73
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -592,6 +593,8 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     assert projection.snapshot["approval_reference"] is not base["approval_reference"]
     assert projection.snapshot["cloud_environment"] is not base["cloud_environment"]
     assert projection.snapshot["request"] is not base["request"]
+    assert projection.snapshot["worktree_removal"] is not base["worktree_removal"]
+    assert projection.snapshot["native_finalize"] is not base["native_finalize"]
     assert set(projection.snapshot.keys()) <= OWNED_FIELDS
 
 

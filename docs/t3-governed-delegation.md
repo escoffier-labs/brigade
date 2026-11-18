@@ -1,12 +1,13 @@
 # Governed native T3 delegation
 
-Status: enrollment, claim, reported correlation and hold resolution are
-implemented. No Brigade-side launch, native observation, cancellation or
-acknowledgement exists yet.
+Status: enrollment, claim, reported correlation, observation, cancellation
+request, acknowledgement, hold resolution and explicit finalization are
+implemented. No Brigade-side launch exists, and Brigade never calls T3.
 
 A T3 Code parent session runs Brigade-governed child tasks by calling Brigade
-CLI verbs around its own native `delegate_task` tool. Brigade never calls T3.
-The trusted boundary is the Brigade-owned caller and its durable journal.
+CLI verbs around its own native `delegate_task`, `task_status` and `task_cancel`
+tools. Brigade never calls T3. The trusted boundary is the Brigade-owned caller
+and its durable journal.
 
 ## Verb sequence
 
@@ -15,17 +16,21 @@ The trusted boundary is the Brigade-owned caller and its durable journal.
 | `brigade t3 open <batch.json> --target .` | Implemented |
 | `brigade t3 claim <run> <task> --parent-thread <thread>` | Implemented |
 | `brigade t3 accepted <run> <task> --parent-thread <thread> --native-json <file|->` | Implemented |
+| `brigade t3 observe <run> <task> --parent-thread <thread> --native-json <file|->` | Implemented |
+| `brigade t3 cancel <run> <task> --parent-thread <thread>` | Implemented |
+| `brigade t3 ack <run> <task> --result-id <id>` | Implemented |
+| `brigade t3 finalize <run>` | Implemented |
+| `brigade t3 status <run> [--json]` | Implemented |
 | `brigade t3 hold-resolve <run> <task> (--native-json <file|-> | --abandon)` | Implemented |
-| `brigade t3 observe <run> <task>` | Later slice |
-| `brigade t3 cancel <run> <task>` | Later slice |
-| `brigade t3 ack <run> <task>` | Later slice |
 
 `open` validates a `brigade.run_batch.v1` batch, binds every task seat to a
 declared native target, retains the exact delegation input, and records
 reference-only enrollment facts. It launches nothing and reserves no budget.
 `claim`, `accepted` and `hold-resolve` consume a launch claim and record
-caller-reported correlation. Later verbs classify native observations, request
-cancellation and acknowledge an exact retained result.
+caller-reported correlation. `observe` classifies native status evidence,
+`cancel` prints native cancel arguments, `ack` consumes one exact retained
+result, and `finalize` closes the run explicitly.
+
 
 ## Seat bindings
 
@@ -98,7 +103,15 @@ the native tool.
 3. `t3 accepted` validates the full returned projection against the durable
    claim and intent and records it as parent-reported correlation. It never
    proves that T3 created or accepted the task.
-4. `t3 hold-resolve` records an operator assertion or abandons an attempt that
+4. On a completion wake the parent calls its own `task_status`, saves the
+   projection and calls `t3 observe`. Observation requires an existing
+   correlation and refuses any handle mismatch.
+5. `t3 cancel` records a digests-only request and prints the native
+   `task_cancel` arguments. `t3 ack` consumes exactly one terminal result id.
+6. `t3 finalize` is explicit and writes `completed` only when every task
+   completed and was acknowledged. `t3 status` is read-only and stays readable
+   after finalization.
+7. `t3 hold-resolve` records an operator assertion or abandons an attempt that
    will never be correlated. It never re-grants launch.
 
 The claim output names the task text once, the exact target (`provider
@@ -158,12 +171,42 @@ when the terminal evidence contradicts itself. Only a classifier terminal
 candidate records a terminal result. A nonterminal record followed by a later
 clean terminal projection is the normal path and is accepted.
 
+## Observation, cancellation and closeout
+
+`t3 observe` requires an existing correlation and never creates one. It
+recomputes the full handle digest and compares it exactly. A terminal
+observation binds the handle, terminal status and run, result transfer, pending
+flags, work state and quiescence into the result artifact digest, which is part
+of the result id. A contradictory terminal refuses with `observation-conflict`,
+and an identical replay appends nothing.
+
+`t3 cancel` records a digests-only request and prints the `task_cancel`
+`taskId` and `clientRequestId` derived from length-prefixed run, task, attempt
+and handle digest. A replay while nonterminal returns the same arguments. A
+terminal or held task refuses with empty stdout. `t3 ack` acknowledges one
+exact result id, idempotently, and stays readable after finalization.
+
+`t3 finalize` is explicit, never automatic. Under the run lock it re-reads
+every task, journals the transition, then updates `run.json`. It writes
+`completed` only when every task has terminal status `completed`, a result id
+and an acknowledgement, and `failed` otherwise, and never refunds budget. An
+unresolved hold refuses with `finalize-held`. An abandoned-unknown task refuses
+with `finalize-abandoned` rather than release live-work capacity.
+
+`t3 status <run> [--json]` is read-only and prints fixed tokens, booleans, the
+attempt number and a seat digest, with no task text, option values, native
+payload or child ids.
+
+
 ## Hold resolution
 
 `t3 hold-resolve --native-json` applies the same projection validation as
 `t3 accepted`, records the result as an operator assertion, and first records a
-missing dispatch request so the run barrier clears and the unit is charged.
-It refuses a task that is already held. `--abandon` marks the attempt
+missing dispatch request so the run barrier clears and the unit is charged. It
+refuses an abandoned task. When the task is held on an accept conflict, the
+assertion clears the hold only when its handle digest matches the already
+recorded correlation, and it records a closed `task.native-hold-resolved` fact.
+A different handle keeps the hold. `--abandon` marks the attempt
 terminal-unknown with a durable hold fact. When a launch claim exists without
 its dispatch request it records that request, so the unit stays charged. When
 no launch claim exists it charges nothing. Neither path ever re-grants launch,
@@ -215,7 +258,9 @@ Claim and correlation refusals use the same one-line form. Codes include
 `budget-exhausted`, `no-claim`, `claim-incomplete`, `parent-mismatch`,
 `intent-mismatch`, `native-invalid`, `native-mismatch`,
 `provider-mismatch`, `model-mismatch`, `options-mismatch`,
-`accept-conflict` and `observation-conflict`.
+`accept-conflict`, `handle-mismatch`, `no-correlation`, `task-terminal`,
+`task-nonterminal`, `result-mismatch`, `ack-refused`, `finalize-held`,
+`finalize-abandoned` and `observation-conflict`.
 
 ## Limits
 
@@ -251,6 +296,16 @@ Claim and correlation refusals use the same one-line form. Codes include
   enrollment cannot be turned into a generic launch grant.
 - Enrollment is custody, not admission. Target containment, provider start and
   result acceptance remain separate qualifications.
+- `task_status` marks a result delivered to T3. That is T3 delivery
+  acknowledgement, not Brigade consumption. Brigade `ack` is a separate exact
+  result acknowledgement.
+- A lost `delegate_task` reply stays held. Resubmission is never authorized and
+  `hold-resolve` is the only resolution path.
+- Finalization refuses while an abandoned-unknown task exists, because this
+  slice cannot release live-work capacity separately from the terminal run
+  status. The dropped unit is never refunded.
+- `t3 cancel` records a request only. Brigade cannot prove native cancellation,
+  containment or the final native status.
 
 ## Related documents
 
