@@ -691,6 +691,18 @@ def _outcome_ratchet_line(ratchet: object) -> str:
     )
 
 
+def _outcome_proposals_line(ratchet: object) -> str:
+    """Return the one-line brief summary of inbox proposals filed by the last ratchet run."""
+    report = ratchet if isinstance(ratchet, dict) else {}
+    if not report.get("present"):
+        return "outcome_proposals: no report yet"
+    counts = report.get("outcome_proposals")
+    if not isinstance(counts, dict):
+        return "outcome_proposals: not requested (run `brigade outcome reconcile --proposals --report`)"
+    keys = ("filed", "existing", "flagged", "skipped")
+    return "outcome_proposals: " + " ".join(f"{key}={counts.get(key, 0)}" for key in keys)
+
+
 def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
@@ -818,6 +830,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if top_outcome:
             print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")
     print(_outcome_ratchet_line(payload.get("outcome_ratchet")))
+    print(_outcome_proposals_line(payload.get("outcome_ratchet")))
 
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:

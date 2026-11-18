@@ -44,6 +44,18 @@ root metadata and nested metadata file digests. Root metadata formatting and
 managed `imported_at`, `updated_at`, `created_at`, `fingerprint`, and `source`
 fields do not change identity. The source selector is bound separately.
 
+## Outcome regression proposals
+
+`brigade outcome reconcile --proposals` files a proposal for a Brigade-bundled skill with a verified regression (see [Outcome scoring](outcome-scoring.md#regression-proposals)). It carries a complete contract filled only from observed evidence:
+
+- `reason` names the artifact, the ratchet reason code (`regression_hold` or `regression_rollback`), the decision reason and the helped and hurt counts.
+- `addressed_failure` names the failing receipt run ids and failing check ids.
+- `change_category` is `bugfix`.
+- `baseline_fingerprint` is the registry package identity at filing, or `null` when the skill is absent from the registry.
+- `expected_observable_behavior` has one assertion per failing check read back from the hurt receipts (`<run id>:<check id>`, with the recorded command), at most five receipts and five checks each. A receipt that is gone yields an assertion that says `command unavailable`; Brigade never invents a command.
+
+The proposal is filed with `dedupe_key` `outcome:<artifact_id>:<reason_code>:<content fingerprint>`, the provenance `brigade://outcome-regression/<skill_id>`, and `requires_revision: true`. Its staged text is the current skill, unchanged, and its `unrevised_identity` records that candidate identity. `inbox accept` refuses a `requires_revision` proposal whose candidate identity still equals `unrevised_identity` (exit 2, `needs a revised candidate`), and `--force` does not bypass it. Accepting would otherwise change nothing while still muting the dedupe key. To act on the request, file a revised candidate with `brigade skills inbox add` and a contract, then reject the review request. `inbox show` prints `requires_revision: yes` for it.
+
 ## `brigade init` never overwrites an edited SKILL.md
 
 `brigade init`, `brigade reconfigure` and `--force` write a bundled `SKILL.md`

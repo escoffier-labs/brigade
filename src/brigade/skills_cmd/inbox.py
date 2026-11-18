@@ -230,6 +230,7 @@ def inbox_add(
     json_output: bool = False,
     dedupe_key: str | None = None,
     provenance: str | None = None,
+    requires_revision: bool = False,
 ) -> int:
     """File a skill proposal in the inbox.
 
@@ -240,6 +241,11 @@ def inbox_add(
 
     ``provenance`` replaces the recorded ``source`` when the staged ``source``
     directory is temporary and will not outlive the call.
+
+    ``requires_revision`` marks a review request whose staged text is the current,
+    unrevised skill (an outcome regression proposal). The proposal records that
+    candidate identity as ``unrevised_identity`` and ``inbox_accept`` refuses it
+    until a revised candidate is filed, because accepting it would change nothing.
     """
     try:
         if behavioral_contract is not None:
@@ -310,7 +316,7 @@ def inbox_add(
                 )
                 lint_payload["target"] = str(target)
                 lint_payload = _search_validate_mod._repoint_staged_lint_paths(lint_payload, skill_dest, staged_skill)
-            proposal = {
+            proposal: dict[str, Any] = {
                 "proposal_id": proposal_dir.name,
                 "skill_id": resolved_skill_id,
                 "status": "pending",
@@ -329,6 +335,9 @@ def inbox_add(
             }
             if dedupe_key is not None:
                 proposal["dedupe_key"] = dedupe_key
+            if requires_revision:
+                proposal["requires_revision"] = True
+                proposal["unrevised_identity"] = proposal["candidate_identity"]
             _registry_mod._write_state_file(
                 state_anchor, *proposal_rel, "proposal.json", data=_registry_mod._json_bytes(proposal)
             )
@@ -350,6 +359,15 @@ def _find_proposal_by_dedupe_key(state_anchor: Any, dedupe_key: str) -> dict[str
         if meta is not None and meta.get("dedupe_key") == dedupe_key and meta.get("status") != "superseded":
             return meta
     return None
+
+
+def proposal_for_dedupe_key(target: Path, dedupe_key: str) -> dict[str, Any] | None:
+    """Return the inbox proposal filed under ``dedupe_key`` (any status but superseded), or None."""
+    try:
+        with _registry_mod._held_state_root(target.expanduser().resolve(), writable=False) as state_anchor:
+            return _find_proposal_by_dedupe_key(state_anchor, dedupe_key)
+    except _registry_mod.SkillsStatePathError:
+        return None
 
 
 def _report_proposal(proposal: dict[str, Any], *, json_output: bool, valid: bool = True, deduped: bool = False) -> int:
@@ -390,6 +408,8 @@ def inbox_show(*, target: Path, proposal_id: str, json_output: bool = False) -> 
     print(f"skill_id: {proposal.get('skill_id')}")
     print(f"status: {proposal.get('status')}")
     print(f"fingerprint: {proposal.get('fingerprint')}")
+    if proposal.get("requires_revision"):
+        print("requires_revision: yes (staged text is the unrevised skill; file a revised candidate)")
     print("behavioral_contract: " + json.dumps(proposal.get("behavioral_contract") or "incomplete", sort_keys=True))
     return 0
 
@@ -467,8 +487,17 @@ def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_ou
             proposal_dirs, proposal_files = _registry_mod._read_tree_from_anchor(
                 state_anchor, "skills", "inbox", name, "skill"
             )
-            if proposal.get("candidate_identity") != _registry_mod._package_identity(proposal_files):
+            candidate_identity = _registry_mod._package_identity(proposal_files)
+            if proposal.get("candidate_identity") != candidate_identity:
                 print("error: candidate changed or proposal identity missing; review a new proposal", file=sys.stderr)
+                return 2
+            if proposal.get("requires_revision") and proposal.get("unrevised_identity") == candidate_identity:
+                # Accepting the unrevised text would be a silent no-op that still mutes the dedupe key.
+                print(
+                    "error: skill proposal needs a revised candidate: its staged text is the unrevised skill; "
+                    "file a revised candidate with `brigade skills inbox add` and reject this request",
+                    file=sys.stderr,
+                )
                 return 2
             skill_id = _registry_mod._slug(str(proposal.get("skill_id") or name))
             if "baseline_identity" not in proposal or proposal["baseline_identity"] != _registry_mod._baseline_identity(

@@ -172,6 +172,28 @@ Three surfaces read it, all read-only:
 - `brigade outcome ratchet` prints the file with the same `mode=` stamp and row counts, or `report: none` when the ratchet has not run with `--report`.
 - The Center dashboard outcomes view adds a panel below the ranking with the report age, mode, summary counts, ineligibility rate and the regression rows. A report older than seven days is labeled stale.
 
+## Regression proposals
+
+`brigade outcome reconcile --proposals` turns a verified regression into a skills inbox review request (#2590, criterion 1). The weekly ratchet runbook passes it with `--report`.
+
+```bash
+brigade outcome reconcile --target . --report --proposals
+brigade skills inbox list --target .
+```
+
+The trigger is a decision coded `regression_hold` or `regression_rollback`, read from the live reconcile run and its scorecard receipt trail, not from the persisted report, which deliberately carries no receipt data. `observed_regression_hold` files nothing in this slice, because its session attribution is not verified. Each decision becomes one of:
+
+| Result | Meaning |
+| --- | --- |
+| `filed` | A new inbox proposal, marked `requires_revision`, with a behavioral contract. |
+| `existing` | The dedupe key already names a proposal in any status but `superseded`. Nothing is written, and a rejected proposal stays muted until the skill text changes. |
+| `flagged` | The skill's install receipt says it came from the registry. No proposal; Brigade never guesses an upstream. |
+| `skipped` | The skill is unclassified (a path source or no install receipt), its text or scorecard is unavailable, or filing failed (a warning names it). |
+
+Only a skill whose install receipt records a reviewed `brigade-bundle` source gets a proposal. The proposal stages the current skill text unchanged. Brigade drafts no text and calls no model, and `brigade skills inbox accept` refuses the proposal until the operator files a revised candidate (see [Skill revision contracts](skill-revision-contracts.md#outcome-regression-proposals)). It is a review request, never authorization, and it never writes a SKILL.md, the registry or any installed copy.
+
+`--proposals` also files in a dry run: without `--apply` the run changes no status or decision, and its output says the proposals were filed because the flag was passed. A failure to file warns on stderr and never changes the exit code. Reconcile prints the counts and up to 20 rows (artifact id, reason code, status, proposal id), and `--json` carries the same under `outcome_proposals`. With `--report` the four counts are stored in the ratchet report summary as `outcome_proposals`. `brigade work brief` prints `outcome_proposals: filed=1 existing=0 flagged=0 skipped=0` (or `not requested` when the last run did not pass the flag), and the dashboard ratchet panel shows the same counts.
+
 ## Which receipts are scoreable
 
 `--capture` does not make a receipt scoreable. Scorecard eligibility is projected only from a verifier-authored `subject_binding`, and only a tracked manifest under `verify/manifests/` can author one. Ad-hoc `--command` and `--argv-json` runs are audit-only: real evidence for a human reader, never a trial for `outcome rank` or the promotion ratchet. The artifact id passed to `--capture` is caller-supplied and is deliberately not trusted as the scored subject (`docs/proposals/skill-scorecards.md`, core contract 2 and 3).

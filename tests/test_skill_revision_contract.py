@@ -462,3 +462,43 @@ def test_inbox_add_dedupe_return_keeps_the_exit_code_of_a_failed_lint(tmp_path, 
 
     assert first == 1, "the fixture must fail lint for this test to mean anything"
     assert again == first
+
+
+def test_accept_refuses_an_unrevised_requires_revision_proposal(tmp_path, capsys):
+    from brigade.skills_cmd import registry
+
+    source = _write_skill(tmp_path / "source")
+    key = "outcome:security-review:regression_hold:" + "c" * 64
+    assert (
+        skills_cmd.inbox_add(
+            target=tmp_path,
+            source=source,
+            behavioral_contract=contract(),
+            dedupe_key=key,
+            requires_revision=True,
+            json_output=True,
+        )
+        == 0
+    )
+    proposal = json.loads(capsys.readouterr().out)
+    assert proposal["requires_revision"] is True
+    assert proposal["unrevised_identity"] == proposal["candidate_identity"]
+    assert skills_cmd.inbox_show(target=tmp_path, proposal_id=proposal["proposal_id"]) == 0
+    assert "requires_revision: yes" in capsys.readouterr().out
+
+    for force in (False, True):
+        assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal["proposal_id"], force=force) == 2
+        assert "needs a revised candidate" in capsys.readouterr().err
+
+    assert not (tmp_path / ".brigade/skills/registry/security-review").exists()
+    with registry._held_state_root(tmp_path, writable=False) as anchor:
+        assert registry._baseline_identity(anchor, "security-review") is None
+    stored = json.loads((tmp_path / ".brigade/skills/inbox" / proposal["proposal_id"] / "proposal.json").read_text())
+    assert stored["status"] == "pending"
+
+    # A revised candidate is a separate proposal and accepts normally.
+    (source / "SKILL.md").write_text((source / "SKILL.md").read_text() + "\nRevised after the regression.\n")
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, behavioral_contract=contract(), json_output=True) == 0
+    revised = json.loads(capsys.readouterr().out)
+    assert "requires_revision" not in revised
+    assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=revised["proposal_id"]) == 0

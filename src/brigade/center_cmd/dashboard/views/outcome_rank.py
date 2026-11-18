@@ -76,6 +76,14 @@ def _ranking_panel(payload: dict) -> str:
     return html.panel(html.esc(TITLE), f"<p>{strip}</p>" + html.table(escaped_headers, rows))
 
 
+def _proposal_label(summary: dict) -> str:
+    """Summarize the inbox proposals the last ratchet run filed (counts persisted in the report)."""
+    counts = outcome_ratchet_report.proposal_counts(summary)
+    if counts is None:
+        return "not requested"
+    return ", ".join(f"{key} {counts[key]}" for key in ("filed", "existing", "flagged", "skipped"))
+
+
 def _ratchet_panel(raw: object) -> str:
     """Render the advisory weekly ratchet report, including how old it is."""
     title = html.esc("Outcome ratchet report")
@@ -96,7 +104,7 @@ def _ratchet_panel(raw: object) -> str:
         f"regression rollbacks {summary.get('regression_rollbacks', '-')}, "
         f"pending physical actions {summary.get('pending_physical_actions') or 0}"
         + (f" (stale {summary['stale_physical_actions']})" if summary.get("stale_physical_actions") else "")
-        + "; "
+        + f"; inbox proposals {_proposal_label(summary)}; "
         f"ineligibility_rate {_fmt(ratchet.get('ineligibility_rate'))}"
     )
     leading = ratchet.get("leading_ineligibility_reason")
