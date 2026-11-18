@@ -33,7 +33,7 @@ To do steps 2 and 3 in one command (so the capture is never forgotten), pass `--
 ```bash
 brigade work verify run --target . --command "<test command>" --capture auto
 ```
-`auto` rows are marked `session_observed`. That attribution is caller-side and forgeable, so it can only lower a rank or hold a promotion, never raise or promote. If no skill was read it writes nothing and prints one note.
+`auto` rows are marked `session_observed`. That attribution is caller-side and forgeable, so it can only lower a rank or hold a promotion, never raise or promote. If no skill was read (a Codex repo, a plain shell) it records against `brigade-work` as `caller_typed` and prints one note, so the loop never records nothing.
 
 For scoreable evidence, use an existing registered verifier manifest tracked under `verify/manifests/`:
 ```bash

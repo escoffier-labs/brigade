@@ -72,26 +72,32 @@ Every ledger row carries `attribution_source`:
 
 | Source | Written by | Trust |
 | --- | --- | --- |
-| `caller_typed` | `--capture <id>`, `brigade outcome capture <id>` | The caller named the artifact. Rows without the field read as `caller_typed` and are never reclassified. |
-| `session_observed` | `--capture auto` | Brigade read the Claude Code hook session state ([session-state containment](claude-hook-session-state.md#skills-read-by-the-session)) and found a `skills/<id>/SKILL.md` the session read. |
+| `caller_typed` | `--capture <id>`, `brigade outcome capture <id>`, the `--capture auto` fallback | The caller named the artifact. Rows without the field read as `caller_typed` and are never reclassified. |
+| `session_observed` | `--capture auto` | Brigade read the Claude Code hook session state ([session-state containment](claude-hook-session-state.md#skills-read-by-the-session)) and found a skill the session read (`SKILL.md`) or invoked (`Skill` tool). |
 
 `--capture auto` resolves once, before the capture-before-retry gate, to the
-ordered unique skill ids the current session read that the registry or an
-installed harness actually has. It writes one row per skill and never persists
-the literal `auto`. With no session identity, no matching state or no known
-skill read, it writes nothing and prints one stderr note. The verification
-result and exit code are unchanged.
+ordered unique skill ids the current session read or invoked through the `Skill`
+tool that the registry or an installed harness actually has. It writes one row
+per skill and never persists the literal `auto`. When nothing resolves (no
+session identity, no matching state, no known skill, as in a Codex repo or a plain
+shell) it falls back to the previous default: one `brigade-work` row recorded as
+`caller_typed`, plus one stderr note, so the loop never silently records nothing.
+The verification result and exit code are unchanged.
 
 Session-observed attribution is caller-side: the agent chooses what it reads,
 so it is forgeable. It may only veto, never promote:
 
 - `outcome rank` and `outcome score` count a `session_observed` row toward
   `hurt` only. It can lower a rank and never raises `helped`.
+- One physical receipt scores once per artifact. A `session_observed` row and a
+  later caller-typed row for the same receipt collapse to the caller-typed row.
 - `outcome reconcile` can turn a candidate install or a promoted bump into a
   hold with `reason_code: observed_regression_hold` when a current-content
-  `session_observed` row is a verified regression. It never produces an
-  install, a bump or a rollback from these rows. Rollback policy for observed
-  rows needs its own security-reviewed change.
+  `session_observed` row is a verified regression. The hold is surfaced for any
+  prior status and counted with the regression holds in the ratchet report. It
+  never produces an install, a bump or a rollback from these rows, skills and
+  cards alike: observed hurt is excluded from every rollback decision. Rollback
+  policy for observed rows needs its own security-reviewed change.
 - Scorecards are built from receipts only, with verifier-authored
   `subject_binding`. They never read `session_observed` rows, and promotion
   stays verifier-only (see [skill scorecards](proposals/skill-scorecards.md)).

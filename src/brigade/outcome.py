@@ -141,6 +141,9 @@ REGRESSION_HOLD = "regression_hold"
 """Decision code: a candidate stays down because verified regressions are present."""
 REGRESSION_ROLLBACK = "regression_rollback"
 """Decision code: a promoted artifact is demoted because a verified regression was measured."""
+OBSERVED_REGRESSION_HOLD = "observed_regression_hold"
+"""Decision code: observed-session hurt withholds an install or bump (veto only)."""
+HOLD_CODES = frozenset({REGRESSION_HOLD, OBSERVED_REGRESSION_HOLD})
 
 
 @dataclass(frozen=True)
@@ -214,18 +217,19 @@ def scored_records(records: list[OutcomeRecord]) -> list[OutcomeRecord]:
     signals for one artifact would all collapse to the empty key and the artifact
     could never reach install_min_helped no matter how many real clears occurred.
     """
-    seen: set[tuple] = set()
+    slots: dict[tuple, int] = {}
     deduped: list[OutcomeRecord] = []
     for idx, r in enumerate(records):
-        # attribution_source is part of the key so a forgeable observed row can
-        # never shadow a caller-typed row for the same receipt.
-        key: tuple = (
-            (r.source, r.evidence_ref, r.task_id, r.attribution_source) if r.evidence_ref else ("__unkeyed__", idx)
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(r)
+        # One physical receipt scores once per artifact. attribution_source is not
+        # part of the key (an observed row plus a later caller-typed capture of the
+        # same receipt would score twice); the caller-typed row wins the slot.
+        key: tuple = (r.artifact_id, r.source, r.evidence_ref, r.task_id) if r.evidence_ref else ("__unkeyed__", idx)
+        slot = slots.get(key)
+        if slot is None:
+            slots[key] = len(deduped)
+            deduped.append(r)
+        elif deduped[slot].attribution_source == SESSION_OBSERVED and r.attribution_source != SESSION_OBSERVED:
+            deduped[slot] = r
     return deduped
 
 
@@ -557,7 +561,8 @@ def decide(
         return Decision(score.artifact_id, "hold", "candidate", "insufficient verified evidence")
 
     if current_status == "promoted":
-        if score.hurt >= config.revert_min_hurt:
+        # session_observed hurt is forgeable and veto-only: it never rolls back.
+        if score.hurt - score.observed_hurt >= config.revert_min_hurt:
             return Decision(
                 score.artifact_id,
                 "rollback",

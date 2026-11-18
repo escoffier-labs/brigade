@@ -77,17 +77,30 @@ Windows directory sharing modes are unchanged.
 ## Skills read by the session
 
 `brigade work verify run --capture auto` reads the session file for the current
-session (`BRIGADE_CLAUDE_SESSION`, or `BRIGADE_AGENT_SESSION`, matched against
-`session_fingerprint`) and derives skill ids from the ordered `read_files` list
-(any `.../skills/<id>/SKILL.md`). The reader is file-only: it never runs or
-signals the hook. It enumerates the held sessions directory, skips anything that
-is not a regular file, refuses a state file over 1 MiB, scans at most the 512
-most recently modified files, and returns no skills on any read failure. Only
-ids the registry or an installed harness has are kept. The attribution is
-forgeable and veto-only; see
-[attribution sources](outcome-scoring.md#attribution-sources). The `Skill` tool
-is not yet in the PostToolUse matcher, so a skill loaded through it leaves no
-`read_files` entry.
+session and derives skill ids from two lists: the ordered `read_files` and the
+`invoked_skills` the PostToolUse `Skill` hook records (the tool name, such as
+`taste` or `plugin:taste`, with the plugin prefix also tried bare). A read counts
+only when it is a repo-relative `.<harness>/skills/<id>/SKILL.md` or
+`.brigade/skills/registry/<id>/SKILL.md`, so a fixture such as
+`tests/fixtures/skills/<id>/SKILL.md` never matches. Ids compare
+case-insensitively and come back in the registry or harness spelling.
+
+The session identity is `BRIGADE_CLAUDE_SESSION` when set (the hook-built verify
+command sets it for exactly this session) and then only that value. The ambient
+`BRIGADE_AGENT_SESSION` is used only outside a `brigade run` worker (no
+`BRIGADE_RUN_ID`), because a worker inherits the parent's value. The state must
+match `session_fingerprint`, and when it names its `session_id` the hash of that
+id must equal the fingerprint.
+
+The reader is file-only: it never runs or signals the hook. It lists the held
+sessions directory, skips anything that is not a regular file, refuses a state
+file over 1 MiB, scans at most the 512 most recently modified files newest first
+(stopping at the first state that matches the session), and returns no skills on
+any read failure. Only ids the registry or an installed harness has are kept.
+The attribution is forgeable and veto-only; see
+[attribution sources](outcome-scoring.md#attribution-sources). With no skill
+resolved, `--capture auto` falls back to `brigade-work` as a caller-typed
+capture.
 
 ## Native Windows qualification
 

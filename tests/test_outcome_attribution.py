@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -125,6 +127,100 @@ def test_resolver_agent_session_env_also_matches(tmp_path):
     assert outcome_attribution.resolve_observed_skill_ids(tmp_path, env, {"alpha"}) == ["alpha"]
 
 
+def test_resolver_only_counts_installed_harness_and_registry_skill_paths(tmp_path):
+    _write_state(
+        tmp_path,
+        [
+            "tests/fixtures/skills/alpha/SKILL.md",
+            "docs/skills/beta/SKILL.md",
+            "skills/gamma/SKILL.md",
+            ".brigade/skills/registry/delta/SKILL.md",
+            ".cursor/skills/epsilon/SKILL.md",
+            ".brigade/skills/zeta/SKILL.md",
+        ],
+    )
+    known = {"alpha", "beta", "gamma", "delta", "epsilon", "zeta"}
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, _env(), known) == ["delta", "epsilon"]
+
+
+def test_resolver_compares_case_insensitively_and_returns_the_known_spelling(tmp_path):
+    _write_state(tmp_path, [".Claude/Skills/Alpha-Skill/skill.MD", ".claude/skills/BETA/SKILL.md"])
+    ids = outcome_attribution.resolve_observed_skill_ids(tmp_path, _env(), {"alpha-skill", "Beta"})
+    assert ids == ["alpha-skill", "Beta"]
+
+
+def test_resolver_stops_at_the_first_matching_state(tmp_path, monkeypatch):
+    for index in range(6):
+        path = _write_state(
+            tmp_path,
+            [".claude/skills/alpha/SKILL.md"],
+            fingerprint=FINGERPRINT if index == 5 else "ffffffffffffffff",
+            name=f"s-{index}.json",
+        )
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+    parsed: list[int] = []
+    real_loads = json.loads
+
+    def counting(raw, *args, **kwargs):
+        parsed.append(1)
+        return real_loads(raw, *args, **kwargs)
+
+    monkeypatch.setattr(outcome_attribution.json, "loads", counting)
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, _env(), {"alpha"}) == ["alpha"]
+    assert len(parsed) == 1  # newest state matched; the five older files were never parsed
+
+
+def test_explicit_claude_session_wins_over_the_ambient_agent_session(tmp_path):
+    _write_state(tmp_path, [".claude/skills/alpha/SKILL.md"], fingerprint=FINGERPRINT, name="own.json")
+    _write_state(tmp_path, [".claude/skills/beta/SKILL.md"], fingerprint="aaaaaaaaaaaaaaaa", name="parent.json")
+    env = {"BRIGADE_CLAUDE_SESSION": FINGERPRINT, "BRIGADE_AGENT_SESSION": "aaaaaaaaaaaaaaaa"}
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, env, {"alpha", "beta"}) == ["alpha"]
+    bad = {"BRIGADE_CLAUDE_SESSION": "nothex", "BRIGADE_AGENT_SESSION": "aaaaaaaaaaaaaaaa"}
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, bad, {"alpha", "beta"}) == []
+
+
+def test_run_worker_does_not_read_the_parents_inherited_session(tmp_path):
+    _write_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
+    inherited = {"BRIGADE_AGENT_SESSION": FINGERPRINT, "BRIGADE_RUN_ID": "run-1"}
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, inherited, {"alpha"}) == []
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, {**inherited, **_env()}, {"alpha"}) == ["alpha"]
+
+
+def test_resolver_requires_the_state_session_id_to_match_its_fingerprint(tmp_path):
+    from brigade import localio
+
+    good = localio.stable_hash({"claude_session_id": "session-1"})
+    sessions = tmp_path / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.mkdir(parents=True)
+    read = [".claude/skills/alpha/SKILL.md"]
+    (sessions / "forged.json").write_text(
+        json.dumps({"session_fingerprint": good, "session_id": "other", "read_files": read})
+    )
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, {"BRIGADE_CLAUDE_SESSION": good}, {"alpha"}) == []
+    (sessions / "forged.json").write_text(
+        json.dumps({"session_fingerprint": good, "session_id": "session-1", "read_files": read})
+    )
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, {"BRIGADE_CLAUDE_SESSION": good}, {"alpha"}) == [
+        "alpha"
+    ]
+
+
+def test_resolver_includes_skill_tool_invocations(tmp_path):
+    sessions = tmp_path / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "s.json").write_text(
+        json.dumps(
+            {
+                "session_fingerprint": FINGERPRINT,
+                "read_files": [".claude/skills/alpha/SKILL.md"],
+                "invoked_skills": ["superpowers:Beta", "gamma", "ghost"],
+            }
+        )
+    )
+    ids = outcome_attribution.resolve_observed_skill_ids(tmp_path, _env(), {"alpha", "beta", "gamma"})
+    assert ids == ["alpha", "beta", "gamma"]
+
+
 # capture auto
 
 
@@ -152,16 +248,29 @@ def test_capture_auto_writes_one_observed_row_per_skill_and_never_auto(tmp_path,
     assert '"attribution_source": "session_observed"' in ledger
 
 
-def test_capture_auto_no_match_writes_nothing_and_notes_once(tmp_path, monkeypatch, capsys):
+def test_capture_auto_without_observed_skill_falls_back_to_caller_typed_default(tmp_path, monkeypatch, capsys):
+    _install_skill(tmp_path, "brigade-work")
     monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", FINGERPRINT)
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         rc = verification.verify_run(target=tmp_path, commands=["true"], capture="auto", reuse=False)
     capsys.readouterr()
     assert rc == 0
-    assert outcome_cmd.load_records(tmp_path) == []
+    [row] = outcome_cmd.load_records(tmp_path)
+    assert (row.artifact_id, row.attribution_source) == ("brigade-work", outcome.CALLER_TYPED)
     notes = [line for line in err.getvalue().splitlines() if "auto found no skill" in line]
     assert len(notes) == 1
+
+
+def test_capture_auto_in_a_plain_shell_still_records(tmp_path, monkeypatch, capsys):
+    _install_skill(tmp_path, "brigade-work")
+    for key in ("BRIGADE_CLAUDE_SESSION", "BRIGADE_AGENT_SESSION", "BRIGADE_RUN_ID"):
+        monkeypatch.delenv(key, raising=False)
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert verification.verify_run(target=tmp_path, commands=["true"], capture="auto", reuse=False) == 0
+    capsys.readouterr()
+    [row] = outcome_cmd.load_records(tmp_path)
+    assert (row.artifact_id, row.attribution_source) == ("brigade-work", outcome.CALLER_TYPED)
 
 
 def test_explicit_capture_is_caller_typed(tmp_path, monkeypatch, capsys):
@@ -221,13 +330,21 @@ def test_observed_hurt_lowers_rank_and_is_reported():
     assert hurt.score < baseline.score
 
 
-def test_observed_row_cannot_shadow_caller_typed_row_for_same_receipt():
-    records = [
+def test_one_receipt_scores_once_and_the_caller_typed_row_wins():
+    observed_first = [
         _record("alpha", -1, "same", outcome.SESSION_OBSERVED),
         _record("alpha", 1, "same", outcome.CALLER_TYPED),
     ]
+    typed_first = list(reversed(observed_first))
+    for records in (observed_first, typed_first):
+        score = outcome.score_records("alpha", records)
+        assert (score.helped, score.hurt, score.observed_hurt) == (1, 0, 0)
+
+
+def test_observed_only_receipt_still_counts_once_as_hurt():
+    records = [_record("alpha", -1, "same", outcome.SESSION_OBSERVED)] * 2
     score = outcome.score_records("alpha", records)
-    assert (score.helped, score.hurt) == (1, 1)
+    assert (score.hurt, score.observed_hurt) == (1, 1)
 
 
 def test_recency_weighted_counts_ignore_observed_helped():
@@ -250,7 +367,7 @@ def test_veto_turns_install_and_bump_into_observed_hold():
     for action, status in (("install", "promoted"), ("bump", "promoted")):
         decision = outcome.Decision("alpha", action, status, "ok")
         vetoed = outcome_attribution.apply_observed_veto(
-            decision, cohorts, artifact_kind="skill", prior_status="candidate" if action == "install" else "promoted"
+            decision, cohorts, prior_status="candidate" if action == "install" else "promoted"
         )
         assert vetoed.action == "hold"
         assert vetoed.code == outcome_attribution.OBSERVED_REGRESSION_HOLD
@@ -260,30 +377,62 @@ def test_veto_turns_install_and_bump_into_observed_hold():
 def test_veto_never_creates_rollback_install_or_bump():
     cohorts = _cohorts([_record("alpha", -1, "o1", outcome.SESSION_OBSERVED)])
     held = outcome.Decision("alpha", "hold", "promoted", "no change")
-    result = outcome_attribution.apply_observed_veto(held, cohorts, artifact_kind="skill", prior_status="promoted")
+    result = outcome_attribution.apply_observed_veto(held, cohorts, prior_status="promoted")
     assert result == held
     for status in ("candidate", "promoted"):
         result = outcome_attribution.apply_observed_veto(
             outcome.Decision("alpha", "hold", status, "cooldown active"),
             cohorts,
-            artifact_kind="skill",
             prior_status=status,
         )
         assert result.action == "hold"
 
 
-def test_veto_ignores_caller_typed_hurt_and_cards():
+def test_veto_ignores_caller_typed_hurt():
     typed = _cohorts([_record("alpha", -1, "t1")])
     decision = outcome.Decision("alpha", "install", "promoted", "ok")
+    assert outcome_attribution.apply_observed_veto(decision, typed, prior_status="candidate") == decision
+
+
+def test_observed_hurt_never_rolls_back_a_promoted_card_and_vetoes_its_bump():
+    config = outcome.ReconcileConfig(cooldown_seconds=0)
+    now = datetime(2026, 6, 21, tzinfo=timezone.utc)
+    typed = [_record("alpha", 1, f"t{i}") for i in range(config.bump_min_helped)]
+    observed = _record("alpha", -1, "o1", outcome.SESSION_OBSERVED)
+    cohorts = _cohorts([*typed, observed])
+    assert cohorts.current.observed_hurt == 1
+    decision = outcome.decide(cohorts.current, current_status="promoted", last_action_ts=None, now=now, config=config)
+    assert decision.action == "bump"  # the decision core itself no longer rolls back on observed hurt
+    vetoed = outcome_attribution.apply_observed_veto(decision, cohorts, prior_status="promoted")
+    assert (vetoed.action, vetoed.code) == ("hold", outcome.OBSERVED_REGRESSION_HOLD)
+    rollback_only = _cohorts([observed])
     assert (
-        outcome_attribution.apply_observed_veto(decision, typed, artifact_kind="skill", prior_status="candidate")
-        == decision
+        outcome.decide(
+            rollback_only.current, current_status="promoted", last_action_ts=None, now=now, config=config
+        ).action
+        != "rollback"
     )
-    observed = _cohorts([_record("alpha", -1, "o1", outcome.SESSION_OBSERVED)])
-    assert (
-        outcome_attribution.apply_observed_veto(decision, observed, artifact_kind="card", prior_status="candidate")
-        == decision
+
+
+def test_caller_typed_hurt_still_rolls_back_a_promoted_card():
+    config = outcome.ReconcileConfig(cooldown_seconds=0)
+    cohorts = _cohorts([_record("alpha", -1, "t1")])
+    decision = outcome.decide(
+        cohorts.current,
+        current_status="promoted",
+        last_action_ts=None,
+        now=datetime(2026, 6, 21, tzinfo=timezone.utc),
+        config=config,
     )
+    assert decision.action == "rollback"
+
+
+def test_observed_veto_is_surfaced_for_every_prior_status():
+    for prior in ("candidate", "promoted"):
+        held = outcome.Decision("alpha", "hold", prior, "withheld", code=outcome.OBSERVED_REGRESSION_HOLD)
+        assert outcome_cmd._surface_hold_decision(held, prior)
+    quiet = outcome.Decision("alpha", "hold", "promoted", "no change")
+    assert not outcome_cmd._surface_hold_decision(quiet, "promoted")
 
 
 def test_reconcile_holds_install_on_observed_hurt_and_never_rolls_back(scoreable_target, capsys, monkeypatch):
@@ -310,34 +459,81 @@ def test_reconcile_promoted_artifact_with_observed_hurt_is_not_rolled_back(score
 
     _stub_execute(monkeypatch)
     _seed_dual_gate_promotion_ready(scoreable_target)
-    assert outcome_cmd.reconcile(target=scoreable_target, apply=True, json_output=True) == 0
-    capsys.readouterr()
+    # No cooldown and a one-clear bump threshold: the second pass really decides, and
+    # without the observed row it would bump (control), so a veto is visible, not vacuous.
+    cfg = outcome.ReconcileConfig(cooldown_seconds=0, bump_min_helped=1)
+    assert outcome_cmd.reconcile(target=scoreable_target, apply=True, config=cfg, json_output=True) == 0
+    [promotion] = json.loads(capsys.readouterr().out)["decisions"]
+    assert (promotion["action"], promotion["new_status"]) == ("install", "promoted")
+    status_path = scoreable_target / "memory" / "outcome" / "status.json"
+    assert json.loads(status_path.read_text())["artifacts"]["brigade-work"]["status"] == "promoted"
+
+    assert outcome_cmd.reconcile(target=scoreable_target, apply=False, config=cfg, json_output=True) == 0
+    [control] = json.loads(capsys.readouterr().out)["decisions"]
+    assert control["action"] == "bump"
+
     outcome_cmd.append_records(
         scoreable_target, [_record("brigade-work", -1, "observed-hurt", outcome.SESSION_OBSERVED)]
     )
+    assert outcome_cmd.reconcile(target=scoreable_target, apply=True, config=cfg, json_output=True) == 0
+    decisions = json.loads(capsys.readouterr().out)["decisions"]
 
-    assert outcome_cmd.reconcile(target=scoreable_target, apply=True, json_output=True) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert all(item["action"] not in {"rollback", "install", "bump"} for item in payload["decisions"])
+    assert [item["action"] for item in decisions] == ["hold"], decisions
+    assert decisions[0]["reason_code"] == outcome_attribution.OBSERVED_REGRESSION_HOLD
+    assert decisions[0]["new_status"] == "promoted"
+    assert json.loads(status_path.read_text())["artifacts"]["brigade-work"]["status"] == "promoted"
+
+
+def test_observed_hold_is_counted_in_the_ratchet_report():
+    from dataclasses import dataclass
+
+    from brigade import outcome_ratchet_report as report_mod
+
+    @dataclass
+    class _Item:
+        decision: outcome.Decision
+        prior_status: str
+        cohorts: object = None
+        scorecard: object = None
+        artifact_kind: str = "skill"
+
+    held = outcome.Decision("alpha", "hold", "promoted", "withheld", code=outcome_attribution.OBSERVED_REGRESSION_HOLD)
+    report = report_mod.build_report(
+        [_Item(held, "promoted")],
+        apply=False,
+        generated_at=datetime(2026, 11, 17, tzinfo=timezone.utc),
+        target=Path("."),
+    )
+    assert report["summary"]["regression_holds"] == 1
+    assert report["summary"]["regression_hold_ids"] == ["alpha"]
+    assert [row["reason_code"] for row in report["regressions"]] == [outcome_attribution.OBSERVED_REGRESSION_HOLD]
 
 
 # scorecards stay receipt-only
 
 
-def test_scorecards_ignore_observed_rows(scoreable_target):
+def test_real_auto_capture_leaves_scorecards_untouched(scoreable_target, monkeypatch, capsys):
     from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready
 
     _seed_dual_gate_promotion_ready(scoreable_target)
-    before = [scorecard.subject_scorecard_to_dict(c) for c in scorecard.build_scorecards(scoreable_target)]
-    outcome_cmd.append_records(
-        scoreable_target,
-        [
-            _record("brigade-work", -1, "observed-hurt", outcome.SESSION_OBSERVED),
-            _record("brigade-work", 1, "observed-helped", outcome.SESSION_OBSERVED),
-        ],
-    )
-    after = [scorecard.subject_scorecard_to_dict(c) for c in scorecard.build_scorecards(scoreable_target)]
-    assert before and before == after
+    _install_skill(scoreable_target, "brigade-work")
+    _write_state(scoreable_target, [".claude/skills/brigade-work/SKILL.md"])
+
+    def cards() -> list[dict]:
+        return [scorecard.subject_scorecard_to_dict(c) for c in scorecard.build_scorecards(scoreable_target)]
+
+    before = cards()
+    assert before
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", FINGERPRINT)
+    for command, expected_signal in (("true", 1), ("false", -1)):
+        with contextlib.redirect_stderr(io.StringIO()):
+            verification.verify_run(target=scoreable_target, commands=[command], capture="auto", reuse=False)
+        capsys.readouterr()
+        row = outcome_cmd.load_records(scoreable_target)[-1]
+        assert (row.artifact_id, row.attribution_source) == ("brigade-work", outcome_attribution.SESSION_OBSERVED)
+        assert row.signal_value == expected_signal
+    assert len(outcome_cmd.load_records(scoreable_target)) == 2
+    assert cards() == before
 
 
 # hook contract

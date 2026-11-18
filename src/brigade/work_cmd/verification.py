@@ -2004,10 +2004,11 @@ def verify_run(
     planned_display = _planned_commands_display(planned)
     planned_identity = _planned_commands_identity(planned)
     auto_ids: list[str] = []
+    auto_observed = False
     if capture == outcome_attribution.AUTO_CAPTURE:
         # Resolve once, before the retry gate; the literal "auto" is never persisted.
-        auto_ids = outcome_attribution.resolve_auto_capture(target)
-        capture, capture_kind = (auto_ids[0] if auto_ids else None), "skill"
+        auto_ids, auto_observed = outcome_attribution.resolve_auto_capture(target)
+        capture, capture_kind = auto_ids[0], "skill"
     try:
         capture_before_retry = config.resolve_capture_before_retry(target)
     except ValueError as exc:
@@ -2087,7 +2088,7 @@ def verify_run(
                             artifact_ids=auto_ids or [capture],
                             artifact_kind=capture_kind,
                             run_id=receipt["run_id"],
-                            observed=bool(auto_ids),
+                            observed=auto_observed,
                         )
                     receipt["outcome_scoreability"] = scoreability
                     _attach_miseledger_indexing(receipt, target=target, json_output=True)
@@ -2119,7 +2120,7 @@ def verify_run(
                             artifact_ids=auto_ids or [capture],
                             artifact_kind=capture_kind,
                             run_id=receipt["run_id"],
-                            observed=bool(auto_ids),
+                            observed=auto_observed,
                         )
                     receipt["outcome_scoreability"] = scoreability
                     with verify_runtime._verify_console_output():

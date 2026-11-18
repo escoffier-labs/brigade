@@ -619,6 +619,8 @@ def _surface_hold_decision(decision: core.Decision, prior_status: str) -> bool:
     """Whether a hold should appear in reconcile/fork output (fail-closed, auditable)."""
     if decision.action != "hold":
         return False
+    if decision.code == core.OBSERVED_REGRESSION_HOLD:
+        return True  # an observed veto of a promoted skill's bump must not vanish silently
     if prior_status != "candidate":
         return False
     return decision.reason != "cooldown active"
@@ -2194,7 +2196,6 @@ def reconcile(
                 config=config,
             ),
             cohorts,
-            artifact_kind=artifact_kind,
             prior_status=prior_status,
         )
         item = _ReconcileItem(

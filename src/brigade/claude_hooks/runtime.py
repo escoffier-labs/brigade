@@ -32,6 +32,7 @@ from . import (
     heartbeat,
     hub_recall,
     presence,
+    skill_invocations,
     verification_mode,
     write_attribution,
 )
@@ -2375,9 +2376,9 @@ def _handle_event(
         if not isinstance(capture_artifact_id, str):
             capture_artifact_id = None
         if _has_unsupported_verifier_structure(str(command)):
-            from .. import outcome_cmd
+            from .. import outcome_attribution
 
-            capture_id = outcome_cmd.resolve_capture_artifact_id(capture_artifact_id)
+            capture_id = capture_artifact_id or outcome_attribution.AUTO_CAPTURE
             reason = (
                 "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
                 "Split shell grouping, command substitution, pipelines, redirection, or complex directory changes "
@@ -2410,6 +2411,9 @@ def _handle_event(
         raw_post_tool_input = payload.get("tool_input")
         post_tool_input: dict[str, Any] = raw_post_tool_input if isinstance(raw_post_tool_input, dict) else {}
         command = post_tool_input.get("command")
+        if tool_name == "Skill":
+            skill_invocations.handle(target, session_id, state, post_tool_input, payload.get("tool_response"))
+            return None
         if tool_name == "Read":
             skill_id = _skill_id_from_skill_path(target, post_tool_input.get("file_path"))
             read_recorded = dependencies.record_read(target, state, payload)
