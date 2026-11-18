@@ -229,6 +229,9 @@ def _place(
     # read as zero sessions, so a stale node is unknown, and so is one with no health row (every host
     # runs the observer after rollout; the reason differs). None means the health read failed: all unknown.
     health = fleet_t3_health.classify_nodes(conn, now)
+    # Node memory rides the same health report and the same freshness rule. None (unreadable) means no
+    # machine has a memory reading; that is informational and never changes eligibility by itself.
+    memory_readings = fleet_t3_health.memory_by_node(conn, now)
 
     loads: dict[str, dict[str, Any]] = {}
 
@@ -259,14 +262,18 @@ def _place(
             reasons.append("t3-health-missing")
         else:
             sessions = int(live.get(node, 0))
-        # Hub-counted sessions are a floor under the node-reported CPU load. Node memory joins this
-        # max in a follow-up once nodes report it.
+        # Hub-counted sessions are a floor under the node-reported CPU load, and node memory is a third
+        # input. A missing memory reading leaves the max to the other two and is only reported
+        # (``memory-unknown``, added in the candidate rows), so an old node never becomes unplaceable.
         session_ratio = None if sessions is None else (sessions / capacity if capacity > 0 else 1.0)
+        memory = None if memory_readings is None else memory_readings.get(node)
         fresh = expiry is not None and now < expiry
-        effective = max(float(cpu), session_ratio) if fresh and cpu is not None and session_ratio is not None else None
+        effective = None
+        if fresh and cpu is not None and session_ratio is not None:
+            effective = max(float(cpu), session_ratio, 0.0 if memory is None else memory)
         loads[name] = {
             "effective_load": None if effective is None else round(effective, 4),
-            "load_inputs": {"cpu": cpu, "sessions": sessions, "concurrency": capacity},
+            "load_inputs": {"cpu": cpu, "sessions": sessions, "memory": memory, "concurrency": capacity},
             "telemetry_observed_at": None if telemetry is None else telemetry.get("observed_at"),
             "telemetry_expires_at": expiry,
         }
@@ -307,6 +314,8 @@ def _place(
                 reasons = list(dict.fromkeys("not-placeable" if r in _INVENTORY_REASONS else r for r in reasons))
             if len(usable.get(name, [])) > 1 and name in (origin, chosen):
                 reasons.append("multiple-projects")  # informational: never changes ``eligible``
+            if name in loads and loads[name]["load_inputs"]["memory"] is None:
+                reasons.append("memory-unknown")  # informational: never changes ``eligible``
             result.append(
                 {
                     "machine": name,

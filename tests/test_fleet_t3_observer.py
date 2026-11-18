@@ -10,7 +10,7 @@ from dataclasses import asdict
 
 import pytest
 
-from brigade import fleet_client, fleet_client_policy
+from brigade import fleet_client, fleet_client_policy, fleet_node_memory
 from brigade.fleet_session_presence import ProviderLinkState
 from tests._home import set_home
 
@@ -78,6 +78,8 @@ def native_t3(tmp_path, monkeypatch):
     HEALTH_POSTS.clear()
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *a, **k: "11111111-1111-4111-8111-111111111111")
     monkeypatch.setattr(fleet_client_policy, "observe_t3", lambda body: HEALTH_POSTS.append(dict(body)) or {})
+    # The host's real memory never leaks into a recorded body. Tests that want a reading patch it themselves.
+    monkeypatch.setattr(fleet_node_memory, "memory_used", lambda: None)
 
     def configure(rows=None, *, drop_archived=False, **patch):
         if rows is None:
@@ -1326,3 +1328,18 @@ def test_a_tail_reserve_reached_mid_loop_keeps_what_was_published_and_no_error(n
     published.clear()
     result = shared._publish_recent(_recent(worktree, 3), harness="openclaw", deadline=deadline)
     assert result["published"] == 3 and "error" not in result
+
+
+def test_health_post_carries_the_memory_reading_when_there_is_one(native_t3, monkeypatch):
+    from brigade import fleet_t3_observer as observer
+
+    monkeypatch.setattr(fleet_node_memory, "memory_used", lambda: 0.4321)
+    assert observer._publish_health(True, deadline=time.monotonic() + 60) == "ok"
+    assert HEALTH_POSTS == [{"node_id": NODE, "ok": True, "memory_used": 0.4321}]
+
+
+def test_health_post_omits_the_key_when_memory_cannot_be_read(native_t3):
+    from brigade import fleet_t3_observer as observer
+
+    assert observer._publish_health(True, deadline=time.monotonic() + 60) == "ok"
+    assert HEALTH_POSTS == [{"node_id": NODE, "ok": True}] and "memory_used" not in HEALTH_POSTS[0]

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence, cast
 
-from . import fleet_client, fleet_client_policy, proc
+from . import fleet_client, fleet_client_policy, fleet_node_memory, proc
 from .fleet_openclaw_observer import (
     OBSERVATION_BUDGET_SECONDS,
     PUBLISH_LIMIT,
@@ -464,7 +464,13 @@ def _publish_health(ok: bool, *, deadline: float) -> str:
         node_id = fleet_client.resolve_node_id()
         if node_id == "unknown":
             return "error"
-        fleet_client_policy.observe_t3({"node_id": node_id, "ok": ok})
+        body: dict[str, object] = {"node_id": node_id, "ok": ok}
+        # Memory rides the health report so placement can treat it as a load input. A node that cannot
+        # read it omits the key; the Hub then records the reading as unknown, never as zero.
+        memory = fleet_node_memory.memory_used()
+        if memory is not None:
+            body["memory_used"] = memory
+        fleet_client_policy.observe_t3(body)
     except Exception:
         return "error"
     return "ok"
