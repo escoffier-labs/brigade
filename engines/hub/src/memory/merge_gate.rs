@@ -5,10 +5,13 @@
 //! nothing else can notice the card is gone. A recomputation at preflight and
 //! again at apply decides, never the proposal's own claims. The retired card
 //! must be the newer of the pair, so a copy cannot retire the card it copied.
+//! Newer is judged by when each card's current claim body first appeared, so
+//! neither retiring an id and writing it again nor editing an old card into a
+//! copy backdates it.
 use super::{
     ids,
     index::{self, Card},
-    ops, proposal_metadata, proposal_tiers,
+    ops, proposal_metadata,
     proposals::{cards, string},
     ranking,
     retrieval_eval::Live,
@@ -32,6 +35,9 @@ const KEEPER: &str = "retrieval_eval_merge_keeper_changed";
 const WRITER: &str = "retrieval_eval_writer_changed";
 const RETIRES_OLDER: &str = "retrieval_eval_merge_retires_older";
 const LITERAL: &str = "retrieval_eval_merge_literal_lost";
+const GROUP_TOO_LARGE: &str = "retrieval_eval_merge_group_too_large";
+/// Most cards one keeper may retire in a single merge.
+const MAX_GROUP: usize = 8;
 
 pub(super) fn is_merge(op: &Json) -> bool {
     op["type"] == MERGE
@@ -78,6 +84,75 @@ fn plan(proposal: &Json) -> Option<Vec<Group<'_>>> {
     .then_some(groups)
 }
 
+/// Revisions read back to date a card's current content. A longer run holds.
+const RUN_CAP: usize = 256;
+
+/// The log sequence at which the card's current claim body first appeared, as
+/// one unbroken run of live revisions ending at the head. Walking back from the
+/// head, a revision belongs to the run while it is live and its claim body
+/// equals the head's, so front-matter, alias and evidence rewrites keep a
+/// card's date. Any other edit of the claim body, a retirement, or a revival
+/// starts a new run, and a body edited away and back dates from the return.
+/// This is what stops a card from passing as older than the text it was
+/// rewritten to copy. None, which holds the merge, when the head has no live
+/// revision row of its own, a revision's text is missing or unreadable, or the
+/// run is longer than `RUN_CAP`, because then the history does not date it.
+fn content_start<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    id: &str,
+    head: (i64, &str, &str),
+) -> rusqlite::Result<Option<i64>> {
+    let (revision, hash, text) = head;
+    let Ok(body) = proposal_metadata::claims(text) else {
+        return Ok(None);
+    };
+    let rows = tx.query(
+        &format!("SELECT seq,state,content_hash FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND seq<=?3 ORDER BY seq DESC LIMIT {}", RUN_CAP + 1),
+        &[ops::t(scope), ops::t(id), Value::Integer(revision)],
+    )?;
+    let mut start = None;
+    // Equal claim bodies, by revision text, so each text is read once.
+    let mut bodies: HashMap<String, bool> = HashMap::new();
+    for (i, row) in rows.iter().enumerate() {
+        let Value::Integer(seq) = row[0] else {
+            return Ok(None);
+        };
+        let (state, row_hash) = (ops::s(&row[1]), ops::s(&row[2]));
+        if i == 0 && (seq != revision || state != "live" || row_hash != hash) {
+            return Ok(None);
+        }
+        if state != "live" {
+            return Ok(start);
+        }
+        if row_hash != hash {
+            let same = match bodies.get(&row_hash) {
+                Some(same) => *same,
+                None => {
+                    let blob = tx.query(
+                        "SELECT bytes FROM memory_blobs WHERE content_hash=?1",
+                        &[ops::t(&row_hash)],
+                    )?;
+                    let Some(Value::Blob(bytes)) = blob.first().and_then(|r| r.first()) else {
+                        return Ok(None);
+                    };
+                    let same = proposal_metadata::claims(&String::from_utf8_lossy(bytes))
+                        .is_ok_and(|other| other == body);
+                    bodies.insert(row_hash, same);
+                    same
+                }
+            };
+            if !same {
+                return Ok(start);
+            }
+        }
+        start = Some(seq);
+    }
+    // Every row read belonged to the run. It ended in a first revision only
+    // when the read was not cut off by the cap.
+    Ok((rows.len() <= RUN_CAP).then_some(start).flatten())
+}
+
 /// A live head as the gate reads it.
 struct Head {
     card: Card,
@@ -85,14 +160,15 @@ struct Head {
     origin: bool,
     writer: String,
     writer_class: String,
-    /// The log sequence of the card's first revision, or None with no history.
+    /// The log sequence at which the card's current claim body first appeared,
+    /// or None when its history does not date it.
     first_seq: Option<i64>,
 }
 
 /// The live head, or None when it moved or is no longer live.
 fn load<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<Head>> {
     let (scope, id) = (string(target, "scope"), string(target, "card_id"));
-    let rows = tx.query(&format!("SELECT c.revision,c.content_hash,c.trust,b.bytes,c.writer_class,{},c.state,c.writer,(SELECT MIN(r.seq) FROM memory_card_revisions r WHERE r.scope=c.scope AND r.card_id=c.card_id) FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", index::ORIGIN_AUTOMATED_SQL), &[ops::t(scope), ops::t(id)])?;
+    let rows = tx.query(&format!("SELECT c.revision,c.content_hash,c.trust,b.bytes,c.writer_class,{},c.state,c.writer FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", index::ORIGIN_AUTOMATED_SQL), &[ops::t(scope), ops::t(id)])?;
     let Some(row) = rows.first() else {
         return Ok(None);
     };
@@ -106,13 +182,15 @@ fn load<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<He
         return Ok(None);
     }
     let origin = matches!(row[5], Value::Integer(n) if n != 0);
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    let first_seq = content_start(tx, scope, id, (*revision, &ops::s(&row[1]), &text))?;
     let card = Card {
         scope: scope.into(),
         card_id: id.into(),
         revision: *revision,
         content_hash: ops::s(&row[1]),
         trust: ops::s(&row[2]),
-        text: String::from_utf8_lossy(bytes).into_owned(),
+        text,
         automated: ops::s(&row[4]) == "principal" || origin,
     };
     Ok(Some(Head {
@@ -120,10 +198,7 @@ fn load<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<He
         origin,
         writer: ops::s(&row[7]),
         writer_class: ops::s(&row[4]),
-        first_seq: match row[8] {
-            Value::Integer(n) => Some(n),
-            _ => None,
-        },
+        first_seq,
     }))
 }
 
@@ -140,42 +215,142 @@ fn covers(have: &[String], need: &[String]) -> bool {
     })
 }
 
-/// A wiki link, markdown link or reference-style definition in the card that
-/// points at `id`.
-fn links_to(text: &str, scope: &str, id: &str) -> bool {
-    let target = |raw: &str| {
-        // A wiki link may carry an alias after a bar.
-        let raw = raw.split('|').next().unwrap_or("");
-        ranking::mentioned_id(raw, scope) == Some(id)
-    };
+/// The name a link resolves by, as the broken-link resolver reads it
+/// (`_loose` in `memory_reflect_links.py`): case folded, with every run of
+/// whitespace or hyphens a single space. Python's `str.casefold` also turns
+/// `ß`, `ſ` and the `ﬁ` family of ligatures into plain letters, so those fold
+/// here too. Folding only widens what matches, which can only hold a merge.
+fn loose(name: &str) -> String {
+    let mut folded = String::with_capacity(name.len());
+    for c in text::py_lower(name).chars() {
+        match c {
+            'ß' => folded.push_str("ss"),
+            'ſ' => folded.push('s'),
+            '\u{fb00}' => folded.push_str("ff"),
+            '\u{fb01}' => folded.push_str("fi"),
+            '\u{fb02}' => folded.push_str("fl"),
+            '\u{fb03}' => folded.push_str("ffi"),
+            '\u{fb04}' => folded.push_str("ffl"),
+            '\u{fb05}' | '\u{fb06}' => folded.push_str("st"),
+            _ => folded.push(c),
+        }
+    }
+    let words: Vec<&str> = folded
+        .split(|c: char| c.is_whitespace() || c == '-')
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.join(" ")
+}
+
+/// Every name a link target or front-matter value could resolve to, loosely
+/// spelled: the strict ids `mentioned_id` reads and the same path forms with any
+/// case, spaces or runs of hyphens, since the resolver compares names loosely.
+/// `scoped` is the loose spelling of `{scope}/`.
+fn candidates(value: &str, scope: &str, scoped: &str, out: &mut HashSet<String>) {
+    if let Some(id) = ranking::mentioned_id(value, scope) {
+        out.insert(loose(id));
+    }
+    let mut path = value.trim();
+    if let Some(inner) = path.strip_prefix('<') {
+        path = inner.strip_suffix('>').unwrap_or(inner);
+    }
+    path = path.split('#').next().unwrap_or("");
+    let mut name = loose(path);
+    while let Some(rest) = ["./", "../", "/"]
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+    {
+        name = rest.to_string();
+    }
+    // A folder prefix is a card path, so any extension after it goes too, as
+    // `link_id` strips one. Without a prefix only `.md` goes.
+    let mut prefixed = false;
+    while let Some(rest) = ["memory/cards/", "cards/", scoped]
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+    {
+        name = rest.to_string();
+        prefixed = true;
+    }
+    if let Some(bare) = name.strip_suffix(".md") {
+        out.insert(bare.to_string());
+    }
+    if let (true, Some((stem, _))) = (prefixed, name.rsplit_once('.')) {
+        out.insert(stem.to_string());
+    }
+    out.insert(name);
+}
+
+/// A link destination: an angle-bracketed form that may hold spaces, or the
+/// text up to the first space, which may be followed by a title.
+fn destination(text: &str) -> &str {
+    let text = text.trim_start();
+    if text.starts_with('<') {
+        if let Some(end) = text.find('>') {
+            return &text[..=end];
+        }
+    }
+    text.split_whitespace().next().unwrap_or("")
+}
+
+/// Every name a card's front-matter values, wiki links, markdown links and
+/// reference definitions could resolve to, loosely spelled. Every key counts and
+/// every list item, past the cap that `Links::parse` applies, because a dangling
+/// link is a defect at any position.
+fn named_in(text: &str, scope: &str) -> HashSet<String> {
+    let scoped = format!("{}/", loose(scope));
+    let mut out = HashSet::new();
+    for (_, value) in ranking::front_values(text, |_| true, usize::MAX) {
+        candidates(&value, scope, &scoped, &mut out);
+    }
     let inner = |open: &str, close: &str| -> Vec<String> {
         text.split(open)
             .skip(1)
             .filter_map(|rest| rest.split_once(close).map(|(inner, _)| inner.to_string()))
             .collect()
     };
+    let mut targets: Vec<String> = inner("[[", "]]");
+    targets.extend(inner("](", ")").iter().map(|d| destination(d).to_string()));
     // A reference definition is `[label]: destination "title"` on its own line.
-    let definition = |line: &str| {
-        let rest = line.trim_start().strip_prefix('[')?;
-        let (_, after) = rest.split_once("]:")?;
-        after.split_whitespace().next().map(target)
-    };
-    inner("[[", "]]").iter().any(|link| target(link))
-        // A markdown destination may carry a title after a space.
-        || inner("](", ")")
-            .iter()
-            .any(|link| target(link.split_whitespace().next().unwrap_or("")))
-        || text.lines().any(|line| definition(line) == Some(true))
+    for line in text.lines() {
+        let rest = line.trim_start().strip_prefix('[');
+        if let Some((_, after)) = rest.and_then(|rest| rest.split_once("]:")) {
+            targets.push(destination(after).to_string());
+        }
+    }
+    for target in targets {
+        // A wiki link may carry an alias after a bar.
+        let raw = target.split('|').next().unwrap_or("");
+        candidates(raw, scope, &scoped, &mut out);
+    }
+    out
 }
 
-/// Any front-matter value, wiki link, markdown link or reference definition
-/// that names `id`. Every key counts and every list item, past the cap that
-/// `Links::parse` applies, because a dangling link is a defect at any position.
-fn names(text: &str, scope: &str, id: &str) -> bool {
-    ranking::front_values(text, |_| true, usize::MAX)
-        .iter()
-        .any(|(_, value)| ranking::mentioned_id(value, scope) == Some(id))
-        || links_to(text, scope, id)
+/// The ids among `ids` that some other live card in the scope names. One pass
+/// parses each live card once, however many ids are asked about. Every live card
+/// is read, because no byte or key filter sees an id that a literal spells with
+/// escapes or concatenation.
+fn inbound<T: ReadTx + ?Sized>(
+    tx: &T,
+    scope: &str,
+    ids: &[&str],
+) -> rusqlite::Result<HashSet<String>> {
+    let rows = tx.query("SELECT c.card_id,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live'", &[ops::t(scope)])?;
+    let wanted: Vec<(&str, String)> = ids.iter().map(|id| (*id, loose(id))).collect();
+    let mut named = HashSet::new();
+    for row in &rows {
+        let Value::Blob(bytes) = &row[1] else {
+            continue;
+        };
+        let owner = ops::s(&row[0]);
+        let found = named_in(&String::from_utf8_lossy(bytes), scope);
+        for (id, spelled) in &wanted {
+            if *id != owner && found.contains(spelled) {
+                named.insert((*id).to_string());
+            }
+        }
+    }
+    Ok(named)
 }
 
 /// Whether search would still find everything the retired card's literal text
@@ -211,12 +386,22 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
     let Some(plan) = plan(proposal) else {
         return Ok(Some(SHAPE));
     };
+    if plan.iter().any(|(_, merges)| merges.len() > MAX_GROUP) {
+        return Ok(Some(GROUP_TOO_LARGE));
+    }
     let applier = live.applier;
     let automated = |origin: bool| applier == "principal" || origin;
     // An apply rewrites the writer and class of each card it writes to the
     // applier's, and a connector sees an agent-unreviewed head only for the
     // credential that wrote it. The ranking digest cannot see that.
     let foreign = |writer: &str, class: &str| writer != live.principal || class != applier;
+    // The ids some live card names, read in one pass the first time a retired
+    // card reaches the check, so the cost does not grow with the group.
+    let retired_ids: Vec<&str> = plan
+        .iter()
+        .flat_map(|(_, merges)| merges.iter().map(|(_, r)| string(r, "card_id")))
+        .collect();
+    let mut named: Option<HashSet<String>> = None;
     for (target, merges) in plan {
         let Some(Head {
             card: keeper,
@@ -259,8 +444,10 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
             else {
                 return Ok(Some(DRIFTED));
             };
-            // A copy made later never retires the card it copied. Without a
-            // first revision for both cards, nothing proves who came first.
+            // A copy made later never retires the card it copied. Each card is
+            // dated from when its current claim body first appeared, so a card
+            // revived or edited into a copy is as new as that write. Without a
+            // date for both cards, nothing proves who came first.
             if !matches!((keeper_first, retired_first), (Some(k), Some(r)) if r > k) {
                 return Ok(Some(RETIRES_OLDER));
             }
@@ -279,11 +466,12 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
             {
                 return Ok(Some(SHAPE));
             }
-            // A retired card leaves `heads`, so a link to it would dangle. Every
-            // live card is parsed, because no byte or key filter sees an id that
-            // a literal spells with escapes or concatenation.
+            // A retired card leaves `heads`, so a link to it would dangle.
             let id = retired.card_id.as_str();
-            if proposal_tiers::named_by(tx, scope, id, true, |text| names(text, scope, id))? {
+            if named
+                .get_or_insert(inbound(tx, scope, &retired_ids)?)
+                .contains(id)
+            {
                 return Ok(Some(INBOUND));
             }
             let before = index::projection(&retired, true);

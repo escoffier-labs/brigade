@@ -134,7 +134,9 @@ pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str>
         lines.join("\n")
     )))
 }
-fn claims(text: &str) -> Result<String, &'static str> {
+/// The card's claim body, the text a merge compares: the body without its
+/// front matter and without supported anchor suffixes.
+pub(super) fn claims(text: &str) -> Result<String, &'static str> {
     let (_, body) = front(text)?;
     // Remove only supported anchor suffixes, retaining opaque syntax as bytes.
     let result = proposal_blocks::strip_anchors(body);

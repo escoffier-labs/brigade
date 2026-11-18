@@ -23,6 +23,7 @@ const TOKENS: &str = "retrieval_eval_merge_tokens_lost";
 const KEEPER: &str = "retrieval_eval_merge_keeper_changed";
 const RETIRES_OLDER: &str = "retrieval_eval_merge_retires_older";
 const LITERAL: &str = "retrieval_eval_merge_literal_lost";
+const GROUP_TOO_LARGE: &str = "retrieval_eval_merge_group_too_large";
 const DRIFTED: &str = "retrieval_eval_target_drifted";
 const LINEAGE: &str = "retrieval_eval_lineage_exposed";
 const WRITER: &str = "retrieval_eval_writer_changed";
@@ -375,6 +376,60 @@ async fn an_id_spelled_with_escapes_in_any_key_holds_the_merge() {
     }
 }
 
+/// The resolver compares names loosely: case folded, with spaces and runs of
+/// hyphens alike. A link it would follow to the retired card dangles after the
+/// merge, so every such spelling holds it, in a body link or a front-matter value.
+#[tokio::test]
+async fn a_loosely_spelled_link_to_the_retired_id_holds_the_merge() {
+    let forms = [
+        ("capitalized wiki link", "See [[Dup-Retired]].\n"),
+        ("upper case wiki link", "See [[DUP-RETIRED]].\n"),
+        ("spaced wiki link", "See [[dup retired]].\n"),
+        ("mixed spaced wiki link", "See [[Dup  Retired|old]].\n"),
+        ("doubled hyphen", "See [[dup--retired]].\n"),
+        ("padded", "See [[ dup-retired ]].\n"),
+        ("cased scope prefix", "See [[Fleet/Dup-Retired]].\n"),
+        ("cased path", "See [[Cards/Dup-Retired.MD]].\n"),
+        ("cased markdown link", "See [old](Cards/DUP-RETIRED.md).\n"),
+        ("spaced markdown link", "See [old](<dup retired>).\n"),
+        (
+            "cased reference definition",
+            "See [old].\n\n[old]: <./Cards/Dup-Retired.md>\n",
+        ),
+        (
+            "cased front matter value",
+            "---\nrelated: Dup-Retired\n---\nBody.\n",
+        ),
+        (
+            "cased superseded_by",
+            "---\nsuperseded_by: DUP-RETIRED\n---\nBody.\n",
+        ),
+        (
+            "spaced front matter list",
+            "---\nrelated: [\"Dup Retired\"]\n---\nBody.\n",
+        ),
+        (
+            "cased front matter path",
+            "---\nrelated: Cards/Dup-Retired.md\n---\nBody.\n",
+        ),
+    ];
+    for (name, text) in forms {
+        assert_eq!(naming_card_holds(text).await, Some(INBOUND), "{name}");
+    }
+    // Looser matching still means the same card. Another id never matches.
+    for (name, text) in [
+        ("keeper in other case", "See [[Dup-Keeper]].\n"),
+        ("longer name", "See [[dup retired extra]].\n"),
+        ("shorter name", "See [[Dup]].\n"),
+        (
+            "cased front matter keeper",
+            "---\nrelated: DUP-KEEPER\n---\nB.\n",
+        ),
+    ] {
+        assert_eq!(naming_card_holds(text).await, None, "{name}");
+    }
+}
+
 #[tokio::test]
 async fn a_link_added_between_preflight_and_apply_is_caught_at_apply() {
     let mut r = pair().await;
@@ -508,6 +563,200 @@ async fn a_newer_copy_cannot_retire_the_original() {
     let body = r.body(&open(&r).await);
     let wipe = "DELETE FROM memory_card_revisions WHERE card_id=?1";
     sql(&r, wipe, KEEP);
+    assert_eq!(held(&r, &body), Some(RETIRES_OLDER));
+}
+
+/// Retire a card as the admin and read nothing back but the outcome.
+async fn retire(r: &Real, id: &str) {
+    let rev: i64 =
+        r.db.query_row(
+            "SELECT revision FROM memory_cards WHERE card_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let epoch = r.h.epoch().await;
+    let reply =
+        r.h.call(
+            ADMIN_TOKEN,
+            json!({"action":"retire","scope":"fleet","card_id":id,"base_revision":rev,
+                   "base_epoch":epoch,"client_event_id":r.h.id()}),
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{reply:?}");
+}
+/// Write a card again over its current head, retired or live.
+async fn rewrite(r: &Real, id: &str, text: &str) {
+    let rev: i64 =
+        r.db.query_row(
+            "SELECT revision FROM memory_cards WHERE card_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        r.h.put(ADMIN_TOKEN, "fleet", id, Some(rev), text)
+            .await
+            .status,
+        201
+    );
+}
+
+/// An id is dated from its current incarnation. An attacker who retires the
+/// card they made first and writes it again with a victim's exact text must not
+/// be able to pass as the older card and retire the victim's.
+#[tokio::test]
+async fn reviving_an_older_id_does_not_backdate_it() {
+    let (old, victim) = ("attacker-old", "victim");
+    let (old_text, victim_text) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
+    let r = Real::untrusted(&[(old, &old_text), (victim, &victim_text)]).await;
+    // Before the churn the attacker's card really is the older one.
+    let honest = r.body(&open_ops(&r, old, &[victim]).await);
+    assert_eq!(held(&r, &honest), None);
+    retire(&r, old).await;
+    rewrite(&r, old, &old_text).await;
+    let exploit = open_ops(&r, old, &[victim]).await;
+    assert_eq!(held(&r, &r.body(&exploit)), Some(RETIRES_OLDER));
+    // The victim's card, as keeper, may retire the revived copy.
+    let r = Real::untrusted(&[(old, &old_text), (victim, &victim_text)]).await;
+    retire(&r, old).await;
+    rewrite(&r, old, &old_text).await;
+    let reversed = open_ops(&r, victim, &[old]).await;
+    assert_eq!(held(&r, &r.body(&reversed)), None);
+}
+
+/// A card that never left `live` keeps its first write as its start, even when
+/// the duplicate it outranks was retired and written again later.
+#[tokio::test]
+async fn a_keeper_that_never_left_live_passes_a_newer_duplicate() {
+    let (keeper_text, copy_text) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
+    let r = Real::untrusted(&[(KEEP, &keeper_text), (GONE, &copy_text)]).await;
+    assert_eq!(held(&r, &r.body(&open(&r).await)), None);
+    retire(&r, GONE).await;
+    rewrite(&r, GONE, &copy_text).await;
+    assert_eq!(held(&r, &r.body(&open(&r).await)), None);
+}
+
+/// Dating follows the latest write of the id, so a card written again after
+/// the keeper existed is the newer copy, however early its first revision.
+#[tokio::test]
+async fn a_card_revived_after_the_keeper_is_the_newer_copy() {
+    let (first, second) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
+    let r = Real::untrusted(&[(GONE, &first), (KEEP, &second)]).await;
+    // GONE was written first, so it is the older card and is held.
+    let before = r.body(&open(&r).await);
+    assert_eq!(held(&r, &before), Some(RETIRES_OLDER));
+    retire(&r, GONE).await;
+    rewrite(&r, GONE, &first).await;
+    assert_eq!(held(&r, &r.body(&open(&r).await)), None);
+}
+
+/// A card revived before the keeper was written is still the older one.
+#[tokio::test]
+async fn a_card_revived_before_the_keeper_was_written_is_still_older() {
+    let (first, second) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
+    let r = Real::untrusted(&[(GONE, &first)]).await;
+    retire(&r, GONE).await;
+    rewrite(&r, GONE, &first).await;
+    assert_eq!(
+        r.h.put(ADMIN_TOKEN, "fleet", KEEP, None, &second)
+            .await
+            .status,
+        201
+    );
+    let held_older = r.body(&open(&r).await);
+    assert_eq!(held(&r, &held_older), Some(RETIRES_OLDER));
+    // The earlier card as keeper may retire the later copy.
+    let reversed = open_ops(&r, GONE, &[KEEP]).await;
+    assert_eq!(held(&r, &r.body(&reversed)), None);
+}
+
+/// A card is dated from when its current claim body first appeared. Editing
+/// an old card into a copy of a newer one must not leave it looking older.
+#[tokio::test]
+async fn editing_an_old_card_into_a_copy_does_not_backdate_it() {
+    let (old, victim) = ("attacker-old", "victim");
+    let own = "Something unrelated. ^c-zzzzzz\n";
+    let (copy, original) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
+    let r = Real::untrusted(&[(old, own), (victim, &original)]).await;
+    rewrite(&r, old, &copy).await;
+    let exploit = open_ops(&r, old, &[victim]).await;
+    assert_eq!(held(&r, &r.body(&exploit)), Some(RETIRES_OLDER));
+    // The victim's card, as keeper, may retire the edited copy.
+    let r = Real::untrusted(&[(old, own), (victim, &original)]).await;
+    rewrite(&r, old, &copy).await;
+    let reversed = open_ops(&r, victim, &[old]).await;
+    assert_eq!(held(&r, &r.body(&reversed)), None);
+}
+
+/// A body edited away and back is dated from the return, not from the first
+/// time the text appeared, or an old card could be flipped into a copy later.
+#[tokio::test]
+async fn editing_a_body_away_and_back_dates_it_from_the_return() {
+    let (first, second) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
+    let r = Real::untrusted(&[(KEEP, &first), (GONE, &second)]).await;
+    assert_eq!(held(&r, &r.body(&open(&r).await)), None);
+    rewrite(&r, KEEP, "Something unrelated. ^c-zzzzzz\n").await;
+    rewrite(&r, KEEP, &first).await;
+    assert_eq!(held(&r, &r.body(&open(&r).await)), Some(RETIRES_OLDER));
+}
+
+/// Front-matter rewrites leave the claim body alone, so a genuine original that
+/// later gained aliases or evidence is still older than a newer duplicate.
+#[tokio::test]
+async fn an_original_that_gained_aliases_and_evidence_is_still_older() {
+    let (first, second) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
+    let r = Real::untrusted(&[(KEEP, &first), (GONE, &second)]).await;
+    let aliased = dup("---\naliases: [\"older-name\"]\n---\n", "aaaaaa");
+    rewrite(&r, KEEP, &aliased).await;
+    let both = dup(
+        "---\naliases: [\"older-name\"]\nevidence: [\"ns/kind/one\"]\n---\n",
+        "aaaaaa",
+    );
+    rewrite(&r, KEEP, &both).await;
+    assert_eq!(held(&r, &r.body(&open(&r).await)), None);
+}
+
+/// One keeper may retire at most eight cards, so the work per proposal stays
+/// bounded. The size check comes before any card is read.
+#[tokio::test]
+async fn a_group_of_more_than_eight_retired_cards_is_held() {
+    let r = pair().await;
+    let body = r.body(&open(&r).await);
+    let grown = |extra: usize| {
+        let mut out = body.clone();
+        let cards = out["cards"].as_array().unwrap().clone();
+        let op = out["ops"][0].clone();
+        let retired = cards.iter().find(|c| c["card_id"] == GONE).unwrap().clone();
+        for i in 0..extra {
+            let id = format!("extra-{i}");
+            let mut card = retired.clone();
+            card["card_id"] = json!(id);
+            out["cards"].as_array_mut().unwrap().push(card);
+            let mut more = op.clone();
+            more["other_card"]["card_id"] = json!(id);
+            out["ops"].as_array_mut().unwrap().push(more);
+        }
+        out
+    };
+    assert_eq!(held(&r, &grown(8)), Some(GROUP_TOO_LARGE));
+    assert_ne!(held(&r, &grown(7)), Some(GROUP_TOO_LARGE));
+}
+
+/// The head's own revision row must exist. Older rows alone do not show when
+/// the head was written.
+#[tokio::test]
+async fn a_head_without_its_revision_row_holds_the_merge() {
+    let text = dup("", "aaaaaa");
+    let r = Real::untrusted(&[(KEEP, &text), (GONE, &dup("", "bbbbbb"))]).await;
+    rewrite(&r, KEEP, &text).await;
+    let body = r.body(&open(&r).await);
+    assert_eq!(held(&r, &body), None);
+    sql(
+        &r,
+        "DELETE FROM memory_card_revisions WHERE card_id=?1 AND revision=(SELECT revision FROM memory_cards WHERE card_id=?1)",
+        KEEP,
+    );
     assert_eq!(held(&r, &body), Some(RETIRES_OLDER));
 }
 

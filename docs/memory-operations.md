@@ -1184,9 +1184,18 @@ must hold `merge_exact_duplicates` ops and nothing else
 once (`retrieval_eval_merge_shape`). Each retired card then needs:
 
 - To be newer than the keeper (`retrieval_eval_merge_retires_older`). The gate
-  compares the log sequence of each card's first revision, so a later copy of a
-  card can never retire the card it copied, and an edit never makes a card
-  newer. A card with no first revision on record is held.
+  dates each card by when its current claim body first appeared, which is the
+  log sequence of the earliest revision in the unbroken run of live revisions
+  ending at the head that all hold that same claim body. The claim body is the
+  text below the front matter, without anchor suffixes. So a rewrite of
+  aliases, evidence or any other front-matter line keeps a card's date, while a
+  claim edit, a retirement, a revival, or an edit away from the text and back
+  starts a new run dated from that write. A card revived or edited into a copy
+  of another card is therefore as new as that write, and it cannot retire the
+  card it copied. The retired card's date must be strictly later than the
+  keeper's. A card whose history does not date it is held: a head with no live
+  revision row, a missing or unreadable revision text, or a run of more than 256
+  revisions.
 - The same trust class as the keeper (`retrieval_eval_merge_trust_mismatch`)
   and the same `automated` value after the apply
   (`retrieval_eval_merge_automated_mismatch`). When trust is
@@ -1194,10 +1203,17 @@ once (`retrieval_eval_merge_shape`). Each retired card then needs:
   (`retrieval_eval_writer_changed`), the same rule the keeper meets.
 - No other live card that names its id as a front-matter value, wiki link,
   markdown link or reference definition (`retrieval_eval_merge_inbound_link`),
-  because a retired card leaves the index and a link to it would dangle. The scan
-  parses every live card in the scope, in any front-matter key and at any list
-  position, and decodes escapes and implicit concatenation the way search does.
-  It ignores a leading `./`, `../` or `/`, angle brackets and a `#fragment`.
+  because a retired card leaves the index and a link to it would dangle. One
+  pass parses every live card in the scope once and tests every retired id in
+  the proposal, in any front-matter key and at any list position, decoding
+  escapes and implicit concatenation the way search does. It ignores a leading
+  `./`, `../` or `/`, angle brackets and a `#fragment`. Names compare the way
+  the broken-link resolver compares them, folded for case with every run of
+  spaces or hyphens read as one space, so `[[Dup-Retired]]` and `[[dup retired]]`
+  both name `dup-retired`. A folder prefix, a scope prefix and a trailing `.md`
+  are ignored in any case.
+- At most eight retired cards per keeper (`retrieval_eval_merge_group_too_large`),
+  so the work for one proposal stays bounded.
 - Title tokens (`retrieval_eval_merge_title_uncovered`) and every search token
   (`retrieval_eval_merge_tokens_lost`) held by the keeper's after text, counted
   as a multiset. An untitled card's title is its id, which the alias the merge
