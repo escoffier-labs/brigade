@@ -534,11 +534,40 @@ def _kill(proc: subprocess.Popen[bytes]) -> None:
         return
     try:
         if os.name == "posix":
-            os.killpg(proc.pid, signal.SIGKILL)  # Also reaps the MCP server child.
+            os.killpg(proc.pid, signal.SIGKILL)  # Also ends the MCP server child.
         else:
             proc.kill()
     except OSError:
         pass
+
+
+def _exited(proc: subprocess.Popen[bytes]) -> bool:
+    """Whether the child has exited. On POSIX this never reaps, so its pid and group stay reserved."""
+    if os.name != "posix":
+        return proc.poll() is not None
+    try:
+        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
+def _reap(proc: subprocess.Popen[bytes], timeout: float) -> int:
+    """Wait for the child to exit, end its process group, then reap it.
+
+    On POSIX the exit is awaited without reaping. An unreaped zombie leader keeps its pid and group id
+    reserved, so killing the group then cannot reach another process, and it ends an MCP server child
+    that outlived the CLI before the arm directory is removed. Only then is the leader reaped. Raises
+    ``TimeoutExpired`` when the child is still running after ``timeout``. Windows only waits.
+    """
+    if os.name != "posix" or proc.returncode is not None:
+        return proc.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while not _exited(proc):
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        time.sleep(0.01)
+    _kill(proc)
+    return proc.wait()
 
 
 def _make_writable_and_retry(root: Path, func: Any, target: str, exc: BaseException | None = None) -> None:
@@ -566,17 +595,24 @@ def _make_writable_and_retry(root: Path, func: Any, target: str, exc: BaseExcept
 
 
 def remove_work_dir(path: Path, *, windows: bool = os.name == "nt") -> None:
-    """Remove an arm directory. On Windows a killed arm releases its handles a moment later.
+    """Remove an arm directory. Any failure is raised.
 
-    The CLI is killed, but there is no handle on its MCP server child to wait for, so the release of
-    the child's open files cannot be awaited. Removal is retried a few times, briefly, and only on
-    Windows. Any other failure, and a failure after the last attempt, is raised.
+    On POSIX this is a plain ``shutil.rmtree`` with no error handler. Unlinking needs write access to
+    the directory, not the file, so a read-only file goes without a mode change, and ``rmtree`` deletes
+    through directory file descriptors without following links. Nothing is ever chmodded, so a path
+    swapped for a link between a check and a use cannot redirect a mode change.
+
+    On Windows a read-only file blocks deletion and a killed arm releases its handles a moment later.
+    The CLI is killed, but there is no handle on its MCP server child to wait for, so removal retries a
+    few times, briefly, with the read-only repair of ``_make_writable_and_retry``.
     """
     attempts = WINDOWS_REMOVE_ATTEMPTS if windows else 1
     handler = functools.partial(_make_writable_and_retry, path)
     for attempt in range(1, attempts + 1):
         try:
-            if sys.version_info >= (3, 12):
+            if not windows:
+                shutil.rmtree(path)
+            elif sys.version_info >= (3, 12):
                 shutil.rmtree(path, onexc=handler)
             else:
                 shutil.rmtree(path, onerror=lambda func, target, info: handler(func, target, info[1]))
@@ -661,9 +697,11 @@ def _run_process(
 
     def expire() -> None:
         with expiry:
-            # A finished cell must not flip to a timeout. poll() reaps, so it runs under the lock.
-            if child.poll() is None:
-                timed_out.set()
+            # A finished cell must not flip to a timeout. The check never reaps on POSIX. A leader that
+            # already exited can still have a group member holding the pipes open, so the group is killed.
+            if child.returncode is None:
+                if not _exited(child):
+                    timed_out.set()
                 _kill(child)
 
     drainer = threading.Thread(target=capture.drain, args=(child.stderr, kill), daemon=True)
@@ -706,7 +744,7 @@ def _run_process(
         timer.cancel()
         try:
             with expiry:  # An expiry already running finishes before we reap.
-                code = child.wait(timeout=EXIT_GRACE)
+                code = _reap(child, EXIT_GRACE)
         except subprocess.TimeoutExpired:  # Closed stdout but kept running.
             timed_out.set()
             with expiry:

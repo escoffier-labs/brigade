@@ -66,6 +66,11 @@ if SC.get("stderr_flood"):
     sys.stderr.flush()
 if SC.get("leak"):  # A misbehaving CLI echoing its credential to the stream and to stderr.
     sys.stderr.write("auth debug " + os.environ["CLAUDE_CODE_OAUTH_TOKEN"] + "\n")
+if SC.get("grandchild"):  # A process in the CLI's group that outlives it and ignores stdin EOF.
+    gc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.PIPE,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(SC["grandchild"], "a") as handle:
+        handle.write(str(gc.pid) + "\n")
 for event in SC.get("pre_events", []):
     emit(event)
 steps = SC.get("steps", [])

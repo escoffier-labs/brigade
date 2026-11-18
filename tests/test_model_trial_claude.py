@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -1122,3 +1123,80 @@ def test_cleanup_never_chmods_through_a_link(tmp_path):
     retried = []
     model_trial_claude._make_writable_and_retry(arm, retried.append, str(inside), PermissionError())
     assert retried == [str(inside)] and inside.stat().st_mode & 0o777 == 0o700
+
+
+def _gone(pid, wait=5.0):
+    """True once the process no longer exists. A zombie awaiting init counts as gone."""
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except (OSError, IndexError):
+            state = ""
+        if state == "Z":
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX process groups")
+@pytest.mark.parametrize(
+    "extra, timeout",
+    [({}, 60), ({"hang": True}, 3), ({"big_line": model_trial_claude.MAX_LINE_BYTES * 2}, 60)],
+    ids=["normal-exit", "timeout", "cap-overflow"],
+)
+def test_a_group_member_that_outlives_the_cli_is_killed_before_the_cell_returns(tmp_path, extra, timeout):
+    pids_file = tmp_path / "grandchildren.txt"
+    exe = make_fake(tmp_path / "fake", grandchild=str(pids_file), **extra)
+    execute_live(LIVE, tmp_path / "evidence", claude_bin=str(exe), environ=ENVIRON, timeout=timeout)
+    pids = [int(line) for line in pids_file.read_text().split()]
+    assert pids
+    assert all(_gone(pid) for pid in pids)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX waitid")
+def test_the_group_is_killed_while_the_leader_is_still_unreaped(monkeypatch):
+    order = []
+    real_killpg, real_wait = os.killpg, subprocess.Popen.wait
+
+    def killpg(pid, sig):
+        order.append(("killpg", child.returncode))
+        real_killpg(pid, sig)
+
+    def wait(self, *args, **kwargs):
+        order.append(("wait",))
+        return real_wait(self, *args, **kwargs)
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    monkeypatch.setattr(model_trial_claude.os, "killpg", killpg, raising=False)
+    monkeypatch.setattr(subprocess.Popen, "wait", wait)
+    assert model_trial_claude._reap(child, 10.0) is not None
+    assert order == [("killpg", None), ("wait",)]  # Signalled while returncode was still unset.
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX permission bits and unprivileged symlinks")
+def test_posix_cleanup_removes_a_read_only_file_and_leaves_a_link_target_alone(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    outside.chmod(0o444)
+    arm = tmp_path / "arm"
+    (arm / "sub").mkdir(parents=True)
+    (arm / "sub" / "link").symlink_to(outside)
+    readonly = arm / "ro.txt"
+    readonly.write_text("x")
+    readonly.chmod(0o400)
+    model_trial_claude.remove_work_dir(arm, windows=False)
+    assert not arm.exists()
+    assert outside.read_text() == "keep" and outside.stat().st_mode & 0o777 == 0o444
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX shutil.rmtree semantics")
+def test_posix_cleanup_installs_no_error_handler(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(shutil, "rmtree", lambda path, **kwargs: seen.append(kwargs))
+    model_trial_claude.remove_work_dir(tmp_path / "arm", windows=False)
+    assert seen == [{}]
