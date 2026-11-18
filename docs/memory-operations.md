@@ -166,7 +166,7 @@ it:
 |---|---|---|
 | `search` with `query_source: "push"` or `"connector"` and `card` with `push: true` (connector push, Dot and Duet `memory_search` and `memory_card`, S23) | Connector | Excluded. Only a clean scan receipt is eligible |
 | Push prompt-load scan | Connector | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` |
-| Search with `query_source: "prompt"` (local recall in Claude Code and Codex hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
+| Search with `query_source: "prompt"` (local recall in Claude Code hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
 | Grok Bot, Dot and Duet `memory_search` and `memory_card` | Connector | Placeholder with `code: "memory_content_private"` |
 | `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding, including a hub placeholder |
 | Embedder (S15a query, document and probe sends) | Loopback only | Sent only when the pinned address is loopback. Any other endpoint, a private-network one included, refuses with reason `content-private` before any lookup or connection. A stored `private` version embeds only for a loopback endpoint |
