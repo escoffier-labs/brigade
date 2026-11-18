@@ -30,6 +30,6 @@
     <rect x="660" y="146.0" width="44" height="44" rx="8" fill="#0a0c0e" stroke="#202428"/><g transform="translate(672 158.0) scale(0.8333)" fill="none" stroke="#e9ecef" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 12 2 2 4-4"/></g>
     <text x="718" y="165.0" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#a1a8b0">Check record</text>
     <text x="718" y="184.0" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#929aa3">tied to the tree it tested</text>
-    <text x="60" y="30" font-size="12" fill="#929aa3">brigade work verify run</text>
+    <text x="60" y="30" font-size="12" fill="#929aa3">brigadestack work verify run</text>
   </g>
 </svg>

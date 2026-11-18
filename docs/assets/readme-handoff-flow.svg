@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="300" viewBox="0 0 880 300" role="img" aria-labelledby="title desc">
   <title id="title">A handoff becomes a card that another checkout finds</title>
-  <desc id="desc">Step 1: one session drafts a handoff recording a decision about retries. Step 2: a reviewer files it as the card payments-retry-policy.md and commits it. Step 3: brigade memory search for retry backoff in a second checkout returns that card with score 0.74.</desc>
+  <desc id="desc">Step 1: one session drafts a handoff recording a decision about retries. Step 2: a reviewer files it as the card payments-retry-policy.md and commits it. Step 3: brigadestack memory search for retry backoff in a second checkout returns that card with score 0.74.</desc>
   <defs>
     <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#202428"/></pattern>
     <radialGradient id="fade" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient>
@@ -9,36 +9,36 @@
   <rect x="0.5" y="0.5" width="879" height="299" rx="10" fill="#0f1215" stroke="#202428"/>
   <rect width="880" height="300" fill="url(#dots)" mask="url(#m)"/>
   <g font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12.5">
-    <path d="M272 168.0H324" stroke="#2e3338"/><circle cx="298.0" cy="168.0" r="2.2" fill="#6d8cff"/>
-    <path d="M556 168.0H608" stroke="#2e3338"/><circle cx="582.0" cy="168.0" r="2.2" fill="#6d8cff"/>
-    <text x="40" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a1a8b0">1  One session drafts a handoff</text>
-    <rect x="40" y="84" width="232" height="168" rx="8" fill="#0a0c0e" stroke="#2e3338"/>
-    <text x="56" y="111" fill="#e9ecef" font-size="13.5">handoff.md</text>
-    <path d="M40 126.5H272" stroke="#202428"/>
-    <text x="56" y="146" fill="#929aa3">type</text><text x="256" y="146" text-anchor="end" fill="#a1a8b0">decision</text>
-    <path d="M40 157.5H272" stroke="#202428"/>
-    <text x="56" y="177" fill="#929aa3">retries</text><text x="256" y="177" text-anchor="end" fill="#a1a8b0">stop after 3</text>
-    <path d="M40 188.5H272" stroke="#202428"/>
-    <text x="56" y="208" fill="#929aa3">backoff</text><text x="256" y="208" text-anchor="end" fill="#a1a8b0">200 ms, doubles</text>
-    <path d="M40 219.5H272" stroke="#202428"/>
-    <text x="56" y="239" fill="#929aa3">4xx</text><text x="256" y="239" text-anchor="end" fill="#a1a8b0">never retried</text>
-    <text x="324" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a1a8b0">2  A reviewer files it as a card</text>
-    <rect x="324" y="84" width="232" height="168" rx="8" fill="#0a0c0e" stroke="#2e3338"/>
-    <text x="340" y="111" fill="#e9ecef" font-size="13.5">memory/cards/</text>
-    <path d="M324 126.5H556" stroke="#202428"/>
-    <text x="340" y="146" fill="#929aa3">card</text><rect x="494" y="131" width="46" height="21" rx="10.5" fill="none" stroke="#6bbf7a"/><text x="517" y="146" text-anchor="middle" fill="#6bbf7a">filed</text>
-    <path d="M324 157.5H556" stroke="#202428"/>
-    <text x="340" y="177" fill="#a1a8b0">payments-retry-policy.md</text><text x="540" y="177" text-anchor="end" fill="#a1a8b0"></text>
-    <path d="M324 188.5H556" stroke="#202428"/>
-    <text x="340" y="208" fill="#929aa3">git</text><text x="540" y="208" text-anchor="end" fill="#a1a8b0">committed</text>
-    <text x="608" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a1a8b0">3  Any checkout finds it</text>
-    <rect x="608" y="84" width="232" height="168" rx="8" fill="#0a0c0e" stroke="#2e3338"/>
-    <text x="624" y="111" fill="#e9ecef" font-size="13.5">$ brigade memory search</text>
-    <path d="M608 126.5H840" stroke="#202428"/>
-    <text x="624" y="146" fill="#929aa3">query</text><text x="824" y="146" text-anchor="end" fill="#a1a8b0">"retry backoff"</text>
-    <path d="M608 157.5H840" stroke="#202428"/>
-    <text x="624" y="177" fill="#929aa3">match</text><text x="824" y="177" text-anchor="end" fill="#a1a8b0">1</text>
-    <path d="M608 188.5H840" stroke="#202428"/>
-    <text x="624" y="208" fill="#929aa3">payments-retry-policy</text><text x="824" y="208" text-anchor="end" fill="#a1a8b0">0.74</text>
+    <path d="M270 168.0H320" stroke="#2e3338"/><circle cx="295.0" cy="168.0" r="2.2" fill="#6d8cff"/>
+    <path d="M560 168.0H610" stroke="#2e3338"/><circle cx="585.0" cy="168.0" r="2.2" fill="#6d8cff"/>
+    <text x="30" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a1a8b0">1  One session drafts a handoff</text>
+    <rect x="30" y="84" width="240" height="168" rx="8" fill="#0a0c0e" stroke="#2e3338"/>
+    <text x="46" y="111" fill="#e9ecef" font-size="12.5">handoff.md</text>
+    <path d="M30 126.5H270" stroke="#202428"/>
+    <text x="46" y="146" fill="#929aa3">type</text><text x="254" y="146" text-anchor="end" fill="#a1a8b0">decision</text>
+    <path d="M30 157.5H270" stroke="#202428"/>
+    <text x="46" y="177" fill="#929aa3">retries</text><text x="254" y="177" text-anchor="end" fill="#a1a8b0">stop after 3</text>
+    <path d="M30 188.5H270" stroke="#202428"/>
+    <text x="46" y="208" fill="#929aa3">backoff</text><text x="254" y="208" text-anchor="end" fill="#a1a8b0">200 ms, doubles</text>
+    <path d="M30 219.5H270" stroke="#202428"/>
+    <text x="46" y="239" fill="#929aa3">4xx</text><text x="254" y="239" text-anchor="end" fill="#a1a8b0">never retried</text>
+    <text x="320" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a1a8b0">2  A reviewer files it as a card</text>
+    <rect x="320" y="84" width="240" height="168" rx="8" fill="#0a0c0e" stroke="#2e3338"/>
+    <text x="336" y="111" fill="#e9ecef" font-size="12.5">memory/cards/</text>
+    <path d="M320 126.5H560" stroke="#202428"/>
+    <text x="336" y="146" fill="#929aa3">card</text><rect x="498" y="131" width="46" height="21" rx="10.5" fill="none" stroke="#6bbf7a"/><text x="521" y="146" text-anchor="middle" fill="#6bbf7a">filed</text>
+    <path d="M320 157.5H560" stroke="#202428"/>
+    <text x="336" y="177" fill="#a1a8b0">payments-retry-policy.md</text><text x="544" y="177" text-anchor="end" fill="#a1a8b0"></text>
+    <path d="M320 188.5H560" stroke="#202428"/>
+    <text x="336" y="208" fill="#929aa3">git</text><text x="544" y="208" text-anchor="end" fill="#a1a8b0">committed</text>
+    <text x="610" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a1a8b0">3  Any checkout finds it</text>
+    <rect x="610" y="84" width="240" height="168" rx="8" fill="#0a0c0e" stroke="#2e3338"/>
+    <text x="626" y="111" fill="#e9ecef" font-size="12.5">$ brigadestack memory search</text>
+    <path d="M610 126.5H850" stroke="#202428"/>
+    <text x="626" y="146" fill="#929aa3">query</text><text x="834" y="146" text-anchor="end" fill="#a1a8b0">"retry backoff"</text>
+    <path d="M610 157.5H850" stroke="#202428"/>
+    <text x="626" y="177" fill="#929aa3">match</text><text x="834" y="177" text-anchor="end" fill="#a1a8b0">1</text>
+    <path d="M610 188.5H850" stroke="#202428"/>
+    <text x="626" y="208" fill="#929aa3">payments-retry-policy</text><text x="834" y="208" text-anchor="end" fill="#a1a8b0">0.74</text>
   </g>
 </svg>
