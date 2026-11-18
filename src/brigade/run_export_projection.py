@@ -41,6 +41,8 @@ _ABS_SEGMENT_RE = re.compile(r"/(?:home|Users|root|tmp)(?:/[^\s\"'`;,)]*)?")
 _FILE_URI_RE = re.compile(r"file://[^\s\"']*")
 
 _PROMPT_KEYS = frozenset("task text detail final error prompt stdout stderr output result content summary".split())
+# Served run views reuse the same text-key set as the export projection.
+PROMPT_KEYS = _PROMPT_KEYS
 _TOP_LEVEL_JSON = frozenset(
     "run.json roster.json plan.json worker-results.json synthesis.json batch-request.json".split()
 )
@@ -123,6 +125,26 @@ def _pat(pattern: str, *, digest_ok: bool = True) -> _CheckedString:
     return _CheckedString(pattern=re.compile(pattern), digest_ok=digest_ok)
 
 
+def object_node(fields: Mapping[str, "Node"], *, any_name: "Node | None" = None, digest_keys: bool = False) -> "Node":
+    """Build the same closed object node the export schemas use (see #2046 views)."""
+    return _Object(fields, any_name=any_name, digest_keys=digest_keys)
+
+
+def list_node(item: "Node") -> "Node":
+    """Build the same closed list node the export schemas use."""
+    return _List(item)
+
+
+def enum(*values: str, fallback: str = "<other>") -> "Node":
+    """Keep only a listed value, otherwise ``fallback`` (the export enum rule)."""
+    return _enum(*values, fallback=fallback)
+
+
+def pattern(source: str, *, digest_ok: bool = True) -> "Node":
+    """Keep a matching string, otherwise digest it (the export pattern rule)."""
+    return _pat(source, digest_ok=digest_ok)
+
+
 def _tags() -> _List:
     return _List(DIGEST)
 
@@ -197,6 +219,17 @@ _WORKER_STATUSES = (
     "running",
 )
 _SANDBOXES = ("none", "read-only", "workspace-write", "danger-full-access", "isolated", "shared")
+
+# Served run views reuse the same closed enums as the export schemas (#2046).
+RUN_STATUSES = _RUN_STATUSES
+FAILURE_PHASES = _FAILURE_PHASES
+TRANSPORTS = _TRANSPORTS
+WORKER_STATUSES = _WORKER_STATUSES
+
+ISO_TIMESTAMP = _pat(_ISO)
+HEX_ID = _pat(_HEX)
+SHA_OR_HEX_ID = _pat(_SHA_OR_HEX)
+VERSION_NUMBER = _pat(_VERSION)
 
 _FAILURE = _Object(
     {
@@ -868,6 +901,30 @@ def project_document(rel: str, document: Any, ctx: _Context, *, allow_legacy: bo
     return _project_node(document, _document_node(rel), ctx, label=rel)
 
 
+def project_node(
+    document: Any,
+    node: "Node",
+    *,
+    workspace: Path,
+    run_dir: Path,
+    key: bytes,
+    label: str = "view",
+) -> Any:
+    """Project a document through one closed node using the export rules (#2046 views)."""
+    ctx = _Context(
+        workspace=Path(workspace).resolve(),
+        run_dir=Path(run_dir).resolve(),
+        home=Path.home(),
+        key=key,
+    )
+    return _project_node(document, node, ctx, label=label)
+
+
+def assert_node(document: Any, node: "Node", *, label: str = "view", home: Path | None = None) -> None:
+    """Fail closed unless a projected document still matches its closed node."""
+    _assert_value(document, node, label=label, home=home if home is not None else Path.home())
+
+
 def iter_receipt_files(payload_root: Path) -> list[str]:
     """Return allowed receipt JSON paths (excluding scrubbed streams and checkpoints)."""
     payload_root = Path(payload_root)
@@ -935,17 +992,20 @@ def project_payload_tree(
     return projected
 
 
-def _assert_safe_string(value: str, *, label: str, home: Path) -> None:
-    unsafe = (
+def is_path_like(value: str) -> bool:
+    """True when ``value`` looks like an absolute, home-relative, or file-URI path."""
+    return (
         value.startswith(("/", "~", "file://", "\\\\"))
         or _DRIVE_RE.match(value) is not None
-        or (bool(home) and str(home) in value)
         or _ABS_SEGMENT_RE.search(value) is not None
         or _FILE_URI_RE.search(value) is not None
         or _WIN_ABS_RE.search(value) is not None
         or _UNC_RE.search(value) is not None
     )
-    if unsafe:
+
+
+def _assert_safe_string(value: str, *, label: str, home: Path) -> None:
+    if is_path_like(value) or (bool(home) and str(home) in value):
         raise RunExportProjectionError(f"{label} must not contain an absolute path")
 
 

@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from brigade import cli
 from brigade import runs_cmd
+from brigade import runs_privacy
 
 
 PLANTED_ENV_VALUE = "planted-env-OPENAI-not-a-real-key"
@@ -337,6 +339,11 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = PLANTED_TASK) -> None:
     )
 
 
+def _view_id(run_dir: Path) -> str:
+    """Return the served id for a run: generated name or its keyed digest."""
+    return runs_privacy.view_run_id(run_dir.name, run_dir) or ""
+
+
 def _write_legacy_run(run_dir: Path) -> None:
     run_dir.mkdir(parents=True)
     _write_json(
@@ -367,7 +374,7 @@ def test_runs_list_json_emits_versioned_schema_shape(tmp_path, capsys):
     assert len(payload["runs"]) == 1
     summary = payload["runs"][0]
     assert set(summary) <= runs_cmd.RUN_SUMMARY_FIELDS
-    assert summary["run_id"] == "20260526-140000-aaaaaa"
+    assert summary["run_id"] == _view_id(runs_root / "20260526-140000-aaaaaa")
     assert summary["status"] == "ok"
     assert "path" not in summary
     assert str(runs_root) not in json.dumps(payload)
@@ -386,7 +393,7 @@ def test_runs_show_and_latest_json_share_one_detail_serializer(tmp_path, capsys)
     assert shown == latest
     assert shown["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
     assert set(shown) == runs_cmd.RUN_DETAIL_KEYS
-    assert shown["run"]["run_id"] == "20260526-140000-bbbbbb"
+    assert shown["run"]["run_id"] == _view_id(run_dir)
     assert "lineage" not in shown["run"]
 
 
@@ -453,6 +460,21 @@ def _assert_artifacts_keep_home_needles(run_dir: Path) -> None:
         assert needle in disk_text or escaped in disk_text, f"artifact lost planted home path: {needle!r}"
 
 
+def _redacted_len(text: str) -> int:
+    """Length after the home-prefix rewrite the JSON contract applies."""
+    return len(text.replace(PLANTED_ABS_HOME, "~"))
+
+
+def _assert_prompt_digest(value: object, chars: int) -> None:
+    """Assert the closed keyed-digest shape from the export projection."""
+    assert isinstance(value, dict), f"expected a digest object, got {value!r}"
+    assert set(value) == {"digest", "chars"}
+    digest = value["digest"]
+    assert isinstance(digest, str) and digest.startswith("hmac-sha256:")
+    assert len(digest) == len("hmac-sha256:") + 64
+    assert value["chars"] == chars
+
+
 def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys):
     run_dir = tmp_path / ".brigade" / "runs" / "20260821-100000-planted"
     _plant_sensitive_run(run_dir)
@@ -464,8 +486,8 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_allowlist(listed)
     _assert_raw_clean(listed_raw)
     assert listed["schema"] == runs_cmd.RUNS_LIST_SCHEMA
-    assert listed["runs"][0]["task"]
-    assert PLANTED_VISIBLE in listed["runs"][0]["task"]
+    _assert_prompt_digest(listed["runs"][0]["task"], len(PLANTED_TASK))
+    assert "task_preview" not in listed["runs"][0]
 
     assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 0
     shown_raw = capsys.readouterr().out
@@ -473,7 +495,8 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_allowlist(shown)
     _assert_raw_clean(shown_raw)
     assert shown["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
-    assert PLANTED_VISIBLE in shown["run"]["task"]
+    _assert_prompt_digest(shown["run"]["task"], len(PLANTED_TASK))
+    assert "task_preview" not in shown["run"]
     assert shown["briefs"]
     assert shown["briefs"][0]["name"] == "code-graph"
     assert shown["briefs"][0]["bytes"] == 32
@@ -501,19 +524,37 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     shown_run = shown["run"]
     assert "failure" in shown_run
     assert PLANTED_ABS_HOME not in json.dumps(shown)
-    assert shown_run["failure"]["detail"] == PLANTED_ABS_FAILURE.replace(PLANTED_ABS_HOME, "~")
-    assert shown_run["error"] == PLANTED_ERROR.replace(PLANTED_ABS_HOME, "~")
-    assert shown["plan"]["assignments"][0]["task"] == PLANTED_PLAN_TASK.replace(PLANTED_ABS_HOME, "~")
+    _assert_prompt_digest(shown_run["failure"]["detail"], _redacted_len(PLANTED_ABS_FAILURE))
+    _assert_prompt_digest(shown_run["error"], _redacted_len(PLANTED_ERROR))
+    _assert_prompt_digest(shown["plan"]["assignments"][0]["task"], _redacted_len(PLANTED_PLAN_TASK))
     worker = shown["workers"]["results"][0]
-    assert worker["detail"] == PLANTED_WORKER_DETAIL.replace(PLANTED_ABS_HOME, "~")
-    assert worker["failure"]["detail"] == PLANTED_WORKER_FAILURE.replace(PLANTED_ABS_HOME, "~")
-    assert shown["synthesis"]["result"]["detail"] == PLANTED_SYNTHESIS_DETAIL.replace(PLANTED_ABS_HOME, "~")
-    assert shown["roster"]["agents"]["chef"]["role"] == PLANTED_ROSTER_ROLE.replace(PLANTED_ABS_HOME, "~")
-    verify_command = shown["verification"][0]["commands"][0]["command"]
-    assert verify_command == PLANTED_ABS_COMMAND.replace(PLANTED_ABS_HOME, "~")
+    _assert_prompt_digest(worker["detail"], _redacted_len(PLANTED_WORKER_DETAIL))
+    _assert_prompt_digest(worker["failure"]["detail"], _redacted_len(PLANTED_WORKER_FAILURE))
+    _assert_prompt_digest(shown["synthesis"]["result"]["detail"], _redacted_len(PLANTED_SYNTHESIS_DETAIL))
+    assert len(shown["roster"]["agents"]) == 1
+    agent = next(iter(shown["roster"]["agents"].values()))
+    _assert_prompt_digest(agent["cli"], _redacted_len("codex"))
+    _assert_prompt_digest(agent["model"], _redacted_len("gpt-5.5"))
+    _assert_prompt_digest(agent["reasoning"], _redacted_len(PLANTED_ROSTER_REASONING))
+    _assert_prompt_digest(agent["role"], _redacted_len(PLANTED_ROSTER_ROLE))
+    _assert_prompt_digest(shown["roster"]["orchestrator"], _redacted_len("chef"))
+    _assert_prompt_digest(shown["verification"][0]["commands"][0]["command"], _redacted_len(PLANTED_ABS_COMMAND))
     final_frames = [frame for frame in frames if frame.get("type") == "final"]
     assert final_frames
     assert final_frames[0]["text"] == PLANTED_ABS_FINAL.replace(PLANTED_ABS_HOME, "~")
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json", "--show-task"]) == 0
+    preview_listed = json.loads(capsys.readouterr().out)
+    preview = preview_listed["runs"][0]["task_preview"]
+    assert PLANTED_VISIBLE in preview
+    assert len(preview) <= 80
+    assert "/home/" not in preview
+    assert preview_listed["runs"][0]["task"] == listed["runs"][0]["task"]
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json", "--show-task"]) == 0
+    preview_shown = json.loads(capsys.readouterr().out)
+    assert PLANTED_VISIBLE in preview_shown["run"]["task_preview"]
+    assert preview_shown["run"]["task"] == shown["run"]["task"]
 
     _assert_artifacts_keep_home_needles(run_dir)
     assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path)]) == 0
@@ -536,6 +577,205 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_artifacts_keep_home_needles(run_dir)
 
 
+def _assert_digest_string(value: object) -> None:
+    assert isinstance(value, str) and value.startswith("hmac-sha256:")
+    assert len(value) == len("hmac-sha256:") + 64
+
+
+CLOSED_RULE_MARKERS = (
+    "TASK-MARKER closed-rule",
+    "Bearer tok_123",
+    "ORCH-MARKER",
+    "MODEL-MARKER-AGENT",
+    "REASONING-MARKER",
+    "ROLE-MARKER",
+    "AGENT-MARKER",
+    "ALLOW-MODEL-MARKER",
+    "PLAN-WORKER-MARKER",
+    "PLAN-TASK-MARKER",
+    "WORKER-MARKER",
+    "WORKER-TASK-MARKER",
+    "WORKER-DETAIL-MARKER",
+    "REQ-MODEL-MARKER",
+    "auth failed: sk-ant-secret",
+    "FAILURE-CLASS-MARKER",
+    "missing /etc/ssl/private/key.pem",
+    "SYNTH-DETAIL-MARKER",
+    "SYNTH-MODEL-MARKER",
+)
+
+
+def _plant_closed_rule_run(run_dir: Path) -> None:
+    run_dir.mkdir(parents=True)
+    _write_json(
+        run_dir / "run.json",
+        {
+            "task": "TASK-MARKER closed-rule",
+            "status": "Bearer tok_123",
+            "started_at": "2026-08-21T10:00:00Z",
+            "finished_at": "2026-08-21T10:00:01Z",
+            "duration_seconds": 1.0,
+            "read_only": False,
+            "failure": {
+                "phase": "dispatch",
+                "kind": "auth failed: sk-ant-secret",
+                "detail": "missing /etc/ssl/private/key.pem",
+            },
+        },
+    )
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "ORCH-MARKER",
+            "max_workers": 1,
+            "allow_models": ["ALLOW-MODEL-MARKER", "/etc/ssl/private/key.pem"],
+            "agents": {
+                "AGENT-MARKER": {
+                    "cli": "codex",
+                    "model": "MODEL-MARKER-AGENT",
+                    "reasoning": "REASONING-MARKER",
+                    "role": "ROLE-MARKER missing /etc/ssl/private/key.pem",
+                }
+            },
+        },
+    )
+    _write_json(
+        run_dir / "plan.json",
+        {"assignments": [{"stage": 1, "worker": "PLAN-WORKER-MARKER", "task": "PLAN-TASK-MARKER"}]},
+    )
+    _write_json(
+        run_dir / "worker-results.json",
+        {
+            "results": [
+                {
+                    "worker": "WORKER-MARKER",
+                    "ok": True,
+                    "status": "ok",
+                    "task": "WORKER-TASK-MARKER",
+                    "detail": "WORKER-DETAIL-MARKER",
+                    "requested_model": "REQ-MODEL-MARKER",
+                    "transport": "cli",
+                    "failure": {"class": "FAILURE-CLASS-MARKER", "detail": "missing /etc/ssl/private/key.pem"},
+                }
+            ]
+        },
+    )
+    _write_json(
+        run_dir / "synthesis.json",
+        {
+            "orchestrator": "ORCH-MARKER",
+            "mode": "orchestrator",
+            "result": {"ok": True, "detail": "SYNTH-DETAIL-MARKER", "requested_model": "SYNTH-MODEL-MARKER"},
+        },
+    )
+
+
+def test_closed_rule_digests_free_text_enums_and_mapping_keys(tmp_path, capsys):
+    """Issue #2046 review: only known enum values and fixed shapes stay readable."""
+    run_dir = tmp_path / ".brigade" / "runs" / "20260821-160000-closed"
+    _plant_closed_rule_run(run_dir)
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    blob = json.dumps(payload)
+    for marker in CLOSED_RULE_MARKERS:
+        assert marker not in blob, marker
+
+    assert payload["run"]["status"] == "<other>"
+    assert payload["run"]["started_at"] == "2026-08-21T10:00:00Z"
+    assert payload["run"]["failure"]["phase"] == "dispatch"
+    _assert_prompt_digest(payload["run"]["failure"]["kind"], len("auth failed: sk-ant-secret"))
+
+    roster = payload["roster"]
+    _assert_prompt_digest(roster["orchestrator"], len("ORCH-MARKER"))
+    assert len(roster["allow_models"]) == 2
+    for allow_model in roster["allow_models"]:
+        assert set(allow_model) == {"digest", "chars"}
+    agent_key = next(iter(roster["agents"]))
+    _assert_digest_string(agent_key)
+    agent = roster["agents"][agent_key]
+    _assert_prompt_digest(agent["model"], len("MODEL-MARKER-AGENT"))
+    _assert_prompt_digest(agent["reasoning"], len("REASONING-MARKER"))
+    _assert_prompt_digest(agent["role"], len("ROLE-MARKER missing /etc/ssl/private/key.pem"))
+
+    assignment = payload["plan"]["assignments"][0]
+    _assert_prompt_digest(assignment["worker"], len("PLAN-WORKER-MARKER"))
+    result = payload["workers"]["results"][0]
+    _assert_prompt_digest(result["worker"], len("WORKER-MARKER"))
+    _assert_prompt_digest(result["requested_model"], len("REQ-MODEL-MARKER"))
+    _assert_prompt_digest(result["failure"]["class"], len("FAILURE-CLASS-MARKER"))
+
+
+def _refuse_digest_key(workspace: Path) -> None:
+    key_dir = workspace / ".brigade" / "memory"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key = key_dir / "search-log-key"
+    key.write_text("ab" * 32 + "\n")
+    key.chmod(0o644)
+
+
+def _block_digest_key(workspace: Path) -> None:
+    (workspace / ".brigade" / "memory").write_text("not a directory")
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param(
+            _refuse_digest_key,
+            marks=pytest.mark.skipif(os.name == "nt", reason="POSIX key mode refusal does not exist on Windows"),
+        ),
+        _block_digest_key,
+    ],
+)
+@pytest.mark.parametrize("command", ["list", "show"])
+def test_digest_key_failure_fails_closed_in_cli_json(tmp_path, capsys, block, command):
+    """Issue #2046 review: a refused or unusable key never falls back to raw text."""
+    run_dir = tmp_path / ".brigade" / "runs" / "20260821-170000-keyfail"
+    _write_legacy_run(run_dir)
+    block(tmp_path)
+
+    argv = ["runs", command, "--cwd", str(tmp_path), "--json"]
+    if command == "show":
+        argv.insert(2, run_dir.name)
+    assert cli.main(argv) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: run digest key unavailable" in captured.err
+
+
+def test_custom_run_id_is_digested_in_cli_json(tmp_path, capsys):
+    """Issue #2046 security review: a user-chosen --output-dir name never appears."""
+    run_dir = tmp_path / ".brigade" / "runs" / "PRIVATE-MODEL-A"
+    _write_legacy_run(run_dir)
+    view_id = runs_privacy.view_run_id("PRIVATE-MODEL-A", run_dir)
+    assert view_id is not None and view_id.startswith("hmac-sha256:")
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
+    listed_raw = capsys.readouterr().out
+    assert "PRIVATE-MODEL-A" not in listed_raw
+    listed = json.loads(listed_raw)
+    assert listed["runs"][0]["run_id"] == view_id
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 0
+    shown_raw = capsys.readouterr().out
+    assert "PRIVATE-MODEL-A" not in shown_raw
+    assert json.loads(shown_raw)["run"]["run_id"] == view_id
+
+
+def test_generated_run_ids_stay_readable_in_cli_json(tmp_path, capsys):
+    run_dir = tmp_path / ".brigade" / "runs" / "20260821-200000-abcdef12"
+    _write_legacy_run(run_dir)
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["runs"][0]["run_id"] == "20260821-200000-abcdef12"
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["run"]["run_id"] == "20260821-200000-abcdef12"
+
+
 def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):
     runs_root = tmp_path / ".brigade" / "runs"
     _write_legacy_run(runs_root / "20260526-140000-valid1")
@@ -549,7 +789,7 @@ def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema"] == runs_cmd.RUNS_LIST_SCHEMA
     assert payload["skipped_invalid"] == 2
-    assert [run["run_id"] for run in payload["runs"]] == ["20260526-140000-valid1"]
+    assert [run["run_id"] for run in payload["runs"]] == [_view_id(runs_root / "20260526-140000-valid1")]
 
 
 @pytest.mark.parametrize("command", ["list", "latest"])
@@ -590,11 +830,11 @@ def test_runs_inventory_json_skips_record_read_errors(tmp_path, monkeypatch, cap
     if command == "list":
         assert payload["schema"] == runs_cmd.RUNS_LIST_SCHEMA
         assert payload["skipped_invalid"] == 1
-        assert [run["run_id"] for run in payload["runs"]] == [healthy.name]
+        assert [run["run_id"] for run in payload["runs"]] == [_view_id(healthy)]
         assert captured.err == ""
     else:
         assert payload["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
-        assert payload["run"]["run_id"] == healthy.name
+        assert payload["run"]["run_id"] == _view_id(healthy)
         assert "skipped 1 invalid run directory" in captured.err
     if read_error != "disappeared":
         assert faulty_record.read_bytes() == original_bytes
@@ -613,7 +853,7 @@ def test_legacy_run_without_lineage_still_serializes(tmp_path, capsys):
 
     assert runs_cmd.list_runs(cwd=tmp_path, json_output=True) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert listed["runs"][0]["run_id"] == "20260101-090000-legacy"
+    assert listed["runs"][0]["run_id"] == _view_id(run_dir)
     assert "parent_run_id" not in listed["runs"][0]
     assert "lineage" not in listed["runs"][0]
 
@@ -641,15 +881,12 @@ def test_show_json_includes_recorded_children_from_sibling_receipts(tmp_path, ca
     shown = json.loads(shown_raw)
     _assert_allowlist(shown)
     _assert_raw_clean(shown_raw)
-    assert shown["run"]["lineage"] == {
-        "children": [
-            {
-                "run_id": child.name,
-                "status": "ok",
-                "branch_point_event_id": "20260821-120000-parent-000003-bbbbbbbbbbbb",
-            }
-        ]
-    }
+    children = shown["run"]["lineage"]["children"]
+    assert len(children) == 1
+    assert children[0]["run_id"] == _view_id(child)
+    assert children[0]["status"] == "ok"
+    assert set(children[0]["branch_point_event_id"]) == {"digest", "chars"}
+    assert children[0]["branch_point_event_id"]["chars"] == len("20260821-120000-parent-000003-bbbbbbbbbbbb")
 
 
 def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
@@ -681,15 +918,15 @@ def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
     shown = json.loads(shown_raw)
     _assert_allowlist(shown)
     _assert_raw_clean(shown_raw)
-    assert shown["run"]["lineage"] == {
-        "kind": "child",
-        "parent_run_id": "20260821-120000-parent",
-        "branch_point_event_id": "20260821-120000-parent-000003-bbbbbbbbbbbb",
-        "shared_prefix": {
-            "event_sequence": 3,
-            "event_digest": "b" * 64,
-            "previous_digest": "a" * 64,
-        },
+    lineage = shown["run"]["lineage"]
+    assert lineage["kind"] == "child"
+    assert lineage["parent_run_id"] == _view_id(runs_root / "20260821-120000-parent")
+    assert set(lineage["branch_point_event_id"]) == {"digest", "chars"}
+    assert lineage["branch_point_event_id"]["chars"] == len("20260821-120000-parent-000003-bbbbbbbbbbbb")
+    assert lineage["shared_prefix"] == {
+        "event_sequence": 3,
+        "event_digest": "b" * 64,
+        "previous_digest": "a" * 64,
     }
 
     assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
@@ -697,7 +934,7 @@ def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
     listed = json.loads(listed_raw)
     _assert_allowlist(listed)
     _assert_raw_clean(listed_raw)
-    assert listed["runs"][0]["parent_run_id"] == "20260821-120000-parent"
+    assert listed["runs"][0]["parent_run_id"] == _view_id(runs_root / "20260821-120000-parent")
 
 
 def test_runs_list_json_does_not_scan_sibling_run_json(tmp_path, capsys, monkeypatch):
@@ -727,8 +964,8 @@ def test_runs_list_json_does_not_scan_sibling_run_json(tmp_path, capsys, monkeyp
 
     assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert [run["run_id"] for run in listed["runs"]] == [child.name, parent.name]
-    assert listed["runs"][0]["parent_run_id"] == parent.name
+    assert [run["run_id"] for run in listed["runs"]] == [_view_id(child), _view_id(parent)]
+    assert listed["runs"][0]["parent_run_id"] == _view_id(parent)
     assert "parent_run_id" not in listed["runs"][1]
     assert reads == [parent.name, child.name] or reads == [child.name, parent.name]
     assert reads.count(parent.name) == 1
@@ -756,11 +993,10 @@ def test_show_json_bounds_oversized_sibling_child_status(tmp_path, capsys):
     shown = json.loads(capsys.readouterr().out)
     _assert_allowlist(shown)
     child_entry = shown["run"]["lineage"]["children"][0]
-    assert child_entry["run_id"] == child.name
-    assert len(child_entry["status"]) <= 400
-    assert len(child_entry["branch_point_event_id"]) <= 400
-    assert child_entry["status"].endswith("...")
-    assert child_entry["branch_point_event_id"].endswith("...")
+    assert child_entry["run_id"] == _view_id(child)
+    assert child_entry["status"] == "<other>"
+    assert set(child_entry["branch_point_event_id"]) == {"digest", "chars"}
+    assert child_entry["branch_point_event_id"]["chars"] == len("y" * 50_000)
     assert UNEXPECTED_CONTRACT_KEY not in child_entry
 
     assert cli.main(["runs", "show", parent.name, "--cwd", str(tmp_path)]) == 0
@@ -777,12 +1013,12 @@ def test_human_list_and_show_remain_text_when_json_omitted(tmp_path, capsys):
     assert cli.main(["runs", "list", "--cwd", str(tmp_path)]) == 0
     listed = capsys.readouterr().out
     assert listed.startswith("2026-05-26T14:00:00Z [ok]")
-    assert "brigade.runs-list.v1" not in listed
+    assert "brigade.runs-list.v2" not in listed
 
     assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path)]) == 0
     shown = capsys.readouterr().out
     assert shown.startswith(f"run: {run_dir.resolve()}")
-    assert "brigade.run-detail.v1" not in shown
+    assert "brigade.run-detail.v2" not in shown
 
 
 def test_allowlisted_rejects_allowlist_key_without_cleaned_counterpart():

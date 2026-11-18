@@ -211,7 +211,7 @@
 (function () {
   var DISPLAY_LIMIT = 400;
   var LIST_LIMIT = 50;
-  var KNOWN_WATCH = ["watch", "run", "plan", "event", "workers", "synthesis", "final", "summary"];
+  var KNOWN_WATCH = ["watch", "run", "plan", "event", "workers", "synthesis", "final", "summary", "error"];
   var MAX_BACKOFF = 8000;
   var lastDetail = null;
   var lastList = null;
@@ -226,6 +226,29 @@
     var text = String(value);
     if (text.length <= DISPLAY_LIMIT) return text;
     return text.slice(0, DISPLAY_LIMIT - 3) + "...";
+  }
+
+  var DIGEST_RE = /^hmac-sha256:[0-9a-f]{64}$/;
+
+  function shortDigest(digest) {
+    return digest.length > 24 ? digest.slice(0, 24) + "..." : digest;
+  }
+
+  function digestValue(value) {
+    if (value && typeof value === "object" && typeof value.digest === "string") return value.digest;
+    return value;
+  }
+
+  function privacyText(value) {
+    if (value == null) return "";
+    if (typeof value === "object" && typeof value.digest === "string") {
+      var chars = typeof value.chars === "number" ? " (" + value.chars + " chars)" : "";
+      return "digest " + shortDigest(value.digest) + chars;
+    }
+    if (typeof value === "string" && DIGEST_RE.test(value)) {
+      return "digest " + shortDigest(value);
+    }
+    return bounded(value);
   }
 
   function setText(id, value) {
@@ -246,7 +269,7 @@
   function relativeTime(iso) {
     if (!iso) return "";
     var then = Date.parse(iso);
-    if (isNaN(then)) return bounded(iso);
+    if (isNaN(then)) return privacyText(iso);
     var delta = Math.round((Date.now() - then) / 1000);
     if (delta < 60) return delta + "s ago";
     if (delta < 3600) return Math.round(delta / 60) + "m ago";
@@ -280,7 +303,7 @@
     return runs.filter(function (run) {
       if (status && run.status !== status) return false;
       if (!needle) return true;
-      var hay = [run.run_id, run.status, run.task, run.failure_phase].join(" ").toLowerCase();
+      var hay = [privacyText(run.run_id), run.status, privacyText(run.task), run.failure_phase].join(" ").toLowerCase();
       return hay.indexOf(needle) !== -1;
     });
   }
@@ -337,12 +360,13 @@
       var item = document.createElement("li");
       var button = document.createElement("button");
       button.type = "button";
-      button.setAttribute("data-run-id", run.run_id || "");
-      if (run.run_id === selectedId) button.setAttribute("aria-current", "true");
-      var title = el("strong", bounded(run.run_id));
+      var runId = digestValue(run.run_id);
+      button.setAttribute("data-run-id", typeof runId === "string" ? runId : "");
+      if (runId === selectedId) button.setAttribute("aria-current", "true");
+      var title = el("strong", privacyText(run.run_id));
       var status = el("span", bounded(run.status || "unknown"));
       status.className = statusClass(run.status);
-      var task = el("span", bounded(run.task));
+      var task = el("span", privacyText(run.task));
       var meta = el("span", [relativeTime(run.started_at), durationText(run.duration_seconds), run.failure_phase ? "failed in " + bounded(run.failure_phase) : ""].filter(Boolean).join(" · "));
       meta.className = "muted";
       button.appendChild(title);
@@ -356,16 +380,18 @@
 
   function assignmentFor(worker, plan) {
     var assignments = plan && plan.assignments ? plan.assignments : [];
+    var seat = digestValue(worker);
     for (var i = 0; i < assignments.length; i++) {
-      if (assignments[i].worker === worker) return assignments[i].task || "";
+      if (digestValue(assignments[i].worker) === seat) return assignments[i].task || "";
     }
     return "";
   }
 
   function resultFor(worker, workers) {
     var results = workers && workers.results ? workers.results : [];
+    var seat = digestValue(worker);
     for (var i = 0; i < results.length; i++) {
-      if (results[i].worker === worker) return results[i].status || (results[i].ok ? "ok" : "");
+      if (digestValue(results[i].worker) === seat) return results[i].status || (results[i].ok ? "ok" : "");
     }
     return "";
   }
@@ -378,7 +404,7 @@
       var agent = agents[seat] || {};
       var row = document.createElement("tr");
       [seat, agent.model, agent.reasoning, assignmentFor(seat, detail.plan), agent.timeout_seconds, resultFor(seat, detail.workers)].forEach(function (value) {
-        row.appendChild(el("td", bounded(value)));
+        row.appendChild(el("td", privacyText(value)));
       });
       body.appendChild(row);
     });
@@ -389,7 +415,7 @@
     clearNode(list);
     var assignments = detail.plan && detail.plan.assignments ? detail.plan.assignments : [];
     assignments.forEach(function (item) {
-      var li = el("li", "stage " + (item.stage == null ? "?" : item.stage) + " → " + bounded(item.worker) + ": " + bounded(item.task));
+      var li = el("li", "stage " + (item.stage == null ? "?" : item.stage) + " → " + privacyText(item.worker) + ": " + privacyText(item.task));
       list.appendChild(li);
     });
   }
@@ -399,26 +425,26 @@
     clearNode(list);
     var run = detail.run || {};
     var steps = [];
-    if (run.started_at) steps.push("started " + bounded(run.started_at));
-    if (run.status) steps.push("status " + bounded(run.status));
+    if (run.started_at) steps.push("started " + privacyText(run.started_at));
+    if (run.status) steps.push("status " + privacyText(run.status));
     var assignments = detail.plan && detail.plan.assignments ? detail.plan.assignments : [];
     assignments.forEach(function (item) {
-      steps.push("plan stage " + (item.stage == null ? "?" : item.stage) + " " + bounded(item.worker));
+      steps.push("plan stage " + (item.stage == null ? "?" : item.stage) + " " + privacyText(item.worker));
     });
     var results = detail.workers && detail.workers.results ? detail.workers.results : [];
     results.forEach(function (item) {
-      steps.push("worker " + bounded(item.worker) + " " + bounded(item.status || (item.ok ? "ok" : "")));
+      steps.push("worker " + privacyText(item.worker) + " " + privacyText(item.status || (item.ok ? "ok" : "")));
     });
-    if (detail.synthesis && detail.synthesis.mode) steps.push("synthesis " + bounded(detail.synthesis.mode));
-    if (run.failure && run.failure.phase) steps.push("failure " + bounded(run.failure.phase));
-    if (run.finished_at) steps.push("finished " + bounded(run.finished_at));
+    if (detail.synthesis && detail.synthesis.mode) steps.push("synthesis " + privacyText(detail.synthesis.mode));
+    if (run.failure && run.failure.phase) steps.push("failure " + privacyText(run.failure.phase));
+    if (run.finished_at) steps.push("finished " + privacyText(run.finished_at));
     steps.forEach(function (step) { list.appendChild(el("li", step)); });
   }
 
   function renderFailure(detail) {
     var run = detail.run || {};
     var failure = run.failure || {};
-    var parts = [failure.phase, failure.kind, failure.detail, run.error].filter(Boolean);
+    var parts = [privacyText(failure.phase), privacyText(failure.kind), privacyText(failure.detail), privacyText(run.error)].filter(Boolean);
     setText("failure-text", parts.length ? bounded(parts.join(" — ")) : "No failure recorded.");
   }
 
@@ -431,7 +457,7 @@
       if (!commands.length) {
         var emptyRow = document.createElement("tr");
         [receipt.run_id, receipt.status, durationText(receipt.duration_seconds), "", ""].forEach(function (value) {
-          emptyRow.appendChild(el("td", bounded(value)));
+          emptyRow.appendChild(el("td", privacyText(value)));
         });
         body.appendChild(emptyRow);
         return;
@@ -439,7 +465,7 @@
       commands.forEach(function (command) {
         var row = document.createElement("tr");
         [receipt.run_id, receipt.status, durationText(receipt.duration_seconds || command.duration_seconds), command.command, command.exit_code].forEach(function (value) {
-          row.appendChild(el("td", bounded(value)));
+          row.appendChild(el("td", privacyText(value)));
         });
         body.appendChild(row);
       });
@@ -467,11 +493,11 @@
   function renderLineage(detail) {
     var lineage = detail.run && detail.run.lineage ? detail.run.lineage : {};
     var parts = [];
-    if (lineage.parent_run_id) parts.push("parent " + bounded(lineage.parent_run_id));
-    if (lineage.kind) parts.push(bounded(lineage.kind));
+    if (lineage.parent_run_id) parts.push("parent " + privacyText(lineage.parent_run_id));
+    if (lineage.kind) parts.push(privacyText(lineage.kind));
     var children = lineage.children || [];
     children.forEach(function (child) {
-      parts.push("child " + bounded(child.run_id) + (child.status ? " (" + bounded(child.status) + ")" : ""));
+      parts.push("child " + privacyText(child.run_id) + (child.status ? " (" + privacyText(child.status) + ")" : ""));
     });
     setText("lineage-text", parts.length ? parts.join(" · ") : "No recorded lineage.");
   }
@@ -479,14 +505,14 @@
   function renderDetail(detail) {
     lastDetail = detail;
     var run = detail.run || {};
-    setText("detail-title", bounded(run.run_id || selectedId || "Run"));
-    setText("detail-task", bounded(run.task));
+    setText("detail-title", privacyText(run.run_id || selectedId || "Run"));
+    setText("detail-task", privacyText(run.task));
     fillDl(document.getElementById("detail-identity"), [
-      ["Run", bounded(run.run_id)],
-      ["Status", bounded(run.status)],
-      ["Mode", bounded(run.mode)],
-      ["Started", bounded(run.started_at)],
-      ["Finished", bounded(run.finished_at)],
+      ["Run", privacyText(run.run_id)],
+      ["Status", privacyText(run.status)],
+      ["Mode", privacyText(run.mode)],
+      ["Started", privacyText(run.started_at)],
+      ["Finished", privacyText(run.finished_at)],
       ["Duration", durationText(run.duration_seconds)],
       ["Resume", run.resume_available ? "available" : "unavailable"]
     ]);
