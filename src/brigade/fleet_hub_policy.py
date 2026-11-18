@@ -311,11 +311,17 @@ def sweep_idle_sessions(
 
 
 def _sweep_best_effort(conn: sqlite3.Connection) -> None:
-    """Retention must never fail the write that triggered it."""
+    """Retention must never fail the write that triggered it, and never commit half a sweep.
+
+    A savepoint undoes every delete if any one fails, so a session is removed from all three
+    tables or from none (a partial removal could leave a receipt without its session row).
+    """
+    conn.execute("SAVEPOINT policy_session_sweep")
     try:
         sweep_idle_sessions(conn, now=_stamp(fleet_hub._utc_now()))
     except sqlite3.Error:
-        pass
+        conn.execute("ROLLBACK TO SAVEPOINT policy_session_sweep")
+    conn.execute("RELEASE SAVEPOINT policy_session_sweep")
 
 
 def _bounded(raw: Any, field: str, limit: int, *, required: bool = True, allow_newlines: bool = False) -> str | None:

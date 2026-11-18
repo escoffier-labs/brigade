@@ -165,6 +165,25 @@ def test_idle_session_is_removed_from_all_three_tables_on_the_next_save(conn):
         assert survivors == [keep["pending_key"]]
 
 
+def test_a_failed_delete_undoes_the_whole_sweep_and_the_save_still_lands(conn):
+    """A session leaves all three tables or none; a sweep error never fails the triggering write."""
+    pending = _acknowledged_session(conn, "idle")
+    _age(conn, pending["pending_key"], "idle", 30)
+    conn.execute(
+        "CREATE TRIGGER block_ack_delete BEFORE DELETE ON fleet_policy_acknowledged "
+        "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+    )
+    conn.commit()
+    before = _counts(conn)
+
+    _save(conn)
+
+    after = _counts(conn)
+    for table in ("fleet_policy_sessions", "fleet_policy_pending", "fleet_policy_acknowledged"):
+        assert after[table] == before[table], table
+    assert after["fleet_policy_revisions"] == before["fleet_policy_revisions"] + 1
+
+
 def test_idle_session_is_removed_on_the_next_session_record(conn):
     pending = _acknowledged_session(conn, "idle")
     _receipt_session(conn, "old-receipt")
