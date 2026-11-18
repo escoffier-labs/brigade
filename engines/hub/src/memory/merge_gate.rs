@@ -158,7 +158,7 @@ fn links_to(text: &str, scope: &str, id: &str) -> bool {
     let definition = |line: &str| {
         let rest = line.trim_start().strip_prefix('[')?;
         let (_, after) = rest.split_once("]:")?;
-        after.split_whitespace().next().map(&target)
+        after.split_whitespace().next().map(target)
     };
     inner("[[", "]]").iter().any(|link| target(link))
         // A markdown destination may carry a title after a space.
