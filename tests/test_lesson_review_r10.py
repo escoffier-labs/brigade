@@ -103,6 +103,49 @@ def test_failed_acknowledgement_does_not_force_review_retry(scope, monkeypatch):
     assert activity.load(scope)["drained_prompt_ids"]
 
 
+def test_reviewed_prompt_stays_deduplicated_after_eviction_while_ack_fails(scope, monkeypatch):
+    text = "Correction: keep publication atomic to prevent partial reads."
+    activity.record_event(scope, "UserPromptSubmit", {"prompt": text}, now=99)
+    spool = activity.prompt_path(scope)
+
+    def fail_ack(_target):
+        raise OSError("injected acknowledgement failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(activity, "acknowledge_prompts", fail_ack)
+        event(scope, now=100)
+        state = activity.load(scope)
+        assert any(e["kind"] == "UserPromptSubmit" and e["at"] == 99 for e in state["events"])
+        for index in range(activity.MAX_EVENTS - len(state["events"])):
+            activity.append_event(scope, state, "PreToolUse", "padding", 100 + (index + 1) / 1000)
+        activity.save(scope, state)
+        state["reviewed"] = state["sequence"]
+        state["reviewed_calls"] = state.get("calls", 0)
+        state.pop("earliest_unreviewed_at", None)
+        activity.save(scope, state)
+
+        # The next append evicts the reviewed prompt event from the bounded buffer.
+        event(scope, now=101)
+        state = activity.load(scope)
+        assert not any(e["kind"] == "UserPromptSubmit" for e in state["events"])
+        assert activity._read_prompts(spool)
+
+        # The retained prompt must not re-enter the window with its old timestamp.
+        event(scope, now=102)
+        state = activity.load(scope)
+        assert not any(e["kind"] == "UserPromptSubmit" for e in state["events"])
+        unreviewed = [e for e in state["events"] if e["id"] > state["reviewed"]]
+        assert [e["at"] for e in unreviewed] == [101, 102]
+        assert min(e["earliest_unreviewed_at"] for e in unreviewed) >= 101
+
+    # Recovery clears the queue without adding a duplicate prompt observation.
+    event(scope, now=103)
+    state = activity.load(scope)
+    assert not activity._read_prompts(spool)
+    assert not any(e["kind"] == "UserPromptSubmit" for e in state["events"])
+    assert any(e["kind"] == "PostToolUse" and e["at"] == 103 for e in state["events"])
+
+
 def test_late_prompt_drain_does_not_move_last_activity_backwards(scope):
     event(scope, now=200)
     activity.record_event(scope, "UserPromptSubmit", {"prompt": "Keep the original evidence for review."}, now=99)
