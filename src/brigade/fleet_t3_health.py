@@ -26,6 +26,8 @@ from .fleet_hub_routing import _bounded, _machine_for_node, _parse_stamp
 # sessions could have expired because it stopped reporting, its count is unknown. With a 120 s
 # timer, a node is still known after two missed cycles (age 240 s) and unknown on the third (360 s).
 STALE_AFTER_SECONDS = 300
+SESSIONS_UNKNOWN = "sessions-unknown"
+T3_HEALTH_MISSING = "t3-health-missing"
 _FIELDS = frozenset({"node_id", "ok", "memory_used"})
 
 _SCHEMA = """
@@ -151,6 +153,20 @@ def classify_nodes(
     for node_id, last_success in rows:
         (fresh if _is_fresh(last_success, moment, ttl) else stale).add(str(node_id))
     return fresh, stale
+
+
+def sessions_unknown_reason(health: tuple[set[str], set[str]] | None, node_id: str) -> str | None:
+    """Why a node's T3 session count cannot be trusted, or None when its observer is fresh.
+
+    ``health`` is the ``classify_nodes`` result. ``sessions-unknown`` covers an unreadable health read
+    and a stale or failed observer; ``t3-health-missing`` is a node that never reported. Placement and
+    the routing snapshot (so the Deck) share this one mapping.
+    """
+    if health is None or node_id in health[1]:
+        return SESSIONS_UNKNOWN
+    if node_id not in health[0]:
+        return T3_HEALTH_MISSING
+    return None
 
 
 def memory_by_node(

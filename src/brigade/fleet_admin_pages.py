@@ -504,7 +504,7 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
         if not station.enrolled:
             state = "not enrolled · offline"
         elif status == "unknown":
-            state = "telemetry unknown"
+            state = "telemetry unknown" if machine is None else status_label(station, machine, status)
         else:
             state = status_label(station, machine, status)
         load_cell = overview._load_cell(machine)

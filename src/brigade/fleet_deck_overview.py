@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 from . import fleet_action_sources, fleet_command_deck as deck
 from .fleet_action_auth import canonical
 from .fleet_deck_empty_copy import COPY
+from .fleet_t3_unknown import T3_UNKNOWN_LABELS, idle_card_text, unknown_note
 from . import fleet_deck_activity as activity, fleet_live_routing, ui_theme
 from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, StationView, Tile
 
@@ -99,8 +100,8 @@ def is_stale(station: StationView, machine: MachineState | None) -> bool:
 def station_status(station: StationView, machine: MachineState | None) -> str:
     """``offline``, ``stale``, ``limited``, ``unknown``, ``working``, or ``idle``. Drives dots and card counts.
 
-    ``unknown`` is an enrolled station with no matching hub machine: its seats
-    are neither idle nor offline, so it adds to neither the Idle nor Offline card.
+    ``unknown`` is an enrolled station with no matching hub machine, or whose T3 observer is not
+    reporting: its seats are neither idle nor offline, so it adds to neither the Idle nor Offline card.
 
     ``limited`` is a fresh machine whose state is neither ``available`` nor
     unreported (busy, draining, unavailable): it is not offline, but it takes no
@@ -116,6 +117,8 @@ def station_status(station: StationView, machine: MachineState | None) -> str:
         return "offline"
     if machine.state not in ("available", UNKNOWN) or machine.unused_reason in POLICY_LIMITS:
         return "limited"
+    if machine.unused_reason in T3_UNKNOWN_LABELS:
+        return "unknown"  # Its T3 observer is not reporting: zero sessions would be a guess, not idle.
     return "working" if station.busy or station.sessions else "idle"
 
 
@@ -142,15 +145,15 @@ def summarize(view: DeckView) -> Summary:
     total = sum(station.station.capacity for station in view.stations)
     idle = offline = UNKNOWN
     if plane is not None and "machines" in plane.present:
-        idle_slots = offline_count = 0
+        idle_slots = offline_count = unknown_count = 0
         for station in view.stations:
             machine = machine_for(view, station)
             status = station_status(station, machine)
-            if status in {"offline", "stale"}:
-                offline_count += 1
-            elif status in {"idle", "working"} and machine is not None:
+            offline_count += status in {"offline", "stale"}
+            unknown_count += status == "unknown" and machine is not None  # T3 observer not reporting: uncounted
+            if status in {"idle", "working"} and machine is not None:
                 idle_slots += free_seats(station, machine)
-        idle, offline = str(idle_slots), str(offline_count)
+        idle, offline = idle_card_text(idle_slots, unknown_count), str(offline_count)
     queued = plane.queue.eligible_count if plane is not None and "queue" in plane.present else UNKNOWN
     return Summary(busy=busy, total=total, idle=idle, offline=offline, queued=queued)
 
@@ -503,7 +506,7 @@ def machine_notes(station: StationView, machine: MachineState | None, status: st
     elif status == "offline" and station.enrolled:
         notes.append(("offline", False))
     elif status == "unknown":
-        notes.append(("no telemetry", False))
+        notes.append(unknown_note(machine.unused_reason if machine is not None else UNKNOWN))
     if machine is not None and machine.active_claims.isdigit():
         try:
             claims = int(machine.active_claims)

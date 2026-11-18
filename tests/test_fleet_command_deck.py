@@ -20,6 +20,7 @@ from brigade.fleet_deck_icons import NAV_ICONS
 
 from brigade import fleet_admin_pages as admin_pages
 from brigade import fleet_command_deck as deck
+from brigade import fleet_t3_health
 from brigade import fleet_repo_policy_page as repos_page
 from brigade import fleet_hub
 from brigade import fleet_hub_policy
@@ -1854,9 +1855,18 @@ def _policy_machines():
     }
 
 
-def _insert_telemetry(db, node_id, *, observed_at, status="available", running=None, load=0.1):
+def _insert_telemetry(db, node_id, *, observed_at, status="available", running=None, load=0.1, t3_healthy=True):
+    """Machine telemetry, plus a fresh native T3 observer row unless ``t3_healthy`` is false."""
     conn = fleet_hub.open_db(db)
     try:
+        if t3_healthy:
+            fleet_t3_health.ensure_schema(conn)
+            stamp = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "INSERT OR REPLACE INTO fleet_t3_observations (node_id, last_success_at, last_attempt_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (node_id, stamp, stamp, stamp),
+            )
         conn.execute(
             "INSERT INTO fleet_machine_telemetry (node_id, machine, observed_at, ttl_seconds, status, load, "
             "running, active_claims, usable_seats, credential_state, observed_id, updated_at) "

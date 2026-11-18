@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import fleet_hub, fleet_hub_policy, fleet_hub_routing, fleet_policy, fleet_quota
+from brigade import fleet_hub, fleet_hub_policy, fleet_hub_routing, fleet_policy, fleet_quota, fleet_t3_health
 from brigade.fleet_hub import FleetHubConflict, FleetHubError, FleetHubForbidden
 
 
@@ -203,7 +203,23 @@ def _observe(
     return fleet_hub_routing.observe_machine(conn, body, caller_node=node_id)
 
 
+def _t3_health(conn, node_id: str, success_age: float | None = 0) -> None:
+    """A native T3 observer health row with its last success ``success_age`` seconds old (None: never)."""
+    fleet_t3_health.ensure_schema(conn)
+    moment = fleet_hub_routing._now()
+    success = None if success_age is None else (moment - timedelta(seconds=success_age)).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO fleet_t3_observations (node_id, last_success_at, last_attempt_at, updated_at) "
+        "VALUES (?, ?, ?, ?)",
+        (node_id, success, moment.isoformat(), moment.isoformat()),
+    )
+    conn.commit()
+
+
 def _observe_linux_fleet(conn) -> None:
+    # Every host reports a healthy T3 observer unless a test says otherwise, so slots are known.
+    for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD, NODE_WINDOWS):
+        _t3_health(conn, node)
     _observe(conn, NODE_LINUX, load=0.0)
     _observe(conn, NODE_LINUX_2, load=0.0)
     _observe(conn, NODE_CLOUD, load=0.0)
