@@ -86,7 +86,28 @@ def register(sub: argparse._SubParsersAction) -> None:
         parser.add_argument("--output-dir", type=Path)
         parser.add_argument("--transcript", type=Path, help="Offline JSON protocol script; never live evidence.")
         parser.add_argument("--evidence-sha256", help="Reviewed evidence digest required for validation.")
+        if command == "paired-live":
+            parser.add_argument("--claude-bin", default="claude", help="Claude Code executable (default: claude).")
+            parser.add_argument(
+                "--case", dest="cases", action="append", help="Run only this case; repeat for several (default: all)."
+            )
+            parser.add_argument("--timeout", type=float, default=600.0, help="Seconds allowed per arm session.")
+            parser.add_argument(
+                "--resume-digest",
+                help=(
+                    "Reviewed evidence digest of the existing output. Without it, earlier evidence in the "
+                    "output directory is moved aside and every cell runs fresh."
+                ),
+            )
         parser.set_defaults(func=_dispatch_paired)
+    p_mcp = trial_sub.add_parser(
+        "paired-mcp", help="Exclusive MCP server for a live paired arm (spawned by the adapter)."
+    )
+    p_mcp.add_argument("--case", required=True)
+    p_mcp.add_argument("--target", type=Path, required=True, help="Fresh empty fixture target.")
+    p_mcp.add_argument("--package-dir", type=Path, required=True, help="Skill package for this arm.")
+    p_mcp.add_argument("--state-dir", type=Path, required=True, help="Directory for the authoritative trace.")
+    p_mcp.set_defaults(func=_dispatch_paired_mcp)
     p_drain = trial_sub.add_parser(
         "drain",
         help="Ask a running trial to launch no more cells; in-flight cells finish and record results.",
@@ -172,6 +193,7 @@ def _dispatch_trial(args) -> int:
 
 def _dispatch_paired(args) -> int:
     import json
+    import subprocess
     import sys
 
     from .. import model_trials
@@ -179,11 +201,17 @@ def _dispatch_paired(args) -> int:
 
     try:
         if args.trial_command == "paired-live":
-            raise ValueError(
-                "live paired trials require an exclusive tool adapter, which is not implemented. "
-                "No model was launched. Use paired-replay for offline apparatus checks."
+            if args.output_dir is None:
+                raise ValueError("live paired trials need --output-dir")
+            result = model_trials.paired_live(
+                args.manifest,
+                args.output_dir,
+                claude_bin=args.claude_bin,
+                cases=args.cases,
+                timeout=args.timeout,
+                resume_digest=args.resume_digest,
             )
-        if args.trial_command == "paired-plan":
+        elif args.trial_command == "paired-plan":
             result = model_trials.paired_plan(args.manifest)
         elif args.trial_command == "paired-validate":
             if args.output_dir is None or args.evidence_sha256 is None:
@@ -196,6 +224,12 @@ def _dispatch_paired(args) -> int:
             result = model_trials.paired_execute(args.manifest, args.output_dir, replay_session(script))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+
+def _dispatch_paired_mcp(args) -> int:
+    from ..paired_mcp import serve
+
+    return serve(args.case, args.target, args.package_dir, args.state_dir)

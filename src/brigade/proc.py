@@ -1472,7 +1472,7 @@ def run_held(
     if not held_exec_supported():
         raise OSError("launching a held executable descriptor is unavailable on this platform")
     return _launch_and_collect(
-        [sys.executable, "-I", "-S", "-c", _HELD_LAUNCHER, str(held_fd), *args],
+        held_argv(held_fd, args),
         subprocess.PIPE,
         timeout=timeout,
         env=env,
@@ -1485,6 +1485,16 @@ def run_held(
 
 
 HELD_FD_MIN = 3
+
+
+def held_argv(held_fd: int, args: Sequence[str]) -> List[str]:
+    """The command that execs the native executable open behind ``held_fd`` as ``args``.
+
+    For a caller that streams the child with its own ``Popen``: pass ``pass_fds=(held_fd,)``
+    and an environment built for the child. ``run_held`` uses the same command.
+    """
+    return [sys.executable, "-I", "-S", "-c", _HELD_LAUNCHER, str(held_fd), *args]
+
 
 # Runs as ``python -I -S -c _HELD_LAUNCHER <fd> <argv...>`` in the child of
 # :func:`run_held`, then replaces itself with the held executable. Python's

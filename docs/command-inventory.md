@@ -43,7 +43,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
 - `brigade memory`: 69 command path(s)
-- `brigade model`: 12 command path(s)
+- `brigade model`: 13 command path(s)
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade operator`: 21 command path(s)
@@ -439,6 +439,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade model scorecard`
 - `brigade model trial drain`
 - `brigade model trial paired-live`
+- `brigade model trial paired-mcp`
 - `brigade model trial paired-plan`
 - `brigade model trial paired-replay`
 - `brigade model trial paired-validate`

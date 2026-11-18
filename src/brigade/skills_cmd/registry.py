@@ -35,7 +35,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Literal, cast
+from typing import Any, Callable, Iterator, Literal, cast
 
 from .. import __version__ as BRIGADE_VERSION
 from .. import mcp_server, dirfd
@@ -1336,8 +1336,39 @@ def _unlink_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
             os.close(fd)
 
 
-def _read_regular_file_via_fd(name: str, dir_fd: int, display: Path, label: str) -> bytes:
-    """Read one regular file through an ``O_NOFOLLOW`` descriptor below *dir_fd*."""
+class TreeBudget:
+    """Optional caps for ``_collect_source_tree``, enforced before bytes are read into memory.
+
+    ``file_limit`` maps a file's relative path to its byte cap. ``max_entries`` counts every
+    directory entry seen across the walk, and ``max_total`` counts file bytes read.
+    """
+
+    def __init__(self, *, max_total: int, max_entries: int, file_limit: Callable[[tuple[str, ...]], int]) -> None:
+        self.max_total, self.max_entries, self.file_limit = max_total, max_entries, file_limit
+        self.entries = 0
+        self.total = 0
+
+    def admit_names(self, count: int, display: Path) -> None:
+        self.entries += count
+        if self.entries > self.max_entries:
+            raise SkillsStatePathError(f"skills source has too many entries (limit {self.max_entries}): {display}")
+
+    def admit_file(self, parts: tuple[str, ...], size: int, display: Path) -> int:
+        """The most bytes this file may be read as, or a refusal when its size already breaks a cap."""
+        allowed = min(self.file_limit(parts), self.max_total - self.total)
+        if size > allowed:
+            raise SkillsStatePathError(f"skills source file is larger than its cap ({allowed} bytes): {display}")
+        return allowed
+
+
+def _read_regular_file_via_fd(
+    name: str, dir_fd: int, display: Path, label: str, *, max_bytes: int | None = None
+) -> bytes:
+    """Read one regular file through an ``O_NOFOLLOW`` descriptor below *dir_fd*.
+
+    With *max_bytes* the read stops with a refusal past that many bytes, so a file that grows
+    after its size was checked still cannot be buffered whole.
+    """
     try:
         fd = dirfd.open_child_file(dir_fd, name, _FILE_READ_FLAGS)
     except OSError as exc:
@@ -1346,11 +1377,17 @@ def _read_regular_file_via_fd(name: str, dir_fd: int, display: Path, label: str)
         st = os.fstat(fd)
         if not stat_module.S_ISREG(st.st_mode) or st.st_nlink > 1:
             raise SkillsStatePathError(f"{label} file must be a plain single-link file: {display}")
+        if max_bytes is not None and st.st_size > max_bytes:
+            raise SkillsStatePathError(f"{label} file is larger than its cap ({max_bytes} bytes): {display}")
         chunks: list[bytes] = []
+        read = 0
         while True:
             chunk = os.read(fd, 1 << 16)
             if not chunk:
                 break
+            read += len(chunk)
+            if max_bytes is not None and read > max_bytes:
+                raise SkillsStatePathError(f"{label} file is larger than its cap ({max_bytes} bytes): {display}")
             chunks.append(chunk)
     finally:
         os.close(fd)
@@ -1358,7 +1395,7 @@ def _read_regular_file_via_fd(name: str, dir_fd: int, display: Path, label: str)
 
 
 def _collect_fd_tree(
-    dir_fd: int, prefix: tuple[str, ...], display: Path, label: str
+    dir_fd: int, prefix: tuple[str, ...], display: Path, label: str, *, budget: TreeBudget | None = None
 ) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
     """Walk an open directory descriptor, skipping symlinks and refusing hardlinks.
 
@@ -1371,9 +1408,13 @@ def _collect_fd_tree(
     dirs: list[tuple[str, ...]] = []
     files: dict[tuple[str, ...], bytes] = {}
     try:
-        names = sorted(dirfd.child_names(dir_fd, sys.maxsize))
+        # With a budget the listing itself stops one past the remaining entry allowance.
+        listed = dirfd.child_names(dir_fd, sys.maxsize if budget is None else budget.max_entries - budget.entries + 1)
+        names = sorted(listed)
     except OSError as exc:
         raise SkillsStatePathError(f"{label} directory could not be listed safely: {display}") from exc
+    if budget is not None:
+        budget.admit_names(len(names), display)
     for name in names:
         entry_display = display / name
         try:
@@ -1393,7 +1434,10 @@ def _collect_fd_tree(
             except OSError as exc:
                 raise SkillsStatePathError(f"{label} directory changed while being walked: {entry_display}") from exc
             try:
-                sub_dirs, sub_files = _collect_fd_tree(child_fd, parts, entry_display, label)
+                if budget is None:
+                    sub_dirs, sub_files = _collect_fd_tree(child_fd, parts, entry_display, label)
+                else:
+                    sub_dirs, sub_files = _collect_fd_tree(child_fd, parts, entry_display, label, budget=budget)
             finally:
                 os.close(child_fd)
             dirs.extend(sub_dirs)
@@ -1401,12 +1445,20 @@ def _collect_fd_tree(
         elif stat_module.S_ISREG(mode):
             if st.st_nlink > 1:
                 raise SkillsStatePathError(f"{label} file must not be a hardlink: {entry_display}")
-            files[(*prefix, name)] = _read_regular_file_via_fd(name, dir_fd, entry_display, label)
+            if budget is None:
+                files[(*prefix, name)] = _read_regular_file_via_fd(name, dir_fd, entry_display, label)
+            else:
+                allowed = budget.admit_file((*prefix, name), st.st_size, entry_display)
+                data = _read_regular_file_via_fd(name, dir_fd, entry_display, label, max_bytes=allowed)
+                budget.total += len(data)
+                files[(*prefix, name)] = data
         # every other entry kind is skipped, matching the previous is_file() filter
     return dirs, files
 
 
-def _collect_source_tree(source_dir: Path) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
+def _collect_source_tree(
+    source_dir: Path, *, budget: TreeBudget | None = None
+) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
     """Collect plain subdirectories and file contents from *source_dir*, skipping symlinks.
 
     The tree is walked through held directory descriptors (see
@@ -1422,7 +1474,9 @@ def _collect_source_tree(source_dir: Path) -> tuple[list[tuple[str, ...]], dict[
     except OSError as exc:
         raise SkillsStatePathError(f"skills source must be a plain readable directory: {source_dir}") from exc
     try:
-        return _collect_fd_tree(root_fd, (), source_dir, "skills source")
+        if budget is None:
+            return _collect_fd_tree(root_fd, (), source_dir, "skills source")
+        return _collect_fd_tree(root_fd, (), source_dir, "skills source", budget=budget)
     finally:
         os.close(root_fd)
 
