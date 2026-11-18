@@ -11,11 +11,13 @@ id and schema, states ``model_executed: true`` and is never promotion eligible.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,7 +27,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Mapping, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import unquote
 
 from . import dirfd, proc
 from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS, open_executable
@@ -60,9 +62,9 @@ ANCESTOR_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
 VERSION_TIMEOUT = 30.0
 VERSION_MAX_BYTES = 4096
 EXIT_GRACE = 10.0
-KILL_TREE_TIMEOUT = 10.0
-WINDOWS_REMOVE_ATTEMPTS = 5
-WINDOWS_REMOVE_PAUSE = 0.2
+# Windows has no tree kill here, so give a grandchild's handles up to about 7 s to be released.
+WINDOWS_REMOVE_ATTEMPTS = 8
+WINDOWS_REMOVE_PAUSE = 0.25
 REDACTED = b"[redacted]"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Every read of child or server output is bounded before it is buffered. Exceeding a cap fails the cell.
@@ -147,21 +149,16 @@ def _token_forms(token: str) -> list[bytes]:
 
 
 def refuse_proxy_credentials(environ: Mapping[str, str]) -> None:
-    """Refuse a live run when a passed-through proxy URL carries userinfo.
+    """Refuse a live run when a passed-through proxy value could carry userinfo.
 
     ``redact`` only removes the OAuth token, so a ``user:password@`` proxy URL could land in saved
-    stream or stderr bytes. The message names the variable, never the value.
+    stream or stderr bytes. Node normalizes malformed forms such as ``http:/user:pw@host`` into an
+    authenticated URL that ``urlsplit`` sees no userinfo in, so any ``@``, raw or percent-decoded,
+    is refused. The message names the variable, never the value.
     """
     for key in PROXY_ENV:
         value = environ.get(key)
-        if not value:
-            continue
-        try:
-            parts = urlsplit(value if "//" in value else f"//{value}")
-            userinfo = parts.username is not None or parts.password is not None
-        except ValueError:
-            userinfo = True  # A proxy value that does not parse is not passed to a child either.
-        if userinfo:
+        if value and ("@" in value or "@" in unquote(value)):
             raise ValueError(
                 f"{key} carries proxy credentials (user:password in the URL). Live paired trials save the "
                 "child's output, so unset it or use a proxy that needs no credentials. No model was launched."
@@ -526,58 +523,63 @@ class _Observer:
         return False
 
 
-def _kill_tree_windows(pid: int) -> None:
-    """End a Windows process and every descendant. ``Popen.kill`` ends only the one process.
-
-    The CLI owns the MCP server as a child. Killing the CLI alone leaves the server running with the
-    arm directory open, and the directory then cannot be removed (WinError 32).
-    """
-    taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
-    try:
-        subprocess.run(
-            [str(taskkill), "/PID", str(pid), "/T", "/F"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=KILL_TREE_TIMEOUT,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-
 def _kill(proc: subprocess.Popen[bytes]) -> None:
+    """Kill an arm's process group, never one that may have been reaped.
+
+    An unreaped child, even a zombie, keeps its pid and group reserved. After ``wait`` or ``poll`` has
+    reaped it the number can belong to another process, so nothing is sent. On Windows only the CLI is
+    ended; its MCP server child exits when the CLI's stdin pipe closes and ``remove_work_dir`` retries.
+    """
+    if proc.returncode is not None:
+        return
     try:
         if os.name == "posix":
             os.killpg(proc.pid, signal.SIGKILL)  # Also reaps the MCP server child.
         else:
-            if proc.poll() is None:  # A reaped pid may belong to something else by now.
-                _kill_tree_windows(proc.pid)
             proc.kill()
-    except (ProcessLookupError, PermissionError, OSError):
+    except OSError:
         pass
 
 
-def _make_writable_and_retry(func: Any, target: str, _exc: object = None) -> None:
-    """A read-only file (git objects on Windows) blocks deletion: make it writable and try once more."""
-    os.chmod(target, 0o700)
+def _make_writable_and_retry(root: Path, func: Any, target: str, exc: BaseException | None = None) -> None:
+    """A read-only file (git objects on Windows) blocks deletion: make it writable and try once more.
+
+    A link, a reparse point, or anything that resolves outside the arm directory is never chmodded:
+    the mode change would land on whatever it points at. The original error is raised instead.
+    """
+    try:
+        info = os.lstat(target)
+        reparse = getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        unsafe = (
+            stat.S_ISLNK(info.st_mode)
+            or bool(reparse)
+            or not Path(os.path.realpath(target)).is_relative_to(os.path.realpath(root))
+        )
+    except OSError:
+        unsafe = True
+    if unsafe:
+        if exc is not None:
+            raise exc
+        raise PermissionError(f"refusing to change the mode of {target}")
+    os.chmod(target, 0o700, follow_symlinks=os.chmod not in os.supports_follow_symlinks)
     func(target)
 
 
 def remove_work_dir(path: Path, *, windows: bool = os.name == "nt") -> None:
-    """Remove an arm directory. On Windows a killed grandchild releases its handles a moment later.
+    """Remove an arm directory. On Windows a killed arm releases its handles a moment later.
 
-    ``taskkill /T`` terminates the tree, but there is no handle on a grandchild to wait for, so the
-    release of its open files cannot be awaited. Removal is retried a few times, briefly, and only
-    on Windows. Any other failure, and a failure after the last attempt, is raised.
+    The CLI is killed, but there is no handle on its MCP server child to wait for, so the release of
+    the child's open files cannot be awaited. Removal is retried a few times, briefly, and only on
+    Windows. Any other failure, and a failure after the last attempt, is raised.
     """
     attempts = WINDOWS_REMOVE_ATTEMPTS if windows else 1
+    handler = functools.partial(_make_writable_and_retry, path)
     for attempt in range(1, attempts + 1):
         try:
             if sys.version_info >= (3, 12):
-                shutil.rmtree(path, onexc=_make_writable_and_retry)
+                shutil.rmtree(path, onexc=handler)
             else:
-                shutil.rmtree(path, onerror=lambda func, target, _info: _make_writable_and_retry(func, target))
+                shutil.rmtree(path, onerror=lambda func, target, info: handler(func, target, info[1]))
             return
         except FileNotFoundError:
             return
@@ -650,16 +652,21 @@ def _run_process(
         **extra,
     )
     timed_out = threading.Event()
+    # Every kill, and every reap, holds this lock: a signal is never sent for a pid that was just reaped.
     expiry = threading.Lock()
+
+    def kill() -> None:
+        with expiry:
+            _kill(child)
 
     def expire() -> None:
         with expiry:
-            # A finished cell must not flip to a timeout or signal a pid group that was recycled.
+            # A finished cell must not flip to a timeout. poll() reaps, so it runs under the lock.
             if child.poll() is None:
                 timed_out.set()
                 _kill(child)
 
-    drainer = threading.Thread(target=capture.drain, args=(child.stderr, lambda: _kill(child)), daemon=True)
+    drainer = threading.Thread(target=capture.drain, args=(child.stderr, kill), daemon=True)
     drainer.start()
     timer = threading.Timer(timeout, expire)
     timer.daemon = True
@@ -695,19 +702,19 @@ def _run_process(
             if observer.feed(event):
                 break
         if observer.failure is not None:
-            _kill(child)
+            kill()
         timer.cancel()
-        with expiry:  # An expiry already running finishes before we reap.
-            pass
         try:
-            code = child.wait(timeout=EXIT_GRACE)
+            with expiry:  # An expiry already running finishes before we reap.
+                code = child.wait(timeout=EXIT_GRACE)
         except subprocess.TimeoutExpired:  # Closed stdout but kept running.
             timed_out.set()
-            _kill(child)
-            code = child.wait()
+            with expiry:
+                _kill(child)
+                code = child.wait()
     finally:
         timer.cancel()
-        _kill(child)
+        kill()
         drainer.join(timeout=EXIT_GRACE)
         for pipe in (child.stdout, child.stderr):
             if pipe is not None:
@@ -891,10 +898,14 @@ def _probe_version(executable: ClaudeExecutable, environ: Mapping[str, str]) -> 
         **extra,
     )
     expired = threading.Event()
+    # Kills and reaps hold this lock, so the timer never signals a pid that wait() has just reaped.
+    lock = threading.Lock()
 
     def expire() -> None:
-        expired.set()
-        _kill(child)
+        with lock:
+            if child.poll() is None:
+                expired.set()
+                _kill(child)
 
     timer = threading.Timer(VERSION_TIMEOUT, expire)
     timer.daemon = True
@@ -903,15 +914,25 @@ def _probe_version(executable: ClaudeExecutable, environ: Mapping[str, str]) -> 
         # One byte past the cap proves overflow without buffering more.
         data = child.stdout.read(VERSION_MAX_BYTES + 1) if child.stdout else b""
         if len(data) > VERSION_MAX_BYTES:
-            _kill(child)
+            with lock:
+                _kill(child)
             raise ValueError("the Claude Code version output is too large")
-        returncode = child.wait()
+        timer.cancel()
+        try:
+            with lock:  # An expiry already running finishes before we reap.
+                returncode = child.wait(timeout=EXIT_GRACE)
+        except subprocess.TimeoutExpired:  # Closed stdout but kept running.
+            expired.set()
+            with lock:
+                _kill(child)
+                returncode = child.wait()
     finally:
         timer.cancel()
-        _kill(child)
+        with lock:
+            _kill(child)  # A no-op once reaped.
+            child.wait()
         if child.stdout:
             child.stdout.close()
-        child.wait()
     if expired.is_set():
         raise subprocess.TimeoutExpired(executable.argv0, VERSION_TIMEOUT)
     parts = data.decode("utf-8", errors="replace").split()

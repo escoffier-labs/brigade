@@ -966,6 +966,21 @@ def test_a_username_only_proxy_url_is_refused_and_a_plain_one_is_allowed():
         model_trial_claude.refuse_proxy_credentials({"http_proxy": "http://user@proxy.example:3128"})
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http:/user:pw@proxy.example:3128",  # Node reads these as an authenticated URL, urlsplit does not.
+        "http:////user:pw@proxy.example:3128",
+        "http://user%40x:pw@proxy.example:3128",
+        "http:/user%3Apw%40proxy.example:3128",
+    ],
+)
+def test_malformed_proxy_urls_that_node_reads_as_authenticated_are_refused(value):
+    with pytest.raises(ValueError, match="HTTPS_PROXY") as caught:
+        model_trial_claude.refuse_proxy_credentials({"HTTPS_PROXY": value})
+    assert "pw" not in str(caught.value).replace("password", "")
+
+
 def test_the_mcp_server_config_blanks_every_proxy_variable(tmp_path):
     env = model_trial_claude.mcp_config("passing-verify", tmp_path, tmp_path, tmp_path)["mcpServers"][
         model_trial_claude.SERVER_NAME
@@ -1020,3 +1035,89 @@ def test_remove_work_dir_retries_only_on_windows_and_only_a_few_times(tmp_path, 
     with pytest.raises(PermissionError):
         model_trial_claude.remove_work_dir(arm, windows=True)
     assert len(calls) == model_trial_claude.WINDOWS_REMOVE_ATTEMPTS
+
+
+def test_kill_sends_nothing_for_a_reaped_child(monkeypatch):
+    sent = []
+    monkeypatch.setattr(model_trial_claude.os, "killpg", lambda *args: sent.append(args))
+
+    class Reaped:
+        pid = 4242
+        returncode = 0
+
+        def kill(self):
+            sent.append("kill")
+
+    model_trial_claude._kill(Reaped())  # type: ignore[arg-type]
+    assert sent == []
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    model_trial_claude._kill(child)
+    assert sent == []
+
+
+def test_kill_signals_an_unreaped_child_group_on_posix_and_the_child_on_windows(monkeypatch):
+    sent = []
+    monkeypatch.setattr(model_trial_claude.os, "killpg", lambda *args: sent.append(("killpg", *args)))
+
+    class Live:
+        pid = 4242
+        returncode = None
+
+        def kill(self):
+            sent.append(("kill",))
+
+    model_trial_claude._kill(Live())  # type: ignore[arg-type]
+    assert sent == [("killpg", 4242, model_trial_claude.signal.SIGKILL)] if os.name == "posix" else [("kill",)]
+
+
+def test_the_version_probe_timer_firing_after_completion_does_not_kill(monkeypatch, tmp_path):
+    callbacks, kills = [], []
+
+    class StubTimer:
+        daemon = False
+
+        def __init__(self, interval, function):
+            callbacks.append(function)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(model_trial_claude.threading, "Timer", StubTimer)
+    monkeypatch.setattr(model_trial_claude, "_kill", lambda proc: kills.append(proc.pid))
+    exe = make_fake(tmp_path / "late", version="2.1.999")
+    with bind_executable(str(exe), LAUNCH) as bound:
+        assert model_trial_claude._probe_version(bound, ENVIRON) == "2.1.999"
+        before = list(kills)
+        callbacks[0]()  # The timer fires after the child was reaped.
+    assert kills == before
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX permission bits and unprivileged symlinks")
+def test_cleanup_never_chmods_through_a_link(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    outside.chmod(0o444)
+    arm = tmp_path / "arm"
+    arm.mkdir()
+    link = arm / "link"
+    link.symlink_to(outside)
+
+    def refuse(func, target, **kwargs):
+        raise PermissionError(13, "denied")
+
+    handler_error = PermissionError(13, "denied")
+    with pytest.raises(PermissionError) as caught:
+        model_trial_claude._make_writable_and_retry(arm, refuse, str(link), handler_error)
+    assert caught.value is handler_error
+    assert outside.stat().st_mode & 0o777 == 0o444
+    # A real file inside the directory is still made writable and retried.
+    inside = arm / "ro.txt"
+    inside.write_text("x")
+    inside.chmod(0o400)
+    retried = []
+    model_trial_claude._make_writable_and_retry(arm, retried.append, str(inside), PermissionError())
+    assert retried == [str(inside)] and inside.stat().st_mode & 0o777 == 0o700
