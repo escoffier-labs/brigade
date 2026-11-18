@@ -3,7 +3,7 @@ use super::{index::Snapshot, text};
 use serde_json::{Value as Json, json};
 use std::collections::{HashMap, HashSet};
 
-pub const SCORER_VERSION: &str = "bm25-1.2-0.75-rrf60-lineage-source-v4";
+pub const SCORER_VERSION: &str = "bm25-1.2-0.75-rrf60-lineage-source-v6";
 
 #[derive(Clone, Copy, Debug)]
 pub struct Weights {
@@ -56,6 +56,11 @@ pub struct Links {
     /// The direction names the successor. Aliases name predecessors.
     pub(super) successor: Option<String>,
     pub(super) predecessors: Vec<String>,
+    /// Every id a lineage key names, with that key. Each key's edge is dated
+    /// on its own before the index forms it, because a name can outlive the
+    /// card it named and a card may later take the id. `superseded_by` keeps
+    /// only the successor that [`Links::successor`] holds.
+    pub(super) named: Vec<(&'static str, String)>,
 }
 /// Every front-matter key [`Links::parse`] reads. It is the only list, and
 /// the lineage prefilter in `proposal_tiers` imports it.
@@ -66,10 +71,18 @@ impl Links {
     pub fn parse(body: &str, scope: &str) -> Self {
         let mut out = Self::default();
         for (key, id) in front_targets(body, scope, |key| LINEAGE_KEYS.contains(&key)) {
-            match key.as_str() {
-                "superseded_by" => out.successor = Some(id),
-                "supersedes" | "merged_from" | "aliases" => out.predecessors.push(id),
-                _ => (),
+            let Some(key) = LINEAGE_KEYS.iter().copied().find(|k| *k == key) else {
+                continue;
+            };
+            if key == "superseded_by" {
+                // The last successor wins, so only it is named.
+                out.named.retain(|(k, _)| *k != key);
+                out.successor = Some(id.clone());
+            } else {
+                out.predecessors.push(id.clone());
+            }
+            if !out.named.iter().any(|(k, n)| *k == key && *n == id) {
+                out.named.push((key, id));
             }
         }
         out

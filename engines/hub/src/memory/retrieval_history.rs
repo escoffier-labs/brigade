@@ -365,6 +365,11 @@ pub fn veto<T: ReadTx + ?Sized>(
             a.content_hash = string(c, "after_hash").into();
         }
     }
+    // These snapshots are undated on purpose. The proposal's `after` card is not
+    // in the store, so its alias dates cannot be read, and an undated builder
+    // forms every alias edge. The veto can therefore collapse a reused id that
+    // the live index leaves visible, and judge a proposal against lineage the
+    // live index no longer has. That is tracked separately (#2726).
     let b = super::index::Builder::from_cards(before, 0).snapshot();
     let a = super::index::Builder::from_cards(after, 0).snapshot();
     for q in judged["queries"].as_array().into_iter().flatten() {

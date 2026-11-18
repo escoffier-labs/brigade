@@ -42,7 +42,7 @@ const QUERIES: [&str; 13] = [
 
 fn append(text: &str, refs: &[&str]) -> String {
     let op = json!({"type":"append_evidence","evidence_ids":refs});
-    proposal_metadata::apply(text, &op, None).unwrap()
+    proposal_metadata::apply(text, &op, None, &Default::default()).unwrap()
 }
 fn stuffed() -> Vec<&'static str> {
     vec![

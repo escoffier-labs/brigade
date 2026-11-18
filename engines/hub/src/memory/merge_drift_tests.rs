@@ -12,8 +12,8 @@ use super::{
 use serde_json::{Value as Json, json};
 use std::collections::BTreeSet;
 
-const KEEP: &str = "dup-keeper";
-const GONE: &str = "dup-retired";
+pub(super) const KEEP: &str = "dup-keeper";
+pub(super) const GONE: &str = "dup-retired";
 const MIXED: &str = "retrieval_eval_merge_mixed_ops";
 const SHAPE: &str = "retrieval_eval_merge_shape";
 const TRUST: &str = "retrieval_eval_merge_trust_mismatch";
@@ -31,17 +31,17 @@ const WRITER: &str = "retrieval_eval_writer_changed";
 const CROSS_WRITER: &str = "retrieval_eval_merge_cross_writer";
 const PROJECTION: &str = "retrieval_eval_projection_changed";
 
-fn dup(front: &str, anchor: &str) -> String {
+pub(super) fn dup(front: &str, anchor: &str) -> String {
     format!("{front}Shared gate claim. ^c-{anchor}\n")
 }
 const ALPHA: &str = "---\ntitle: Alpha\n---\n";
 /// Two untitled exact duplicates and one unrelated card.
-async fn pair() -> Real {
+pub(super) async fn pair() -> Real {
     let (keeper, retired) = (dup("", "aaaaaa"), dup("", "bbbbbb"));
     let other = "Another topic entirely. ^c-cccccc\n";
     Real::untrusted(&[(KEEP, &keeper), (GONE, &retired), ("other-card", other)]).await
 }
-async fn merge_op(r: &Real, keep: &str, gone: &str) -> Json {
+pub(super) async fn merge_op(r: &Real, keep: &str, gone: &str) -> Json {
     let (k, o) = (
         card(&r.h, "fleet", keep).await,
         card(&r.h, "fleet", gone).await,
@@ -62,18 +62,18 @@ async fn submit_ops(r: &Real, ops: Vec<Json>, tier: u8) -> Reply {
     opened
 }
 /// One proposal that merges each of `retired` into `keeper`.
-async fn open_ops(r: &Real, keeper: &str, retired: &[&str]) -> Reply {
+pub(super) async fn open_ops(r: &Real, keeper: &str, retired: &[&str]) -> Reply {
     let mut ops = Vec::new();
     for id in retired {
         ops.push(merge_op(r, keeper, id).await);
     }
     submit_ops(r, ops, 0).await
 }
-async fn open(r: &Real) -> Reply {
+pub(super) async fn open(r: &Real) -> Reply {
     open_ops(r, KEEP, &[GONE]).await
 }
 /// The proposal with one card's after text rewritten.
-fn edit(body: &Json, id: &str, f: impl Fn(&str) -> String) -> Json {
+pub(super) fn edit(body: &Json, id: &str, f: impl Fn(&str) -> String) -> Json {
     let mut out = body.clone();
     let card = out["cards"]
         .as_array_mut()
@@ -100,7 +100,7 @@ fn retext(body: &Json, id: &str, text: &str) -> Json {
     card["after_text"] = json!(text);
     out
 }
-fn held(r: &Real, body: &Json) -> Option<&'static str> {
+pub(super) fn held(r: &Real, body: &Json) -> Option<&'static str> {
     r.hold(body, "admin", None)
 }
 fn sql(r: &Real, statement: &str, id: &str) {
@@ -116,7 +116,7 @@ async fn link(r: &Real, text: &str) {
 }
 
 /// Two trusted (imported) exact duplicates and one unrelated card.
-async fn trusted() -> Real {
+pub(super) async fn trusted() -> Real {
     let other = "Another topic entirely. ^c-cccccc\n";
     let r = Real::new(&[
         (KEEP, &dup("", "aaaaaa")),
@@ -127,7 +127,7 @@ async fn trusted() -> Real {
     assert_eq!(card(&r.h, "fleet", KEEP).await["trust"], "imported");
     r
 }
-async fn auto(r: &Real, opened: &Reply) -> Reply {
+pub(super) async fn auto(r: &Real, opened: &Reply) -> Reply {
     let request = attestation_tests::auto_request(&r.h, &opened.body["proposal_id"]).await;
     r.h.call(ADMIN_TOKEN, request).await
 }
@@ -1134,7 +1134,7 @@ async fn a_newer_copy_cannot_retire_the_original() {
 }
 
 /// Retire a card as the admin and read nothing back but the outcome.
-async fn retire(r: &Real, id: &str) {
+pub(super) async fn retire(r: &Real, id: &str) {
     let rev: i64 =
         r.db.query_row(
             "SELECT revision FROM memory_cards WHERE card_id=?1",
@@ -1153,7 +1153,7 @@ async fn retire(r: &Real, id: &str) {
     assert_eq!(reply.status, 200, "{reply:?}");
 }
 /// Write a card again over its current head, retired or live.
-async fn rewrite(r: &Real, id: &str, text: &str) {
+pub(super) async fn rewrite(r: &Real, id: &str, text: &str) {
     let rev: i64 =
         r.db.query_row(
             "SELECT revision FROM memory_cards WHERE card_id=?1",
@@ -1663,6 +1663,132 @@ async fn the_keepers_alias_makes_no_edge_to_a_card_that_reuses_the_retired_id() 
     assert_eq!(edges("reviewed"), (true, true));
 }
 
+/// The index a hub restart would build from the store once every card is
+/// trusted, with the alias edges dated from the real revision history.
+pub(super) fn trusted_index(r: &Real) -> std::sync::Arc<index::Snapshot> {
+    r.db.execute("UPDATE memory_cards SET trust='reviewed'", [])
+        .unwrap();
+    index::load(&r.db).unwrap().snapshot()
+}
+/// The card ids a search for `query` shows once lineage has collapsed its hits.
+pub(super) fn visible(snap: &index::Snapshot, query: &str) -> Vec<String> {
+    let allowed = vec![true; snap.scopes().len()];
+    let hits = snap.top(snap.score(&allowed, &text::tokenize(query)), index::TOP);
+    let mut ids: Vec<_> = ranking::collapse(snap, &allowed, hits)
+        .hits
+        .iter()
+        .map(|(n, _)| snap.doc(*n).card_id.to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+/// Puts `text` over the retired card `id`, as a new incarnation of the id.
+pub(super) async fn reuse(r: &Real, id: &str, text: &str) {
+    let revision = card(&r.h, "fleet", id).await["revision"].as_i64();
+    let put = r.h.put(ADMIN_TOKEN, "fleet", id, revision, text).await;
+    assert_eq!(put.status, 201, "{put:?}");
+}
+
+/// The same reuse as above, read from the store. The keeper's alias was written
+/// before the new card took the id, so the index forms no edge and collapse
+/// leaves both cards in the results (#2671).
+#[tokio::test]
+async fn a_new_card_under_the_merged_id_is_not_linked_or_collapsed() {
+    let r = pair().await;
+    apply_merge(&r).await;
+    reuse(&r, GONE, "A new card that reuses the retired id.\n").await;
+    let snap = trusted_index(&r);
+    assert!(!snap.in_lineage("fleet", KEEP));
+    assert!(!snap.in_lineage("fleet", GONE));
+    assert_eq!(visible(&snap, "claim reuses"), [KEEP, GONE]);
+}
+
+/// The hub replays later writes onto a built index. A card that takes the
+/// merged id after that build is dated on the replay, not only on a restart.
+#[tokio::test]
+async fn a_replayed_reuse_of_the_merged_id_forms_no_edge() {
+    let r = pair().await;
+    apply_merge(&r).await;
+    r.db.execute("UPDATE memory_cards SET trust='reviewed'", [])
+        .unwrap();
+    let mut builder = index::load(&r.db).unwrap();
+    assert!(!builder.snapshot().in_lineage("fleet", GONE), "retired");
+    reuse(&r, GONE, "A new card that reuses the retired id.\n").await;
+    r.db.execute("UPDATE memory_cards SET trust='reviewed'", [])
+        .unwrap();
+    let reused = live_cards(&r)
+        .await
+        .into_iter()
+        .find(|c| c.card_id == GONE)
+        .unwrap();
+    let seq = reused.revision;
+    builder
+        .apply_dated(vec![index::Change::Live(reused)], seq, &r.db)
+        .unwrap();
+    let snap = builder.snapshot();
+    assert!(!snap.in_lineage("fleet", KEEP));
+    assert!(!snap.in_lineage("fleet", GONE));
+}
+
+/// Control: an alias written after its target existed is a real predecessor,
+/// and collapse shows only the keeper.
+#[tokio::test]
+async fn an_alias_written_after_its_target_existed_still_links() {
+    let r = Real::untrusted(&[("old-name", "Old topic claim. ^c-111111\n")]).await;
+    // The scoped spelling is the one a merge writes.
+    let keeper = "---\naliases: [\"fleet/old-name\"]\n---\nCurrent topic claim. ^c-222222\n";
+    assert_eq!(
+        r.h.put(ADMIN_TOKEN, "fleet", "new-name", None, keeper)
+            .await
+            .status,
+        201
+    );
+    let snap = trusted_index(&r);
+    assert!(snap.in_lineage("fleet", "new-name"));
+    assert!(snap.in_lineage("fleet", "old-name"));
+    assert_eq!(visible(&snap, "claim"), ["new-name"]);
+}
+
+/// Reviving the retired card with its own old text is still a new incarnation
+/// that postdates the alias.
+#[tokio::test]
+async fn reviving_the_merged_id_forms_no_edge() {
+    let r = pair().await;
+    apply_merge(&r).await;
+    reuse(&r, GONE, &dup("", "bbbbbb")).await;
+    assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live");
+    let snap = trusted_index(&r);
+    assert!(!snap.in_lineage("fleet", KEEP));
+    assert!(!snap.in_lineage("fleet", GONE));
+    assert_eq!(visible(&snap, "claim"), [KEEP, GONE]);
+}
+
+/// An alias may name an id nothing holds yet. A card created under it later is
+/// not that alias's predecessor.
+#[tokio::test]
+async fn a_card_created_after_an_alias_to_an_unused_id_is_not_linked() {
+    let r = Real::untrusted(&[(
+        "keeper",
+        "---\naliases: [\"later\"]\n---\nKeeper claim. ^c-333333\n",
+    )])
+    .await;
+    assert_eq!(
+        r.h.put(
+            ADMIN_TOKEN,
+            "fleet",
+            "later",
+            None,
+            "Later claim. ^c-444444\n"
+        )
+        .await
+        .status,
+        201
+    );
+    let snap = trusted_index(&r);
+    assert!(!snap.in_lineage("fleet", "keeper"));
+    assert_eq!(visible(&snap, "claim"), ["keeper", "later"]);
+}
+
 const QUERIES: [&str; 14] = [
     "gate",
     "claim",
@@ -1691,7 +1817,7 @@ const RANKED: [&str; 8] = [
     "tight-card",
 ];
 /// Every live card among [`RANKED`], as the index would read it.
-async fn live_cards(r: &Real) -> Vec<Card> {
+pub(super) async fn live_cards(r: &Real) -> Vec<Card> {
     let mut cards = Vec::new();
     for id in RANKED {
         let c = card(&r.h, "fleet", id).await;
@@ -1723,7 +1849,7 @@ async fn rankings(r: &Real, queries: &[&str]) -> Vec<Vec<String>> {
     };
     queries.iter().map(|q| ranked(q)).collect()
 }
-async fn apply_merge(r: &Real) {
+pub(super) async fn apply_merge(r: &Real) {
     let opened = open(r).await;
     let applied = decide(&r.h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
     assert_eq!(applied.body["state"], "applied", "{applied:?}");

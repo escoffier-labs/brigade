@@ -35,7 +35,7 @@ use super::text::{self, Fields};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
@@ -72,6 +72,11 @@ pub(super) fn backoff(failures: u32) -> Duration {
         .min(RETRY_MAX)
 }
 const CHUNK: usize = 1024;
+/// History reads one replayed publication may spend dating lineage names. Work
+/// over the budget stays pending, forms no edge and resumes on the next
+/// publication, so one card becoming live never reads every owner at once. A
+/// full build dates to completion, because it already reads the whole corpus.
+pub const DATING_BUDGET: usize = 256;
 /// Events one tail query reads, the same window the `log` reader scans.
 const WINDOW: i64 = 5000;
 
@@ -536,6 +541,24 @@ pub struct Builder {
     heads: HashMap<(u32, Arc<str>), u32>,
     scope_ids: HashMap<String, u32>,
     lineage_sources: HashSet<u32>,
+    /// The incarnation start of each document a lineage key names, and the
+    /// dates each trusted owner's names were written, per key. See
+    /// `alias_dating`. A document is immutable, so an entry holds until the
+    /// document is dropped.
+    born: HashMap<u32, Option<(i64, bool)>>,
+    named_since: HashMap<u32, super::alias_dating::Since>,
+    /// The owners that name an id, by scope and id. A card becoming live under
+    /// an id reaches exactly the owners that name it, with no scan.
+    named_by: HashMap<(u32, Arc<str>), HashSet<u32>>,
+    /// The owners whose dates are not all read. A dated builder forms no edge
+    /// for an owner until it leaves this set.
+    pending: BTreeSet<u32>,
+    /// Whether a build or replay has read the store. Once dated, a builder
+    /// stays dated: only a dated builder holds dates, so only an undated one
+    /// lets a name link.
+    dated: bool,
+    /// [`DATING_BUDGET`], which tests lower to reach the limit.
+    pub(super) budget: usize,
     /// [`MERGE_FAN_IN`]; tests raise it to reach the segment cap.
     pub(super) fan_in: usize,
 }
@@ -546,18 +569,46 @@ impl Builder {
             heads: HashMap::new(),
             scope_ids: HashMap::new(),
             lineage_sources: HashSet::new(),
+            born: HashMap::new(),
+            named_since: HashMap::new(),
+            named_by: HashMap::new(),
+            pending: BTreeSet::new(),
+            dated: false,
+            budget: DATING_BUDGET,
             fan_in: MERGE_FAN_IN,
         }
     }
     /// A new main segment over `cards`, covering the log up to `watermark`.
+    ///
+    /// No store is read, so no lineage edge is dated and each one forms. The hub
+    /// builds with [`Builder::from_cards_dated`].
     pub fn from_cards(cards: impl IntoIterator<Item = Card>, watermark: i64) -> Self {
+        Self::build(cards, watermark, None).expect("an undated build reads no store")
+    }
+    /// [`Builder::from_cards`], with each lineage edge dated from `db`.
+    pub fn from_cards_dated(
+        cards: impl IntoIterator<Item = Card>,
+        watermark: i64,
+        db: &Connection,
+    ) -> rusqlite::Result<Self> {
+        Self::build(cards, watermark, Some(db))
+    }
+    fn build(
+        cards: impl IntoIterator<Item = Card>,
+        watermark: i64,
+        db: Option<&Connection>,
+    ) -> rusqlite::Result<Self> {
         let mut b = Self::empty();
         let (postings, added) = b.add(cards);
         b.snap.segments = vec![Arc::new(postings.finish())];
         b.snap.main_docs = added;
         b.snap.indexed_seq = watermark;
+        if let Some(db) = db {
+            b.dated = true;
+            b.date_lineage(db, usize::MAX)?;
+        }
         b.resolve_lineage();
-        b
+        Ok(b)
     }
     fn scope_id(&mut self, scope: &str) -> u32 {
         if let Some(id) = self.scope_ids.get(scope) {
@@ -573,7 +624,20 @@ impl Builder {
         if let Some(old) = self.heads.remove(&(scope, Arc::from(card_id))) {
             let length = self.snap.docs.get(old).length as u64;
             self.snap.docs.kill(old);
-            self.lineage_sources.remove(&old);
+            if self.lineage_sources.remove(&old) {
+                for (_, id) in &self.snap.doc(old).links.named {
+                    let name = (scope, Arc::from(id.as_str()));
+                    if let Some(owners) = self.named_by.get_mut(&name) {
+                        owners.remove(&old);
+                        if owners.is_empty() {
+                            self.named_by.remove(&name);
+                        }
+                    }
+                }
+            }
+            self.pending.remove(&old);
+            self.born.remove(&old);
+            self.named_since.remove(&old);
             let s = &mut Arc::make_mut(&mut self.snap.stats)[scope as usize];
             s.docs -= 1;
             s.tokens -= length;
@@ -613,6 +677,18 @@ impl Builder {
                 && (d.links.successor.is_some() || !d.links.predecessors.is_empty())
             {
                 self.lineage_sources.insert(doc);
+                for (_, id) in &d.links.named {
+                    self.named_by
+                        .entry((scope, Arc::from(id.as_str())))
+                        .or_default()
+                        .insert(doc);
+                }
+                self.pending.insert(doc);
+            }
+            // A document now live under this id is a new target for each owner
+            // that names it, and only for them.
+            if let Some(owners) = self.named_by.get(&(scope, card_id.clone())) {
+                self.pending.extend(owners.iter().copied());
             }
             self.heads.insert((scope, card_id), doc);
             postings.add(doc, tokens);
@@ -621,7 +697,28 @@ impl Builder {
         (postings, added)
     }
     /// Applies one replayed tail as one delta segment, then moves `indexed_seq`.
+    ///
+    /// No store is read, so no lineage edge is dated. The hub applies with
+    /// [`Builder::apply_dated`].
     pub fn apply(&mut self, changes: Vec<Change>, seq: i64) {
+        self.replay(changes, seq, None)
+            .expect("an undated apply reads no store");
+    }
+    /// [`Builder::apply`], with each lineage edge dated from `db`.
+    pub fn apply_dated(
+        &mut self,
+        changes: Vec<Change>,
+        seq: i64,
+        db: &Connection,
+    ) -> rusqlite::Result<()> {
+        self.replay(changes, seq, Some(db))
+    }
+    fn replay(
+        &mut self,
+        changes: Vec<Change>,
+        seq: i64,
+        db: Option<&Connection>,
+    ) -> rusqlite::Result<()> {
         let mut live = Vec::new();
         for change in changes {
             match change {
@@ -640,12 +737,139 @@ impl Builder {
             self.merge_deltas();
         }
         self.snap.indexed_seq = seq;
+        match db {
+            Some(db) => {
+                self.dated = true;
+                self.date_lineage(db, self.budget)?;
+            }
+            // Dating is sticky, so an undated apply cannot turn linking back on.
+            None => debug_assert!(!self.dated, "an undated apply on a dated builder"),
+        }
         self.resolve_lineage();
+        Ok(())
+    }
+    /// The live trusted cards `owner` names, with the id each is named by. Only
+    /// they can take an edge, so only they are dated.
+    fn live_targets(&self, owner: u32) -> Vec<(u32, String)> {
+        let d = self.snap.doc(owner);
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for (_, id) in &d.links.named {
+            let Some(&target) = self.heads.get(&(d.scope, Arc::from(id.as_str()))) else {
+                continue;
+            };
+            if target != owner
+                && super::ranking::trusted(&self.snap.doc(target).trust)
+                && seen.insert(target)
+            {
+                out.push((target, id.clone()));
+            }
+        }
+        out
+    }
+    /// Reads what each pending owner's edges are dated by: when each of its
+    /// names was written, per key, and when each card it names began its
+    /// current incarnation. Each read is one unit of `left`. An owner that runs
+    /// out stays pending with what it read kept, so work over the budget forms
+    /// no edge and resumes on the next publication. An owner none of whose ids
+    /// is live costs nothing, and its history is read when the first one is.
+    fn date_lineage(&mut self, db: &Connection, mut left: usize) -> rusqlite::Result<()> {
+        for owner in self.pending.iter().copied().collect::<Vec<_>>() {
+            let d = self.snap.doc(owner);
+            let (revision, card_id) = (d.revision, d.card_id.clone());
+            let scope = self.snap.scopes[d.scope as usize].clone();
+            let targets = self.live_targets(owner);
+            let mut done = true;
+            if !targets.is_empty() && !self.named_since.contains_key(&owner) {
+                if left == 0 {
+                    continue;
+                }
+                left -= 1;
+                let since = super::alias_dating::named_since(db, &scope, &card_id, revision)?;
+                self.named_since.insert(owner, since);
+            }
+            for (target, id) in targets {
+                if self.born.contains_key(&target) {
+                    continue;
+                }
+                if left == 0 {
+                    done = false;
+                    continue;
+                }
+                left -= 1;
+                let at = self.snap.doc(target).revision;
+                let born = super::alias_dating::incarnation(db, &scope, &id, at)?;
+                self.born.insert(target, born);
+            }
+            if done {
+                self.pending.remove(&owner);
+            }
+        }
+        Ok(())
+    }
+    /// Owners with dates still to read. A publication that finds some leaves
+    /// their edges unformed, and the writer dates more on its next one.
+    pub(super) fn dating_pending(&self) -> bool {
+        self.dated && !self.pending.is_empty()
+    }
+    /// How many owners hold dates. Tests read it to see which owners the store
+    /// was asked about.
+    #[cfg(test)]
+    pub(super) fn dated_keepers(&self) -> usize {
+        self.named_since.len()
+    }
+    /// Whether the name `id`, written by `owner` under `key`, may link `target`.
+    /// An owner the store dated needs both dates and the target's incarnation
+    /// to begin earlier. An undated builder, which only a test or the retrieval
+    /// history veto holds, reads no store and links. A dated builder that holds
+    /// no dates for the owner forms no edge: an unknown date never links.
+    ///
+    /// `superseded_by` may name a card that does not exist yet, so a successor
+    /// that is the first incarnation of its id links whenever it appears. A
+    /// successor whose id an earlier card held needs the dates, because a
+    /// reused id is not the card the owner meant.
+    fn predates(&self, owner: u32, target: u32, key: &'static str, id: &str) -> bool {
+        let Some(since) = self.named_since.get(&owner) else {
+            return !self.dated;
+        };
+        let Some(&Some((born, reused))) = self.born.get(&target) else {
+            return false;
+        };
+        match since.get(&(key, id.to_string())) {
+            Some(&written) if born < written => true,
+            _ => key == "superseded_by" && !reused,
+        }
+    }
+    /// Once no owner is pending, every owner naming a live trusted card holds
+    /// its dates and that card's incarnation start.
+    fn lineage_dated(&self) -> bool {
+        !self.dated
+            || !self.pending.is_empty()
+            || self.lineage_sources.iter().all(|&owner| {
+                let targets = self.live_targets(owner);
+                targets.is_empty()
+                    || (self.named_since.contains_key(&owner)
+                        && targets.iter().all(|(t, _)| self.born.contains_key(t)))
+            })
     }
     /// Resolve trusted assertions once per publication. Ordinary cards require
     /// no graph work. Old snapshots retain their own immutable adjacency lists.
+    ///
+    /// Each key's edge is judged on its own: a name forms an edge only when the
+    /// target's current incarnation began before the owner revision that first
+    /// wrote that name under that key. An id named under several keys forms an
+    /// edge if any one key passes, because a key that passes is a fresh claim
+    /// about the card that holds the id now, and a stale key never forms an
+    /// edge by itself. A `superseded_by` name points the other way, from the
+    /// owner to the successor. The successor is the head, so a reused id cannot
+    /// hide the new card through it. It could hide the owner, an older card
+    /// whose own successor was retired, behind whichever card took the id, so a
+    /// successor whose id an earlier card held is dated like the others. One
+    /// that is the first card under its id links, because a card may name its
+    /// successor before it is written.
     // Switch to incremental key patching if trusted-owner rebuilds dominate publication cost.
     fn resolve_lineage(&mut self) {
+        debug_assert!(self.lineage_dated(), "a lineage name is undated");
         let mut forward: HashMap<u32, Vec<super::ranking::Neighbour>> = HashMap::new();
         let mut reverse: HashMap<u32, Vec<super::ranking::Neighbour>> = HashMap::new();
         for &owner in &self.lineage_sources {
@@ -665,17 +889,18 @@ impl Builder {
                         .push(super::ranking::Neighbour { doc: from, owner });
                 }
             };
-            if let Some(to) = d
-                .links
-                .successor
-                .as_ref()
-                .and_then(|id| self.heads.get(&(d.scope, Arc::from(id.as_str()))))
-            {
-                link(owner, *to);
-            }
-            for id in &d.links.predecessors {
-                if let Some(from) = self.heads.get(&(d.scope, Arc::from(id.as_str()))) {
-                    link(*from, owner);
+            let mut linked = HashSet::new();
+            for (key, id) in &d.links.named {
+                let Some(&other) = self.heads.get(&(d.scope, Arc::from(id.as_str()))) else {
+                    continue;
+                };
+                if !self.predates(owner, other, key, id) {
+                    continue;
+                }
+                if *key == "superseded_by" {
+                    link(owner, other);
+                } else if linked.insert(other) {
+                    link(other, owner);
                 }
             }
         }
@@ -762,10 +987,10 @@ pub fn load(db: &Connection) -> rusqlite::Result<Builder> {
         let rows = s
             .query_map([], card_row)?
             .map_while(|row| row.map_err(|e| failed = Some(e)).ok());
-        let builder = Builder::from_cards(rows, watermark);
+        let builder = Builder::from_cards_dated(rows, watermark, db);
         match failed {
             Some(e) => Err(e),
-            None => Ok(builder),
+            None => builder,
         }
     })();
     let _ = db.execute_batch("COMMIT");
@@ -1021,11 +1246,14 @@ impl Publisher {
         }
         let (keys, last) = tail(db, self.builder.snap.indexed_seq)?;
         if last == self.builder.snap.indexed_seq && keys.is_empty() {
+            // No new event, but dates over the last budget are still to read.
+            if self.builder.dating_pending() {
+                return self.builder.apply_dated(Vec::new(), last, db);
+            }
             return Ok(());
         }
         let changes = heads(db, keys)?;
-        self.builder.apply(changes, last);
-        Ok(())
+        self.builder.apply_dated(changes, last, db)
     }
     /// After every committed batch, once its commands have been answered.
     pub fn after_commit(&mut self, db: &Connection) {
@@ -1320,5 +1548,100 @@ mod projection_tests {
         );
         b.apply(vec![Change::Live(one)], 2);
         assert_eq!(replay(&b.snapshot()), before);
+    }
+}
+
+#[cfg(test)]
+mod alias_fail_closed_tests {
+    use super::*;
+    fn trusted(id: &str, text: &str, revision: i64) -> Card {
+        Card {
+            scope: "fleet".into(),
+            card_id: id.into(),
+            revision,
+            content_hash: super::super::ids::sha256_hex(text.as_bytes()),
+            trust: "reviewed".into(),
+            text: text.into(),
+            automated: false,
+        }
+    }
+    fn pair() -> Builder {
+        let keeper = "---\naliases: [\"target\"]\n---\nKeeper claim.\n";
+        Builder::from_cards(
+            [
+                trusted("keeper", keeper, 2),
+                trusted("target", "Target claim.\n", 1),
+            ],
+            2,
+        )
+    }
+    fn docs(b: &Builder) -> (u32, u32) {
+        (
+            b.heads[&(0, Arc::from("keeper"))],
+            b.heads[&(0, Arc::from("target"))],
+        )
+    }
+    /// An undated builder reads no store, so it holds no dates and every name
+    /// forms. Only a test or the retrieval history veto builds one.
+    #[test]
+    fn an_undated_builder_links_every_alias() {
+        let b = pair();
+        let (owner, target) = docs(&b);
+        assert!(b.predates(owner, target, "aliases", "target"));
+        assert!(b.snapshot().in_lineage("fleet", "target"));
+    }
+    /// A dated builder with no date for the keeper never links: an unknown date
+    /// is not proof that the alias is older.
+    #[test]
+    fn a_dated_builder_without_the_keepers_date_forms_no_edge() {
+        let mut b = pair();
+        b.dated = true;
+        let (owner, target) = docs(&b);
+        assert!(!b.predates(owner, target, "aliases", "target"));
+        // With the keeper's date but not the target's, it still forms none.
+        b.named_since.insert(
+            owner,
+            HashMap::from([(("aliases", "target".to_string()), 2)]),
+        );
+        assert!(!b.predates(owner, target, "aliases", "target"));
+        b.born.insert(target, Some((1, false)));
+        assert!(b.predates(owner, target, "aliases", "target"));
+        // The date belongs to the key that wrote it: another key forms none.
+        assert!(!b.predates(owner, target, "supersedes", "target"));
+    }
+    /// The builder checks its own invariant when it resolves lineage: once no
+    /// owner is pending, a dated owner whose names reach a live card must hold
+    /// its dates.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "name is undated")]
+    fn a_dated_builder_that_skipped_a_keeper_fails_its_assertion() {
+        let mut b = pair();
+        b.dated = true;
+        b.pending.clear();
+        b.resolve_lineage();
+    }
+    /// Dating is sticky. An undated apply on a dated builder would turn every
+    /// undated name back into a link, so it fails the debug assertion.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "undated apply on a dated builder")]
+    fn an_undated_apply_on_a_dated_builder_fails_its_assertion() {
+        let mut b = pair();
+        b.dated = true;
+        b.apply(Vec::new(), 3);
+    }
+    /// A replay that dates keeps the builder dated, and an undated build is
+    /// not dated until a store is read.
+    #[test]
+    fn the_dated_flag_only_rises() {
+        // No card names another, so the store is never asked.
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut b = Builder::from_cards([trusted("solo", "Solo claim.\n", 1)], 1);
+        assert!(!b.dated);
+        b.apply_dated(Vec::new(), 3, &db).unwrap();
+        assert!(b.dated);
+        b.apply_dated(Vec::new(), 4, &db).unwrap();
+        assert!(b.dated);
     }
 }

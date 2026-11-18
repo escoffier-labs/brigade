@@ -402,12 +402,28 @@ fn submit<T: ReadTx + ?Sized>(
                     Err(r) => return Ok(Err(r.into())),
                 }
             } else {
+                // The aliases the keeper must not inherit, from the same call
+                // the merge gate makes against the live heads.
+                let stale = match (&other, op["type"] == "merge_exact_duplicates") {
+                    (Some((c, _)), true) => super::alias_dating::stale_inherited(
+                        tx,
+                        string(card, "scope"),
+                        string(card, "after_text"),
+                        (
+                            string(c, "card_id"),
+                            c["base_revision"].as_i64().unwrap_or(0),
+                            string(c, "after_text"),
+                        ),
+                    )?,
+                    _ => Default::default(),
+                };
                 match super::proposal_metadata::apply(
                     string(card, "after_text"),
                     op,
                     other
                         .as_ref()
                         .map(|(c, n)| (string(c, "after_text"), n.as_str())),
+                    &stale,
                 ) {
                     Ok(r) => r,
                     Err(r) => return Ok(Err(r.into())),
@@ -885,6 +901,13 @@ fn apply_cards(
             body["reason"] = json!("auto_apply_held");
             return Ok(None);
         }
+    }
+    // A reviewer decides on the text the proposal stored at submit time, so a
+    // merge is checked again against the live heads, however it is applied.
+    if let Some(reason) = super::alias_dating::merge_is_stale(tx, body)? {
+        body["state"] = json!("stale");
+        body["reason"] = json!(reason);
+        return Ok(None);
     }
     let id = string(body, "proposal_id").to_string();
     let rollback = !body["rollback_of"].is_null();

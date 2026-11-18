@@ -9,7 +9,7 @@
 //! neither retiring an id and writing it again nor editing an old card into a
 //! copy backdates it.
 use super::{
-    ids,
+    alias_dating, ids,
     index::{self, Card},
     ops, proposal_metadata,
     proposals::{cards, string},
@@ -645,7 +645,14 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
             }
             gone.push((retired.clone(), before));
             let name = format!("{scope}/{id}");
-            match proposal_metadata::apply(&expected, op, Some((&retired.text, &name))) {
+            // The same call the proposal made, so a clean merge still matches.
+            let stale = alias_dating::stale_inherited(
+                tx,
+                scope,
+                &expected,
+                (id, retired.revision, &retired.text),
+            )?;
+            match proposal_metadata::apply(&expected, op, Some((&retired.text, &name)), &stale) {
                 Ok(text) => expected = text,
                 Err(_) => return Ok(Some(SHAPE)),
             }
