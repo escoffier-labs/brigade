@@ -1260,6 +1260,34 @@ are not dated. Scorer `lineage-source-v5` introduced the dating, so an older
 retrieval evaluation record holds with `retrieval_eval_scorer_mismatch` until a
 new run is recorded.
 
+A merge writes aliases, so the guard dates the ones a merge writes. A keeper
+also inherits the retired card's own aliases, and the keeper's history would
+date them from the new merge. The merge therefore leaves out an inherited alias
+when a card holds that id now and either date is unknown, or that card's
+current incarnation began after the retired card first wrote the alias. The
+preflight, the merge gate and the apply all make that choice with one function,
+so a proposal that kept such an alias holds with
+`retrieval_eval_merge_keeper_changed`. A merge that drops one also loses the
+alias line's tokens, so it holds with `retrieval_eval_merge_tokens_lost` and goes
+to a reviewer. A retired keeper that already holds an alias declares lineage,
+so a chained merge opens at tier 2 for a trusted pair.
+
+Known limits of the dating, each of which fails closed and only un-hides cards:
+
+- A keeper writer who deliberately drops an alias and writes it again re-dates
+  it from the second write. That writer already holds the same power through
+  `supersedes`, which is not dated.
+- A rollback restores the exact earlier text, because rollback stays an exact
+  inverse. An alias that the rolled-back change had dropped is therefore dated
+  from the rollback, not from its first write.
+- The index reads at most 256 revisions of a card to date it. A longer run, and
+  a revision whose blob is missing, leave the date unknown, so the alias forms
+  no edge. The alias history of a keeper id that was retired and then reused
+  does not carry into the new card.
+- The history veto for a retrieval evaluation builds its snapshots without
+  dates, so it can still collapse a reused id that the live index shows. That
+  is tracked separately.
+
 This bounds what a merge may remove from search. It does not freeze ranking.
 The retired card's matches move to the keeper, whose searchable content is a
 superset of the retired card's. Every other card's score shifts with the
