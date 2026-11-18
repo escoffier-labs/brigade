@@ -786,11 +786,15 @@ def report_journal_event(
     envelope: dict[str, Any], *, journal_path: Path | None = None, workspace: Path | None = None
 ) -> bool:
     """Report durable events using the trusted run workspace when supplied."""
+    from .worktree_lease import worktree_event_parent
+
     try:
         if not load_fleet_config()["hub_url"]:
             return False
         raw_payload = envelope.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        parent = worktree_event_parent(workspace) if workspace is not None else None
+        workspace = parent or workspace
         base_path = workspace if workspace is not None else journal_path
         event_workspace = find_workspace_for_path(base_path) if base_path is not None else None
         repo = event_workspace.name if event_workspace is not None else None
@@ -804,11 +808,12 @@ def report_journal_event(
             except _claim_target.ClaimTargetError:
                 _LOG.warning("repo-key-fallback: fleet event is using the previous workspace name")
         repo_identity = None
-        if event_workspace is not None:
+        identity_workspace = parent or event_workspace
+        if identity_workspace is not None:
             try:
                 from .fleet_session_presence import repository_identity
 
-                repo_identity = repository_identity(event_workspace).value
+                repo_identity = repository_identity(identity_workspace).value
             except Exception:
                 repo_identity = None
         event = {

@@ -5,9 +5,34 @@ from __future__ import annotations
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
 
 from . import proc
+
+
+_EVENT_PARENT: ContextVar[tuple[Path, Path] | None] = ContextVar("worktree_event_parent", default=None)
+
+
+@contextmanager
+def attribute_worktree_events(checkout: Path, parent: Path) -> Iterator[None]:
+    """Describe an automatic run's parent even before or after Git checkout."""
+    token = _EVENT_PARENT.set((checkout.resolve(), parent))
+    try:
+        yield
+    finally:
+        _EVENT_PARENT.reset(token)
+
+
+def worktree_event_parent(workspace: Path) -> Path | None:
+    attribution = _EVENT_PARENT.get()
+    if attribution is not None and workspace == attribution[0]:
+        return attribution[1]
+    if reserved_worktree_lock_dir(workspace) is None:
+        return None
+    from .handoff_worktrees import main_checkout
+
+    return main_checkout(workspace)
 
 
 def brigade_worktree_root() -> Path:

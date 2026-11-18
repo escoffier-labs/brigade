@@ -430,7 +430,7 @@ def dispatch(args) -> int:
     from .. import aboyeur as aboyeur_mod
     from .. import fleet_client, fleet_home_guard
     from .. import run_budget
-    from .. import runguard
+    from .. import runguard, worktree_lease
     from .. import roster as roster_mod
     from ..route_catalog import validate_overrides
 
@@ -814,6 +814,8 @@ def dispatch(args) -> int:
                 raise runguard.RunGuardError(f"worktree already exists: {checkout}") from exc
             worktree_cwd = checkout
         with ExitStack() as lifecycle:
+            if worktree_cwd is not None and canonical_workspace is not None:
+                lifecycle.enter_context(worktree_lease.attribute_worktree_events(worktree_cwd, canonical_workspace))
             lifecycle.enter_context(
                 _terminalize_escaped_run(output_dir, seat=lifecycle_seat, interrupt_failure=_fleet_interrupt_failure)
             )

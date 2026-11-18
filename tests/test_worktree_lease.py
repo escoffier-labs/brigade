@@ -68,3 +68,71 @@ def test_cassette_purge_locks_removed_checkout_without_recreating_it(checkout, t
     assert run_cassette.purge_cli(str(run_dir), cwd=tmp_path) == 0
     assert not checkout.exists()
     assert not lease_dir.exists()
+
+
+@pytest.mark.parametrize("workspace_identity", [False, True])
+def test_fleet_events_use_parent_during_start_dispatch_and_removal(checkout, tmp_path, monkeypatch, workspace_identity):
+    from brigade import aboyeur, cli, fleet_client
+    from tests.test_run_worktree import _git, _git_repo, _write_successful_worktree_run
+
+    repo = _git_repo(tmp_path)
+    _git(repo, "remote", "add", "origin", "https://github.com/example/project.git")
+    if workspace_identity:
+        (repo / ".brigade" / "node.toml").write_text("")
+        _git(repo, "add", ".brigade/node.toml")
+        _git(repo, "commit", "-m", "wire workspace")
+    output_dir = tmp_path / "run"
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.invalid")
+    reported = []
+
+    def report(event, *, base_path):
+        reported.append((event, base_path))
+        return True
+
+    monkeypatch.setattr(fleet_client, "report_event", report)
+
+    def emit(state, workspace):
+        assert fleet_client.report_journal_event(
+            {
+                "run_id": "run",
+                "event_type": state,
+                "recorded_at": "2026-07-16T00:00:00+00:00",
+                "sequence": 1,
+                "event_digest": "test-digest",
+            },
+            workspace=workspace,
+        )
+
+    record_start = aboyeur.record_run_start
+
+    def before_checkout(output_dir, **kwargs):
+        workspace = kwargs["lock_workspace"]
+        assert not (workspace / ".git").exists()
+        emit("test.started", workspace)
+        return record_start(output_dir, **kwargs)
+
+    def fake_run(task, loaded_roster, *, cwd, output_dir, **kwargs):
+        assert cwd.is_dir()
+        emit("test.dispatched", cwd)
+        _write_successful_worktree_run(output_dir, cwd)
+        return 0
+
+    record_removal = aboyeur.record_worktree_removal
+
+    def after_removal(output_dir, *, path, reason):
+        assert not path.exists()
+        emit("test.removed", path)
+        record_removal(output_dir, path=path, reason=reason)
+
+    monkeypatch.setattr(aboyeur, "record_run_start", before_checkout)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(aboyeur, "record_worktree_removal", after_removal)
+    assert (
+        cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree", "--no-fleet-claim"])
+        == 0
+    )
+    assert {"test.started", "test.dispatched", "test.removed"} <= {event["state"] for event, _ in reported}
+    assert {base_path for _, base_path in reported} == {repo}
+    expected_repo = "repo" if workspace_identity else "example/project"
+    assert {event["repo"] for event, _ in reported} == {expected_repo}
+    assert {event["repo_identity"] for event, _ in reported} == {"github.com/example/project"}
