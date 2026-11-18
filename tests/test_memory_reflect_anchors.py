@@ -427,6 +427,149 @@ def test_real_hold_reply_suppresses_revision_and_selects_fresh_head(setup, capsy
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
     reason="safe directory descriptors unavailable",
 )
+def test_lineage_hold_leaves_the_proposal_open_for_review_and_is_not_retried(setup, capsys, monkeypatch):
+    import json
+    from brigade import memory_reflect_hub as reflect_hub
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "robot-a", card_text("Unique robot-a.", None), "live", "robot-a")
+    policy.set_enabled(target, True)
+    held = [{"gate": "candidate", "state": "held", "code": "lineage_requires_review"}]
+    monkeypatch.setattr(
+        hub,
+        "do_auto_apply",
+        lambda body: (200, {"state": "pending", "reason": "auto_apply_held", "preflight": {"checks": held}}),
+        raising=False,
+    )
+    code, first = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert first["proposals"][0]["automatic"]["checks"] == held
+    # No withdrawal: the hub leaves the Tier 2 proposal open for a reviewer.
+    assert "withdrawal" not in first["proposals"][0]
+    assert not [call for call in writes(hub) if call["action"] == "decide"]
+    state_path = target / ".brigade/memory/reflect/schedule.json"
+    state = json.loads(state_path.read_text())
+    assert any(record.get("lineage_review") for record in state["submissions"].values())
+    # The strict ledger validator accepts the new field, and raises on one it does not know.
+    assert reflect_hub.schedule_status(target)["consecutive_failures"] == 0
+    code, second = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert second["skipped_reasons"]["lineage_review"] == 1
+    # Neither a withdrawal nor a second automatic attempt followed.
+    assert not [call for call in writes(hub) if call["action"] == "decide"]
+    assert len([call for call in writes(hub) if call["action"] == "auto_apply"]) == 1
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+@pytest.mark.parametrize("stored", ["window", "future", "legacy-true"])
+def test_lineage_review_flag_expires_so_the_card_is_proposed_again(setup, capsys, monkeypatch, stored):
+    import json
+    from brigade import memory_reflect_hub as reflect_hub
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "robot-a", card_text("Unique robot-a.", None), "live", "robot-a")
+    policy.set_enabled(target, True)
+    held = [{"gate": "candidate", "state": "held", "code": "lineage_requires_review"}]
+    monkeypatch.setattr(
+        hub,
+        "do_auto_apply",
+        lambda body: (200, {"state": "pending", "reason": "auto_apply_held", "preflight": {"checks": held}}),
+        raising=False,
+    )
+    assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+    state = json.loads(path.read_text())
+    flagged = [record for record in state["submissions"].values() if "lineage_review" in record]
+    assert len(flagged) == 1 and type(flagged[0]["lineage_review"]) is int
+    proposed = len([call for call in writes(hub) if call["action"] == "propose"])
+    # Inside the window the proposal stays suppressed, which is the old behaviour.
+    code, quiet = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0 and quiet["skipped_reasons"]["lineage_review"] == 1
+    assert len([call for call in writes(hub) if call["action"] == "propose"]) == proposed
+    # Past it, or for a time that cannot be trusted, or for state with no time, it is proposed again.
+    if stored == "window":
+        later = reflect_hub._now_ms() + reflect_hub.LINEAGE_REVIEW_RETRY_MS + 1
+        monkeypatch.setattr(reflect_hub, "_now_ms", lambda: later)
+    else:
+        flagged[0]["lineage_review"] = (
+            reflect_hub._now_ms() + 10 * reflect_hub.LINEAGE_REVIEW_RETRY_MS if stored == "future" else True
+        )
+        path.write_text(json.dumps(state))
+        assert reflect_hub.schedule_status(target)["consecutive_failures"] == 0
+    code, again = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert "lineage_review" not in again["skipped_reasons"]
+    assert len([call for call in writes(hub) if call["action"] == "propose"]) == proposed + 1
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_second_lineage_expiry_rearms_the_flag_and_does_not_retry_auto_apply(setup, capsys, monkeypatch):
+    import json
+    from brigade import memory_reflect_hub as reflect_hub
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "robot-a", card_text("Unique robot-a.", None), "live", "robot-a")
+    policy.set_enabled(target, True)
+    held = [{"gate": "candidate", "state": "held", "code": "lineage_requires_review"}]
+    monkeypatch.setattr(
+        hub,
+        "do_auto_apply",
+        lambda body: (200, {"state": "pending", "reason": "auto_apply_held", "preflight": {"checks": held}}),
+        raising=False,
+    )
+    assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+
+    def flagged():
+        state = json.loads(path.read_text())
+        return [record for record in state["submissions"].values() if "lineage_review" in record]
+
+    first = flagged()[0]["lineage_review"]
+    open_id = json.loads(path.read_text())["submissions"]
+    open_id = next(iter(open_id.values()))["proposal_id"]
+    auto_applies = len([call for call in writes(hub) if call["action"] == "auto_apply"])
+    assert auto_applies == 1
+    # The window runs out while the hub still holds the proposal open.
+    later = reflect_hub._now_ms() + reflect_hub.LINEAGE_REVIEW_RETRY_MS + 1
+    monkeypatch.setattr(reflect_hub, "_now_ms", lambda: later)
+    # The hub answers that the old proposal is still open.
+    monkeypatch.setattr(
+        hub,
+        "do_propose",
+        lambda body: (409, {"code": "memory_proposal_duplicate_pending", "proposal_id": open_id, "error": "dup"}),
+    )
+    code, expired = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert expired["skipped_reasons"]["duplicate_pending"] == 1
+    # The duplicate answer re-armed the flag with the new time.
+    assert len(flagged()) == 1 and flagged()[0]["lineage_review"] == later > first
+    # A later run inside the new window skips it and never reaches auto_apply again.
+    code, quiet = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert quiet["skipped_reasons"]["lineage_review"] == 1
+    assert "already_proposed" not in quiet["skipped_reasons"]
+    assert len([call for call in writes(hub) if call["action"] == "auto_apply"]) == auto_applies
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_future_withdrawal_time_does_not_extend_suppression(setup, capsys, monkeypatch):
     import json
     from brigade import memory_reflect_hub as reflect_hub

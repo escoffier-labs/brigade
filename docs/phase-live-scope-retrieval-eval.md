@@ -53,21 +53,46 @@ That fails closed and is visible in the preflight hold and private history.
 
 ## Projection invariance and vetoes
 
-On real scopes only Tier 0 proposals with equal before and after projection
-hashes on every target can pass the retrieval gate without measurement. The hub
-uses the indexer's projection function, including indexed tokens, searchable
-fields, scope, identity, live status, trust, lineage, automated origin and
-revision recency. Changed document membership always holds. Hybrid scopes hold.
+On real scopes only Tier 0 proposals whose every target keeps an equal
+ranking digest can pass the retrieval gate without measurement. The ranking
+digest comes from the same function the indexer uses. It covers scope, card id,
+live status, normalized tokens, normalized literal text, title, summary, tags,
+trust, lineage links and the `automated` value as it will be after the apply. It
+leaves out revision, head sequence, content hash and raw text. Changed document
+membership always holds. Hybrid scopes hold.
 
-No current Tier 0 op class is unconditionally invariant. `append_evidence`
-indexes the evidence metadata as part of the full card text and advances
-revision recency, so ordinary evidence appends hold. `merge_exact_duplicates`
-never qualifies in this PR, even for equal fingerprints: removing a document
-changes BM25 document counts and average length. Only an unchanged full
-projection passes the hash check. Cosmetic `replace_block` is Tier 1 and stays
-outside this authorizer. Future op classes must prove all projection inputs stay
-equal. This PR does not change the indexer's text or ranking semantics to make
-an operation qualify.
+Search indexes `ranking_text`, not the stored card. It drops the single-line
+`evidence:` front-matter line, by the same key rule the proposal writer uses, and
+the ` ^c-xxxxxx` anchor suffixes. Both are still stored and shown, and neither
+is searchable. So only an op list made entirely of `append_evidence` and
+`anchor_blocks` is admitted, and each must leave `ranking_text` and every other
+ranking input equal. An apply rewrites the card's writer class to the applier's,
+so a target whose `automated` value would flip holds. A mixed op list, a stale
+base revision and `merge_exact_duplicates` hold. Removing a document changes
+BM25 document counts and average length, so duplicate merges stay held until
+they have their own drift bound. Cosmetic `replace_block` is Tier 1 and stays
+outside this authorizer.
+
+The one ranking input the digest cannot see is lineage recency, because every
+apply gives the target a new revision. A trusted target that declares
+`superseded_by`, `supersedes`, `merged_from` or `aliases` links, or that another
+live card in its scope names, is classified Tier 2 on real scopes. Its
+automatic attempt ends as a pending proposal held with
+`lineage_requires_review`. The reflect client leaves that proposal open for a
+reviewer, with no withdrawal and no retry. The gate repeats the check as
+`retrieval_eval_lineage_exposed` for a link added after tiering, and for a
+target that is an end of a trusted edge in the published index. The naming-card
+scan prefilters on the four lineage key names, because `Links::parse` decodes
+values with `literal_eval` and a key cannot be escaped, while an id can be.
+
+The digest covers ranking and literal search only. Push and connector search
+also read `writer` and `writer_class`, and an apply writes the applier's onto
+the head. A target with `agent-unreviewed` trust whose head writer differs from
+the applier's principal or class holds with `retrieval_eval_writer_changed`.
+The automatic path denies such a target earlier, with `card_trust_denied`, so
+this hold is the backstop for a later change to that check. The literal scan
+spends its byte budget on the text it searches, so an admitted append cannot
+push later matching cards past it.
 
 Live evaluation is diagnostic and a per-query veto only. Every surviving gold
 card must rank at least as well after the proposal. A gain on another query or

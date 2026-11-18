@@ -287,6 +287,11 @@ pub fn cheap<T: ReadTx + ?Sized>(
     if super::compensation::class_held(tx, body)? {
         return Ok(Some("compensation_class_held"));
     }
+    // Named apart from the generic tier hold, so the reflect client leaves a
+    // lineage proposal open for review instead of withdrawing and retrying it.
+    if body["rollback_of"].is_null() && super::proposal_tiers::lineage_review(tx, body)? {
+        return Ok(Some("lineage_requires_review"));
+    }
     Ok((body["opened_tier"] != 0 || !body["rollback_of"].is_null())
         .then_some("tier_requires_review"))
 }

@@ -114,6 +114,30 @@ FIELDS = [
     ("unicode-key-space", "---\n title : nbsp\n---\nx\n"),
 ]
 
+# Cards whose search text drops the `evidence` line and the anchor suffixes.
+RANKING = [
+    ("plain", "Claim. ^c-abcdef\n"),
+    ("evidence", '---\ntitle: T\nevidence: ["ns/a/b", "ns/c/d"]\n---\nClaim one. ^c-abcdef\n\n- Claim two. ^c-123456\n'),
+    ("evidence-angle", '---\nevidence: ["ns/a/<"]\n---\nClaim. ^c-abcdef\n'),
+    ("angle-in-body", "---\ntitle: T\n---\nx < y ^c-abcdef\n\nClaim. ^c-123456\n"),
+    ("duplicate-evidence", '---\nevidence: ["a/b/c"]\ntitle: T\nevidence: ["d/e/f"]\n---\nClaim. ^c-abcdef\n'),
+    ("evidence-key-spacing", '---\n evidence: ["a/b/c"]\nevidence : ["d/e/f"]\nevidence:["g/h/i"]\n---\nClaim.\n'),
+    ("evidence-line-separator", '---\nevidence: ["a/b/c"]\u2028title: Sneaky\n---\nClaim. ^c-abcdef\n'),
+    ("not-front-matter", 'Claim.\n---\nevidence: ["a/b/c"]\n---\nMore. ^c-abcdef\n'),
+    ("unterminated", '---\nevidence: ["a/b/c"]\nClaim. ^c-abcdef\n'),
+    ("trailing-space-anchor", "Claim. ^c-abcdef  \t\n\nCafé. ^c-123456\t\n"),
+    ("bad-anchors", "Claim. ^c-abcde\n\nClaim. ^c-ABCDEF\n\nClaim.^c-abcdef\n\nClaim. ^c-abcdefg\n"),
+    ("fenced", "```\ncode ^c-abcdef\n```\n\nProse. ^c-123456\n"),
+    ("first-evidence", '---\nevidence: ["a/b/c"]\n---\nClaim. ^c-abcdef\n'),
+    ("only-evidence", '---\nevidence: []\n---\n'),
+    # The writer rewrites metadata through `str::lines`, which drops a blank last line.
+    ("evidence-blank-last-line", '---\ntitle: T\nevidence: ["a/b/c"]\n\n---\nbody ^c-abcdef\n'),
+    ("evidence-blank-middle-line", '---\nevidence: ["a/b/c"]\n\ntitle: T\n---\nbody\n'),
+    # The search parser closes the front matter at a fence with trailing whitespace.
+    ("fence-trailing-space", '---\nevidence: ["a/b/c"]\n---  \nClaim. ^c-abcdef\n'),
+    ("fence-earlier-than-writers", '---\ntitle: T\n---  \nevidence: ["a/b/c"]\n---\nClaim.\n'),
+]
+
 ROUND = [0.03125, 0.00015, 1.23455, 2.5, 0.000049999, 12.34565, 1e-05, 3.14159265, 0.99995, 7.00005]
 
 FLEET = ["fleet"]
@@ -178,6 +202,14 @@ CORPORA = {
             ("runbook", FLEET),
             ("ops", FLEET),
         ],
+    },
+    "evidence-anchors": {
+        "cards": [
+            ("fleet", "plain", "---\ntitle: Plain\n---\nShared claim here.\n"),
+            ("fleet", "marked", '---\ntitle: Plain\nevidence: ["ns/shared/claim", "ns/other/ref"]\n---\nShared claim here. ^c-abcdef\n'),
+            ("fleet", "stuffed", '---\ntitle: Stuffed\nevidence: ["ns/keyword-keyword/keyword"]\n---\nOther words.\n'),
+        ],
+        "queries": [(q, FLEET) for q in ("shared claim", "keyword", "evidence", "abcdef", "c abcdef", "^", "/", "ns/shared", "^c-abcdef")],
     },
     "literal": {
         "cards": [
@@ -311,6 +343,7 @@ def golden() -> dict:
         "tokenize": [{"text": t, "lower": t.lower(), "tokens": memory_bm25.tokenize(t)} for t in TOKENIZE],
         "single_line": [{"text": t, "line": " ".join("".join(c if c.isprintable() else " " for c in t).split())} for t in TOKENIZE],
         "fields": fields,
+        "ranking": [{"card_id": cid, "text": t, "ranking_text": memory_bm25.ranking_text(t)} for cid, t in RANKING],
         "round": [[x, round(x, memory_bm25.SCORE_DIGITS)] for x in ROUND],
         "corpora": corpora,
     }
