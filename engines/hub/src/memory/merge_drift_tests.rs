@@ -9,6 +9,7 @@ use super::{
     text, *,
 };
 use serde_json::{Value as Json, json};
+use std::collections::BTreeSet;
 
 const KEEP: &str = "dup-keeper";
 const GONE: &str = "dup-retired";
@@ -380,17 +381,21 @@ const QUERIES: [&str; 14] = [
     "note",
     "zzz",
 ];
+/// Every card id the ranking tests put, live or retired.
+const RANKED: [&str; 8] = [
+    KEEP,
+    GONE,
+    "tight-note",
+    "long-note",
+    "other-card",
+    "sibling",
+    "wide-card",
+    "tight-card",
+];
 /// Top results for each query over every live card, as card ids.
-async fn rankings(r: &Real) -> Vec<Vec<String>> {
+async fn rankings(r: &Real, queries: &[&str]) -> Vec<Vec<String>> {
     let mut cards = Vec::new();
-    for id in [
-        KEEP,
-        GONE,
-        "tight-note",
-        "long-note",
-        "other-card",
-        "sibling",
-    ] {
+    for id in RANKED {
         let c = card(&r.h, "fleet", id).await;
         let text = |key: &str| c[key].as_str().unwrap().to_string();
         if c["state"] == "live" {
@@ -414,11 +419,19 @@ async fn rankings(r: &Real) -> Vec<Vec<String>> {
             .map(|(n, _)| snap.doc(n).card_id.to_string())
             .collect()
     };
-    QUERIES.iter().map(|q| ranked(q)).collect()
+    queries.iter().map(|q| ranked(q)).collect()
+}
+async fn apply_merge(r: &Real) {
+    let opened = open(r).await;
+    let applied = decide(&r.h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
 }
 
+/// What the gate enforces. The retired card's matches move to the keeper, whose
+/// searchable content is a superset of the retired card's. Nothing else is
+/// promised about order, so this pins the matching set and not the ranking.
 #[tokio::test]
-async fn every_query_ranks_the_same_apart_from_the_retired_card() {
+async fn the_retired_cards_matches_move_to_the_keeper() {
     let r = Real::untrusted(&[
         (KEEP, &dup("", "aaaaaa")),
         (GONE, &dup("", "bbbbbb")),
@@ -434,41 +447,51 @@ async fn every_query_ranks_the_same_apart_from_the_retired_card() {
         ("sibling", "Shared claim without the g word. ^c-ffffff\n"),
     ])
     .await;
-    let before = rankings(&r).await;
-    let opened = open(&r).await;
-    assert_eq!(
-        decide(&r.h, ADMIN_TOKEN, &opened.body["proposal_id"])
-            .await
-            .body["state"],
-        "applied"
-    );
-    let after = rankings(&r).await;
+    let before = rankings(&r, &QUERIES).await;
+    apply_merge(&r).await;
+    let after = rankings(&r, &QUERIES).await;
     for ((query, was), now) in QUERIES.iter().zip(&before).zip(&after) {
-        // The keeper stands in where the retired card ranked, once.
-        let mut want: Vec<String> = Vec::new();
+        let mut want: BTreeSet<&str> = BTreeSet::new();
         for id in was.iter().map(|id| if id == GONE { KEEP } else { id }) {
-            if !want.iter().any(|w| w == id) {
-                want.push(id.to_string());
-            }
+            want.insert(id);
         }
-        // The same cards answer every query, and the other cards keep their order.
-        let (mut got, mut left) = (now.clone(), want.clone());
-        got.sort();
-        left.sort();
-        assert_eq!(got, left, "{query}: before {was:?}");
-        let others = |ids: &[String]| {
-            ids.iter()
-                .filter(|id| *id != KEEP)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(others(now), others(&want), "{query}: before {was:?}");
+        let got: BTreeSet<&str> = now.iter().map(String::as_str).collect();
+        // Every card that matched still matches, the retired one as the keeper.
+        assert!(want.is_subset(&got), "{query}: before {was:?} after {now:?}");
+        // Only the keeper can match more, through the alias line it gained.
+        let extra: Vec<_> = got.difference(&want).collect();
+        assert!(
+            extra.iter().all(|id| **id == KEEP),
+            "{query}: {extra:?} gained a match"
+        );
     }
-    // Bounded drift, not ranking identity. The alias line makes the keeper's
-    // document longer, so BM25 length normalization can move it below a close
-    // competitor. Only the keeper's own place can move. The gate cannot prevent it.
+    // The keeper's alias line lengthens its document and every statistic moves,
+    // so scores shift and the keeper can fall below a close competitor.
     assert_eq!(before[0], [KEEP, GONE, "tight-note", "long-note"]);
     assert_eq!(after[0], ["tight-note", KEEP, "long-note"]);
     // Control: the keeper really does move into the retired card's results.
     assert!(before[6].iter().all(|id| id != KEEP) && after[6] == [KEEP]);
+}
+
+/// The gate does not freeze other cards' order. Retiring a card changes the
+/// scope's document count, document frequencies and average length, so two
+/// cards that are neither the keeper nor the retired card can swap places even
+/// on one term. Pinned so the docs keep saying only what is enforced.
+#[tokio::test]
+async fn two_non_keeper_cards_can_swap_places_on_a_single_term() {
+    let r = Real::untrusted(&[
+        (KEEP, &dup("", "aaaaaa")),
+        (GONE, &dup("", "bbbbbb")),
+        (
+            "wide-card",
+            "Alpha alpha one two three four. ^c-aaaaa1\n",
+        ),
+        ("tight-card", "Alpha. ^c-aaaaa2\n"),
+    ])
+    .await;
+    let before = rankings(&r, &["alpha"]).await;
+    apply_merge(&r).await;
+    let after = rankings(&r, &["alpha"]).await;
+    assert_eq!(before[0], ["tight-card", "wide-card"]);
+    assert_eq!(after[0], ["wide-card", "tight-card"]);
 }

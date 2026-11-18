@@ -1203,10 +1203,15 @@ keeper has `agent-unreviewed` trust also holds with
 `retrieval_eval_writer_changed` when the applier is not the keeper's writer.
 
 This bounds what a merge may remove from search. It does not freeze ranking.
-The alias line lengthens the keeper's document, so BM25 length normalization can
-move the keeper below a close competitor. The retired card leaves every result
-and the keeper answers for it, and the other cards keep their relative order.
-The compensation watch reverses an automatic merge with its exact inverse.
+The retired card's matches move to the keeper, whose searchable content is a
+superset of the retired card's. Every other card's score shifts with the
+scope-wide statistics, because retiring a card changes the document count, each
+term's document frequency and the average document length, and the alias line
+lengthens the keeper's document. Near-ties between other cards can reorder, and
+a top-k cutoff can admit a card it excluded before, since the retired card
+frees a slot. Hybrid mode is out of scope. The gate holds any scope that is not
+lexical with `retrieval_eval_projection_changed`. The compensation watch
+reverses an automatic merge with its exact inverse.
 
 Three older gates still hold every merge before this one is the deciding hold.
 The one-card blast cap counts the keeper and the retired card

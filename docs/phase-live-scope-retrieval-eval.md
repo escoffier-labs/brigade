@@ -72,9 +72,11 @@ base revision hold. Removing a document changes BM25 document counts and
 average length, so a duplicate merge is admitted under a bounded drift instead
 of a digest: the keeper keeps every search token of the retired card, trust and
 `automated` match, no live card links to the retired id, and the keeper changes
-only by the aliases and evidence the merge writes. See
-[memory operations](memory-operations.md) for the reason codes. Cosmetic `replace_block` is Tier 1 and stays
-outside this authorizer.
+only by the aliases and evidence the merge writes. The retired card's matches
+move to the keeper. Other cards' scores shift with the scope-wide statistics and
+near-ties can reorder, so ranking is not frozen. See
+[memory operations](memory-operations.md) for the reason codes. Cosmetic
+`replace_block` is Tier 1 and stays outside this authorizer.
 
 The one ranking input the digest cannot see is lineage recency, because every
 apply gives the target a new revision. A trusted target that declares
