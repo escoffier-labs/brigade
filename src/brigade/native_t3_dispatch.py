@@ -1083,6 +1083,15 @@ def _resolve_hold(
     handle_digest = _handle_digest(result, binding.parent_thread)
     if prior is None or prior[1] != handle_digest:
         raise _refuse("accept-conflict", "the operator assertion contradicts the recorded native handle")
+    observation = _classify(verified, binding, result)
+    if observation.family == "refused":
+        raise _refuse("native-mismatch", "the native projection does not correlate with this task")
+    evidence = (
+        _evidence_digest(handle_digest, result, observation) if observation.family == "terminal-candidate" else None
+    )
+    updated = _observe(workspace, run_dir, verified, result, observation, evidence=evidence)
+    # Clear the hold only after the projection is accepted. A refused or
+    # contradictory projection must leave the task held.
     _append(
         workspace,
         run_dir,
@@ -1095,13 +1104,6 @@ def _resolve_hold(
         },
         key=_key("hold-resolved", result.task_id, binding.attempt_id, ACCEPT_CONFLICT, handle_digest),
     )
-    observation = _classify(verified, binding, result)
-    if observation.family == "refused":
-        raise _refuse("native-mismatch", "the native projection does not correlate with this task")
-    evidence = (
-        _evidence_digest(handle_digest, result, observation) if observation.family == "terminal-candidate" else None
-    )
-    updated = _observe(workspace, run_dir, verified, result, observation, evidence=evidence)
     return {
         **base,
         "mode": "hold-resolved",

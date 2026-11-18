@@ -439,3 +439,25 @@ def test_skill_template_names_every_verb_and_the_ack_boundary():
     assert "acknowledges T3 delivery" in text and "Brigade `ack` is separate" in text
     assert "do not resubmit `delegate_task`" in text.lower() or "do not resubmit `delegate_task`" in text
     assert "hold-resolve" in text and "delegate_task" in text
+
+
+@POSIX_ONLY
+def test_refused_hold_resolution_keeps_the_task_held(tmp_path):
+    """A contradictory operator assertion must not clear the hold (security review)."""
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _accepted(workspace, run_id, payload=_terminal("one"))
+    with pytest.raises(dispatch.DispatchError) as conflict:
+        _accepted(workspace, run_id, payload=_native("one", childRunId="run-child-other"))
+    assert conflict.value.code == "accept-conflict"
+
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.hold_resolve(
+            workspace=workspace, run_id=run_id, task_id="one", payload=_terminal("one", status="failed"), abandon=False
+        )
+
+    assert lifecycle.status(workspace=workspace, run_id=run_id)["tasks"][0]["held_reason"] == "accept-conflict"
+    assert not [event for event in _events(workspace, run_id) if event.event_type == "task.native-hold-resolved"]
+    with pytest.raises(dispatch.DispatchError) as refused:
+        lifecycle.finalize(workspace=workspace, run_id=run_id)
+    assert refused.value.code == "finalize-held"
