@@ -61,6 +61,16 @@ def _local_edit_kept_reason(item: dict[str, Any], installed_dir: Path, workspace
     )
 
 
+def _unproven_copy_reason(*, has_skill_md: bool) -> str:
+    """Why sync will not touch a copy it cannot judge; the dry run and the write agree on it."""
+    if not has_skill_md:
+        return (
+            "installed copy is missing SKILL.md but other files remain; "
+            "repair it with `brigade skills install <skill> --target <harness> --force`"
+        )
+    return "installed copy has no valid provenance receipt"
+
+
 def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[str, Any]], str | None]:
     install_targets = _install_mod._install_targets(workspace)
     if harness not in (*install_targets, "all"):
@@ -202,7 +212,7 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
             elif drift["overall"] == "changed":
                 item.update(state="changed", action="update", result="planned")
             else:
-                item["reason"] = "installed copy has no valid provenance receipt"
+                item["reason"] = _unproven_copy_reason(has_skill_md=bool(drift["installed"]))
             items.append(item)
     return items, None
 
@@ -256,12 +266,20 @@ def _sync_file_mutations(
     before: dict[str, tuple[bytes, int]],
     after: dict[str, tuple[bytes, int]],
     display_prefix: str,
+    bind_unchanged: bool = False,
 ) -> list[projection.MutationSpec]:
+    """File mutations turning ``before`` into ``after``.
+
+    ``bind_unchanged`` also binds every file that stays byte-identical with an
+    idempotent replace, so its ``expected_before`` digest is a precondition: an
+    edit made between planning and execution aborts the write instead of being
+    recorded as pristine in a new receipt and snapshot.
+    """
     mutations: list[projection.MutationSpec] = []
     for relative in sorted(set(before) | set(after)):
         old = before.get(relative)
         new = after.get(relative)
-        if old == new:
+        if old == new and not (bind_unchanged and old is not None):
             continue
         destination = root / relative
         mutation_type = "create" if old is None else "remove" if new is None else "replace"
@@ -439,8 +457,11 @@ def _sync_projection_plan(
                         state="blocked",
                         action="none",
                         result="blocked",
-                        reason="installed copy has no valid provenance receipt",
+                        reason=_unproven_copy_reason(has_skill_md="SKILL.md" in previous_files),
                     )
+                # The report must say why the item was kept, not the stale dry-run view.
+                if isinstance(item.get("drift"), dict):
+                    item["drift"] = {**item["drift"], "local_edit": edit_state}
                 item["receipt"] = None
                 continue
             mutations.extend(
@@ -449,6 +470,7 @@ def _sync_projection_plan(
                     before=previous_files,
                     after=desired_files,
                     display_prefix=f"bundle:{skill_id}:{harness}",
+                    bind_unchanged=True,
                 )
             )
             installed_at = _now()
@@ -485,6 +507,9 @@ def _sync_projection_plan(
                 "render": {**render, "fingerprint": _registry_mod._text_fingerprint(skill_content)},
                 "installed": {
                     "bundle_fingerprint": _sync_files_fingerprint(desired_files),
+                    "edit_fingerprint": _registry_mod._edit_fingerprint(
+                        {tuple(Path(relative).parts): data for relative, (data, _mode) in desired_files.items()}
+                    ),
                     "skill_fingerprint": _registry_mod._text_fingerprint(skill_content),
                     "metadata_fingerprint": _registry_mod._text_fingerprint(
                         desired_files.get("skill.json", (b"", 0))[0].decode("utf-8", errors="replace")
@@ -589,9 +614,12 @@ def sync(
                         applied[result] += 1
                 else:
                     state = "restored" if receipt.terminal_state == "restored" else "recovery-required"
-                    for item in mutable_items:
+                    # Items the projection pass kept (edited, blocked, excluded)
+                    # were never part of the failed operation: keep their result.
+                    failed_items = [item for item in mutable_items if item["action"] in {"install", "update"}]
+                    for item in failed_items:
                         item["result"] = state
-                    applied["restored"] = len(mutable_items) if state == "restored" else 0
+                    applied["restored"] = len(failed_items) if state == "restored" else 0
                     applied["failed"] = 1
 
     counts = {
@@ -792,6 +820,7 @@ def rollback(
     workspace: Path,
     skill: str,
     harness: str,
+    discard_local_edits: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
@@ -911,6 +940,35 @@ def rollback(
             }
             if expected_binding is not None:
                 _install_mod._check_review_binding(expected_binding, workspace, skill_id, harness, anchor=state_anchor)
+            if dest_state == "dir":
+                # Read the live bytes now, right before anything is deleted, so an
+                # edit made after validation is still seen. A hand edit is never
+                # discarded unless asked, and then it is snapshotted first.
+                live = _install_mod._inspect_installed_tree(workspace, dest, anchor=state_anchor)
+                if (
+                    _install_mod._local_edit_state(current_receipt, live.files, skill_id=skill_id, harness=harness)
+                    == "changed"
+                ):
+                    if not discard_local_edits:
+                        selector, against = _install_mod._local_edit_selector(
+                            current_receipt, skill_id=skill_id, fallback=f"registry:{skill_id}"
+                        )
+                        reason = _install_mod._local_edit_reason(
+                            installed_dir=dest,
+                            diff_command=_install_mod._local_edit_diff_command(
+                                workspace=workspace, selector=selector, harness=harness, against=against
+                            ),
+                            discard_command=_install_mod._local_edit_rollback_discard_command(
+                                workspace=workspace, skill_id=skill_id, harness=harness
+                            ),
+                        )
+                        print(f"error: {reason}", file=sys.stderr)
+                        return 2
+                    stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-") + "-local-edits"
+                    _registry_mod._write_collected_tree_into_anchor(
+                        live.dirs, live.files, state_anchor, "skills", "rollback", skill_id, harness, stamp
+                    )
+                    payload["edit_snapshot"] = str(_registry_mod._rollback_root(workspace, skill_id, harness) / stamp)
             if under_state_root:
                 _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 _registry_mod._write_collected_tree_into_anchor(dirs, files, state_anchor, *state_parts)

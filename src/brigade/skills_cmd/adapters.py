@@ -821,6 +821,10 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
                 "discard_command": discard_command,
             }
         )
+    for row in copies:
+        # Every row has the same override keys; only an edited copy fills them.
+        row.setdefault("diff_command", None)
+        row.setdefault("discard_command", None)
     copies.sort(key=lambda row: (str(row["skill_id"]), str(row["harness"])))
     counts = {
         state: sum(row["status"] == state for row in copies)

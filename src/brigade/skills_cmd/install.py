@@ -499,22 +499,30 @@ def _local_edit_state(
 ) -> str:
     """Compare installed bytes with the receipt: ``current``, ``changed`` or ``unknown``.
 
-    ``unknown`` means the bytes cannot be judged: no SKILL.md on disk, or no
-    receipt satisfying the contract to prove what was installed. Callers that
-    protect hand edits treat only ``current`` as safe to replace.
+    ``unknown`` means the bytes cannot be judged: no SKILL.md on disk, no
+    receipt satisfying the contract to prove what was installed, or a receipt
+    from before ``installed.edit_fingerprint`` that cannot vouch for a nested
+    ``skill.json``. Callers that protect hand edits treat only ``current`` as
+    safe to replace; ``changed`` is a proven edit.
     """
     installed_raw = files.get(("SKILL.md",))
     if installed_raw is None or not receipt or not _valid_receipt_contract(receipt, skill_id=skill_id, harness=harness):
         return "unknown"
     installed = receipt["installed"]
-    return (
-        "current"
-        if installed.get("bundle_fingerprint") == registry._files_fingerprint(files)
-        and installed.get("skill_fingerprint")
-        == registry._text_fingerprint(installed_raw.decode("utf-8", errors="replace"))
-        and installed.get("metadata_fingerprint") == registry._bytes_fingerprint(files.get(("skill.json",)))
-        else "changed"
-    )
+    if installed.get("skill_fingerprint") != registry._text_fingerprint(
+        installed_raw.decode("utf-8", errors="replace")
+    ) or installed.get("metadata_fingerprint") != registry._bytes_fingerprint(files.get(("skill.json",))):
+        return "changed"
+    edit_fingerprint = installed.get("edit_fingerprint")
+    if isinstance(edit_fingerprint, str) and edit_fingerprint:
+        return "current" if edit_fingerprint == registry._edit_fingerprint(files) else "changed"
+    # The receipt predates the edit digest, whose bundle digest ignored every
+    # skill.json. A difference elsewhere is a real edit; matching bytes are only
+    # provable pristine when no nested skill.json exists to have been skipped.
+    if installed.get("bundle_fingerprint") != registry._files_fingerprint(files):
+        return "changed"
+    nested_metadata = any(parts[-1] == "skill.json" and parts != ("skill.json",) for parts in files)
+    return "unknown" if nested_metadata else "current"
 
 
 def _local_edit_diff_command(*, workspace: Path, selector: str, harness: str, against: str) -> str:
@@ -552,6 +560,38 @@ def _local_edit_discard_command(*, workspace: Path, selector: str, harness: str)
             "--discard-local-edits",
         ]
     )
+
+
+def _local_edit_rollback_discard_command(*, workspace: Path, skill_id: str, harness: str) -> str:
+    """The explicit override for a rollback: the edit is snapshotted, then replaced."""
+    return shlex.join(
+        [
+            "brigade",
+            "skills",
+            "rollback",
+            skill_id,
+            "--workspace",
+            str(workspace),
+            "--target",
+            harness,
+            "--discard-local-edits",
+        ]
+    )
+
+
+def installed_local_edit(workspace: Path, skill_id: str, harness: str) -> str:
+    """Read-only edit state of an installed copy against its receipt (``current``/``changed``/``unknown``).
+
+    Autonomous callers (outcome reconcile) use it to leave a hand-edited copy
+    alone before they roll back or uninstall; they never see the bytes.
+    """
+    try:
+        dest = _install_dir(workspace, harness, skill_id, leaf_link_is_local=True)
+    except (ValueError, registry.SkillsStatePathError):
+        return "unknown"
+    files = _inspect_installed_tree(workspace, dest).files
+    receipt = _latest_install_receipt(workspace, skill_id, harness)
+    return _local_edit_state(receipt, files, skill_id=skill_id, harness=harness)
 
 
 def _local_edit_reason(*, installed_dir: Path, diff_command: str, discard_command: str) -> str:
@@ -598,7 +638,10 @@ def _drift_payload(
         source_state = "unknown"
         render_state = "unknown"
         local_state = "unknown"
-    elif not installed_present and receipt and not known:
+    elif not installed_present and (snapshot_files or (receipt and not known)):
+        # Leftover files without SKILL.md are neither missing nor current: a
+        # write would have to guess what to overwrite, so every reader reports
+        # unknown and ``install --force`` is the only way to repair it.
         overall = "unknown"
         source_state = "unknown"
         render_state = "unknown"
@@ -1110,6 +1153,7 @@ def install(
                 "render": {**render_contract, "fingerprint": render_fingerprint},
                 "installed": {
                     "bundle_fingerprint": installed_fingerprint,
+                    "edit_fingerprint": registry._edit_fingerprint(install_files),
                     "skill_fingerprint": installed_skill_fingerprint,
                     "metadata_fingerprint": installed_metadata_fingerprint,
                 },

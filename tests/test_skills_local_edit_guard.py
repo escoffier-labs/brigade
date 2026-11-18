@@ -13,22 +13,27 @@ SKILL = "edit-guard"
 HARNESS = "claude"
 
 
-def _write_skill(root: Path, body: str = "original") -> Path:
-    skill_dir = root / SKILL
+def _write_skill(
+    root: Path,
+    body: str = "original",
+    skill_id: str = SKILL,
+    harnesses: tuple[str, ...] = ("claude", "codex", "cursor"),
+) -> Path:
+    skill_dir = root / skill_id
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(f"# Edit Guard\n\n{body}\n")
     (skill_dir / "CHANGELOG.md").write_text("# 0.1.0\n\n- Initial reviewed workflow.\n")
     (skill_dir / "skill.json").write_text(
         json.dumps(
             {
-                "id": SKILL,
+                "id": skill_id,
                 "title": "Edit Guard",
                 "version": "0.1.0",
                 "required_tools": ["git"],
                 "required_mcp_servers": ["github"],
-                "supported_harnesses": ["claude", "codex", "cursor"],
+                "supported_harnesses": list(harnesses),
                 "trust_level": "workspace",
-                "tests": ["brigade skills lint edit-guard"],
+                "tests": [f"brigade skills lint {skill_id}"],
             }
         )
     )
@@ -55,6 +60,13 @@ def _rollback_snapshots(workspace: Path) -> list[Path]:
     return sorted(root.rglob("SKILL.md")) if root.exists() else []
 
 
+def _history_rows(workspace: Path, harness: str) -> list[str]:
+    history = workspace / ".brigade" / "skills" / "installs" / "history.jsonl"
+    if not history.exists():
+        return []
+    return [line for line in history.read_text().splitlines() if json.loads(line).get("target") == harness]
+
+
 def _edited_workspace(workspace: Path, capsys, harness: str = HARNESS) -> Path:
     """Install a registry skill, hand-edit the copy, then move the registry forward."""
     assert skills_cmd.import_skill(target=workspace, source=_write_skill(workspace / "src1"), json_output=True) == 0
@@ -72,8 +84,8 @@ def _sync(workspace: Path, capsys, *, write: bool, harness: str = HARNESS) -> tu
     return rc, json.loads(capsys.readouterr().out)
 
 
-def _item(payload: dict) -> dict:
-    return next(item for item in payload["items"] if item["skill_id"] == SKILL)
+def _item(payload: dict, skill_id: str = SKILL) -> dict:
+    return next(item for item in payload["items"] if item["skill_id"] == skill_id)
 
 
 def test_sync_dry_run_reports_edited_copy_as_kept_with_diff_and_override(tmp_path, capsys):
@@ -226,6 +238,9 @@ def test_install_discard_local_edits_overwrites_and_snapshots_first(tmp_path, ca
 def test_install_all_records_edited_copy_as_skipped_and_still_installs_the_rest(tmp_path, capsys):
     installed = _edited_workspace(tmp_path, capsys)
     before = installed.read_bytes()
+    receipt_path = tmp_path / ".brigade" / "skills" / "installs" / f"{SKILL}-{HARNESS}.json"
+    receipt_before = receipt_path.read_bytes()
+    history_before = _history_rows(tmp_path, HARNESS)
 
     rc = skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness="all", force=True, json_output=True)
 
@@ -235,6 +250,10 @@ def test_install_all_records_edited_copy_as_skipped_and_still_installs_the_rest(
     assert len(skipped) == 1 and skipped[0]["local_edit"] is True
     assert "--discard-local-edits" in skipped[0]["reason"]
     assert installed.read_bytes() == before
+    # The edited target's receipt and history are untouched; only the others were written.
+    assert receipt_path.read_bytes() == receipt_before
+    assert _history_rows(tmp_path, HARNESS) == history_before
+    assert len(_history_rows(tmp_path, "codex")) == 1
     assert (tmp_path / ".codex" / "skills" / SKILL / "SKILL.md").exists()
     assert _rollback_snapshots(tmp_path) == []
 
@@ -349,3 +368,310 @@ def test_hub_report_keeps_edited_copy_inside_the_closed_status_set(tmp_path, cap
     rows = [row for row in fleet_skills_report.build_copies(tmp_path) if row["skill_id"] == SKILL]
 
     assert [row["status"] for row in rows] == ["stale"]
+
+
+# ---- rollback: the guard also covers restoring an older snapshot ------------
+
+
+def _rollbackable_edited_workspace(workspace: Path, capsys) -> tuple[Path, str]:
+    """Two installs (so a rollback snapshot exists), then a hand edit of the live copy."""
+    assert skills_cmd.import_skill(target=workspace, source=_write_skill(workspace / "src1"), json_output=True) == 0
+    assert skills_cmd.install(workspace=workspace, skill=f"registry:{SKILL}", harness=HARNESS, json_output=True) == 0
+    first_text = _installed(workspace).read_text()
+    updated = _write_skill(workspace / "src2", body="registry moved on")
+    assert skills_cmd.import_skill(target=workspace, source=updated, force=True, json_output=True) == 0
+    assert skills_cmd.install(workspace=workspace, skill=f"registry:{SKILL}", harness=HARNESS, force=True) == 0
+    installed = _installed(workspace)
+    installed.write_text(installed.read_text() + "\nhand edit\n")
+    capsys.readouterr()
+    return installed, first_text
+
+
+def test_rollback_refuses_edited_copy_before_any_deletion(tmp_path, capsys):
+    installed, _first = _rollbackable_edited_workspace(tmp_path, capsys)
+    before = _state_bytes(tmp_path)
+
+    rc = skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS)
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert str(installed.parent) in err
+    assert "skills diff" in err
+    assert "skills rollback" in err and "--discard-local-edits" in err
+    assert "hand edit" in installed.read_text()
+    # The installed copy, receipt, history and the rollback snapshot are all untouched.
+    assert _state_bytes(tmp_path) == before
+
+
+def test_rollback_discard_local_edits_snapshots_the_edit_then_rolls_back(tmp_path, capsys):
+    installed, first_text = _rollbackable_edited_workspace(tmp_path, capsys)
+    edited_text = installed.read_text()
+
+    rc = skills_cmd.rollback(
+        workspace=tmp_path, skill=SKILL, harness=HARNESS, discard_local_edits=True, json_output=True
+    )
+
+    assert rc == 0
+    capsys.readouterr()
+    assert installed.read_text() == first_text
+    # The consumed snapshot is gone, and the hand edit survives as a new snapshot.
+    assert [path.read_text() for path in _rollback_snapshots(tmp_path)] == [edited_text]
+
+
+def test_rollback_still_works_on_a_pristine_copy_without_the_flag(tmp_path, capsys):
+    installed, first_text = _rollbackable_edited_workspace(tmp_path, capsys)
+    # Undo the hand edit through the receipt-bound bytes: reinstall pristine, then force a fresh snapshot.
+    assert (
+        skills_cmd.install(
+            workspace=tmp_path,
+            skill=f"registry:{SKILL}",
+            harness=HARNESS,
+            force=True,
+            discard_local_edits=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert "hand edit" not in installed.read_text()
+
+    assert skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS) == 0
+    capsys.readouterr()
+    assert "hand edit" in installed.read_text()
+    assert _local_edit(tmp_path) != "unknown"
+
+
+def test_rollback_flag_works_through_the_cli(tmp_path, capsys):
+    installed, first_text = _rollbackable_edited_workspace(tmp_path, capsys)
+    argv = ["skills", "rollback", SKILL, "--workspace", str(tmp_path), "--target", HARNESS]
+
+    assert cli.main(argv) == 2
+    capsys.readouterr()
+    assert cli.main([*argv, "--discard-local-edits"]) == 0
+    assert installed.read_text() == first_text
+
+
+# ---- digest: only the root skill.json is provenance, nested ones are content --
+
+
+def _nested_workspace(workspace: Path, capsys) -> Path:
+    source = _write_skill(workspace / "src1")
+    (source / "assets").mkdir()
+    (source / "assets" / "skill.json").write_text('{"fixture": 1}\n')
+    assert skills_cmd.import_skill(target=workspace, source=source, json_output=True) == 0
+    assert skills_cmd.install(workspace=workspace, skill=f"registry:{SKILL}", harness=HARNESS, json_output=True) == 0
+    capsys.readouterr()
+    return workspace / f".{HARNESS}" / "skills" / SKILL / "assets" / "skill.json"
+
+
+def _local_edit(workspace: Path) -> str:
+    rows = skills_cmd._fleet_status_payload(workspace)["copies"]
+    return next(row for row in rows if row["skill_id"] == SKILL)["drift"]["local_edit"]
+
+
+def _strip_edit_digest(workspace: Path) -> None:
+    """Make the receipt look like one written before the digest rule changed."""
+    path = workspace / ".brigade" / "skills" / "installs" / f"{SKILL}-{HARNESS}.json"
+    receipt = json.loads(path.read_text())
+    receipt["installed"].pop("edit_fingerprint", None)
+    path.write_text(json.dumps(receipt))
+
+
+def test_edit_to_nested_skill_json_is_an_edit_and_never_overwritten(tmp_path, capsys):
+    nested = _nested_workspace(tmp_path, capsys)
+    assert _local_edit(tmp_path) == "current"
+    nested.write_text('{"fixture": 2}\n')
+    updated = _write_skill(tmp_path / "src2", body="registry moved on")
+    (updated / "assets").mkdir()
+    (updated / "assets" / "skill.json").write_text('{"fixture": 1}\n')
+    assert skills_cmd.import_skill(target=tmp_path, source=updated, force=True, json_output=True) == 0
+    capsys.readouterr()
+    before = _state_bytes(tmp_path)
+
+    assert _local_edit(tmp_path) == "changed"
+    rc, payload = _sync(tmp_path, capsys, write=True)
+
+    assert rc == 0
+    assert (_item(payload)["state"], _item(payload)["result"]) == ("edited", "kept")
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, force=True) == 2
+    assert nested.read_text() == '{"fixture": 2}\n'
+    assert _state_bytes(tmp_path) == before
+
+
+def test_old_receipt_with_nested_skill_json_is_unknown_never_current(tmp_path, capsys):
+    _nested_workspace(tmp_path, capsys)
+    _strip_edit_digest(tmp_path)
+
+    # The old digest ignored nested skill.json files, so it cannot prove they are pristine.
+    assert _local_edit(tmp_path) == "unknown"
+
+
+def test_old_receipt_without_nested_skill_json_still_compares_as_current(tmp_path, capsys):
+    assert skills_cmd.import_skill(target=tmp_path, source=_write_skill(tmp_path / "src1"), json_output=True) == 0
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, json_output=True) == 0
+    capsys.readouterr()
+    _strip_edit_digest(tmp_path)
+    assert _local_edit(tmp_path) == "current"
+
+    installed = _installed(tmp_path)
+    installed.write_text(installed.read_text() + "\nhand edit\n")
+    assert _local_edit(tmp_path) == "changed"
+
+
+def test_sync_written_receipt_binds_the_same_edit_digest(tmp_path, capsys):
+    assert skills_cmd.import_skill(target=tmp_path, source=_write_skill(tmp_path / "src1"), json_output=True) == 0
+    capsys.readouterr()
+    rc, _payload = _sync(tmp_path, capsys, write=True)
+    assert rc == 0
+    receipt = json.loads((tmp_path / ".brigade" / "skills" / "installs" / f"{SKILL}-{HARNESS}.json").read_text())
+
+    assert receipt["installed"]["edit_fingerprint"]
+    assert _local_edit(tmp_path) == "current"
+
+
+# ---- sync --write: sibling failure and write-time preconditions --------------
+
+
+class _FakeReceipt:
+    def __init__(self, terminal_state: str) -> None:
+        self.terminal_state = terminal_state
+
+    def to_dict(self) -> dict:
+        return {"operation_id": "skills-fake", "terminal_state": self.terminal_state}
+
+
+def test_sync_write_failure_of_a_sibling_does_not_relabel_a_kept_edit_as_restored(tmp_path, capsys, monkeypatch):
+    other = "second-skill"
+    for skill_id in (SKILL, other):
+        assert (
+            skills_cmd.import_skill(
+                target=tmp_path, source=_write_skill(tmp_path / "src1", skill_id=skill_id), json_output=True
+            )
+            == 0
+        )
+        assert (
+            skills_cmd.install(workspace=tmp_path, skill=f"registry:{skill_id}", harness=HARNESS, json_output=True) == 0
+        )
+        updated = _write_skill(tmp_path / "src2", body="registry moved on", skill_id=skill_id)
+        assert skills_cmd.import_skill(target=tmp_path, source=updated, force=True, json_output=True) == 0
+    capsys.readouterr()
+    installed = _installed(tmp_path)
+    real_plan = sync_history._sync_plan
+
+    def plan_then_edit(**kwargs):
+        result = real_plan(**kwargs)
+        installed.write_text(installed.read_text() + "\nlate hand edit\n")
+        return result
+
+    monkeypatch.setattr(sync_history, "_sync_plan", plan_then_edit)
+    monkeypatch.setattr(sync_history.projection, "execute", lambda plan, target: _FakeReceipt("restored"))
+
+    rc, payload = _sync(tmp_path, capsys, write=True)
+
+    assert rc == 1
+    kept = _item(payload)
+    assert (kept["state"], kept["action"], kept["result"]) == ("edited", "none", "kept")
+    assert kept["drift"]["local_edit"] == "changed"
+    assert _item(payload, other)["result"] == "restored"
+    assert payload["applied"]["restored"] == 1
+
+
+def test_sync_write_aborts_when_an_unchanged_file_is_edited_after_planning(tmp_path, capsys, monkeypatch):
+    # State-backed copies (the mcp target) keep a fixed mode, so an untouched file
+    # produces no mutation of its own: exactly the file whose edit used to slip through.
+    harnesses = ("mcp",)
+    first = _write_skill(tmp_path / "src1", harnesses=harnesses)
+    (first / "notes.md").write_text("reference notes\n")
+    assert skills_cmd.import_skill(target=tmp_path, source=first, json_output=True) == 0
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness="mcp", json_output=True) == 0
+    updated = _write_skill(tmp_path / "src2", body="registry moved on", harnesses=harnesses)
+    (updated / "notes.md").write_text("reference notes\n")
+    assert skills_cmd.import_skill(target=tmp_path, source=updated, force=True, json_output=True) == 0
+    capsys.readouterr()
+    live = skills_cmd._install_dir(tmp_path, "mcp", SKILL)
+    notes = live / "notes.md"
+    real_plan = sync_history._sync_projection_plan
+
+    def plan_then_edit(**kwargs):
+        result = real_plan(**kwargs)
+        assert result[0] is not None
+        notes.write_text(notes.read_text() + "edit after planning\n")
+        return result
+
+    monkeypatch.setattr(sync_history, "_sync_projection_plan", plan_then_edit)
+    receipt_path = tmp_path / ".brigade" / "skills" / "installs" / f"{SKILL}-mcp.json"
+    receipt_before = receipt_path.read_bytes()
+    live_before = (live / "SKILL.md").read_bytes()
+
+    rc = skills_cmd.sync(workspace=tmp_path, harness="mcp", write=True, json_output=True)
+
+    assert rc == 1
+    assert "edit after planning" in notes.read_text()
+    assert (live / "SKILL.md").read_bytes() == live_before
+    assert receipt_path.read_bytes() == receipt_before
+    assert _rollback_snapshots(tmp_path) == []
+    assert len(_history_rows(tmp_path, "mcp")) == 1
+
+
+# ---- SKILL.md gone but other files remain: unknown everywhere ----------------
+
+
+def test_receipted_copy_missing_skill_md_with_other_files_is_unknown_everywhere(tmp_path, capsys):
+    assert skills_cmd.import_skill(target=tmp_path, source=_write_skill(tmp_path / "src1"), json_output=True) == 0
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, json_output=True) == 0
+    capsys.readouterr()
+    installed = _installed(tmp_path)
+    installed.unlink()
+    assert (installed.parent / "CHANGELOG.md").exists()
+    before = _state_bytes(tmp_path)
+
+    row = next(r for r in skills_cmd._fleet_status_payload(tmp_path)["copies"] if r["skill_id"] == SKILL)
+    assert (row["status"], row["drift"]["overall"]) == ("unknown", "unknown")
+    for write in (False, True):
+        rc, payload = _sync(tmp_path, capsys, write=write)
+        assert rc == 0
+        item = _item(payload)
+        assert (item["state"], item["action"], item["result"]) == ("blocked", "none", "blocked")
+        assert "SKILL.md" in item["reason"] and "install" in item["reason"]
+        assert _state_bytes(tmp_path) == before
+
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, force=True) == 0
+    assert installed.exists()
+
+
+def test_a_copy_with_its_directory_removed_is_still_missing(tmp_path, capsys):
+    assert skills_cmd.import_skill(target=tmp_path, source=_write_skill(tmp_path / "src1"), json_output=True) == 0
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, json_output=True) == 0
+    capsys.readouterr()
+    import shutil
+
+    shutil.rmtree(_installed(tmp_path).parent)
+
+    rc, payload = _sync(tmp_path, capsys, write=False)
+
+    assert rc == 0
+    assert (_item(payload)["state"], _item(payload)["action"]) == ("missing", "install")
+
+
+# ---- fleet rows: the same keys on every row ---------------------------------
+
+
+def test_every_fleet_row_carries_diff_and_discard_keys(tmp_path, capsys):
+    assert skills_cmd.import_skill(target=tmp_path, source=_write_skill(tmp_path / "src1"), json_output=True) == 0
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, json_output=True) == 0
+    assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness="codex", json_output=True) == 0
+    capsys.readouterr()
+    # codex copy becomes a symlink row; the claude copy loses its registry source (unknown row).
+    codex_dir = tmp_path / ".codex" / "skills" / SKILL
+    import shutil
+
+    shutil.rmtree(codex_dir)
+    (tmp_path / "linked-target").mkdir()
+    codex_dir.symlink_to(tmp_path / "linked-target")
+    shutil.rmtree(tmp_path / ".brigade" / "skills" / "registry" / SKILL)
+
+    rows = skills_cmd._fleet_status_payload(tmp_path)["copies"]
+
+    assert {row["status"] for row in rows} >= {"symlink", "unknown"}
+    for row in rows:
+        assert "diff_command" in row and "discard_command" in row
+        assert row["diff_command"] is None and row["discard_command"] is None

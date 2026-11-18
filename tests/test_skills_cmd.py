@@ -2764,7 +2764,8 @@ def test_skills_fleet_does_not_remove_partial_unsupported_copy(tmp_path, capsys)
     row = next(item for item in payload["copies"] if item["skill_id"] == "partial-unsupported")
 
     assert row["drift"]["receipt_known"] is True
-    assert row["status"] == "missing"
+    # Leftover files without SKILL.md are unknown, never missing and never removable.
+    assert row["status"] == "unknown"
     assert row["remove_command"] is None
 
 
@@ -3914,7 +3915,7 @@ def test_state_backed_install_reads_go_through_the_anchor(tmp_path, capsys):
     # rollback material.
     sync_payload = json.loads(sync_out)
     assert sync_payload["applied"]["updated"] == 0
-    assert any(item["result"] == "excluded" for item in sync_payload["items"])
+    assert any(item["result"] in {"excluded", "blocked"} for item in sync_payload["items"])
     assert installed_md.is_symlink()
     rollback_root = workspace / ".brigade" / "skills" / "rollback"
     if rollback_root.is_dir():

@@ -61,6 +61,13 @@ brigade outcome explain <skill-or-card-id> --target .
 | `outcome ratchet` | Print the last written ratchet report, read-only, without ranking or reconciling |
 | `outcome explain` | Print the signal trail behind a score or reconcile decision |
 
+### Hand-edited installed copies
+
+`outcome reconcile --apply` runs unattended, so it never changes a skill copy that has hand edits (see `docs/skill-registry.md`):
+
+- **Rollback.** Per harness it checks the installed copy against its install receipt before it rolls back and again before the first-install `skills uninstall` fallback. An edited copy is skipped and reported as `<harness>:rollback-skipped: local edits` in the decision's `execution`. A reconcile that skipped a harness does not record the demotion as applied: the artifact keeps its status and route policy, the decision receipt records the skip, and the next run retries once the edit is reviewed or discarded with `skills rollback --discard-local-edits`.
+- **Install.** A promotion counts only when `install` reports at least one harness installed. If it exits 0 but skipped every target (for example because each copy is edited), the execution is `install-failed: nothing installed (...)`, the status stays put and no route policy is written.
+
 Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
 
 ## Weekly ratchet report

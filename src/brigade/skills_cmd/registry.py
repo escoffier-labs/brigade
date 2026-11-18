@@ -301,6 +301,25 @@ def _files_fingerprint(files: dict[tuple[str, ...], bytes]) -> str:
     return digest.hexdigest()
 
 
+def _edit_fingerprint(files: dict[tuple[str, ...], bytes]) -> str:
+    """Digest of installed bytes for hand-edit detection.
+
+    Unlike ``_files_fingerprint`` it skips only the root ``skill.json``
+    provenance file (guarded by its own ``metadata_fingerprint``). A nested
+    ``skill.json`` such as ``assets/skill.json`` is ordinary skill content, so
+    an edit to it is visible. Receipts record it as ``installed.edit_fingerprint``.
+    """
+    digest = hashlib.sha256()
+    for parts in sorted(files, key=lambda key: "/".join(key)):
+        if parts[-1] == ".DS_Store" or parts == ("skill.json",):
+            continue
+        digest.update("/".join(parts).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(files[parts])
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _package_identity(files: dict[tuple[str, ...], bytes]) -> str:
     """Identity of collected package bytes plus semantic metadata, without timestamps."""
     from ..localio import canonical_json_digest

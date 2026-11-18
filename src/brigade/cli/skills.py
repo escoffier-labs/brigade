@@ -159,6 +159,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Require exact reviewed package identities before mutation.",
     )
+    p_skills_rollback.add_argument(
+        "--discard-local-edits",
+        action="store_true",
+        help="Also roll back an installed copy that has local edits (the edited bytes are snapshotted first).",
+    )
     p_skills_rollback.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_serve = skills_sub.add_parser("serve-mcp", help="Report the local MCP skills resource contract.")
     p_skills_serve.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
@@ -358,6 +363,7 @@ def dispatch(args) -> int:
             workspace=args.workspace,
             skill=args.skill,
             harness=args.install_target,
+            discard_local_edits=args.discard_local_edits,
             expected_binding=args.expected_binding_json,
             json_output=args.json,
         )

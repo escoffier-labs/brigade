@@ -88,6 +88,29 @@ unless you say so:
   restores the earlier behavior: a rollback snapshot of the edited copy is taken
   first, then the copy is replaced.
 
+- `brigade skills rollback <skill> --target <harness>` on an edited copy exits 2
+  before it deletes anything, naming the installed path, the diff command and
+  `--discard-local-edits`. With the flag, the edited bytes are snapshotted under
+  the rollback tree (named in the rollback receipt as `edit_snapshot`) before the
+  copy is rolled back, so the edit stays recoverable.
+- `brigade outcome reconcile --apply` never rolls back, uninstalls or promotes
+  over an edited copy. See `docs/outcome-scoring.md`.
+- The edit check compares every installed file except the root `skill.json`
+  provenance file, which its own metadata fingerprint covers. A nested
+  `skill.json` (for example `assets/skill.json`) is ordinary content, so an edit
+  to it counts. Receipts record this digest as `installed.edit_fingerprint`.
+  A receipt written before it existed is still compared with the earlier digest,
+  except that a copy holding a nested `skill.json` reads as `unknown` until it is
+  reinstalled, because the earlier digest cannot prove that file untouched.
+- A receipted copy whose `SKILL.md` is gone while other files remain is
+  `unknown` in sync (dry run and `--write`) and in `fleet status`, never
+  `missing`. Sync leaves it alone; `install --force` repairs it.
+- `sync --write` binds every installed file of an updated copy, unchanged ones
+  included, to the bytes it planned against. An edit made between planning and
+  writing aborts the write with exit 1 before any receipt or snapshot is
+  written. `fleet status` rows always carry `diff_command` and
+  `discard_command` (null unless the copy is edited).
+
 Every copy that is replaced, edited or not, still gets its rollback snapshot.
 
 Use `brigade skills sync --workspace . --target all --trust workspace` to plan

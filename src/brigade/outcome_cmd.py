@@ -11,7 +11,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
-import io
 import json
 import os
 import platform as platform_mod
@@ -2089,51 +2088,15 @@ def capture(
     return 0
 
 
-def _silently(fn, **kwargs) -> int:
-    """Call a noisy command function while swallowing its stdout/stderr."""
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-        return fn(**kwargs)
-
-
 def _execute_skill_decision(target: Path, artifact_id: str, action: str) -> str:
     """Perform a decision's physical side effect for a skill artifact.
 
-    install -> install across all harnesses (idempotent). rollback -> restore the
-    last good snapshot per harness, or uninstall when a first install has no prior
-    snapshot (the first-install-safe rule). Defensive: a skills failure is
-    recorded, never raised, so one artifact cannot abort the autonomous run.
+    Delegates to ``outcome_skill_exec``: a hand-edited installed copy is never
+    rolled back, uninstalled or counted as installed by an unattended run.
     """
-    from . import skills_cmd
+    from . import outcome_skill_exec
 
-    try:
-        if action == "install":
-            if not skills_cmd._registry_entry_present(target, artifact_id):
-                # The ledger named an artifact that was never accepted into the
-                # registry, so there is nothing to install. Report it distinctly
-                # instead of a generic rc failure; reconcile keeps it a candidate.
-                return "install-skipped: not in registry"
-            rc = _silently(
-                skills_cmd.install, workspace=target, skill=artifact_id, harness="all", force=True, json_output=True
-            )
-            return "installed" if rc == 0 else f"install-failed(rc={rc})"
-        if action == "rollback":
-            outcomes: list[str] = []
-            for harness in skills_cmd._install_targets(target):
-                rc = _silently(
-                    skills_cmd.rollback, workspace=target, skill=artifact_id, harness=harness, json_output=True
-                )
-                if rc == 0:
-                    outcomes.append(f"{harness}:rollback")
-                    continue
-                rc = _silently(
-                    skills_cmd.uninstall, workspace=target, skill=artifact_id, harness=harness, json_output=True
-                )
-                outcomes.append(f"{harness}:uninstall" if rc == 0 else f"{harness}:noop")
-            return "reverted:" + ",".join(outcomes)
-        return "noop"
-    except Exception as exc:  # noqa: BLE001 - autonomy must survive any skills failure
-        return f"error:{type(exc).__name__}"
+    return outcome_skill_exec.execute(target, artifact_id, action)
 
 
 def reconcile(
@@ -2222,10 +2185,12 @@ def reconcile(
                 and execution != "installed"
             )
             # Rollback demotes routing authority immediately; physical revert is best-effort.
-            if decision.action == "rollback":
+            # A harness skipped for local edits is not a demotion: it stays pending for a retry.
+            rollback_skipped = decision.action == "rollback" and "rollback-skipped: local edits" in execution
+            if decision.action == "rollback" and not rollback_skipped:
                 new_status = decision.new_status
             else:
-                new_status = prior_status if install_failed else decision.new_status
+                new_status = prior_status if install_failed or rollback_skipped else decision.new_status
             effective_status[decision.artifact_id] = new_status
             if cohorts is not None:
                 score_payload: dict[str, Any] = dataclasses.asdict(cohorts.current)
@@ -2259,6 +2224,10 @@ def reconcile(
             ):
                 receipt["route_policy"] = scorecard_mod.route_policy_marker_for_promotion()
             _write_decision_receipt(target, now, decision.artifact_id, receipt)
+            if rollback_skipped:
+                # The receipt records the skip; the status entry (and its route policy)
+                # stays as it was so the demotion is retried, not recorded as applied.
+                continue
             status_map[decision.artifact_id] = _status_entry_for_transition(
                 new_status=new_status,
                 now=now,
