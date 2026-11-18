@@ -53,7 +53,8 @@ $C cleanup
 
 The drive creates a clean nested git workspace inside the temp target, writes
 a roster with one bound seat, opens a two-task worktree batch, and opens it a
-second time. Observed on the drive that owns this file: `ok: true`, two tasks
+second time. It then exercises the governed claim, accepted and abandon verbs
+covered by [t3-claim.md](t3-claim.md). Observed on the drive that owns this file: `ok: true`, two tasks
 `enrolled`, `run.json` status `awaiting-native-parent`, two assets at `0600`,
 task text absent from the lifecycle journal, and the replay returning the same
 `run_id`.

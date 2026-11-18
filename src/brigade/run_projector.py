@@ -186,6 +186,11 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "task.observed",
         "task.acknowledged",
         "task.native-enrolled",
+        # Governed native T3 claim, correlation and hold facts change task
+        # custody, not the aggregate run status.
+        "task.native-claimed",
+        "task.native-correlated",
+        "task.native-held",
         "control.requested",
         "control.observed",
         "control.failed",

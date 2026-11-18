@@ -211,6 +211,24 @@ _TASK_EVENT_TYPES = frozenset(
 EVENT_TYPES.update(
     {
         "task.batch-accepted": frozenset({"descriptor_version", "request_id", "members", "membership_digest"}),
+        # Governed native T3 verbs. These are generic paired facts, not folded
+        # task facts: they bind a claim intent, a caller-reported correlation
+        # and a task hold by digest. No task text or native payload enters the
+        # journal.
+        "task.native-claimed": frozenset(
+            {
+                "task_id",
+                "attempt_id",
+                "dispatch_attempt",
+                "parent_thread",
+                "template_digest",
+                "intent_digest",
+            }
+        ),
+        "task.native-correlated": frozenset(
+            {"task_id", "attempt_id", "mode", "handle_digest", "child_thread_id", "child_run_id"}
+        ),
+        "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
         # Native T3 enrollment holds one immutable delegation input asset
         # outside the journal. Only its relative name and digests are retained
         # here, never task text, options values, or raw native JSON.
@@ -244,7 +262,8 @@ APPROVAL_DECISION_EVENT_STATES = {
     "approval.rejected": "rejected",
     "approval.held": "held",
 }
-_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES
+_NATIVE_T3_EVENT_TYPES = frozenset({"task.native-claimed", "task.native-correlated", "task.native-held"})
+_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
 _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "approval": frozenset(
         {
@@ -272,6 +291,13 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     ),
     "run.ship": frozenset({"stage"}),
     "run.merge": frozenset({"stage"}),
+    "task.native-claimed": frozenset(
+        {"task_id", "attempt_id", "dispatch_attempt", "parent_thread", "template_digest", "intent_digest"}
+    ),
+    "task.native-correlated": frozenset(
+        {"task_id", "attempt_id", "mode", "handle_digest", "child_thread_id", "child_run_id"}
+    ),
+    "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
 }
 
 # Private-data exclusion list: these payload key names are never part of any
@@ -473,6 +499,43 @@ def build_event(
     return envelope
 
 
+_NATIVE_MODES = frozenset({"parent-reported", "operator-asserted"})
+_NATIVE_HELD_REASONS = frozenset({"accept-conflict", "abandoned-unknown"})
+
+
+def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> None:
+    """Closed governed native shapes, matching the existing task fact rules."""
+    from brigade import run_task_journal
+
+    if not run_task_journal.task_id(payload.get("task_id")):
+        raise CanonicalizationError(f"{event_type} task identity is invalid")
+    if not run_task_journal.digest(payload.get("attempt_id")):
+        raise CanonicalizationError(f"{event_type} attempt identity is invalid")
+    if event_type == "task.native-claimed":
+        attempt = payload.get("dispatch_attempt")
+        if type(attempt) is not int or attempt < 1:
+            raise CanonicalizationError("task.native-claimed dispatch attempt is invalid")
+        if not run_task_journal.provider_reference(payload.get("parent_thread")):
+            raise CanonicalizationError("task.native-claimed parent thread is invalid")
+        for field in ("template_digest", "intent_digest"):
+            if not run_task_journal.digest(payload.get(field)):
+                raise CanonicalizationError(f"task.native-claimed {field} is invalid")
+        return
+    if event_type == "task.native-correlated":
+        if payload.get("mode") not in _NATIVE_MODES:
+            raise CanonicalizationError("task.native-correlated mode is invalid")
+        if not run_task_journal.digest(payload.get("handle_digest")):
+            raise CanonicalizationError("task.native-correlated handle digest is invalid")
+        for field in ("child_thread_id", "child_run_id"):
+            if not run_task_journal.provider_reference(payload.get(field)):
+                raise CanonicalizationError(f"task.native-correlated {field} is invalid")
+        return
+    if payload.get("reason") not in _NATIVE_HELD_REASONS:
+        raise CanonicalizationError("task.native-held reason is invalid")
+    if not run_task_journal.digest(payload.get("evidence_digest")):
+        raise CanonicalizationError("task.native-held evidence digest is invalid")
+
+
 def _validate_payload(event_type: str, payload: Any) -> None:
     if not isinstance(payload, Mapping):
         raise CanonicalizationError("payload must be an object")
@@ -553,6 +616,8 @@ def _validate_payload(event_type: str, payload: Any) -> None:
         from . import run_cassette
 
         run_cassette.validate_reference(payload)
+    if event_type in _NATIVE_T3_EVENT_TYPES:
+        _validate_native_t3_payload(event_type, payload)
 
 
 def validate_event(env: Any) -> list[str]:
