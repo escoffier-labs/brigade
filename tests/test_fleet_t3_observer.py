@@ -15,6 +15,9 @@ from brigade.fleet_session_presence import ProviderLinkState
 from tests._home import set_home
 
 
+HEALTH_POSTS: list[dict] = []
+
+
 @pytest.fixture
 def native_t3(tmp_path, monkeypatch):
     set_home(monkeypatch, tmp_path)
@@ -71,6 +74,10 @@ def native_t3(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client, "publish_session", lambda s: published.append(s) or fleet_client.SessionWriteResult(ok=True)
     )
+    # Health posts never reach a network in these tests. The recorder is HEALTH_POSTS.
+    HEALTH_POSTS.clear()
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *a, **k: "11111111-1111-4111-8111-111111111111")
+    monkeypatch.setattr(fleet_client_policy, "observe_t3", lambda body: HEALTH_POSTS.append(dict(body)) or {})
 
     def configure(rows=None, *, drop_archived=False, **patch):
         if rows is None:
@@ -251,7 +258,8 @@ def test_missing_interpreter_and_native_deadline_fail_closed(native_t3, monkeypa
     assert observer.main(["--t3-python", "relative-python"]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
     monkeypatch.setenv("FIXTURE_MODE", "sleep")
-    monkeypatch.setattr(observer, "NATIVE_TIMEOUT_SECONDS", 0.1)
+    # The first snapshot gets the budget minus the publish reserve: 4 - 0.25 - 3.5 leaves 0.25 s.
+    monkeypatch.setattr(observer, "OBSERVATION_BUDGET_SECONDS", 4)
     assert observer.main(["--t3-python", sys.executable]) == 1
     report = json.loads(capsys.readouterr().out)
     assert report["error"] == "observation_timeout"
@@ -1008,3 +1016,192 @@ def test_inventory_size_cap_is_strictly_below_the_printed_limit(native_t3, monke
     assert size(kept) == _CAP and kept["inventory"]["projects"]
     dropped = run(count, tuned(_CAP + 1))
     assert "inventory" not in dropped and dropped["schemaVersion"] == 2
+
+
+# --- T3 observer health (#2166 slice 6) ---------------------------------------------------------------------
+
+NODE = "11111111-1111-4111-8111-111111111111"
+
+
+def _running(thread_id: str) -> dict:
+    return {
+        "id": thread_id,
+        "projectId": "p",
+        "status": "running",
+        "activeRunId": "run",
+        "worktreePath": None,
+    }
+
+
+def test_publish_reports_health_once_with_no_node_time(native_t3, capsys):
+    from brigade.fleet_t3_observer import main
+
+    _, published, _, _ = native_t3
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["health"] == "ok" and len(published) == 1
+    # Only the node id and the verdict leave the node: the Hub stamps its own receipt time.
+    assert HEALTH_POSTS == [{"node_id": NODE, "ok": True}]
+
+
+def test_inspect_mode_posts_no_health(native_t3, capsys):
+    from brigade.fleet_t3_observer import main
+
+    assert main(["--t3-python", sys.executable]) == 0
+    assert "health" not in json.loads(capsys.readouterr().out) and not HEALTH_POSTS
+
+
+def test_an_idle_node_reports_a_healthy_observer(native_t3, capsys):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure([])
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["active_threads"] == 0 and report["health"] == "ok" and not published
+    assert HEALTH_POSTS == [{"node_id": NODE, "ok": True}]
+
+
+def test_rotation_truncation_still_counts_as_a_healthy_observer(native_t3, capsys):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure([_running(f"app-thread-{i:03d}") for i in range(60)])
+    assert main(["--t3-python", sys.executable, "--publish"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["truncated"] is True and "error" not in report and len(published) == 50
+    assert report["health"] == "ok" and HEALTH_POSTS == [{"node_id": NODE, "ok": True}]
+
+
+def test_a_failed_session_publication_reports_an_unhealthy_observer(native_t3, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    monkeypatch.setattr(fleet_client, "publish_session", lambda s: fleet_client.SessionWriteResult(ok=False))
+    assert main(["--t3-python", sys.executable, "--publish"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["error"] == "publication_failed" and report["health"] == "ok"
+    assert HEALTH_POSTS == [{"node_id": NODE, "ok": False}]
+
+
+def test_a_snapshot_timeout_reports_an_unhealthy_observer(native_t3, monkeypatch, capsys):
+    from brigade import fleet_t3_observer as observer
+
+    monkeypatch.setenv("FIXTURE_MODE", "sleep")
+    monkeypatch.setattr(observer, "OBSERVATION_BUDGET_SECONDS", 4)
+    assert observer.main(["--t3-python", sys.executable, "--publish"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["error"] == "observation_timeout" and report["health"] == "ok"
+    assert HEALTH_POSTS == [{"node_id": NODE, "ok": False}]
+
+
+def test_a_malformed_snapshot_reports_an_unhealthy_observer(native_t3, capsys):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure(schemaVersion=1)
+    assert main(["--t3-python", sys.executable, "--publish"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["error"] == "native_metadata_failed" and not published
+    assert HEALTH_POSTS == [{"node_id": NODE, "ok": False}]
+
+
+def test_a_failed_health_post_never_changes_session_publishing_or_the_exit_code(native_t3, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    _, published, _, _ = native_t3
+
+    def refuse(body):
+        raise fleet_client_policy.FleetPolicyClientError("network", "down")
+
+    monkeypatch.setattr(fleet_client_policy, "observe_t3", refuse)
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["health"] == "error" and report["ok"] is True and report["published"] == 1 and len(published) == 1
+
+
+def test_a_failed_health_post_on_a_failing_snapshot_keeps_the_original_error(native_t3, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    configure, _, _, _ = native_t3
+    configure(schemaVersion=1)
+
+    def refuse(body):
+        raise fleet_client_policy.FleetPolicyClientError("network", "down")
+
+    monkeypatch.setattr(fleet_client_policy, "observe_t3", refuse)
+    assert main(["--t3-python", sys.executable, "--publish"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["error"] == "native_metadata_failed" and report["health"] == "error"
+
+
+def test_an_unresolvable_node_id_is_a_health_error_not_a_crash(native_t3, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *a, **k: "unknown")
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["health"] == "error" and not HEALTH_POSTS
+
+
+def test_no_time_left_skips_the_health_post(native_t3):
+    from brigade import fleet_t3_observer as observer
+
+    assert observer._publish_health(True, deadline=time.monotonic()) == "skipped"
+    assert not HEALTH_POSTS
+
+
+def test_an_inventory_failure_does_not_stop_a_healthy_report(inventory_posts, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    def refuse(body):
+        raise fleet_client_policy.FleetPolicyClientError("network", "down")
+
+    monkeypatch.setattr(fleet_client_policy, "observe_projects", refuse)
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["inventory"] == "error" and report["health"] == "ok"
+    assert HEALTH_POSTS == [{"node_id": NODE, "ok": True}]
+
+
+def test_health_is_posted_before_the_inventory_so_it_is_never_starved_by_it(inventory_posts, monkeypatch, capsys):
+    from brigade.fleet_t3_observer import main
+
+    order: list[str] = []
+    monkeypatch.setattr(fleet_client_policy, "observe_t3", lambda body: order.append("health") or {})
+    monkeypatch.setattr(fleet_client_policy, "observe_projects", lambda body: order.append("inventory") or {})
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert order == ["health", "inventory"]
+
+
+def test_snapshot_cap_is_the_remaining_budget_minus_the_publish_reserve():
+    from brigade import fleet_openclaw_observer as shared, fleet_t3_observer as observer
+
+    margin = shared._MARGIN_SECONDS
+    deadline = time.monotonic() + shared.OBSERVATION_BUDGET_SECONDS
+    cap = observer._native_timeout(deadline, detail=False)
+    expected = shared.OBSERVATION_BUDGET_SECONDS - margin - observer.PUBLISH_RESERVE_SECONDS
+    assert expected - 0.5 < cap <= expected
+    # Larger than the old fixed 8 s, and the whole observer still fits inside the shared budget.
+    assert cap > observer.NATIVE_TIMEOUT_SECONDS
+    assert cap + observer.PUBLISH_RESERVE_SECONDS + margin <= shared.OBSERVATION_BUDGET_SECONDS + 1e-6
+    # The shared budget is untouched: OpenClaw uses the same constant.
+    assert shared.OBSERVATION_BUDGET_SECONDS == 15 and observer.OBSERVATION_BUDGET_SECONDS == 15
+
+
+def test_snapshot_cap_shrinks_with_the_clock_and_never_goes_negative():
+    from brigade import fleet_openclaw_observer as shared, fleet_t3_observer as observer
+
+    soon = time.monotonic() + observer.PUBLISH_RESERVE_SECONDS + shared._MARGIN_SECONDS + 2
+    assert 1.5 < observer._native_timeout(soon, detail=False) <= 2
+    with pytest.raises(shared.ObservationError, match="observation_timeout"):
+        observer._native_timeout(time.monotonic() + observer.PUBLISH_RESERVE_SECONDS, detail=False)
+
+
+def test_detail_pass_keeps_its_fixed_cap_and_reserve():
+    from brigade import fleet_t3_observer as observer
+
+    deadline = time.monotonic() + observer.OBSERVATION_BUDGET_SECONDS
+    assert observer._native_timeout(deadline, detail=True) == observer.NATIVE_TIMEOUT_SECONDS
+    tight = time.monotonic() + fleet_client.REPORT_TIMEOUT_SECONDS + observer.DETAIL_RESERVE_SECONDS + 0.25 + 1
+    assert 0.5 < observer._native_timeout(tight, detail=True) <= 1

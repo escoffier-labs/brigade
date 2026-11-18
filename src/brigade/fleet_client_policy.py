@@ -415,6 +415,12 @@ def observe_projects(body: Mapping[str, Any]) -> dict[str, Any]:
     return post_policy(payload, admin=False)
 
 
+def observe_t3(body: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(body)
+    payload["action"] = "t3-observe"
+    return post_policy(payload, admin=False)
+
+
 def ingest_quota(body: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(body)
     payload["action"] = "quota-ingest"

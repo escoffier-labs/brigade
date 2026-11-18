@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Iterator, Mapping
 
-from . import fleet_hub_policy, fleet_hub_routing, fleet_node_projects, fleet_policy
+from . import fleet_hub_policy, fleet_hub_routing, fleet_node_projects, fleet_policy, fleet_t3_health
 from .fleet_hub import FleetHubError
 from .fleet_hub_claims import ClaimFenceError
 from .fleet_hub_sessions import count_live_by_node
@@ -225,6 +225,9 @@ def _place(
     except Exception:
         # Fail closed: unreadable sessions must never read as zero sessions.
         live = None
+    # Nodes whose T3 observer stopped reporting. Their expired presence rows would read as zero
+    # sessions, so their count is unknown. None means the health read itself failed: all unknown.
+    stale = fleet_t3_health.stale_nodes(conn, now)
 
     loads: dict[str, dict[str, Any]] = {}
 
@@ -245,7 +248,8 @@ def _place(
         expiry = _telemetry_expiry(telemetry, routing)
         cpu = None if telemetry is None else telemetry.get("load")
         capacity = int(machine.get("concurrency") or 0)
-        sessions = None if live is None else int(live.get(str(machine.get("node_id")), 0))
+        node = str(machine.get("node_id"))
+        sessions = None if live is None or stale is None or node in stale else int(live.get(node, 0))
         if sessions is None:
             reasons.append("sessions-unknown")
         # Hub-counted sessions are a floor under the node-reported CPU load. Node memory joins this

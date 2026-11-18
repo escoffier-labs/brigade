@@ -1430,8 +1430,10 @@ def _read_bounded_response(response: object, *, limit: int) -> bytes:
     return bytes(data)
 
 
-def fetch_sessions(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
-    """GET /sessions from the hub; raises FleetClientError when unreachable."""
+def fetch_sessions(
+    *, hub_url: str | None = None, include_all: bool = False, extras: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """GET /sessions from the hub; raises FleetClientError when unreachable. ``extras`` receives the unknown-T3 fields."""
     config = load_fleet_config()
     hub = hub_url or config["hub_url"]
     if not hub:
@@ -1448,6 +1450,8 @@ def fetch_sessions(*, hub_url: str | None = None, include_all: bool = False) -> 
     except Exception as exc:
         raise FleetClientError(f"fleet hub sessions failed: {type(exc).__name__}") from exc
     sessions = payload.get("sessions") if isinstance(payload, dict) else None
+    if extras is not None and isinstance(payload, dict):
+        extras.update({k: payload[k] for k in ("nodes_unknown", "nodes_unknown_error") if k in payload})
     return list(sessions) if isinstance(sessions, list) else []
 
 

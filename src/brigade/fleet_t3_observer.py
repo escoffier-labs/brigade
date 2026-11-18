@@ -35,7 +35,11 @@ from .fleet_openclaw_observer import (
 
 from .fleet_session_presence import ProviderLinkState
 
+# The detail pass keeps this fixed cap. The first snapshot instead gets the rest of the observation
+# budget minus PUBLISH_RESERVE_SECONDS, so a slow shell read under load still fits.
 NATIVE_TIMEOUT_SECONDS = 8
+# Held back for the session publish and the health post that follow the snapshot.
+PUBLISH_RESERVE_SECONDS = 3.5
 INVENTORY_TTL_SECONDS = 900
 DETAIL_RESERVE_SECONDS = 1.5
 MAX_THREADS = 10_000
@@ -196,6 +200,15 @@ os._exit(0)
 """
 
 
+def _native_timeout(deadline: float, *, detail: bool) -> float:
+    """Seconds the native subprocess may run. Raises observation_timeout when none is left."""
+    if detail:
+        # A failed optional phase must leave time to publish the metadata batch.
+        reserve = fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS
+        return _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
+    return _remaining(deadline, cap=float("inf"), reserve=PUBLISH_RESERVE_SECONDS)
+
+
 def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: list[str] | None = None) -> object:
     path = Path(interpreter)
     if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
@@ -204,9 +217,7 @@ def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: li
         if len(detail_thread_ids) > PUBLISH_LIMIT:
             raise ObservationError("native_metadata_invalid")
         detail_thread_ids = [_native_id(value) for value in detail_thread_ids]
-    # A failed optional phase must leave time to publish the metadata batch.
-    reserve = fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS if detail_thread_ids is not None else 0
-    timeout = _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
+    timeout = _native_timeout(deadline, detail=detail_thread_ids is not None)
     from . import fleet_node_projects as inventory_rules
 
     program = (
@@ -427,13 +438,48 @@ def _link_publication_batch(
         return batch
 
 
+class _ObservationFailed(ObservationError):
+    """An observation error that also carries the outcome of the best-effort failure health post."""
+
+    def __init__(self, code: str, health: str) -> None:
+        super().__init__(code)
+        self.health = health
+
+
+def _publish_health(ok: bool, *, deadline: float) -> str:
+    """Tell the Hub whether this observation succeeded: (ok|error|skipped) is the post outcome. Never raises.
+
+    The Hub stamps its own receipt time, so no timestamp is sent. Success means the Hub accepted
+    current presence, so a caller sends ok=True only after the session publication returned cleanly.
+    """
+    try:
+        _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
+    except ObservationError:
+        return "skipped"
+    try:
+        node_id = fleet_client.resolve_node_id()
+        if node_id == "unknown":
+            return "error"
+        fleet_client_policy.observe_t3({"node_id": node_id, "ok": ok})
+    except Exception:
+        return "error"
+    return "ok"
+
+
 def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
     deadline = time.monotonic() + OBSERVATION_BUDGET_SECONDS
     if publish:
         _require_node_auth()
-    payload = _native_metadata(t3_python, deadline)
-    recent, total, invalid = _active_threads(payload)
-    _remaining(deadline, cap=1)
+    try:
+        payload = _native_metadata(t3_python, deadline)
+        recent, total, invalid = _active_threads(payload)
+        _remaining(deadline, cap=1)
+    except Exception as exc:
+        if not publish:
+            raise
+        # A failing observer reports so; a missing report is just as unknown, once the TTL passes.
+        code = str(exc) if isinstance(exc, ObservationError) else "observation_failed"
+        raise _ObservationFailed(code, _publish_health(False, deadline=deadline)) from exc
     report: dict[str, object] = {
         "ok": not invalid,
         "mode": "publish" if publish else "inspect",
@@ -455,6 +501,9 @@ def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
         report.update(_publish_recent(recent, harness="t3", deadline=deadline, batch=batch))
         report["skipped"] = cast(int, report["skipped"]) + invalid
         report["ok"] = not (report["truncated"] or invalid or report.get("error"))
+        # Never changes ok or the exit code. Rotation truncation and the inventory do not matter:
+        # only a session publication that ran without error counts as current presence.
+        report["health"] = _publish_health(not report.get("error"), deadline=deadline)
         # After sessions, within the same deadline. Never changes ok or the exit code.
         report["inventory"], report["inventory_dropped"] = _publish_inventory(payload, deadline=deadline)
     return report
@@ -467,6 +516,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         report = observe(t3_python=args.t3_python, publish=args.publish)
+    except _ObservationFailed as exc:
+        report = {
+            "ok": False,
+            "error": str(exc),
+            "observed": 0,
+            "published": 0,
+            "skipped": 0,
+            "health": exc.health,
+        }
     except ObservationError as exc:
         report = {"ok": False, "error": str(exc), "observed": 0, "published": 0, "skipped": 0}
     except Exception:

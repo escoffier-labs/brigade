@@ -178,7 +178,7 @@ here. The action table lists 19 actions, and the drive covers 16.
 | GET | /policy | bearer | `?history=1&limit=` | 200 policy document, bad limit 400 `{error: {code: "invalid-request", message}}` | covered (401 envelope only) |
 | GET | /policy/status | bearer | none | 200 policy status | not yet |
 | GET | /policy/inventory | bearer | none | 200 model inventory | not yet |
-| POST | /policy | admin (`preview`, `save`, `rollback`) or node (`resolve`, `prepare`, `acknowledge`, `route`, `work-next`, `place`, `reservation-renew`, `reservation-release`, `telemetry-observe`, `projects-observe`, `delegation-create`, `delegation-show`), `refresh`, `quota-ingest`, `inventory-ingest` either | `{action, ...}` | action result, errors `{error: {code, message}}` | not yet |
+| POST | /policy | admin (`preview`, `save`, `rollback`) or node (`resolve`, `prepare`, `acknowledge`, `route`, `work-next`, `place`, `reservation-renew`, `reservation-release`, `telemetry-observe`, `projects-observe`, `t3-observe`, `delegation-create`, `delegation-show`), `refresh`, `quota-ingest`, `inventory-ingest` either | `{action, ...}` | action result, errors `{error: {code, message}}` | not yet |
 | POST | /grokbot | node or actor (admin: `list`, `status`, `report-metadata`, `enroll-actor`) | `{action: enqueue\|list\|status\|whoami\|cancel\|expire\|report-metadata\|claim\|start\|renew\|complete\|fail\|ack-cancel\|enroll-actor, ...}` | queue result | not yet |
 
 ### Reports and CI

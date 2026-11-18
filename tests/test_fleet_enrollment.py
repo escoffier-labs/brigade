@@ -874,7 +874,7 @@ def test_cli_enroll_session_list_revoke_and_activity_compatibility(hub, monkeypa
         assert "browser session" in capsys.readouterr().err
     calls = []
 
-    def fetch(*, include_all):
+    def fetch(*, include_all, extras=None):
         calls.append(include_all)
         return [{"session_id": "fixture-presence"}]
 

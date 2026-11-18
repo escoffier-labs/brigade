@@ -69,8 +69,9 @@ fsmonitor disabled. No dirty paths are attributed to a thread. Non-repository
 workspaces use the existing node-scoped `local:` path-hash identity.
 `dirty_paths=()` and `dirty_truncated=True` mean dirty-file ownership is unknown.
 
-A poll has a total 15-second work budget, native timeout at most eight seconds,
-and up to 50 publication attempts while time permits. The caller should allow five
+A poll has a total 15-second work budget. The first native snapshot may use the
+rest of it minus a 3.5-second reserve for publishing (about 11 seconds), and the
+optional detail pass keeps its eight-second cap. Up to 50 publication attempts while time permits. The caller should allow five
 additional seconds for process cleanup with an outer 20-second hard timeout.
 Every native/Git call uses the remaining deadline. Publication starts only when
 the public client's fixed two-second call plus 250 ms fits. A fast Hub can
@@ -150,6 +151,27 @@ rows. A mismatched report older than the stored snapshot changes nothing.
 A machine without a binding is stored but read as unbound. Reads recompute the
 binding from the current policy, so a policy change applies without a
 republish, and placement must skip unbound rows.
+
+## Observer health
+
+Presence rows expire after 300 seconds, so a node whose observer is failing looks
+like a node with no sessions. Each `--publish` run therefore also sends the
+node-token `t3-observe` policy action, after sessions and before the inventory:
+`ok: true` only when the snapshot parsed and the session publication returned
+without an error (rotation truncation and the inventory outcome do not matter),
+and `ok: false` when the observation failed and time remains. The report adds
+`health` with `ok`, `error` or `skipped` (the post outcome). A failed post never
+changes `ok`, the exit code or session publishing.
+
+The Hub stamps its own clock when it receives the report, never a node-supplied
+time, in the optional `fleet_t3_observations` table (created on the first
+report). A node with a row whose last success is missing or at least 300 seconds
+old, the same as the session TTL, has unknown T3 sessions: one missed 120-second
+cycle stays known, two do not. Placement then reports `sessions-unknown` and the
+machine is ineligible, `GET /sessions` adds `nodes_unknown`, and
+`brigade fleet sessions` prints a footer naming those nodes. If the health table
+cannot be read, every machine is unknown. A node with no row keeps the earlier
+behavior. A node can only write its own row.
 
 ## Placement
 

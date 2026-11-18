@@ -758,7 +758,8 @@ def _dispatch_sessions(args: argparse.Namespace) -> int:
     from .. import fleet_client
 
     try:
-        sessions = fleet_client.fetch_sessions(include_all=args.all)
+        unknown: dict[str, object] = {}
+        sessions = fleet_client.fetch_sessions(include_all=args.all, extras=unknown)
     except fleet_client.FleetClientError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -792,6 +793,12 @@ def _dispatch_sessions(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
     if not rows:
         print("(no active fleet sessions)")
+    unknown_nodes = unknown.get("nodes_unknown")
+    if unknown.get("nodes_unknown_error") is True:
+        print("T3 sessions unknown: the hub could not read T3 observer health")
+    elif isinstance(unknown_nodes, list) and unknown_nodes:
+        names = ", ".join(_safe_table_cell(str(node)) for node in unknown_nodes)
+        print(f"T3 sessions unknown for: {names} (observer not reporting; absent rows are not zero)")
     return 0
 
 
