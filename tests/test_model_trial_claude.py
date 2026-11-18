@@ -863,19 +863,7 @@ def test_the_mcp_server_starts_without_the_token(good):
 def test_child_output_is_redacted_in_memory_before_any_byte_reaches_disk(tmp_path, monkeypatch):
     """Keep the arm work directories as a crash before cleanup would, then look for the token in them."""
     kept = []
-
-    class KeepDirectory:
-        def __init__(self, prefix="tmp"):
-            self.name = tempfile.mkdtemp(prefix=prefix)
-            kept.append(Path(self.name))
-
-        def __enter__(self):
-            return self.name
-
-        def __exit__(self, *exc):
-            return False
-
-    monkeypatch.setattr(model_trial_claude.tempfile, "TemporaryDirectory", KeepDirectory)
+    monkeypatch.setattr(model_trial_claude, "remove_work_dir", kept.append)
     result, _, output = _live(tmp_path, steps=GOOD_STEPS, leak=True)
     assert all(a["failure"] is None for a in result["attempts"]) and len(kept) == 2
     leaked = [p for root in kept for p in root.rglob("*") if p.is_file() and SECRET_TOKEN.encode() in p.read_bytes()]
@@ -999,3 +987,36 @@ def test_the_version_probe_is_bounded_and_kills_a_flood(tmp_path):
     with bind_executable(str(exe), LAUNCH) as bound:
         with pytest.raises(ValueError, match="too large"):
             model_trial_claude._probe_version(bound, ENVIRON)
+
+
+def test_remove_work_dir_retries_only_on_windows_and_only_a_few_times(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_trial_claude, "WINDOWS_REMOVE_PAUSE", 0.0)
+    real = shutil.rmtree
+    calls = []
+
+    def busy(path, **kwargs):
+        calls.append(path)
+        if len(calls) < 3:
+            raise PermissionError(32, "in use")
+        real(path, **kwargs)
+
+    arm = tmp_path / "arm"
+    (arm / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(shutil, "rmtree", busy)
+    model_trial_claude.remove_work_dir(arm, windows=True)
+    assert not arm.exists() and len(calls) == 3
+    arm.mkdir()
+    calls.clear()
+    with pytest.raises(PermissionError):  # Off Windows a failed removal is raised at once.
+        model_trial_claude.remove_work_dir(arm, windows=False)
+    assert len(calls) == 1
+    calls.clear()
+
+    def denied(path, **kwargs):
+        calls.append(path)
+        raise PermissionError(5, "denied")
+
+    monkeypatch.setattr(shutil, "rmtree", denied)
+    with pytest.raises(PermissionError):
+        model_trial_claude.remove_work_dir(arm, windows=True)
+    assert len(calls) == model_trial_claude.WINDOWS_REMOVE_ATTEMPTS

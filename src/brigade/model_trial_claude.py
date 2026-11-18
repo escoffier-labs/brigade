@@ -60,6 +60,9 @@ ANCESTOR_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
 VERSION_TIMEOUT = 30.0
 VERSION_MAX_BYTES = 4096
 EXIT_GRACE = 10.0
+KILL_TREE_TIMEOUT = 10.0
+WINDOWS_REMOVE_ATTEMPTS = 5
+WINDOWS_REMOVE_PAUSE = 0.2
 REDACTED = b"[redacted]"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Every read of child or server output is bounded before it is buffered. Exceeding a cap fails the cell.
@@ -523,14 +526,65 @@ class _Observer:
         return False
 
 
+def _kill_tree_windows(pid: int) -> None:
+    """End a Windows process and every descendant. ``Popen.kill`` ends only the one process.
+
+    The CLI owns the MCP server as a child. Killing the CLI alone leaves the server running with the
+    arm directory open, and the directory then cannot be removed (WinError 32).
+    """
+    taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+    try:
+        subprocess.run(
+            [str(taskkill), "/PID", str(pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=KILL_TREE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _kill(proc: subprocess.Popen[bytes]) -> None:
     try:
         if os.name == "posix":
             os.killpg(proc.pid, signal.SIGKILL)  # Also reaps the MCP server child.
         else:
+            if proc.poll() is None:  # A reaped pid may belong to something else by now.
+                _kill_tree_windows(proc.pid)
             proc.kill()
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+def _make_writable_and_retry(func: Any, target: str, _exc: object = None) -> None:
+    """A read-only file (git objects on Windows) blocks deletion: make it writable and try once more."""
+    os.chmod(target, 0o700)
+    func(target)
+
+
+def remove_work_dir(path: Path, *, windows: bool = os.name == "nt") -> None:
+    """Remove an arm directory. On Windows a killed grandchild releases its handles a moment later.
+
+    ``taskkill /T`` terminates the tree, but there is no handle on a grandchild to wait for, so the
+    release of its open files cannot be awaited. Removal is retried a few times, briefly, and only
+    on Windows. Any other failure, and a failure after the last attempt, is raised.
+    """
+    attempts = WINDOWS_REMOVE_ATTEMPTS if windows else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(path, onexc=_make_writable_and_retry)
+            else:
+                shutil.rmtree(path, onerror=lambda func, target, _info: _make_writable_and_retry(func, target))
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == attempts:
+                raise
+            time.sleep(WINDOWS_REMOVE_PAUSE * attempt)
 
 
 class _StderrCapture:
@@ -1041,10 +1095,13 @@ def _execute(
         attempt_id = f"{cell['cell_id']}-{1 + sum(a['cell']['cell_id'] == cell['cell_id'] for a in attempts)}"
         artifact_dir = output / "attempts" / attempt_id
         bound.dir_fd(*artifact_dir.relative_to(output).parts, create=True)
-        with tempfile.TemporaryDirectory(prefix="brigade-paired-live-") as temp:
+        work = Path(tempfile.mkdtemp(prefix="brigade-paired-live-"))
+        try:
             ran = run_cell(
-                cell=cell, files=packages[cell["arm"]], package_dir=snapshots[cell["arm"]], ctx=ctx, work=Path(temp)
+                cell=cell, files=packages[cell["arm"]], package_dir=snapshots[cell["arm"]], ctx=ctx, work=work
             )
+        finally:
+            remove_work_dir(work)
         for name, data in ran.pop("artifacts").items():
             safe_write(bound, artifact_dir / name, data)
         receipt_bytes = ran.pop("receipt_bytes")
