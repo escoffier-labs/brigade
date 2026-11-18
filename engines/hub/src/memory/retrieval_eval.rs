@@ -566,7 +566,7 @@ fn real_scope_hold<T: ReadTx + ?Sized>(
             .is_some_and(|s| s.in_lineage(string(target, "scope"), string(target, "card_id")))
     };
     if merging {
-        if cards.iter().any(|target| published_lineage(target)) {
+        if cards.iter().any(&published_lineage) {
             return Ok(Some("retrieval_eval_lineage_exposed"));
         }
         return super::merge_gate::hold(tx, proposal, live);

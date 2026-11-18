@@ -221,7 +221,7 @@ impl Real {
         self.hold_as(body, applier, ADMIN, dense, None)
     }
     /// The gate as a given credential would meet it, against a given published index.
-    fn hold_as(
+    pub(super) fn hold_as(
         &self,
         body: &Json,
         applier: &'static str,

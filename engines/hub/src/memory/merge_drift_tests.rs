@@ -1,7 +1,7 @@
 //! Exact-duplicate merges auto-apply on a real scope under bounded drift (#2591).
 //! Every hub here uses the real scope `fleet`, never the fixture scope.
 use super::{
-    index::{Builder, Card},
+    index::{self, Builder, Card},
     proposal_blocks,
     proposal_tests::*,
     ranking_gate_tests::Real,
@@ -22,6 +22,7 @@ const TOKENS: &str = "retrieval_eval_merge_tokens_lost";
 const KEEPER: &str = "retrieval_eval_merge_keeper_changed";
 const DRIFTED: &str = "retrieval_eval_target_drifted";
 const LINEAGE: &str = "retrieval_eval_lineage_exposed";
+const WRITER: &str = "retrieval_eval_writer_changed";
 const PROJECTION: &str = "retrieval_eval_projection_changed";
 
 fn dup(front: &str, anchor: &str) -> String {
@@ -244,6 +245,12 @@ async fn a_card_naming_the_retired_id_holds_the_merge() {
             "---\naliases: [\"fleet/dup-retired\"]\n---\nBody.\n",
         ),
         ("other key", "---\nrelated: [dup-retired]\n---\nBody.\n"),
+        // Values go through `literal_eval`, so an escape spells the id with
+        // no byte of it in the stored card.
+        (
+            "escaped predecessor",
+            "---\nsupersedes: [\"dup-\\x72etired\"]\n---\nBody.\n",
+        ),
         ("only the keeper", "See [[dup-keeper]].\n"),
     ];
     for (name, text) in forms {
@@ -305,6 +312,56 @@ async fn a_lineage_exposed_pair_stays_with_the_lineage_review_rule() {
             .unwrap();
         assert_eq!(held(&r, &body), Some(LINEAGE), "{name}");
     }
+}
+
+/// A published index whose trusted lineage graph holds `linked` as an edge end.
+fn published(linked: &str) -> std::sync::Arc<index::Snapshot> {
+    let card = |id: &str, text: &str, revision| Card {
+        scope: "fleet".into(),
+        card_id: id.into(),
+        revision,
+        content_hash: format!("hash-{id}"),
+        trust: "imported".into(),
+        text: text.into(),
+        automated: false,
+    };
+    let edge = format!("---\nsuperseded_by: {linked}\n---\nOlder.\n");
+    Builder::from_cards([card(linked, "Newer.\n", 1), card("older", &edge, 2)], 2).snapshot()
+}
+
+/// Search answers from the published graph, which keeps an edge its owner has
+/// since dropped from the store. Either merge card at its end holds the merge,
+/// whichever of the two it is. A snapshot without the edge does not.
+#[tokio::test]
+async fn a_merge_card_in_the_published_lineage_graph_is_held_for_review() {
+    let r = pair().await;
+    let body = r.body(&open(&r).await);
+    let hold = |snapshot| r.hold_as(&body, "admin", ADMIN, None, Some(snapshot));
+    assert_eq!(hold(published("other-card")), None);
+    for (name, id) in [("keeper", KEEP), ("retired", GONE)] {
+        assert_eq!(hold(published(id)), Some(LINEAGE), "{name}");
+    }
+}
+
+/// An apply rewrites the keeper's writer and class, and a connector sees an
+/// agent-unreviewed head only for its writer. The ranking digest cannot see
+/// that, so a different applier holds the merge.
+#[tokio::test]
+async fn a_merge_held_when_the_applier_is_not_the_unreviewed_keepers_writer() {
+    let r = pair().await;
+    let body = r.body(&open(&r).await);
+    assert_eq!(held(&r, &body), None);
+    sql(
+        &r,
+        "UPDATE memory_cards SET writer='node:one',writer_class='node' WHERE card_id=?1",
+        KEEP,
+    );
+    for (principal, class) in [(ADMIN, "admin"), ("node:two", "node")] {
+        let hold = r.hold_as(&body, class, principal, None, None);
+        assert_eq!(hold, Some(WRITER), "{principal} {class}");
+    }
+    // The same credential rewrites the same writer and class, so nothing moves.
+    assert_eq!(r.hold_as(&body, "node", "node:one", None, None), None);
 }
 
 const QUERIES: [&str; 14] = [

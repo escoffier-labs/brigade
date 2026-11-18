@@ -179,15 +179,6 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
         else {
             return Ok(Some(DRIFTED));
         };
-        // The apply rewrites the keeper's writer and class to the applier's.
-        // A connector sees an agent-unreviewed head only for the credential
-        // that wrote it, and the digest cannot see that. The retired card
-        // leaves search for everyone, so only the keeper is judged here.
-        if keeper.trust == "agent-unreviewed"
-            && (writer != live.principal || writer_class != applier)
-        {
-            return Ok(Some(WRITER));
-        }
         let scope = keeper.scope.as_str();
         let after = Card {
             content_hash: string(target, "after_hash").into(),
@@ -245,6 +236,15 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
         };
         if expected != string(target, "after_text") || ranked(&keeper) != ranked(&after) {
             return Ok(Some(KEEPER));
+        }
+        // The apply rewrites the keeper's writer and class to the applier's.
+        // A connector sees an agent-unreviewed head only for the credential
+        // that wrote it, and the digest cannot see that. The retired card
+        // leaves search for everyone, so only the keeper is judged here.
+        if keeper.trust == "agent-unreviewed"
+            && (writer != live.principal || writer_class != applier)
+        {
+            return Ok(Some(WRITER));
         }
     }
     Ok(None)
