@@ -19,6 +19,11 @@ def _serve(tmp_path, requests, case="passing-verify"):
     target.mkdir()
     state.mkdir()
     env = {
+        # Windows resolves a home from USERPROFILE and cannot start Python without SYSTEMROOT, so the
+        # server env must carry both, exactly as the live adapter's child env does.
+        **{k: os.environ[k] for k in ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT") if k in os.environ},
+        "HOME": str(tmp_path / "home"),
+        "USERPROFILE": str(tmp_path / "home"),
         "PATH": os.environ["PATH"],
         "PYTHONPATH": str(Path(paired_mcp.__file__).resolve().parents[1]),
         "CLAUDE_CODE_OAUTH_TOKEN": "sentinel-token",

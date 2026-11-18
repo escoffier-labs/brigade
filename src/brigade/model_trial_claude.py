@@ -22,8 +22,9 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS
 from .model_trial_paired import (
     INSTRUCTION,
     TOOLS,
@@ -46,6 +47,14 @@ MODE = "live-claude-cli"
 CALL_PREFIX = f"mcp__{SERVER_NAME}__"
 QUALIFIED = tuple(CALL_PREFIX + tool for tool in TOOLS)
 CONTROL_TOOL = "EndConversation"  # Survives --tools "" whenever MCP tools exist; observed, never graded.
+PERMISSION_MODE = "dontAsk"
+# Every stream block type that can carry a tool request. Same set memory_verify_seat refuses.
+STREAM_TOOL_TYPES = frozenset({"tool_use", "server_tool_use", "mcp_tool_use"})
+# Without --safe-mode (it disables MCP) the CLI still walks parent directories for these files.
+ANCESTOR_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
+VERSION_TIMEOUT = 30.0
+EXIT_GRACE = 10.0
+REDACTED = b"[redacted]"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MAX_STREAM_BYTES = 16 * 1024 * 1024
 STDERR_TAIL = 65536
@@ -59,7 +68,7 @@ PRELUDE = (
     "--- SKILL.md ---\n"
 )
 # The child sees only these parent variables. Auth comes from the setup-token OAuth token;
-# ANTHROPIC_API_KEY and every other variable are dropped by construction.
+# provider API keys and every other variable are dropped by construction.
 ENV_PASSTHROUGH = (
     "PATH",
     "LANG",
@@ -75,6 +84,12 @@ ENV_PASSTHROUGH = (
     "https_proxy",
     "http_proxy",
     "no_proxy",
+    # Windows cannot start Python or resolve executables without these.
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
 )
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 FIXED_ENV = {
@@ -90,9 +105,41 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# Every module a live cell executes or trusts. Editing any of them refuses resume.
+LIVE_MODULES = (
+    "model_trial_claude.py",
+    "model_trial_paired.py",
+    "paired_mcp.py",
+    "paired_output.py",
+    "mcp_server.py",
+    "memory_verify_seat.py",
+    "dirfd.py",
+    "run_dirfd.py",
+    "skills_cmd/registry.py",
+)
+
+
 def module_hashes() -> dict[str, str]:
     here = Path(__file__).parent
-    return {name: _sha((here / name).read_bytes()) for name in ("model_trial_claude.py", "paired_mcp.py")}
+    return {name: _sha((here / name).read_bytes()) for name in LIVE_MODULES}
+
+
+def redact(data: bytes, token: str) -> bytes:
+    """Remove the OAuth token, raw and JSON-escaped, from bytes about to be hashed and saved."""
+    for form in {token, json.dumps(token)[1:-1]}:
+        if form:
+            data = data.replace(form.encode("utf-8"), REDACTED)
+    return data
+
+
+def ancestor_instruction_file(cwd: Path) -> Path | None:
+    """First CLAUDE.md or AGENTS.md in the arm cwd or any ancestor. The CLI would load it as context."""
+    real = Path(os.path.realpath(cwd))
+    for directory in (real, *real.parents):
+        for name in ANCESTOR_INSTRUCTION_FILES:
+            if (directory / name).exists():
+                return directory / name
+    return None
 
 
 def system_prompt(skill: bytes) -> bytes:
@@ -122,6 +169,8 @@ def build_argv(
         str(mcp_config),
         "--setting-sources",
         "",
+        "--settings",
+        CLAUDE_SETTINGS,  # Switches every builtin plugin off; the init gate then requires plugins == [].
         "--no-session-persistence",
         "--session-id",
         session_id,
@@ -133,7 +182,7 @@ def build_argv(
         "--model",
         cli_model,
         "--permission-mode",
-        "dontAsk",
+        PERMISSION_MODE,
         "--allowedTools",
         ",".join(QUALIFIED),
     ]
@@ -153,6 +202,7 @@ def build_env(source: Mapping[str, str], arm_dir: Path) -> dict[str, str]:
             "XDG_DATA_HOME": str(home / ".local/share"),
             "XDG_CACHE_HOME": str(home / ".cache"),
             "XDG_STATE_HOME": str(home / ".local/state"),
+            "USERPROFILE": str(home),  # Windows Path.home() ignores HOME; the MCP server needs a home.
             "TMPDIR": str(arm_dir / "tmp"),
             TOKEN_ENV: source[TOKEN_ENV],
             **FIXED_ENV,
@@ -187,7 +237,9 @@ def mcp_config(case: str, target: Path, package_dir: Path, state_dir: Path) -> d
     }
 
 
-def init_gate(event: Mapping[str, Any], *, expected_model: str, session_id: str, version: str) -> str | None:
+def init_gate(
+    event: Mapping[str, Any], *, expected_model: str, session_id: str, version: str, cwd: str | Path
+) -> str | None:
     """Return why this CLI session may not be graded, or None. Runs before any grading."""
     tools = event.get("tools")
     if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
@@ -208,16 +260,19 @@ def init_gate(event: Mapping[str, Any], *, expected_model: str, session_id: str,
         return "expected exactly one connected paired MCP server"
     if event.get("mcp_server_errors"):
         return "mcp_server_errors is not empty"
-    plugins = event.get("plugins")
-    # Claude Code 2.1.327 ships builtin plugins that always report here. Anything installed is refused.
-    if not isinstance(plugins, list) or any(
-        not isinstance(p, dict) or p.get("path") != "builtin" or not str(p.get("source", "")).endswith("@builtin")
-        for p in plugins
-    ):
-        return "non-builtin plugin loaded"
-    for key in ("skills", "slash_commands"):
+    for key in ("skills", "slash_commands", "plugins"):  # --settings disables every builtin plugin
         if event.get(key) != []:
             return f"{key} is not empty"
+    agents = event.get("agents")
+    if not isinstance(agents, list) or not set(map(str, agents)) <= CLAUDE_BUILTIN_AGENTS:
+        return "agents beyond the built-ins"
+    if event.get("additional_directories", []) != []:
+        return "additional directories are loaded"
+    reported = event.get("cwd")
+    if not isinstance(reported, str) or os.path.realpath(reported) != os.path.realpath(cwd):
+        return "working directory is not the arm cwd"
+    if event.get("permissionMode") != PERMISSION_MODE:
+        return f"permission mode {event.get('permissionMode')!r} is not {PERMISSION_MODE!r}"
     if event.get("model") != expected_model:
         return f"resolved model {event.get('model')!r} is not the expected {expected_model!r}"
     if event.get("session_id") != session_id:
@@ -230,11 +285,15 @@ def init_gate(event: Mapping[str, Any], *, expected_model: str, session_id: str,
     return None
 
 
+def _is_paired_tool(name: str) -> bool:
+    return name.startswith(CALL_PREFIX) and name[len(CALL_PREFIX) :] in TOOLS
+
+
 class _Observer:
     """Consume the stream line by line; ``feed`` returns True when the cell must abort now."""
 
-    def __init__(self, *, expected_model: str, session_id: str, version: str) -> None:
-        self.expected_model, self.session_id, self.version = expected_model, session_id, version
+    def __init__(self, *, expected_model: str, session_id: str, version: str, cwd: Path) -> None:
+        self.expected_model, self.session_id, self.version, self.cwd = expected_model, session_id, version, cwd
         self.init_event: dict[str, Any] | None = None
         self.init_ok = False
         self.failure: str | None = None
@@ -256,7 +315,11 @@ class _Observer:
                 return self._abort(f"init_gate:first event is {kind}/{sub}, not system/init")
             self.init_event = event
             reason = init_gate(
-                event, expected_model=self.expected_model, session_id=self.session_id, version=self.version
+                event,
+                expected_model=self.expected_model,
+                session_id=self.session_id,
+                version=self.version,
+                cwd=self.cwd,
             )
             if reason is not None:
                 return self._abort(f"init_gate:{reason}")
@@ -276,17 +339,20 @@ class _Observer:
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         for item in content if isinstance(content, list) else []:
-            if not isinstance(item, dict) or item.get("type") != "tool_use":
+            if not isinstance(item, dict) or item.get("type") not in STREAM_TOOL_TYPES:
                 continue
             name, call_id = item.get("name"), item.get("id")
-            if not isinstance(call_id, str) or call_id in self._seen:
-                continue
+            # Name first, so a reused id cannot hide a forbidden tool.
+            if not isinstance(name, str) or not (name == CONTROL_TOOL or _is_paired_tool(name)):
+                return self._abort(f"forbidden_tool:{name}")
+            if item["type"] != "tool_use":
+                return self._abort(f"forbidden_tool_type:{item['type']}")
+            if not isinstance(call_id, str) or not call_id or call_id in self._seen:
+                return self._abort("malformed_tool_use")
             self._seen.add(call_id)
             if name == CONTROL_TOOL:
                 self.controls.append({"tool": name, "callId": call_id})
                 continue
-            if not (isinstance(name, str) and name.startswith(CALL_PREFIX) and name[len(CALL_PREFIX) :] in TOOLS):
-                return self._abort(f"forbidden_tool:{name}")
             arguments, turn = item.get("input", {}), event.get("uuid")
             if not isinstance(arguments, dict) or not isinstance(turn, str):
                 return self._abort("malformed_tool_use")
@@ -324,6 +390,7 @@ def _run_process(
     timeout: float,
     observer: _Observer,
     stderr_path: Path,
+    token: str,
 ) -> tuple[bytes, int | None, bool]:
     raw: list[bytes] = []
     size = 0
@@ -338,10 +405,14 @@ def _run_process(
             start_new_session=os.name == "posix",
         )
         timed_out = threading.Event()
+        expiry = threading.Lock()
 
         def expire() -> None:
-            timed_out.set()
-            _kill(proc)
+            with expiry:
+                # A finished cell must not flip to a timeout or signal a pid group that was recycled.
+                if proc.poll() is None:
+                    timed_out.set()
+                    _kill(proc)
 
         timer = threading.Timer(timeout, expire)
         timer.daemon = True
@@ -354,6 +425,7 @@ def _run_process(
             except OSError:
                 pass
             for line in proc.stdout:
+                line = redact(line, token)  # Observer, evidence and hashes only ever see redacted bytes.
                 raw.append(line)
                 size += len(line)
                 if size > MAX_STREAM_BYTES:
@@ -373,7 +445,15 @@ def _run_process(
                     break
             if observer.failure is not None:
                 _kill(proc)
-            code = proc.wait()
+            timer.cancel()
+            with expiry:  # An expiry already running finishes before we reap.
+                pass
+            try:
+                code = proc.wait(timeout=EXIT_GRACE)
+            except subprocess.TimeoutExpired:  # Closed stdout but kept running.
+                timed_out.set()
+                _kill(proc)
+                code = proc.wait()
         finally:
             timer.cancel()
             _kill(proc)
@@ -382,10 +462,10 @@ def _run_process(
     return b"".join(raw), code, timed_out.is_set()
 
 
-def _read_server_state(state_dir: Path) -> tuple[list[dict[str, Any]] | None, bytes, bytes | None]:
+def _read_server_state(state_dir: Path, token: str) -> tuple[list[dict[str, Any]] | None, bytes, bytes | None]:
     trace_path, receipt_path = state_dir / TRACE_FILE, state_dir / RECEIPT_FILE
-    trace_bytes = trace_path.read_bytes() if trace_path.is_file() else b""
-    receipt = receipt_path.read_bytes() if receipt_path.is_file() else None
+    trace_bytes = redact(trace_path.read_bytes(), token) if trace_path.is_file() else b""
+    receipt = redact(receipt_path.read_bytes(), token) if receipt_path.is_file() else None
     rows = []
     try:
         for index, line in enumerate(trace_bytes.decode("utf-8").splitlines(), start=1):
@@ -456,21 +536,32 @@ def run_cell(
         cli_model=ctx["cli_model"],
         effort=ctx["effort"],
     )
-    observer = _Observer(expected_model=ctx["expected_model"], session_id=session_id, version=ctx["version"])
-    stream, code, timed_out = _run_process(
-        argv,
-        build_env(ctx["environ"], work),
-        work / "cwd",
-        user_message(cell["case"]),
-        ctx["timeout"],
-        observer,
-        work / "stderr.txt",
-    )
-    rows, trace_bytes, receipt_bytes = _read_server_state(work / "state")
+    cwd = Path(os.path.realpath(work / "cwd"))
+    token = ctx["environ"][TOKEN_ENV]
+    observer = _Observer(expected_model=ctx["expected_model"], session_id=session_id, version=ctx["version"], cwd=cwd)
+    stderr_path = work / "stderr.txt"
+    blocked = ancestor_instruction_file(cwd)
+    if blocked is not None:  # Never launch: the CLI would load this file as instructions.
+        stream, code, timed_out = b"", None, False
+        stderr_path.write_bytes(b"")
+    else:
+        stream, code, timed_out = _run_process(
+            [*ctx["launcher"], *argv],
+            build_env(ctx["environ"], work),
+            cwd,
+            user_message(cell["case"]),
+            ctx["timeout"],
+            observer,
+            stderr_path,
+            token,
+        )
+    rows, trace_bytes, receipt_bytes = _read_server_state(work / "state", token)
     server_failure, trace = _server_failure(rows, observer)
     result = observer.result
     failure = observer.failure
-    if failure is None and timed_out:
+    if blocked is not None:
+        failure = f"ancestor_instructions:{blocked.name}"
+    elif failure is None and timed_out:
         failure = "model_timeout"
     elif failure is None and result is None:
         failure = f"claude_exit:{code}" if code else "no_result"
@@ -478,7 +569,7 @@ def run_cell(
         failure = f"model_error:{result.get('subtype')}"
     diagnostics = [] if server_failure is None else [server_failure]
     failure = failure or server_failure
-    stderr = (work / "stderr.txt").read_bytes()[-STDERR_TAIL:]
+    stderr = redact(stderr_path.read_bytes(), token)[-STDERR_TAIL:]
     return {
         "trace": trace,
         "receipt": json.loads(receipt_bytes) if receipt_bytes is not None else None,
@@ -486,6 +577,8 @@ def run_cell(
         "final": None if failure else _final(result),
         "failure": failure,
         "live": {
+            "session_id": session_id,
+            "cwd": str(cwd),
             "init": observer.init_event,
             "observed_calls": observer.observed,
             "control_events": observer.controls,
@@ -511,9 +604,11 @@ def _cli_settings(manifest: dict[str, Any]) -> tuple[str, str | None]:
     return cli_model, effort if effort in EFFORTS else None
 
 
-def _probe_version(claude_bin: str, environ: Mapping[str, str]) -> str:
+def _probe_version(command: Sequence[str], environ: Mapping[str, str]) -> str:
     env = {key: environ[key] for key in ENV_PASSTHROUGH if key in environ}
-    done = subprocess.run([claude_bin, "--version"], env=env, capture_output=True, text=True, timeout=30, check=False)
+    done = subprocess.run(
+        [*command, "--version"], env=env, capture_output=True, text=True, timeout=VERSION_TIMEOUT, check=False
+    )
     parts = done.stdout.split()
     if done.returncode != 0 or not parts:
         raise ValueError("could not read the Claude Code version")
@@ -581,21 +676,24 @@ def execute_live(
     cases: list[str] | None = None,
     environ: Mapping[str, str] | None = None,
     timeout: float = 600.0,
+    launcher: Sequence[str] = (),
 ) -> dict[str, Any]:
+    """``launcher`` is a command prefix (for example the Python interpreter for a script stand-in)."""
     environ = os.environ if environ is None else environ
     if not environ.get(TOKEN_ENV):
         raise ValueError(
             f"live paired trials authenticate with {TOKEN_ENV} from `claude setup-token` (subscription). "
             "API keys are never used. No model was launched."
         )
-    resolved = shutil.which(claude_bin)
+    resolved = (claude_bin if Path(claude_bin).is_file() else None) if launcher else shutil.which(claude_bin)
     if resolved is None:
         raise ValueError(f"claude executable not found: {claude_bin}")
     manifest, packages = _load(path)
     cli_model, effort = _cli_settings(manifest)
-    adapter = adapter_identity(manifest, packages, _probe_version(resolved, environ), timeout)
+    adapter = adapter_identity(manifest, packages, _probe_version([*launcher, resolved], environ), timeout)
     ctx = {
         "claude_bin": resolved,
+        "launcher": list(launcher),
         "cli_model": cli_model,
         "effort": effort,
         "expected_model": manifest["model"],
@@ -707,13 +805,16 @@ def _validate_attempt(
     ):
         if _sha((folder / name).read_bytes()) != live[key]:
             raise ValueError(f"{name} artifact mismatch")
-    session_id = str((live["init"] or {}).get("session_id", ""))
+    session_id = live["session_id"]  # The requested uuid, stored at launch. Never derived from init.
+    if not isinstance(session_id, str) or not session_id or not isinstance(live["cwd"], str):
+        raise ValueError("live session identity missing")
     if attempt["failure"] is None:
         reason = init_gate(
             live["init"] or {},
             expected_model=plan_data["model"],
             session_id=session_id,
             version=adapter["claude_code_version"],
+            cwd=live["cwd"],
         )
         if reason is not None or len(attempt["trace"]) != len(live["observed_calls"]):
             raise ValueError("live trace was not observed")

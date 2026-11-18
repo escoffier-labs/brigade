@@ -132,7 +132,7 @@ authentication, so no model call happened. A full live arm has not run yet.
 ```text
 claude -p --output-format stream-json --verbose --include-hook-events
   --tools "" --strict-mcp-config --mcp-config <one server> --setting-sources ""
-  --no-session-persistence --session-id <uuid> --disable-slash-commands
+  --settings <every builtin plugin disabled> --no-session-persistence --session-id <uuid> --disable-slash-commands
   --no-chrome --restricted --system-prompt-file <per-arm file> --model <alias>
   --permission-mode dontAsk --allowedTools <the five paired tools>
   [--effort <level>] --disallowedTools Task Agent
@@ -152,8 +152,9 @@ allowlist is rejected, logged and fails the cell.
 
 Each arm gets a fresh process, working directory, `HOME`, `CLAUDE_CONFIG_DIR`,
 temp directory, fixture target and session id. The child environment is built
-from an allowlist (`PATH`, locale, timezone, TLS and proxy variables) plus
-`CLAUDE_CODE_OAUTH_TOKEN` and these fixed values:
+from an allowlist (`PATH`, locale, timezone, TLS and proxy variables, and the
+Windows system variables the interpreter needs) plus `CLAUDE_CODE_OAUTH_TOKEN`, a
+per-arm `HOME` and `USERPROFILE`, and these fixed values:
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `DISABLE_TELEMETRY=1` and
 `DISABLE_AUTOUPDATER=1`. `ANTHROPIC_API_KEY` and every other parent variable are
@@ -164,7 +165,10 @@ it runs any fixture command.
 `SKILL.md` bytes of that arm. Arms therefore differ only in skill bytes. The
 system prompt, prelude and skill sha256 values are part of the adapter identity
 inside every cell id, so a changed skill, prelude, flag set, CLI version, model,
-timeout or adapter source file refuses resume.
+timeout or adapter source file refuses resume. "Adapter source file" covers the
+adapter, the paired MCP server, the stdio server, the safe-output helpers, the
+settings constants it shares with the verify seat, the evaluator and the skill
+registry; editing any of them refuses resume.
 
 #### Init gate
 
@@ -174,15 +178,30 @@ adapter aborts the cell unless the init event shows:
 - no built-in tools, or exactly `EndConversation`, plus exactly the five paired
   MCP tools;
 - exactly one MCP server, ours, connected, and no `mcp_server_errors`;
-- no plugins except the CLI's own builtin ones (2.1.327 reports three), no
-  skills and no slash commands;
+- no plugins (the `--settings` flag switches every builtin plugin off, so a
+  reported plugin of any kind fails the gate), no skills and no slash commands;
+- `agents` limited to the CLI's built-in agents, no additional directories, a
+  `cwd` whose real path is the arm's working directory, and `permissionMode`
+  `dontAsk`;
 - a resolved `model` equal to the manifest's full model id, the requested
   session id, the recorded CLI version, and an `apiKeySource` that is not an API
   key.
 
-Any hook event anywhere in the stream also aborts the cell. A `tool_use` for
-anything except the five paired tools (a built-in such as Bash, Read or Write, or
-another MCP name) aborts the cell as `forbidden_tool`.
+Without `--safe-mode` the CLI still reads `CLAUDE.md` and `AGENTS.md` from the
+working directory and every ancestor. Each arm's working directory is created
+under a fresh temporary directory, and before launching the adapter checks that
+neither file exists in that directory or any ancestor of it. If one does, the
+cell fails as `ancestor_instructions:<file name>` and the CLI is never started.
+Point `TMPDIR` at a location whose ancestors hold neither file; a home
+directory that carries a `CLAUDE.md` is not such a location.
+
+Any hook event anywhere in the stream also aborts the cell. A `tool_use`,
+`server_tool_use` or `mcp_tool_use` block for anything except the five paired
+tools (a built-in such as Bash, Read or Write, or another MCP name) aborts the
+cell as `forbidden_tool`; the name is checked before duplicate ids, so a reused id
+cannot hide one. A paired tool name carried by a `server_tool_use` or
+`mcp_tool_use` block aborts as `forbidden_tool_type`, and a block whose id is
+missing, not a string or already seen aborts as `malformed_tool_use`.
 
 `EndConversation` survives `--tools ""` whenever MCP tools exist in some CLI
 builds. It is recorded under `live.control_events` and never graded. 2.1.327 did
@@ -202,7 +221,11 @@ Live results use adapter id `brigade.claude-cli-live.v1` and schema
 `brigade.paired_trial.live.v1`, with `model_executed: true`, `live: true` and
 `promotion_eligible: false`. They never share an output directory with
 `brigade.offline-replay.v1`, which is unchanged. Raw stream, server trace and
-stderr are kept under each attempt and bound by hash. `paired-validate` picks the
+stderr are kept under each attempt and bound by hash. The OAuth token value is
+removed from the stream, stderr, server trace and receipt bytes before they are
+hashed or saved, so artifacts show `[redacted]` in its place. The requested
+session id and arm working directory are stored with each attempt and revalidated
+against the init event instead of being read back from it. `paired-validate` picks the
 live validator from the schema. The init gate reports the CLI's own view of its
 configuration. Model and CLI authenticity remain unverified, and the result can
 neither score nor promote a skill.
@@ -212,7 +235,8 @@ neither score nor promote a skill.
 Authentication is the subscription OAuth token only. Run `claude setup-token`
 once, supply the result as `CLAUDE_CODE_OAUTH_TOKEN` from your secret store, and
 leave API keys out. `paired-live` exits 2 before launching anything when the token
-is absent. A live manifest must name a full model id (for example
+is absent, and `claude --version` that does not return within 30 seconds exits 2
+the same way. A live manifest must name a full model id (for example
 `claude-opus-5-5`). `settings.claude_cli_model` is the alias passed to `--model`,
 and `settings.reasoning` becomes `--effort` when it is a valid level.
 

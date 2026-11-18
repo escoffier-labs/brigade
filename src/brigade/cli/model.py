@@ -186,6 +186,7 @@ def _dispatch_trial(args) -> int:
 
 def _dispatch_paired(args) -> int:
     import json
+    import subprocess
     import sys
 
     from .. import model_trials
@@ -211,7 +212,7 @@ def _dispatch_paired(args) -> int:
             result = model_trials.paired_execute(args.manifest, args.output_dir, replay_session(script))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

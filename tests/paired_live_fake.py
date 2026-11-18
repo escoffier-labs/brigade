@@ -21,6 +21,9 @@ import json, os, subprocess, sys, uuid
 
 SC = json.load(open("__SCENARIO__"))
 if "--version" in sys.argv:
+    if SC.get("version_hang"):
+        import time
+        time.sleep(600)
     print(SC.get("version", "2.1.327") + " (Claude Code)")
     sys.exit(0)
 argv = sys.argv[1:]
@@ -51,6 +54,8 @@ def rpc(method, params=None):
     return json.loads(proc.stdout.readline())
 
 
+if SC.get("leak"):  # A misbehaving CLI echoing its credential to the stream and to stderr.
+    sys.stderr.write("auth debug " + os.environ["CLAUDE_CODE_OAUTH_TOKEN"] + "\n")
 for event in SC.get("pre_events", []):
     emit(event)
 steps = SC.get("steps", [])
@@ -67,12 +72,14 @@ init = {
     "tools": [QUAL + t for t in TOOLS] + (["EndConversation"] if SC.get("end_tool_listed") else []),
     "mcp_servers": [{"name": "brigade-paired", "status": "connected", "source": "dynamic"}],
     "model": "claude-opus-5-5", "permissionMode": "dontAsk", "slash_commands": [], "apiKeySource": "none",
-    "claude_code_version": SC.get("version", "2.1.327"), "skills": [],
-    "plugins": [{"name": "cc-plugin-privacy", "path": "builtin", "source": "cc-plugin-privacy@builtin"}],
+    "claude_code_version": SC.get("version", "2.1.327"), "skills": [], "plugins": [],
+    "agents": ["general-purpose", "Explore", "Plan"], "additional_directories": [],
     "uuid": str(uuid.uuid4()),
 }
 init.update(SC.get("init", {}))
 emit(init)
+if SC.get("leak"):
+    emit({"type": "system", "subtype": "debug", "note": "token=" + os.environ["CLAUDE_CODE_OAUTH_TOKEN"]})
 for event in SC.get("post_init_events", []):
     emit(event)
 if SC.get("hang"):
@@ -97,7 +104,8 @@ def result(tid, text):
 for step in steps:
     if "call" in step or "server_only" in step or "emit_only" in step:
         tool = step.get("call") or step.get("server_only") or step.get("emit_only")
-        tid = None if "server_only" in step else assistant(QUAL + tool, step.get("input", {}))
+        shown = step.get("stream_input", step.get("input", {}))  # What the stream says may differ from the server.
+        tid = None if "server_only" in step else assistant(QUAL + step.get("stream_as", tool), shown)
         if "emit_only" in step:
             continue
         reply = rpc("tools/call", {"name": tool, "arguments": step.get("input", {})})["result"]
@@ -110,6 +118,9 @@ for step in steps:
         result(assistant(step["tool_use"], step.get("input", {})), "No such tool available")
     elif "event" in step:
         emit(step["event"])
+    elif "block" in step:
+        emit({"type": "assistant", "uuid": str(uuid.uuid4()), "session_id": sid,
+              "message": {"id": "msg_x", "role": "assistant", "content": [step["block"]]}})
 if SC.get("end_conversation"):
     assistant("EndConversation", {})
 final = SC.get("final", "receipt")
