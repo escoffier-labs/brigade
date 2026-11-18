@@ -1170,8 +1170,11 @@ index, with `retrieval_eval_lineage_exposed`, since search answers from that
 graph. A target with `agent-unreviewed` trust holds with
 `retrieval_eval_writer_changed` when the applier is not the head's writer,
 because an apply rewrites the writer and push search shows such a head only to
-its writer. The reflect client asks for a proposal held for lineage review
-again after seven days.
+its writer. An admitted automatic apply, like any write, removes the card from
+push and connector search until the next index snapshot publishes, because push
+requires the live revision and content hash to match the snapshot and the new
+content to be scanned clean. The reflect client asks for a proposal held for
+lineage review again after seven days.
 
 Operator procedure:
 

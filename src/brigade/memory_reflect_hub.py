@@ -600,6 +600,8 @@ def _reflect(
     previous = {d: p for d, p in previous.items() if ledger.current(p, live, _now_ms(), settings.read_scopes)}
 
     retries: list[tuple[str, list[dict[str, Any]]]] = []
+    # Digests whose lineage review window ran out, so a duplicate answer can re-arm the flag.
+    lapsed_reviews: set[str] = set()
 
     def unremembered(submissions: list[list[dict[str, Any]]]) -> list[tuple[str, list[dict[str, Any]]]]:
         fresh = []
@@ -615,6 +617,7 @@ def _reflect(
                 # The link may be gone and the proposal decided by now. Forget it so a later
                 # run proposes the card again. The hub reports a still-open copy as a duplicate.
                 previous.pop(digest, None)
+                lapsed_reviews.add(digest)
                 fresh.append((digest, ops))
             elif type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
                 # A future timestamp counts as expired, so local state cannot stretch the window.
@@ -770,6 +773,11 @@ def _reflect(
                 _save(target, state)
             if sent.outcome == DUPLICATE:
                 skipped["duplicate_pending"] = skipped.get("duplicate_pending", 0) + 1
+                if digest in lapsed_reviews and sent.proposal_id is not None and digest in previous:
+                    # The hub still holds the proposal for review. Arm the window again so later
+                    # runs skip it instead of retrying an automatic apply that stays held.
+                    previous[digest]["lineage_review"] = _now_ms()
+                    _save(target, state)
             else:
                 proposal: dict[str, Any] = {"proposal_id": sent.proposal_id}
                 if apply and sent.proposal_id is not None:

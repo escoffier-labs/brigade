@@ -165,9 +165,6 @@ pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite:
     Ok(true)
 }
 
-/// Every front-matter key `ranking::Links::parse` reads. Keep it in step.
-const LINEAGE_KEYS: [&str; 4] = ["superseded_by", "supersedes", "merged_from", "aliases"];
-
 /// A trusted card that declares lineage links, or that another live card in
 /// its scope names, can change search order when its revision moves. Lineage
 /// recency compares head revisions, so any apply there needs a human decision.
@@ -194,7 +191,7 @@ pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlit
         // the target id. Values go through `literal_eval`, so escapes and
         // implicit concatenation can spell an id that no byte search finds.
         // A key cannot be escaped, because `front_matter` splits on the raw colon.
-        let rows = tx.query(&format!("SELECT b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' AND c.card_id<>?2 AND ({})", LINEAGE_KEYS.iter().map(|key| format!("instr(b.bytes,CAST('{key}' AS BLOB))>0")).collect::<Vec<_>>().join(" OR ")), &[ops::t(scope), ops::t(id)])?;
+        let rows = tx.query(&format!("SELECT b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' AND c.card_id<>?2 AND ({})", super::ranking::LINEAGE_KEYS.iter().map(|key| format!("instr(b.bytes,CAST('{key}' AS BLOB))>0")).collect::<Vec<_>>().join(" OR ")), &[ops::t(scope), ops::t(id)])?;
         let named = rows.iter().any(|row| {
             let rusqlite::types::Value::Blob(bytes) = &row[0] else {
                 return false;

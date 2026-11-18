@@ -515,6 +515,61 @@ def test_lineage_review_flag_expires_so_the_card_is_proposed_again(setup, capsys
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
     reason="safe directory descriptors unavailable",
 )
+def test_second_lineage_expiry_rearms_the_flag_and_does_not_retry_auto_apply(setup, capsys, monkeypatch):
+    import json
+    from brigade import memory_reflect_hub as reflect_hub
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "robot-a", card_text("Unique robot-a.", None), "live", "robot-a")
+    policy.set_enabled(target, True)
+    held = [{"gate": "candidate", "state": "held", "code": "lineage_requires_review"}]
+    monkeypatch.setattr(
+        hub,
+        "do_auto_apply",
+        lambda body: (200, {"state": "pending", "reason": "auto_apply_held", "preflight": {"checks": held}}),
+        raising=False,
+    )
+    assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+
+    def flagged():
+        state = json.loads(path.read_text())
+        return [record for record in state["submissions"].values() if "lineage_review" in record]
+
+    first = flagged()[0]["lineage_review"]
+    open_id = json.loads(path.read_text())["submissions"]
+    open_id = next(iter(open_id.values()))["proposal_id"]
+    auto_applies = len([call for call in writes(hub) if call["action"] == "auto_apply"])
+    assert auto_applies == 1
+    # The window runs out while the hub still holds the proposal open.
+    later = reflect_hub._now_ms() + reflect_hub.LINEAGE_REVIEW_RETRY_MS + 1
+    monkeypatch.setattr(reflect_hub, "_now_ms", lambda: later)
+    # The hub answers that the old proposal is still open.
+    monkeypatch.setattr(
+        hub,
+        "do_propose",
+        lambda body: (409, {"code": "memory_proposal_duplicate_pending", "proposal_id": open_id, "error": "dup"}),
+    )
+    code, expired = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert expired["skipped_reasons"]["duplicate_pending"] == 1
+    # The duplicate answer re-armed the flag with the new time.
+    assert len(flagged()) == 1 and flagged()[0]["lineage_review"] == later > first
+    # A later run inside the new window skips it and never reaches auto_apply again.
+    code, quiet = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert quiet["skipped_reasons"]["lineage_review"] == 1
+    assert "already_proposed" not in quiet["skipped_reasons"]
+    assert len([call for call in writes(hub) if call["action"] == "auto_apply"]) == auto_applies
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_future_withdrawal_time_does_not_extend_suppression(setup, capsys, monkeypatch):
     import json
     from brigade import memory_reflect_hub as reflect_hub

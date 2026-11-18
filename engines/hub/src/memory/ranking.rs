@@ -57,10 +57,18 @@ pub struct Links {
     pub(super) successor: Option<String>,
     pub(super) predecessors: Vec<String>,
 }
+/// Every front-matter key [`Links::parse`] reads. It is the only list, and
+/// the lineage prefilter in `proposal_tiers` imports it.
+pub(super) const LINEAGE_KEYS: [&str; 4] =
+    ["superseded_by", "supersedes", "merged_from", "aliases"];
+
 impl Links {
     pub fn parse(body: &str, scope: &str) -> Self {
         let mut out = Self::default();
         for (key, value) in text::front_matter(body) {
+            if !LINEAGE_KEYS.contains(&key.as_str()) {
+                continue;
+            }
             let values = match value {
                 text::Value::Str(s) => {
                     match s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
@@ -384,4 +392,37 @@ pub fn collapse_eligible(
             .then_with(|| recency(snap, *a, *b))
     });
     Ok(out)
+}
+
+#[cfg(test)]
+mod lineage_key_tests {
+    use super::{LINEAGE_KEYS, Links};
+
+    fn edges(key: &str) -> usize {
+        let links = Links::parse(&format!("---\n{key}: other-card\n---\nbody\n"), "fleet");
+        usize::from(links.successor.is_some()) + links.predecessors.len()
+    }
+
+    #[test]
+    fn parse_honors_exactly_the_listed_lineage_keys() {
+        for key in LINEAGE_KEYS {
+            assert_eq!(edges(key), 1, "{key} is listed but makes no edge");
+        }
+        // The prefilter in `proposal_tiers` searches only the listed keys, so a key
+        // that parse honored without being listed would slip past it.
+        for key in [
+            "replaces",
+            "replaced_by",
+            "related",
+            "evidence",
+            "links",
+            "tags",
+            "title",
+            "supersede",
+            "Supersedes",
+        ] {
+            assert!(!LINEAGE_KEYS.contains(&key), "{key}");
+            assert_eq!(edges(key), 0, "{key} makes an edge but is not listed");
+        }
+    }
 }

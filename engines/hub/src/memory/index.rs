@@ -465,6 +465,8 @@ pub struct Projection {
     pub fields: Fields,
     pub tokens: Vec<String>,
     pub links: super::ranking::Links,
+    /// The text the indexer tokenizes. Literal search reads it lowercased.
+    pub indexed: String,
     pub digest: String,
 }
 pub fn projection(card: &Card, live: bool) -> Projection {
@@ -486,25 +488,33 @@ pub fn projection(card: &Card, live: bool) -> Projection {
         fields,
         tokens,
         links,
+        indexed,
         digest,
     }
 }
 
 /// A digest of the inputs ranking and literal search read from one card, and
-/// nothing else. It leaves out the raw text, revision, head sequence and
-/// content hash. It covers ranking and literal search only. `writer` and
-/// `writer_class` decide push and connector visibility, and the revision moves
-/// lineage recency. Neither is in the digest, so the gate guards both apart.
-/// Lineage recency is the one ranking input left out, so a gate must exclude
-/// lineage targets. Only the gate computes it. Indexing never pays for it.
+/// nothing else. It hashes the fields, tokens, links and literal text that
+/// [`projection`] builds, so a search-visible input added there reaches the
+/// gate with no second list to update. It leaves out the raw text, revision,
+/// head sequence and content hash. It covers ranking and literal search only.
+/// `writer` and `writer_class` decide push and connector visibility, and the
+/// revision moves lineage recency. Neither is in the digest, so the gate
+/// guards both apart. Lineage recency is the one ranking input left out, so a
+/// gate must exclude lineage targets. Only the gate computes it. Indexing
+/// never pays for it.
 pub fn ranking_digest(card: &Card, live: bool) -> String {
-    let fields = text::fields(&card.text, &card.card_id);
-    let indexed = text::card_text(&fields, &card.text);
-    let links = super::ranking::Links::parse(&card.text, &card.scope);
+    let Projection {
+        fields,
+        tokens,
+        links,
+        indexed,
+        ..
+    } = projection(card, live);
     super::ids::sha256_hex(
         super::ids::canonical(&serde_json::json!({
             "scope":card.scope,"card_id":card.card_id,"live":live,
-            "tokens":text::tokenize(&indexed),"literal":text::py_lower(&indexed),
+            "tokens":tokens,"literal":text::py_lower(&indexed),
             "title":fields.title,"summary":fields.summary,"tags":fields.tags,
             "trust":card.trust,"automated":card.automated,
             "successor":links.successor,"predecessors":links.predecessors
