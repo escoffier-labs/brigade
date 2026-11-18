@@ -157,6 +157,7 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
         "python\tscripts/version_sync.py\t--check",
         "python\tscripts/managed_snapshot.py\t--check",
         "python\tscripts/template_profile_snapshot.py\t--check",
+        "python\tscripts/shipped_file_history.py\t--check",
         "python\tscripts/verify_parallel.py",
     ]
     assert not flock_log.exists()
