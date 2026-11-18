@@ -1,0 +1,35 @@
+title: "[Idea] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you hitting?
+      description: What are you trying to do, and where does it get in the way?
+      placeholder: |
+        I want to X. Brigade makes me Y first, and that gets in the way because Z.
+    validations:
+      required: true
+  - type: textarea
+    id: what-would-help
+    attributes:
+      label: What would help
+      description: The change, flag or behavior that would unblock you. A rough sketch is fine.
+    validations:
+      required: false
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do today
+      description: Any workaround or manual step that stands in for this.
+    validations:
+      required: false
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing discussions and did not find this idea.
+          required: true
+        - label: This is not a reproducible bug. Bugs go to Issues.
+          required: true

@@ -1,0 +1,32 @@
+title: "[Q] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: BrigadeStack version
+      description: Output of `brigadestack --version`.
+      placeholder: brigade 0.31.0
+    validations:
+      required: true
+  - type: input
+    id: os-python
+    attributes:
+      label: OS and Python
+      description: Your operating system and Python version.
+      placeholder: Ubuntu 24.04, Python 3.12.3
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What you are trying to do
+      description: The outcome you want and the command you are working from.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried and what happened
+      description: The commands you ran and the output you got. Redact tokens, private hostnames and personal paths.
+    validations:
+      required: true
