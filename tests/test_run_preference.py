@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from threading import Barrier
+from threading import Barrier, local
 
 import pytest
 
@@ -77,14 +77,23 @@ def test_cache_round_trip(tmp_path) -> None:
     assert loaded == pref
 
 
-def test_cache_concurrent_refreshes_publish_complete_preferences(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("simulate_sharing_violation", [False, True])
+def test_cache_concurrent_refreshes_publish_complete_preferences(
+    tmp_path, monkeypatch, simulate_sharing_violation
+) -> None:
     path = run_preference.cache_path(tmp_path)
     ready = Barrier(2, timeout=10)
+    attempt = local()
     replace = os.replace
 
     def overlap_replacements(src, dst, **kwargs):
-        if dst == path:
-            ready.wait()
+        if dst == path and not getattr(attempt, "started", False):
+            attempt.started = True
+            writer = ready.wait()
+            if simulate_sharing_violation and writer == 0:
+                error = PermissionError("destination temporarily open")
+                error.winerror = 5
+                raise error
         return replace(src, dst, **kwargs)
 
     monkeypatch.setattr(os, "replace", overlap_replacements)

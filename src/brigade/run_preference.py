@@ -13,6 +13,7 @@ import tomllib
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 
@@ -135,7 +136,17 @@ def write_cached(preference: RunPreference, home: Path | None = None) -> Path:
     payload = preference.payload()
     if payload:
         lines.extend(f"{key} = {toml_format.format_toml_value(value)}" for key, value in payload.items())
-    localio.write_text_atomic(path, "\n".join(lines) + "\n")
+    data = "\n".join(lines) + "\n"
+    deadline = monotonic() + 1.0
+    while True:
+        try:
+            localio.write_text_atomic(path, data)
+            break
+        except PermissionError as exc:
+            # Windows readers and concurrent replacements can briefly deny a rename.
+            if getattr(exc, "winerror", None) not in {5, 32, 33} or monotonic() >= deadline:
+                raise
+            sleep(0.025)
     return path
 
 
