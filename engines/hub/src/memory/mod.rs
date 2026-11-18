@@ -2371,6 +2371,8 @@ mod alias_dating_tests;
 #[cfg(test)]
 mod anchor_tests;
 #[cfg(test)]
+mod lineage_dating_tests;
+#[cfg(test)]
 mod merge_drift_tests;
 #[cfg(test)]
 mod ranking_gate_tests;

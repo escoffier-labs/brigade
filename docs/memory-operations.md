@@ -1248,22 +1248,34 @@ on a keeper that was not automated, and that holds with
 `retrieval_eval_merge_automated_mismatch`. The history veto, the lineage rule
 and the published-index lineage check apply to both cards as before. The
 keeper's `aliases` line names the retired id as a predecessor. Only trusted
-cards form lineage edges, and an `aliases` edge also needs the named card to be
-older than the alias. The index forms it only when the target's current
-incarnation began before the keeper revision that first wrote the alias. An
-incarnation starts at the first live revision after the card's latest retired
-revision. A new card that takes the retired id, a revival of that id, and a card
-created under an id an alias already named all start after the alias, so none is
-linked or collapsed under the keeper. An alias whose history the index cannot
-read to its start forms no edge. `supersedes`, `superseded_by` and `merged_from`
-are not dated. Scorer `lineage-source-v5` introduced the dating, so an older
-retrieval evaluation record holds with `retrieval_eval_scorer_mismatch` until a
-new run is recorded.
+cards form lineage edges, and every lineage key is dated: `aliases`,
+`supersedes`, `merged_from` and `superseded_by`. The index forms an edge only
+when the named card's current incarnation began before the owner revision that
+first wrote that name under that key. An incarnation starts at the first live
+revision after the card's latest retired revision. A new card that takes a
+retired id, a revival of that id, and a card created under an id a predecessor
+key already named all start after the name, so none is linked or collapsed
+under the owner. A name whose history the index cannot read to its start forms
+no edge.
 
-A merge writes aliases, so the guard dates the ones a merge writes. A keeper
-also inherits the retired card's own aliases, and the keeper's history would
-date them from the new merge. The merge therefore leaves out an inherited alias
-when a card holds that id now and either date is unknown, or that card's
+Each key is judged on its own, from the unbroken run of the owner's revisions
+that name the id under that key. An id named under several keys forms an edge
+if any one key passes. A key that passes is a fresh claim about the card that
+holds the id now, and a stale key never forms an edge by itself, so an old
+`aliases` line cannot be combined with a `supersedes` line to link a reused id.
+`superseded_by` points from the owner to its successor, and a reused id can
+only hide the owner behind an unrelated card. It follows the same rule, with
+one exception: a card may name its successor before that card is written, so a
+successor that is the first card under its id links whenever it appears. Scorer
+`lineage-source-v6` introduced the dating of every key, so an older retrieval
+evaluation record holds with `retrieval_eval_scorer_mismatch` until a new run is
+recorded.
+
+A merge writes aliases, so the guard dates the ones a merge writes. A merge
+writes only `aliases` and `evidence`, so this is the only key it can copy. A
+keeper also inherits the retired card's own aliases, and the keeper's history
+would date them from the new merge. The merge therefore leaves out an inherited
+alias when a card holds that id now and either date is unknown, or that card's
 current incarnation began after the retired card first wrote the alias. The
 preflight, the merge gate and the apply all make that choice with one function,
 so a proposal that kept such an alias holds with
@@ -1272,18 +1284,37 @@ alias line's tokens, so it holds with `retrieval_eval_merge_tokens_lost` and goe
 to a reviewer. A retired keeper that already holds an alias declares lineage,
 so a chained merge opens at tier 2 for a trusted pair.
 
+A proposal stores the keeper text computed at submit time, and a reviewer
+accepts that text as stored. An id the retired card named may have been taken
+since then, so every apply of a merge, automatic or reviewed, asks the same
+function again under the writer lock against the live heads. A stored text that
+keeps an alias the function would now drop is not applied and is not rewritten.
+The proposal becomes `stale` with the reason `inherited_alias_reused`, and a
+fresh proposal is needed.
+
+The index reads each owner's history once per owner revision and each target's
+once per target revision. A reverse index from each named id to its owners finds
+the owners a new live card affects. One publication spends at most 256 history
+reads on dating, and a full build dates to completion. Work over the budget
+stays pending and forms no edge, and the writer finishes it on the next
+publication, including one that carries no new event. A hub with a very large
+backlog of undated owners therefore shows fewer collapsed results until those
+publications run, never more.
+
 Known limits of the dating, each of which fails closed and only un-hides cards:
 
-- A keeper writer who deliberately drops an alias and writes it again re-dates
-  it from the second write. That writer already holds the same power through
-  `supersedes`, which is not dated.
+- A keeper writer who deliberately drops a name and writes it again re-dates it
+  from the second write. A trusted writer may also write a fresh `supersedes`
+  against a card that holds the id now. Review of trusted writes polices both.
 - A rollback restores the exact earlier text, because rollback stays an exact
-  inverse. An alias that the rolled-back change had dropped is therefore dated
+  inverse. A name that the rolled-back change had dropped is therefore dated
   from the rollback, not from its first write.
 - The index reads at most 256 revisions of a card to date it. A longer run, and
-  a revision whose blob is missing, leave the date unknown, so the alias forms
-  no edge. The alias history of a keeper id that was retired and then reused
+  a revision whose blob is missing, leave the date unknown, so the name forms
+  no edge. The naming history of an owner id that was retired and then reused
   does not carry into the new card.
+- A `supersedes`, `merged_from` or `aliases` name that precedes the card it
+  names, a forward reference, forms no edge. Only `superseded_by` allows one.
 - The history veto for a retrieval evaluation builds its snapshots without
   dates, so it can still collapse a reused id that the live index shows. That
   is tracked separately.

@@ -902,6 +902,13 @@ fn apply_cards(
             return Ok(None);
         }
     }
+    // A reviewer decides on the text the proposal stored at submit time, so a
+    // merge is checked again against the live heads, however it is applied.
+    if let Some(reason) = super::alias_dating::merge_is_stale(tx, body)? {
+        body["state"] = json!("stale");
+        body["reason"] = json!(reason);
+        return Ok(None);
+    }
     let id = string(body, "proposal_id").to_string();
     let rollback = !body["rollback_of"].is_null();
     let digest = body["policy_digest"].as_str().map(String::from);

@@ -13,10 +13,10 @@ use rusqlite::Connection;
 
 /// A trusted keeper older than `KEEP`, so a merge of `KEEP` into it retires the
 /// newer card. `GONE` is the first merge's retired duplicate.
-const WIDE: &str = "wide-keeper";
+pub(super) const WIDE: &str = "wide-keeper";
 const NEW_Y: &str = "A new card that reuses the retired id.\n";
 
-async fn chain() -> Real {
+pub(super) async fn chain() -> Real {
     Real::new(&[
         (WIDE, &dup("", "dddddd")),
         (KEEP, &dup("", "aaaaaa")),
@@ -25,7 +25,7 @@ async fn chain() -> Real {
     ])
     .await
 }
-async fn merge_automatically(r: &Real, keeper: &str, retired: &str) {
+pub(super) async fn merge_automatically(r: &Real, keeper: &str, retired: &str) {
     let opened = open_ops(r, keeper, &[retired]).await;
     let applied = auto(r, &opened).await;
     assert_eq!(applied.body["state"], "applied", "{applied:?}");
@@ -203,8 +203,12 @@ async fn a_reused_keeper_id_dates_its_aliases_from_its_own_incarnation() {
     retire(&r, "keeper").await;
     let text = "---\naliases: [\"zed\"]\n---\nKeeper claim again. ^c-555555\n";
     rewrite(&r, "keeper", text).await;
-    let dates = alias_dating::alias_since(&r.db, "fleet", "keeper", head(&r, "keeper")).unwrap();
-    assert_eq!(dates["zed"], head(&r, "keeper"), "dated from the revival");
+    let dates = alias_dating::named_since(&r.db, "fleet", "keeper", head(&r, "keeper")).unwrap();
+    assert_eq!(
+        dates[&("aliases", "zed".to_string())],
+        head(&r, "keeper"),
+        "dated from the revival"
+    );
     let snap = trusted_index(&r);
     assert!(snap.in_lineage("fleet", "keeper"));
     assert_eq!(visible(&snap, "claim"), ["keeper"]);
@@ -230,8 +234,8 @@ async fn an_alias_dropped_and_written_again_dates_from_the_second_write() {
     let readded = "---\naliases: [\"zed\"]\n---\nKeeper claim. ^c-333333\n";
     rewrite(&r, "keeper", readded).await;
     let at = head(&r, "keeper");
-    let dates = alias_dating::alias_since(&r.db, "fleet", "keeper", at).unwrap();
-    assert_eq!(dates["zed"], at);
+    let dates = alias_dating::named_since(&r.db, "fleet", "keeper", at).unwrap();
+    assert_eq!(dates[&("aliases", "zed".to_string())], at);
     let snap = trusted_index(&r);
     assert!(snap.in_lineage("fleet", "zed"), "written after zed existed");
 }
@@ -259,8 +263,12 @@ async fn the_revision_cap_leaves_a_longer_run_undated_for_both_dates() {
         )
         .unwrap();
     assert_eq!(revisions as usize, RUN_CAP);
-    let dates = alias_dating::alias_since(&r.db, "fleet", "busy", at).unwrap();
-    assert_eq!(dates["zed"], first, "a run of exactly the cap is read");
+    let dates = alias_dating::named_since(&r.db, "fleet", "busy", at).unwrap();
+    assert_eq!(
+        dates[&("aliases", "zed".to_string())],
+        first,
+        "a run of exactly the cap is read"
+    );
     assert_eq!(
         alias_dating::incarnation_start(&r.db, "fleet", "busy", at).unwrap(),
         Some(first)
@@ -268,7 +276,7 @@ async fn the_revision_cap_leaves_a_longer_run_undated_for_both_dates() {
     rewrite(&r, "busy", &write(RUN_CAP)).await;
     let at = head(&r, "busy");
     assert!(
-        alias_dating::alias_since(&r.db, "fleet", "busy", at)
+        alias_dating::named_since(&r.db, "fleet", "busy", at)
             .unwrap()
             .is_empty(),
         "one revision past the cap is unknown"
@@ -317,32 +325,18 @@ async fn a_missing_blob_leaves_the_alias_undated() {
         201
     );
     let at = head(&r, "keeper");
-    let before = alias_dating::alias_since(&r.db, "fleet", "keeper", at).unwrap();
+    let before = alias_dating::named_since(&r.db, "fleet", "keeper", at).unwrap();
     assert_eq!(before.len(), 1, "control: the full run is dated");
     r.db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
     r.db.execute("DELETE FROM memory_blobs WHERE content_hash=?1", [&oldest])
         .unwrap();
     assert!(
-        alias_dating::alias_since(&r.db, "fleet", "keeper", at)
+        alias_dating::named_since(&r.db, "fleet", "keeper", at)
             .unwrap()
             .is_empty()
     );
     let snap = trusted_index(&r);
     assert!(!snap.in_lineage("fleet", "keeper"));
-}
-
-/// An id that `supersedes` also names keeps that key's undated edge, so a
-/// reused id is still linked. Dating covers the ids only `aliases` names.
-#[tokio::test]
-async fn an_id_that_aliases_and_supersedes_both_name_stays_undated() {
-    let r = pair().await;
-    let keeper = "---\naliases: [\"fleet/dup-retired\"]\nsupersedes: [\"dup-retired\"]\n---\nKeeper claim. ^c-777777\n";
-    rewrite(&r, KEEP, keeper).await;
-    retire(&r, GONE).await;
-    reuse(&r, GONE, NEW_Y).await;
-    let snap = trusted_index(&r);
-    assert!(snap.in_lineage("fleet", KEEP));
-    assert!(snap.in_lineage("fleet", GONE));
 }
 
 /// A card that is edited keeps the incarnation that dated its alias, and one
@@ -380,7 +374,7 @@ async fn re_adding_a_live_target_refreshes_its_cached_date() {
     assert_eq!(builder.dated_keepers(), 1);
 }
 /// Replays the live head of `id` onto the builder, as the hub does after a write.
-fn replay(r: &Real, builder: &mut index::Builder, id: &str) {
+pub(super) fn replay(r: &Real, builder: &mut index::Builder, id: &str) {
     r.db.execute("UPDATE memory_cards SET trust='reviewed'", [])
         .unwrap();
     let (revision, content_hash, trust, bytes): (i64, String, String, Vec<u8>) =

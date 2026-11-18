@@ -1,16 +1,23 @@
-//! Dates the lineage edges that `aliases` writes (#2671). A merge writes the
-//! retired id into the keeper's `aliases`, so the name can outlive the card it
-//! named. If a new card later takes that id, the alias must not link it. An
-//! alias edge forms only when the target's current incarnation began before the
-//! keeper revision that first wrote the alias. Both dates come from the log
-//! sequence numbers in `memory_card_revisions`, which are globally ordered.
+//! Dates every lineage edge (#2671, #2726). A card names another by id under
+//! `aliases`, `supersedes`, `merged_from` or `superseded_by`, and a name can
+//! outlive the card it named. A merge writes the retired id into the keeper's
+//! `aliases`, for one. If a new card later takes that id, the name must not
+//! link it. An edge forms only when the target's current incarnation began
+//! before the owner revision that first wrote the name under that key. Both
+//! dates come from the log sequence numbers in `memory_card_revisions`, which
+//! are globally ordered.
 //!
 //! A merge also copies the retired card's own aliases into the keeper, and the
 //! keeper's run dates them from the merge. [`stale_inherited`] names the copies
 //! that would turn a reused id into a linked one, so the merge leaves them out.
-use super::{ops, proposal_metadata, ranking};
+use super::{
+    ops, proposal_metadata,
+    proposals::{cards, string},
+    ranking,
+};
 use crate::writer::ReadTx;
 use rusqlite::{Connection, params, types::Value};
+use serde_json::Value as Json;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Revisions read back to date a card. A longer run leaves the date unknown,
@@ -28,12 +35,23 @@ pub(super) const RUN: &str = "SELECT r.revision,r.state,b.bytes FROM memory_card
 /// non-live revision, or of its first revision when it was never retired. None
 /// when `head` is not the card's own live revision or the run is too long to
 /// read. A revived or recreated id therefore dates from its revival.
+#[cfg(test)]
 pub(super) fn incarnation_start(
     db: &Connection,
     scope: &str,
     card_id: &str,
     head: i64,
 ) -> rusqlite::Result<Option<i64>> {
+    Ok(incarnation(db, scope, card_id, head)?.map(|(start, _)| start))
+}
+/// [`incarnation_start`], and whether an earlier incarnation of the id ended
+/// before it. A first incarnation has no earlier card that a name could mean.
+pub(super) fn incarnation(
+    db: &Connection,
+    scope: &str,
+    card_id: &str,
+    head: i64,
+) -> rusqlite::Result<Option<(i64, bool)>> {
     let mut s = db.prepare_cached(STATES)?;
     let rows = s
         .query_map(params![scope, card_id, head, READ_LIMIT], |r| {
@@ -62,36 +80,39 @@ fn incarnation_start_in<T: ReadTx + ?Sized>(
         .iter()
         .map(|r| (integer(&r[0]), ops::s(&r[1]) == "live"))
         .collect::<Vec<_>>();
-    Ok(start_of(&rows, head))
+    Ok(start_of(&rows, head).map(|(start, _)| start))
 }
-fn start_of(rows: &[(i64, bool)], head: i64) -> Option<i64> {
+fn start_of(rows: &[(i64, bool)], head: i64) -> Option<(i64, bool)> {
     let mut start = None;
     for (i, (seq, live)) in rows.iter().enumerate() {
         if i == 0 && (*seq != head || !live) {
             return None;
         }
         if !live {
-            return start;
+            return start.map(|start| (start, true));
         }
         start = Some(*seq);
     }
-    (rows.len() <= RUN_CAP).then_some(start).flatten()
+    (rows.len() <= RUN_CAP)
+        .then_some(start)
+        .flatten()
+        .map(|start| (start, false))
 }
 
-/// For each id the head's `aliases` names, the log sequence of the oldest
-/// revision in the unbroken run of revisions, ending at the head, that all
-/// name it. An alias dropped and written again dates from the second write. The
-/// run also ends at the card's own first non-live revision, as an incarnation
-/// does, so a retired and then reused card id does not inherit the alias
-/// history of the card it replaced. An id whose run cannot be read to its
-/// start, because a blob is missing or the history is too long, is left out,
-/// so it forms no edge.
-pub(super) fn alias_since(
+/// For each (key, id) the head names under a lineage key, the log sequence of
+/// the oldest revision in the unbroken run of revisions, ending at the head,
+/// that all name it under that key. A name dropped and written again dates from
+/// the second write. The run also ends at the card's own first non-live
+/// revision, as an incarnation does, so a retired and then reused card id does
+/// not inherit the naming history of the card it replaced. A pair whose run
+/// cannot be read to its start, because a blob is missing or the history is too
+/// long, is left out, so it forms no edge.
+pub(super) fn named_since(
     db: &Connection,
     scope: &str,
     card_id: &str,
     head: i64,
-) -> rusqlite::Result<HashMap<String, i64>> {
+) -> rusqlite::Result<Since> {
     let mut s = db.prepare_cached(RUN)?;
     let rows = s.query_map(params![scope, card_id, head, READ_LIMIT], |r| {
         Ok((
@@ -102,13 +123,13 @@ pub(super) fn alias_since(
     })?;
     since_of(rows, scope, head)
 }
-/// [`alias_since`] inside a writer transaction.
-fn alias_since_in<T: ReadTx + ?Sized>(
+/// [`named_since`] inside a writer transaction.
+fn named_since_in<T: ReadTx + ?Sized>(
     tx: &T,
     scope: &str,
     card_id: &str,
     head: i64,
-) -> rusqlite::Result<HashMap<String, i64>> {
+) -> rusqlite::Result<Since> {
     let rows = tx.query(
         RUN,
         &[
@@ -133,19 +154,21 @@ fn alias_since_in<T: ReadTx + ?Sized>(
         head,
     )
 }
+/// The log sequence at which each (lineage key, id) pair was first named.
+pub(super) type Since = HashMap<(&'static str, String), i64>;
 fn since_of(
     rows: impl Iterator<Item = rusqlite::Result<(i64, bool, Option<Vec<u8>>)>>,
     scope: &str,
     head: i64,
-) -> rusqlite::Result<HashMap<String, i64>> {
-    let mut since = HashMap::new();
-    let mut open: HashSet<String> = HashSet::new();
+) -> rusqlite::Result<Since> {
+    let mut since = Since::new();
+    let mut open: HashSet<(&'static str, String)> = HashSet::new();
     let (mut read, mut unreadable) = (0, false);
     for row in rows {
         let (seq, live, bytes) = row?;
         read += 1;
         if read == 1 && (seq != head || !live) {
-            return Ok(HashMap::new());
+            return Ok(Since::new());
         }
         // The run ends where the id's current incarnation began.
         if !live {
@@ -155,29 +178,27 @@ fn since_of(
             unreadable = true;
             break;
         };
-        let named: HashSet<String> =
-            ranking::front_targets(&String::from_utf8_lossy(&bytes), scope, |key| {
-                key == "aliases"
-            })
-            .into_iter()
-            .map(|(_, id)| id)
-            .collect();
+        let named: HashSet<(&'static str, String)> =
+            ranking::Links::parse(&String::from_utf8_lossy(&bytes), scope)
+                .named
+                .into_iter()
+                .collect();
         if read == 1 {
             open = named;
         } else {
-            open.retain(|id| named.contains(id));
+            open.retain(|pair| named.contains(pair));
         }
-        for id in &open {
-            since.insert(id.clone(), seq);
+        for pair in &open {
+            since.insert(pair.clone(), seq);
         }
         if open.is_empty() {
             return Ok(since);
         }
     }
-    // The rows ran out, or the read was cut, with ids still open.
+    // The rows ran out, or the read was cut, with pairs still open.
     if unreadable || read > RUN_CAP {
-        for id in &open {
-            since.remove(id);
+        for pair in &open {
+            since.remove(pair);
         }
     }
     Ok(since)
@@ -218,7 +239,7 @@ pub(super) fn stale_inherited<T: ReadTx + ?Sized>(
     };
     let id = |raw: &str| ranking::link_id(raw, scope).map(str::to_string);
     let held: HashSet<String> = own.iter().filter_map(|raw| id(raw)).collect();
-    let mut written: Option<HashMap<String, i64>> = None;
+    let mut written: Option<Since> = None;
     let mut stale = BTreeSet::new();
     for raw in inherited {
         let Some(named) = id(&raw).filter(|named| !held.contains(named)) else {
@@ -234,11 +255,68 @@ pub(super) fn stale_inherited<T: ReadTx + ?Sized>(
         let born = incarnation_start_in(tx, scope, &named, integer(&row[0]))?;
         let since = match &written {
             Some(since) => since,
-            None => written.insert(alias_since_in(tx, scope, card_id, head)?),
+            None => written.insert(named_since_in(tx, scope, card_id, head)?),
         };
-        if !matches!((born, since.get(&named)), (Some(born), Some(&at)) if born < at) {
+        if !matches!((born, since.get(&("aliases", named))), (Some(born), Some(&at)) if born < at) {
             stale.insert(raw);
         }
     }
     Ok(stale)
+}
+
+/// Why a stored merge cannot apply as written, or None. A proposal keeps the
+/// keeper text computed at submit time, and a reviewer accepts that text as
+/// stored. An id the retired card named may have been taken by a new card since
+/// then, so the stored alias line would link it. This asks [`stale_inherited`]
+/// again against the live heads, for an automatic and a reviewed apply alike.
+/// A stored text that keeps an alias the filter now drops is refused, never
+/// rewritten, so the reviewer sees the text that is applied.
+pub(super) fn merge_is_stale<T: ReadTx + ?Sized>(
+    tx: &T,
+    body: &Json,
+) -> rusqlite::Result<Option<&'static str>> {
+    let Some(all) = body["ops"].as_array() else {
+        return Ok(None);
+    };
+    let find = |scope: &Json, id: &Json| {
+        cards(body)
+            .iter()
+            .find(|c| c["scope"] == *scope && c["card_id"] == *id)
+    };
+    for op in all
+        .iter()
+        .filter(|op| op["type"] == "merge_exact_duplicates")
+    {
+        let (Some(keeper), Some(retired)) = (
+            find(&op["scope"], &op["card_id"]),
+            find(&op["other_card"]["scope"], &op["other_card"]["card_id"]),
+        ) else {
+            continue;
+        };
+        let scope = string(keeper, "scope");
+        // The staleness check already pinned both texts to the live heads.
+        let stale = stale_inherited(
+            tx,
+            scope,
+            string(keeper, "before_text"),
+            (
+                string(retired, "card_id"),
+                retired["base_revision"].as_i64().unwrap_or(0),
+                string(retired, "after_text"),
+            ),
+        )?;
+        let Ok(kept) = proposal_metadata::list(string(keeper, "after_text"), "aliases") else {
+            continue;
+        };
+        let id = |raw: &String| ranking::link_id(raw, scope).map(str::to_string);
+        let dropped: HashSet<String> = stale.iter().filter_map(id).collect();
+        if kept
+            .iter()
+            .filter_map(id)
+            .any(|named| dropped.contains(&named))
+        {
+            return Ok(Some("inherited_alias_reused"));
+        }
+    }
+    Ok(None)
 }
