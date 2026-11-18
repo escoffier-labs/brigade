@@ -42,8 +42,13 @@ def test_line_lists_holds_and_leading_reason():
     assert briefing._outcome_ratchet_line(payload) == (
         "outcome_ratchet: generated_at=2026-11-17T07:30:00+00:00 "
         "mode=dry-run regression_holds=2 (skill-a, skill-b) "
-        "ineligibility_rate=1.0 leading=unattributed"
+        "ineligibility_rate=1.0 leading=unattributed pending_physical_actions=0"
     )
+
+
+def test_line_shows_the_pending_physical_action_count():
+    payload = {"present": True, "generated_at": NOW.isoformat(), "mode": "applied", "pending_physical_actions": 3}
+    assert briefing._outcome_ratchet_line(payload).endswith("pending_physical_actions=3")
 
 
 def test_line_marks_an_applied_run():

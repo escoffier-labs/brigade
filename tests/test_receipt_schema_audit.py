@@ -494,9 +494,8 @@ def test_work_closeout_emits_schema_version(tmp_path, monkeypatch):
 
 def test_outcome_decision_emits_schema_version(tmp_path, monkeypatch):
     from tests.test_outcome_cmd import _write_registry_skill
-    from tests.test_scorecard_reconcile import _stub_execute, seed_registry_skill_scorecard_promotion
+    from tests.test_scorecard_reconcile import seed_registry_skill_scorecard_promotion
 
-    _stub_execute(monkeypatch)
     _write_registry_skill(tmp_path, "skill-x")
     seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0

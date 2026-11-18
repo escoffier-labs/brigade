@@ -681,7 +681,7 @@ def test_every_fleet_row_carries_diff_and_discard_keys(tmp_path, capsys):
         assert row["diff_command"] is None and row["discard_command"] is None
 
 
-# ---- unknown is a veto on unattended paths ------------------------------------
+# ---- a copy with no valid receipt: manual commands repair it, reconcile never touches it ----
 
 
 def _receipt_path(workspace: Path) -> Path:
@@ -695,69 +695,12 @@ def _lose_receipt(workspace: Path, how: str) -> None:
         _receipt_path(workspace).write_text("{not json")
 
 
-@pytest.mark.parametrize("how", ["deleted", "corrupt"])
-def test_unattended_install_all_skips_a_copy_with_no_valid_receipt(tmp_path, capsys, how):
-    installed = _edited_workspace(tmp_path, capsys)
-    _lose_receipt(tmp_path, how)
-    before = installed.parent.joinpath("SKILL.md").read_bytes()
-
-    rc = skills_cmd.install(
-        workspace=tmp_path, skill=f"registry:{SKILL}", harness="all", force=True, unattended=True, json_output=True
-    )
-
-    assert rc == 0
-    skipped = {row["target"]: row for row in json.loads(capsys.readouterr().out)["receipt"]["skipped"]}
-    assert skipped[HARNESS].get("unverified") is True
-    assert "no valid receipt" in skipped[HARNESS]["reason"]
-    assert installed.read_bytes() == before
-    assert not _rollback_snapshots(tmp_path)
-
-
 def test_manual_install_force_still_replaces_a_copy_with_no_valid_receipt(tmp_path, capsys):
     installed = _edited_workspace(tmp_path, capsys)
     _lose_receipt(tmp_path, "deleted")
 
     assert skills_cmd.install(workspace=tmp_path, skill=f"registry:{SKILL}", harness=HARNESS, force=True) == 0
     assert "hand edit" not in installed.read_text()
-
-
-def test_unattended_rollback_refuses_a_copy_it_cannot_prove_pristine(tmp_path, capsys):
-    installed, _first = _rollbackable_edited_workspace(tmp_path, capsys)
-    # Reinstall pristine so the only thing wrong is a receipt that cannot vouch for the copy.
-    assert (
-        skills_cmd.install(
-            workspace=tmp_path,
-            skill=f"registry:{SKILL}",
-            harness=HARNESS,
-            force=True,
-            discard_local_edits=True,
-        )
-        == 0
-    )
-    skill_dir = installed.parent
-    (skill_dir / "SKILL.md").unlink()
-    (skill_dir / "stray.md").write_text("leftover\n")
-    capsys.readouterr()
-    before = _state_bytes(tmp_path)
-
-    rc = skills_cmd.rollback(workspace=tmp_path, skill=SKILL, harness=HARNESS, unattended=True)
-
-    assert rc == 2
-    assert "unverified" in capsys.readouterr().err
-    assert _state_bytes(tmp_path) == before
-
-
-def test_unattended_uninstall_refuses_a_copy_it_cannot_prove_pristine(tmp_path, capsys):
-    installed = _edited_workspace(tmp_path, capsys)
-    _lose_receipt(tmp_path, "corrupt")
-    before = _state_bytes(tmp_path)
-
-    rc = skills_cmd.uninstall(workspace=tmp_path, skill=SKILL, harness=HARNESS, unattended=True, json_output=True)
-
-    assert rc == 2
-    capsys.readouterr()
-    assert installed.exists()
-    assert _state_bytes(tmp_path) == before
 
 
 # ---- the final mutation is bound to the bytes the check saw -------------------

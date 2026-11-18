@@ -93,9 +93,11 @@ unless you say so:
   `--discard-local-edits`. With the flag, the edited bytes are snapshotted under
   the rollback tree (named in the rollback receipt as `edit_snapshot`) before the
   copy is rolled back, so the edit stays recoverable.
-- `brigade outcome reconcile --apply` never rolls back, uninstalls or promotes
-  over an edited or unverifiable copy, and a partial `--target all` install
-  (some harnesses skipped) is not a promotion. See `docs/outcome-scoring.md`.
+- `brigade outcome reconcile --apply` is routing only ([decision on #2589](https://github.com/escoffier-labs/brigade/issues/2589#issuecomment-6965099265)):
+  it never installs, rolls back or uninstalls a skill file, so it cannot touch
+  an edited copy at all. It lists the `skills install` or `skills rollback`
+  command that would apply a status change, and you run it. See
+  `docs/outcome-scoring.md`.
 - The edit check compares every installed file except the root `skill.json`
   provenance file, which its own metadata fingerprint covers. A nested
   `skill.json` (for example `assets/skill.json`) is ordinary content, so an edit
@@ -115,19 +117,17 @@ unless you say so:
   overwritten: the operation restores the mutations already applied and reports
   `restored` with exit 1. `fleet status` rows always carry `diff_command` and
   `discard_command` (null unless the copy is edited).
-- `install --force`, `rollback` and the uninstall fallback bind their removal to
+- `install --force` and `rollback` bind their removal to
   the bytes the edit check saw. Immediately before each removal or replacement
   they re-verify the copy (directory inode and device plus a digest of every
   byte); a hand edit or a swapped directory that lands after the check aborts the
   command with exit 2 and changes nothing. The snapshot written for the aborted
   command is dropped.
-- Unknown is a veto on unattended paths. The receipt sits in the workspace the
-  agent's own user can write, so it may stop a write but never authorize one. A
-  copy with a missing, corrupt or digest-less receipt reads as `unknown`, and an
-  unattended caller (`outcome reconcile --apply`, through `install --target all`,
-  `rollback` and `uninstall` with `unattended`) skips it exactly like an edited
-  copy: `<harness>:skipped: unverified (no valid receipt)`. A manual
-  `install --force` on such a copy stays operator-driven and still repairs it.
+- A copy with a missing, corrupt or digest-less receipt reads as `unknown`. A
+  manual `install --force` on it stays operator-driven and repairs it. No
+  unattended path writes over it: the receipt sits in the workspace the agent's
+  own user can write, so forgeable state may veto a change but never authorize
+  one, and `outcome reconcile --apply` changes no skill file at all.
 
 Every copy that is replaced, edited or not, still gets its rollback snapshot.
 

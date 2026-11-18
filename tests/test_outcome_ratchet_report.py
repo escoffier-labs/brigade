@@ -92,6 +92,7 @@ def test_write_and_load_round_trip(tmp_path):
         "regression_holds": 1,
         "regression_rollbacks": 1,
         "regression_hold_ids": ["skill-a"],
+        "pending_physical_actions": 0,
     }
     assert loaded["decisions_by_action"] == {"hold": 1, "install": 1, "rollback": 1}
     assert [(row["artifact_id"], row["reason_code"]) for row in loaded["regressions"]] == [
@@ -217,6 +218,7 @@ def test_reconcile_report_flag_writes_report_and_keeps_dry_run(tmp_path, monkeyp
         "regression_holds": 1,
         "regression_rollbacks": 0,
         "regression_hold_ids": ["skill-regressed"],
+        "pending_physical_actions": 0,
     }
     assert report["regressions"][0]["artifact_id"] == "skill-regressed"
     assert not outcome_cmd._status_path(tmp_path).exists()
@@ -447,6 +449,7 @@ def test_cli_reconcile_report_flag_writes_advisory_file(tmp_path, capsys):
         "regression_holds": 0,
         "regression_rollbacks": 0,
         "regression_hold_ids": [],
+        "pending_physical_actions": 0,
     }
 
 
@@ -456,3 +459,31 @@ def test_writer_warns_when_the_report_cannot_fit_the_cap(tmp_path, monkeypatch, 
     assert _write(tmp_path, [_hold()]) is None
     assert "still over 10 bytes after truncation" in capsys.readouterr().err
     assert not report_mod.report_path(tmp_path).exists()
+
+
+def test_pending_physical_actions_are_counted_listed_and_bounded(tmp_path):
+    many = {
+        f"skill-{n:02d}": [f"brigade skills install skill-{n:02d} --target h{i} --force" for i in range(10)]
+        for n in range(25)
+    }
+    many["skill-empty"] = []
+
+    report_mod.write_report(tmp_path, [], apply=True, generated_at=NOW, pending_commands=many)
+
+    report = report_mod.load_report(tmp_path)
+    assert report["summary"]["pending_physical_actions"] == 250
+    assert len(report["pending_physical"]) == 20
+    assert all(len(row["commands"]) == 8 for row in report["pending_physical"])
+    assert "skill-empty" not in {row["artifact_id"] for row in report["pending_physical"]}
+    assert report_mod.brief_payload(report)["pending_physical_actions"] == 250
+
+
+def test_a_report_without_pending_data_briefs_zero(tmp_path):
+    _write(tmp_path, [])
+    assert report_mod.brief_payload(report_mod.load_report(tmp_path))["pending_physical_actions"] == 0
+    assert (
+        report_mod.brief_payload({"present": True, "summary": {"pending_physical_actions": True}})[
+            "pending_physical_actions"
+        ]
+        == 0
+    )

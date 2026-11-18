@@ -26,6 +26,7 @@ from . import (
     localio,
     outcome as core,
     outcome_projection,
+    outcome_skill_exec,
     receipt_schema,
     scorecard as scorecard_mod,
     verify_trial,
@@ -636,16 +637,10 @@ def _status_entry_for_transition(
     new_status: str,
     now: Any,
     decision: core.Decision,
-    install_failed: bool,
     artifact_kind: str,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {"status": new_status, "last_action_ts": now.isoformat()}
-    if (
-        artifact_kind == "skill"
-        and new_status == "promoted"
-        and not install_failed
-        and decision.action in {"install", "bump"}
-    ):
+    if artifact_kind == "skill" and new_status == "promoted" and decision.action in {"install", "bump"}:
         entry["route_policy"] = scorecard_mod.route_policy_marker_for_promotion()
     return entry
 
@@ -2088,17 +2083,6 @@ def capture(
     return 0
 
 
-def _execute_skill_decision(target: Path, artifact_id: str, action: str) -> str:
-    """Perform a decision's physical side effect for a skill artifact.
-
-    Delegates to ``outcome_skill_exec``: a hand-edited installed copy is never
-    rolled back, uninstalled or counted as installed by an unattended run.
-    """
-    from . import outcome_skill_exec
-
-    return outcome_skill_exec.execute(target, artifact_id, action)
-
-
 def reconcile(
     *,
     target: Path,
@@ -2111,14 +2095,16 @@ def reconcile(
 
     Dry-run by default (the canary posture): it reports what it would promote or
     roll back without writing. With ``apply`` it writes a decision receipt per
-    transition, advances the persisted status, and performs the physical skill
-    install/rollback. No human approval is consulted. ``report`` additionally
+    transition and advances the persisted status. It is routing only (#2589): it
+    never installs, rolls back or uninstalls a skill file, and the physical
+    change is reported as an operator command instead. No human approval is
+    consulted. ``report`` additionally
     writes the advisory ratchet report; it never changes a decision or status.
 
     Skills promote only through the receipt scorecard dual gate (#503); legacy
     ``records.jsonl`` signals never advance skill promotion. Cards still use the
     legacy scorer. Routing authority is stamped via ``route_policy.policy_version``
-    on promotion; demotion drops broad authority even when physical rollback fails.
+    on promotion; demotion drops it. Neither waits on a physical install.
     """
     target = target.expanduser().resolve()
     config = config or core.ReconcileConfig()
@@ -2166,6 +2152,7 @@ def reconcile(
 
     applied: list[str] = []
     executions: dict[str, str] = {}
+    pending: dict[str, list[str]] = {}
     effective_status: dict[str, str] = {}
     if apply and results:
         for item in results:
@@ -2175,22 +2162,14 @@ def reconcile(
             execution = "noop"
             if decision.action in ("install", "rollback"):
                 if kinds.get(decision.artifact_id, "skill") == "skill":
-                    execution = _execute_skill_decision(target, decision.artifact_id, decision.action)
+                    execution = outcome_skill_exec.ROUTING_ONLY
+                    pending[decision.artifact_id] = outcome_skill_exec.pending_commands(
+                        target, decision.artifact_id, decision.new_status
+                    )
                 else:
                     execution = "skipped: card execution is v1.1"
             executions[decision.artifact_id] = execution
-            install_failed = (
-                decision.action == "install"
-                and kinds.get(decision.artifact_id, "skill") == "skill"
-                and execution != "installed"
-            )
-            # Rollback demotes routing authority immediately; the physical revert is
-            # best-effort, and a harness with local edits keeps its files (the
-            # execution string records the skip) while routing is still demoted.
-            if decision.action == "rollback":
-                new_status = decision.new_status
-            else:
-                new_status = prior_status if install_failed else decision.new_status
+            new_status = decision.new_status
             effective_status[decision.artifact_id] = new_status
             if cohorts is not None:
                 score_payload: dict[str, Any] = dataclasses.asdict(cohorts.current)
@@ -2213,13 +2192,14 @@ def reconcile(
                 "execution": execution,
                 "created_at": now.isoformat(),
             }
+            if pending.get(decision.artifact_id):
+                receipt["pending_commands"] = pending[decision.artifact_id]
             if cohorts is not None:
                 receipt.update(_fingerprint_decision_fields(cohorts))
             receipt.update(_scorecard_decision_fields(item.scorecard))
             if (
                 kinds.get(decision.artifact_id, "skill") == "skill"
                 and new_status == "promoted"
-                and not install_failed
                 and decision.action in {"install", "bump"}
             ):
                 receipt["route_policy"] = scorecard_mod.route_policy_marker_for_promotion()
@@ -2228,11 +2208,9 @@ def reconcile(
                 new_status=new_status,
                 now=now,
                 decision=decision,
-                install_failed=install_failed,
                 artifact_kind=kinds.get(decision.artifact_id, "skill"),
             )
-            if not install_failed:
-                applied.append(decision.artifact_id)
+            applied.append(decision.artifact_id)
         localio.write_json(_status_path(target), {"version": 1, "artifacts": status_map})
 
     decisions_payload = []
@@ -2249,6 +2227,8 @@ def reconcile(
             "reason": decision.reason,
             "execution": executions.get(decision.artifact_id, "dry-run"),
         }
+        if pending.get(decision.artifact_id):
+            payload_item["pending_commands"] = pending[decision.artifact_id]
         if decision.code is not None:
             payload_item["reason_code"] = decision.code
         if cohorts is not None:
@@ -2275,7 +2255,13 @@ def reconcile(
     if report:
         from . import outcome_ratchet_report
 
-        outcome_ratchet_report.write_report(target, audited, apply=apply, generated_at=now)
+        outcome_ratchet_report.write_report(
+            target,
+            audited,
+            apply=apply,
+            generated_at=now,
+            pending_commands=outcome_skill_exec.pending_by_artifact(target, status_map, kinds),
+        )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -2298,6 +2284,8 @@ def reconcile(
             f"- {decision.artifact_id} {prior_status} -> {shown_status} "
             f"[{decision.action}] {decision.reason}{fingerprint_tail}{graph_tail}{brief_tail}{tail}"
         )
+        for command in pending.get(decision.artifact_id, []):
+            print(f"    operator: {command}")
     return 0
 
 

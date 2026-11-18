@@ -653,13 +653,6 @@ def _local_edit_reason(*, installed_dir: Path, diff_command: str, discard_comman
     )
 
 
-def _unverified_copy_reason(*, installed_dir: Path, discard_command: str) -> str:
-    return (
-        f"installed copy {installed_dir} is unverified (no valid receipt for its bytes) and was kept; "
-        f"an unattended run never writes over it, repair it by hand with `{discard_command}`"
-    )
-
-
 def _drift_payload(
     *,
     target: Path,
@@ -866,11 +859,10 @@ def install(
     harness: str,
     force: bool = False,
     discard_local_edits: bool = False,
-    unattended: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
-    """Install a skill. ``unattended`` (autonomous callers) also vetoes a copy no receipt can vouch for."""
+    """Install a skill."""
     workspace = workspace.expanduser().resolve()
     install_targets = _install_targets(workspace)
     if harness not in (*install_targets, "all"):
@@ -1128,34 +1120,26 @@ def install(
                 # A hand-edited copy is never replaced by --force alone: the
                 # receipt proves what was installed, so bytes that differ are
                 # an edit. Without a receipt a manual --force (operator-driven)
-                # may repair a legacy copy, but an unattended caller never
-                # writes over bytes it cannot prove pristine. This runs before
-                # any snapshot or removal.
+                # may repair a legacy copy. This runs before any snapshot or
+                # removal.
                 edit_state = _local_edit_state(
                     previous_receipt, inspected.files, skill_id=skill_id, harness=install_target
                 )
-                if edit_state == "changed" or (unattended and edit_state != "current"):
+                if edit_state == "changed":
                     selector, against = _local_edit_selector(previous_receipt, skill_id=skill_id, fallback=skill)
-                    discard_command = _local_edit_discard_command(
-                        workspace=workspace, selector=selector, harness=install_target
+                    reason = _local_edit_reason(
+                        installed_dir=dest,
+                        diff_command=_local_edit_diff_command(
+                            workspace=workspace, selector=selector, harness=install_target, against=against
+                        ),
+                        discard_command=_local_edit_discard_command(
+                            workspace=workspace, selector=selector, harness=install_target
+                        ),
                     )
-                    if edit_state == "changed":
-                        reason = _local_edit_reason(
-                            installed_dir=dest,
-                            diff_command=_local_edit_diff_command(
-                                workspace=workspace, selector=selector, harness=install_target, against=against
-                            ),
-                            discard_command=discard_command,
-                        )
-                    else:
-                        reason = _unverified_copy_reason(installed_dir=dest, discard_command=discard_command)
                     if harness != "all":
                         print(f"error: {reason}", file=sys.stderr)
                         return 2
-                    skipped.append(
-                        {"target": install_target, "reason": reason}
-                        | ({"local_edit": True} if edit_state == "changed" else {"unverified": True})
-                    )
+                    skipped.append({"target": install_target, "reason": reason, "local_edit": True})
                     continue
             rollback_snapshot: str | None = None
             rollback_snapshot_fingerprint: str | None = None

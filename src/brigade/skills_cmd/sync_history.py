@@ -696,15 +696,10 @@ def uninstall(
     workspace: Path,
     skill: str,
     harness: str,
-    unattended: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
-    """Remove an installed skill from one or all harnesses, the inverse of install.
-
-    ``unattended`` (autonomous callers) removes only a copy its receipt proves
-    pristine; an edited or unverifiable copy is kept and the command exits 2.
-    """
+    """Remove an installed skill from one or all harnesses, the inverse of install."""
     workspace = workspace.expanduser().resolve()
     install_targets = _install_mod._install_targets(workspace)
     if harness not in (*install_targets, "all"):
@@ -717,7 +712,6 @@ def uninstall(
     targets = install_targets if harness == "all" else (harness,)
     removed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    vetoed: list[str] = []
     try:
         state_anchor = _registry_mod._hold_state_root(workspace)
     except _registry_mod.SkillsStatePathError as exc:
@@ -759,23 +753,7 @@ def uninstall(
                 continue
             if dest_state == "missing" and not has_receipt:
                 continue
-            checked_identity: _install_mod.TreeIdentity | None = None
-            if dest_state == "dir" and unattended:
-                inspected = _install_mod._inspect_installed_tree(workspace, dest, anchor=state_anchor)
-                checked_identity = _install_mod._tree_identity(dest, inspected)
-                receipt = _install_mod._previous_install_receipt(
-                    state_anchor, skill_id=skill_id, harness=install_target
-                )
-                if (
-                    _install_mod._local_edit_state(receipt, inspected.files, skill_id=skill_id, harness=install_target)
-                    != "current"
-                ):
-                    # Edited or unverifiable: the copy and its receipt stay as they are.
-                    vetoed.append(install_target)
-                    continue
             if dest_state == "dir":
-                if checked_identity is not None:
-                    _install_mod._require_tree_unchanged(checked_identity, workspace, dest, anchor=state_anchor)
                 if under_state_root:
                     _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 else:
@@ -815,13 +793,6 @@ def uninstall(
         return 2
     finally:
         state_anchor.close()
-    if vetoed and not removed:
-        print(
-            f"error: unattended uninstall kept {skill_id} on {', '.join(vetoed)}: "
-            "the copy is edited or unverified (no valid receipt for its bytes)",
-            file=sys.stderr,
-        )
-        return 2
     if not removed and not skipped:
         print(f"error: skill not installed: {skill} ({harness})", file=sys.stderr)
         return 1
@@ -850,11 +821,10 @@ def rollback(
     skill: str,
     harness: str,
     discard_local_edits: bool = False,
-    unattended: bool = False,
     json_output: bool = False,
     expected_binding: dict[str, Any] | None = None,
 ) -> int:
-    """Restore the last snapshot. ``unattended`` (autonomous callers) also refuses a copy no receipt can vouch for."""
+    """Restore the last snapshot."""
     workspace = workspace.expanduser().resolve()
     skill_id = _registry_mod._slug(skill)
     if harness not in _install_mod._install_targets(workspace):
@@ -996,13 +966,6 @@ def rollback(
                         ),
                     )
                     print(f"error: {reason}", file=sys.stderr)
-                    return 2
-                if unattended and edit_state != "current":
-                    print(
-                        f"error: installed copy {dest} is unverified (no valid receipt for its bytes); "
-                        "an unattended rollback never replaces it",
-                        file=sys.stderr,
-                    )
                     return 2
                 if edit_state == "changed":
                     edit_snapshot_stamp = _now().replace(":", "").replace("+", "Z").replace(".", "-") + "-local-edits"

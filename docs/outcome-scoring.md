@@ -47,7 +47,7 @@ brigade outcome capture brigade-work --run-id latest --kind skill
 brigade outcome rank --target .
 brigade outcome score --target .
 brigade outcome reconcile --target .          # dry-run
-brigade outcome reconcile --target . --apply  # install or roll back
+brigade outcome reconcile --target . --apply  # routing only: status and route policy, no skill files
 brigade outcome explain <skill-or-card-id> --target .
 ```
 
@@ -56,19 +56,23 @@ brigade outcome explain <skill-or-card-id> --target .
 | `outcome capture` | Bind a verify/run receipt's real result to the skill or card that did the work (`+1` / `0` / `-1`) |
 | `outcome rank` | Order artifacts by current score (Wilson lower bound) |
 | `outcome score` | Recompute and show scores from stored receipts |
-| `outcome reconcile` | Dry-run by default. `--apply` promotes a proven registry skill or rolls a regressed one back across harnesses |
+| `outcome reconcile` | Dry-run by default. `--apply` records status and the route policy for a proven or regressed registry skill (routing only) and lists the operator commands that would change the installed copies |
 | `outcome reconcile --report` | Also write the advisory `.brigade/memory-care/outcome/ratchet-report.json` summary of this run |
 | `outcome ratchet` | Print the last written ratchet report, read-only, without ranking or reconciling |
 | `outcome explain` | Print the signal trail behind a score or reconcile decision |
 
-### Hand-edited installed copies
+### Routing only
 
-`outcome reconcile --apply` runs unattended, so it never changes a skill copy that has hand edits (see `docs/skill-registry.md`):
+`outcome reconcile --apply` is routing only ([owner decision on #2589](https://github.com/escoffier-labs/brigade/issues/2589#issuecomment-6965099265), 2026-11-18). It changes a skill's status and route policy marker and nothing else: it never installs, rolls back, uninstalls or otherwise writes a skill file, under any harness directory, receipt or rollback snapshot.
 
-- **Rollback.** Per harness it checks the installed copy against its install receipt before it rolls back and again before the first-install `skills uninstall` fallback. An edited copy is skipped and reported as `<harness>:rollback-skipped: local edits` in the decision's `execution`. The demotion itself is still recorded: routing authority is withdrawn immediately and the route policy is removed, because routing restriction is never gated on the physical revert. Only the edited files stay in place. Review the edit, or discard it with `skills rollback --discard-local-edits`.
-- **Unknown is a veto.** The install receipt lives in the workspace, so an agent's own user can delete or rewrite it. A receipt may stop a write but never authorize one: a copy whose receipt is missing, corrupt or without the install digests reads as `unknown`, and reconcile treats it exactly like an edited copy. Rollback and the uninstall fallback skip it and report `<harness>:skipped: unverified (no valid receipt)`; the install path (`install --target all`, run with `unattended`) records it as skipped instead of writing over it. A manual `skills install --force` is operator-driven and still repairs such a copy.
-- **Install.** A promotion counts only when `install` freshly installed every applicable harness. If it exits 0 but skipped every target, the execution is `install-failed: nothing installed (...)`. If it installed some harnesses and skipped others (edited or unverified copies), the execution is `install-failed: partial (N skipped: ...)`. Either way the status stays put and no route policy is written, because a promotion is global routing authority and must not rest on a partly installed skill. A harness that cannot apply at all (no Hermes home) is not counted.
-- **Bound to the checked bytes.** The final rollback, uninstall and replace re-verify the copy (directory inode and device plus a digest of every byte) immediately before they remove it. An edit or a swapped directory that lands after the check aborts the command without mutating, so a late hand edit is never lost.
+Why: every local input to a physical change is writable by the agent being gated. Install receipts, rollback snapshot pointers and fingerprints, and the registry all sit in a workspace that agent's own user controls, so a scheduled rollback could install bytes the agent chose. Forgeable state may veto a change, never authorize one, so no unattended path acts on it.
+
+- **Promotion** rests on scorecard evidence alone. It sets the status to `promoted` and stamps the route policy marker. It does not wait for an install and never reads a receipt.
+- **Demotion** sets the status to `demoted` and removes the route policy, so broad routing authority is withdrawn immediately.
+- **The decision's `execution` is `routing-only`.** `--apply` text and JSON also list `pending_commands` (text prints each as an `operator:` line), computed read-only from current drift and never run: `brigade skills install <id> --target <harness> --force` for a promoted skill whose copy is missing or stale, `brigade skills rollback <id> --target <harness>` for a demoted skill whose copy still exists. Each command ends with `--workspace <workspace>`. A hand-edited copy gets no install command: review it with `skills diff` and repair it with `--discard-local-edits` when you decide to. The same commands are stored in the decision receipt.
+- **Pending actions stay visible.** The ratchet report carries `summary.pending_physical_actions` and a bounded `pending_physical` list, computed from every skill that is currently promoted or demoted, so the count remains after the run that changed the status. The session brief's `outcome_ratchet:` line shows `pending_physical_actions=<n>`, and `outcome ratchet` lists the commands.
+
+The commands you run by hand keep their own guards (see `docs/skill-registry.md`): `install --force` and `rollback` refuse an installed copy with local edits unless `--discard-local-edits` is passed, in which case the edit is snapshotted first, and both re-verify the copy's bytes immediately before they remove it.
 
 Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
 
@@ -81,7 +85,7 @@ brigade outcome reconcile --target . --report
 brigade outcome ratchet --target . --json
 ```
 
-`.brigade/memory-care/outcome/ratchet-report.json` is versioned (`"version": 1`), written atomically, capped at 64 KiB, and written at most once per reconcile call. It holds `generated_at`, the `apply` flag, summary counts (`decisions`, `regression_holds`, `regression_rollbacks`, plus the first `regression_hold_ids`), decision counts by action, a `regressions` list of `{artifact_id, prior_state, reason_code, reason, helped, hurt}`, the receipt ineligibility rate, and the leading ineligibility reason. Only counts, ids and decision reasons are stored: no card body, handoff text or receipt payload. If a run produces more regression rows than the cap allows, trailing rows are dropped and `truncated` plus `regressions_omitted` say how many; the counts and the hold ids still describe the whole run. A `helped`/`hurt` pair in a row is the one the decision used: a skill reports its scorecard effectiveness counts, a card its fingerprint cohorts.
+`.brigade/memory-care/outcome/ratchet-report.json` is versioned (`"version": 1`), written atomically, capped at 64 KiB, and written at most once per reconcile call. It holds `generated_at`, the `apply` flag, summary counts (`decisions`, `regression_holds`, `regression_rollbacks`, plus the first `regression_hold_ids` and `pending_physical_actions`, the count of operator install or rollback commands still pending), decision counts by action, a bounded `pending_physical` list of `{artifact_id, commands}`, a `regressions` list of `{artifact_id, prior_state, reason_code, reason, helped, hurt}`, the receipt ineligibility rate, and the leading ineligibility reason. Only counts, ids and decision reasons are stored: no card body, handoff text or receipt payload. If a run produces more regression rows than the cap allows, trailing rows are dropped and `truncated` plus `regressions_omitted` say how many; the counts and the hold ids still describe the whole run. A `helped`/`hurt` pair in a row is the one the decision used: a skill reports its scorecard effectiveness counts, a card its fingerprint cohorts.
 
 Two counts read differently from `reconcile --json`. The report's `decisions` counts every artifact the run evaluated, including `no change` and `cooldown active` holds, while the reconcile JSON lists only changes and reported holds. A candidate inside its cooldown window reports `cooldown active` even when it has verified hurt, so a zero `regression_holds` count does not by itself mean no regressions. When a write is skipped (an unwritable or symlinked path, or a report still over the cap), reconcile prints a warning and the previous report stays in place. Its `generated_at` shows how old it is.
 
@@ -89,7 +93,7 @@ Two counts read differently from `reconcile --json`. The report's `decisions` co
 
 The report is advisory:
 
-- `--apply` never reads it. Promotions and rollbacks come from receipts and status, exactly as before. A report path that cannot be written (read-only directory, full disk, a directory in place of the file) warns once on stderr and leaves the reconcile run's own exit code and output alone.
+- `--apply` never reads it. Promotions and demotions come from receipts and status, exactly as before. A report path that cannot be written (read-only directory, full disk, a directory in place of the file) warns once on stderr and leaves the reconcile run's own exit code and output alone.
 - An absent, unreadable, oversized, wrong-version or symlinked file is a normal empty state. The loader refuses a symlinked path rather than following it, including between its check and its open.
 - Readers never recompute `rank` or `reconcile`, so an old file reads as old instead of being silently refreshed.
 
