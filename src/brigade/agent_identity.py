@@ -65,7 +65,9 @@ def session_fingerprint(harness: str, session_id: str) -> str:
 
 
 # Hook defaults plus memory_verify_seat.CLAUDE_BUILTIN_AGENTS. Custom names stay unknown.
-AGENT_TYPES = frozenset((UNKNOWN, "main", "subagent", "claude", "Explore", "Plan", "general-purpose", "statusline-setup"))
+AGENT_TYPES = frozenset(
+    (UNKNOWN, "main", "subagent", "claude", "Explore", "Plan", "general-purpose", "statusline-setup")
+)
 # Families listed by the harness/model catalog, without provider paths or free text.
 MODEL_FAMILIES = ("claude-", "gpt-", "gemini-", "kimi-", "glm-", "composer-", "muse-")
 
