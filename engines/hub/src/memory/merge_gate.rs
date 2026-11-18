@@ -33,6 +33,7 @@ const TITLE: &str = "retrieval_eval_merge_title_uncovered";
 const TOKENS: &str = "retrieval_eval_merge_tokens_lost";
 const KEEPER: &str = "retrieval_eval_merge_keeper_changed";
 const WRITER: &str = "retrieval_eval_writer_changed";
+const CROSS_WRITER: &str = "retrieval_eval_merge_cross_writer";
 const RETIRES_OLDER: &str = "retrieval_eval_merge_retires_older";
 const LITERAL: &str = "retrieval_eval_merge_literal_lost";
 const GROUP_TOO_LARGE: &str = "retrieval_eval_merge_group_too_large";
@@ -199,6 +200,16 @@ fn read<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<He
         writer_class: ops::s(&row[4]),
         first_seq: None,
     }))
+}
+
+/// Whether one credential wrote both heads and is the one applying the merge.
+/// An automatic merge retires a card, so it is allowed only over cards the
+/// applier itself wrote. Otherwise any reflect principal could plant a card
+/// early and later retire another principal's newer copy of the same claim.
+/// Writer and class come from the live heads, never from the proposal body. A
+/// pair written by different credentials goes to a reviewer instead.
+fn same_writer(keeper: (&str, &str), retired: (&str, &str), live: &Live) -> bool {
+    keeper == retired && keeper == (live.principal.as_str(), live.applier)
 }
 
 /// The live head with the date of its current claim body, or None when it
@@ -394,21 +405,28 @@ struct Kept<'a> {
 
 /// The structural fact that makes one merge safe to treat as a single change:
 /// the proposal holds exactly one merge pair, both live heads still match what
-/// it read, and their claim bodies are identical. It is recomputed from the
-/// live heads here, so nothing in the proposal body can supply it. Preflight
-/// relaxes the blast cap and the attested evidence floors on this fact alone.
+/// it read, their claim bodies are identical, and one credential wrote both
+/// heads and is the one applying. It is recomputed from the live heads here, so
+/// nothing in the proposal body can supply it. Preflight relaxes the blast cap
+/// and the attested evidence floors on this fact alone.
 ///
 /// The reserved fixture scope never qualifies. Its proposals skip this gate
 /// and take the stored fixture report path, so a relaxation there would have
-/// nothing behind it.
-pub(super) fn exact_pair<T: ReadTx + ?Sized>(tx: &T, proposal: &Json) -> rusqlite::Result<bool> {
+/// nothing behind it. The scope is read from the plan and its op, which the
+/// plan ties to the cards, and never from the card list alone.
+pub(super) fn exact_pair<T: ReadTx + ?Sized>(
+    tx: &T,
+    proposal: &Json,
+    live: Option<&Live>,
+) -> rusqlite::Result<bool> {
+    let Some(live) = live else {
+        return Ok(false);
+    };
     let ops = proposal["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    if !matches!(ops, [op] if is_merge(op))
-        || cards(proposal).len() != 2
-        || cards(proposal)
-            .iter()
-            .any(|c| c["scope"] == retrieval_eval::FIXTURE_SCOPE)
-    {
+    let [op] = ops else {
+        return Ok(false);
+    };
+    if !is_merge(op) || cards(proposal).len() != 2 {
         return Ok(false);
     }
     let Some(plan) = plan(proposal) else {
@@ -420,13 +438,25 @@ pub(super) fn exact_pair<T: ReadTx + ?Sized>(tx: &T, proposal: &Json) -> rusqlit
     let [(_, retired)] = merges.as_slice() else {
         return Ok(false);
     };
+    let fixture = [
+        &op["scope"],
+        &op["other_card"]["scope"],
+        &keeper["scope"],
+        &retired["scope"],
+    ]
+    .iter()
+    .any(|scope| **scope == retrieval_eval::FIXTURE_SCOPE);
+    if fixture {
+        return Ok(false);
+    }
     let (Some(keeper), Some(retired)) = (read(tx, keeper)?, read(tx, retired)?) else {
         return Ok(false);
     };
-    Ok(proposal_metadata::same_claims(
-        &keeper.card.text,
-        &retired.card.text,
-    ))
+    Ok(same_writer(
+        (&keeper.writer, &keeper.writer_class),
+        (&retired.writer, &retired.writer_class),
+        live,
+    ) && proposal_metadata::same_claims(&keeper.card.text, &retired.card.text))
 }
 
 /// Whether `card` is the keeper or the retired card of a merge op in `proposal`.
@@ -456,22 +486,42 @@ pub(super) fn aliases_added<'a>(proposal: &'a Json, card: &Json) -> Vec<&'a str>
         .collect()
 }
 
-/// Whether `text` lists aliases that `proposal_metadata::list`, which the merge
-/// reads and rewrites with, and `Links::parse`, which search and lineage review
-/// read, decode to different cards. A spelling only one of them understands,
-/// such as a JSON `\/` escape, would let the rewrite publish a link that
-/// review never saw. A list the merge cannot read counts as ambiguous too.
-pub(super) fn aliases_ambiguous(text: &str, scope: &str) -> bool {
-    let Ok(listed) = proposal_metadata::list(text, "aliases") else {
-        return true;
-    };
-    let listed: BTreeSet<&str> = listed
-        .iter()
-        .filter_map(|alias| ranking::link_id(alias, scope))
-        .collect();
-    let parsed = ranking::front_targets(text, scope, |key| key == "aliases");
-    let parsed: BTreeSet<&str> = parsed.iter().map(|(_, id)| id.as_str()).collect();
-    listed != parsed
+/// Whether `text` names lineage in any key that `proposal_metadata`, which the
+/// merge reads and rewrites with, and `Links::parse`, which search and lineage
+/// review read, decode to different cards. The first reads values as JSON and
+/// the second as a Python literal, so a spelling only one of them understands,
+/// such as a JSON `\/` escape, would let the rewrite or another reader publish
+/// a link that review never saw. Every key in `ranking::LINEAGE_KEYS` counts,
+/// not only the aliases the merge writes. A value the merge cannot read counts
+/// as ambiguous too.
+pub(super) fn lineage_ambiguous(text: &str, scope: &str) -> bool {
+    ranking::LINEAGE_KEYS.iter().any(|key| {
+        let Ok(raw) = proposal_metadata::get(text, key) else {
+            return true;
+        };
+        let read: Result<BTreeSet<String>, _> = match raw.as_deref() {
+            // A list is decoded as JSON, as the merge decodes aliases.
+            None => proposal_metadata::list(text, key),
+            Some(value) if value.starts_with('[') => proposal_metadata::list(text, key),
+            // A quoted scalar is a JSON string, and a bare one is its own text.
+            Some(value) if value.starts_with('"') => serde_json::from_str::<String>(value)
+                .map(|id| BTreeSet::from([id]))
+                .map_err(|_| "lineage value is not a JSON string"),
+            Some(value) => Ok(BTreeSet::from([value
+                .trim_matches(['\'', '"'])
+                .to_string()])),
+        };
+        let Ok(listed) = read else {
+            return true;
+        };
+        let listed: BTreeSet<&str> = listed
+            .iter()
+            .filter_map(|value| ranking::link_id(value, scope))
+            .collect();
+        let parsed = ranking::front_targets(text, scope, |name| name == *key);
+        let parsed: BTreeSet<&str> = parsed.iter().map(|(_, id)| id.as_str()).collect();
+        listed != parsed
+    })
 }
 
 /// Decide a proposal whose ops are all `merge_exact_duplicates`.
@@ -534,6 +584,7 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
         let after_projection = index::projection(&after, true);
         let mut expected = keeper.text.clone();
         let mut gone = Vec::new();
+        let mut cross_writer = false;
         for (op, retired_target) in merges {
             let Some(Head {
                 card: retired,
@@ -561,6 +612,13 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
             if keeper.trust == "agent-unreviewed" && foreign(&retired_writer, &retired_class) {
                 return Ok(Some(WRITER));
             }
+            // Read from the live heads. It is acted on last, so a more
+            // specific hold keeps its own code.
+            cross_writer |= !same_writer(
+                (&writer, &writer_class),
+                (&retired_writer, &retired_class),
+                live,
+            );
             // Only the keeper changes. The retired card's side is its own text.
             if string(retired_target, "before_text") != retired.text
                 || string(retired_target, "after_text") != retired.text
@@ -623,6 +681,11 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
         }
         if keeper.trust == "agent-unreviewed" && foreign(&writer, &writer_class) {
             return Ok(Some(WRITER));
+        }
+        // An automatic merge needs one credential that wrote every card in the
+        // group and is the one applying. A cross-writer duplicate is a review.
+        if cross_writer {
+            return Ok(Some(CROSS_WRITER));
         }
     }
     Ok(None)

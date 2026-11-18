@@ -69,6 +69,7 @@ MERGE_HOLDS = [
     "retrieval_eval_merge_retires_older",
     "retrieval_eval_merge_literal_lost",
     "retrieval_eval_merge_group_too_large",
+    "retrieval_eval_merge_cross_writer",
 ]
 
 

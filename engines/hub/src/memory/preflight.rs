@@ -166,7 +166,8 @@ pub fn evaluate<T: ReadTx + ?Sized>(
     // An exact-duplicate merge changes the keeper's text and retires the other
     // card. That pair is one change. Several pairs, or a pair beside any other
     // op, are not, and both cards stay in the cooldown below.
-    let merged = tier == 0 && super::merge_gate::exact_pair(tx, body)?;
+    let merged =
+        tier == 0 && super::merge_gate::exact_pair(tx, body, authority.retrieval.as_ref())?;
     let paths = if merged { 1 } else { changed.len() };
     check(
         &mut checks,

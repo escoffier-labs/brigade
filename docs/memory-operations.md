@@ -1201,6 +1201,19 @@ once (`retrieval_eval_merge_shape`). Each retired card then needs:
   (`retrieval_eval_merge_automated_mismatch`). When trust is
   `agent-unreviewed`, its writer and class must also be the applier's
   (`retrieval_eval_writer_changed`), the same rule the keeper meets.
+- The same writer as the keeper, and that writer must be the applier
+  (`retrieval_eval_merge_cross_writer`). Both heads must carry one writer and
+  one writer class, and they must equal the principal and credential class
+  applying the merge. They are read from the live heads, never from the
+  proposal body, at preflight and again under the writer lock at apply. An
+  automatic merge retires a card, so it may only retire a card the applier
+  itself wrote. Without this, any reflect principal could plant a trusted card
+  with common claim text, wait for another principal to write identical text
+  and retire theirs. This holds for every trust class, so reviewed, imported
+  and policy-promoted pairs are covered, and not only `agent-unreviewed` ones.
+  A pair written by different credentials is not refused. It is proposed as
+  usual, it holds from automatic apply with this code, the reflect client leaves
+  it pending, and a reviewer can accept it through `decide`.
 - No other live card that names its id as a front-matter value, wiki link,
   markdown link or reference definition (`retrieval_eval_merge_inbound_link`),
   because a retired card leaves the index and a link to it would dangle. One
@@ -1258,22 +1271,29 @@ other op class keeps them exactly as before:
 - Blast cap. One exact-merge pair counts as one changed path, though it changes
   the keeper's text and retires the other card. The proposal must hold exactly
   one merge pair. Several pairs, or a pair beside any other op, still exceed the
-  cap (`blast_cap_exceeded`). Both cards stay in the 24 hour cooldown.
+  cap (`blast_cap_exceeded`). So does a pair written by two credentials, or one
+  the applier did not write, because the relaxation needs the same-writer fact
+  above. Both cards stay in the 24 hour cooldown.
 - Evidence floors. For a merge, identical claims are the proof, in the same way
   `anchor_proof` lets anchoring skip attested evidence. Preflight recomputes
   that fact from the live heads with the comparison the merge op validates with,
   never from the proposal body, and the report records it as
-  `structural_merge_proof`. A pair whose live claims differ keeps the floors and
-  holds with `proof_binding_incomplete`. Contrary evidence still holds.
+  `structural_merge_proof`. A pair whose live claims differ, or that fails the
+  same-writer rule, keeps the floors and holds with `proof_binding_incomplete`.
+  Contrary evidence still holds.
 - Lineage. A trusted keeper no longer goes to Tier 2 because of the alias the
   merge itself adds. Lineage is read from the before texts of both cards, so a
   link that existed before the merge still routes the merge to review: a
   predecessor or successor field, an existing alias on either card, or another
-  live card that names either one.
+  live card that names either one. An alias the keeper already lists is never
+  discounted as one the merge adds, even when it names the retired id. A value
+  in any lineage key (`superseded_by`, `supersedes`, `merged_from` or `aliases`)
+  that the merge's JSON reader and search's literal reader decode to different
+  cards, such as a `\/` escape, also routes the pair to review.
 
 Trust is unchanged. `agent-unreviewed` cards stay out of automatic apply
 (`card_trust_denied`), and only reviewed, imported and policy-promoted cards
-qualify. The kill switch, `auto_apply` policy, the policy's class listing,
+qualify, and then only as a same-writer pair. The kill switch, `auto_apply` policy, the policy's class listing,
 curation ownership, the cooldown and the history veto all apply to a merge as
 they do to any other automatic apply. A clean merge of two trusted exact
 duplicates therefore applies with no reviewer on a real scope.

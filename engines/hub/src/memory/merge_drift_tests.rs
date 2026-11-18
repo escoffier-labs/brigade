@@ -28,6 +28,7 @@ const GROUP_TOO_LARGE: &str = "retrieval_eval_merge_group_too_large";
 const DRIFTED: &str = "retrieval_eval_target_drifted";
 const LINEAGE: &str = "retrieval_eval_lineage_exposed";
 const WRITER: &str = "retrieval_eval_writer_changed";
+const CROSS_WRITER: &str = "retrieval_eval_merge_cross_writer";
 const PROJECTION: &str = "retrieval_eval_projection_changed";
 
 fn dup(front: &str, anchor: &str) -> String {
@@ -821,6 +822,88 @@ async fn lineage_hidden_by_a_json_escape_is_still_lineage_for_the_merge() {
     assert_eq!(held(&r, &forged), Some(LINEAGE));
 }
 
+/// Every lineage key is read twice, as JSON by the merge and as a Python literal
+/// by search and review. A `\/` escape in any of them, not only the aliases the
+/// merge rewrites, decodes to a card for one reader and to nothing for the other,
+/// so the pair goes to a reviewer. A forged tier 0 body is held by the backstop.
+#[tokio::test]
+async fn lineage_hidden_by_an_escape_in_any_lineage_key_is_lineage_for_the_merge() {
+    let lists = |key: &str| format!("---\n{key}: [\"fleet\\/victim\"]\n---\n");
+    let scalar = |key: &str| format!("---\n{key}: \"fleet\\/victim\"\n---\n");
+    let mut cases = Vec::new();
+    for key in ["supersedes", "merged_from", "aliases"] {
+        cases.push((key, lists(key)));
+    }
+    cases.push(("superseded_by", scalar("superseded_by")));
+    for (key, front) in cases {
+        assert!(
+            merge_gate::lineage_ambiguous(&dup(&front, "aaaaaa"), "fleet"),
+            "{key}"
+        );
+        for side in ["keeper", "retired"] {
+            let (keeper, retired) = match side {
+                "keeper" => (dup(&front, "aaaaaa"), dup("", "bbbbbb")),
+                _ => (dup("", "aaaaaa"), dup(&front, "bbbbbb")),
+            };
+            let r = Real::new(&[
+                (KEEP, &keeper),
+                (GONE, &retired),
+                ("victim", "Another topic entirely. ^c-cccccc\n"),
+            ])
+            .await;
+            let op = merge_op(&r, KEEP, GONE).await;
+            let opened = submit(&r.h, ADMIN_TOKEN, vec![op]).await;
+            assert_eq!(opened.body["tier"], 2, "{key} on the {side}: {opened:?}");
+            let attempt = auto(&r, &opened).await;
+            assert_ne!(attempt.body["state"], "applied", "{key} on the {side}");
+            assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live");
+        }
+        let r = trusted().await;
+        let body = r.body(&open(&r).await);
+        let forged = retext(&body, KEEP, &dup(&front, "aaaaaa"));
+        assert_eq!(held(&r, &forged), Some(LINEAGE), "{key}");
+    }
+    // Control: the same keys spelled plainly and naming nothing are no ambiguity.
+    for key in ["supersedes", "merged_from", "aliases"] {
+        let plain = format!("---\n{key}: [\"fleet/victim\"]\n---\n");
+        assert!(!merge_gate::lineage_ambiguous(&plain, "fleet"), "{key}");
+    }
+    assert!(!merge_gate::lineage_ambiguous(
+        "---\nsuperseded_by: fleet/victim\n---\n",
+        "fleet"
+    ));
+    assert!(!merge_gate::lineage_ambiguous(&dup("", "aaaaaa"), "fleet"));
+}
+
+/// An alias the keeper already lists in plain form is not one the merge adds,
+/// even when it names the retired id. The subtraction of added aliases must not
+/// excuse it, so the pair goes to review whatever the before text says.
+#[tokio::test]
+async fn a_plain_alias_to_the_retired_id_that_was_already_there_is_lineage() {
+    let plain = "---\naliases: [\"fleet/dup-retired\"]\n---\n";
+    let r = Real::new(&[
+        (KEEP, &dup(plain, "aaaaaa")),
+        (GONE, &dup("", "bbbbbb")),
+        ("victim", "Another topic entirely. ^c-cccccc\n"),
+    ])
+    .await;
+    let op = merge_op(&r, KEEP, GONE).await;
+    let opened = submit(&r.h, ADMIN_TOKEN, vec![op]).await;
+    assert_eq!(opened.body["tier"], 2, "{opened:?}");
+    let attempt = auto(&r, &opened).await;
+    assert_ne!(attempt.body["state"], "applied", "{attempt:?}");
+    assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live");
+    // A tier 0 body that forges the alias into the after text alone is held by
+    // the backstop, which judges the keeper's after text less only added aliases.
+    let r = trusted().await;
+    let body = r.body(&open(&r).await);
+    assert_eq!(held(&r, &body), None);
+    let forged = edit(&body, KEEP, |after| {
+        after.replacen("---\n", &format!("---\naliases: [\"fleet/{GONE}\"]\n"), 1)
+    });
+    assert_ne!(held(&r, &forged), None);
+}
+
 /// The older gates a merge relaxes all pass for one trusted exact pair, so the
 /// merge gate alone is left to decide the apply.
 async fn relaxed_gates_pass(r: &Real, opened: &Reply, why: &str) {
@@ -1324,6 +1407,90 @@ async fn an_unreviewed_retired_card_must_be_the_appliers_too() {
         );
     }
     assert_ne!(held(&r, &body), Some(WRITER));
+}
+
+const OTHER_WRITER: &str =
+    "UPDATE memory_cards SET writer='node:one',writer_class='node' WHERE card_id=?1";
+
+/// An automatic merge retires a card, so it may only retire a card the applier
+/// wrote. A trusted pair written by two credentials is held from automatic
+/// apply whichever card is the foreign one, and stays an open proposal that a
+/// reviewer can accept. Without this, any reflect principal could plant a card
+/// with common claim text and later retire another principal's newer copy.
+#[tokio::test]
+async fn a_cross_writer_trusted_pair_is_held_for_review_and_a_reviewer_can_accept_it() {
+    for trust in ["imported", "reviewed"] {
+        for (side, foreign) in [("retired", GONE), ("keeper", KEEP)] {
+            let why = format!("{trust} pair, foreign {side}");
+            let r = trusted().await;
+            r.db.execute("UPDATE memory_cards SET trust=?1", [trust])
+                .unwrap();
+            sql(&r, OTHER_WRITER, foreign);
+            let opened = open(&r).await;
+            assert_eq!(held(&r, &r.body(&opened)), Some(CROSS_WRITER), "{why}");
+            // The relaxations are off, so the report cannot read as one clean change.
+            let report = preflight_report(&r, &opened).await;
+            assert_eq!(report["structural_merge_proof"], false, "{why}");
+            assert_eq!(
+                gate(&report, "delta"),
+                (json!("held"), json!("blast_cap_exceeded")),
+                "{why}"
+            );
+            held_by_merge_gate(&r, &opened, &[GONE], CROSS_WRITER, &why).await;
+            // The proposal is still open, not refused, so a reviewer can accept it.
+            let decided = decide(&r.h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+            assert_eq!(decided.body["state"], "applied", "{why}: {decided:?}");
+            assert_eq!(card(&r.h, "fleet", GONE).await["state"], "retired", "{why}");
+        }
+    }
+}
+
+/// One credential wrote both cards, but it is not the one applying. The apply
+/// would rewrite each card's writer to the applier's, so it is held. The same
+/// credential applying its own pair is the one clean case.
+#[tokio::test]
+async fn a_same_writer_pair_is_held_when_the_applier_is_another_credential() {
+    let r = trusted().await;
+    for id in [KEEP, GONE] {
+        sql(&r, OTHER_WRITER, id);
+    }
+    let opened = open(&r).await;
+    let body = r.body(&opened);
+    assert_eq!(r.hold_as(&body, "node", "node:one", None, None), None);
+    for (class, principal) in [
+        ("admin", ADMIN),
+        ("node", "node:two"),
+        ("admin", "node:one"),
+    ] {
+        let hold = r.hold_as(&body, class, principal, None, None);
+        assert_eq!(hold, Some(CROSS_WRITER), "{principal} {class}");
+    }
+    // The ADMIN credential applies here, and it did not write either card.
+    held_by_merge_gate(
+        &r,
+        &opened,
+        &[GONE],
+        CROSS_WRITER,
+        "applier is not the writer",
+    )
+    .await;
+}
+
+/// The writer is read from the live heads, so a proposal body cannot claim one.
+#[tokio::test]
+async fn the_writer_of_a_merge_pair_comes_from_the_live_heads() {
+    let r = trusted().await;
+    let opened = open(&r).await;
+    let mut body = r.body(&opened);
+    assert_eq!(held(&r, &body), None);
+    for card in body["cards"].as_array_mut().unwrap() {
+        card["writer"] = json!("node:one");
+        card["writer_class"] = json!("node");
+    }
+    body["proposer"] = json!("node:one");
+    assert_eq!(held(&r, &body), None);
+    sql(&r, OTHER_WRITER, GONE);
+    assert_eq!(held(&r, &body), Some(CROSS_WRITER));
 }
 
 #[tokio::test]

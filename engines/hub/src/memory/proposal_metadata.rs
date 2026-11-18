@@ -14,7 +14,7 @@ fn front(text: &str) -> Result<(Vec<&str>, &str), &'static str> {
         Ok((Vec::new(), text))
     }
 }
-fn get(text: &str, key: &str) -> Result<Option<String>, &'static str> {
+pub(super) fn get(text: &str, key: &str) -> Result<Option<String>, &'static str> {
     let (meta, _) = front(text)?;
     let mut found = None;
     for (i, line) in meta.iter().enumerate() {

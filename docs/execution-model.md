@@ -116,9 +116,16 @@ the live cards, and search must keep every token and literal the retired card
 held. Three older preflight gates are relaxed for this one op class. A single
 pair of exact duplicates counts as one changed path, identical claims stand in
 for attested evidence, and the alias the merge adds is not lineage. Reviewed,
-imported and policy-promoted cards qualify, while an `agent-unreviewed` pair,
-earlier lineage, several pairs in one proposal, a group of more than eight and a
-pair beside other ops still wait for a reviewer. The drift is bounded, not
+imported and policy-promoted cards qualify, but only when one credential wrote
+both cards and is the one applying the merge. An automatic merge retires a
+card, and without that rule any reflect principal could plant a card early and
+later retire another principal's newer copy of the same claim. A duplicate
+pair written by different credentials is still proposed, and it waits for a
+reviewer as an ordinary open proposal. It holds with
+`retrieval_eval_merge_cross_writer`, the reflect client leaves it pending, and a
+reviewer can accept it. An `agent-unreviewed` pair, earlier lineage, several
+pairs in one proposal, a group of more than eight and a pair beside other ops
+also wait for a reviewer. The drift is bounded, not
 zero: the same cards answer each query, but the keeper's own position can move
 because the added alias lengthens it, and scope statistics shift every score.
 Verifier

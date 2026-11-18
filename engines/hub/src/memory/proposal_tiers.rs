@@ -215,26 +215,31 @@ pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlit
             continue;
         }
         let (before, after) = (string(card, "before_text"), string(card, "after_text"));
-        // A merge card's aliases must read the same to the merge and to lineage
-        // review. A spelling only one of them decodes would hide a link here
-        // that the merge then writes out in plain form.
+        // A merge card's lineage keys must read the same to the merge and to
+        // lineage review. A spelling only one of them decodes would hide a link
+        // here that another reader, or the merge's own rewrite, then follows.
         if super::merge_gate::in_merge(body, card)
             && [before, after]
                 .iter()
-                .any(|text| super::merge_gate::aliases_ambiguous(text, scope))
+                .any(|text| super::merge_gate::lineage_ambiguous(text, scope))
         {
             return Ok(true);
         }
         // The keeper of an all-merge proposal gains one alias per retired card.
         // Its after text is judged whole, less exactly those aliases, so a link
         // the merge did not add still counts, however the before text spells it.
+        // An alias the before text already lists is not one the merge adds, so
+        // it is never subtracted, and no other check has to catch it.
+        let was = super::ranking::Links::parse(before, scope);
         let mut links = super::ranking::Links::parse(after, scope);
         for retired in super::merge_gate::aliases_added(body, card) {
+            if was.predecessors.iter().any(|p| p == retired) {
+                continue;
+            }
             if let Some(at) = links.predecessors.iter().position(|p| p == retired) {
                 links.predecessors.remove(at);
             }
         }
-        let was = super::ranking::Links::parse(before, scope);
         let declares = links.successor.is_some()
             || !links.predecessors.is_empty()
             || was.successor.is_some()
