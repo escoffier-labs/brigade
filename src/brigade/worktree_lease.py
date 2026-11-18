@@ -112,4 +112,3 @@ def remove_worktree_directory(repo: Path, worktree_path: Path) -> None:
     result = proc.run(["git", "worktree", "prune", "--expire", "now"], cwd=repo, timeout=120.0)
     if result.code != 0:
         raise OSError(f"failed to prune Git worktree registration: {result.stderr.strip()}")
-
