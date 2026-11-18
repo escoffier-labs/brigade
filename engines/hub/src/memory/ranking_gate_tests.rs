@@ -173,7 +173,7 @@ impl Real {
         Self { h, db, hub }
     }
     /// Model a head written by an earlier gated automatic apply.
-    fn auto_authored(&self, id: &str) {
+    pub(super) fn auto_authored(&self, id: &str) {
         self.db.execute(
             "INSERT INTO memory_events(seq,event_id,client_event_id,kind,principal,scope,card_id,revision,content_hash,trust,payload,created_at) SELECT 900000,'prior-auto','prior-auto','proposal.apply',writer,scope,card_id,900000,content_hash,trust,'{\"decision_mode\":\"automatic\"}',?2 FROM memory_cards WHERE scope='fleet' AND card_id=?1",
             rusqlite::params![id, ids::isoformat(self.h.now() - 86_401_000)],
@@ -191,7 +191,7 @@ impl Real {
             .as_i64()
             .unwrap()
     }
-    async fn evidence(&self, id: &str, refs: &[&str]) -> Reply {
+    pub(super) async fn evidence(&self, id: &str, refs: &[&str]) -> Reply {
         let current = card(&self.h, "fleet", id).await;
         // Evidence is appended through the card's first anchored block.
         let pin = proposal_blocks::pins(current["text"].as_str().unwrap()).remove(0);
@@ -200,7 +200,7 @@ impl Real {
             "expected_block_hash":pin["hash"],"evidence_ids":refs});
         submit(&self.h, ADMIN_TOKEN, vec![op]).await
     }
-    async fn anchor(&self, id: &str) -> Reply {
+    pub(super) async fn anchor(&self, id: &str) -> Reply {
         let op = json!({"type":"anchor_blocks","scope":"fleet","card_id":id,"base_revision":self.revision(id).await});
         submit(&self.h, ADMIN_TOKEN, vec![op]).await
     }
@@ -244,6 +244,27 @@ impl Real {
             weights: json!({"lexical":1.0,"dense":1.0}),
         });
         retrieval_eval::hold(&Tx(&self.db), body, &authority, self.h.now()).unwrap()
+    }
+    /// The whole preflight report as a given credential would meet it.
+    pub(super) fn evaluate_as(&self, body: &Json, applier: &'static str, principal: &str) -> Json {
+        let mut authority =
+            ops::Authority::with_credentials(&Tx(&self.hub), &digest(ADMIN_TOKEN)).unwrap();
+        authority.retrieval = Some(retrieval_eval::Live {
+            applier,
+            principal: principal.into(),
+            snapshot: None,
+            indexed_seq: self.h.events(),
+            embedder_id: None,
+            weights: json!({"lexical":1.0,"dense":1.0}),
+        });
+        preflight::evaluate(
+            &Tx(&self.db),
+            body,
+            &authority,
+            clean().as_ref(),
+            self.h.now(),
+        )
+        .unwrap()
     }
 }
 

@@ -219,13 +219,21 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "held",
     );
     let trust = input_blocker(tx, body)?;
+    // One exact pair that `exact_pair` proved, which includes that the applier
+    // wrote both heads, may be agent-unreviewed on both sides (#2591). Mixed
+    // trust, a flagged card and every other op class stay on the list below.
+    let unreviewed_merge = merged
+        && cards
+            .iter()
+            .all(|c| string(c, "before_trust") == "agent-unreviewed");
     let mut known_trust = true;
     let mut clean = true;
     for card in cards {
-        known_trust &= matches!(
-            string(card, "before_trust"),
-            "reviewed" | "imported" | "policy-promoted"
-        );
+        known_trust &= unreviewed_merge
+            || matches!(
+                string(card, "before_trust"),
+                "reviewed" | "imported" | "policy-promoted"
+            );
         let rows = tx.query("SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3", &[
             ops::t(string(card,"scope")), ops::t(string(card,"card_id")), rusqlite::types::Value::Integer(card["base_revision"].as_i64().unwrap_or(0))
         ])?;

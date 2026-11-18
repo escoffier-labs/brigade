@@ -1357,12 +1357,23 @@ other op class keeps them exactly as before:
   that the merge's JSON reader and search's literal reader decode to different
   cards, such as a `\/` escape, also routes the pair to review.
 
-Trust is unchanged. `agent-unreviewed` cards stay out of automatic apply
-(`card_trust_denied`), and only reviewed, imported and policy-promoted cards
-qualify, and then only as a same-writer pair. The kill switch, `auto_apply` policy, the policy's class listing,
-curation ownership, the cooldown and the history veto all apply to a merge as
-they do to any other automatic apply. A clean merge of two trusted exact
-duplicates therefore applies with no reviewer on a real scope.
+Trust is unchanged. One exact pair qualifies when both cards are reviewed,
+imported or policy-promoted, or when both are `agent-unreviewed`, and then only
+as a same-writer pair: one credential wrote both heads and is the one applying.
+The preflight takes that from the merge gate's own live-head check, so the
+`card_trust` gate satisfies for an `agent-unreviewed` pair exactly when the
+proposal is a single exact pair with a proven same writer. A flagged card, a
+pair of mixed trust, several pairs, a group of more than eight, a pair beside
+other ops, `append_evidence` and `anchor_blocks` on `agent-unreviewed` cards, and
+an `agent-unreviewed` pair written by different credentials or applied by another
+one stay out of automatic apply. They hold with `card_trust_denied` or
+`tier_requires_review`, and a pair written by different credentials also holds
+with `retrieval_eval_writer_changed`. The kill switch,
+`auto_apply` policy, the policy's class listing, curation ownership, the
+cooldown and the history veto all apply to a merge as they do to any other
+automatic apply. A clean merge of two exact duplicates one credential wrote and
+applies therefore applies with no reviewer on a real scope, and a rollback
+restores both cards, their text and their trust, exactly.
 
 Operator procedure:
 

@@ -2375,4 +2375,6 @@ mod lineage_dating_tests;
 #[cfg(test)]
 mod merge_drift_tests;
 #[cfg(test)]
+mod merge_unreviewed_tests;
+#[cfg(test)]
 mod ranking_gate_tests;

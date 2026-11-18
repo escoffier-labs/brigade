@@ -18,17 +18,17 @@ const MIXED: &str = "retrieval_eval_merge_mixed_ops";
 const SHAPE: &str = "retrieval_eval_merge_shape";
 const TRUST: &str = "retrieval_eval_merge_trust_mismatch";
 const AUTOMATED: &str = "retrieval_eval_merge_automated_mismatch";
-const INBOUND: &str = "retrieval_eval_merge_inbound_link";
+pub(super) const INBOUND: &str = "retrieval_eval_merge_inbound_link";
 const TITLE: &str = "retrieval_eval_merge_title_uncovered";
 const TOKENS: &str = "retrieval_eval_merge_tokens_lost";
 const KEEPER: &str = "retrieval_eval_merge_keeper_changed";
-const RETIRES_OLDER: &str = "retrieval_eval_merge_retires_older";
+pub(super) const RETIRES_OLDER: &str = "retrieval_eval_merge_retires_older";
 const LITERAL: &str = "retrieval_eval_merge_literal_lost";
 const GROUP_TOO_LARGE: &str = "retrieval_eval_merge_group_too_large";
 const DRIFTED: &str = "retrieval_eval_target_drifted";
 const LINEAGE: &str = "retrieval_eval_lineage_exposed";
-const WRITER: &str = "retrieval_eval_writer_changed";
-const CROSS_WRITER: &str = "retrieval_eval_merge_cross_writer";
+pub(super) const WRITER: &str = "retrieval_eval_writer_changed";
+pub(super) const CROSS_WRITER: &str = "retrieval_eval_merge_cross_writer";
 const PROJECTION: &str = "retrieval_eval_projection_changed";
 
 pub(super) fn dup(front: &str, anchor: &str) -> String {
@@ -103,7 +103,7 @@ fn retext(body: &Json, id: &str, text: &str) -> Json {
 pub(super) fn held(r: &Real, body: &Json) -> Option<&'static str> {
     r.hold(body, "admin", None)
 }
-fn sql(r: &Real, statement: &str, id: &str) {
+pub(super) fn sql(r: &Real, statement: &str, id: &str) {
     r.db.execute(statement, [id]).unwrap();
 }
 async fn link(r: &Real, text: &str) {
@@ -132,7 +132,7 @@ pub(super) async fn auto(r: &Real, opened: &Reply) -> Reply {
     r.h.call(ADMIN_TOKEN, request).await
 }
 /// Every gate code an automatic attempt reported, passing or held.
-fn codes(reply: &Reply) -> Vec<Json> {
+pub(super) fn codes(reply: &Reply) -> Vec<Json> {
     [
         &reply.body["preflight"]["checks"],
         &reply.body["auto_apply_gates"],
@@ -143,18 +143,18 @@ fn codes(reply: &Reply) -> Vec<Json> {
     .map(|c| c["code"].clone())
     .collect()
 }
-async fn preflight_report(r: &Real, opened: &Reply) -> Json {
+pub(super) async fn preflight_report(r: &Real, opened: &Reply) -> Json {
     attestation_tests::report(&r.h, &opened.body["proposal_id"])
         .await
         .body
 }
-fn gate(report: &Json, name: &str) -> (Json, Json) {
+pub(super) fn gate(report: &Json, name: &str) -> (Json, Json) {
     let checks = report["checks"].as_array().unwrap();
     let c = checks.iter().find(|c| c["gate"] == name).unwrap();
     (c["state"].clone(), c["code"].clone())
 }
 /// Rewrite the hub policy's memory section.
-fn policy(r: &Real, edit: impl FnOnce(&mut Json)) {
+pub(super) fn policy(r: &Real, edit: impl FnOnce(&mut Json)) {
     let db = rusqlite::Connection::open(&r.h.hub).unwrap();
     let raw: String = db
         .query_row("SELECT document FROM fleet_policy_revisions", [], |row| {
@@ -169,7 +169,7 @@ fn policy(r: &Real, edit: impl FnOnce(&mut Json)) {
     )
     .unwrap();
 }
-async fn assert_not_applied(r: &Real, opened: &Reply, why: &str) -> Reply {
+pub(super) async fn assert_not_applied(r: &Real, opened: &Reply, why: &str) -> Reply {
     let attempt = auto(r, opened).await;
     assert_ne!(attempt.body["state"], "applied", "{why}: {attempt:?}");
     assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live", "{why}");
@@ -361,23 +361,6 @@ async fn anything_but_one_exact_pair_keeps_the_blast_cap_and_evidence_floors() {
     .unwrap();
     held_gates(&preflight_report(&r, &opened).await, 2);
     assert_not_applied(&r, &opened, "live bytes differ").await;
-}
-
-/// `agent-unreviewed` merges stay out of automatic apply.
-#[tokio::test]
-async fn an_unreviewed_pair_still_fails_the_card_trust_gate() {
-    let r = pair().await;
-    let opened = open(&r).await;
-    let report = preflight_report(&r, &opened).await;
-    assert_eq!(
-        gate(&report, "card_trust"),
-        (json!("held"), json!("card_trust_denied"))
-    );
-    assert_eq!(
-        gate(&report, "delta"),
-        (json!("satisfied"), json!("delta_satisfied"))
-    );
-    assert_not_applied(&r, &opened, "agent-unreviewed").await;
 }
 
 /// The relaxations are for merges alone. Evidence needs attested proof and two
@@ -922,7 +905,13 @@ async fn relaxed_gates_pass(r: &Real, opened: &Reply, why: &str) {
 /// An automatic attempt that ends held for the merge gate rule `code`. The
 /// retrieval check names it in the report, the proposal stays pending with
 /// `auto_apply_held`, and every card the proposal would retire stays live.
-async fn held_by_merge_gate(r: &Real, opened: &Reply, retired: &[&str], code: &str, why: &str) {
+pub(super) async fn held_by_merge_gate(
+    r: &Real,
+    opened: &Reply,
+    retired: &[&str],
+    code: &str,
+    why: &str,
+) {
     let report = preflight_report(r, opened).await;
     assert_eq!(
         gate(&report, "retrieval_eval"),
@@ -1409,7 +1398,7 @@ async fn an_unreviewed_retired_card_must_be_the_appliers_too() {
     assert_ne!(held(&r, &body), Some(WRITER));
 }
 
-const OTHER_WRITER: &str =
+pub(super) const OTHER_WRITER: &str =
     "UPDATE memory_cards SET writer='node:one',writer_class='node' WHERE card_id=?1";
 
 /// An automatic merge retires a card, so it may only retire a card the applier
