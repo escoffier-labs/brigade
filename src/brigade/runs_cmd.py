@@ -1406,7 +1406,11 @@ def _emit_watch_json(payload: dict[str, object]) -> None:
 
 
 def _watch_run_id(run_dir: Path) -> str:
-    """Directory name only — never an absolute operator path."""
+    """Directory name only — never an absolute operator path.
+
+    The CLI keeps the raw name so its ``inspect_command`` stays runnable. The
+    served stream normalizes it to a digest in ``watch_record_projector``.
+    """
     return _clean_str(run_dir.name) or "unknown"
 
 
@@ -1776,7 +1780,7 @@ def _detail_children(run_dir: Path) -> list[dict[str, object]]:
             _merge_source(
                 child,
                 {
-                    "run_id": _clean_str(child.get("run_id")),
+                    "run_id": runs_privacy.view_run_id(child.get("run_id"), run_dir),
                     "status": _clean_str(child.get("status")),
                     "branch_point_event_id": _clean_str(child.get("branch_point_event_id")),
                 },
@@ -1815,7 +1819,9 @@ def _detail_lineage_section(run_dir: Path, meta: Mapping[str, Any]) -> dict[str,
             lineage,
             {
                 "kind": _clean_str(lineage.get("kind")) if lineage is not None else None,
-                "parent_run_id": _clean_str(lineage.get("parent_run_id")) if lineage is not None else None,
+                "parent_run_id": (
+                    runs_privacy.view_run_id(lineage.get("parent_run_id"), run_dir) if lineage is not None else None
+                ),
                 "branch_point_event_id": (
                     _clean_str(lineage.get("branch_point_event_id")) if lineage is not None else None
                 ),
@@ -1848,7 +1854,7 @@ def _run_summary_payload(run_dir: Path, meta: dict[str, Any], *, show_task: bool
         _merge_source(
             meta,
             {
-                "run_id": _clean_str(run_dir.name),
+                "run_id": runs_privacy.view_run_id(run_dir.name, run_dir),
                 "status": _clean_str(meta.get("status")) or "unknown",
                 "task": runs_privacy.text_value(meta.get("task")),
                 "task_preview": None,
@@ -1858,7 +1864,7 @@ def _run_summary_payload(run_dir: Path, meta: dict[str, Any], *, show_task: bool
                 "failure_phase": _clean_str(phase),
                 "mode": _clean_str(_mode_text(meta)),
                 "resume_available": _resume_available(run_dir),
-                "parent_run_id": _parent_run_id_from_meta(meta),
+                "parent_run_id": runs_privacy.view_run_id(_parent_run_id_from_meta(meta), run_dir),
             },
         ),
         RUN_SUMMARY_FIELDS,
@@ -1879,7 +1885,7 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
         _merge_source(
             meta,
             {
-                "run_id": _clean_str(run_dir.name),
+                "run_id": runs_privacy.view_run_id(run_dir.name, run_dir),
                 "status": _clean_str(meta.get("status")) or "unknown",
                 "task": runs_privacy.text_value(meta.get("task")),
                 "task_preview": None,
@@ -2010,6 +2016,7 @@ def _detail_synthesis_section(synthesis: dict[str, Any] | None) -> dict[str, obj
 def _detail_verification_section(
     worker_results: dict[str, Any] | None,
     synthesis: dict[str, Any] | None,
+    run_dir: Path,
 ) -> list[dict[str, object]]:
     receipts: list[object] = []
     for source in (worker_results, synthesis):
@@ -2036,7 +2043,7 @@ def _detail_verification_section(
         payload.append(
             _compact(
                 {
-                    "run_id": _clean_str(receipt.get("run_id")),
+                    "run_id": runs_privacy.view_run_id(receipt.get("run_id"), run_dir),
                     "status": _clean_str(receipt.get("status")),
                     "started_at": _clean_str(receipt.get("started_at")),
                     "duration_seconds": _clean_number(receipt.get("duration_seconds")),
@@ -2096,7 +2103,7 @@ def _run_detail_payload(
         "plan": _detail_plan_section(plan),
         "workers": _detail_workers_section(worker_results),
         "synthesis": _detail_synthesis_section(synthesis),
-        "verification": _detail_verification_section(worker_results, synthesis),
+        "verification": _detail_verification_section(worker_results, synthesis, run_dir),
         "briefs": _detail_briefs_section(run_meta),
     }
     ordered = {key: payload[key] for key in RUN_DETAIL_KEYS}

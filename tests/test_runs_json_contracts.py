@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from brigade import cli
 from brigade import runs_cmd
+from brigade import runs_privacy
 
 
 PLANTED_ENV_VALUE = "planted-env-OPENAI-not-a-real-key"
@@ -337,6 +339,11 @@ def _plant_sensitive_run(run_dir: Path, *, task: str = PLANTED_TASK) -> None:
     )
 
 
+def _view_id(run_dir: Path) -> str:
+    """Return the served id for a run: generated name or its keyed digest."""
+    return runs_privacy.view_run_id(run_dir.name, run_dir) or ""
+
+
 def _write_legacy_run(run_dir: Path) -> None:
     run_dir.mkdir(parents=True)
     _write_json(
@@ -367,7 +374,7 @@ def test_runs_list_json_emits_versioned_schema_shape(tmp_path, capsys):
     assert len(payload["runs"]) == 1
     summary = payload["runs"][0]
     assert set(summary) <= runs_cmd.RUN_SUMMARY_FIELDS
-    assert summary["run_id"] == "20260526-140000-aaaaaa"
+    assert summary["run_id"] == _view_id(runs_root / "20260526-140000-aaaaaa")
     assert summary["status"] == "ok"
     assert "path" not in summary
     assert str(runs_root) not in json.dumps(payload)
@@ -386,7 +393,7 @@ def test_runs_show_and_latest_json_share_one_detail_serializer(tmp_path, capsys)
     assert shown == latest
     assert shown["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
     assert set(shown) == runs_cmd.RUN_DETAIL_KEYS
-    assert shown["run"]["run_id"] == "20260526-140000-bbbbbb"
+    assert shown["run"]["run_id"] == _view_id(run_dir)
     assert "lineage" not in shown["run"]
 
 
@@ -711,7 +718,16 @@ def _block_digest_key(workspace: Path) -> None:
     (workspace / ".brigade" / "memory").write_text("not a directory")
 
 
-@pytest.mark.parametrize("block", [_refuse_digest_key, _block_digest_key])
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param(
+            _refuse_digest_key,
+            marks=pytest.mark.skipif(os.name == "nt", reason="POSIX key mode refusal does not exist on Windows"),
+        ),
+        _block_digest_key,
+    ],
+)
 @pytest.mark.parametrize("command", ["list", "show"])
 def test_digest_key_failure_fails_closed_in_cli_json(tmp_path, capsys, block, command):
     """Issue #2046 review: a refused or unusable key never falls back to raw text."""
@@ -728,6 +744,38 @@ def test_digest_key_failure_fails_closed_in_cli_json(tmp_path, capsys, block, co
     assert "error: run digest key unavailable" in captured.err
 
 
+def test_custom_run_id_is_digested_in_cli_json(tmp_path, capsys):
+    """Issue #2046 security review: a user-chosen --output-dir name never appears."""
+    run_dir = tmp_path / ".brigade" / "runs" / "PRIVATE-MODEL-A"
+    _write_legacy_run(run_dir)
+    view_id = runs_privacy.view_run_id("PRIVATE-MODEL-A", run_dir)
+    assert view_id is not None and view_id.startswith("hmac-sha256:")
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
+    listed_raw = capsys.readouterr().out
+    assert "PRIVATE-MODEL-A" not in listed_raw
+    listed = json.loads(listed_raw)
+    assert listed["runs"][0]["run_id"] == view_id
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 0
+    shown_raw = capsys.readouterr().out
+    assert "PRIVATE-MODEL-A" not in shown_raw
+    assert json.loads(shown_raw)["run"]["run_id"] == view_id
+
+
+def test_generated_run_ids_stay_readable_in_cli_json(tmp_path, capsys):
+    run_dir = tmp_path / ".brigade" / "runs" / "20260821-200000-abcdef12"
+    _write_legacy_run(run_dir)
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["runs"][0]["run_id"] == "20260821-200000-abcdef12"
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["run"]["run_id"] == "20260821-200000-abcdef12"
+
+
 def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):
     runs_root = tmp_path / ".brigade" / "runs"
     _write_legacy_run(runs_root / "20260526-140000-valid1")
@@ -741,7 +789,7 @@ def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema"] == runs_cmd.RUNS_LIST_SCHEMA
     assert payload["skipped_invalid"] == 2
-    assert [run["run_id"] for run in payload["runs"]] == ["20260526-140000-valid1"]
+    assert [run["run_id"] for run in payload["runs"]] == [_view_id(runs_root / "20260526-140000-valid1")]
 
 
 @pytest.mark.parametrize("command", ["list", "latest"])
@@ -782,11 +830,11 @@ def test_runs_inventory_json_skips_record_read_errors(tmp_path, monkeypatch, cap
     if command == "list":
         assert payload["schema"] == runs_cmd.RUNS_LIST_SCHEMA
         assert payload["skipped_invalid"] == 1
-        assert [run["run_id"] for run in payload["runs"]] == [healthy.name]
+        assert [run["run_id"] for run in payload["runs"]] == [_view_id(healthy)]
         assert captured.err == ""
     else:
         assert payload["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
-        assert payload["run"]["run_id"] == healthy.name
+        assert payload["run"]["run_id"] == _view_id(healthy)
         assert "skipped 1 invalid run directory" in captured.err
     if read_error != "disappeared":
         assert faulty_record.read_bytes() == original_bytes
@@ -805,7 +853,7 @@ def test_legacy_run_without_lineage_still_serializes(tmp_path, capsys):
 
     assert runs_cmd.list_runs(cwd=tmp_path, json_output=True) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert listed["runs"][0]["run_id"] == "20260101-090000-legacy"
+    assert listed["runs"][0]["run_id"] == _view_id(run_dir)
     assert "parent_run_id" not in listed["runs"][0]
     assert "lineage" not in listed["runs"][0]
 
@@ -833,15 +881,12 @@ def test_show_json_includes_recorded_children_from_sibling_receipts(tmp_path, ca
     shown = json.loads(shown_raw)
     _assert_allowlist(shown)
     _assert_raw_clean(shown_raw)
-    assert shown["run"]["lineage"] == {
-        "children": [
-            {
-                "run_id": child.name,
-                "status": "ok",
-                "branch_point_event_id": "20260821-120000-parent-000003-bbbbbbbbbbbb",
-            }
-        ]
-    }
+    children = shown["run"]["lineage"]["children"]
+    assert len(children) == 1
+    assert children[0]["run_id"] == _view_id(child)
+    assert children[0]["status"] == "ok"
+    assert set(children[0]["branch_point_event_id"]) == {"digest", "chars"}
+    assert children[0]["branch_point_event_id"]["chars"] == len("20260821-120000-parent-000003-bbbbbbbbbbbb")
 
 
 def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
@@ -873,15 +918,15 @@ def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
     shown = json.loads(shown_raw)
     _assert_allowlist(shown)
     _assert_raw_clean(shown_raw)
-    assert shown["run"]["lineage"] == {
-        "kind": "child",
-        "parent_run_id": "20260821-120000-parent",
-        "branch_point_event_id": "20260821-120000-parent-000003-bbbbbbbbbbbb",
-        "shared_prefix": {
-            "event_sequence": 3,
-            "event_digest": "b" * 64,
-            "previous_digest": "a" * 64,
-        },
+    lineage = shown["run"]["lineage"]
+    assert lineage["kind"] == "child"
+    assert lineage["parent_run_id"] == _view_id(runs_root / "20260821-120000-parent")
+    assert set(lineage["branch_point_event_id"]) == {"digest", "chars"}
+    assert lineage["branch_point_event_id"]["chars"] == len("20260821-120000-parent-000003-bbbbbbbbbbbb")
+    assert lineage["shared_prefix"] == {
+        "event_sequence": 3,
+        "event_digest": "b" * 64,
+        "previous_digest": "a" * 64,
     }
 
     assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
@@ -889,7 +934,7 @@ def test_child_lineage_is_allowlisted_on_show_and_list(tmp_path, capsys):
     listed = json.loads(listed_raw)
     _assert_allowlist(listed)
     _assert_raw_clean(listed_raw)
-    assert listed["runs"][0]["parent_run_id"] == "20260821-120000-parent"
+    assert listed["runs"][0]["parent_run_id"] == _view_id(runs_root / "20260821-120000-parent")
 
 
 def test_runs_list_json_does_not_scan_sibling_run_json(tmp_path, capsys, monkeypatch):
@@ -919,8 +964,8 @@ def test_runs_list_json_does_not_scan_sibling_run_json(tmp_path, capsys, monkeyp
 
     assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert [run["run_id"] for run in listed["runs"]] == [child.name, parent.name]
-    assert listed["runs"][0]["parent_run_id"] == parent.name
+    assert [run["run_id"] for run in listed["runs"]] == [_view_id(child), _view_id(parent)]
+    assert listed["runs"][0]["parent_run_id"] == _view_id(parent)
     assert "parent_run_id" not in listed["runs"][1]
     assert reads == [parent.name, child.name] or reads == [child.name, parent.name]
     assert reads.count(parent.name) == 1
@@ -948,7 +993,7 @@ def test_show_json_bounds_oversized_sibling_child_status(tmp_path, capsys):
     shown = json.loads(capsys.readouterr().out)
     _assert_allowlist(shown)
     child_entry = shown["run"]["lineage"]["children"][0]
-    assert child_entry["run_id"] == child.name
+    assert child_entry["run_id"] == _view_id(child)
     assert child_entry["status"] == "<other>"
     assert set(child_entry["branch_point_event_id"]) == {"digest", "chars"}
     assert child_entry["branch_point_event_id"]["chars"] == len("y" * 50_000)

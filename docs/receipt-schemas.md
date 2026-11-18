@@ -1187,6 +1187,16 @@ return `503` with a fixed `error: run view unavailable` body, and SSE sends one
 closed `{"type": "error", "error": "digest-key-unavailable"}` record and ends.
 No path falls back to raw text.
 
+A run directory name is user-controlled because `brigade run --output-dir`
+accepts any path. A run id stays readable only when Brigade minted it: the
+legacy and node-namespaced forms from `brigade.run_id`, `batch-` plus 64 hex,
+and `t3-` plus 64 hex. Any other name becomes a keyed digest, and so does any
+event id built from that name. The Run View list returns the digest as the run
+id, and the detail and events routes resolve the digest by matching every
+directory name server-side. The raw name never appears in a URL, header or
+body, and an unknown route id is refused rather than reflected. The memory
+handoff note applies the same rule, so a custom run id never enters the note.
+
 `brigade runs serve` exposes the same three contracts on loopback as
 `GET /api/runs`, `GET /api/runs/<run-id>`, and `GET /api/runs/<run-id>/events`
 (SSE of watch records). It does not add a second artifact reader, and it calls

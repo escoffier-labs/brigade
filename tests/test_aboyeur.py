@@ -22,6 +22,7 @@ from brigade import run_journal
 from brigade import run_lifecycle
 from brigade import run_projector
 from brigade import run_transport
+from brigade import runs_privacy
 from brigade import runguard
 from brigade.roster import Agent, Roster
 from tests import thread_sync
@@ -4714,7 +4715,9 @@ def test_run_writes_handoff(monkeypatch, tmp_path, capsys):
         )
         == 0
     )
-    handoffs = list(inbox.glob("*-brigade-run-run.md"))
+    view_id = runs_privacy.view_run_id("run", output_dir)
+    assert view_id is not None
+    handoffs = list(inbox.glob("*-brigade-run-*.md"))
     assert len(handoffs) == 1
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "ok"
@@ -4724,7 +4727,7 @@ def test_run_writes_handoff(monkeypatch, tmp_path, capsys):
     assert "## Recommended memory action\n\nno-card" in body
     assert "## Target document\n\n.learnings/LEARNINGS.md" in body
     assert "- mode: read-only" in body
-    assert "- run id: run" in body
+    assert f"- run id: {view_id}" in body
     assert "- status: ok" in body
     assert "- workers: 1 ok, 0 failed" in body
     assert "- task digest: hmac-sha256:" in body
@@ -4766,9 +4769,11 @@ def test_handoff_note_carries_no_task_or_generated_text(tmp_path):
         now=datetime(2026, 8, 21, 15, 0, tzinfo=timezone.utc),
     )
 
-    assert handoff.name == "2026-08-21-1500-brigade-run-20260821-150000-private1.md"
+    view_id = runs_privacy.view_run_id("20260821-150000-private1", run_dir)
+    assert view_id is not None and view_id.startswith("hmac-sha256:")
+    assert "20260821-150000-private1" not in handoff.name
     body = handoff.read_text()
-    assert "- run id: 20260821-150000-private1" in body
+    assert f"- run id: {view_id}" in body
     assert "- status: ok" in body
     assert "- mode: normal" in body
     assert "- workers: 1 ok, 1 failed" in body
@@ -4780,6 +4785,46 @@ def test_handoff_note_carries_no_task_or_generated_text(tmp_path):
         assert leaked not in body
     assert "/home/someuser" not in body  # content-guard: allow home-path
     assert str(run_dir) not in body
+
+
+def test_handoff_note_digests_a_custom_run_id(tmp_path):
+    """Issue #2046 security review: a user-chosen --output-dir name is not echoed."""
+    workspace = tmp_path / "workspace"
+    custom = workspace / ".brigade" / "runs" / "PRIVATE-MODEL-A"
+    custom.mkdir(parents=True)
+    inbox = workspace / "memory-handoffs"
+    view_id = runs_privacy.view_run_id("PRIVATE-MODEL-A", custom)
+    assert view_id is not None and view_id.startswith("hmac-sha256:")
+
+    handoff = aboyeur.write_run_handoff(
+        inbox,
+        task="custom id task",
+        cwd=None,
+        output_dir=custom,
+        assignments=[],
+        worker_results=[],
+        final_text="",
+        now=datetime(2026, 8, 21, 21, 0, tzinfo=timezone.utc),
+    )
+
+    body = handoff.read_text()
+    assert f"- run id: {view_id}" in body
+    assert "PRIVATE-MODEL-A" not in body
+    assert "PRIVATE-MODEL-A" not in handoff.name
+
+    generated = workspace / ".brigade" / "runs" / "20260821-210000-abcdef12"
+    generated.mkdir()
+    generated_handoff = aboyeur.write_run_handoff(
+        inbox,
+        task="generated id task",
+        cwd=None,
+        output_dir=generated,
+        assignments=[],
+        worker_results=[],
+        final_text="",
+        now=datetime(2026, 8, 21, 21, 5, tzinfo=timezone.utc),
+    )
+    assert f"- run id: {generated.name}" in generated_handoff.read_text()
 
 
 def test_handoff_failure_preserves_final_artifacts(monkeypatch, tmp_path, capsys):

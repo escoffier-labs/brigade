@@ -36,6 +36,7 @@ from .. import run_budget
 from .. import run_dirfd
 from .. import run_events
 from .. import run_export_projection
+from .. import runs_privacy
 from .. import run_journal
 from .. import run_lifecycle
 from .. import run_projector
@@ -650,7 +651,13 @@ def write_run_handoff(
     except run_export_projection.RunExportProjectionError:
         # A refused digest key must not fail the run or leak raw text.
         key = None
-    run_id = output_dir.name if output_dir is not None and output_dir.name else "unknown"
+    raw_run_id = output_dir.name if output_dir is not None and output_dir.name else "unknown"
+    if raw_run_id == "unknown" or runs_privacy.is_generated_run_id(raw_run_id):
+        run_id = raw_run_id
+    elif key is not None:
+        run_id = runs_privacy.digest_string(key, raw_run_id)
+    else:
+        run_id = "<run-id-digest-unavailable>"
     status_text = _one_line(str(status)) or "unknown"
     mode_text = "read-only" if read_only else "normal"
     ok_count = sum(1 for result in worker_results if result.ok)

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import re
 import secrets
 import socket
 import sys
@@ -27,13 +26,17 @@ _UNREADABLE_DIAGNOSTIC = "run-unreadable"
 _UNAVAILABLE_DIAGNOSTIC = "run-view-unavailable"
 _DEFAULT_LIST_LIMIT = 10
 _MAX_LIST_LIMIT = 200
-_SERVED_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _API_RUNS_PREFIX = "/api/runs"
 _CSP_NONCE_PLACEHOLDER = "__BRIGADE_CSP_NONCE__"
 _INDEX_PATH = Path(__file__).with_name("runs_view.html")
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"})
 
 INDEX_HTML = _INDEX_PATH.read_text(encoding="utf-8")
+
+
+def _safe_entry_name(name: str) -> bool:
+    """True for a single directory entry name that may be matched by digest."""
+    return bool(name) and name not in {".", ".."} and "/" not in name and "\\" not in name
 
 
 def _bound_address(server: ThreadingHTTPServer) -> tuple[str, int]:
@@ -53,14 +56,40 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def resolve_served_run_id(run_id: str, runs_root: Path) -> Path | None:
-    """Resolve *run_id* strictly beneath *runs_root*.
+def _run_names_for_view_id(run_id: str, root: Path, workspace: Path) -> list[str] | None:
+    """Return directory names for a generated id or its keyed digest stand-in."""
+    if runs_privacy.is_generated_run_id(run_id):
+        from . import run_id as run_id_mod
 
-    Rejects absolute paths, parent traversal, symlink escape, alternate
-    roots, and malformed identifiers. This is a location check only; the
-    caller must still load the run through ``runs_cmd`` serializers.
+        return run_id_mod.lookup_names_for_workspace(run_id, workspace)
+    if not run_export_projection.is_valid_digest(run_id):
+        return None
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return None
+    names: list[str] = []
+    for entry in entries:
+        if not _safe_entry_name(entry.name):
+            continue
+        try:
+            if runs_privacy.view_run_id(entry.name, entry) == run_id:
+                names.append(entry.name)
+        except runs_privacy.DigestKeyUnavailable:
+            return None
+    return names
+
+
+def resolve_served_run_id(run_id: str, runs_root: Path) -> Path | None:
+    """Resolve a generated run id or its keyed digest strictly beneath *runs_root*.
+
+    A custom ``--output-dir`` name never travels in a URL. The list returns its
+    keyed digest and this function matches that digest against each directory
+    name server-side. Rejects absolute paths, parent traversal, symlink escape,
+    alternate roots, and malformed identifiers. This is a location check only;
+    the caller must still load the run through ``runs_cmd`` serializers.
     """
-    if not isinstance(run_id, str) or not _SERVED_RUN_ID.fullmatch(run_id):
+    if not runs_privacy.is_view_run_id(run_id):
         return None
     try:
         root = runs_root.resolve()
@@ -69,11 +98,13 @@ def resolve_served_run_id(run_id: str, runs_root: Path) -> Path | None:
     if not root.is_dir():
         return None
     from . import node as node_mod
-    from . import run_id as run_id_mod
 
     workspace = node_mod.infer_workspace_from_runs_dir(root)
-    for name in run_id_mod.lookup_names_for_workspace(run_id, workspace):
-        if not _SERVED_RUN_ID.fullmatch(name):
+    names = _run_names_for_view_id(run_id, root, workspace)
+    if names is None:
+        return None
+    for name in names:
+        if not _safe_entry_name(name):
             continue
         resolved = _resolve_contained_run_dir(root, name)
         if resolved is not None:

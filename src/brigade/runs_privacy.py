@@ -26,7 +26,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import run_export_projection
+from . import run_export_projection, run_id as run_id_mod
 
 TEXT_PREVIEW_CHARS = 80
 
@@ -34,12 +34,29 @@ RUNS_LIST_SCHEMA = "brigade.runs-list.v2"
 RUN_DETAIL_SCHEMA = "brigade.run-detail.v2"
 RUN_WATCH_SCHEMA = "brigade.run-watch.v2"
 
-# The serve layer resolves run directory names with this same form. A run id is
-# a navigation identifier, so it stays readable. Anything outside it is digested.
-RUN_ID = run_export_projection.pattern(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-EVENT_ID = run_export_projection.pattern(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# A run id is user-controlled when ``--output-dir`` picks the directory name.
+# Only Brigade-generated forms stay readable: legacy and node-namespaced ids
+# from ``run_id``, plus the hash-derived batch and T3 forms. Anything else is
+# rendered as a keyed digest string everywhere, and served navigation resolves
+# that digest back to the directory server-side.
+_BATCH_OR_T3_RUN_ID_RE = re.compile(r"^(?:batch|t3)-[0-9a-f]{64}$")
+_GENERATED_RUN_ID_PATTERN = (
+    r"(?i:\d{8}-\d{6}-[0-9a-f]{8}"
+    r"|[0-9a-f]{8}\.\d{8}-\d{6}-[0-9a-f]{8}"
+    r"|(?:batch|t3)-[0-9a-f]{64})"
+)
+RUN_ID = run_export_projection.pattern(
+    rf"^(?:{_GENERATED_RUN_ID_PATTERN}|hmac-sha256:[0-9a-f]{{64}})$", digest_ok=False
+)
+EVENT_ID = run_export_projection.pattern(rf"^(?:{_GENERATED_RUN_ID_PATTERN})-\d{{6}}-[0-9a-f]{{12}}$")
 
-_RUN_STATUS = run_export_projection.enum(*run_export_projection.RUN_STATUSES, "timeout", "incomplete", "canceled")
+_RUN_STATUS = run_export_projection.enum(
+    *run_export_projection.RUN_STATUSES,
+    "timeout",
+    "incomplete",
+    "canceled",
+    "awaiting-native-parent",
+)
 # The export set plus the failure phases the run lifecycle records today. An
 # unknown phase still becomes "<other>" rather than raw text.
 _VIEW_FAILURE_PHASES = (
@@ -61,15 +78,24 @@ _VIEW_FAILURE_PHASES = (
     "workers",
     "result",
     "routing",
+    "executable-unavailable",
+    "execution-not-started",
+    "locator",
+    "runs-child",
+    "transport-error",
 )
 _FAILURE_PHASE = run_export_projection.enum(*_VIEW_FAILURE_PHASES)
 _TRANSPORT = run_export_projection.enum(*run_export_projection.TRANSPORTS)
-_WORKER_STATUS = run_export_projection.enum(*run_export_projection.WORKER_STATUSES)
+_WORKER_STATUS = run_export_projection.enum(
+    *run_export_projection.WORKER_STATUSES, "timeout", "incomplete", "canceled", "error"
+)
 _RUN_MODE = run_export_projection.enum("normal", "read-only", "normal, dry-run", "read-only, dry-run")
-_TERMINAL = run_export_projection.enum("terminal", "nonterminal")
+_TERMINAL = run_export_projection.enum("terminal", "running")
 _LINEAGE_KIND = run_export_projection.enum("branch", "child", "parent", "root", "unknown")
-_SYNTHESIS_MODE = run_export_projection.enum("direct-worker", "orchestrator", "single-seat")
-_VERIFY_STATUS = run_export_projection.enum("ok", "completed", "failed", "rejected", "timeout", "running", "unknown")
+_SYNTHESIS_MODE = run_export_projection.enum("direct-worker", "orchestrator", "single-seat", "merge")
+_VERIFY_STATUS = run_export_projection.enum(
+    "ok", "completed", "failed", "rejected", "timeout", "running", "unknown", "error"
+)
 _LOCAL_STATE = run_export_projection.enum("cleared", "required", "unknown")
 _BRIEF_NAME = run_export_projection.enum("code-graph", "drift-impact", "evidence")
 _WATCH_TYPE = run_export_projection.enum(
@@ -260,6 +286,36 @@ def digest_key(run_dir: Path) -> bytes:
         raise DigestKeyUnavailable("run digest key unavailable") from exc
 
 
+def is_generated_run_id(value: object) -> bool:
+    """True only for a run id Brigade itself minted."""
+    if not isinstance(value, str) or not value:
+        return False
+    return (
+        run_id_mod.is_legacy_run_id(value)
+        or run_id_mod.is_namespaced_run_id(value)
+        or bool(_BATCH_OR_T3_RUN_ID_RE.fullmatch(value))
+    )
+
+
+def is_view_run_id(value: object) -> bool:
+    """True for a generated run id or the keyed digest that stands in for one."""
+    return isinstance(value, str) and (is_generated_run_id(value) or run_export_projection.is_valid_digest(value))
+
+
+def digest_string(key: bytes, value: str) -> str:
+    """Return the bare keyed digest string for one value."""
+    return run_export_projection.digest_prompt(key, value)["digest"]
+
+
+def view_run_id(value: object, anchor: Path) -> str | None:
+    """Return a generated run id or its keyed digest, never a custom raw name."""
+    if not isinstance(value, str) or not value:
+        return None
+    if is_generated_run_id(value) or run_export_projection.is_valid_digest(value):
+        return value
+    return digest_string(digest_key(anchor), value)
+
+
 def task_preview(value: object) -> str | None:
     """Return a bounded, home-redacted, one-line task preview for ``--show-task``."""
     return _clean_str(value, TEXT_PREVIEW_CHARS)
@@ -325,8 +381,11 @@ def watch_record_projector(run_dir: Path) -> Callable[[Mapping[str, Any]], dict[
     workspace = run_export_projection.workspace_for_run(run_dir)
 
     def project(record: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = dict(record)
+        if "run_id" in normalized:
+            normalized["run_id"] = view_run_id(normalized["run_id"], run_dir) or "unknown"
         projected = run_export_projection.project_node(
-            dict(record),
+            normalized,
             _WATCH,
             workspace=workspace,
             run_dir=run_dir,

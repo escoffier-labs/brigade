@@ -25,6 +25,7 @@ from brigade import run_resume
 from brigade import run_redaction
 from brigade import runguard
 from brigade import runs_cmd
+from brigade import runs_privacy
 from brigade import tools_cmd
 
 
@@ -1322,15 +1323,14 @@ def test_runs_show_json_includes_child_lineage(tmp_path, capsys):
     assert runs_cmd.show(run_dir, json_output=True) == 0
     detail = json.loads(capsys.readouterr().out)
     assert detail["schema"] == "brigade.run-detail.v2"
-    assert detail["run"]["lineage"] == {
-        "kind": "child",
-        "parent_run_id": "20260817-120000-parent-aaaaaa",
-        "branch_point_event_id": "20260817-120000-parent-aaaaaa-000003-bbbbbbbbbbbb",
-        "shared_prefix": {
-            "event_sequence": 3,
-            "event_digest": "b" * 64,
-            "previous_digest": "a" * 64,
-        },
+    lineage = detail["run"]["lineage"]
+    assert lineage["kind"] == "child"
+    assert lineage["parent_run_id"].startswith("hmac-sha256:")
+    assert set(lineage["branch_point_event_id"]) == {"digest", "chars"}
+    assert lineage["shared_prefix"] == {
+        "event_sequence": 3,
+        "event_digest": "b" * 64,
+        "previous_digest": "a" * 64,
     }
 
 
@@ -1351,7 +1351,7 @@ def test_runs_list_json_includes_parent_run_id(tmp_path, capsys):
     assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)
     assert listed["schema"] == "brigade.runs-list.v2"
-    assert listed["runs"][0]["parent_run_id"] == "20260817-120000-parent-aaaaaa"
+    assert listed["runs"][0]["parent_run_id"].startswith("hmac-sha256:")
 
 
 def test_runs_show_reports_missing_run_json(tmp_path, capsys):
@@ -1422,6 +1422,11 @@ def _write_detail_run_artifacts(run_dir):
     )
 
 
+def _view_id(run_dir: Path) -> str:
+    """Return the served id for a run: generated name or its keyed digest."""
+    return runs_privacy.view_run_id(run_dir.name, run_dir) or ""
+
+
 def _assert_closed_digest(value: object) -> int:
     assert isinstance(value, dict)
     assert set(value) == {"digest", "chars"}
@@ -1449,7 +1454,7 @@ def test_runs_show_json_emits_versioned_detail_contract(tmp_path, capsys):
         "verification",
         "workers",
     ]
-    assert payload["run"]["run_id"] == "run"
+    assert payload["run"]["run_id"] == _view_id(run_dir)
     assert payload["run"]["status"] == "ok"
     assert payload["run"]["mode"] == "read-only"
     assert payload["run"]["resume_available"] is False
@@ -1463,7 +1468,7 @@ def test_runs_show_json_emits_versioned_detail_contract(tmp_path, capsys):
     assert _assert_closed_digest(payload["workers"]["results"][0]["requested_model"]) == len("gpt-5.5")
     assert payload["synthesis"]["result"]["ok"] is True
     verification = payload["verification"][0]
-    assert verification["run_id"] == "verify-1"
+    assert verification["run_id"].startswith("hmac-sha256:")
     assert verification["status"] == "ok"
     assert verification["started_at"] == "2026-05-26T14:00:01Z"
     assert verification["duration_seconds"] == 3.2
@@ -1567,7 +1572,7 @@ def test_runs_latest_json_shares_detail_contract(tmp_path, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema"] == "brigade.run-detail.v2"
-    assert payload["run"]["run_id"] == "20260526-140000-bbbb"
+    assert payload["run"]["run_id"] == _view_id(late)
 
 
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="requires unprivileged POSIX permissions")
@@ -1607,11 +1612,11 @@ def test_runs_inventory_skips_unreadable_record(tmp_path, capsys, command, json_
             if command == "list":
                 assert payload["schema"] == runs_cmd.RUNS_LIST_SCHEMA
                 assert payload["skipped_invalid"] == 1
-                assert [run["run_id"] for run in payload["runs"]] == [healthy.name]
+                assert [run["run_id"] for run in payload["runs"]] == [_view_id(healthy)]
                 assert captured.err == ""
             else:
                 assert payload["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
-                assert payload["run"]["run_id"] == healthy.name
+                assert payload["run"]["run_id"] == _view_id(healthy)
                 assert "skipped 1 invalid run directory" in captured.err
         else:
             assert healthy.name in captured.out
@@ -1675,8 +1680,8 @@ def test_runs_list_json_emits_versioned_contract(tmp_path, capsys):
     assert payload["schema"] == "brigade.runs-list.v2"
     assert payload["skipped_invalid"] == 1
     assert [run["run_id"] for run in payload["runs"]] == [
-        "20260526-140000-bbbb",
-        "20260526-130000-aaaa",
+        _view_id(runs_root / "20260526-140000-bbbb"),
+        _view_id(runs_root / "20260526-130000-aaaa"),
     ]
     newest, oldest = payload["runs"]
     assert newest["status"] == "failed"
@@ -1704,7 +1709,7 @@ def test_runs_list_json_respects_limit(tmp_path, capsys):
     assert runs_cmd.list_runs(cwd=tmp_path, limit=1, json_output=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert [run["run_id"] for run in payload["runs"]] == ["20260526-140000-aaaa"]
+    assert [run["run_id"] for run in payload["runs"]] == [_view_id(runs_root / "20260526-140000-aaaa")]
 
 
 def test_runs_recover_cli_dispatches_resolved_run(tmp_path, monkeypatch):
