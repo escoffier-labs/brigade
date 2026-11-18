@@ -774,18 +774,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
                 retrieval["effective"].as_str().unwrap_or(""),
                 retrieval["state"].as_str().unwrap_or("")
             ));
-            let m = store.metrics();
-            text += &format!(
-                "brigade_hub_memory_batches_total {}\nbrigade_hub_memory_hub_lock_residence_seconds_last {}\nbrigade_hub_memory_hub_lock_residence_seconds_max {}\nbrigade_hub_memory_hub_lock_residence_seconds_sum {}\nbrigade_hub_memory_hub_lock_wait_seconds_max {}\nbrigade_hub_memory_authority_timeouts_total {}\nbrigade_hub_memory_commit_failures_total {}\nbrigade_hub_memory_residence_bucket_seconds {}\n",
-                m.batches,
-                m.residence_last,
-                m.residence_max,
-                m.residence_sum,
-                m.wait_max,
-                m.authority_timeouts,
-                m.commit_failures,
-                store.bucket()
-            );
+            text += &store.lock_metrics();
             text += &store.read_count_metrics();
             let index = store.index();
             let snapshot = index.current();

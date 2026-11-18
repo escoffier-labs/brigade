@@ -95,6 +95,26 @@ pub struct Failure {
     pub reason: &'static str,
 }
 pub type Answer = Result<Reply, Failure>;
+/// Buckets, in seconds, of the two authority-lock histograms: 1 ms to 5 s, with
+/// the last one open so a longer wait still lands somewhere. They are fixed
+/// here, so a scrape sees the same bound set whatever the traffic.
+pub const LOCK_BOUNDS: [f64; 13] = [
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    f64::INFINITY,
+];
+const LOCK_BUCKETS: usize = LOCK_BOUNDS.len();
+
 /// Residence and wait of the hub lock for memory batches, in seconds.
 #[derive(Clone, Debug, Default)]
 pub struct Metrics {
@@ -104,11 +124,73 @@ pub struct Metrics {
     pub residence_max: f64,
     pub residence_sum: f64,
     pub wait_max: f64,
+    /// Sum of the waits, one per batch that took the lock.
+    pub wait_sum: f64,
     pub authority_timeouts: u64,
     pub commit_failures: u64,
     pub sweeps: u64,
     /// The most commands ever held in the writer's own queue, beside the channel.
     pub pending_max: u64,
+    /// Cumulative histogram counts, one observation per batch that took the
+    /// authority lock, so the open bucket is `batches` in both.
+    pub wait_buckets: [u64; LOCK_BUCKETS],
+    pub residence_buckets: [u64; LOCK_BUCKETS],
+}
+impl Metrics {
+    /// Records one batch in both histograms. Each bound is checked on its own,
+    /// so a bucket holds every observation at or below it: a scrape reads
+    /// cumulative counts, and the open bucket is the batch count. The sums are
+    /// the `_sum` series of those histograms.
+    pub fn observe_lock(&mut self, wait: Duration, residence: Duration) {
+        let wait = wait.as_secs_f64();
+        let residence = residence.as_secs_f64();
+        self.wait_sum += wait;
+        self.residence_sum += residence;
+        for (count, bound) in self.wait_buckets.iter_mut().zip(LOCK_BOUNDS) {
+            *count += u64::from(wait <= bound);
+        }
+        for (count, bound) in self.residence_buckets.iter_mut().zip(LOCK_BOUNDS) {
+            *count += u64::from(residence <= bound);
+        }
+    }
+    /// Both histograms for `/metrics`, each as one block: HELP, TYPE, every
+    /// bucket, the sum, then the count. A bucket carries only `le`, and the sum
+    /// and count carry no labels, so a parser joins them into one series and
+    /// the cardinality stays fixed. Only batches that took the authority lock
+    /// are observed, so a batch refused at the lock is counted by
+    /// `authority_timeouts`, not here.
+    pub fn lock_histograms(&self) -> String {
+        let mut text = String::new();
+        for (name, help, buckets, sum) in [
+            (
+                "brigade_hub_memory_hub_lock_wait_seconds",
+                "Time each memory batch waited for an arbiter turn and the hub write lock, from the memory lock.",
+                self.wait_buckets,
+                self.wait_sum,
+            ),
+            (
+                "brigade_hub_memory_hub_lock_residence_seconds",
+                "Time each memory batch held the arbiter turn and the hub write lock.",
+                self.residence_buckets,
+                self.residence_sum,
+            ),
+        ] {
+            text += &format!("# HELP {name} {help}\n# TYPE {name} histogram\n");
+            for (bound, count) in LOCK_BOUNDS.into_iter().zip(buckets) {
+                let le = if bound.is_infinite() {
+                    "+Inf".to_owned()
+                } else {
+                    bound.to_string()
+                };
+                text += &format!("{name}_bucket{{le=\"{le}\"}} {count}\n");
+            }
+            text += &format!(
+                "{name}_sum {sum}\n{name}_count {}\n",
+                buckets[LOCK_BUCKETS - 1]
+            );
+        }
+        text
+    }
 }
 pub enum Job {
     Write {
@@ -991,16 +1073,20 @@ pub(crate) fn run(
         // when the memory commit failed.
         hub.release();
         drop(turn);
-        let residence = locked.elapsed().as_secs_f64();
+        let residence = locked.elapsed();
+        // The wait covers the arbiter turn and the hub write lock, the same
+        // span the wait max already reports.
+        let wait = locked.duration_since(waited);
         hook(&config, Step::Released);
         {
             let mut m = metrics.lock().unwrap();
             m.batches += 1;
             m.commands += results.len() as u64;
-            m.residence_last = residence;
-            m.residence_max = m.residence_max.max(residence);
-            m.residence_sum += residence;
-            m.wait_max = m.wait_max.max(locked.duration_since(waited).as_secs_f64());
+            m.residence_last = residence.as_secs_f64();
+            m.residence_max = m.residence_max.max(residence.as_secs_f64());
+            m.wait_max = m.wait_max.max(wait.as_secs_f64());
+            // One observation per histogram for this batch, sums included.
+            m.observe_lock(wait, residence);
             if !committed {
                 m.commit_failures += 1;
             }

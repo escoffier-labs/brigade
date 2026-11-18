@@ -1145,6 +1145,186 @@ fn shim_hub(hook: writer::Hook) -> (Hub, hub_writer::Writer) {
     (h, w)
 }
 
+#[test]
+fn authority_lock_histograms_are_fixed_buckets_from_one_millisecond_to_five_seconds() {
+    let mut m = writer::Metrics {
+        batches: 2,
+        ..Default::default()
+    };
+    // A fast batch, then one that waited 1.5 s for the turn and held the lock 4.2 s.
+    m.observe_lock(Duration::from_micros(400), Duration::from_micros(900));
+    m.observe_lock(Duration::from_millis(1500), Duration::from_millis(4200));
+    assert_eq!(writer::LOCK_BOUNDS.len(), 13);
+    assert_eq!(writer::LOCK_BOUNDS[0], 0.001);
+    assert_eq!(writer::LOCK_BOUNDS[10], 2.5);
+    assert_eq!(writer::LOCK_BOUNDS[11], 5.0);
+    assert!(writer::LOCK_BOUNDS[12].is_infinite());
+    // Cumulative, one bucket per bound: the 1 ms bucket holds only the fast
+    // batch and the open bucket holds both, in each histogram.
+    assert_eq!(m.wait_buckets, [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2]);
+    assert_eq!(m.residence_buckets, [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2]);
+    // The histogram sums are the residence and wait sums a scrape already reads.
+    assert!(
+        (m.residence_sum - 4.2009).abs() < 1e-9,
+        "{}",
+        m.residence_sum
+    );
+    assert!((m.wait_sum - 1.5004).abs() < 1e-9, "{}", m.wait_sum);
+    let text = m.lock_histograms();
+    assert!(
+        text.contains("# TYPE brigade_hub_memory_hub_lock_wait_seconds histogram\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_wait_seconds_bucket{le=\"0.001\"} 1\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_wait_seconds_bucket{le=\"2.5\"} 2\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_wait_seconds_bucket{le=\"+Inf\"} 2\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_wait_seconds_sum 1.5004\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_wait_seconds_count 2\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_residence_seconds_bucket{le=\"5\"} 2\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_residence_seconds_sum 4.2009\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_residence_seconds_count 2\n"),
+        "{text}"
+    );
+    // Fixed label cardinality: one bucket series per fixed bound, `le` the only
+    // label, and nothing that varies with traffic.
+    assert_eq!(text.matches("_bucket{le=\"").count(), 26, "{text}");
+    assert_eq!(text.matches("le=\"+Inf\"").count(), 2, "{text}");
+    assert_eq!(text.matches("# TYPE ").count(), 2, "{text}");
+    for variable in ["lane", "principal=", "scope=", "card", "id="] {
+        assert!(!text.contains(variable), "{variable} in {text}");
+    }
+}
+
+/// One exposition line split into its metric name, label set and value.
+fn metric_sample(line: &str) -> (&str, &str, &str) {
+    let (head, value) = line.split_once(' ').expect("a name and a value");
+    match head.find('{') {
+        Some(at) => (&head[..at], &head[at..], value),
+        None => (head, "", value),
+    }
+}
+
+#[tokio::test]
+async fn memory_lock_histograms_are_contiguous_blocks_whose_labels_match() {
+    let h = Hub::new();
+    let store = h.store.as_ref().unwrap();
+    let credential = store.authenticate(NODE_TOKEN).await.unwrap();
+    let body = json!({"action":"put","scope":"fleet","card_id":"metrics","base_revision":null,
+                      "text":"x","client_event_id":h.id()});
+    assert_eq!(
+        store
+            .handle(&credential, body.to_string().as_bytes())
+            .await
+            .status,
+        201
+    );
+    let m = store.metrics();
+    assert_eq!(m.batches, 1);
+    let text = store.lock_metrics();
+    let lines: Vec<&str> = text.lines().collect();
+    for (family, sum) in [
+        ("brigade_hub_memory_hub_lock_wait_seconds", m.wait_sum),
+        (
+            "brigade_hub_memory_hub_lock_residence_seconds",
+            m.residence_sum,
+        ),
+    ] {
+        // A family is a histogram only if its TYPE line comes before every one
+        // of its samples, and each sample appears once: a `_sum` beside the
+        // gauges would leave the family untyped and split.
+        let type_line = format!("# TYPE {family} histogram");
+        let type_at = lines
+            .iter()
+            .position(|line| *line == type_line)
+            .unwrap_or_else(|| panic!("no {type_line} in\n{text}"));
+        let at = |suffix: &str| -> Vec<usize> {
+            let prefix = format!("{family}_{suffix}");
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.starts_with(&prefix))
+                .map(|(index, _)| index)
+                .collect()
+        };
+        let buckets = at("bucket");
+        let sums = at("sum");
+        let counts = at("count");
+        assert_eq!(buckets.len(), writer::LOCK_BOUNDS.len(), "{text}");
+        assert_eq!(sums.len(), 1, "{family}_sum must appear once:\n{text}");
+        assert_eq!(counts.len(), 1, "{family}_count must appear once:\n{text}");
+        assert!(type_at < buckets[0], "TYPE after a bucket:\n{text}");
+        assert!(
+            buckets.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "buckets split:\n{text}"
+        );
+        // Buckets, then sum, then count, with nothing between them.
+        assert_eq!(sums[0], buckets[buckets.len() - 1] + 1, "{text}");
+        assert_eq!(counts[0], sums[0] + 1, "{text}");
+        let (_, sum_labels, sum_value) = metric_sample(lines[sums[0]]);
+        let (_, count_labels, count_value) = metric_sample(lines[counts[0]]);
+        assert_eq!(sum_labels, "", "{family}_sum must carry no labels:\n{text}");
+        assert_eq!(
+            count_labels, "",
+            "{family}_count must carry no labels:\n{text}"
+        );
+        assert_eq!(sum_value, sum.to_string(), "{text}");
+        assert_eq!(count_value, m.batches.to_string(), "{text}");
+        // Every bucket keeps the sum's and count's label set, `le` aside.
+        for index in &buckets {
+            let (name, labels, _) = metric_sample(lines[*index]);
+            assert_eq!(name, format!("{family}_bucket"));
+            let le = labels
+                .strip_prefix("{le=\"")
+                .and_then(|rest| rest.strip_suffix("\"}"))
+                .unwrap_or_else(|| panic!("bucket labels are not le alone: {labels}"));
+            assert!(!le.contains(','), "{labels}");
+        }
+    }
+    // Labels are fixed: no lane, principal, scope, card or id anywhere.
+    for variable in ["lane", "principal=", "scope=", "card", "id="] {
+        assert!(!text.contains(variable), "{variable} in\n{text}");
+    }
+    // The last and max series keep their names and values.
+    for (name, value) in [
+        (
+            "brigade_hub_memory_hub_lock_residence_seconds_last",
+            m.residence_last,
+        ),
+        (
+            "brigade_hub_memory_hub_lock_residence_seconds_max",
+            m.residence_max,
+        ),
+        ("brigade_hub_memory_hub_lock_wait_seconds_max", m.wait_max),
+    ] {
+        assert!(
+            text.contains(&format!("{name} {value}\n")),
+            "missing {name} {value} in\n{text}"
+        );
+    }
+}
+
 // The process-global VFS registration is serialized across the whole test.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1207,6 +1387,34 @@ async fn one_slow_memory_sync_holds_the_hub_lock_once_and_the_bucket_repays_it()
     assert_eq!(slow.await.unwrap().status, 201);
     let m = h.store.as_ref().unwrap().metrics();
     assert!(m.residence_max >= 0.9, "residence {}", m.residence_max);
+    // Both histograms observed every batch that took the lock, so their open
+    // bucket matches the batch count.
+    let open = writer::LOCK_BOUNDS.len() - 1;
+    assert_eq!(
+        m.residence_buckets[open], m.batches,
+        "{:?}",
+        m.residence_buckets
+    );
+    assert_eq!(m.wait_buckets[open], m.batches, "{:?}", m.wait_buckets);
+    // The slow batch's residence is the longest one, so the first bound at or
+    // above it holds at least that observation, and the buckets only grow.
+    let at_max = writer::LOCK_BOUNDS
+        .iter()
+        .position(|bound| *bound >= m.residence_max)
+        .unwrap();
+    assert!(
+        m.residence_buckets[at_max] >= 1,
+        "residence {} missing from {:?}",
+        m.residence_max,
+        m.residence_buckets
+    );
+    assert!(
+        m.residence_buckets
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1]),
+        "{:?}",
+        m.residence_buckets
+    );
     // The bucket is negative after the slow batch; memory waits until it refills.
     assert!(h.arbiter.balance() < 0.0);
     let started = Instant::now();

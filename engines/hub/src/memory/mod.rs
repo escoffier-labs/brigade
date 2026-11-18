@@ -926,6 +926,23 @@ impl Store {
     pub fn read_count_metrics(&self) -> String {
         read_counts::render(&self.read_counts)
     }
+    /// The hub lock metrics for `/metrics`: the last and max series, then the
+    /// wait and residence histograms, each as one block with its own sum.
+    pub fn lock_metrics(&self) -> String {
+        let m = self.metrics();
+        let mut text = format!(
+            "brigade_hub_memory_batches_total {}\nbrigade_hub_memory_hub_lock_residence_seconds_last {}\nbrigade_hub_memory_hub_lock_residence_seconds_max {}\nbrigade_hub_memory_hub_lock_wait_seconds_max {}\nbrigade_hub_memory_authority_timeouts_total {}\nbrigade_hub_memory_commit_failures_total {}\nbrigade_hub_memory_residence_bucket_seconds {}\n",
+            m.batches,
+            m.residence_last,
+            m.residence_max,
+            m.wait_max,
+            m.authority_timeouts,
+            m.commit_failures,
+            self.bucket()
+        );
+        text += &m.lock_histograms();
+        text
+    }
     /// The memory reader queue, for `/metrics`.
     pub fn reader_probe(&self) -> crate::telemetry::QueueProbe {
         self.readers.queue_probe()

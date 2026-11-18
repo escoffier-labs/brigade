@@ -2089,6 +2089,87 @@ Scope readers without review authority receive only proposal id, state,
 decision and decision mode in proposal event payloads. This reader redaction
 also covers historical payloads without rewriting the append-only log.
 
+## Hub memory lock metrics
+
+Every memory batch takes the memory lock, an arbiter turn and the hub write
+lock. `/metrics` reports the wait for that turn and the residence under it, both
+per batch and both in seconds. Wait runs from the end of the memory lock to the
+hub lock. Residence runs from the hub lock to the release, before the batch
+answers its callers.
+
+The per-batch gauges and counters are unchanged, and the residence sum and wait
+sum keep their names and values as the histograms' `_sum` series:
+
+| Series | Meaning |
+|---|---|
+| `brigade_hub_memory_batches_total` | Batches that reached the authority lock |
+| `brigade_hub_memory_hub_lock_residence_seconds_last` | Residence of the most recent batch |
+| `brigade_hub_memory_hub_lock_residence_seconds_max` | Longest residence since start |
+| `brigade_hub_memory_hub_lock_wait_seconds_max` | Longest wait since start |
+| `brigade_hub_memory_authority_timeouts_total` | Batches refused at the turn or the hub lock |
+| `brigade_hub_memory_commit_failures_total` | Batches that held the lock and failed to commit |
+
+Two histograms sit beside them, one for the wait and one for the residence:
+
+| Histogram | Observations |
+|---|---|
+| `brigade_hub_memory_hub_lock_wait_seconds` | Wait of each batch that took the turn and the hub lock |
+| `brigade_hub_memory_hub_lock_residence_seconds` | Residence of each batch that took them |
+
+Both use the same fixed bounds, 1 ms to 5 s, with an open tail:
+`0.001`, `0.0025`, `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`,
+`2.5`, `5` and `+Inf`. Every bucket is cumulative, so a scrape reads each one
+directly, and `_count` matches `brigade_hub_memory_batches_total`. Each family is
+one contiguous block, `# TYPE` first, then every bucket, then its `_sum`, then
+its `_count`, so a parser sees a single typed histogram. A bucket carries only
+`le`, and `_sum` and `_count` carry no labels, which is the same series once `le`
+is removed: `_bucket / ignoring(le) _count` joins. No label varies with
+principal, scope, card or batch, so the series count stays at 30 whatever the
+traffic. A batch refused before it holds the lock is counted once by
+`brigade_hub_memory_authority_timeouts_total` and observed in neither histogram:
+
+```
+# HELP brigade_hub_memory_hub_lock_wait_seconds Time each memory batch waited for an arbiter turn and the hub write lock, from the memory lock.
+# TYPE brigade_hub_memory_hub_lock_wait_seconds histogram
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.001"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.0025"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.005"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.01"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.025"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.05"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.1"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.25"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="0.5"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="1"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="2.5"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="5"} 3
+brigade_hub_memory_hub_lock_wait_seconds_bucket{le="+Inf"} 3
+brigade_hub_memory_hub_lock_wait_seconds_sum 0.000036164
+brigade_hub_memory_hub_lock_wait_seconds_count 3
+# HELP brigade_hub_memory_hub_lock_residence_seconds Time each memory batch held the arbiter turn and the hub write lock.
+# TYPE brigade_hub_memory_hub_lock_residence_seconds histogram
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.001"} 0
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.0025"} 0
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.005"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.01"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.025"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.05"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.1"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.25"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="0.5"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="1"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="2.5"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="5"} 3
+brigade_hub_memory_hub_lock_residence_seconds_bucket{le="+Inf"} 3
+brigade_hub_memory_hub_lock_residence_seconds_sum 0.013724285
+brigade_hub_memory_hub_lock_residence_seconds_count 3
+```
+
+`_count` and the open bucket agree because the histogram is the same batch set
+as the batch counter. Alert on the ratio of the open bucket to the total, or on
+a p99 estimate from two scrapes, rather than on a single batch. The last and max
+gauges remain the cheapest way to see the current batch.
+
 ## Hub read counts
 
 Memory schema 10 adds per-card daily read counts for the verification cadence
