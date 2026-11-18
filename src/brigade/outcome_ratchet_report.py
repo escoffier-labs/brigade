@@ -36,6 +36,7 @@ _REGRESSION_CODES = outcome.HOLD_CODES | {outcome.REGRESSION_ROLLBACK}
 _BRIEF_MAX_IDS = 6
 _PENDING_MAX_ARTIFACTS = 20
 _PENDING_MAX_COMMANDS = 8
+_PROPOSAL_KEYS = ("filed", "existing", "flagged", "skipped")
 
 
 def report_path(target: Path) -> Path:
@@ -60,6 +61,7 @@ def write_report(
     apply: bool,
     generated_at: datetime,
     pending: PendingPhysical | None = None,
+    proposal_counts: Mapping[str, int] | None = None,
 ) -> Path | None:
     """Write the advisory report once and return its path, or None if skipped.
 
@@ -68,7 +70,9 @@ def write_report(
     ``scorecard``. Only the fields below are read from them. ``pending`` holds the
     operator commands (per skill, recent status changes only) that would apply a
     status to the installed copies, plus a count of older ones; reconcile is
-    routing only and never runs them.
+    routing only and never runs them. ``proposal_counts`` carries the filed,
+    existing, flagged and skipped inbox proposal counts of a ``--proposals`` run;
+    it is None when the run did not ask for proposals.
 
     A symlinked report path is refused, and a payload that cannot fit the byte
     cap even without regression rows is skipped, so a broken report can never
@@ -77,7 +81,9 @@ def write_report(
     warns once on stderr and keeps its own exit code and output.
     """
     try:
-        return _write_report(target, items, apply=apply, generated_at=generated_at, pending=pending)
+        return _write_report(
+            target, items, apply=apply, generated_at=generated_at, pending=pending, proposal_counts=proposal_counts
+        )
     except OSError as exc:
         print(f"warning: outcome ratchet report not written: {exc}", file=sys.stderr)
         return None
@@ -90,13 +96,16 @@ def _write_report(
     apply: bool,
     generated_at: datetime,
     pending: PendingPhysical | None = None,
+    proposal_counts: Mapping[str, int] | None = None,
 ) -> Path | None:
     path = report_path(target)
     if _has_symlinked_component(path, path.parents[len(REPORT_RELATIVE_PATH.parts) - 1]):
         # The previous report stays in place, so say this run's write was skipped.
         print(f"warning: outcome ratchet report not written: symlinked path refused: {path}", file=sys.stderr)
         return None
-    report = build_report(items, apply=apply, generated_at=generated_at, target=target, pending=pending)
+    report = build_report(
+        items, apply=apply, generated_at=generated_at, target=target, pending=pending, proposal_counts=proposal_counts
+    )
     encoded = _encode(report)
     if len(encoded) > REPORT_MAX_BYTES:
         print(
@@ -115,6 +124,7 @@ def build_report(
     generated_at: datetime,
     target: Path,
     pending: PendingPhysical | None = None,
+    proposal_counts: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Build the versioned report payload from reconcile decision items."""
     counts: Counter[str] = Counter()
@@ -163,6 +173,8 @@ def build_report(
         "ineligibility_rate": audit["ineligibility_rate"],
         "leading_ineligibility_reason": audit["leading_ineligibility_reason"],
     }
+    if proposal_counts is not None:
+        report["summary"]["outcome_proposals"] = {key: int(proposal_counts.get(key, 0)) for key in _PROPOSAL_KEYS}
     return _fit(report)
 
 
@@ -230,6 +242,17 @@ def load_report(target: Path) -> dict[str, Any]:
     return payload
 
 
+def proposal_counts(summary: Mapping[str, Any]) -> dict[str, int] | None:
+    """Return the persisted inbox proposal counts, or None when the run did not file proposals."""
+    raw = summary.get("outcome_proposals")
+    if not isinstance(raw, dict):
+        return None
+    return {
+        key: raw[key] if isinstance(raw.get(key), int) and not isinstance(raw.get(key), bool) else 0
+        for key in _PROPOSAL_KEYS
+    }
+
+
 def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     """Reduce a loaded report to the bounded fields the session brief prints.
 
@@ -258,6 +281,7 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     stale_count = raw_stale if isinstance(raw_stale, int) and not isinstance(raw_stale, bool) else 0
     return {
         "present": True,
+        "outcome_proposals": proposal_counts(summary),
         "generated_at": report.get("generated_at"),
         "pending_physical_actions": pending_count,
         "stale_physical_actions": stale_count,
