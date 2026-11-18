@@ -324,6 +324,11 @@ def sweep_idle_sessions(
 def _sweep_best_effort(conn: sqlite3.Connection) -> None:
     """Retention never fails the write that triggered it, and never commits half a sweep.
 
+    Only policy saves and rollbacks call this. A new revision already makes every existing
+    session stale, so removing an idle one there costs its consumer nothing; a session record
+    must not sweep, because a consumer that only passes launch checks writes no timestamp and
+    would lose a session that is still current.
+
     The sweep undoes its own deletes on error, so a session leaves all three tables or none.
     If SQLite discarded the whole transaction (disk full, I/O error), the triggering write is
     lost anyway, so that error is raised instead of being hidden.
@@ -853,7 +858,6 @@ def record_session_policy(
             "refresh_updated_at=NULL, refresh_detail=NULL, updated_at=excluded.updated_at",
             (session, consumer_value, owner, repo, revision, digest, source_value, loaded, now),
         )
-        _sweep_best_effort(conn)
         payload = _session_payload(conn, session)
         if opened:
             conn.commit()

@@ -243,17 +243,20 @@ def test_the_retention_constant_is_read_at_call_time(conn, monkeypatch):
     assert _three(conn) == (0, 0, 0)
 
 
-def test_idle_session_is_removed_on_the_next_session_record(conn):
-    pending = _acknowledged_session(conn, "idle")
-    _receipt_session(conn, "old-receipt")
-    _age(conn, pending["pending_key"], "idle", 30)
-    _age_receipt(conn, "old-receipt", 30)
+def test_a_session_record_does_not_sweep_a_current_session(conn):
+    """A consumer that only passes launch checks writes no timestamp; another node's record must not remove it."""
+    pending = _acknowledged_session(conn, "launch-only")
+    _age(conn, pending["pending_key"], "launch-only", 30)
 
-    _receipt_session(conn, "fresh-receipt")
+    _receipt_session(conn, "other-node-receipt")
 
-    assert [row[0] for row in conn.execute("SELECT session_id FROM fleet_policy_sessions")] == ["fresh-receipt"]
-    assert _counts(conn)["fleet_policy_pending"] == 0
-    assert _counts(conn)["fleet_policy_acknowledged"] == 0
+    assert _three(conn) == (2, 1, 1)
+    assert (
+        fleet_hub_policy.find_loaded_session(
+            conn, session_id=pending["pending_key"], consumer=CONSUMER, repo_identity=REPO
+        )
+        is not None
+    )
 
 
 def test_the_cutoff_is_fourteen_days(conn):
