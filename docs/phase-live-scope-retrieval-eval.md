@@ -102,7 +102,7 @@ The automatic path denies such a target earlier, with `card_trust_denied`, for
 every op except `merge_exact_duplicates`. A single exact-duplicate pair of
 `agent-unreviewed` cards passes `card_trust` when the merge gate proves one
 writer wrote both and is applying, so for that op this hold, with
-`retrieval_eval_merge_cross_writer`, is load-bearing and no longer a backstop. The literal scan
+`retrieval_eval_merge_cross_writer`, is the check that decides. The literal scan
 spends its byte budget on the text it searches, so an admitted append cannot
 push later matching cards past it.
 
