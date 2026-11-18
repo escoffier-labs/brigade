@@ -21,6 +21,15 @@ Every writer behind ``brigade care install`` and ``brigade memory care init
 * ``dry_run=True`` checks every destination exactly like a real run, then prints
   what would be written and touches nothing.
 
+A shipped file that already exists is kept unless it is *pristine*: its content
+(minus the top-level ``pins`` block, and only that block) equals a text a past
+release shipped for that runbook (``shipped_history``). Such a copy has no local
+edits and is replaced with the current text and fresh pins, no backup, printed as
+``refreshed (pristine): <path>``. It is re-read without following a link right
+before the publish and kept if it changed meanwhile. Any other differing copy is
+never overwritten and is reported once as ``kept (drifted): <path>``. These two
+lines go to stderr when *quiet* is set, so a ``--json`` caller's stdout stays clean.
+
 ``refresh=True`` is for the explicit ``memory care init --force
 --with-runbooks`` only. A shipped file whose content differs from the template
 is copied to ``<name>.bak-<UTC timestamp>`` and then replaced. A file that
@@ -43,7 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import localio, runbook_cmd
+from . import localio, runbook_cmd, shipped_history
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,37 @@ class RunbookSpec:
 
     rel: str
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _Item:
+    """One destination to publish. ``expected`` is the bytes of a pristine past-release copy to replace."""
+
+    spec: RunbookSpec
+    dest: Path
+    exists: bool
+    expected: bytes | None = None
+
+
+def _say(line: str, *, quiet: bool) -> None:
+    print(line, file=sys.stderr if quiet else sys.stdout)
+
+
+def _classify(spec: RunbookSpec, dest: Path) -> tuple[str, bytes | None]:
+    """Compare an existing shipped file with the spec: ``same``, ``pristine`` (a past release) or ``drifted``."""
+    try:
+        raw = shipped_history.read_regular_file(dest, shipped_history.MAX_INSTALLED_BYTES)
+    except OSError:
+        return "drifted", None
+    digest = shipped_history.runbook_bytes_digest(raw)
+    if digest is None:
+        return "drifted", raw
+    wanted = shipped_history.runbook_payload_digest(spec.payload)
+    if digest == wanted:
+        return "same", raw
+    known = shipped_history.digests(shipped_history.runbook_key(spec.rel))
+    # Both the installed text and the one about to be written must be recorded shipped texts.
+    return ("pristine" if digest in known and wanted in known else "drifted"), raw
 
 
 def shipped_specs(template_dir: Path, rel_dir: str, names: Iterable[str]) -> tuple[list[RunbookSpec] | None, int]:
@@ -179,13 +219,29 @@ def _publish(staged: Path, dest: Path, *, replace: bool, stamp: str) -> str | No
     return f"replaced shipped runbook: {dest} (backup: {backup})"
 
 
-def _report_plan(work: list[tuple[RunbookSpec, Path, bool]], *, quiet: bool) -> int:
+def _publish_pristine(staged: Path, dest: Path, expected: bytes) -> str | None:
+    """Replace a pristine past-release copy, only if it still holds exactly ``expected``; None means kept."""
+    try:
+        current = shipped_history.read_regular_file(dest, shipped_history.MAX_INSTALLED_BYTES)
+    except OSError:
+        return None
+    if current != expected:
+        return None
+    os.replace(staged, dest)
+    return f"refreshed (pristine): {dest}"
+
+
+def _report_plan(work: list[_Item], *, quiet: bool) -> int:
     """Print what a real run would do for each destination; writes nothing."""
     if quiet:
         return 0
-    for spec, dest, exists in work:
+    for item in work:
+        spec, dest, exists = item.spec, item.dest, item.exists
         if not exists:
             print(f"would write runbook: {dest}")
+            continue
+        if item.expected is not None:
+            print(f"would refresh (pristine): {dest}")
             continue
         try:
             current = dest.read_bytes()
@@ -218,7 +274,7 @@ def ensure(
 
 
 def _ensure(target: Path, specs: list[RunbookSpec], *, refresh: bool, dry_run: bool, quiet: bool) -> int:
-    work: list[tuple[RunbookSpec, Path, bool]] = []  # (spec, dest, destination exists)
+    work: list[_Item] = []
     for spec in specs:
         dest = target / spec.rel
         problem = _dir_problem(target, dest.parent)
@@ -233,7 +289,13 @@ def _ensure(target: Path, specs: list[RunbookSpec], *, refresh: bool, dry_run: b
             )
             return 2
         if regular is None or refresh:
-            work.append((spec, dest, regular is True))
+            work.append(_Item(spec, dest, regular is True))
+            continue
+        state, raw = _classify(spec, dest)
+        if state == "pristine":
+            work.append(_Item(spec, dest, True, raw))
+        elif state == "drifted":
+            _say(f"kept (drifted): {dest}", quiet=quiet)
     if dry_run:
         return _report_plan(work, quiet=quiet)
     if not work:
@@ -241,8 +303,9 @@ def _ensure(target: Path, specs: list[RunbookSpec], *, refresh: bool, dry_run: b
 
     stage_dirs: dict[Path, Path] = {}
     try:
-        staged: list[tuple[Path, Path, bool]] = []
-        for spec, dest, exists in work:
+        staged: list[tuple[Path, _Item]] = []
+        for item in work:
+            spec, dest = item.spec, item.dest
             if dest.parent not in stage_dirs:
                 dest.parent.parent.mkdir(parents=True, exist_ok=True)
                 if (problem := _dir_problem(target, dest.parent)) is not None:
@@ -252,16 +315,23 @@ def _ensure(target: Path, specs: list[RunbookSpec], *, refresh: bool, dry_run: b
             result = _stage(target, spec, stage_dirs[dest.parent])
             if isinstance(result, int):
                 return result
-            staged.append((result, dest, exists))
+            staged.append((result, item))
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         done: list[str] = []
-        for staged_path, dest, exists in staged:
+        for staged_path, item in staged:
+            dest = item.dest
             try:
                 dest.parent.mkdir(exist_ok=True)
                 if (problem := _dir_problem(target, dest.parent)) is not None:
                     raise OSError(problem)
-                line = _publish(staged_path, dest, replace=exists, stamp=stamp)
+                if item.expected is not None:
+                    line = _publish_pristine(staged_path, dest, item.expected)
+                    _say(line or f"kept (drifted): {dest}", quiet=quiet)
+                    if line is not None:
+                        done.append(dest.name)
+                    continue
+                line = _publish(staged_path, dest, replace=item.exists, stamp=stamp)
             except OSError as exc:
                 print(f"error: cannot publish runbook {dest}: {exc}", file=sys.stderr)
                 if done:

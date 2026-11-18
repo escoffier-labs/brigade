@@ -21,6 +21,16 @@ Set the version in `pyproject.toml`, then synchronize every stamped location:
 .venv/bin/python scripts/version_sync.py --check
 ```
 
+Regenerate the shipped-file history, which records every released text of the bundled `SKILL.md` files and care runbooks so an upgrade can refresh an installed copy that has no local edits. Do it before the version-bump commit, with every `v*` tag fetched, and commit the result with the bump:
+
+```bash
+git fetch origin --tags
+.venv/bin/python scripts/shipped_file_history.py --write
+.venv/bin/python scripts/shipped_file_history.py --check
+```
+
+The file is append-only. The release cut leaves the new texts marked unreleased, and the first `--write` after the tag exists records the tag.
+
 ## 2. Full verification
 
 ```bash
