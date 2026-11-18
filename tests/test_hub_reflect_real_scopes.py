@@ -210,7 +210,7 @@ class ProposalReads:
         if action == "proposal_show":
             return 200, {"proposal_id": self.ident, "state": "pending", "diff": None}
         if action == "decide":
-            assert body["expected_policy_digest"] == "a" * 64
+            assert body["expected_policy_digest"] == "sha256:" + "a" * 64
             return 200, {"proposal_id": self.ident, "state": "applied" if body["decision"] == "accept" else "rejected"}
         return self.hub(url, token, body, timeout)
 
@@ -231,6 +231,44 @@ def test_operator_list_defaults_pending_and_all_is_explicit(setup, capsys, monke
     assert not any(c["action"] in {"log", "card", "decide"} for c in transport.calls)
 
 
+EMPTY_LIST_NOTE = (
+    "note: an empty list also means this credential lacks list_proposals on *. Use proposals show <id> with a known id."
+)
+
+
+def test_list_empty_prints_note_only_without_json(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    transport = ProposalReads(hub)
+
+    def empty(url, token, body, timeout):
+        if body["action"] == "proposal_list":
+            return 200, {"proposals": [], "next_after": None}
+        return transport(url, token, body, timeout)
+
+    monkeypatch.setattr(hubc, "urllib_transport", empty)
+    code = cli.main(["memory", "proposals", "list", "--target", str(target)])
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert code == 0
+    assert json.loads("\n".join(lines[:-1])) == {"proposals": [], "next_after": None}
+    assert lines[-1] == EMPTY_LIST_NOTE
+
+    code = cli.main(["memory", "proposals", "list", "--target", str(target), "--json"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert json.loads(out) == {"proposals": [], "next_after": None}
+    assert EMPTY_LIST_NOTE not in out
+
+
+def test_list_non_empty_prints_no_note(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    monkeypatch.setattr(hubc, "urllib_transport", ProposalReads(hub))
+    code = cli.main(["memory", "proposals", "list", "--target", str(target)])
+    out = capsys.readouterr().out
+    assert code == 0 and EMPTY_LIST_NOTE not in out
+    assert json.loads(out)["proposals"]
+
+
 def test_show_preserves_hub_redaction(setup, capsys, monkeypatch):
     target, hub, _ = setup
     transport = ProposalReads(hub)
@@ -241,7 +279,7 @@ def test_show_preserves_hub_redaction(setup, capsys, monkeypatch):
 
 
 @pytest.mark.parametrize("decision,state", [("accept", "applied"), ("reject", "rejected")])
-def test_decide_sends_explicit_policy_digest(setup, capsys, monkeypatch, decision, state):
+def test_decide_normalizes_bare_hex_digest_to_prefixed(setup, capsys, monkeypatch, decision, state):
     target, hub, _ = setup
     transport = ProposalReads(hub)
     monkeypatch.setattr(hubc, "urllib_transport", transport)
@@ -250,9 +288,48 @@ def test_decide_sends_explicit_policy_digest(setup, capsys, monkeypatch, decisio
     )
     assert code == 0 and report["state"] == state
     [request] = [c for c in transport.calls if c["action"] == "decide"]
+    assert request["expected_policy_digest"] == "sha256:" + "a" * 64
     assert request["decision"] == decision
     assert request["base_epoch"] == hub.epoch
     assert hubc.event_id_ms(request["client_event_id"]) is not None
+
+
+def test_decide_accepts_prefixed_digest_verbatim(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    transport = ProposalReads(hub)
+    digest = "sha256:" + "c" * 64
+    calls = []
+
+    def decide(url, token, body, timeout):
+        if body["action"] == "decide":
+            calls.append(body)
+            return 200, {"proposal_id": transport.ident, "state": "applied"}
+        return transport(url, token, body, timeout)
+
+    monkeypatch.setattr(hubc, "urllib_transport", decide)
+    code, report = proposals(target, capsys, "decide", transport.ident, "--accept", "--expected-policy-digest", digest)
+    assert code == 0 and report["state"] == "applied"
+    assert len(calls) == 1 and calls[0]["expected_policy_digest"] == digest
+
+
+@pytest.mark.parametrize(
+    "bad", ["sha256:" + "A" * 64, "sha256:xyz", "deadbeef", "sha256:" + "a" * 63, "SHA256:" + "a" * 64]
+)
+def test_decide_refuses_invalid_digest_before_hub_call(setup, capsys, monkeypatch, bad):
+    target, hub, _ = setup
+    transport = ProposalReads(hub)
+    calls = []
+
+    def decide(url, token, body, timeout):
+        if body["action"] == "decide":
+            calls.append(body)
+        return transport(url, token, body, timeout)
+
+    monkeypatch.setattr(hubc, "urllib_transport", decide)
+    code, report = proposals(target, capsys, "decide", transport.ident, "--reject", "--expected-policy-digest", bad)
+    assert code == 2 and "--expected-policy-digest" in report["error"]
+    assert "proposals show" in report["error"]
+    assert calls == []
 
 
 def test_care_reinstall_retains_scope_without_repeating_option(setup, capsys):
@@ -278,7 +355,7 @@ def test_decide_policy_mismatch_never_retries_or_prints_hub_text(setup, capsys, 
             return 409, {
                 "code": "memory_policy_digest_mismatch",
                 "error": "private card text",
-                "policy_digest": "b" * 64,
+                "policy_digest": "sha256:" + "b" * 64,
             }
         return transport(url, token, body, timeout)
 
@@ -287,9 +364,26 @@ def test_decide_policy_mismatch_never_retries_or_prints_hub_text(setup, capsys, 
         target, capsys, "decide", transport.ident, "--accept", "--expected-policy-digest", "a" * 64
     )
     assert code == 2 and report["error"] == "memory_policy_digest_mismatch"
-    assert report["policy_digest"] == "b" * 64
-    assert len(calls) == 1 and calls[0]["expected_policy_digest"] == "a" * 64
+    assert report["policy_digest"] == "sha256:" + "b" * 64
+    assert len(calls) == 1 and calls[0]["expected_policy_digest"] == "sha256:" + "a" * 64
     assert "private card text" not in json.dumps(report)
+
+
+def test_decide_policy_mismatch_drops_unrecognized_digest(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    transport = ProposalReads(hub)
+
+    def refusal(url, token, body, timeout):
+        if body["action"] == "decide":
+            return 409, {"code": "memory_policy_digest_mismatch", "error": "denied", "policy_digest": "b" * 64}
+        return transport(url, token, body, timeout)
+
+    monkeypatch.setattr(hubc, "urllib_transport", refusal)
+    code, report = proposals(
+        target, capsys, "decide", transport.ident, "--accept", "--expected-policy-digest", "sha256:" + "a" * 64
+    )
+    assert code == 2 and report["error"] == "memory_policy_digest_mismatch"
+    assert "policy_digest" not in report
 
 
 def test_operator_credential_file_pair_is_explicit_and_never_falls_back(setup, capsys, monkeypatch):

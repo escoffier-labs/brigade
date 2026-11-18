@@ -1,0 +1,2 @@
+- Accept the hub's `sha256:` policy digest in `memory proposals decide`, including the bare-hex form, so an operator can copy the value printed by `proposals show` and get an accept decision past the hub's digest check.
+- Note on a non-JSON `memory proposals list` that an empty result can also mean the credential lacks `list_proposals` on `*`, while leaving JSON output unchanged.
