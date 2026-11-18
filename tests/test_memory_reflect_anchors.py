@@ -467,6 +467,54 @@ def test_lineage_hold_leaves_the_proposal_open_for_review_and_is_not_retried(set
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
     reason="safe directory descriptors unavailable",
 )
+@pytest.mark.parametrize("stored", ["window", "future", "legacy-true"])
+def test_lineage_review_flag_expires_so_the_card_is_proposed_again(setup, capsys, monkeypatch, stored):
+    import json
+    from brigade import memory_reflect_hub as reflect_hub
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "robot-a", card_text("Unique robot-a.", None), "live", "robot-a")
+    policy.set_enabled(target, True)
+    held = [{"gate": "candidate", "state": "held", "code": "lineage_requires_review"}]
+    monkeypatch.setattr(
+        hub,
+        "do_auto_apply",
+        lambda body: (200, {"state": "pending", "reason": "auto_apply_held", "preflight": {"checks": held}}),
+        raising=False,
+    )
+    assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    path = target / ".brigade/memory/reflect/schedule.json"
+    state = json.loads(path.read_text())
+    flagged = [record for record in state["submissions"].values() if "lineage_review" in record]
+    assert len(flagged) == 1 and type(flagged[0]["lineage_review"]) is int
+    proposed = len([call for call in writes(hub) if call["action"] == "propose"])
+    # Inside the window the proposal stays suppressed, which is the old behaviour.
+    code, quiet = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0 and quiet["skipped_reasons"]["lineage_review"] == 1
+    assert len([call for call in writes(hub) if call["action"] == "propose"]) == proposed
+    # Past it, or for a time that cannot be trusted, or for state with no time, it is proposed again.
+    if stored == "window":
+        later = reflect_hub._now_ms() + reflect_hub.LINEAGE_REVIEW_RETRY_MS + 1
+        monkeypatch.setattr(reflect_hub, "_now_ms", lambda: later)
+    else:
+        flagged[0]["lineage_review"] = (
+            reflect_hub._now_ms() + 10 * reflect_hub.LINEAGE_REVIEW_RETRY_MS if stored == "future" else True
+        )
+        path.write_text(json.dumps(state))
+        assert reflect_hub.schedule_status(target)["consecutive_failures"] == 0
+    code, again = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert "lineage_review" not in again["skipped_reasons"]
+    assert len([call for call in writes(hub) if call["action"] == "propose"]) == proposed + 1
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_future_withdrawal_time_does_not_extend_suppression(setup, capsys, monkeypatch):
     import json
     from brigade import memory_reflect_hub as reflect_hub

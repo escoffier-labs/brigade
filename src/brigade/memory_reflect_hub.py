@@ -79,7 +79,8 @@ LEDGER_FIELDS = {
     "pins": ledger.valid_pins,
     "attempted_ms": lambda value: type(value) is int and value >= 0,
     "anchor_review_only": lambda value: type(value) is int and value >= 0,
-    "lineage_review": lambda value: value is True,
+    # The time the hub left the proposal open for review. Older state wrote `True`.
+    "lineage_review": lambda value: value is True or (type(value) is int and value >= 0),
     "ops_sha256": _digest,
     "duplicate": lambda value: value is True,
     "expired": lambda value: value is True,
@@ -203,8 +204,22 @@ def _awaits_lineage_review(automatic: object) -> bool:
 ANCHOR_WITHDRAWN_RETRY_MS = 7 * 24 * 60 * 60 * 1000
 
 
+# A proposal left open for lineage review waits this long before reflection proposes it again.
+LINEAGE_REVIEW_RETRY_MS = 7 * 24 * 60 * 60 * 1000
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _lineage_review_expired(reviewed_ms: object) -> bool:
+    """A future time counts as expired, so local state cannot stretch the window.
+
+    The first version of this field was a bare `True` with no time, which counts as expired too.
+    """
+    if type(reviewed_ms) is not int:
+        return True
+    return not 0 <= _now_ms() - reviewed_ms < LINEAGE_REVIEW_RETRY_MS
 
 
 def _submission_digest(ops: list[dict[str, Any]]) -> str:
@@ -592,9 +607,15 @@ def _reflect(
             digest = _submission_digest(ops)
             remembered = previous.get(digest, {})
             withdrawn_ms = remembered.get("anchor_review_only")
-            if remembered.get("lineage_review"):
+            reviewed_ms = remembered.get("lineage_review")
+            if reviewed_ms is not None and not _lineage_review_expired(reviewed_ms):
                 # The hub kept it open for review. A retry would be held the same way.
                 skipped["lineage_review"] = skipped.get("lineage_review", 0) + 1
+            elif reviewed_ms is not None:
+                # The link may be gone and the proposal decided by now. Forget it so a later
+                # run proposes the card again. The hub reports a still-open copy as a duplicate.
+                previous.pop(digest, None)
+                fresh.append((digest, ops))
             elif type(withdrawn_ms) is int and all(op["type"] == "anchor_blocks" for op in ops):
                 # A future timestamp counts as expired, so local state cannot stretch the window.
                 if 0 <= _now_ms() - withdrawn_ms < ANCHOR_WITHDRAWN_RETRY_MS:
@@ -766,7 +787,7 @@ def _reflect(
                 review = _awaits_lineage_review(proposal.get("automatic"))
                 if review and sent.proposal_id is not None:
                     # A lineage target needs a human decision, so the proposal stays open and is not retried.
-                    previous[digest]["lineage_review"] = True
+                    previous[digest]["lineage_review"] = _now_ms()
                     _save(target, state)
                 if (
                     anchoring
