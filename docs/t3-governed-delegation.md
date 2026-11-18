@@ -47,6 +47,7 @@ provider_instance = "codex-example"
 driver = "codex"
 model = "example-model"
 isolation = "worktree"
+max_live = 2
 
 [t3_targets.coder.options]
 reasoningEffort = "high"
@@ -55,9 +56,11 @@ reasoningEffort = "high"
 The eight identity fields above are required. `runtime_mode` defaults to
 `app-server` and `interaction_mode` to `default`. `isolation` must be
 `worktree`, unknown fields refuse the whole batch, and a seat without a
-declaration refuses the whole batch. The source revision is never taken from
-the roster. It is the clean workspace `HEAD` at `open` time, and a dirty
-workspace refuses.
+declaration refuses the whole batch. `max_live` is optional and must be a
+positive integer. It caps how many governed native tasks that one seat may hold
+at once. Without it the seat has no per-seat cap and only the workspace-wide
+limit applies. The source revision is never taken from the roster. It is the
+clean workspace `HEAD` at `open` time, and a dirty workspace refuses.
 
 ## What open writes
 
@@ -91,15 +94,16 @@ the native tool.
 
 1. `t3 open` retains the exact delegation input and the reference-only
    enrollment facts.
-2. `t3 claim` takes the per-invocation run lock, checks the run-wide barrier
-   and the asset, template, source and run-state bindings, then makes one
-   coordinator call with `reclaim_pending=False`. Inside its
-   `record_requested` callback it prepares the attempt, finalizes the
-   `NativeIntent` from the retained template, binds it with a digests-only
-   journal fact, consumes the launch claim and records the durable dispatch
-   request. Only a granted claim prints the delegate arguments, and only after
-   every mutation committed. The parent submits that exact input through its
-   own `delegate_task` call.
+2. `t3 claim` takes the workspace native capacity lock and then the
+   per-invocation run lock. Under both locks it checks live governed
+   occupancy, re-applies seat admission, checks the run-wide barrier and the
+   asset, template, source and run-state bindings, then makes one coordinator
+   call with `reclaim_pending=False`. Inside its `record_requested` callback it
+   prepares the attempt, finalizes the `NativeIntent` from the retained
+   template, binds it with a digests-only journal fact, consumes the launch
+   claim and records the durable dispatch request. Only a granted claim prints
+   the delegate arguments, and only after every mutation committed. The parent
+   submits that exact input through its own `delegate_task` call.
 3. `t3 accepted` validates the full returned projection against the durable
    claim and intent and records it as parent-reported correlation. It never
    proves that T3 created or accepted the task.
@@ -146,6 +150,77 @@ to retry. Use `t3 hold-resolve --abandon` when the attempt must be closed. It
 records the missing dispatch request, which clears the barrier for the rest of
 the run, marks the attempt terminal-unknown and leaves the budget unit charged.
 The task itself stays held and can never be claimed again.
+
+## Claim admission and workspace capacity
+
+Brigade is the admission and capacity authority for governed T3, because T3
+Code keeps no admission ledger and no child concurrency limit. `t3 claim`
+therefore re-applies seat admission and bounds concurrent governed tasks
+across every run in the workspace.
+
+### Seat admission
+
+A claim is admitted only when all of these hold.
+
+- The seat exists in the current roster and is not the orchestrator.
+- The current `[t3_targets.<seat>]` declaration resolves and equals the
+  retained target in every `NativeTarget` field, including canonical options.
+  A declaration edited after `t3 open` refuses the claim.
+- The seat adapter passes `limits.allow_models`, and neither the target launch
+  model nor the seat model is retired.
+- When this node is enrolled with a Hub, `fleet_policy.admissible_seat` passes
+  against the live Hub policy for the `brigade-run` consumer.
+
+An enrolled node requires live policy authority. A policy read that fails, or a
+last-known-good roster used without live policy, refuses with
+`admission-unavailable`. Local roster rules alone never authorize a claim once
+active enrollment is observed. Refusals are fixed tokens on stderr with empty
+stdout. A granted claim records digests-only evidence on its
+`task.native-claimed` fact: the admission code, the roster digest and, when
+enrolled, the live policy digest.
+
+### Occupancy and the capacity rule
+
+Occupancy counts one unit for every durable `task.launch-claimed` fact in every
+native-enrolled run under the workspace runs root. A unit stays live until a
+trusted terminal result proves quiescence and that exact result is
+acknowledged. These all occupy:
+
+- a claim that was requested but never correlated,
+- a correlated nonterminal task,
+- a task held for any reason,
+- a task abandoned after its launch claim.
+
+A binding abandoned before any launch claim occupies nothing, because it never
+charged or launched. The scanner never takes a run lock. It uses bounded
+no-follow reads, caps the run entries and bytes it reads, and marks its answer
+non-authoritative on any malformed, unreadable, replaced or unverifiable run.
+A claim then refuses with `capacity-unknown` rather than reading an unreadable
+run as zero live work.
+
+The capacity rule is `min(global_free, seat_free)`.
+
+- `global_free` is `limits.max_workers` minus every live governed task in the
+  workspace. `max_workers` is one workspace-wide allowance, never one
+  allowance per seat.
+- `seat_free` is `max_live` minus the seat's live count, and it applies only
+  when that seat declares `max_live`.
+
+Zero remaining capacity refuses with `capacity-denied`.
+
+### Lock order
+
+`t3 claim` takes one crash-safe workspace-scoped native capacity lock with a
+bounded wait, then the existing per-invocation run lock. The order is fixed and
+no path acquires the run lock first. The capacity lock is held through
+`reserve_and_record_dispatch`, so the launch claim and the dispatch request are
+durable before the lock is released. A lock wait timeout, or a stale lock that
+is not yet reconcilable, refuses with `capacity-lock` instead of proceeding.
+
+Post-launch abandonment retains capacity indefinitely. `t3 hold-resolve
+--abandon` never frees a unit, and no release command exists today. Releasing
+that capacity requires a separately reviewed containment-reconciliation
+operation. None is implemented here.
 
 ## Reported correlation, not authenticated acceptance
 

@@ -40,7 +40,18 @@ def _workspace(tmp_path: Path, *, targets: tuple[str, ...] = ("coder",)) -> Path
     (repo / "tracked.txt").write_text("base\n")
     _git(repo, "add", "tracked.txt")
     _git(repo, "commit", "-m", "initial")
-    lines = ['orchestrator = "coder"', "", "[agents.coder]", 'cli = "codex"', 'role = "coder"', ""]
+    lines = [
+        'orchestrator = "lead"',
+        "",
+        "[agents.lead]",
+        'cli = "codex"',
+        'role = "orchestrator"',
+        "",
+        "[agents.coder]",
+        'cli = "codex"',
+        'role = "coder"',
+        "",
+    ]
     for name in targets:
         lines += [
             f"[t3_targets.{name}]",

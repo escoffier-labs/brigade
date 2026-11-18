@@ -459,7 +459,12 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
     for seat_name, target_config in raw_targets.items():
         if not isinstance(target_config, dict):
             raise ValueError(f"t3_targets.{seat_name} must be a TOML table")
-        t3_targets[_as_str(seat_name, "t3_targets seat name")] = dict(target_config)
+        seat = _as_str(seat_name, "t3_targets seat name")
+        if "max_live" in target_config:
+            max_live = target_config["max_live"]
+            if type(max_live) is not int or max_live < 1:
+                raise ValueError(f"t3_targets.{seat}.max_live must be a positive integer")
+        t3_targets[seat] = dict(target_config)
 
     parsed_agents: dict[str, Agent] = {}
     for name, raw_agent in raw_agents.items():
