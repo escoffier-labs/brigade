@@ -6,8 +6,9 @@ last accepted a successful observation, so readers can tell "zero sessions" from
 "unknown". Both timestamps are the Hub's own clock at receipt: a node-supplied time
 never decides freshness.
 
-A node with no row here has never reported health, and keeps its previous behavior.
-The table is optional: it is created on the first report, never at hub startup.
+A node with no row here has never reported health. Session views leave such a node alone, but
+placement treats its sessions as unknown (every host runs the observer, so a missing row means
+the node is not reporting). The table is optional: it is created on the first report, never at hub startup.
 """
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ from .fleet_hub import FleetHubError, FleetHubForbidden
 from .fleet_hub_routing import _bounded, _machine_for_node, _parse_stamp
 
 # Equal to the T3 session presence TTL (fleet_openclaw_observer.TTL_SECONDS): once a node's
-# sessions could have expired because it stopped reporting, its count is unknown. One missed
-# 120 s cycle stays known, two missed cycles do not.
+# sessions could have expired because it stopped reporting, its count is unknown. With a 120 s
+# timer, a node is still known after two missed cycles (age 240 s) and unknown on the third (360 s).
 STALE_AFTER_SECONDS = 300
 _FIELDS = frozenset({"node_id", "ok"})
 
@@ -93,21 +94,22 @@ def observe_t3(conn: sqlite3.Connection, body: Any, caller_node: str) -> dict[st
         raise
 
 
-def stale_nodes(
+def classify_nodes(
     conn: sqlite3.Connection, now: datetime | None = None, ttl: int = STALE_AFTER_SECONDS
-) -> set[str] | None:
-    """Pure read: node ids with a health row whose last success is missing or older than ``ttl``.
+) -> tuple[set[str], set[str]] | None:
+    """Pure read: (fresh, stale) node ids among nodes that have a health row, or None if unreadable.
 
-    A missing table means no node ever reported, so the set is empty. Any other read failure
-    returns None: the caller must treat every node's T3 sessions as unknown. Never writes.
+    Fresh means the last success is younger than ``ttl``. A missing table means no node ever
+    reported, so both sets are empty. Never writes.
     """
     moment = now or _now()
     try:
         rows = conn.execute("SELECT node_id, last_success_at FROM fleet_t3_observations").fetchall()
     except sqlite3.OperationalError as exc:
-        return set() if "no such table" in str(exc) else None
+        return (set(), set()) if "no such table" in str(exc) else None
     except sqlite3.Error:
         return None
+    fresh: set[str] = set()
     stale: set[str] = set()
     for node_id, last_success in rows:
         try:
@@ -115,9 +117,32 @@ def stale_nodes(
         except ValueError:
             success = None  # An unparseable stamp is as unknown as a missing one.
         # Session rows are published before the health post, so at exactly ``ttl`` they have expired.
-        if success is None or moment - success >= timedelta(seconds=ttl):
-            stale.add(str(node_id))
-    return stale
+        known = success is not None and moment - success < timedelta(seconds=ttl)
+        (fresh if known else stale).add(str(node_id))
+    return fresh, stale
+
+
+def stale_nodes(
+    conn: sqlite3.Connection, now: datetime | None = None, ttl: int = STALE_AFTER_SECONDS
+) -> set[str] | None:
+    """Node ids with a health row whose last success is missing or at least ``ttl`` old, for session views.
+
+    A node with no row is not listed. None means the read failed: treat everything as unknown.
+    """
+    classified = classify_nodes(conn, now, ttl)
+    return None if classified is None else classified[1]
+
+
+def fresh_nodes(
+    conn: sqlite3.Connection, now: datetime | None = None, ttl: int = STALE_AFTER_SECONDS
+) -> set[str] | None:
+    """Node ids whose observer succeeded within ``ttl``, for placement. None means the read failed.
+
+    Placement trusts a session count only for these nodes: no row, a failed attempt and a stale
+    success are all unknown.
+    """
+    classified = classify_nodes(conn, now, ttl)
+    return None if classified is None else classified[0]
 
 
 def unknown_view(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:

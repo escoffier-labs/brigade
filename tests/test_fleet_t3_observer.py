@@ -1073,6 +1073,18 @@ def test_rotation_truncation_still_counts_as_a_healthy_observer(native_t3, capsy
     assert report["health"] == "ok" and HEALTH_POSTS == [{"node_id": NODE, "ok": True}]
 
 
+def test_an_invalid_active_thread_reports_an_unhealthy_observer_but_keeps_publishing(native_t3, capsys):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure([_running("app-thread-good"), _running("bad\x01id")])
+    assert main(["--t3-python", sys.executable, "--publish"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    # The valid thread still publishes; the skipped one may hide a session, so presence is not healthy.
+    assert report["invalid_rows"] == 1 and len(published) == 1 and "error" not in report
+    assert report["health"] == "ok" and HEALTH_POSTS == [{"node_id": NODE, "ok": False}]
+
+
 def test_a_failed_session_publication_reports_an_unhealthy_observer(native_t3, monkeypatch, capsys):
     from brigade.fleet_t3_observer import main
 
@@ -1172,6 +1184,14 @@ def test_health_is_posted_before_the_inventory_so_it_is_never_starved_by_it(inve
     assert main(["--t3-python", sys.executable, "--publish"]) == 0
     capsys.readouterr()
     assert order == ["health", "inventory"]
+
+
+def test_publish_reserve_fits_the_session_publish_and_the_health_post():
+    from brigade import fleet_t3_observer as observer
+
+    assert observer.PUBLISH_RESERVE_SECONDS == (
+        fleet_client.REPORT_TIMEOUT_SECONDS + fleet_client_policy.POLICY_TIMEOUT_SECONDS
+    )
 
 
 def test_snapshot_cap_is_the_remaining_budget_minus_the_publish_reserve():

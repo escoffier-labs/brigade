@@ -225,9 +225,10 @@ def _place(
     except Exception:
         # Fail closed: unreadable sessions must never read as zero sessions.
         live = None
-    # Nodes whose T3 observer stopped reporting. Their expired presence rows would read as zero
-    # sessions, so their count is unknown. None means the health read itself failed: all unknown.
-    stale = fleet_t3_health.stale_nodes(conn, now)
+    # Only nodes whose T3 observer reported recently have a trustworthy count. Expired presence rows
+    # read as zero sessions, so a stale node, or one with no health row (every host runs the observer
+    # after rollout), is unknown. None means the health read itself failed: all unknown.
+    healthy = fleet_t3_health.fresh_nodes(conn, now)
 
     loads: dict[str, dict[str, Any]] = {}
 
@@ -249,7 +250,7 @@ def _place(
         cpu = None if telemetry is None else telemetry.get("load")
         capacity = int(machine.get("concurrency") or 0)
         node = str(machine.get("node_id"))
-        sessions = None if live is None or stale is None or node in stale else int(live.get(node, 0))
+        sessions = None if live is None or healthy is None or node not in healthy else int(live.get(node, 0))
         if sessions is None:
             reasons.append("sessions-unknown")
         # Hub-counted sessions are a floor under the node-reported CPU load. Node memory joins this

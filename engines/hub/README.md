@@ -334,8 +334,10 @@ clock with the managed Python upstream. This flag is for throwaway fixtures.
 
 ### Native heartbeat (S6)
 
-`--route-mode heartbeat=native` serves `POST /events`, `GET /status`,
-`POST /sessions` and `GET /sessions`. The default stays `proxy`. Shadow mode
+`--route-mode heartbeat=native` serves `POST /events`, `GET /status` and
+`POST /sessions`. `GET /sessions` stays on the Python upstream because its body
+carries `nodes_unknown`, the T3 observer health view, which has no native
+projection. The default stays `proxy`. Shadow mode
 is refused until a heartbeat shadow audit exists. The native commands share
 one hub-file writer with registration, claims and messages. Event and session
 admission is non-durable, with the durable queue reserve left for claims and

@@ -39,7 +39,7 @@ from .fleet_session_presence import ProviderLinkState
 # budget minus PUBLISH_RESERVE_SECONDS, so a slow shell read under load still fits.
 NATIVE_TIMEOUT_SECONDS = 8
 # Held back for the session publish and the health post that follow the snapshot.
-PUBLISH_RESERVE_SECONDS = 3.5
+PUBLISH_RESERVE_SECONDS = fleet_client.REPORT_TIMEOUT_SECONDS + fleet_client_policy.POLICY_TIMEOUT_SECONDS
 INVENTORY_TTL_SECONDS = 900
 DETAIL_RESERVE_SECONDS = 1.5
 MAX_THREADS = 10_000
@@ -502,8 +502,9 @@ def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
         report["skipped"] = cast(int, report["skipped"]) + invalid
         report["ok"] = not (report["truncated"] or invalid or report.get("error"))
         # Never changes ok or the exit code. Rotation truncation and the inventory do not matter:
-        # only a session publication that ran without error counts as current presence.
-        report["health"] = _publish_health(not report.get("error"), deadline=deadline)
+        # only a clean session publication over a fully valid snapshot counts as current presence,
+        # so an invalid (skipped) active thread means the count may be low and is not reported healthy.
+        report["health"] = _publish_health(not (report.get("error") or invalid), deadline=deadline)
         # After sessions, within the same deadline. Never changes ok or the exit code.
         report["inventory"], report["inventory_dropped"] = _publish_inventory(payload, deadline=deadline)
     return report

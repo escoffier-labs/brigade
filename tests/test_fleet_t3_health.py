@@ -135,12 +135,33 @@ def test_stale_threshold_equals_the_session_ttl(conn):
     assert fleet_openclaw_observer.TTL_SECONDS == SESSION_TTL
 
 
-def test_one_missed_cycle_stays_known_and_two_become_unknown(conn):
+def test_two_missed_cycles_stay_known_and_the_third_becomes_unknown(conn):
     cycle = 120
-    _seed(conn, NODE_LINUX, 1 * cycle)  # one missed 120 s cycle: the 300 s session rows are still live
-    _seed(conn, NODE_LINUX_2, 2 * cycle + 60)  # two missed cycles: session rows may have expired
+    _seed(conn, NODE_LINUX, 2 * cycle)  # two missed 120 s cycles (age 240 s): the 300 s session rows are still live
+    _seed(conn, NODE_LINUX_2, 3 * cycle)  # third missed cycle (age 360 s): session rows may have expired
     assert fleet_t3_health.stale_nodes(conn, MOMENT) == {NODE_LINUX_2}
+    assert fleet_t3_health.fresh_nodes(conn, MOMENT) == {NODE_LINUX}
     assert fleet_t3_health.stale_nodes(conn, MOMENT + timedelta(seconds=59)) == {NODE_LINUX_2}
+    assert fleet_t3_health.stale_nodes(conn, MOMENT + timedelta(seconds=60)) == {NODE_LINUX, NODE_LINUX_2}
+
+
+def test_fresh_and_stale_never_overlap_and_a_node_without_a_row_is_in_neither(conn):
+    _seed(conn, NODE_LINUX, 5)
+    _seed(conn, NODE_LINUX_2, 9999)
+    assert fleet_t3_health.fresh_nodes(conn, MOMENT) == {NODE_LINUX}
+    assert fleet_t3_health.stale_nodes(conn, MOMENT) == {NODE_LINUX_2}
+    assert fleet_t3_health.classify_nodes(conn, MOMENT) == ({NODE_LINUX}, {NODE_LINUX_2})
+
+
+def test_fresh_nodes_is_empty_without_a_table_and_none_on_a_read_failure(conn):
+    assert fleet_t3_health.fresh_nodes(conn, MOMENT) == set()
+    assert "fleet_t3_observations" not in _tables(conn)
+
+    class Broken:
+        def execute(self, *_args):
+            raise sqlite3.DatabaseError("malformed")
+
+    assert fleet_t3_health.fresh_nodes(Broken(), MOMENT) is None  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(("age", "stale"), [(0, False), (299, False), (299.9, False), (300, True), (3600, True)])
@@ -293,6 +314,32 @@ def test_cli_footer_reports_an_unreadable_health_table(monkeypatch, capsys):
     assert "T3 sessions unknown: the hub could not read T3 observer health" in out
 
 
-def test_cli_json_output_keeps_the_bare_row_list(monkeypatch, capsys):
-    out = _run_cli(monkeypatch, capsys, {"nodes_unknown": [NODE_LINUX]}, "--json")
-    assert json.loads(out) == []
+def test_cli_json_stdout_is_unchanged_and_unknown_nodes_warn_on_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(
+        fleet_client,
+        "fetch_sessions",
+        lambda *, include_all, extras: extras.update({"nodes_unknown": [NODE_LINUX]}) or [],
+    )
+    assert cli.main(["fleet", "sessions", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == [] and captured.out == "[]\n"
+    assert captured.err.count("\n") == 1
+    assert captured.err.startswith("warning: T3 sessions unknown for: " + NODE_LINUX)
+
+
+def test_cli_json_warns_on_stderr_when_the_health_read_failed(monkeypatch, capsys):
+    monkeypatch.setattr(
+        fleet_client,
+        "fetch_sessions",
+        lambda *, include_all, extras: extras.update({"nodes_unknown": [], "nodes_unknown_error": True}) or [],
+    )
+    assert cli.main(["fleet", "sessions", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "[]\n" and "could not read T3 observer health" in captured.err
+
+
+def test_cli_json_is_silent_on_stderr_when_every_node_is_known(monkeypatch, capsys):
+    monkeypatch.setattr(fleet_client, "fetch_sessions", lambda *, include_all, extras: [])
+    assert cli.main(["fleet", "sessions", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "[]\n" and captured.err == ""

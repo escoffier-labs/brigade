@@ -103,6 +103,18 @@ def _place(conn, *, caller: str = NODE_LINUX, **body) -> dict:
     return fleet_hub_placement.place(conn, {"action": "place", "repo": REPO, **body}, caller)
 
 
+def _health(conn, node: str, success_age: float | None) -> None:
+    """A health row whose last success is ``success_age`` seconds before the placement clock."""
+    fleet_t3_health.ensure_schema(conn)
+    stamp = _now()
+    success = None if success_age is None else (stamp - timedelta(seconds=success_age)).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO fleet_t3_observations VALUES (?, ?, ?, ?)",
+        (node, success, stamp.isoformat(), stamp.isoformat()),
+    )
+    conn.commit()
+
+
 @pytest.fixture()
 def conn(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_hub_routing, "_now", _now)
@@ -113,6 +125,8 @@ def conn(tmp_path, monkeypatch):
         fleet_hub_policy.save_policy(connection, _document(), expected_version=1, actor="operator", reason="routing")
         _save(connection)
         _fresh_quota(connection)
+        for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD):
+            _health(connection, node, 5)  # a healthy T3 observer: session counts are trusted by default
         yield connection
     finally:
         connection.close()
@@ -683,18 +697,6 @@ def test_a_caller_transaction_is_refused_not_borrowed(fleet):
 # --- T3 observer health: a failing observer is unknown sessions, never zero (#2166 slice 6) ---------------
 
 
-def _health(conn, node: str, success_age: float | None) -> None:
-    """A health row whose last success is ``success_age`` seconds before the placement clock."""
-    fleet_t3_health.ensure_schema(conn)
-    stamp = _now()
-    success = None if success_age is None else (stamp - timedelta(seconds=success_age)).isoformat()
-    conn.execute(
-        "INSERT OR REPLACE INTO fleet_t3_observations VALUES (?, ?, ?, ?)",
-        (node, success, stamp.isoformat(), stamp.isoformat()),
-    )
-    conn.commit()
-
-
 def test_a_node_with_a_stale_observer_is_sessions_unknown_and_ineligible(fleet):
     _health(fleet, NODE_LINUX, 301)
     result = _place(fleet)
@@ -728,7 +730,7 @@ def test_a_failed_attempt_with_no_success_is_unknown(fleet):
 
 
 @pytest.mark.parametrize(("age", "unknown"), [(120, False), (240, False), (299, False), (300, True), (361, True)])
-def test_one_missed_cycle_stays_known_and_two_become_unknown(fleet, age, unknown):
+def test_placement_trusts_a_count_below_the_ttl_and_not_from_it(fleet, age, unknown):
     _health(fleet, NODE_LINUX, age)
     assert ("sessions-unknown" in _reasons(_place(fleet), "worker-linux-1")) is unknown
 
@@ -741,9 +743,32 @@ def test_an_idle_node_with_a_healthy_observer_stays_placeable(fleet):
     assert "sessions-unknown" not in _reasons(result, "worker-linux-1")
 
 
-def test_no_health_row_leaves_placement_unchanged(fleet):
+def test_a_node_with_no_health_row_is_sessions_unknown_in_placement(fleet):
+    # Every host runs the observer after rollout, so a missing row means the node is not reporting.
+    fleet.execute("DELETE FROM fleet_t3_observations WHERE node_id=?", (NODE_LINUX,))
+    fleet.commit()
+    result = _place(fleet)
+    row = next(r for r in result["candidates"] if r["machine"] == "worker-linux-1")
+    assert "sessions-unknown" in row["reasons"] and row["eligible"] is False and row["effective_load"] is None
+    assert result["recommended"]["machine"] != "worker-linux-1"
+    for peer in ("worker-linux-2", "worker-cloud-1"):
+        assert "sessions-unknown" not in _reasons(result, peer)
+
+
+def test_a_hub_with_no_health_table_makes_every_machine_sessions_unknown(fleet):
+    fleet.execute("DROP TABLE fleet_t3_observations")
+    fleet.commit()
+    before = _row_counts(fleet)
+    result = _place(fleet)
+    assert result["status"] == "none" and result["reason"] == "no-eligible-candidate"
+    for row in result["candidates"]:
+        assert "sessions-unknown" in row["reasons"] and row["eligible"] is False
+    # Reading creates nothing.
+    assert _row_counts(fleet) == before and "fleet_t3_observations" not in before
+
+
+def test_other_nodes_and_unconfigured_nodes_health_rows_change_nothing(fleet):
     baseline = _place(fleet)
-    # A row for another node, and for a node that is not configured, change nothing about this one.
     _health(fleet, "99999999-9999-4999-8999-999999999999", 9999)
     assert _place(fleet) == baseline
     _health(fleet, NODE_LINUX_2, 5)
@@ -775,7 +800,7 @@ def test_a_recovered_observer_makes_the_node_placeable_again(fleet):
 
 
 def test_an_unreadable_health_table_makes_every_machine_sessions_unknown(fleet, monkeypatch):
-    monkeypatch.setattr(fleet_t3_health, "stale_nodes", lambda *_a, **_k: None)
+    monkeypatch.setattr(fleet_t3_health, "classify_nodes", lambda *_a, **_k: None)
     result = _place(fleet)
     assert result["status"] == "none" and result["recommended"] is None
     for row in result["candidates"]:

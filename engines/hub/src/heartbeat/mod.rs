@@ -158,9 +158,11 @@ impl writer::Command for Mutation {
 }
 impl Heartbeat {
     pub fn route(method: &str, path: &str) -> bool {
+        // GET /sessions stays on Python: its body carries the T3 observer health view
+        // (`nodes_unknown`), which has no native projection. Add it back with one.
         matches!(
             (method, path),
-            ("POST", "/events" | "/sessions") | ("GET", "/status" | "/sessions")
+            ("POST", "/events" | "/sessions") | ("GET", "/status")
         )
     }
     pub async fn auth(&self, parts: &Parts) -> Option<Response<Body>> {
@@ -196,7 +198,6 @@ impl Heartbeat {
                         .map(|(_, v)| v.to_lowercase())
                 })
                 .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
-            let path = parts.uri.path().to_string();
             return match self
                 .readers
                 .submit(move |c| {
@@ -207,12 +208,7 @@ impl Heartbeat {
                         return Ok(Some(Reply { status, body }));
                     }
                     let now = epoch(route.clock.as_deref());
-                    let result = if path == "/status" {
-                        status::list(&tx, all, now, route.stale_after)
-                    } else {
-                        sessions::list(&tx, all, now)
-                    };
-                    match result {
+                    match status::list(&tx, all, now, route.stale_after) {
                         Ok(r) => Ok(r),
                         Err(Error::Refusal(r)) => Ok(Some(r)),
                         Err(Error::Sql(_) | Error::Python) => Ok(None),
