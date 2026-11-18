@@ -1,0 +1,2 @@
+- `brigade fleet policy status --json` now returns slim session records, about 0.8 KB each instead of about 18 KB, so the status body fits the bounded client again on a Hub with many stale sessions.
+- `brigade fleet policy` page and the session endpoints still show the full loaded and pending policy snapshots.

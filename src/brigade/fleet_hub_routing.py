@@ -17,7 +17,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
-from . import fleet_hub, fleet_hub_policy, fleet_policy, fleet_quota, task_roles
+from . import fleet_hub, fleet_hub_policy, fleet_policy, fleet_quota, fleet_status_sessions, task_roles
 from .fleet_hub import FleetHubConflict, FleetHubError, FleetHubForbidden
 from .fleet_model_roster import canonical_json
 
@@ -1820,7 +1820,9 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     queue = _queue_projection(conn)
     queue["route_denials"] = blocked
     try:
-        sessions = fleet_hub_policy.list_session_states(conn)
+        # Status keeps identity and state facts only; the policy page and the
+        # session endpoints keep the full rows from list_session_states.
+        sessions = fleet_status_sessions.status_sessions(fleet_hub_policy.list_session_states(conn))
     except Exception:
         sessions = []
     quota_effective = []
@@ -1903,7 +1905,12 @@ def _authority_projection(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def control_plane_status(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Authenticated GET /policy/status projection."""
+    """Authenticated GET /policy/status projection.
+
+    Sessions here are the slim :mod:`brigade.fleet_status_sessions` projection,
+    because the bounded policy client refuses a body over 512 KiB. Full session
+    rows stay on the policy page and the session endpoints.
+    """
     snap = snapshot(conn)
     return {
         "schema": CONTROL_PLANE_SCHEMA,
