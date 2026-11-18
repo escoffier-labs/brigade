@@ -33,6 +33,7 @@ from brigade.model_trial_claude import (
     module_hashes,
 )
 from brigade.model_trial_paired import TOOLS, _pairs, digest
+from tests._posix import requires_process_groups
 from tests.paired_live_fake import GOOD_STEPS, make_fake, records, render_script
 
 pytestmark = pytest.mark.allow_agent_cli  # launches only the fake claude from tests/paired_live_fake.py
@@ -1143,7 +1144,7 @@ def _gone(pid, wait=5.0):
     return False
 
 
-@pytest.mark.skipif(os.name != "posix", reason="needs POSIX process groups")
+@requires_process_groups
 @pytest.mark.parametrize(
     "extra, timeout",
     [({}, 60), ({"hang": True}, 3), ({"big_line": model_trial_claude.MAX_LINE_BYTES * 2}, 60)],
@@ -1158,7 +1159,7 @@ def test_a_group_member_that_outlives_the_cli_is_killed_before_the_cell_returns(
     assert all(_gone(pid) for pid in pids)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="needs POSIX waitid")
+@requires_process_groups
 def test_the_group_is_killed_while_the_leader_is_still_unreaped(monkeypatch):
     order = []
     real_killpg, real_wait = os.killpg, subprocess.Popen.wait
