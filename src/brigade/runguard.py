@@ -33,7 +33,6 @@ from .runguard_gate import _try_lock_descriptor as _try_lock_descriptor
 from .worktree_lease import (
     brigade_worktree_root as brigade_worktree_root,
     discard_incomplete_worktree as discard_incomplete_worktree,
-    is_upstream_fast_forward,
     remove_worktree_directory,
     reserved_worktree_lock_dir as reserved_worktree_lock_dir,
     run_lock_parent,
@@ -1798,10 +1797,8 @@ def snapshot_payload(snapshot: PreRunSnapshot | None) -> dict[str, object] | Non
     }
 
 
-def detect_branch_head_drift(
-    cwd: Path | None, snapshot: PreRunSnapshot | None, *, allow_upstream_fast_forward: bool = False
-) -> str | None:
-    """Return a diagnostic for unexpected branch or HEAD movement."""
+def detect_branch_head_drift(cwd: Path | None, snapshot: PreRunSnapshot | None) -> str | None:
+    """Return a human detail when branch or HEAD moved since the snapshot."""
     if snapshot is None or cwd is None:
         return None
     head = _git(cwd, "rev-parse", "HEAD")
@@ -1817,8 +1814,6 @@ def detect_branch_head_drift(
             f"HEAD {snapshot.head[:12]} -> {current_head[:12]}"
         )
     if current_head != snapshot.head:
-        if allow_upstream_fast_forward and is_upstream_fast_forward(cwd, snapshot.head, current_head):
-            return None
         return f"git HEAD drifted during run: {snapshot.head[:12]} -> {current_head[:12]}"
     if current_branch != snapshot.branch:
         return f"git branch drifted during run: {snapshot.branch!r} -> {current_branch!r}"
