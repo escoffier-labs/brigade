@@ -27,6 +27,7 @@ from brigade import (
     worktree_lease,
 )
 from brigade.fleet_claim_target import ClaimTargetError
+from brigade.roster import load_roster
 
 
 def _git(repo: Path, *args: str) -> proc.Result:
@@ -616,6 +617,38 @@ class TestRunsPruneWorktrees:
         assert f"removed: {old_clean} (15" in out
         assert f"kept: {young_clean} (younger than 14 days)" in out
         assert f"kept: {old_dirty} (dirty)" in out
+
+    @pytest.mark.parametrize("owner_state", ["live", "dead", "retained"])
+    def test_prune_uses_external_lease_liveness(self, tmp_path, monkeypatch, capsys, owner_state):
+        repo, _home, root = self._setup(tmp_path, monkeypatch)
+        checkout = self._create_brigade_worktree(repo, root, "run")
+        _age_directory(checkout, 15)
+        output_dir = tmp_path / "run"
+        roster = load_roster(repo / ".brigade" / "roster.toml")
+        lease = runguard.worktree_lock_dir(checkout)
+        lease.mkdir(parents=True)
+        with pytest.raises(runguard.RetainRunLockError):
+            with runguard.run_lock(checkout, run_dir=output_dir):
+                aboyeur.record_run_start(output_dir, task="x", cwd=checkout, roster=roster, read_only=False)
+                raise runguard.RetainRunLockError("simulated interrupted run")
+        if owner_state == "retained":
+            (lease / "run.lock").rename(lease / ".run.lock.retained-test.stale")
+        elif owner_state == "dead":
+            owner = json.loads((lease / "run.lock" / "owner.json").read_text())
+            owner["pid"] = 99999999
+            (lease / "run.lock" / "owner.json").write_text(json.dumps(owner))
+            (lease / "run.lock" / "pid").write_text("99999999\n")
+
+        assert cli.main(["runs", "prune-worktrees", "--target", str(repo), "--apply"]) == 0
+        if owner_state == "dead":
+            assert not checkout.exists()
+            assert not lease.exists()
+            receipt = json.loads((output_dir / "run.json").read_text())
+            assert receipt["failure"]["lock_workspace"] == str(checkout)
+        else:
+            assert checkout.exists()
+            assert lease.exists()
+            assert "run lock is present" in capsys.readouterr().out
 
     def test_rejects_non_git_target(self, tmp_path, capsys):
         target = tmp_path / "not-a-repo"
