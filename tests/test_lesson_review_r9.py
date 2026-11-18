@@ -59,7 +59,10 @@ def test_prompt_drain_survives_write_failure_without_duplicates(scope, monkeypat
 
     with monkeypatch.context() as patch:
         patch.setattr(activity.io, "write", fail)
-        with pytest.raises(OSError, match="injected persistence failure"):
+        if crash == "before-save":
+            with pytest.raises(OSError, match="injected persistence failure"):
+                event(scope)
+        else:
             event(scope)
     assert activity._read_prompts(spool)
     event(scope)
@@ -102,8 +105,9 @@ def test_retry_keeps_new_and_identical_prompts(scope, monkeypatch):
 
     with monkeypatch.context() as patch:
         patch.setattr(activity.io, "write", fail_ack)
-        with pytest.raises(OSError, match="injected ack failure"):
-            event(scope)
+        event(scope)
+    assert activity.load(scope)["events"][-1]["kind"] == "PostToolUse"
+    assert activity._read_prompts(spool)
     activity.record_event(scope, "UserPromptSubmit", {"prompt": text}, now=100)
     event(scope)
     prompts = [e for e in activity.load(scope)["events"] if e["kind"] == "UserPromptSubmit"]

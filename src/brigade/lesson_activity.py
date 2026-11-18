@@ -58,6 +58,9 @@ def load(target: Path) -> dict[str, Any]:
         or not 0 <= state["reviewed"] <= state["sequence"]
         or not isinstance(state.get("events"), list)
         or len(state["events"]) > MAX_EVENTS
+        or not isinstance(state.get("drained_prompt_markers", []), list)
+        or len(state.get("drained_prompt_markers", [])) > MAX_EVENTS
+        or any(not isinstance(e, dict) for e in state.get("drained_prompt_markers", []))
         or type(state.get("last_activity")) not in (int, float)
     ):
         raise ValueError("invalid lesson activity state")
@@ -132,7 +135,8 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
         text = "[observation withheld by scanner]"
     with held_file_lock(root(target) / "state.lock", deadline_seconds=1):
         state = load(target)
-        drain_prompts(target, state, acknowledge=False)
+        persisted_ids = {e["id"] for e in state["events"]}
+        drain_prompts(target, state, save_and_acknowledge=False)
         # Pre-tool activity invalidates an in-flight review without counting twice.
         at = time.time() if now is None else now
         metadata: dict[str, Any] = {}
@@ -153,11 +157,12 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
                 if run_id:
                     metadata["verify_run_id"] = run_id
         metadata.update(_session_metadata(target, payload))
-        append_event(target, state, event, text, at, **metadata)
+        _, evicted = append_event(target, state, event, text, at, **metadata)
+        _retain_evicted_prompts(target, state, [e for e in evicted if e["id"] in persisted_ids])
         if event in {"PostToolUse", "PostToolUseFailure"}:
             state["calls"] = state.get("calls", 0) + 1
         save(target, state)
-        acknowledge_prompts(target)
+        _acknowledge_saved_prompts(target)
     return None
 
 
@@ -245,8 +250,59 @@ def discard_prompts(target: Path) -> None:
         io.write(path, b"null\n")
 
 
-def drain_prompts(target: Path, state: dict[str, Any], *, acknowledge: bool = True) -> None:
-    """Caller holds state.lock. Prompt hooks acquire only the cache-side lock."""
+def _prompt_marker(target: Path, event: dict[str, Any]) -> dict[str, Any]:
+    """Sign a compact dedup identity for a prompt that stays queued.
+
+    The marker binds the saved event id and prompt digest with the workspace key,
+    so eviction cannot turn an unsigned id list into review authority.
+    """
+    marker = {
+        "id": event["id"],
+        "append_sequence": event["append_sequence"],
+        "kind": "DrainedPrompt",
+        "at": event["at"],
+        "earliest_unreviewed_at": event["earliest_unreviewed_at"],
+        "prompt_id": event["prompt_id"],
+        "prompt_digest": event["prompt_digest"],
+    }
+    lesson_auth.stamp(target, marker)
+    return marker
+
+
+def _prompt_marker_matches(target: Path, marker: dict[str, Any], prompt: dict[str, Any]) -> bool:
+    return (
+        isinstance(marker, dict)
+        and marker.get("kind") == "DrainedPrompt"
+        and marker.get("prompt_id") == prompt["prompt_id"]
+        and marker.get("prompt_digest") == localio.canonical_json_digest(prompt["prompt"])
+        and marker.get("at") == prompt["at"]
+        and lesson_auth.authentic(target, marker)
+    )
+
+
+def _retain_evicted_prompts(target: Path, state: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    """Keep signed dedup markers for authentic prompt events that left the buffer."""
+    markers = {
+        e["prompt_id"]: e
+        for e in state.get("drained_prompt_markers", [])
+        if isinstance(e, dict) and isinstance(e.get("prompt_id"), str)
+    }
+    for event in events:
+        if (
+            event.get("kind") == "UserPromptSubmit"
+            and isinstance(event.get("prompt_id"), str)
+            and isinstance(event.get("prompt_digest"), str)
+            and lesson_auth.authentic(target, event)
+        ):
+            markers[event["prompt_id"]] = _prompt_marker(target, event)
+    if markers:
+        state["drained_prompt_markers"] = list(markers.values())[-MAX_EVENTS:]
+    else:
+        state.pop("drained_prompt_markers", None)
+
+
+def drain_prompts(target: Path, state: dict[str, Any], *, save_and_acknowledge: bool = True) -> None:
+    """Drain under state.lock, or let the hook save the combined observation state."""
     if receipt_signing.load_workspace_key(target) is None:
         discard_prompts(target)
         return
@@ -254,6 +310,7 @@ def drain_prompts(target: Path, state: dict[str, Any], *, acknowledge: bool = Tr
     with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1):
         prompts = _read_prompts(path)
         if not prompts:
+            state.pop("drained_prompt_markers", None)
             return
         # Upgrade legacy entries before recording them so retries have stable ids.
         if any(not isinstance(p.get("prompt_id"), str) or not p["prompt_id"] for p in prompts):
@@ -261,34 +318,81 @@ def drain_prompts(target: Path, state: dict[str, Any], *, acknowledge: bool = Tr
                 if not isinstance(prompt.get("prompt_id"), str) or not prompt["prompt_id"]:
                     prompt["prompt_id"] = uuid.uuid4().hex
             io.write(path, io.json_bytes(prompts))
+        # Keep signed identities for authentic prompt events that were evicted
+        # while their prompt stays queued after an acknowledgement failure. The
+        # marker deduplicates the prompt, so an old timestamp cannot re-enter a
+        # later review window.
+        queued = {p["prompt_id"] for p in prompts}
+        persisted_ids = {e["id"] for e in state["events"]}
+        markers = {
+            e["prompt_id"]: e
+            for e in state.get("drained_prompt_markers", [])
+            if isinstance(e, dict) and isinstance(e.get("prompt_id"), str) and e["prompt_id"] in queued
+        }
         for prompt in prompts:
-            if not any(lesson_auth.prompt_matches(target, e, prompt) for e in state["events"]):
-                candidate = {**state, "events": list(state["events"])}
-                append_event(
-                    target,
-                    candidate,
-                    "UserPromptSubmit",
-                    prompt["prompt"],
-                    prompt["at"],
-                    prompt_id=prompt["prompt_id"],
-                    prompt_digest=localio.canonical_json_digest(prompt["prompt"]),
-                    **{
-                        key: prompt[key]
-                        for key in ("session_id", "harness_session_fingerprint", "work_session_id")
-                        if key in prompt
-                    },
-                )
-                # A full protected buffer leaves the prompt queued without
-                # changing the review digest or resetting its attempt budget.
-                if any(
-                    e["id"] == candidate["sequence"] and lesson_auth.prompt_matches(target, e, prompt)
-                    for e in candidate["events"]
-                ):
-                    state.update(candidate)
+            matched = next(
+                (e for e in state["events"] if lesson_auth.prompt_matches(target, e, prompt)),
+                None,
+            )
+            if matched is not None:
+                continue
+            marker = markers.get(prompt["prompt_id"])
+            if marker is not None and _prompt_marker_matches(target, marker, prompt):
+                continue
+            candidate = {
+                **state,
+                "events": list(state["events"]),
+                "drained_prompt_markers": list(state.get("drained_prompt_markers", [])),
+            }
+            _, evicted = append_event(
+                target,
+                candidate,
+                "UserPromptSubmit",
+                prompt["prompt"],
+                prompt["at"],
+                prompt_id=prompt["prompt_id"],
+                prompt_digest=localio.canonical_json_digest(prompt["prompt"]),
+                **{
+                    key: prompt[key]
+                    for key in ("session_id", "harness_session_fingerprint", "work_session_id")
+                    if key in prompt
+                },
+            )
+            _retain_evicted_prompts(target, candidate, [e for e in evicted if e["id"] in persisted_ids])
+            # A full protected buffer leaves the prompt queued without
+            # changing the review digest or resetting its attempt budget.
+            if any(
+                e["id"] == candidate["sequence"] and lesson_auth.prompt_matches(target, e, prompt)
+                for e in candidate["events"]
+            ):
+                state.update(candidate)
+                markers = {
+                    e["prompt_id"]: e
+                    for e in state.get("drained_prompt_markers", [])
+                    if isinstance(e, dict) and isinstance(e.get("prompt_id"), str)
+                }
+        state["drained_prompt_markers"] = list(markers.values())[-MAX_EVENTS:]
+        if not state["drained_prompt_markers"]:
+            state.pop("drained_prompt_markers", None)
         state["drained_prompt_ids"] = [p["prompt_id"] for p in prompts]
-        save(target, state)
-    if acknowledge:
+        # A hook saves once after its own append, which can evict a new prompt.
+        if save_and_acknowledge:
+            save(target, state)
+    if save_and_acknowledge:
+        _acknowledge_saved_prompts(target)
+
+
+def _acknowledge_saved_prompts(target: Path) -> None:
+    """Keep prompts queued when the acknowledgement write fails.
+
+    The signed saved event, not the spool write, suppresses a repeat drain, so a
+    failed acknowledgement must not abort the caller after it has saved its own
+    event.
+    """
+    try:
         acknowledge_prompts(target)
+    except OSError:
+        pass
 
 
 def acknowledge_prompts(target: Path) -> None:
@@ -297,11 +401,18 @@ def acknowledge_prompts(target: Path) -> None:
     with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1):
         prompts = _read_prompts(path)
         saved = load(target)
-        remaining = [p for p in prompts if not any(lesson_auth.prompt_matches(target, e, p) for e in saved["events"])]
+        remaining = [
+            p
+            for p in prompts
+            if not any(lesson_auth.prompt_matches(target, e, p) for e in saved["events"])
+            and not any(_prompt_marker_matches(target, e, p) for e in saved.get("drained_prompt_markers", []))
+        ]
         io.write(path, io.json_bytes(remaining) if remaining else b"null\n")
 
 
-def append_event(target: Path, state: dict[str, Any], kind: str, text: str, at: float, **metadata: Any) -> None:
+def append_event(
+    target: Path, state: dict[str, Any], kind: str, text: str, at: float, **metadata: Any
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     authenticated = [e for e in state["events"] if lesson_auth.authentic(target, e)]
     # A forged counter can only skip ids or veto recording, never move an
     # authenticated append backwards relative to the retained history.
@@ -323,12 +434,13 @@ def append_event(target: Path, state: dict[str, Any], kind: str, text: str, at: 
     }
     lesson_auth.stamp(target, observation)
     state["events"].append(observation)
+    evicted: list[dict[str, Any]] = []
     # Keep the failure side of a fix even in long sessions. Other observations
     # are bounded to over twenty complete pre/post tool pairs plus prompts.
     while len(state["events"]) > MAX_EVENTS or len(io.json_bytes(state)) > 256 * 1024:
         reviewed = next((i for i, e in enumerate(state["events"]) if e["id"] <= state["reviewed"]), None)
         if reviewed is not None:
-            state["events"].pop(reviewed)
+            evicted.append(state["events"].pop(reviewed))
             continue
         index = next(
             (
@@ -340,4 +452,5 @@ def append_event(target: Path, state: dict[str, Any], kind: str, text: str, at: 
         )
         if index is None:
             index = next((i for i, e in enumerate(state["events"]) if not e.get("verify_command")), 0)
-        state["events"].pop(index)
+        evicted.append(state["events"].pop(index))
+    return observation, evicted

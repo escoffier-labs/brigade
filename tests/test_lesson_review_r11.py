@@ -187,6 +187,32 @@ def test_final_hook_save_must_retain_correction_before_ack(scope):
     assert activity._read_prompts(activity.prompt_path(scope))
 
 
+def test_hook_saves_only_final_state_when_prompt_does_not_fit(scope, monkeypatch):
+    for _ in range(activity.MAX_EVENTS - 1):
+        event(scope)
+    activity.record_event(scope, "PostToolUse", {"tool_output": "Read source."}, now=100)
+    activity.record_event(scope, "UserPromptSubmit", {"prompt": "Keep publication atomic."}, now=101)
+
+    save = activity.save
+    writes = []
+
+    def record_save(target, state):
+        writes.append([(entry["kind"], entry["at"]) for entry in state["events"]])
+        save(target, state)
+
+    def fail_ack(_target):
+        raise OSError("injected acknowledgement failure")
+
+    monkeypatch.setattr(activity, "save", record_save)
+    monkeypatch.setattr(activity, "acknowledge_prompts", fail_ack)
+    event(scope, now=102)
+
+    assert len(writes) == 1
+    assert ("PostToolUse", 102) in writes[0]
+    assert ("UserPromptSubmit", 101) not in writes[0]
+    assert activity._read_prompts(activity.prompt_path(scope))
+
+
 def test_hooks_record_nothing_while_admission_is_off(tmp_path):
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".brigade/lesson-review.json").write_text(
