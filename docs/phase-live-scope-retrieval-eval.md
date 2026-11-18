@@ -87,7 +87,10 @@ automatic attempt ends as a pending proposal held with
 `lineage_requires_review`. The reflect client leaves that proposal open for a
 reviewer, with no withdrawal and no retry. The gate repeats the check as
 `retrieval_eval_lineage_exposed` for a link added after tiering, and for a
-target that is an end of a trusted edge in the published index. The naming-card
+target that is an end of a trusted edge in the published index. For an
+exact-duplicate merge the tier and backstop scans read only the before texts of
+both cards, so the alias the merge itself adds does not count, while earlier
+lineage and an edge in the published index still do. The naming-card
 scan prefilters on the four lineage key names, because `Links::parse` decodes
 values with `literal_eval` and a key cannot be escaped, while an id can be.
 

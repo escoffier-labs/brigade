@@ -163,19 +163,27 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         .iter()
         .filter(|c| c["before_text"] != c["after_text"] || c["before_state"] != c["after_state"])
         .collect();
+    // An exact-duplicate merge changes the keeper's text and retires the other
+    // card. That pair is one change. Several pairs, or a pair beside any other
+    // op, are not, and both cards stay in the cooldown below.
+    let merged =
+        tier == 0 && super::merge_gate::exact_pair(tx, body, authority.retrieval.as_ref())?;
+    let paths = if merged { 1 } else { changed.len() };
     check(
         &mut checks,
         "delta",
         if tier != 0 || changed.is_empty() {
             Some("delta_requires_review")
-        } else if changed.len() > 1 {
+        } else if paths > 1 {
             Some("blast_cap_exceeded")
         } else {
             None
         },
         "held",
     );
-    let structural = tier == 0 && super::proposal_tiers::anchor_proof(tx, body)?;
+    // Identical claims are the proof for a merge, as anchoring is for an anchor.
+    let anchored = tier == 0 && super::proposal_tiers::anchor_proof(tx, body)?;
+    let structural = anchored || merged;
     let proof = super::attestation::resolve(tx, body, authority, scanner, now)?;
     check(
         &mut checks,
@@ -298,10 +306,11 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "candidate_id":body["proposal_id"],"run_id":null,"policy_sha256":authority.policy.as_ref().map(|a| &a.1),
         "policy_limits":{"enabled_classes":memory["tier0_op_classes"].as_array().cloned().unwrap_or_default(),"reflect_principals":memory["reflect_principals"].as_array().cloned().unwrap_or_default(),"minimum_evidence_ids":3,"minimum_source_groups":2,"max_changed_paths":1,"cooldown_seconds":86400},
         "candidate_sha256":candidate,"source_sha256":sources,"config_digests":{},
-        "workspace_fingerprint":null,"evidence_log_sha256":"incomplete","delta_sha256":delta,"changed_path_count":changed.len(),
+        "workspace_fingerprint":null,"evidence_log_sha256":"incomplete","delta_sha256":delta,"changed_path_count":paths,
         "proof_evidence_count":if proof.complete{json!(proof.hashes.len())}else{Json::Null},"proof_source_group_count":if proof.complete{json!(proof.principals.len())}else{Json::Null},"attesting_credentials":proof.credentials,"evidence_sha256":proof.hashes,"evaluation_sha256":null,"checks":checks
     });
-    report["structural_anchor_proof"] = json!(structural);
+    report["structural_anchor_proof"] = json!(anchored);
+    report["structural_merge_proof"] = json!(merged);
     report["retrieval_eval_record"] = super::retrieval_eval::summary(tx, authority)?;
     let eval_expiry = if proposals::cards(body)
         .iter()

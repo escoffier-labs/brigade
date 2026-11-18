@@ -14,7 +14,7 @@ fn front(text: &str) -> Result<(Vec<&str>, &str), &'static str> {
         Ok((Vec::new(), text))
     }
 }
-fn get(text: &str, key: &str) -> Result<Option<String>, &'static str> {
+pub(super) fn get(text: &str, key: &str) -> Result<Option<String>, &'static str> {
     let (meta, _) = front(text)?;
     let mut found = None;
     for (i, line) in meta.iter().enumerate() {
@@ -143,6 +143,11 @@ pub(super) fn claims(text: &str) -> Result<String, &'static str> {
     // Normalization has already fixed line endings. Preserve every other byte,
     // including indentation and spacing inside opaque Markdown and code.
     Ok(result)
+}
+/// The comparison `merge_exact_duplicates` validates with, as a plain fact.
+/// A text that does not parse never counts as a duplicate.
+pub(super) fn same_claims(a: &str, b: &str) -> bool {
+    matches!((claims(a), claims(b)), (Ok(x), Ok(y)) if x == y)
 }
 pub fn apply(text: &str, op: &Json, other: Option<(&str, &str)>) -> Result<String, &'static str> {
     match op["type"].as_str() {

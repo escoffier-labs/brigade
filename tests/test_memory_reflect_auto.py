@@ -69,6 +69,7 @@ MERGE_HOLDS = [
     "retrieval_eval_merge_retires_older",
     "retrieval_eval_merge_literal_lost",
     "retrieval_eval_merge_group_too_large",
+    "retrieval_eval_merge_cross_writer",
 ]
 
 
@@ -92,6 +93,41 @@ def test_held_exact_merge_stays_a_pending_proposal_for_review(setup, capsys, cod
     assert "withdrawal" not in report["proposals"][0]
     assert [c["action"] for c in writes(hub)] == ["propose", "auto_apply"]
     assert hub.cards == before
+
+
+def test_scheduled_run_opens_a_merge_and_makes_one_automatic_attempt_with_no_reviewer(setup, capsys):
+    # Client behavior only. The fake hub's `do_auto_apply` is a stub that
+    # models what a clean apply writes, so this test proves the client opens one
+    # proposal, asks for one automatic apply and never decides it. That the real
+    # hub passes the gates for a clean merge is proved on the Rust side by
+    # `a_clean_merge_of_trusted_duplicates_applies_automatically` in
+    # engines/hub/src/memory/merge_drift_tests.rs.
+    target, hub, _ = setup
+    policy.set_enabled(target, True)
+    applied = []
+
+    def apply_merge(body):
+        # Stub for the hub's decision, not the hub's gates.
+        applied.append(body)
+        keeper, retired = hub.cards[("fleet", "a")], hub.cards[("fleet", "b")]
+        alias = 'aliases: ["fleet/b"]\n'
+        hub._commit(
+            "proposal.apply", "fleet", "a", keeper["text"].replace("---\n", "---\n" + alias, 1), "live", "auto-a"
+        )
+        hub._commit("proposal.apply", "fleet", "b", retired["text"], "retired", "auto-b")
+        return 200, {"state": "applied", "auto_apply_gates": []}
+
+    hub.do_auto_apply = apply_merge
+    code, report = run(target, capsys, "run", "--scheduled", "--apply")
+    assert code == 0
+    assert [op["type"] for op in report["ops"]] == ["merge_exact_duplicates"]
+    assert report["proposals"][0]["automatic"]["state"] == "applied"
+    assert "withdrawal" not in report["proposals"][0]
+    # One proposal, one automatic attempt, and no human decision in between.
+    assert [c["action"] for c in writes(hub)] == ["propose", "auto_apply"]
+    assert len(applied) == 1
+    assert hub.cards[("fleet", "b")]["state"] == "retired"
+    assert "fleet/b" in hub.cards[("fleet", "a")]["text"]
 
 
 def test_off_switch_read_at_each_candidate(tmp_path):
