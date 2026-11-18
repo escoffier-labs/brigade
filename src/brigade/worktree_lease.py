@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 
 from . import proc
@@ -27,6 +28,21 @@ def reserved_worktree_lock_dir(checkout: Path) -> Path | None:
         if reservation.is_dir():
             return reservation
     return None
+
+
+def workspace_identity_ancestors(start: Path) -> Iterator[Path]:
+    """Stop before an automatic checkout whose claim is Git-derived."""
+    current = Path(start).expanduser()
+    try:
+        current = current.resolve()
+    except OSError:
+        pass
+    if current.is_file():
+        current = current.parent
+    for candidate in (current, *current.parents):
+        if reserved_worktree_lock_dir(candidate) is not None:
+            break
+        yield candidate
 
 
 def discard_incomplete_worktree(repo: Path, worktree_path: Path) -> None:
