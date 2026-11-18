@@ -21,13 +21,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import fleet_t3_transport, run_budget, run_journal, run_lifecycle, run_tasks, runguard
+from . import fleet_t3_transport, run_budget, run_events, run_journal, run_lifecycle, run_tasks, runguard
 from . import run_task_journal as journal
 from . import native_t3_enrollment as enrollment
 from .fleet_t3_transport import SourceRevisionError
@@ -46,6 +48,7 @@ HELD_RUN_STATUS = "held"
 _MAX_DIAGNOSTIC = 240
 _MAX_NATIVE_BYTES = 1_048_576
 _INTENT_DOMAIN = "brigade.native-t3.intent.v1"
+_KEY_DOMAIN = "brigade.native-t3.idempotency.v1"
 _HANDLE_DOMAIN = "brigade.native-t3.handle.v1"
 _STATUS_MAP = {
     "queued": "queued",
@@ -145,7 +148,14 @@ class _Verified:
 def _run_dir(workspace: Path, run_id: str) -> Path:
     if not journal.token(run_id):
         raise _refuse("invalid-run", "the run identity is not valid")
-    return runguard.lock_path(workspace).parent / "runs" / run_id
+    try:
+        runs = runguard.lock_path(workspace).parent / "runs"
+    except (OSError, ValueError):
+        raise _refuse("run-missing", "no run matches that identity") from None
+    run_dir = runs / run_id
+    if not run_dir.is_dir():
+        raise _refuse("run-missing", "no run matches that identity")
+    return run_dir
 
 
 def _run_meta(workspace: Path, run_dir: Path) -> dict[str, Any]:
@@ -227,11 +237,27 @@ def _verified(workspace: Path, run_dir: Path, only: str | None = None) -> dict[s
 
 
 def _barrier(events: Sequence[run_journal.RunEvent]) -> None:
-    """Refuse all new claims while any durable claim lacks its dispatch request."""
+    """Refuse all new claims while any durable claim is unresolved.
+
+    Two states block the run. A launch claim without its dispatch request was
+    authorized but never recorded. A claim binding without a launch claim died
+    between the two facts and never consumed launch permission. Neither state
+    may let a sibling reuse the dispatch identity.
+    """
     requested = {
         (event.payload["seat"], event.payload["attempt"])
         for event in events
         if event.event_type == "run.dispatch.requested"
+    }
+    launched = {
+        (event.payload["task_id"], event.payload["attempt_id"])
+        for event in events
+        if event.event_type == "task.launch-claimed"
+    }
+    abandoned = {
+        event.payload["task_id"]
+        for event in events
+        if event.event_type == HELD_EVENT and event.payload.get("reason") == ABANDONED
     }
     for event in events:
         if event.event_type == "task.launch-claimed":
@@ -239,6 +265,13 @@ def _barrier(events: Sequence[run_journal.RunEvent]) -> None:
                 raise _refuse(
                     "run-barrier",
                     "a durable launch claim has no matching dispatch request, so the run holds every new claim",
+                )
+        elif event.event_type == CLAIM_EVENT:
+            identity = (event.payload["task_id"], event.payload["attempt_id"])
+            if identity not in launched and identity[0] not in abandoned:
+                raise _refuse(
+                    "run-barrier",
+                    "a retained claim binding has no launch claim, so the run holds every new claim",
                 )
 
 
@@ -336,6 +369,19 @@ def _intent_digest(intent: NativeIntent) -> str:
     )
 
 
+def _key(kind: str, *identity: object) -> str:
+    """Derive a fixed-length idempotency key from an identity tuple.
+
+    Task ids reach 128 characters and may not be embedded beside a 64-hex
+    digest inside the 128-character key bound. The digest of the whole
+    identity keeps the key both bounded and collision-safe.
+    """
+    digest = hashlib.sha256(
+        run_events.canonical_bytes({"domain": _KEY_DOMAIN, "kind": kind, "identity": list(identity)})
+    ).hexdigest()
+    return f"native-{kind}:{digest}"
+
+
 def _append(
     workspace: Path, run_dir: Path, event_type: str, payload: Mapping[str, Any], *, key: str
 ) -> run_journal.RunEvent:
@@ -355,7 +401,7 @@ def _record_held(workspace: Path, run_dir: Path, task_id: str, attempt_id: str, 
         run_dir,
         HELD_EVENT,
         {"task_id": task_id, "attempt_id": attempt_id, "reason": reason, "evidence_digest": evidence},
-        key=f"native-held:{task_id}:{reason}:{evidence}",
+        key=_key("held", task_id, attempt_id, reason, evidence),
     )
 
 
@@ -445,7 +491,7 @@ def _claim_record(
             "template_digest": verified.template.template_digest,
             "intent_digest": digest,
         },
-        key=f"native-claimed:{task_id}:{handle.attempt_id}",
+        key=_key("claimed", task_id, handle.attempt_id),
     )
     try:
         decision = run_tasks.claim_task_launch(
@@ -610,7 +656,7 @@ def _correlate(
             "child_thread_id": result.child_thread_id,
             "child_run_id": result.child_run_id,
         },
-        key=f"native-correlated:{result.task_id}:{mode}:{handle_digest}",
+        key=_key("correlated", result.task_id, binding.attempt_id, mode, handle_digest),
     )
     return {
         "schema": CORRELATION_SCHEMA,
@@ -713,6 +759,7 @@ def _durable_claim(
     task_id: str,
     parent_thread: str | None,
     *,
+    require_launch: bool = True,
     require_requested: bool = True,
 ) -> tuple[list[run_journal.RunEvent], _Verified, ClaimBinding]:
     """Load the task, its asset binding, its claim and (optionally) its parent thread."""
@@ -724,22 +771,17 @@ def _durable_claim(
     binding = _claim_binding(events, task_id)
     if binding is None or current.result.handle.attempt_id != binding.attempt_id:
         raise _refuse("no-claim", "the task has no durable governed claim")
-    if current.result.launch_claim is None:
+    if current.result.launch_claim is None and require_launch:
         raise _refuse("no-claim", "the task has no durable launch claim")
     requested = {
         (event.payload["seat"], event.payload["attempt"])
         for event in events
         if event.event_type == "run.dispatch.requested"
     }
-    if (
-        require_requested
-        and (
-            current.result.launch_claim.seat,
-            current.result.launch_claim.dispatch_attempt,
-        )
-        not in requested
-    ):
-        raise _refuse("claim-incomplete", "the claim has no durable dispatch request")
+    if require_requested and current.result.launch_claim is not None:
+        binding_key = (current.result.launch_claim.seat, current.result.launch_claim.dispatch_attempt)
+        if binding_key not in requested:
+            raise _refuse("claim-incomplete", "the claim has no durable dispatch request")
     if parent_thread is not None and binding.parent_thread != parent_thread:
         raise _refuse("parent-mismatch", "the parent thread does not match the durable claim")
     batch_ref = _batch_ref(events, run_dir.name, task_id)
@@ -809,9 +851,16 @@ def hold_resolve(
     run_dir = _context(workspace, run_id, task_id)
     with enrollment.owned_run(workspace, run_dir):
         _run_meta(workspace, run_dir)
-        events, verified, binding = _durable_claim(workspace, run_dir, task_id, None, require_requested=False)
-        if abandon:
-            _close_lost_request(workspace, run_dir, events, verified)
+        events, verified, binding = _durable_claim(
+            workspace, run_dir, task_id, None, require_launch=False, require_requested=False
+        )
+        held = _held(events, task_id)
+        if not abandon:
+            if held is not None:
+                raise _refuse("task-held", f"the task is held ({held})")
+            if verified.result.launch_claim is None:
+                raise _refuse("no-claim", "the task has no durable launch claim")
+        _close_lost_request(workspace, run_dir, events, verified)
         base = {
             "schema": CORRELATION_SCHEMA,
             "run_id": run_dir.name,
@@ -819,7 +868,7 @@ def hold_resolve(
             "attempt_id": binding.attempt_id,
         }
         if abandon:
-            replay = _held(events, task_id) == ABANDONED
+            replay = held == ABANDONED
             if not replay:
                 _record_held(workspace, run_dir, task_id, binding.attempt_id, ABANDONED, binding.intent_digest)
             return {**base, "mode": ABANDONED, "status": verified.result.status, "replayed": replay}
@@ -837,7 +886,13 @@ def hold_resolve(
 
 def _read_native(path: str) -> object:
     try:
-        raw = sys.stdin.buffer.read(_MAX_NATIVE_BYTES + 1) if path == "-" else Path(path).expanduser().read_bytes()
+        if path == "-":
+            raw = sys.stdin.buffer.read(_MAX_NATIVE_BYTES + 1)
+        else:
+            with Path(path).expanduser().open("rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise _refuse("native-unreadable", "the native result is not a regular file")
+                raw = handle.read(_MAX_NATIVE_BYTES + 1)
     except OSError:
         raise _refuse("native-unreadable", "the native result file is not readable") from None
     if len(raw) > _MAX_NATIVE_BYTES:

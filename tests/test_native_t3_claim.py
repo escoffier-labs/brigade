@@ -14,6 +14,7 @@ from brigade import (
     native_t3_dispatch as dispatch,
     native_t3_enrollment as enrollment,
     proc,
+    run_events,
     run_journal,
     run_tasks,
 )
@@ -455,3 +456,255 @@ def test_hold_resolve_assertion_is_operator_correlation(tmp_path):
         )
     journal_text = (_run_dir(workspace, run_id) / "events" / "lifecycle.jsonl").read_text(encoding="utf-8")
     assert TASK_TEXT not in journal_text
+
+
+# Fix round for #2702: bounded keys, lost-request closure in both modes, the
+# pre-launch barrier, final holds, closed event shapes, missing targets and
+# bounded native reads.
+
+
+@POSIX_ONLY
+def test_long_task_id_keeps_fixed_length_idempotency_keys(tmp_path):
+    task_id = "a" * 128
+    workspace, run_id = _enroll(tmp_path, (task_id,))
+    report = _claim(workspace, run_id, task_id)
+    accepted = dispatch.accepted(
+        workspace=workspace, run_id=run_id, task_id=task_id, parent_thread=THREAD, payload=_native(task_id)
+    )
+    assert accepted["mode"] == dispatch.PARENT_REPORTED
+    abandoned = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id=task_id, payload=None, abandon=True)
+    assert abandoned["mode"] == dispatch.ABANDONED
+    assert report["clientRequestId"]
+    events = _events(workspace, run_id)
+    native = [
+        event
+        for event in events
+        if event.event_type in {dispatch.CLAIM_EVENT, dispatch.CORRELATION_EVENT, dispatch.HELD_EVENT}
+    ]
+    assert len(native) == 3
+    assert all(len(event.idempotency_key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN for event in native)
+
+
+@POSIX_ONLY
+def test_native_json_closes_a_lost_dispatch_request(tmp_path, monkeypatch):
+    workspace, run_id = _enroll(tmp_path)
+    original = dispatch._record_dispatch_requested
+
+    def boom(*_args: object, **_kwargs: object) -> int:
+        raise dispatch.DispatchError("journal-refused", "injected crash before the requested fact")
+
+    monkeypatch.setattr(dispatch, "_record_dispatch_requested", boom)
+    with pytest.raises(dispatch.DispatchError):
+        _claim(workspace, run_id, "one")
+    monkeypatch.setattr(dispatch, "_record_dispatch_requested", original)
+    assert not [event for event in _events(workspace, run_id) if event.event_type == "run.dispatch.requested"]
+    with pytest.raises(dispatch.DispatchError) as blocked:
+        _claim(workspace, run_id, "two")
+    assert blocked.value.code == "run-barrier"
+
+    report = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=_native(), abandon=False)
+    assert report["mode"] == dispatch.OPERATOR_ASSERTED
+    requested = [
+        event.payload["attempt"] for event in _events(workspace, run_id) if event.event_type == "run.dispatch.requested"
+    ]
+    assert requested == [1]
+    assert _claim(workspace, run_id, "two")["dispatch_attempt"] == 2
+
+
+@POSIX_ONLY
+def test_crash_before_the_launch_claim_blocks_and_abandon_resolves(tmp_path, monkeypatch):
+    workspace, run_id = _enroll(tmp_path)
+    original = dispatch.run_tasks.claim_task_launch
+
+    def crash(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("injected crash before the launch claim")
+
+    monkeypatch.setattr(dispatch.run_tasks, "claim_task_launch", crash)
+    with pytest.raises(RuntimeError):
+        _claim(workspace, run_id, "one")
+    monkeypatch.setattr(dispatch.run_tasks, "claim_task_launch", original)
+    events = _events(workspace, run_id)
+    assert len([event for event in events if event.event_type == dispatch.CLAIM_EVENT]) == 1
+    assert not [event for event in events if event.event_type == "task.launch-claimed"]
+    assert not [event for event in events if event.event_type == "run.dispatch.requested"]
+
+    with pytest.raises(dispatch.DispatchError) as blocked:
+        _claim(workspace, run_id, "two")
+    assert blocked.value.code == "run-barrier"
+    with pytest.raises(dispatch.DispatchError) as prelaunch:
+        dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=_native(), abandon=False)
+    assert prelaunch.value.code == "no-claim"
+
+    report = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=None, abandon=True)
+    assert report["mode"] == dispatch.ABANDONED and report["status"] == "queued"
+    assert not [event for event in _events(workspace, run_id) if event.event_type == "run.dispatch.requested"]
+    with pytest.raises(dispatch.DispatchError) as held:
+        _claim(workspace, run_id, "one")
+    assert held.value.code == "task-held"
+    assert _claim(workspace, run_id, "two")["dispatch_attempt"] == 1
+
+
+@POSIX_ONLY
+def test_native_json_refuses_an_abandoned_task(tmp_path):
+    workspace, run_id = _enroll(tmp_path)
+    _claim(workspace, run_id, "one")
+    dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=None, abandon=True)
+    journal_path = _run_dir(workspace, run_id) / "events" / "lifecycle.jsonl"
+    before = journal_path.read_bytes()
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=_native(), abandon=False)
+    assert refused.value.code == "task-held"
+    assert journal_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            "task.native-claimed",
+            {
+                "task_id": "one",
+                "attempt_id": "a" * 64,
+                "dispatch_attempt": 1,
+                "template_digest": "b" * 64,
+                "intent_digest": "c" * 64,
+            },
+        ),
+        (
+            "task.native-claimed",
+            {
+                "task_id": "one",
+                "attempt_id": "a" * 64,
+                "dispatch_attempt": True,
+                "parent_thread": "thread-parent",
+                "template_digest": "b" * 64,
+                "intent_digest": "c" * 64,
+            },
+        ),
+        (
+            "task.native-claimed",
+            {
+                "task_id": "one",
+                "attempt_id": "a" * 64,
+                "dispatch_attempt": 1,
+                "parent_thread": "thread-parent",
+                "template_digest": "not-a-digest",
+                "intent_digest": "c" * 64,
+            },
+        ),
+        (
+            "task.native-correlated",
+            {
+                "task_id": "one",
+                "attempt_id": "a" * 64,
+                "mode": "authenticated",
+                "handle_digest": "b" * 64,
+                "child_thread_id": "thread-child",
+                "child_run_id": "run-child",
+            },
+        ),
+        (
+            "task.native-correlated",
+            {
+                "task_id": "one",
+                "attempt_id": "a" * 64,
+                "mode": "parent-reported",
+                "handle_digest": "b" * 64,
+                "child_thread_id": None,
+                "child_run_id": "run-child",
+            },
+        ),
+        (
+            "task.native-held",
+            {"task_id": "one", "attempt_id": "a" * 64, "reason": "lost", "evidence_digest": "b" * 64},
+        ),
+        (
+            "task.native-held",
+            {
+                "task_id": "one",
+                "attempt_id": "a" * 64,
+                "reason": "abandoned-unknown",
+                "evidence_digest": "b" * 64,
+                "task_text": "leak",
+            },
+        ),
+    ],
+)
+def test_native_event_payloads_are_closed(event_type, payload):
+    with pytest.raises(run_events.CanonicalizationError):
+        run_events.validate_event_request(event_type=event_type, payload=payload, idempotency_key="k")
+    valid = {
+        "task.native-claimed": {
+            "task_id": "one",
+            "attempt_id": "a" * 64,
+            "dispatch_attempt": 1,
+            "parent_thread": "thread-parent",
+            "template_digest": "b" * 64,
+            "intent_digest": "c" * 64,
+        },
+        "task.native-correlated": {
+            "task_id": "one",
+            "attempt_id": "a" * 64,
+            "mode": "parent-reported",
+            "handle_digest": "b" * 64,
+            "child_thread_id": "thread-child",
+            "child_run_id": "run-child",
+        },
+        "task.native-held": {
+            "task_id": "one",
+            "attempt_id": "a" * 64,
+            "reason": "abandoned-unknown",
+            "evidence_digest": "b" * 64,
+        },
+    }[event_type]
+    run_events.validate_event_request(event_type=event_type, payload=valid, idempotency_key="k")
+
+
+@POSIX_ONLY
+def test_missing_target_is_a_bounded_run_missing_refusal(tmp_path, capsys):
+    missing = tmp_path / "does-not-exist"
+    command = [
+        "t3",
+        "claim",
+        "t3-" + "0" * 64,
+        "one",
+        "--parent-thread",
+        THREAD,
+        "--target",
+        str(missing),
+    ]
+    assert cli.main(command) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[run-missing]" in captured.err and TASK_TEXT not in captured.err
+    assert not missing.exists()
+
+
+@POSIX_ONLY
+def test_native_json_refuses_non_regular_and_oversized_files(tmp_path, capsys):
+    workspace, run_id = _enroll(tmp_path)
+    _claim(workspace, run_id, "one")
+    capsys.readouterr()
+
+    def argv(path: str) -> list[str]:
+        return [
+            "t3",
+            "accepted",
+            run_id,
+            "one",
+            "--parent-thread",
+            THREAD,
+            "--native-json",
+            path,
+            "--target",
+            str(workspace),
+        ]
+
+    assert cli.main(argv("/dev/zero")) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "[native-unreadable]" in captured.err
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b" " * (dispatch._MAX_NATIVE_BYTES + 1))
+    assert cli.main(argv(str(oversized))) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "[native-too-large]" in captured.err

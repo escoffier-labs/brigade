@@ -67,11 +67,15 @@ text absent from the lifecycle journal.
   missing request, which frees the run while the task stays held. A requested
   but unaccepted task does not block siblings, but it keeps its budget unit
   charged.
+- A claim binding without its launch claim is the same barrier. Brigade never
+  replays it. `hold-resolve --abandon` closes it and charges nothing.
 - Every claim re-reads every retained asset and refuses on a digest, custody,
   mode or source revision mismatch.
 - `accepted` refuses a mismatched provider, model, options, parent thread or
   child node, and a null child thread or run. A different handle holds the
   task, not the run.
+- `hold-resolve --native-json` refuses a task that is already held. Abandon is
+  the only resolution for an abandoned task.
 - `hold-resolve` cannot be restricted to one operator on a shared local
   account. It never re-grants launch.
 - POSIX-only until an owner-only asset DACL exists on Windows.

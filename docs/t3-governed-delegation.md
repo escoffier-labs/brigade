@@ -120,6 +120,14 @@ the pending attempt. A task that was requested but not accepted stays charged,
 active and non-relaunchable, and it does not block other tasks. Its dispatch
 unit counts against the run budget.
 
+A claim binding without its `task.launch-claimed` fact is the second barrier
+state. Brigade does not replay that binding on retry, because a sibling could
+already hold the same dispatch ordinal and a replayed identity with a changed
+payload would conflict. The run holds every new claim, the task cannot be
+correlated, and only `t3 hold-resolve --abandon` closes it. Abandoning this
+state charges nothing, because no dispatch request was ever recorded, and the
+task stays non-relaunchable.
+
 A requested-but-unaccepted task is exactly that state. It is not an invitation
 to retry. Use `t3 hold-resolve --abandon` when the attempt must be closed. It
 records the missing dispatch request, which clears the barrier for the rest of
@@ -144,9 +152,13 @@ not change the run state.
 ## Hold resolution
 
 `t3 hold-resolve --native-json` applies the same projection validation as
-`t3 accepted` and records the result as an operator assertion. `--abandon`
-marks the attempt terminal-unknown with a durable hold fact and keeps the
-budget charged. Neither path ever re-grants launch, and a later claim refuses.
+`t3 accepted`, records the result as an operator assertion, and first records a
+missing dispatch request so the run barrier clears and the unit is charged.
+It refuses a task that is already held. `--abandon` marks the attempt
+terminal-unknown with a durable hold fact. When a launch claim exists without
+its dispatch request it records that request, so the unit stays charged. When
+no launch claim exists it charges nothing. Neither path ever re-grants launch,
+and a later claim refuses.
 
 The verb is available to any principal allowed to mutate the run. Brigade
 cannot enforce operator-only access on a shared local account, so the honest
