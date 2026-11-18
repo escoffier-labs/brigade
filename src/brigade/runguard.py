@@ -1105,9 +1105,9 @@ def recover_stale_run(
 def run_recovery_status(cwd: Path, run_dir: Path) -> str:
     cwd = cwd.expanduser().resolve()
     run_dir = run_dir.expanduser().resolve()
-    if not cwd.is_dir():
-        return "unknown"
     path = lock_path(cwd)
+    if not cwd.is_dir() and not path.parent.is_dir():
+        return "unknown"
     try:
         lock_is_directory = _lock_path_is_directory(path)
     except RunLockError:

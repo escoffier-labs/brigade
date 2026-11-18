@@ -44,3 +44,13 @@ def test_recovery_receipt_names_checkout(checkout, tmp_path, monkeypatch):
     assert runguard.recover_stale_run(checkout, run_dir, before_terminalize=lambda owner: None)
     receipt = json.loads((run_dir / "run.json").read_text())
     assert receipt["failure"]["lock_workspace"] == str(checkout.resolve())
+
+
+@pytest.mark.parametrize("lock_name", ["run.lock", ".run.lock.retained-test.stale"])
+def test_retained_lease_requires_recovery_after_checkout_removed(checkout, tmp_path, lock_name):
+    run_dir = tmp_path / "run"
+    _write_dead_lock(runguard.worktree_lock_dir(checkout) / lock_name, run_dir)
+
+    assert not checkout.exists()
+    assert runguard.run_recovery_status(checkout, run_dir) == "required"
+    assert runguard.run_recovery_status(checkout, tmp_path / "other-run") == "cleared"
