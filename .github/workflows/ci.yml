@@ -1212,6 +1212,19 @@ jobs:
       # documentation, and it is exactly what the guard below rejects.
       - name: Validate changelog fragments
         run: python3 scripts/changelog_fragments.py check
+      - name: Fetch the pull request head's merged parents
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # HEAD is GitHub's test merge of the base tip and the pull request
+          # head, so its parents are not the change's own history. The head's
+          # parents are, and a released upstream among them is the evidence the
+          # guard needs. A parent that cannot be fetched leaves it strict.
+          for parent in $(git cat-file -p "$PR_HEAD_SHA" | sed -n '/^$/q;s/^parent //p'); do
+            git fetch --no-tags --depth=1 origin "$parent" || true
+          done
       - name: Reject CHANGELOG.md edits outside a release commit
         if: ${{ github.event_name != 'push' }}
         env:
@@ -1227,6 +1240,9 @@ jobs:
               exit 1
             fi
             base=$(git rev-parse HEAD^1)
+            # Name the actual change so the guard reads the head's own parents,
+            # never the synthetic test merge.
+            python3 scripts/changelog_fragments.py guard --base "$base" --head "$PR_HEAD_SHA"
           else
             base=$EVENT_BASE_SHA
             if [ -z "$base" ]; then
@@ -1234,8 +1250,8 @@ jobs:
               exit 1
             fi
             git fetch --no-tags --depth=1 origin "$base"
+            python3 scripts/changelog_fragments.py guard --base "$base"
           fi
-          python3 scripts/changelog_fragments.py guard --base "$base"
 
   install-from-source:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}

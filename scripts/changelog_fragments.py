@@ -15,8 +15,11 @@ Subcommands (stdlib only, no dependencies):
   assemble   append fragments to ``## [Unreleased]`` and delete them.
 
 A release commit is a diff that adds a new ``## [X.Y.Z] - YYYY-MM-DD`` heading
-to CHANGELOG.md. It must also leave no fragment behind, except the fragments a
-base branch already carried when the change merged an already released base.
+to CHANGELOG.md. It must also leave no fragment behind. A change that merges an
+already released upstream may keep that upstream's fragments and the base
+branch's own fragments, but only when the caller names the change's own commit
+and the added release heading is found in a parent of that commit. Without that
+evidence the strict rule applies.
 """
 
 from __future__ import annotations
@@ -225,36 +228,63 @@ def _fragment_blobs(root: Path, revision: str) -> dict[str, str]:
     return blobs
 
 
-def guard(root: Path, base: str, head: str = "HEAD") -> list[str]:
-    """Reject a CHANGELOG.md edit that is not part of a release commit."""
-    changed = _git(root, "diff", "--name-only", "--no-renames", base, head).splitlines()
+def _inherited_release(root: Path, head_commit: str, headings: list[str], base_commit: str) -> str | None:
+    """Return a parent of the head whose changelog already carried the release.
+
+    Only a parent whose objects are in the checkout can prove inheritance. A
+    shallow clone that fetched just the head or the test merge has none, so the
+    caller stays on the strict rule instead of trusting a synthetic merge.
+    """
+    for parent in _commit_parents(root, head_commit):
+        if parent == base_commit:
+            continue
+        try:
+            text = _git(root, "show", f"{parent}:{CHANGELOG}")
+        except FragmentError:
+            continue
+        lines = {line.strip() for line in text.splitlines()}
+        if all(heading.strip() in lines for heading in headings):
+            return parent
+    return None
+
+
+def guard(root: Path, base: str, head: str | None = None) -> list[str]:
+    """Reject a CHANGELOG.md edit that is not part of a release commit.
+
+    ``head`` names the change's own commit. Without it the guard checks HEAD
+    under the strict rule only, because a caller that did not name the change
+    may have handed it a synthetic merge whose parents are not the change's own
+    history.
+    """
+    revision = head or "HEAD"
+    changed = _git(root, "diff", "--name-only", "--no-renames", base, revision).splitlines()
     if CHANGELOG not in changed:
         return []
-    diff = _git(root, "diff", "-U0", "--no-color", "--no-renames", base, head, "--", CHANGELOG)
+    diff = _git(root, "diff", "-U0", "--no-color", "--no-renames", base, revision, "--", CHANGELOG)
     added_headings = [line[1:] for line in diff.splitlines() if line.startswith("+## [")]
-    if not any(RELEASE_HEADING_RE.match(heading) for heading in added_headings):
+    release_headings = [heading for heading in added_headings if RELEASE_HEADING_RE.match(heading)]
+    if not release_headings:
         return [
             f"{CHANGELOG}: pull requests do not edit the changelog. Add a fragment as "
             f"{FRAGMENT_DIR}/<pr-number-or-slug>.md instead (see {FRAGMENT_DIR}/README.md). "
             "Only a release commit, which adds a '## [X.Y.Z] - YYYY-MM-DD' heading, may edit it."
         ]
-    head_commit = _resolve(root, head)
-    at_head = _fragment_blobs(root, head_commit)
+    head_commit = _resolve(root, revision)
     base_commit = _resolve(root, base)
-    # An integration branch takes a released main by merging it: the release
-    # heading and its deletions arrive from the merged side while the branch's
-    # own fragments stay. When the change is exactly that merge (the head has a
-    # merged-in parent and its first parent is the base), the release does not
-    # own the fragments the base branch already carried, so only fragments this
-    # change adds or rewrites must be gone. Parent ids come from the commit
-    # header because CI fetches two commits and revision traversal stops there
-    # (#2562).
-    parents = _commit_parents(root, head_commit)
-    if len(parents) > 1 and parents[0] == base_commit:
-        at_base = _fragment_blobs(root, base_commit)
-        leftover = [path for path, blob in at_head.items() if at_base.get(path) != blob]
-    else:
+    at_head = _fragment_blobs(root, head_commit)
+    # A change that merged an already released upstream inherits its release
+    # heading, and the upstream may also carry fragments started after that
+    # release. Both those and the base branch's own fragments are not this
+    # change's to assemble, so only fragments it adds or rewrites must be gone.
+    upstream = None if head is None else _inherited_release(root, head_commit, release_headings, base_commit)
+    if upstream is None:
         leftover = list(at_head)
+    else:
+        at_base = _fragment_blobs(root, base_commit)
+        at_upstream = _fragment_blobs(root, upstream)
+        leftover = [
+            path for path, blob in at_head.items() if at_base.get(path) != blob and at_upstream.get(path) != blob
+        ]
     if leftover:
         return [
             f"{path}: a release commit must assemble and delete every fragment "
@@ -281,7 +311,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check", help="validate every fragment")
     guard_parser = sub.add_parser("guard", help="fail on a CHANGELOG.md edit outside a release commit")
     guard_parser.add_argument("--base", required=True, help="revision the change is compared against")
-    guard_parser.add_argument("--head", default="HEAD")
+    guard_parser.add_argument(
+        "--head",
+        default=None,
+        help="revision of the change's own commit; without it only the strict rule applies",
+    )
     assemble_parser = sub.add_parser("assemble", help="fold fragments into [Unreleased] and delete them")
     assemble_parser.add_argument("--dry-run", action="store_true", help="validate and report without writing")
     args = parser.parse_args(argv)
