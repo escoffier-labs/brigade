@@ -23,6 +23,9 @@ abandons an attempt. None of them resubmits a lost reply.
 - A second claim of the same task refuses with `already-claimed`.
 - An identical `accepted` replay is idempotent and appends no journal line.
   The record is labeled `parent-reported`, never authenticated acceptance.
+- A pending child run, question, approval or timed out wait records a
+  nonterminal task even when the native status is terminal. A later clean
+  terminal projection is accepted and records the result.
 - `hold-resolve --abandon` records `abandoned-unknown`, and a later claim
   refuses with `task-held`.
 - The lifecycle journal never contains task text.

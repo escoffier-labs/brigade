@@ -118,6 +118,20 @@ def _native(task_id: str = "one", **changes: object) -> dict:
     return payload
 
 
+def _terminal(task_id: str = "one", *, status: str = "completed", **changes: object) -> dict:
+    payload = _native(
+        task_id,
+        status=status,
+        workState="result_available",
+        latestTerminalStatus=status,
+        latestTerminalRunId="run-child",
+        latestTerminalResultContextTransferId="transfer-1",
+        resultContextTransferId="transfer-1",
+    )
+    payload.update(changes)
+    return payload
+
+
 def _claim(workspace: Path, run_id: str, task_id: str = "one", *, parent: str = THREAD) -> dict:
     return dispatch.claim(workspace=workspace, run_id=run_id, task_id=task_id, parent_thread=parent)
 
@@ -363,21 +377,22 @@ def test_accepted_records_parent_reported_correlation_idempotently(tmp_path):
     assert TASK_TEXT not in journal_path.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("transfers", ["both", "latest-only", "result-only"])
 @POSIX_ONLY
-def test_accepted_records_a_terminal_projection(tmp_path):
+def test_accepted_records_a_terminal_projection(tmp_path, transfers):
     workspace, run_id = _enroll(tmp_path)
     _claim(workspace, run_id, "one")
+    payload = _terminal()
+    if transfers == "latest-only":
+        payload["resultContextTransferId"] = None
+    elif transfers == "result-only":
+        payload["latestTerminalResultContextTransferId"] = None
     report = dispatch.accepted(
         workspace=workspace,
         run_id=run_id,
         task_id="one",
         parent_thread=THREAD,
-        payload=_native(
-            status="completed",
-            workState="result_available",
-            latestTerminalStatus="completed",
-            latestTerminalRunId="run-child",
-        ),
+        payload=payload,
     )
     assert report["status"] == "completed"
     task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
@@ -708,3 +723,139 @@ def test_native_json_refuses_non_regular_and_oversized_files(tmp_path, capsys):
     assert cli.main(argv(str(oversized))) == 2
     captured = capsys.readouterr()
     assert captured.out == "" and "[native-too-large]" in captured.err
+
+
+TERMINAL_STATUSES = ("completed", "failed", "cancelled", "interrupted")
+BRIGADE_TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+
+
+@pytest.mark.parametrize("status", TERMINAL_STATUSES)
+@pytest.mark.parametrize("pending", ["children", "question", "approval", "timeout"])
+@POSIX_ONLY
+def test_pending_evidence_never_records_a_terminal_result(tmp_path, pending, status):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    changes = {
+        "children": {"hasPendingChildRuns": True},
+        "question": {"hasPendingQuestion": True},
+        "approval": {
+            "pendingApproval": {"requestId": "request-1", "kind": "command", "runId": "run-1"},
+        },
+        "timeout": {"waitTimedOut": True},
+    }[pending]
+    report = dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_terminal(status=status, **changes),
+    )
+    assert report["status"] not in BRIGADE_TERMINAL
+    task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
+    assert task.status not in BRIGADE_TERMINAL and task.result_id is None
+
+    # The normal path: a later clean projection records the terminal result.
+    clean = dispatch.accepted(
+        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_terminal(status=status)
+    )
+    assert clean["status"] == status
+    task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
+    assert task.status == status and task.result_id is not None
+
+
+@POSIX_ONLY
+def test_failed_with_active_children_stays_recoverable(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    report = dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_terminal(status="failed", hasPendingChildRuns=True),
+    )
+    assert report["status"] == "waiting-for-children"
+    task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
+    assert task.status == "waiting-for-children" and task.result_id is None
+    corrected = dispatch.accepted(
+        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_terminal(status="failed")
+    )
+    assert corrected["status"] == "failed"
+    task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
+    assert task.status == "failed" and task.result_id is not None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("pendingApproval", {"requestId": 1, "kind": "command", "runId": "run-1"}, "native-invalid"),
+        ("pendingApproval", {"requestId": "request-1", "kind": "unknown", "runId": "run-1"}, "native-invalid"),
+        ("pendingApproval", {"kind": "command", "runId": "run-1"}, "native-invalid"),
+        ("hasPendingQuestion", "false", "native-invalid"),
+        ("waitTimedOut", 0, "native-invalid"),
+        ("latestTerminalRunId", 5, "native-invalid"),
+        ("latestTerminalResultContextTransferId", 5, "native-invalid"),
+        ("resultContextTransferId", {}, "native-invalid"),
+        ("summary", 5, "native-invalid"),
+        ("latestTerminalSummary", 5, "native-invalid"),
+        ("remoteChild", {"environmentId": "env", "threadId": "thread", "label": "x"}, "native-mismatch"),
+        ("remoteChild", {"environmentId": "env", "threadId": "thread"}, "native-invalid"),
+    ],
+)
+@POSIX_ONLY
+def test_malformed_projection_refuses(tmp_path, field, value, code):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    journal_path = _run_dir(workspace, run_id) / "events" / "lifecycle.jsonl"
+    before = journal_path.read_bytes()
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.accepted(
+            workspace=workspace,
+            run_id=run_id,
+            task_id="one",
+            parent_thread=THREAD,
+            payload=_native(**{field: value}),
+        )
+    assert refused.value.code == code
+    assert journal_path.read_bytes() == before
+
+
+@POSIX_ONLY
+def test_native_json_refuses_pipes_and_symlinks(tmp_path, capsys):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    capsys.readouterr()
+
+    def argv(path: str) -> list[str]:
+        return [
+            "t3",
+            "accepted",
+            run_id,
+            "one",
+            "--parent-thread",
+            THREAD,
+            "--native-json",
+            path,
+            "--target",
+            str(workspace),
+        ]
+
+    fifo = tmp_path / "native.fifo"
+    try:
+        os.mkfifo(fifo)
+    except (AttributeError, OSError, NotImplementedError):
+        pytest.skip("named pipes are unavailable on this platform")
+    assert cli.main(argv(str(fifo))) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "[native-unreadable]" in captured.err
+
+    real = tmp_path / "native.json"
+    real.write_text(json.dumps(_native()), encoding="utf-8")
+    link = tmp_path / "native-link.json"
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+    assert cli.main(argv(str(link))) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "[native-unreadable]" in captured.err

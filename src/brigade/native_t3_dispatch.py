@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import fleet_t3_transport, run_budget, run_events, run_journal, run_lifecycle, run_tasks, runguard
+from . import native_t3_observations as observations
 from . import run_task_journal as journal
 from . import native_t3_enrollment as enrollment
 from .fleet_t3_transport import SourceRevisionError
@@ -61,6 +62,7 @@ _STATUS_MAP = {
 }
 _TERMINAL_NATIVE = frozenset({"completed", "failed", "cancelled", "interrupted"})
 _WORK_STATES = frozenset({"working", "waiting_for_children", "result_available"})
+_APPROVAL_KINDS = frozenset({"command", "file-read", "file-change", "mcp-elicitation", "permission"})
 _RESULT_REQUIRED = frozenset(
     """taskId childThreadId childRunId childNodeId status workState hasPendingChildRuns latestTerminalRunId
     latestTerminalStatus latestTerminalSummary latestTerminalResultContextTransferId providerInstanceId model
@@ -130,11 +132,16 @@ class NativeResult:
     model: str
     options: tuple[tuple[str, str | bool], ...]
     has_pending_child_runs: bool
+    has_pending_question: bool
+    pending_approval: Mapping[str, str] | None
+    wait_timed_out: bool
     latest_terminal_run_id: str | None
     latest_terminal_status: str | None
+    latest_terminal_result_context_transfer_id: str | None
+    result_context_transfer_id: str | None
 
     @property
-    def terminal(self) -> bool:
+    def terminal_status(self) -> bool:
         return self.status in _TERMINAL_NATIVE
 
 
@@ -540,8 +547,56 @@ def _reference(value: object) -> str:
     return str(value)
 
 
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise _refuse("native-invalid", "a native text field is not usable")
+    return value
+
+
+def _optional_reference(value: object) -> str | None:
+    if value is None:
+        return None
+    return _reference(value)
+
+
+def _pending_approval(value: object) -> Mapping[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise _refuse("native-invalid", "a native pending approval is not usable")
+    kind = value.get("kind")
+    if type(kind) is not str or kind not in _APPROVAL_KINDS:
+        raise _refuse("native-invalid", "a native pending approval kind is not usable")
+    return {
+        "requestId": _reference(value.get("requestId")),
+        "kind": kind,
+        "runId": _reference(value.get("runId")),
+    }
+
+
+def _require_local_child(payload: Mapping[str, object]) -> None:
+    """A linked-environment child is outside the enrolled local target."""
+    remote = payload.get("remoteChild")
+    if remote is None:
+        return
+    if not isinstance(remote, Mapping):
+        raise _refuse("native-invalid", "a native remote child is not usable")
+    if any(not journal.provider_reference(remote.get(field)) for field in ("environmentId", "threadId")):
+        raise _refuse("native-invalid", "a native remote child reference is not usable")
+    if type(remote.get("label")) is not str:
+        raise _refuse("native-invalid", "a native remote child label is not usable")
+    raise _refuse("native-mismatch", "the native result names a remote child outside the enrolled target")
+
+
 def parse_native_result(payload: object, *, task_id: str) -> NativeResult:
-    """Validate the full ``delegate_task`` projection; never retain raw fields."""
+    """Validate the full ``delegate_task`` projection; never retain raw fields.
+
+    Every field the classifier reads is type checked here. The classifier then
+    decides whether the projection is terminal, because a terminal status alone
+    never proves that descendants, questions, approvals or waits are settled.
+    """
     if not isinstance(payload, Mapping) or not _RESULT_REQUIRED.issubset(payload):
         raise _refuse("native-invalid", "the native result is missing required projection fields")
     if payload["taskId"] != task_id or payload["childNodeId"] != task_id:
@@ -551,18 +606,18 @@ def parse_native_result(payload: object, *, task_id: str) -> NativeResult:
         raise _refuse("native-invalid", "the native task status is not usable")
     if type(work_state) is not str or work_state not in _WORK_STATES:
         raise _refuse("native-invalid", "the native work state is not usable")
-    if any(type(payload[field]) is not bool for field in ("hasPendingChildRuns", "hasPendingQuestion", "waitTimedOut")):
+    flags = ("hasPendingChildRuns", "hasPendingQuestion", "waitTimedOut")
+    if any(type(payload[field]) is not bool for field in flags):
         raise _refuse("native-invalid", "a native pending or wait flag is not usable")
-    approval = payload["pendingApproval"]
-    if approval is not None and not isinstance(approval, Mapping):
-        raise _refuse("native-invalid", "a native pending approval is not usable")
     terminal_status = payload["latestTerminalStatus"]
     if terminal_status is not None and (type(terminal_status) is not str or terminal_status not in _TERMINAL_NATIVE):
         raise _refuse("native-invalid", "the native terminal status is not usable")
-    terminal_run = payload["latestTerminalRunId"]
+    for field in ("latestTerminalSummary", "summary", "link", "next"):
+        _optional_text(payload.get(field))
     model = payload["model"]
     if type(model) is not str or not model:
         raise _refuse("native-invalid", "the native model is not usable")
+    _require_local_child(payload)
     result = NativeResult(
         task_id=task_id,
         child_thread_id=_reference(payload["childThreadId"]),
@@ -574,10 +629,19 @@ def parse_native_result(payload: object, *, task_id: str) -> NativeResult:
         model=model,
         options=_native_options(payload.get("options")),
         has_pending_child_runs=payload["hasPendingChildRuns"],
-        latest_terminal_run_id=None if terminal_run is None else _reference(terminal_run),
+        has_pending_question=payload["hasPendingQuestion"],
+        pending_approval=_pending_approval(payload["pendingApproval"]),
+        wait_timed_out=payload["waitTimedOut"],
+        latest_terminal_run_id=_optional_reference(payload["latestTerminalRunId"]),
         latest_terminal_status=terminal_status,
+        latest_terminal_result_context_transfer_id=_optional_reference(
+            payload["latestTerminalResultContextTransferId"]
+        ),
+        result_context_transfer_id=_optional_reference(payload["resultContextTransferId"]),
     )
-    if result.terminal and (result.latest_terminal_status != result.status or result.latest_terminal_run_id is None):
+    if result.terminal_status and (
+        result.latest_terminal_status != result.status or result.latest_terminal_run_id is None
+    ):
         raise _refuse("native-invalid", "a terminal native result lacks matching terminal metadata")
     return result
 
@@ -607,18 +671,84 @@ def _require_target(result: NativeResult, target: NativeTarget) -> None:
         raise _refuse("options-mismatch", "the native options do not match the finalized intent")
 
 
-def _observe(workspace: Path, run_dir: Path, verified: _Verified, result: NativeResult) -> run_tasks.TaskResult:
+def _classify(verified: _Verified, binding: ClaimBinding, result: NativeResult) -> observations.NativeObservation:
+    """Route the projection through the shipped lifecycle classifier.
+
+    Containment evidence is the projection's own pending-child statement: a
+    pending child run is active, and no pending child run is the only quiescent
+    evidence this verb can supply. Any pending child run, question, approval or
+    wait timeout classifies as awaiting no matter what the status field says.
+    The origin is the enrolled intent's declared origin, because the projection
+    carries no origin of its own.
+    """
+    target = verified.retained.target
+    try:
+        reference = observations.NativeTaskReference(
+            origin_environment_id=target.origin_environment,
+            native_client_request_key=enrollment.request_key(
+                verified.result.handle.run_id, result.task_id, binding.attempt_id
+            ),
+            task_id=result.task_id,
+        )
+    except ValueError:
+        raise _refuse("native-invalid", "the native correlation reference is not usable") from None
+    snapshot = {
+        "taskId": result.task_id,
+        "status": result.status,
+        "workState": result.work_state,
+        "hasPendingChildRuns": result.has_pending_child_runs,
+        "hasPendingQuestion": result.has_pending_question,
+        "pendingApproval": result.pending_approval,
+        "waitTimedOut": result.wait_timed_out,
+        "latestTerminalStatus": result.latest_terminal_status,
+        "latestTerminalRunId": result.latest_terminal_run_id,
+        "latestTerminalResultContextTransferId": result.latest_terminal_result_context_transfer_id,
+        "resultContextTransferId": result.result_context_transfer_id,
+    }
+    try:
+        return observations.classify_native_snapshot(
+            reference,
+            snapshot,
+            observed_origin_environment_id=target.origin_environment,
+            containment="active" if result.has_pending_child_runs else "quiescent",
+        )
+    except ValueError:
+        raise _refuse("native-invalid", "the native projection is not classifiable") from None
+
+
+def _recorded_status(result: NativeResult, observation: observations.NativeObservation) -> str:
+    """Map a classification to a durable status, never terminal before its time."""
+    if observation.family == "terminal-candidate":
+        return _STATUS_MAP[result.status]
+    if result.status not in _TERMINAL_NATIVE:
+        return _STATUS_MAP[result.status]
+    if result.has_pending_child_runs or result.work_state == "waiting_for_children":
+        return "waiting-for-children"
+    if result.has_pending_question or result.pending_approval is not None:
+        return "waiting-for-input"
+    return "unknown"
+
+
+def _observe(
+    workspace: Path,
+    run_dir: Path,
+    verified: _Verified,
+    result: NativeResult,
+    observation: observations.NativeObservation,
+) -> run_tasks.TaskResult:
+    terminal = observation.family == "terminal-candidate"
+    containment = "quiescent" if terminal else ("active" if result.has_pending_child_runs else "unknown")
     try:
         return run_tasks.observe_task(
             run_dir,
             workspace=workspace,
             handle=verified.result.handle,
             observation=run_tasks.TaskObservation(
-                status=_STATUS_MAP[result.status],
+                status=_recorded_status(result, observation),
                 provider_task_id=result.child_node_id,
                 original_run_id=result.child_run_id,
-                provider_result_id=result.latest_terminal_run_id if result.terminal else None,
-                containment="active" if result.has_pending_child_runs else "unknown",
+                provider_result_id=observation.terminal_run_id if terminal else None,
+                containment=containment,
             ),
             expected_version=verified.result.version,
         )
@@ -643,7 +773,10 @@ def _correlate(
             _record_held(workspace, run_dir, result.task_id, binding.attempt_id, ACCEPT_CONFLICT, handle_digest)
             raise _refuse("accept-conflict", "a different native handle already correlates this task")
         raise _refuse("accept-conflict", "the operator assertion contradicts the recorded native handle")
-    updated = _observe(workspace, run_dir, verified, result)
+    observation = _classify(verified, binding, result)
+    if observation.family == "refused":
+        raise _refuse("native-mismatch", "the native projection does not correlate with this task")
+    updated = _observe(workspace, run_dir, verified, result, observation)
     _append(
         workspace,
         run_dir,
@@ -885,16 +1018,43 @@ def hold_resolve(
 
 
 def _read_native(path: str) -> object:
-    try:
-        if path == "-":
-            raw = sys.stdin.buffer.read(_MAX_NATIVE_BYTES + 1)
-        else:
-            with Path(path).expanduser().open("rb") as handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    raise _refuse("native-unreadable", "the native result is not a regular file")
-                raw = handle.read(_MAX_NATIVE_BYTES + 1)
-    except OSError:
-        raise _refuse("native-unreadable", "the native result file is not readable") from None
+    """Read a bounded native projection from stdin or one regular file.
+
+    A named pipe would block the CLI forever, so the path is lstat-checked
+    first, then opened non-blocking and no-follow where the platform supports
+    it, and the open handle is checked again before any read.
+    """
+    if path == "-":
+        raw = sys.stdin.buffer.read(_MAX_NATIVE_BYTES + 1)
+    else:
+        target = Path(path).expanduser()
+        try:
+            before = os.lstat(target)
+        except OSError:
+            raise _refuse("native-unreadable", "the native result file is not readable") from None
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise _refuse("native-unreadable", "the native result is not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(target, flags)
+        except OSError:
+            raise _refuse("native-unreadable", "the native result file is not readable") from None
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise _refuse("native-unreadable", "the native result is not a regular file")
+            chunks: list[bytes] = []
+            remaining = _MAX_NATIVE_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+        except OSError:
+            raise _refuse("native-unreadable", "the native result file is not readable") from None
+        finally:
+            os.close(descriptor)
     if len(raw) > _MAX_NATIVE_BYTES:
         raise _refuse("native-too-large", "the native result exceeds the size bound")
     try:

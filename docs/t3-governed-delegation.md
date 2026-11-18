@@ -149,6 +149,15 @@ assertion is labeled as an assertion. An identical replay is idempotent. A
 different native handle for the same task refuses and holds that task. It does
 not change the run state.
 
+The projection is then classified by the existing
+`native_t3_observations.classify_native_snapshot`, not by its status field
+alone. A pending child run, a pending question, a pending approval or a timed
+out wait keeps the task nonterminal whatever the status says. A terminal status
+also stays nonterminal when the terminal run or result transfer is missing, or
+when the terminal evidence contradicts itself. Only a classifier terminal
+candidate records a terminal result. A nonterminal record followed by a later
+clean terminal projection is the normal path and is accepted.
+
 ## Hold resolution
 
 `t3 hold-resolve --native-json` applies the same projection validation as
@@ -216,6 +225,8 @@ Claim and correlation refusals use the same one-line form. Codes include
   after a lost reply. The task holds until an operator resolves it.
 - `t3 hold-resolve` cannot be restricted to one operator on a shared local
   account.
+- A projection that names a linked-environment `remoteChild` is refused,
+  because the enrolled target is local. That lane is not supported here.
 - The finalized intent keeps the roster target's runtime and interaction modes,
   but the delegate arguments do not send `runtimeMode`, because the declared
   default `app-server` is not one of the native runtime mode literals. The
