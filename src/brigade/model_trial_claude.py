@@ -296,9 +296,24 @@ def build_argv(
     return argv + ["--disallowedTools", "Task", "Agent"]
 
 
-def build_env(source: Mapping[str, str], arm_dir: Path) -> dict[str, str]:
+def build_env(source: Mapping[str, str], arm_dir: Path, *, windows: bool = os.name == "nt") -> dict[str, str]:
+    """The child environment: the named ``ENV_PASSTHROUGH`` variables and arm-local paths, nothing else.
+
+    No other parent variable is copied. On Windows the per-user and temp roots come from the arm
+    directory too, because the Brigade commands behind the MCP server need ``LOCALAPPDATA`` for their
+    authority key and receipts, and the parent's profile must not be reachable from a cell.
+    """
     env = {key: source[key] for key in ENV_PASSTHROUGH if key in source}
     home = arm_dir / "home"
+    if windows:
+        env.update(
+            {
+                "APPDATA": str(home / "AppData" / "Roaming"),
+                "LOCALAPPDATA": str(home / "AppData" / "Local"),
+                "TEMP": str(arm_dir / "tmp"),
+                "TMP": str(arm_dir / "tmp"),
+            }
+        )
     env.update(
         {
             "HOME": str(home),

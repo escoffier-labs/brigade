@@ -177,7 +177,9 @@ def test_arm_system_prompts_differ_only_in_skill_bytes_and_hashes_are_in_the_cel
     result, fake_dir, _, _ = good
     prompts = {r["session_id"]: r["system_prompt"] for r in records(fake_dir)}
     by_arm = {a["cell"]["arm"]: a for a in result["attempts"]}
-    skills = {arm: (FIXTURES / arm / "SKILL.md").read_text() for arm in ("baseline", "candidate")}
+    # The adapter hands the model the file's exact bytes, so read them without newline translation
+    # (a Windows checkout holds SKILL.md with CRLF, and read_text would fold it to LF).
+    skills = {arm: (FIXTURES / arm / "SKILL.md").read_bytes().decode("utf-8") for arm in ("baseline", "candidate")}
     for arm, attempt in by_arm.items():
         prompt = prompts[attempt["live"]["init"]["session_id"]]
         assert prompt.startswith(PRELUDE) and prompt[len(PRELUDE) :] == skills[arm]
@@ -461,9 +463,28 @@ def test_live_refuses_before_launching_without_subscription_token_or_full_model(
 
 
 def test_build_env_requires_no_parent_secrets_beyond_the_token():
-    env = build_env({"CLAUDE_CODE_OAUTH_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "s", "PATH": "/p"}, Path("/arm"))
-    assert "AWS_SECRET_ACCESS_KEY" not in env and env["PATH"] == "/p" and env["HOME"] == "/arm/home"
+    arm = Path("/arm")
+    env = build_env({"CLAUDE_CODE_OAUTH_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "s", "PATH": "/p"}, arm)
+    assert "AWS_SECRET_ACCESS_KEY" not in env and env["PATH"] == "/p"
+    assert env["HOME"] == str(arm / "home")  # str(Path) so the separator is the platform's
     assert env["USERPROFILE"] == env["HOME"]
+
+
+def test_build_env_copies_only_named_variables_and_roots_windows_dirs_in_the_arm():
+    parent = {name: f"parent-{name}" for name in ENV_PASSTHROUGH}
+    secrets = ("AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP")
+    parent.update({name: "parent-secret" for name in secrets} | {TOKEN_ENV: "t"})
+    arm = Path("/arm")
+    for windows in (False, True):
+        env = build_env(parent, arm, windows=windows)
+        assert all(value != "parent-secret" for value in env.values())  # no unlisted parent variable survives
+        assert {k for k, v in env.items() if v.startswith("parent-")} == set(ENV_PASSTHROUGH)
+        assert ("LOCALAPPDATA" in env) is windows and ("TEMP" in env) is windows
+        if windows:
+            home = arm / "home"
+            assert env["LOCALAPPDATA"] == str(home / "AppData" / "Local")
+            assert env["APPDATA"] == str(home / "AppData" / "Roaming")
+            assert env["TEMP"] == env["TMP"] == str(arm / "tmp")
 
 
 def test_argv_builder_effort_is_optional():
@@ -695,12 +716,20 @@ def test_expiry_cannot_flip_a_finished_cell_or_signal_a_recycled_group(monkeypat
 
 
 def _elf(name):
+    """A native program for a held-descriptor launch, resolved through its symlinks.
+
+    Pass a shell, never ``echo``: some runners ship ``echo`` as a single-utility build that refuses to
+    start unless the path it was executed by names echo, and a held exec goes through a descriptor
+    (the same limit tests/test_memory_verify_seat.py documents). Both the file and its copy named
+    ``claude`` must therefore be a program that does not look at its own name.
+    """
     found = shutil.which(name)
     if found is None or not proc.held_exec_supported():
         pytest.skip(f"needs a native {name} and held-descriptor launch")
-    if Path(found).read_bytes()[:4] != b"\x7fELF":
+    real = Path(os.path.realpath(found))
+    if real.read_bytes()[:4] != b"\x7fELF":
         pytest.skip(f"{name} is not a native ELF binary here")
-    return Path(found)
+    return real
 
 
 def test_adapter_identity_records_the_executable_hash_and_a_changed_file_refuses_resume(tmp_path):
@@ -749,21 +778,22 @@ def test_the_bound_executable_is_rechecked_before_every_launch(tmp_path, monkeyp
 
 
 def test_a_replaced_path_cannot_change_what_runs_after_the_hash(tmp_path):
-    echo, true = _elf("echo"), _elf("true")
+    shell, true = _elf("sh"), _elf("true")
     claude = tmp_path / "claude"
-    shutil.copy(echo, claude)
+    shutil.copy(shell, claude)
     other = tmp_path / "other"
     shutil.copy(true, other)
     with bind_executable(str(claude)) as bound:
         assert bound.identity()["launch"] == "held-fexecve"
-        assert bound.sha256 == hashlib.sha256(echo.read_bytes()).hexdigest()
+        assert bound.sha256 == hashlib.sha256(shell.read_bytes()).hexdigest()
         os.replace(other, claude)  # the path now names a different binary
-        assert subprocess.run([str(claude), "held"], capture_output=True).stdout == b""  # by path: the replacement
-        ran = subprocess.run(bound.command(["claude", "held"]), capture_output=True, pass_fds=bound.pass_fds)
-        assert ran.stdout == b"held\n"  # by descriptor: the file that was hashed
+        script = ["-c", "echo held"]
+        assert subprocess.run([str(claude), *script], capture_output=True).stdout == b""  # by path: the replacement
+        ran = subprocess.run(bound.command(["claude", *script]), capture_output=True, pass_fds=bound.pass_fds)
+        assert ran.stdout == b"held\n", ran.stderr  # by descriptor: the file that was hashed
         bound.verify()  # a replaced path leaves the held file intact
     rewritten = tmp_path / "claude2"
-    shutil.copy(echo, rewritten)
+    shutil.copy(shell, rewritten)
     with bind_executable(str(rewritten)) as bound:
         with rewritten.open("ab") as handle:  # an in-place rewrite of the held inode
             handle.write(b"\0")
@@ -772,15 +802,15 @@ def test_a_replaced_path_cannot_change_what_runs_after_the_hash(tmp_path):
 
 
 def test_a_live_run_with_a_native_executable_records_its_hash_and_launches_by_descriptor(tmp_path):
-    echo = _elf("echo")
+    bash = _elf("bash")  # `bash --version` prints a version; a dash shell has no such flag
     claude = tmp_path / "claude"
-    shutil.copy(echo, claude)
+    shutil.copy(bash, claude)
     result = _execute_live(LIVE, tmp_path / "out", claude_bin=str(claude), environ=ENVIRON, timeout=30)
     recorded = result["plan"]["adapter"]["executable"]
     assert recorded["sha256"] == hashlib.sha256(claude.read_bytes()).hexdigest()
     assert recorded["launch"] == "held-fexecve"
     assert result["plan"]["adapter"]["claude_code_version"]  # read through the held descriptor
-    assert all(a["failure"] for a in result["attempts"])  # echo is no Claude, and no cell passes
+    assert all(a["failure"] for a in result["attempts"])  # bash is no Claude, and no cell passes
 
 
 def test_live_runs_refuse_a_platform_without_held_launch_before_any_process(tmp_path, monkeypatch):
