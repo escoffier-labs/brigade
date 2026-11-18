@@ -470,7 +470,18 @@ def _publish_health(ok: bool, *, deadline: float) -> str:
         memory = fleet_node_memory.memory_used()
         if memory is not None:
             body["memory_used"] = memory
-        fleet_client_policy.observe_t3(body)
+        try:
+            fleet_client_policy.observe_t3(body)
+        except fleet_client_policy.FleetPolicyClientError as exc:
+            # A Hub older than this node refuses the unknown field and would otherwise reject every
+            # health report, dropping this node out of placement. Resend once without memory.
+            if "memory_used" not in body or "unknown field 'memory_used'" not in str(exc.message):
+                raise
+            body.pop("memory_used")
+            _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
+            fleet_client_policy.observe_t3(body)
+    except ObservationError:
+        return "skipped"
     except Exception:
         return "error"
     return "ok"

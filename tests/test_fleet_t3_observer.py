@@ -1343,3 +1343,58 @@ def test_health_post_omits_the_key_when_memory_cannot_be_read(native_t3):
 
     assert observer._publish_health(True, deadline=time.monotonic() + 60) == "ok"
     assert HEALTH_POSTS == [{"node_id": NODE, "ok": True}] and "memory_used" not in HEALTH_POSTS[0]
+
+
+def test_health_post_resends_without_memory_when_an_older_hub_refuses_the_field(native_t3, monkeypatch):
+    from brigade import fleet_t3_observer as observer
+
+    sent: list[dict] = []
+
+    def older_hub(body):
+        sent.append(dict(body))
+        if "memory_used" in body:
+            raise fleet_client_policy.FleetPolicyClientError(
+                "invalid-request", "t3 observation report has unknown field 'memory_used'"
+            )
+        return {}
+
+    monkeypatch.setattr(fleet_node_memory, "memory_used", lambda: 0.5)
+    monkeypatch.setattr(fleet_client_policy, "observe_t3", older_hub)
+    assert observer._publish_health(True, deadline=time.monotonic() + 60) == "ok"
+    assert sent == [{"node_id": NODE, "ok": True, "memory_used": 0.5}, {"node_id": NODE, "ok": True}]
+
+
+def test_health_post_does_not_retry_other_refusals(native_t3, monkeypatch):
+    from brigade import fleet_t3_observer as observer
+
+    sent: list[dict] = []
+
+    def refuse(body):
+        sent.append(dict(body))
+        raise fleet_client_policy.FleetPolicyClientError(
+            "invalid-request", "t3 observation field 'memory_used' must be a number in 0..1"
+        )
+
+    monkeypatch.setattr(fleet_node_memory, "memory_used", lambda: 0.5)
+    monkeypatch.setattr(fleet_client_policy, "observe_t3", refuse)
+    assert observer._publish_health(True, deadline=time.monotonic() + 60) == "error"
+    assert len(sent) == 1
+
+
+def test_health_post_fallback_is_skipped_when_no_time_remains(native_t3, monkeypatch):
+    from brigade import fleet_t3_observer as observer
+
+    sent: list[dict] = []
+    deadline = time.monotonic() + fleet_client_policy.POLICY_TIMEOUT_SECONDS + 0.6
+
+    def older_hub_slow(body):
+        sent.append(dict(body))
+        time.sleep(0.5)
+        raise fleet_client_policy.FleetPolicyClientError(
+            "invalid-request", "t3 observation report has unknown field 'memory_used'"
+        )
+
+    monkeypatch.setattr(fleet_node_memory, "memory_used", lambda: 0.5)
+    monkeypatch.setattr(fleet_client_policy, "observe_t3", older_hub_slow)
+    assert observer._publish_health(True, deadline=deadline) == "skipped"
+    assert len(sent) == 1
