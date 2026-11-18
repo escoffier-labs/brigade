@@ -15,7 +15,8 @@ Subcommands (stdlib only, no dependencies):
   assemble   append fragments to ``## [Unreleased]`` and delete them.
 
 A release commit is a diff that adds a new ``## [X.Y.Z] - YYYY-MM-DD`` heading
-to CHANGELOG.md. It must also leave no fragment behind.
+to CHANGELOG.md. It must also leave no fragment behind, except the fragments a
+base branch already carried when the change merged an already released base.
 """
 
 from __future__ import annotations
@@ -198,6 +199,32 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout
 
 
+def _resolve(root: Path, revision: str) -> str:
+    """Return the full commit id for ``revision``."""
+    return _git(root, "rev-parse", "--verify", f"{revision}^{{commit}}").strip()
+
+
+def _commit_parents(root: Path, commit: str) -> list[str]:
+    """Return a commit's parents, read from its raw header.
+
+    Revision traversal stops at a shallow boundary, but a commit object keeps
+    its parent lines, so this works when CI fetched only two commits (#2562).
+    """
+    header = _git(root, "cat-file", "-p", commit).split("\n\n", 1)[0]
+    return [line[len("parent ") :] for line in header.splitlines() if line.startswith("parent ")]
+
+
+def _fragment_blobs(root: Path, revision: str) -> dict[str, str]:
+    """Map every fragment path in ``revision``'s tree to its blob id."""
+    blobs: dict[str, str] = {}
+    for line in _git(root, "ls-tree", "-r", revision, "--", FRAGMENT_DIR).splitlines():
+        metadata, path = line.split("\t", 1)
+        name = path.removeprefix(f"{FRAGMENT_DIR}/")
+        if path.startswith(f"{FRAGMENT_DIR}/") and name not in IGNORED_NAMES:
+            blobs[path] = metadata.split()[2]
+    return blobs
+
+
 def guard(root: Path, base: str, head: str = "HEAD") -> list[str]:
     """Reject a CHANGELOG.md edit that is not part of a release commit."""
     changed = _git(root, "diff", "--name-only", "--no-renames", base, head).splitlines()
@@ -211,17 +238,28 @@ def guard(root: Path, base: str, head: str = "HEAD") -> list[str]:
             f"{FRAGMENT_DIR}/<pr-number-or-slug>.md instead (see {FRAGMENT_DIR}/README.md). "
             "Only a release commit, which adds a '## [X.Y.Z] - YYYY-MM-DD' heading, may edit it."
         ]
-    ls_tree = _git(root, "ls-tree", "-r", "--name-only", head, "--", FRAGMENT_DIR).splitlines()
-    leftover = [
-        path
-        for path in ls_tree
-        if path.startswith(f"{FRAGMENT_DIR}/") and path.removeprefix(f"{FRAGMENT_DIR}/") not in IGNORED_NAMES
-    ]
+    head_commit = _resolve(root, head)
+    at_head = _fragment_blobs(root, head_commit)
+    base_commit = _resolve(root, base)
+    # An integration branch takes a released main by merging it: the release
+    # heading and its deletions arrive from the merged side while the branch's
+    # own fragments stay. When the change is exactly that merge (the head has a
+    # merged-in parent and its first parent is the base), the release does not
+    # own the fragments the base branch already carried, so only fragments this
+    # change adds or rewrites must be gone. Parent ids come from the commit
+    # header because CI fetches two commits and revision traversal stops there
+    # (#2562).
+    parents = _commit_parents(root, head_commit)
+    if len(parents) > 1 and parents[0] == base_commit:
+        at_base = _fragment_blobs(root, base_commit)
+        leftover = [path for path, blob in at_head.items() if at_base.get(path) != blob]
+    else:
+        leftover = list(at_head)
     if leftover:
         return [
             f"{path}: a release commit must assemble and delete every fragment "
             "(run 'python3 scripts/changelog_fragments.py assemble' on the merged tree)"
-            for path in leftover
+            for path in sorted(leftover)
         ]
     return []
 
