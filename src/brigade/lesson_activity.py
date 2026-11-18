@@ -136,7 +136,7 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
     with held_file_lock(root(target) / "state.lock", deadline_seconds=1):
         state = load(target)
         persisted_ids = {e["id"] for e in state["events"]}
-        drain_prompts(target, state, acknowledge=False)
+        drain_prompts(target, state, save_and_acknowledge=False)
         # Pre-tool activity invalidates an in-flight review without counting twice.
         at = time.time() if now is None else now
         metadata: dict[str, Any] = {}
@@ -301,8 +301,8 @@ def _retain_evicted_prompts(target: Path, state: dict[str, Any], events: list[di
         state.pop("drained_prompt_markers", None)
 
 
-def drain_prompts(target: Path, state: dict[str, Any], *, acknowledge: bool = True) -> None:
-    """Caller holds state.lock. Prompt hooks acquire only the cache-side lock."""
+def drain_prompts(target: Path, state: dict[str, Any], *, save_and_acknowledge: bool = True) -> None:
+    """Drain under state.lock, or let the hook save the combined observation state."""
     if receipt_signing.load_workspace_key(target) is None:
         discard_prompts(target)
         return
@@ -375,8 +375,10 @@ def drain_prompts(target: Path, state: dict[str, Any], *, acknowledge: bool = Tr
         if not state["drained_prompt_markers"]:
             state.pop("drained_prompt_markers", None)
         state["drained_prompt_ids"] = [p["prompt_id"] for p in prompts]
-        save(target, state)
-    if acknowledge:
+        # A hook saves once after its own append, which can evict a new prompt.
+        if save_and_acknowledge:
+            save(target, state)
+    if save_and_acknowledge:
         _acknowledge_saved_prompts(target)
 
 
