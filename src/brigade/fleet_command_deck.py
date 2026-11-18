@@ -22,6 +22,7 @@ from brigade.fleet_deck_brands import (
 )
 
 from .fleet_event_freshness import observation_state
+from .fleet_t3_unknown import unused_label
 from . import fleet_deck_shell, ui_theme, fleet_live_routing
 from .fleet_deck_empty_copy import COPY
 
@@ -1644,7 +1645,7 @@ def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled
         f"<tr><td>{_esc(machine.id)}</td><td>{_esc(machine.os)}</td><td>{_esc(machine.state)}</td>"
         f"<td>{_esc(machine.load)}/{_esc(machine.capacity)}</td><td>{_esc(machine.active_claims)}</td>"
         f"<td>{_esc(machine.available_slots)}</td><td>{_esc(machine.eligible_queued_work)}</td>"
-        f"<td>{_esc(machine.unused_reason)}</td><td>{_esc(machine.last_observed_at)}</td></tr>"
+        f"<td>{_esc(unused_label(machine.unused_reason))}</td><td>{_esc(machine.last_observed_at)}</td></tr>"
         for machine in control_plane.machines
     )
     machines_html = (

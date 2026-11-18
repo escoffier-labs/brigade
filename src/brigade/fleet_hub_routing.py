@@ -1726,6 +1726,10 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     now = _now()
     routing = document.get("routing") or {}
     seats = document.get("seats") or {}
+    # Imported here: fleet_t3_health imports this module at load time.
+    from . import fleet_t3_health
+
+    t3_health = fleet_t3_health.classify_nodes(conn, now)
     machines: list[dict[str, Any]] = []
     for name, record in document.get("machines", {}).items():
         node_id = record.get("node_id")
@@ -1755,6 +1759,10 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
             elif reasons:
                 available_slots = 0
                 unused_reason = reasons[0]
+            elif (unknown := fleet_t3_health.sessions_unknown_reason(t3_health, str(node_id))) is not None:
+                # Expired T3 session rows read as zero sessions, so a node whose observer is stale, missing
+                # or unreadable has unknown slots, never free ones. Placement applies the same classifier.
+                unused_reason = unknown
             else:
                 available_slots = max(capacity - occupancy, 0)
                 if available_slots > 0 and state == "available":
