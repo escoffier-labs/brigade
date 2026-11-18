@@ -1091,6 +1091,86 @@ async fn hub_lock_timeout_answers_503_and_applies_nothing() {
     assert_eq!(store.metrics().authority_timeouts, 1);
 }
 
+#[tokio::test]
+async fn memory_metrics_render_cumulative_authority_lock_histograms() {
+    let h = Hub::new();
+    let put = h.put(NODE_TOKEN, "fleet", "histogram", None, "x").await;
+    assert_eq!(put.status, 201, "{put:?}");
+    let m = h.store.as_ref().unwrap().metrics();
+    assert_eq!(m.batches, 1);
+    assert_eq!(m.wait_histogram.samples, 1);
+    assert_eq!(m.residence_histogram.samples, 1);
+    assert_eq!(*m.wait_histogram.buckets.last().unwrap(), 1);
+    assert_eq!(*m.residence_histogram.buckets.last().unwrap(), 1);
+    assert!((m.wait_histogram.sum - m.wait_max).abs() < 1e-12);
+    assert!((m.residence_histogram.sum - m.residence_sum).abs() < 1e-12);
+    let text = m.render();
+    assert!(text.contains("brigade_hub_memory_batches_total 1\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_residence_seconds_last "));
+    assert!(text.contains("brigade_hub_memory_hub_lock_residence_seconds_max "));
+    assert!(text.contains("brigade_hub_memory_hub_lock_residence_seconds_sum "));
+    assert!(text.contains("brigade_hub_memory_hub_lock_wait_seconds_max "));
+    assert!(text.contains("brigade_hub_memory_authority_timeouts_total 0\n"));
+    assert!(text.contains("brigade_hub_memory_commit_failures_total 0\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_wait_seconds_bucket{le=\"+Inf\"} 1\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_wait_seconds_count 1\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_residence_seconds_bucket{le=\"+Inf\"} 1\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_residence_seconds_count 1\n"));
+}
+
+#[test]
+fn authority_lock_histograms_are_cumulative_and_keep_the_existing_series() {
+    let mut m = writer::Metrics::default();
+    // Two samples at or below 1 ms, three at or below 2.5 ms, four at or below
+    // 10 ms, and one above the largest explicit bound.
+    for sample in [0.0005, 0.001, 0.0025, 0.01, 6.0] {
+        m.observe_wait(sample);
+        m.observe_residence(sample);
+    }
+    assert_eq!(m.residence_last, 6.0);
+    assert_eq!(m.residence_max, 6.0);
+    assert_eq!(m.wait_max, 6.0);
+    assert!(
+        (m.residence_sum - 6.014).abs() < 1e-12,
+        "{}",
+        m.residence_sum
+    );
+    let wait = &m.wait_histogram;
+    assert_eq!(wait.samples, 5);
+    assert_eq!(wait.buckets[0], 2);
+    assert_eq!(wait.buckets[1], 3);
+    assert_eq!(wait.buckets[2], 3);
+    assert_eq!(wait.buckets[3], 4);
+    assert_eq!(wait.buckets[11], 4);
+    assert!((wait.sum - 6.014).abs() < 1e-12, "{}", wait.sum);
+    let residence = &m.residence_histogram;
+    assert_eq!(residence.samples, 5);
+    assert_eq!(residence.buckets, wait.buckets);
+    assert!((residence.sum - m.residence_sum).abs() < 1e-12);
+    assert_eq!(
+        writer::AUTHORITY_LOCK_BUCKETS_SECONDS,
+        [
+            0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0
+        ]
+    );
+    let text = m.render();
+    assert!(text.contains("brigade_hub_memory_hub_lock_residence_seconds_last 6\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_residence_seconds_max 6\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_wait_seconds_max 6\n"));
+    assert_eq!(
+        text.matches("brigade_hub_memory_hub_lock_residence_seconds_sum ")
+            .count(),
+        1
+    );
+    assert!(
+        text.contains("brigade_hub_memory_hub_lock_residence_seconds_bucket{le=\"0.001\"} 2\n")
+    );
+    assert!(text.contains("brigade_hub_memory_hub_lock_wait_seconds_bucket{le=\"+Inf\"} 5\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_wait_seconds_count 5\n"));
+    assert!(text.contains("brigade_hub_memory_hub_lock_wait_seconds_sum "));
+    assert!(text.contains("brigade_hub_memory_hub_lock_residence_seconds_count 5\n"));
+}
+
 /// A hub-writer command standing in for a claim or revocation.
 struct HubInsert(&'static str);
 impl hub_writer::Command for HubInsert {

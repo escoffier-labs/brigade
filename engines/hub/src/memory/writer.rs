@@ -95,6 +95,35 @@ pub struct Failure {
     pub reason: &'static str,
 }
 pub type Answer = Result<Reply, Failure>;
+/// Fixed upper bounds, in seconds, for the authority-lock histograms. Every
+/// series carries only the `le` label, so label cardinality does not depend on
+/// observed durations.
+pub const AUTHORITY_LOCK_BUCKETS_SECONDS: [f64; 12] = [
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+];
+
+/// Cumulative fixed-bucket counts for one duration series.
+#[derive(Clone, Debug, Default)]
+pub struct Histogram {
+    /// Samples at or below the bound at the same index in
+    /// [`AUTHORITY_LOCK_BUCKETS_SECONDS`]. Samples above the last bound are
+    /// counted only in [`Histogram::samples`], which is the `+Inf` bucket.
+    pub buckets: [u64; AUTHORITY_LOCK_BUCKETS_SECONDS.len()],
+    pub samples: u64,
+    pub sum: f64,
+}
+impl Histogram {
+    pub fn observe(&mut self, seconds: f64) {
+        self.samples += 1;
+        self.sum += seconds;
+        for (bucket, bound) in self.buckets.iter_mut().zip(AUTHORITY_LOCK_BUCKETS_SECONDS) {
+            if seconds <= bound {
+                *bucket += 1;
+            }
+        }
+    }
+}
+
 /// Residence and wait of the hub lock for memory batches, in seconds.
 #[derive(Clone, Debug, Default)]
 pub struct Metrics {
@@ -109,6 +138,72 @@ pub struct Metrics {
     pub sweeps: u64,
     /// The most commands ever held in the writer's own queue, beside the channel.
     pub pending_max: u64,
+    /// Wait from the memory lock to the hub lock, including the arbiter turn.
+    pub wait_histogram: Histogram,
+    /// Time the hub lock was held by a completed batch.
+    pub residence_histogram: Histogram,
+}
+impl Metrics {
+    /// Records one acquisition wait and keeps the existing maximum beside it.
+    pub fn observe_wait(&mut self, seconds: f64) {
+        self.wait_max = self.wait_max.max(seconds);
+        self.wait_histogram.observe(seconds);
+    }
+    /// Records one residence and keeps the existing last, maximum and sum
+    /// series beside it. The residence histogram reuses that sum.
+    pub fn observe_residence(&mut self, seconds: f64) {
+        self.residence_last = seconds;
+        self.residence_max = self.residence_max.max(seconds);
+        self.residence_sum += seconds;
+        self.residence_histogram.observe(seconds);
+    }
+    /// The memory section of `/metrics`: the existing series first, then both
+    /// histograms with their fixed `le` buckets.
+    pub fn render(&self) -> String {
+        let mut text = format!(
+            "brigade_hub_memory_batches_total {}\n\
+             brigade_hub_memory_hub_lock_residence_seconds_last {}\n\
+             brigade_hub_memory_hub_lock_residence_seconds_max {}\n\
+             brigade_hub_memory_hub_lock_residence_seconds_sum {}\n\
+             brigade_hub_memory_hub_lock_wait_seconds_max {}\n\
+             brigade_hub_memory_authority_timeouts_total {}\n\
+             brigade_hub_memory_commit_failures_total {}\n",
+            self.batches,
+            self.residence_last,
+            self.residence_max,
+            self.residence_sum,
+            self.wait_max,
+            self.authority_timeouts,
+            self.commit_failures
+        );
+        render_histogram(
+            &mut text,
+            "brigade_hub_memory_hub_lock_wait_seconds",
+            &self.wait_histogram,
+            true,
+        );
+        // The existing residence sum is this histogram's sum; emit it once.
+        render_histogram(
+            &mut text,
+            "brigade_hub_memory_hub_lock_residence_seconds",
+            &self.residence_histogram,
+            false,
+        );
+        text
+    }
+}
+fn render_histogram(text: &mut String, name: &str, histogram: &Histogram, emit_sum: bool) {
+    for (bound, count) in AUTHORITY_LOCK_BUCKETS_SECONDS.iter().zip(histogram.buckets) {
+        text.push_str(&format!("{name}_bucket{{le=\"{bound}\"}} {count}\n"));
+    }
+    text.push_str(&format!(
+        "{name}_bucket{{le=\"+Inf\"}} {}\n",
+        histogram.samples
+    ));
+    if emit_sum {
+        text.push_str(&format!("{name}_sum {}\n", histogram.sum));
+    }
+    text.push_str(&format!("{name}_count {}\n", histogram.samples));
 }
 pub enum Job {
     Write {
@@ -997,10 +1092,8 @@ pub(crate) fn run(
             let mut m = metrics.lock().unwrap();
             m.batches += 1;
             m.commands += results.len() as u64;
-            m.residence_last = residence;
-            m.residence_max = m.residence_max.max(residence);
-            m.residence_sum += residence;
-            m.wait_max = m.wait_max.max(locked.duration_since(waited).as_secs_f64());
+            m.observe_wait(locked.duration_since(waited).as_secs_f64());
+            m.observe_residence(residence);
             if !committed {
                 m.commit_failures += 1;
             }

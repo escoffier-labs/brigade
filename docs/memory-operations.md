@@ -2071,6 +2071,37 @@ Scope readers without review authority receive only proposal id, state,
 decision and decision mode in proposal event payloads. This reader redaction
 also covers historical payloads without rewriting the append-only log.
 
+## Hub memory lock metrics
+
+`GET /metrics` (admin token only) reports the hub-lock wait and residence of
+the memory writer beside the rest of the hub's series. Wait runs from the
+memory lock to the hub lock and includes the arbiter turn. Residence is the
+time a completed batch holds the hub lock. Both histograms use the fixed
+bounds below and the single label `le`, so label cardinality never depends on
+observed durations.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `brigade_hub_memory_batches_total` | counter | Memory batches that acquired and released the hub lock |
+| `brigade_hub_memory_hub_lock_residence_seconds_last` | gauge | Residence of the most recent batch |
+| `brigade_hub_memory_hub_lock_residence_seconds_max` | gauge | Largest residence seen |
+| `brigade_hub_memory_hub_lock_residence_seconds_sum` | counter | Total residence, and the residence histogram's sum |
+| `brigade_hub_memory_hub_lock_wait_seconds_max` | gauge | Largest acquisition wait seen |
+| `brigade_hub_memory_authority_timeouts_total` | counter | Batches that gave up the arbiter turn or hub lock; these are not observed in either histogram |
+| `brigade_hub_memory_commit_failures_total` | counter | Batches whose memory commit failed |
+| `brigade_hub_memory_residence_bucket_seconds` | gauge | Arbiter token-bucket balance; negative means memory is waiting |
+| `brigade_hub_memory_hub_lock_wait_seconds_bucket{le="..."}` | histogram | Cumulative wait samples per bound, plus `+Inf` |
+| `brigade_hub_memory_hub_lock_wait_seconds_sum` / `_count` | counter | Wait total and sample count |
+| `brigade_hub_memory_hub_lock_residence_seconds_bucket{le="..."}` | histogram | Cumulative residence samples per bound, plus `+Inf` |
+| `brigade_hub_memory_hub_lock_residence_seconds_count` | counter | Residence sample count |
+
+The fixed bounds are `0.001`, `0.0025`, `0.005`, `0.01`, `0.025`, `0.05`,
+`0.1`, `0.25`, `0.5`, `1`, `2.5` and `5` seconds, followed by `+Inf`. Counts
+are cumulative, as Prometheus histograms expect, so the `+Inf` bucket equals
+the sample count. The existing `_last`, `_max` and `_sum` residence series and
+the `_max` wait series are unchanged. Reading p99 and the maximum for the S13a
+and S16b targets therefore needs no client-side timing.
+
 ## Hub read counts
 
 Memory schema 10 adds per-card daily read counts for the verification cadence
