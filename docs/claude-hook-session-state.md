@@ -74,6 +74,43 @@ same-uid mutations and processes that ignore advisory locks remain residuals
 under [the threat model in #1093](https://github.com/escoffier-labs/brigade/issues/1093).
 Windows directory sharing modes are unchanged.
 
+## Skills read by the session
+
+`brigade work verify run --capture auto` reads the session file for the current
+session and derives skill ids from two lists: the ordered `read_files` and the
+`invoked_skills` the PostToolUse `Skill` hook records. A bare name such as
+`taste` counts, and so does a name under this install's own plugin prefix
+(`brigade:taste`, tried bare); another plugin's `other:taste` is a different skill
+and credits nothing. A read counts
+only when it is a repo-relative `.<harness>/skills/<id>/SKILL.md` or
+`.brigade/skills/registry/<id>/SKILL.md`, so a fixture such as
+`tests/fixtures/skills/<id>/SKILL.md` never matches. Ids compare
+case-insensitively and come back in the registry or harness spelling.
+
+The session identity is `BRIGADE_CLAUDE_SESSION` when set (the hook-built verify
+command sets it for exactly this session) and then only that value. The ambient
+`BRIGADE_AGENT_SESSION` is used only outside a `brigade run` worker (no
+`BRIGADE_RUN_ID`), because a worker inherits the parent's value. The state must
+match `session_fingerprint`, and when it names its `session_id` the hash of that
+id must equal the fingerprint.
+
+The reader is file-only: it never runs or signals the hook. It lists the held
+sessions directory, skips anything that is not a regular file, refuses a state
+file over 1 MiB, scans at most the 512 most recently modified files newest first
+(stopping at the first state that matches the session), and returns no skills on
+any read failure. Only ids the registry or an installed harness has are kept.
+Reads and invocations never become the hook's `exercised_artifact_id`: only an id
+typed in a `--capture <id>` is preferred by the verify replacement, the
+unsupported-shell hint and the failed-verify follow-up, and otherwise they all say
+`--capture auto`. When the verifier runs in a different checkout than the one
+holding the session state, the replacement also sets
+`BRIGADE_CLAUDE_SESSION_TARGET` to the checkout holding the state, and the reader
+tries the verify target first and that checkout second (same fingerprint match,
+same file-only rules). The attribution is forgeable and veto-only; see
+[attribution sources](outcome-scoring.md#attribution-sources). With no skill
+resolved, `--capture auto` falls back to `brigade-work` as a caller-typed
+capture.
+
 ## Native Windows qualification
 
 `tests/test_claude_hooks_state_containment.py` uses directory junctions on

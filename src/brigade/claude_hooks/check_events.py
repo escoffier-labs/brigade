@@ -129,11 +129,12 @@ def failure_followup(
         and verifier
         and verification_mode.verification_enforced(command, payload.get("cwd"), target)
     ):
-        from .. import outcome_cmd
+        from .. import outcome_attribution, outcome_cmd
 
         capture_id = outcome_cmd.resolve_capture_artifact_id(
             rt._parse_capture_flag(command),
             state.get("exercised_artifact_id") if isinstance(state.get("exercised_artifact_id"), str) else None,
+            outcome_attribution.AUTO_CAPTURE,
         )
         return rt._additional_context(
             "PostToolUseFailure",

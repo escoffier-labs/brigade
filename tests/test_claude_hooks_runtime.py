@@ -295,7 +295,7 @@ def test_pretooluse_denies_raw_verification_with_exact_replacement(tmp_path: Pat
     reason = specific["permissionDecisionReason"]
     assert "brigade work verify run" in reason
     assert f"--target {target.resolve()}" in reason
-    assert "--capture brigade-work" in reason
+    assert "--capture auto" in reason
     assert "python -m pytest -q" in reason
 
 
@@ -2889,7 +2889,7 @@ def test_heredoc_scanner_is_quote_aware_and_queues_delimiters(tmp_path: Path):
     assert "pytest" not in stripped_bs
 
 
-def test_posttooluse_read_skill_sets_exercised_artifact(tmp_path: Path):
+def test_posttooluse_read_skill_is_observed_not_an_exercised_artifact(tmp_path: Path):
     target = _wired_claude(tmp_path)
     skill = target / ".claude" / "skills" / "taste" / "SKILL.md"
     skill.parent.mkdir(parents=True, exist_ok=True)
@@ -2905,7 +2905,8 @@ def test_posttooluse_read_skill_sets_exercised_artifact(tmp_path: Path):
     )
     state = runtime.read_session_state(target, "session-1")
     assert state is not None
-    assert state["exercised_artifact_id"] == "taste"
+    assert "exercised_artifact_id" not in state  # session-derived ids are veto-only, never caller typed
+    assert any(item.endswith("taste/SKILL.md") for item in state["read_files"])
 
 
 def test_posttooluse_read_external_skill_does_not_set_exercised_artifact(tmp_path: Path):
@@ -2929,18 +2930,33 @@ def test_posttooluse_read_external_skill_does_not_set_exercised_artifact(tmp_pat
     assert "exercised_artifact_id" not in state
 
 
-def test_verify_replacement_uses_session_exercised_artifact(tmp_path: Path):
+def test_verify_replacement_after_a_skill_read_still_says_auto(tmp_path: Path):
     target = _wired_claude(tmp_path)
     skill = target / ".claude" / "skills" / "taste" / "SKILL.md"
     skill.parent.mkdir(parents=True, exist_ok=True)
     skill.write_text("# taste\n")
     runtime.handle_payload(
         "PostToolUse",
+        _payload(target, "PostToolUse", tool_name="Read", tool_input={"file_path": str(skill)}),
+    )
+    result = runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
+    )
+    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "--capture auto" in reason
+    assert "--capture taste" not in reason
+
+
+def test_verify_replacement_prefers_an_explicitly_typed_capture(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    runtime.handle_payload(
+        "PostToolUse",
         _payload(
             target,
             "PostToolUse",
-            tool_name="Read",
-            tool_input={"file_path": str(skill)},
+            tool_name="Bash",
+            tool_input={"command": 'brigade work verify run --target . --command "true" --capture taste'},
         ),
     )
     result = runtime.handle_payload(
@@ -2949,17 +2965,29 @@ def test_verify_replacement_uses_session_exercised_artifact(tmp_path: Path):
     )
     reason = result["hookSpecificOutput"]["permissionDecisionReason"]
     assert "--capture taste" in reason
-    assert "--capture brigade-work" not in reason
+    assert "--capture auto" not in reason
 
 
-def test_verify_replacement_falls_back_to_brigade_work(tmp_path: Path):
+def test_verify_replacement_names_the_hook_target_when_the_verifier_checkout_differs(tmp_path: Path):
+    hook_target = tmp_path / "hook"
+    verify_target = tmp_path / "verify"
+    hook_target.mkdir()
+    verify_target.mkdir()
+    same = runtime._verify_replacement(hook_target, "pytest", "0123456789abcdef", hook_target=None)
+    assert "BRIGADE_CLAUDE_SESSION_TARGET" not in same
+    other = runtime._verify_replacement(verify_target, "pytest", "0123456789abcdef", hook_target=hook_target)
+    assert f"BRIGADE_CLAUDE_SESSION_TARGET={hook_target}" in other
+    assert "--capture auto" in other
+
+
+def test_verify_replacement_falls_back_to_auto_capture(tmp_path: Path):
     target = _wired_claude(tmp_path)
     result = runtime.handle_payload(
         "PreToolUse",
         _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
     )
     reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "--capture brigade-work" in reason
+    assert "--capture auto" in reason
 
 
 def test_posttooluse_routed_verify_records_capture_artifact(tmp_path: Path):

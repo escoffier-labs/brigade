@@ -254,7 +254,10 @@ def test_denied_verifier_replacement_keeps_the_verifier_worktree(worktrees):
     assert specific["permissionDecision"] == "deny"
     reason = specific["permissionDecisionReason"]
     fingerprint = runtime._session_fingerprint(SESSION)
-    assert runtime._verify_replacement(first, "pytest tests/test_first_only.py", fingerprint) in reason
+    # The session state lives in the written tree; the verifier in the first checkout is told where.
+    assert (
+        runtime._verify_replacement(first, "pytest tests/test_first_only.py", fingerprint, hook_target=second) in reason
+    )
     assert runtime._verify_replacement(second, "pytest tests/test_first_only.py", fingerprint) not in reason
 
 
