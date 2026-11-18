@@ -99,7 +99,8 @@ def test_good_pair_runs_through_real_server_and_validates(good):
     assert result["plan"]["adapter"]["id"] == ADAPTER_ID != "brigade.offline-replay.v1"
     assert (result["live"], result["model_executed"], result["promotion_eligible"]) == (True, True, False)
     assert result["plan"]["model_executed"] is True
-    assert all(a["failure"] is None and a["grade"]["passed"] for a in result["attempts"])
+    outcomes = [(a["failure"], a["grade"]["passed"], a["grade"].get("reasons")) for a in result["attempts"]]
+    assert all(failure is None and passed for failure, passed, _ in outcomes), outcomes
     assert result["pairs"][0]["comparison"] == "both_pass"
     digest = (output / "evidence.sha256").read_text().strip()
     assert model_trials.paired_validate(output, digest)["live"] is True  # live-aware dispatch
@@ -123,7 +124,7 @@ def test_end_conversation_is_an_observed_control_event_never_graded(good):
     assert [c["tool"] for c in attempt["live"]["control_events"]] == ["EndConversation"]
     assert "EndConversation" not in [r["tool"] for r in attempt["trace"]]
     assert "EndConversation" in attempt["live"]["init"]["tools"]
-    assert attempt["grade"]["passed"] is True
+    assert attempt["grade"]["passed"] is True, (attempt["failure"], attempt["grade"])
 
 
 def test_each_arm_is_fresh_and_the_child_env_is_allowlisted(good):
@@ -143,6 +144,8 @@ def test_each_arm_is_fresh_and_the_child_env_is_allowlisted(good):
         assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
         allowed = {*ENV_PASSTHROUGH, *FIXED_ENV, TOKEN_ENV, "HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR", "TMPDIR"}
         allowed |= {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}
+        # On Windows build_env also roots these inside the arm directory (never copied from the parent).
+        allowed |= {"APPDATA", "LOCALAPPDATA", "TEMP", "TMP"}
         assert set(env) <= allowed | {"PWD", "SHLVL", "_", "LC_CTYPE", "LANG"}, sorted(set(env) - allowed)
         assert not [key for key in env if key.startswith("ANTHROPIC_")]
         assert env["USERPROFILE"] == env["HOME"]
