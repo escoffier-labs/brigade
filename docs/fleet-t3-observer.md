@@ -69,9 +69,14 @@ fsmonitor disabled. No dirty paths are attributed to a thread. Non-repository
 workspaces use the existing node-scoped `local:` path-hash identity.
 `dirty_paths=()` and `dirty_truncated=True` mean dirty-file ownership is unknown.
 
-A poll has a total 15-second work budget, native timeout at most eight seconds,
-and up to 50 publication attempts while time permits. The caller should allow five
-additional seconds for process cleanup with an outer 20-second hard timeout.
+A poll has a total 15-second work budget. The first native snapshot may use the
+rest of it minus a reserve for publishing (the session call timeout plus the policy
+call timeout, plus one safety margin, so about 10 seconds), and the optional detail
+pass keeps its eight-second cap, less the policy call timeout. Up to 50 publication
+attempts while time permits, leaving the policy call timeout free after the loop for
+the health post. The observer finishes inside its own 15-second budget. The per-host
+telemetry script that runs it applies a subprocess timeout of its own (17 seconds in
+the reference script), which must stay above 15 seconds.
 Every native/Git call uses the remaining deadline. Publication starts only when
 the public client's fixed two-second call plus 250 ms fits. A fast Hub can
 refresh all 13 active threads in one pass. Slow calls or the 50-row cap leave
@@ -150,6 +155,49 @@ rows. A mismatched report older than the stored snapshot changes nothing.
 A machine without a binding is stored but read as unbound. Reads recompute the
 binding from the current policy, so a policy change applies without a
 republish, and placement must skip unbound rows.
+
+## Observer health
+
+Presence rows expire after 300 seconds, so a node whose observer is failing looks
+like a node with no sessions. Each `--publish` run therefore also sends the
+node-token `t3-observe` policy action, after sessions and before the inventory:
+`ok: true` only when the snapshot parsed, the session publication returned
+without an error and no active thread was skipped as invalid (rotation truncation
+and the inventory outcome do not matter),
+and `ok: false` when the observation failed and time remains. The report adds
+`health` with `ok`, `error` or `skipped` (the post outcome). A failed post never
+changes `ok`, the exit code or session publishing.
+
+The Hub stamps its own clock when it receives the report, never a node-supplied
+time, in the optional `fleet_t3_observations` table (created on the first
+report). A node with a row whose last success is missing or at least 300 seconds
+old, the same as the session TTL, has unknown T3 sessions. With a 120-second
+timer a node is still known after two missed cycles (age 240 seconds) and unknown
+on the third (age 360 seconds). `GET /sessions` adds `nodes_unknown`, and
+`brigade fleet sessions` prints a footer naming those nodes (with `--json`,
+stdout stays the bare session list and one warning line goes to stderr). If the
+health table cannot be read, `nodes_unknown_error` is set. Session views leave a
+node with no row alone.
+
+Placement is stricter: it trusts a session count only for a node whose observer
+succeeded within 300 seconds. A stale node, a node that only ever failed, a node
+with no health row (every host runs the observer, so a missing row means the node
+is not reporting) and an unreadable health table all make the machine ineligible.
+A node with no row at all gets its own reason, `t3-health-missing`, so it can be
+told apart from a failing or stale node, which gets `sessions-unknown`. A node can
+only write its own row.
+
+Rollout order: upgrade the Hub first, then each node's observer. Until a node
+posts its first health report, placement has `t3-health-missing` for it, so
+placement recommends nothing until every candidate machine has reported once
+(about one observer cycle after its upgrade).
+
+Causes that keep a node unknown until fixed: an active thread that stays invalid
+(its `invalid_rows` count is non-zero every run, so `ok: true` is never posted), a
+`rotation_state_unavailable` error from an unreadable cursor file, and a host that
+has no T3 install or cannot reach the native client, because its observer fails
+every run and posts `ok: false`. Read the observer's JSON (`error`, `invalid_rows`,
+`health`) on that host to tell which.
 
 ## Placement
 

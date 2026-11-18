@@ -40,6 +40,7 @@ NODE_ACTIONS = frozenset(
         "reservation-release",
         "telemetry-observe",
         "projects-observe",
+        "t3-observe",
         "delegation-create",
         "delegation-show",
     }
@@ -845,6 +846,13 @@ def handle_policy(
 
             observed_projects = {key: value for key, value in body.items() if key != "action"}
             status_payload = (200, fleet_node_projects.observe_projects(conn, observed_projects, caller_node))
+        elif action == "t3-observe":
+            if caller_node is None:
+                raise _error("auth-failed", "a node token is required to report T3 observer health", status=403)
+            from . import fleet_t3_health
+
+            observed_t3 = {key: value for key, value in body.items() if key != "action"}
+            status_payload = (200, fleet_t3_health.observe_t3(conn, observed_t3, caller_node))
         elif action == "quota-ingest":
             status_payload = (200, _ingest_quota(conn, body, caller_node=caller_node, is_admin=is_admin))
         elif action == "inventory-ingest":
