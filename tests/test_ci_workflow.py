@@ -450,6 +450,10 @@ def test_changelog_fragments_job_checks_fragments_and_guards_changelog_edits_on_
     assert "\n    needs:" not in section
     assert "python3 scripts/changelog_fragments.py check" in section
     assert 'python3 scripts/changelog_fragments.py guard --base "$base"' in section
+    assert '--provenance "$PR_HEAD_SHA"' in section
+    assert "--trusted-ref refs/remotes/origin/main" in section
+    assert 'git cat-file -p "$PR_HEAD_SHA"' in section
+    assert "+refs/heads/main:refs/remotes/origin/main" in section
     assert "fetch-depth: 2" in section
     # The guard is skipped after merge, and the base is the test-merge parent, not pull_request.base.sha.
     assert "if: ${{ github.event_name != 'push' }}" in section
