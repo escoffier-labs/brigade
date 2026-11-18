@@ -270,14 +270,20 @@ def _rendered_skill_validation(text: str, harness: str) -> list[str]:
     return errors
 
 
-def _write_snapshot_tree(dirs: list[tuple[str, ...]], files: dict[tuple[str, ...], bytes], dest: Path) -> None:
+def _write_snapshot_tree(
+    dirs: list[tuple[str, ...]], files: dict[tuple[str, ...], bytes], dest: Path, *, fresh: bool = False
+) -> None:
     """Materialize a collected snapshot at *dest* (trusted, non-state-root destination).
 
     Every byte written comes from the snapshot; no source file is re-read by
     path, so a symlink planted in the source after collection cannot smuggle
-    outside content into the copy.
+    outside content into the copy. With ``fresh`` the destination must not exist
+    (its previous copy was already moved aside): an entry that appeared since
+    is refused with ``FileExistsError`` rather than removed.
     """
-    if dest.is_symlink() or _is_reparse_point(dest):
+    if fresh:
+        pass
+    elif dest.is_symlink() or _is_reparse_point(dest):
         dest.unlink()
     elif dest.exists():
         shutil.rmtree(dest)
@@ -293,6 +299,25 @@ def _files_fingerprint(files: dict[tuple[str, ...], bytes]) -> str:
     digest = hashlib.sha256()
     for parts in sorted(files, key=lambda key: "/".join(key)):
         if parts[-1] in {".DS_Store", "skill.json"}:
+            continue
+        digest.update("/".join(parts).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(files[parts])
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _edit_fingerprint(files: dict[tuple[str, ...], bytes]) -> str:
+    """Digest of installed bytes for hand-edit detection.
+
+    Unlike ``_files_fingerprint`` it skips only the root ``skill.json``
+    provenance file (guarded by its own ``metadata_fingerprint``). A nested
+    ``skill.json`` such as ``assets/skill.json`` is ordinary skill content, so
+    an edit to it is visible. Receipts record it as ``installed.edit_fingerprint``.
+    """
+    digest = hashlib.sha256()
+    for parts in sorted(files, key=lambda key: "/".join(key)):
+        if parts[-1] == ".DS_Store" or parts == ("skill.json",):
             continue
         digest.update("/".join(parts).encode("utf-8"))
         digest.update(b"\0")
@@ -1491,7 +1516,11 @@ def _read_tree_from_anchor(
 
 
 def _write_collected_tree_into_anchor(
-    dirs: list[tuple[str, ...]], files: dict[tuple[str, ...], bytes], anchor: _StateRootAnchor, *relative: str
+    dirs: list[tuple[str, ...]],
+    files: dict[tuple[str, ...], bytes],
+    anchor: _StateRootAnchor,
+    *relative: str,
+    replace: bool = True,
 ) -> None:
     """Write a previously collected directory tree into the anchored state root.
 
@@ -1503,7 +1532,8 @@ def _write_collected_tree_into_anchor(
     display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
         raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
-    _remove_tree_in_anchor(anchor, *relative)
+    if replace:
+        _remove_tree_in_anchor(anchor, *relative)
     dest_parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], create=True)
     assert dest_parent_fd is not None
     try:

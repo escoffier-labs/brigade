@@ -15,21 +15,24 @@ def _import_skill(tmp_path, name="security-review"):
     return name
 
 
-def test_reconcile_apply_physically_installs_a_verified_skill(tmp_path, capsys):
+def test_reconcile_apply_promotes_a_verified_skill_without_installing_it(tmp_path, capsys):
     name = _import_skill(tmp_path)
     seed_registry_skill_scorecard_promotion(tmp_path, name)
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     decision = {d["artifact_id"]: d for d in payload["decisions"]}[name]
     assert decision["action"] == "install"
-    assert decision["execution"].startswith("installed")
-    assert skills_cmd._install_dir(tmp_path.resolve(), "claude", name).exists()
+    assert decision["execution"] == "routing-only"
+    assert any(f"brigade skills install {name} --target claude --force" in c for c in decision["pending_commands"])
+    assert not skills_cmd._install_dir(tmp_path.resolve(), "claude", name).exists()
 
 
-def test_reconcile_rollback_of_a_first_install_uninstalls(tmp_path, capsys):
+def test_reconcile_rollback_of_an_operator_install_demotes_and_leaves_the_copy(tmp_path, capsys):
     cfg = outcome.ReconcileConfig(cooldown_seconds=0)
     name = _import_skill(tmp_path)
     seed_registry_skill_scorecard_promotion(tmp_path, name)
+    assert skills_cmd.install(workspace=tmp_path, skill=name, harness="claude", json_output=True) == 0
+    capsys.readouterr()
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=cfg, json_output=True) == 0
     capsys.readouterr()
     dest = skills_cmd._install_dir(tmp_path.resolve(), "claude", name)
@@ -40,8 +43,10 @@ def test_reconcile_rollback_of_a_first_install_uninstalls(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     decision = {d["artifact_id"]: d for d in payload["decisions"]}[name]
     assert decision["action"] == "rollback"
-    # first install had no prior snapshot, so the regression uninstalls it cleanly
-    assert not dest.exists()
+    assert decision["new_status"] == "demoted"
+    # The operator runs the rollback; reconcile only names it.
+    assert dest.exists()
+    assert any(f"brigade skills rollback {name} --target claude" in c for c in decision["pending_commands"])
 
 
 def test_reconcile_dry_run_does_not_install(tmp_path, capsys):

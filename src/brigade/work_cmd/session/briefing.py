@@ -685,7 +685,8 @@ def _outcome_ratchet_line(ratchet: object) -> str:
         f"mode={report.get('mode') or 'dry-run'} "
         f"regression_holds={report.get('regression_holds')} ({listed}) "
         f"ineligibility_rate={report.get('ineligibility_rate')} "
-        f"leading={report.get('leading_reason') or 'none'}"
+        f"leading={report.get('leading_reason') or 'none'} "
+        f"pending_physical_actions={report.get('pending_physical_actions') or 0}"
     )
 
 

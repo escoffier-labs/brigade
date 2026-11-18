@@ -56,13 +56,6 @@ def _decisions_dir(target: Path) -> Path:
     return target / "memory" / "outcome" / "decisions"
 
 
-def _stub_execute(monkeypatch, *, install: str = "installed") -> None:
-    def _fake(target, artifact_id, action):
-        return install if action == "install" else "reverted:claude:uninstall"
-
-    monkeypatch.setattr(outcome_cmd, "_execute_skill_decision", _fake)
-
-
 def _skill_fingerprint(target: Path, artifact_id: str = "brigade-work") -> str:
     skill = target / "skills" / artifact_id / "SKILL.md"
     return verify_trial.subject_hash_for_path(target, str(skill.relative_to(target)))
@@ -301,7 +294,6 @@ def _seed_dual_gate_promotion_ready(target: Path) -> str:
 
 
 def test_effectiveness_pass_utility_fail_holds_promotion(scoreable_target, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
     _ensure_scorecard_manifest(scoreable_target, manifest_id=_SCORECARD_UTILITY_PASSING_MANIFEST_ID)
     skill = _write_skill_subject(scoreable_target)
     fingerprint = verify_trial.subject_hash_for_path(scoreable_target, str(skill.relative_to(scoreable_target)))
@@ -345,7 +337,6 @@ def test_effectiveness_pass_utility_fail_holds_promotion(scoreable_target, capsy
 
 
 def test_duplicate_utility_evidence_does_not_satisfy_gate(scoreable_target, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
     _ensure_scorecard_manifest(scoreable_target, manifest_id=_SCORECARD_UTILITY_PASSING_MANIFEST_ID)
     skill = _write_skill_subject(scoreable_target)
     fingerprint = verify_trial.subject_hash_for_path(scoreable_target, str(skill.relative_to(scoreable_target)))
@@ -380,7 +371,6 @@ def test_duplicate_utility_evidence_does_not_satisfy_gate(scoreable_target, caps
 
 
 def test_dual_gate_promotion_persists_route_policy_marker(scoreable_target, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
     _seed_dual_gate_promotion_ready(scoreable_target)
 
     assert outcome_cmd.reconcile(target=scoreable_target, apply=True, json_output=True) == 0
@@ -403,7 +393,6 @@ def test_dual_gate_promotion_persists_route_policy_marker(scoreable_target, caps
 
 
 def test_missing_scorecard_holds_skill_promotion(scoreable_target, capsys, monkeypatch):
-    _stub_execute(monkeypatch)
     from tests.test_outcome_cmd import _helped, _seed, _write_registry_skill
 
     _write_registry_skill(scoreable_target, "skill-x")
@@ -419,7 +408,6 @@ def test_missing_scorecard_holds_skill_promotion(scoreable_target, capsys, monke
 
 
 def test_promoted_regression_demotes_inside_cooldown(scoreable_target, capsys, monkeypatch):
-    _stub_execute(monkeypatch, install="installed")
     _seed_dual_gate_promotion_ready(scoreable_target)
     cfg = outcome.ReconcileConfig(cooldown_seconds=86_400, revert_min_hurt=99)
     assert outcome_cmd.reconcile(target=scoreable_target, apply=True, config=cfg, json_output=True) == 0
@@ -450,48 +438,6 @@ def test_promoted_regression_demotes_inside_cooldown(scoreable_target, capsys, m
 
     status = json.loads(_status_file(scoreable_target).read_text())
     assert status["artifacts"]["brigade-work"]["status"] == "demoted"
-
-
-def test_promoted_regression_demotes_even_when_rollback_fails(scoreable_target, capsys, monkeypatch):
-    _stub_execute(monkeypatch, install="installed")
-
-    def _rollback_always_fails(target, artifact_id, action):
-        return "reverted:claude:noop" if action == "rollback" else "installed"
-
-    monkeypatch.setattr(outcome_cmd, "_execute_skill_decision", _rollback_always_fails)
-
-    _seed_dual_gate_promotion_ready(scoreable_target)
-    cfg = outcome.ReconcileConfig(cooldown_seconds=0)
-    assert outcome_cmd.reconcile(target=scoreable_target, apply=True, config=cfg, json_output=True) == 0
-    capsys.readouterr()
-
-    fingerprint = _skill_fingerprint(scoreable_target)
-    binding = _fixture_binding(
-        fingerprint=fingerprint,
-        target=scoreable_target,
-        manifest_id=_SCORECARD_ALT_CHECK_MANIFEST_ID,
-        case_id="report-failing-tests",
-        check_id="fixture.echo-alt",
-    )
-    _write_verify_receipt(
-        scoreable_target,
-        "hurt",
-        binding=binding,
-        commands=[_effectiveness_command(ok=False, check_id="fixture.echo-alt")],
-        started_at="2026-06-20T02:00:00+00:00",
-    )
-
-    assert outcome_cmd.reconcile(target=scoreable_target, apply=True, config=cfg, json_output=True) == 0
-    payload = json.loads(capsys.readouterr().out)
-    decision = payload["decisions"][0]
-    assert decision["action"] == "rollback"
-    assert decision["new_status"] == "demoted"
-    assert "noop" in decision["execution"]
-
-    status = json.loads(_status_file(scoreable_target).read_text())
-    entry = status["artifacts"]["brigade-work"]
-    assert entry["status"] == "demoted"
-    assert "route_policy" not in entry
 
 
 def test_fork_parity_with_reconcile_dual_gate(scoreable_target, capsys, tmp_path):

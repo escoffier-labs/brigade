@@ -240,6 +240,11 @@ def _dispatch_ratchet(args) -> int:
         f"regression_holds={summary.get('regression_holds')} "
         f"regression_rollbacks={summary.get('regression_rollbacks')}"
     )
+    print(f"pending_physical_actions: {summary.get('pending_physical_actions') or 0}")
+    for pending_row in report.get("pending_physical") or []:
+        if isinstance(pending_row, dict):
+            for command in pending_row.get("commands") or []:
+                print(f"  operator: {command}")
     print(f"ineligibility_rate: {report.get('ineligibility_rate')}")
     if report.get("leading_ineligibility_reason"):
         print(f"leading_ineligibility_reason: {report['leading_ineligibility_reason']}")
