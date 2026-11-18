@@ -20,14 +20,15 @@ checked-out tree, GitHub's post-merge result, against the current base. A change
 that merges an already released upstream may keep that upstream's fragments and
 the base branch's own fragments, but only when the caller names the change's own
 commit, that commit is the post-merge's second parent, the added release heading
-is in one of its parents, and the post-merge changelog is exactly the base and
-upstream content. Without that evidence the strict rule applies.
+is in one of its parents, that parent is reachable from an independently fetched
+trusted main ref, and the post-merge changelog is exactly the upstream changelog,
+including its rewritten ``[Unreleased]`` compare link. Without that evidence the
+strict rule applies.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import os
 from pathlib import Path
 import re
@@ -247,29 +248,56 @@ def _changelog_additions(diff: str) -> list[str]:
     return added
 
 
-def _changelog_lines(root: Path, commit: str) -> Counter[str] | None:
-    """Return the non-blank CHANGELOG lines at ``commit``, or None if absent."""
+def _changelog_text(root: Path, commit: str) -> str | None:
+    """Return the exact CHANGELOG.md content at ``commit``, or None if absent."""
     try:
-        text = _git(root, "show", f"{commit}:{CHANGELOG}")
+        return _git(root, "show", f"{commit}:{CHANGELOG}")
     except FragmentError:
         return None
-    return Counter(line.strip() for line in text.splitlines() if line.strip())
+
+
+def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    """True when ``ancestor`` is reachable from ``descendant`` locally.
+
+    A shallow checkout, a missing object and an unrelated commit all return
+    ``False``, so callers stay strict instead of trusting a release parent the
+    guard cannot place on the trusted branch.
+    """
+    result = subprocess.run(
+        ["git", "--no-replace-objects", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
+    return result.returncode == 0
 
 
 def _verified_inheritance(
-    root: Path, head_commit: str, base_commit: str, provenance: str | None, headings: list[str]
-) -> tuple[str, Counter[str]] | None:
-    """Prove the release came from an upstream merged into the change.
+    root: Path,
+    head_commit: str,
+    base_commit: str,
+    provenance: str | None,
+    headings: list[str],
+    trusted_ref: str | None,
+) -> tuple[str, str] | None:
+    """Prove the release came from a trusted upstream merged into the change.
 
     GitHub's pull request test merge has exactly ``[base, pull request head]``
-    as parents. A provenance that does not match that shape, a change that is
-    not a merge, or a parent missing from a shallow checkout proves nothing, so
-    incomplete evidence returns ``None`` and the caller stays strict.
+    as parents. The pull request head is only provenance: it must be a merge
+    whose non-base parent carries every added release heading and is reachable
+    from ``trusted_ref``, an independently fetched main ref. A provenance that
+    does not match that shape, a change that is not a merge, a parent missing
+    from a shallow checkout, or a parent the trusted ref does not contain proves
+    nothing, so incomplete evidence returns ``None`` and the caller stays strict.
     """
-    if provenance is None:
+    if provenance is None or not trusted_ref:
         return None
     try:
         provenance_commit = _resolve(root, provenance)
+        trusted_commit = _resolve(root, trusted_ref)
     except FragmentError:
         return None
     if _commit_parents(root, head_commit) != [base_commit, provenance_commit]:
@@ -278,22 +306,25 @@ def _verified_inheritance(
     if len(parents) < 2:
         return None
     for parent in parents:
-        if parent == base_commit:
+        if parent == base_commit or not _is_ancestor(root, parent, trusted_commit):
             continue
-        lines = _changelog_lines(root, parent)
-        if lines is not None and all(heading.strip() in lines for heading in headings):
-            return parent, lines
+        text = _changelog_text(root, parent)
+        if text is None:
+            continue
+        lines = {line.strip() for line in text.splitlines()}
+        if all(heading.strip() in lines for heading in headings):
+            return parent, text
     return None
 
 
-def guard(root: Path, base: str, provenance: str | None = None) -> list[str]:
+def guard(root: Path, base: str, provenance: str | None = None, trusted_ref: str | None = None) -> list[str]:
     """Reject a CHANGELOG.md edit that is not part of a release commit.
 
     The checked tree is always ``HEAD``, GitHub's post-merge result, compared
     with the current base. ``provenance`` names the change's own commit, the
-    pull request head, and is used only to prove that an added release heading
-    was inherited from a merged upstream. Without complete evidence the strict
-    rule applies.
+    pull request head, and ``trusted_ref`` names an independently fetched main
+    ref. Both are used only to prove that an added release heading was inherited
+    from a trusted upstream. Without complete evidence the strict rule applies.
     """
     base_commit = _resolve(root, base)
     head_commit = _resolve(root, "HEAD")
@@ -314,16 +345,15 @@ def guard(root: Path, base: str, provenance: str | None = None) -> list[str]:
     # heading, and the upstream may also carry fragments started after that
     # release. Both those and the base branch's own fragments are not this
     # change's to assemble, so only fragments it adds or rewrites must be gone.
-    # The exemption needs verified provenance and a post-merge changelog that is
-    # exactly the inherited content: the multiset union of the base and upstream
-    # lines, with nothing added, removed or duplicated.
+    # The exemption needs verified provenance and an exact post-merge changelog:
+    # a branch does not edit CHANGELOG.md itself, so merging the released
+    # upstream must leave exactly the upstream file, with its rewritten
+    # [Unreleased] compare link. A union or subset of lines is not enough.
     upstream: str | None = None
-    evidence = _verified_inheritance(root, head_commit, base_commit, provenance, release_headings)
+    evidence = _verified_inheritance(root, head_commit, base_commit, provenance, release_headings, trusted_ref)
     if evidence is not None:
-        candidate, upstream_lines = evidence
-        base_lines = _changelog_lines(root, base_commit)
-        head_lines = _changelog_lines(root, head_commit)
-        if base_lines is not None and head_lines is not None and head_lines == base_lines | upstream_lines:
+        candidate, upstream_text = evidence
+        if _changelog_text(root, head_commit) == upstream_text:
             upstream = candidate
     if upstream is None:
         leftover = list(at_head)
@@ -364,6 +394,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="commit of the change itself, used only to prove an inherited release",
     )
+    guard_parser.add_argument(
+        "--trusted-ref",
+        default=None,
+        help="independently fetched main ref a release parent must be reachable from",
+    )
     assemble_parser = sub.add_parser("assemble", help="fold fragments into [Unreleased] and delete them")
     assemble_parser.add_argument("--dry-run", action="store_true", help="validate and report without writing")
     args = parser.parse_args(argv)
@@ -375,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             if not problems:
                 print(f"{len(fragments)} changelog fragment(s) valid")
         elif args.command == "guard":
-            problems = guard(root, args.base, args.provenance)
+            problems = guard(root, args.base, args.provenance, args.trusted_ref)
             if not problems:
                 print("changelog edit policy satisfied")
         else:

@@ -238,6 +238,18 @@ RELEASED = CHANGELOG.replace(
 )
 RELEASE_HEADING = "## [1.1.0] - 2026-02-01"
 
+# The released main in #2560 also rewrote the [Unreleased] compare link, so a
+# union of the base and upstream lines is not the merged changelog.
+LINKED = CHANGELOG + "\n[Unreleased]: https://example.invalid/compare/v1.0.0...HEAD\n"
+RELEASED_LINKED = LINKED.replace(
+    "## [Unreleased]\n\n- Existing one.\n- Existing two.\n",
+    "## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n- Existing one.\n- Existing two.\n",
+).replace(
+    "[Unreleased]: https://example.invalid/compare/v1.0.0...HEAD\n",
+    "[Unreleased]: https://example.invalid/compare/v1.1.0...HEAD\n"
+    "[1.1.0]: https://example.invalid/compare/v1.0.0...v1.1.0\n",
+)
+
 
 def test_guard_accepts_a_release_commit_that_deleted_every_fragment(git_repo):
     _write(git_repo, "5.md", "- Pending.\n")
@@ -295,6 +307,19 @@ def _fetch_head_parents(clone: Path, head: str) -> list[str]:
     for parent in parents:
         _git(clone, "fetch", "-q", "--no-tags", "--depth=1", "origin", parent)
     return parents
+
+
+def _fetch_trusted_main(clone: Path) -> None:
+    """Fetch main's full history as the changelog-fragments job does."""
+    _git(
+        clone,
+        "fetch",
+        "-q",
+        "--no-tags",
+        "--unshallow",
+        "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+    )
 
 
 def _origin_with_pull_request(tmp_path: Path, edit, *, prepare=None) -> tuple[Path, str, str]:
@@ -369,6 +394,37 @@ def _origin_with_released_main_and_integration_branch(
     return origin, base, head
 
 
+def _origin_with_linked_release_and_integration_branch(tmp_path: Path) -> tuple[Path, str, str]:
+    """main releases 1.1.0 and rewrites the [Unreleased] compare link (#2560).
+
+    Returns ``(origin, base, head)``: ``base`` is the integration branch tip
+    GitHub merges into and ``head`` is the pull request head, a merge of the
+    released main whose changelog replaces the base's stale compare link.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-b", "main")
+    _git(origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+    _repo(origin, LINKED)
+    _write(origin, "README.md", "docs\n")
+    _write(origin, "10.md", "- Released entry.\n")
+    _commit(origin, "base")
+    seed = _git_text(origin, "rev-parse", "HEAD").strip()
+    (origin / "changelog.d" / "10.md").unlink()
+    (origin / "CHANGELOG.md").write_text(RELEASED_LINKED)
+    _commit(origin, "release")
+    _write(origin, "20.md", "- After the release.\n")
+    _commit(origin, "post release")
+    _git(origin, "checkout", "-q", "-b", "overhaul", seed)
+    _write(origin, "overhaul-1.md", "- Branch entry.\n")
+    (origin / "feature.py").write_text("y = 1\n")
+    _commit(origin, "overhaul work")
+    _git(origin, "merge", "--no-edit", "main")
+    head = _git_text(origin, "rev-parse", "HEAD").strip()
+    base = _git_text(origin, "rev-parse", "HEAD^1").strip()
+    return origin, base, head
+
+
 def _origin_with_base_advancement_and_release_pr(tmp_path: Path) -> tuple[Path, str, str]:
     """A release branch, and a base that gained a fragment after it forked."""
     origin = tmp_path / "origin"
@@ -422,7 +478,11 @@ def test_guard_accepts_an_integration_merge_only_with_upstream_evidence_at_ci_ch
     assert base in parents
     upstream = next(parent for parent in parents if parent != base)
     assert RELEASE_HEADING in _git_text(clone, "show", f"{upstream}:CHANGELOG.md")
-    assert cf.guard(clone, "HEAD^1", "HEAD^2") == []
+    # The release parent must be on the independently fetched main, not merely
+    # named by the pull request.
+    assert cf.guard(clone, "HEAD^1", "HEAD^2")
+    _fetch_trusted_main(clone)
+    assert cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main") == []
 
 
 def test_guard_rejects_a_direct_changelog_edit_at_ci_checkout_depth(tmp_path):
@@ -456,9 +516,10 @@ def test_guard_covers_upstream_post_release_fragments_at_ci_checkout_depth(tmp_p
     _test_merge(origin, base, head)
     clone = _shallow_ci_checkout(origin, tmp_path / "clone")
     _fetch_head_parents(clone, head)
+    _fetch_trusted_main(clone)
     # overhaul-1.md came from the base branch and 20.md from the merged
     # upstream; neither is this change's fragment.
-    assert cf.guard(clone, "HEAD^1", "HEAD^2") == []
+    assert cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main") == []
 
 
 def test_guard_covers_an_advanced_base_at_ci_checkout_depth(tmp_path):
@@ -468,7 +529,9 @@ def test_guard_covers_an_advanced_base_at_ci_checkout_depth(tmp_path):
     # Without the fetched parents the advanced base keeps the strict rule.
     assert cf.guard(clone, "HEAD^1", "HEAD^2")
     _fetch_head_parents(clone, head)
-    assert cf.guard(clone, "HEAD^1", "HEAD^2") == []
+    assert cf.guard(clone, "HEAD^1", "HEAD^2")
+    _fetch_trusted_main(clone)
+    assert cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main") == []
 
 
 def test_guard_rejects_a_base_advanced_fragment_at_ci_checkout_depth(tmp_path):
@@ -476,8 +539,10 @@ def test_guard_rejects_a_base_advanced_fragment_at_ci_checkout_depth(tmp_path):
     _test_merge(origin, base, head)
     clone = _shallow_ci_checkout(origin, tmp_path / "clone")
     _fetch_head_parents(clone, head)
+    _fetch_trusted_main(clone)
     # The release branch never saw 5.md, but the post-merge result carries it.
-    problems = cf.guard(clone, "HEAD^1", "HEAD^2")
+    # Its head is not a merge, so there is no inherited release to exempt.
+    problems = cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main")
     assert problems and "changelog.d/5.md" in problems[0]
 
 
@@ -492,8 +557,9 @@ def test_guard_rejects_an_unverified_provenance_at_ci_checkout_depth(tmp_path):
     _test_merge(origin, base, head)
     clone = _shallow_ci_checkout(origin, tmp_path / "clone")
     _fetch_head_parents(clone, head)
+    _fetch_trusted_main(clone)
     _git(clone, "fetch", "-q", "--no-tags", "--depth=1", "origin", decoy)
-    problems = cf.guard(clone, "HEAD^1", decoy)
+    problems = cf.guard(clone, "HEAD^1", decoy, "refs/remotes/origin/main")
     assert problems and "changelog.d/overhaul-1.md" in problems[0]
 
 
@@ -504,8 +570,10 @@ def test_guard_rejects_unrelated_changelog_edits_at_ci_checkout_depth(tmp_path):
     _test_merge(origin, base, head)
     clone = _shallow_ci_checkout(origin, tmp_path / "clone")
     _fetch_head_parents(clone, head)
-    # A merged release heading does not excuse an invented changelog line.
-    problems = cf.guard(clone, "HEAD^1", "HEAD^2")
+    _fetch_trusted_main(clone)
+    # A merged release heading does not excuse a changelog that is not exactly
+    # the trusted upstream content.
+    problems = cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main")
     assert problems and "changelog.d/overhaul-1.md" in problems[0]
 
 
@@ -529,10 +597,94 @@ def test_guard_rejects_a_fragment_added_by_a_merge_of_a_released_main(tmp_path):
     _test_merge(origin, base, head)
     clone = _shallow_ci_checkout(origin, tmp_path / "clone")
     _fetch_head_parents(clone, head)
-    problems = cf.guard(clone, "HEAD^1", "HEAD^2")
+    _fetch_trusted_main(clone)
+    problems = cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main")
     # The fragment that was already on the base branch is not the change's.
     assert len(problems) == 1
     assert "changelog.d/extra.md" in problems[0]
+
+
+def test_guard_accepts_a_released_upstream_that_rewrites_the_unreleased_link(tmp_path):
+    # #2560 merged released main into overhaul. The merge legitimately replaced
+    # the branch's [Unreleased] compare link and kept no line the release dropped.
+    origin, base, head = _origin_with_linked_release_and_integration_branch(tmp_path)
+    _test_merge(origin, base, head)
+    clone = _shallow_ci_checkout(origin, tmp_path / "clone")
+    # Fail closed before the job fetches the parents and trusted main.
+    assert cf.guard(clone, "HEAD^1", "HEAD^2")
+    _fetch_head_parents(clone, head)
+    assert cf.guard(clone, "HEAD^1", "HEAD^2")
+    _fetch_trusted_main(clone)
+    assert cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main") == []
+    merged = _git_text(clone, "show", "HEAD:CHANGELOG.md")
+    assert "[Unreleased]: https://example.invalid/compare/v1.1.0...HEAD" in merged
+    assert "[1.1.0]: https://example.invalid/compare/v1.0.0...v1.1.0" in merged
+    assert "compare/v1.0.0...HEAD" not in merged
+
+
+def test_guard_rejects_the_previous_multiset_union_of_base_and_upstream(tmp_path):
+    # The old rule accepted the multiset union of the base and upstream lines,
+    # which keeps the stale compare link beside the rewritten one.
+    origin, base, _head = _origin_with_linked_release_and_integration_branch(tmp_path)
+    _git(origin, "checkout", "-q", "--detach", base)
+    _git(origin, "merge", "--no-commit", "main")
+    upstream_text = _git_text(origin, "show", "main:CHANGELOG.md")
+    union = upstream_text.replace(
+        "[Unreleased]: https://example.invalid/compare/v1.1.0...HEAD\n",
+        "[Unreleased]: https://example.invalid/compare/v1.1.0...HEAD\n"
+        "[Unreleased]: https://example.invalid/compare/v1.0.0...HEAD\n",
+    )
+    (origin / "CHANGELOG.md").write_text(union)
+    _commit(origin, "union merge")
+    head = _git_text(origin, "rev-parse", "HEAD").strip()
+    _test_merge(origin, base, head)
+    clone = _shallow_ci_checkout(origin, tmp_path / "clone")
+    _fetch_head_parents(clone, head)
+    _fetch_trusted_main(clone)
+    problems = cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main")
+    assert problems
+    assert any("must assemble and delete every fragment" in problem for problem in problems)
+
+
+def test_guard_rejects_a_release_parent_that_is_not_on_trusted_main(tmp_path):
+    # A pull request can name a parent it wrote itself. That parent carries the
+    # release heading, but it is not reachable from the trusted main ref.
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-b", "main")
+    _git(origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+    _repo(origin)
+    _write(origin, "README.md", "docs\n")
+    _commit(origin, "base")
+    seed = _git_text(origin, "rev-parse", "HEAD").strip()
+    _git(origin, "checkout", "-q", "-b", "side-release")
+    (origin / "CHANGELOG.md").write_text(RELEASED)
+    _commit(origin, "release off main")
+    release = _git_text(origin, "rev-parse", "HEAD").strip()
+    _git(origin, "checkout", "-q", "-b", "overhaul", seed)
+    _write(origin, "overhaul-1.md", "- Branch entry.\n")
+    _commit(origin, "overhaul work")
+    _git(origin, "merge", "--no-edit", "side-release")
+    head = _git_text(origin, "rev-parse", "HEAD").strip()
+    base = _git_text(origin, "rev-parse", "HEAD^1").strip()
+    _test_merge(origin, base, head)
+    clone = _shallow_ci_checkout(origin, tmp_path / "clone")
+    _fetch_head_parents(clone, head)
+    _fetch_trusted_main(clone)
+    assert RELEASE_HEADING in _git_text(clone, "show", f"{release}:CHANGELOG.md")
+    # The merged changelog is exactly the release's, so only provenance blocks it.
+    assert _git_text(clone, "show", "HEAD:CHANGELOG.md") == _git_text(clone, "show", f"{release}:CHANGELOG.md")
+    problems = cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/main")
+    assert problems and "changelog.d/overhaul-1.md" in problems[0]
+
+
+def test_guard_rejects_an_unknown_trusted_ref(tmp_path):
+    origin, base, head = _origin_with_released_main_and_integration_branch(tmp_path)
+    _test_merge(origin, base, head)
+    clone = _shallow_ci_checkout(origin, tmp_path / "clone")
+    _fetch_head_parents(clone, head)
+    problems = cf.guard(clone, "HEAD^1", "HEAD^2", "refs/remotes/origin/does-not-exist")
+    assert problems and "changelog.d/overhaul-1.md" in problems[0]
 
 
 def test_guard_with_an_unknown_base_is_an_operational_error(git_repo, capsys):

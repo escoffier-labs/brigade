@@ -1225,6 +1225,16 @@ jobs:
           for parent in $(git cat-file -p "$PR_HEAD_SHA" | sed -n '/^$/q;s/^parent //p'); do
             git fetch --no-tags --depth=1 origin "$parent" || true
           done
+      - name: Fetch the trusted main history
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+          # An inherited release must come from main, not from a parent the pull
+          # request names. Fetch main independently and blobless so the guard can
+          # prove the release-bearing parent is reachable from it. If this
+          # history is unavailable the guard keeps the strict rule.
+          git fetch --no-tags --filter=blob:none --unshallow origin \
+            +refs/heads/main:refs/remotes/origin/main
       - name: Reject CHANGELOG.md edits outside a release commit
         if: ${{ github.event_name != 'push' }}
         env:
@@ -1241,8 +1251,10 @@ jobs:
             fi
             base=$(git rev-parse HEAD^1)
             # The checked tree stays HEAD, GitHub's post-merge result. The pull
-            # request head is only provenance for an inherited release.
-            python3 scripts/changelog_fragments.py guard --base "$base" --provenance "$PR_HEAD_SHA"
+            # request head and the independently fetched main are provenance for
+            # an inherited release.
+            python3 scripts/changelog_fragments.py guard --base "$base" \
+              --provenance "$PR_HEAD_SHA" --trusted-ref refs/remotes/origin/main
           else
             base=$EVENT_BASE_SHA
             if [ -z "$base" ]; then
