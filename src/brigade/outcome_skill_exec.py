@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import importlib
 import shlex
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from . import localio
 
 ROUTING_ONLY = "routing-only"
 
@@ -112,24 +116,99 @@ def pending_commands(
     return []
 
 
+@dataclass(frozen=True)
+class PendingAction:
+    """Commands for one skill, with the status they apply and when that status was set."""
+
+    status: str
+    changed_at: str | None
+    commands: list[str]
+    current_run: bool = False
+
+
+@dataclass(frozen=True)
+class PendingPhysical:
+    """Pending operator commands: ``recent`` is listed as pending, ``stale`` is old rollback history.
+
+    ``stale_actions`` counts every stale command, so a bounded ``stale`` list never understates it.
+    """
+
+    recent: dict[str, PendingAction] = field(default_factory=dict)
+    stale: dict[str, PendingAction] = field(default_factory=dict)
+    stale_actions: int = 0
+
+
+def age_label(status: str, changed_at: Any, now: datetime) -> str:
+    """Human age of a status, such as ``demoted 3 days ago``; ``unknown age`` without a timestamp."""
+    changed = localio.parse_iso_datetime(changed_at)
+    if changed is None or changed > now:
+        return f"{status}, unknown age"
+    days = (now - changed).days
+    if days == 0:
+        return f"{status} today"
+    return f"{status} {days} day{'' if days == 1 else 's'} ago"
+
+
+def sort_pending(rows: Mapping[str, PendingAction]) -> list[tuple[str, PendingAction]]:
+    """Order rows current run first, then newest status change (unreadable last), then artifact id."""
+
+    def key(item: tuple[str, PendingAction]) -> tuple[int, float, str]:
+        changed = localio.parse_iso_datetime(item[1].changed_at)
+        return (0 if item[1].current_run else 1, -changed.timestamp() if changed else float("inf"), item[0])
+
+    return sorted(rows.items(), key=key)
+
+
 def pending_by_artifact(
-    target: Path, status_map: Mapping[str, Mapping[str, Any]], kinds: Mapping[str, str]
-) -> dict[str, list[str]]:
-    """Pending operator commands for every skill currently promoted or demoted."""
+    target: Path,
+    status_map: Mapping[str, Mapping[str, Any]],
+    kinds: Mapping[str, str],
+    *,
+    now: datetime,
+    window_days: int,
+    current_run_ids: Collection[str] = (),
+) -> PendingPhysical:
+    """Pending operator commands for every skill currently promoted or demoted.
+
+    Install commands for a promoted skill come from current drift, not history, so
+    they are always listed. Rollback commands for a demoted skill are listed only
+    when its ``last_action_ts`` is within ``window_days`` of ``now`` (exact time, not
+    whole days) or it was decided in this run (``current_run_ids``); a missing or
+    unreadable timestamp cannot prove recency. Older rollbacks are kept in ``stale``
+    and counted in ``stale_actions``, so a demotion that predates routing-only
+    reconcile never reads as an action to take but stays reachable.
+    """
     wanted = {
         artifact_id: str(entry.get("status"))
         for artifact_id, entry in status_map.items()
         if kinds.get(artifact_id, "skill") == "skill" and entry.get("status") in {"promoted", "demoted"}
     }
     if not wanted:
-        return {}
+        return PendingPhysical()
     plan: list[dict[str, Any]] | None = None
     if "promoted" in wanted.values():
         try:
             plan = _read_plan(target)
         except Exception:  # noqa: BLE001 - see pending_commands
             plan = []
-    result = {
-        artifact_id: pending_commands(target, artifact_id, status, plan=plan) for artifact_id, status in wanted.items()
-    }
-    return {artifact_id: commands for artifact_id, commands in result.items() if commands}
+    window = timedelta(days=window_days)
+    recent: dict[str, PendingAction] = {}
+    stale: dict[str, PendingAction] = {}
+    stale_actions = 0
+    for artifact_id, status in wanted.items():
+        commands = pending_commands(target, artifact_id, status, plan=plan)
+        if not commands:
+            continue
+        changed_at = status_map[artifact_id].get("last_action_ts")
+        changed = localio.parse_iso_datetime(changed_at)
+        in_run = artifact_id in current_run_ids
+        action = PendingAction(status, changed_at if isinstance(changed_at, str) else None, commands, in_run)
+        # A future timestamp (clock skew, a copied or hand-edited status file) cannot
+        # prove recency either, so it is stale like a missing one.
+        provably_recent = changed is not None and changed <= now and now - changed <= window
+        if status == "promoted" or in_run or provably_recent:
+            recent[artifact_id] = action
+        else:
+            stale[artifact_id] = action
+            stale_actions += len(commands)
+    return PendingPhysical(recent=recent, stale=stale, stale_actions=stale_actions)

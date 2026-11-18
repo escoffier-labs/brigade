@@ -687,6 +687,7 @@ def _outcome_ratchet_line(ratchet: object) -> str:
         f"ineligibility_rate={report.get('ineligibility_rate')} "
         f"leading={report.get('leading_reason') or 'none'} "
         f"pending_physical_actions={report.get('pending_physical_actions') or 0}"
+        + (f" stale={report['stale_physical_actions']}" if report.get("stale_physical_actions") else "")
     )
 
 

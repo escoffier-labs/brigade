@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import localio, outcome
+from .outcome_skill_exec import PendingAction, PendingPhysical, sort_pending
 
 REPORT_VERSION = 1
 REPORT_MAX_BYTES = 64 * 1024
@@ -58,15 +59,16 @@ def write_report(
     *,
     apply: bool,
     generated_at: datetime,
-    pending_commands: Mapping[str, Sequence[str]] | None = None,
+    pending: PendingPhysical | None = None,
 ) -> Path | None:
     """Write the advisory report once and return its path, or None if skipped.
 
     ``items`` are reconcile decision items: each carries ``decision``,
     ``prior_status``, ``artifact_kind`` and either fingerprint ``cohorts`` or a
-    ``scorecard``. Only the fields below are read from them. ``pending_commands``
-    maps a skill id to the operator commands that would apply its status to the
-    installed copies; reconcile is routing only and never runs them.
+    ``scorecard``. Only the fields below are read from them. ``pending`` holds the
+    operator commands (per skill, recent status changes only) that would apply a
+    status to the installed copies, plus a count of older ones; reconcile is
+    routing only and never runs them.
 
     A symlinked report path is refused, and a payload that cannot fit the byte
     cap even without regression rows is skipped, so a broken report can never
@@ -75,7 +77,7 @@ def write_report(
     warns once on stderr and keeps its own exit code and output.
     """
     try:
-        return _write_report(target, items, apply=apply, generated_at=generated_at, pending_commands=pending_commands)
+        return _write_report(target, items, apply=apply, generated_at=generated_at, pending=pending)
     except OSError as exc:
         print(f"warning: outcome ratchet report not written: {exc}", file=sys.stderr)
         return None
@@ -87,16 +89,14 @@ def _write_report(
     *,
     apply: bool,
     generated_at: datetime,
-    pending_commands: Mapping[str, Sequence[str]] | None = None,
+    pending: PendingPhysical | None = None,
 ) -> Path | None:
     path = report_path(target)
     if _has_symlinked_component(path, path.parents[len(REPORT_RELATIVE_PATH.parts) - 1]):
         # The previous report stays in place, so say this run's write was skipped.
         print(f"warning: outcome ratchet report not written: symlinked path refused: {path}", file=sys.stderr)
         return None
-    report = build_report(
-        items, apply=apply, generated_at=generated_at, target=target, pending_commands=pending_commands
-    )
+    report = build_report(items, apply=apply, generated_at=generated_at, target=target, pending=pending)
     encoded = _encode(report)
     if len(encoded) > REPORT_MAX_BYTES:
         print(
@@ -114,7 +114,7 @@ def build_report(
     apply: bool,
     generated_at: datetime,
     target: Path,
-    pending_commands: Mapping[str, Sequence[str]] | None = None,
+    pending: PendingPhysical | None = None,
 ) -> dict[str, Any]:
     """Build the versioned report payload from reconcile decision items."""
     counts: Counter[str] = Counter()
@@ -138,7 +138,9 @@ def build_report(
             }
         )
     audit = _receipt_audit(target)
-    pending = {str(key): [str(c) for c in cmds] for key, cmds in (pending_commands or {}).items() if cmds}
+    pending_set = pending or PendingPhysical()
+    recent = {key: action for key, action in pending_set.recent.items() if action.commands}
+    stale = {key: action for key, action in pending_set.stale.items() if action.commands}
     hold_ids = [row["artifact_id"] for row in regressions if row["reason_code"] in outcome.HOLD_CODES]
     report: dict[str, Any] = {
         "version": REPORT_VERSION,
@@ -151,18 +153,30 @@ def build_report(
             # Computed before ``_fit`` can drop trailing rows, so the brief names
             # holds the size cap removed from the list itself.
             "regression_hold_ids": hold_ids[:_BRIEF_MAX_IDS],
-            "pending_physical_actions": sum(len(cmds) for cmds in pending.values()),
+            "pending_physical_actions": sum(len(action.commands) for action in recent.values()),
+            "stale_physical_actions": pending_set.stale_actions,
         },
-        "pending_physical": [
-            {"artifact_id": artifact_id, "commands": cmds[:_PENDING_MAX_COMMANDS]}
-            for artifact_id, cmds in sorted(pending.items())[:_PENDING_MAX_ARTIFACTS]
-        ],
+        "pending_physical": _pending_rows(recent),
+        "stale_physical": _pending_rows(stale),
         "decisions_by_action": dict(sorted(counts.items())),
         "regressions": regressions,
         "ineligibility_rate": audit["ineligibility_rate"],
         "leading_ineligibility_reason": audit["leading_ineligibility_reason"],
     }
     return _fit(report)
+
+
+def _pending_rows(actions: Mapping[str, PendingAction]) -> list[dict[str, Any]]:
+    """Bounded rows, current-run first then newest, so the cap never drops a fresh change."""
+    return [
+        {
+            "artifact_id": artifact_id,
+            "status": action.status,
+            "status_changed_at": action.changed_at,
+            "commands": [str(c) for c in action.commands[:_PENDING_MAX_COMMANDS]],
+        }
+        for artifact_id, action in sort_pending(actions)[:_PENDING_MAX_ARTIFACTS]
+    ]
 
 
 def mode_label(apply: object) -> str:
@@ -240,10 +254,13 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) else len(ids)
     raw_pending = summary.get("pending_physical_actions")
     pending_count = raw_pending if isinstance(raw_pending, int) and not isinstance(raw_pending, bool) else 0
+    raw_stale = summary.get("stale_physical_actions")
+    stale_count = raw_stale if isinstance(raw_stale, int) and not isinstance(raw_stale, bool) else 0
     return {
         "present": True,
         "generated_at": report.get("generated_at"),
         "pending_physical_actions": pending_count,
+        "stale_physical_actions": stale_count,
         "mode": mode_label(report.get("apply")),
         "regression_holds": count,
         "regression_hold_ids": ids[:_BRIEF_MAX_IDS],
@@ -303,6 +320,12 @@ def _fit(report: dict[str, Any]) -> dict[str, Any]:
     """
     if len(_encode(report)) <= REPORT_MAX_BYTES:
         return report
+    # Stale rows are listed only for reference and their count stays in
+    # ``stale_physical_actions``, so drop them before any regression row.
+    if report.get("stale_physical"):
+        report = {**report, "stale_physical": [], "stale_physical_truncated": True}
+        if len(_encode(report)) <= REPORT_MAX_BYTES:
+            return report
     regressions = report.get("regressions")
     if not isinstance(regressions, list) or not regressions:
         return report

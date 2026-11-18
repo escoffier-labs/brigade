@@ -2192,8 +2192,9 @@ def reconcile(
             cohorts = item.cohorts
             prior_status = item.prior_status
             execution = "noop"
-            if decision.action in ("install", "rollback"):
-                if kinds.get(decision.artifact_id, "skill") == "skill":
+            is_skill = kinds.get(decision.artifact_id, "skill") == "skill"
+            if decision.action in ("install", "rollback") or (decision.action == "bump" and is_skill):
+                if is_skill:
                     execution = outcome_skill_exec.ROUTING_ONLY
                     pending[decision.artifact_id] = outcome_skill_exec.pending_commands(
                         target, decision.artifact_id, decision.new_status
@@ -2261,6 +2262,7 @@ def reconcile(
         }
         if pending.get(decision.artifact_id):
             payload_item["pending_commands"] = pending[decision.artifact_id]
+            payload_item["status_changed_at"] = now.isoformat()
         if decision.code is not None:
             payload_item["reason_code"] = decision.code
         if cohorts is not None:
@@ -2292,7 +2294,14 @@ def reconcile(
             audited,
             apply=apply,
             generated_at=now,
-            pending_commands=outcome_skill_exec.pending_by_artifact(target, status_map, kinds),
+            pending=outcome_skill_exec.pending_by_artifact(
+                target,
+                status_map,
+                kinds,
+                now=now,
+                window_days=config.pending_physical_window_days,
+                current_run_ids=applied,
+            ),
         )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2322,7 +2331,7 @@ def reconcile(
             if inspect is not None:
                 print(f"    {outcome_skill_exec.ROLLBACK_WARNING}")
                 print(f"    inspect first: {inspect}")
-            print(f"    operator: {command}")
+            print(f"    operator: {command} ({outcome_skill_exec.age_label(shown_status, now.isoformat(), now)})")
     return 0
 
 

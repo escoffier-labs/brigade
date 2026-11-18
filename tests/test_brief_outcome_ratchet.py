@@ -51,6 +51,14 @@ def test_line_shows_the_pending_physical_action_count():
     assert briefing._outcome_ratchet_line(payload).endswith("pending_physical_actions=3")
 
 
+def test_line_shows_stale_only_when_nonzero():
+    base = {"present": True, "generated_at": NOW.isoformat(), "mode": "applied", "pending_physical_actions": 2}
+    assert briefing._outcome_ratchet_line({**base, "stale_physical_actions": 62}).endswith(
+        "pending_physical_actions=2 stale=62"
+    )
+    assert "stale=" not in briefing._outcome_ratchet_line({**base, "stale_physical_actions": 0})
+
+
 def test_line_marks_an_applied_run():
     payload = {
         "present": True,

@@ -11,6 +11,7 @@ from typing import Any
 from brigade import cli, outcome, outcome_cmd
 from brigade import outcome_ratchet_report as report_mod
 from brigade import scorecard as scorecard_mod
+from brigade.outcome_skill_exec import PendingAction, PendingPhysical
 from brigade.work_cmd.session import briefing
 
 NOW = datetime(2026, 11, 17, 7, 30, tzinfo=timezone.utc)
@@ -93,6 +94,7 @@ def test_write_and_load_round_trip(tmp_path):
         "regression_rollbacks": 1,
         "regression_hold_ids": ["skill-a"],
         "pending_physical_actions": 0,
+        "stale_physical_actions": 0,
     }
     assert loaded["decisions_by_action"] == {"hold": 1, "install": 1, "rollback": 1}
     assert [(row["artifact_id"], row["reason_code"]) for row in loaded["regressions"]] == [
@@ -219,6 +221,7 @@ def test_reconcile_report_flag_writes_report_and_keeps_dry_run(tmp_path, monkeyp
         "regression_rollbacks": 0,
         "regression_hold_ids": ["skill-regressed"],
         "pending_physical_actions": 0,
+        "stale_physical_actions": 0,
     }
     assert report["regressions"][0]["artifact_id"] == "skill-regressed"
     assert not outcome_cmd._status_path(tmp_path).exists()
@@ -450,6 +453,7 @@ def test_cli_reconcile_report_flag_writes_advisory_file(tmp_path, capsys):
         "regression_rollbacks": 0,
         "regression_hold_ids": [],
         "pending_physical_actions": 0,
+        "stale_physical_actions": 0,
     }
 
 
@@ -463,19 +467,31 @@ def test_writer_warns_when_the_report_cannot_fit_the_cap(tmp_path, monkeypatch, 
 
 def test_pending_physical_actions_are_counted_listed_and_bounded(tmp_path):
     many = {
-        f"skill-{n:02d}": [f"brigade skills install skill-{n:02d} --target h{i} --force" for i in range(10)]
+        f"skill-{n:02d}": PendingAction(
+            "demoted",
+            NOW.isoformat(),
+            [f"brigade skills install skill-{n:02d} --target h{i} --force" for i in range(10)],
+        )
         for n in range(25)
     }
-    many["skill-empty"] = []
+    many["skill-empty"] = PendingAction("demoted", NOW.isoformat(), [])
 
-    report_mod.write_report(tmp_path, [], apply=True, generated_at=NOW, pending_commands=many)
+    report_mod.write_report(
+        tmp_path, [], apply=True, generated_at=NOW, pending=PendingPhysical(recent=many, stale_actions=7)
+    )
 
     report = report_mod.load_report(tmp_path)
     assert report["summary"]["pending_physical_actions"] == 250
+    assert report["summary"]["stale_physical_actions"] == 7
     assert len(report["pending_physical"]) == 20
     assert all(len(row["commands"]) == 8 for row in report["pending_physical"])
+    assert all(
+        row["status"] == "demoted" and row["status_changed_at"] == NOW.isoformat() for row in report["pending_physical"]
+    )
     assert "skill-empty" not in {row["artifact_id"] for row in report["pending_physical"]}
-    assert report_mod.brief_payload(report)["pending_physical_actions"] == 250
+    brief = report_mod.brief_payload(report)
+    assert brief["pending_physical_actions"] == 250
+    assert brief["stale_physical_actions"] == 7
 
 
 def test_a_report_without_pending_data_briefs_zero(tmp_path):
@@ -487,3 +503,22 @@ def test_a_report_without_pending_data_briefs_zero(tmp_path):
         ]
         == 0
     )
+
+
+def test_the_size_cap_drops_the_stale_list_before_any_regression_row():
+    stale = [
+        {"artifact_id": f"s{n}", "status": "demoted", "status_changed_at": None, "commands": ["x" * 4000]}
+        for n in range(20)
+    ]
+    report = {
+        "version": 1,
+        "summary": {"stale_physical_actions": 20},
+        "stale_physical": stale,
+        "regressions": [{"artifact_id": "r"}],
+    }
+
+    fitted = report_mod._fit(report)
+
+    assert fitted["stale_physical"] == [] and fitted["stale_physical_truncated"] is True
+    assert fitted["regressions"] == [{"artifact_id": "r"}]
+    assert fitted["summary"]["stale_physical_actions"] == 20
