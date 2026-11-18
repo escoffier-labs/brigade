@@ -52,3 +52,16 @@ def discard_incomplete_worktree(repo: Path, worktree_path: Path) -> None:
         # Git cannot remove the reserved directory if add failed before it
         # registered the checkout. Only the caller that reserved it can clean it.
         shutil.rmtree(worktree_path)
+
+
+def is_upstream_fast_forward(checkout: Path, previous_head: str, current_head: str) -> bool:
+    """Prove the parent advanced through commits reachable from its remote upstream."""
+    upstream = proc.run(["git", "rev-parse", "--symbolic-full-name", "@{upstream}"], cwd=checkout, timeout=30.0)
+    remote_ref = upstream.stdout.strip()
+    if upstream.code != 0 or not remote_ref.startswith("refs/remotes/"):
+        return False
+    for ancestor, descendant in ((previous_head, current_head), (current_head, remote_ref)):
+        result = proc.run(["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=checkout, timeout=30.0)
+        if result.code != 0:
+            return False
+    return True

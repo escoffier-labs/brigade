@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from .. import runguard
@@ -11,11 +12,12 @@ def parent_worktree_breach(
     workspace: Path | None,
     snapshot: runguard.PreRunSnapshot | None,
     output_dir: Path | None,
+    branch_head_drift: Callable[[], str | None],
 ) -> str | None:
     if workspace is None or snapshot is None:
         return None
     # Branch and HEAD changes are classified by the run's drift checkpoints.
-    if runguard.detect_branch_head_drift(workspace, snapshot) is not None:
+    if branch_head_drift() is not None:
         return None
     try:
         changed, untracked = runguard.changes_relative_to_snapshot(workspace, snapshot)

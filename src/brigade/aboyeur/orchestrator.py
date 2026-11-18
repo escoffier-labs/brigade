@@ -725,17 +725,21 @@ def run(
         print(f"error: pre-run snapshot failed: {exc}", file=sys.stderr)
         return 2
     pre_run_snapshot_payload = runguard.snapshot_payload(pre_run_snapshot)
+    branch_head_drift = partial(
+        runguard.detect_branch_head_drift,
+        drift_workspace,
+        drift_snapshot,
+        allow_upstream_fast_forward=canonical_workspace is not None and drift_workspace != cwd,
+    )
 
     def _drift_failure_rc() -> int | None:
         """Centralized branch/HEAD drift check across every return path.
 
-        Returns 2 (and records a run-isolation failure) when branch or HEAD
-        moved since the drift snapshot taken from the monitored checkout, else
-        None so the caller can proceed. Call this after planning, before any
-        dry-run return, after worker dispatch, after synthesis, and
-        immediately before finalization.
+        Returns 2 and records a run-isolation failure for unexpected branch
+        or HEAD movement. Call after planning, after worker dispatch, after
+        synthesis, and immediately before finalization.
         """
-        detail = runguard.detect_branch_head_drift(drift_workspace, drift_snapshot)
+        detail = branch_head_drift()
         if detail is None:
             return None
         if output_dir is not None:
@@ -1714,7 +1718,7 @@ def run(
             ),
         )
     isolation_detail = isolation.parent_worktree_breach(
-        drift_workspace if drift_workspace != cwd else None, drift_snapshot, output_dir
+        drift_workspace if drift_workspace != cwd else None, drift_snapshot, output_dir, branch_head_drift
     )
     if isolation_detail is not None:
         if output_dir is not None:
