@@ -57,6 +57,40 @@ def test_gate_hold_is_completed_proposal(setup, capsys):
     assert [c["action"] for c in writes(hub)] == ["propose", "auto_apply"]
 
 
+MERGE_HOLDS = [
+    "retrieval_eval_merge_mixed_ops",
+    "retrieval_eval_merge_shape",
+    "retrieval_eval_merge_tokens_lost",
+    "retrieval_eval_merge_trust_mismatch",
+    "retrieval_eval_merge_automated_mismatch",
+    "retrieval_eval_merge_inbound_link",
+    "retrieval_eval_merge_title_uncovered",
+    "retrieval_eval_merge_keeper_changed",
+]
+
+
+@pytest.mark.parametrize("code", MERGE_HOLDS)
+def test_held_exact_merge_stays_a_pending_proposal_for_review(setup, capsys, code):
+    target, hub, _ = setup
+    policy.set_enabled(target, True)
+    held = [{"gate": "retrieval_eval", "state": "held", "code": code}]
+    hub.do_auto_apply = lambda body: (
+        200,
+        {"state": "pending", "reason": "auto_apply_held", "preflight": {"checks": held}},
+    )
+    before = dict(hub.cards)
+    exit_code, report = run(target, capsys, "run", "--apply")
+    assert exit_code == 0
+    assert [op["type"] for op in report["ops"]] == ["merge_exact_duplicates"]
+    automatic = report["proposals"][0]["automatic"]
+    assert automatic["state"] == "pending"
+    assert automatic["checks"] == held
+    # A merge hold is not a lineage hold: nothing is withdrawn, decided or marked.
+    assert "withdrawal" not in report["proposals"][0]
+    assert [c["action"] for c in writes(hub)] == ["propose", "auto_apply"]
+    assert hub.cards == before
+
+
 def test_off_switch_read_at_each_candidate(tmp_path):
     policy.set_enabled(tmp_path, True)
     assert policy.allowed(tmp_path, [{"type": "append_evidence"}]) is None

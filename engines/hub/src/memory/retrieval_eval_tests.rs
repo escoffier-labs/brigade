@@ -1973,7 +1973,7 @@ async fn retrieval_eval_invariant_projection_passes_without_any_measurement() {
     merge["ops"][0]["type"] = json!("merge_exact_duplicates");
     assert_eq!(
         retrieval_eval::hold(&Tx(&db), &merge, &authority, h.now()).unwrap(),
-        Some("retrieval_eval_projection_changed")
+        Some("retrieval_eval_merge_shape")
     );
 }
 

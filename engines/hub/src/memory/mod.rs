@@ -24,6 +24,7 @@ mod hardening;
 pub mod ids;
 pub mod index;
 mod manifest_binding;
+mod merge_gate;
 pub mod ops;
 mod preflight;
 mod proposal_blocks;
@@ -2366,5 +2367,7 @@ fn reads<T: ReadTx + ?Sized>(
 
 #[cfg(test)]
 mod anchor_tests;
+#[cfg(test)]
+mod merge_drift_tests;
 #[cfg(test)]
 mod ranking_gate_tests;

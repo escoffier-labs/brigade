@@ -126,13 +126,20 @@ fn every_query_ranks_the_same_after_an_admitted_edit() {
     assert_ne!(answers("Claim.\n"), answers("Claim. keyword\n"));
 }
 
-struct Real {
-    h: Hub,
-    db: Connection,
+pub(super) struct Real {
+    pub(super) h: Hub,
+    pub(super) db: Connection,
     hub: Connection,
 }
 impl Real {
     async fn new(cards: &[(&str, &str)]) -> Self {
+        Self::build(cards, false).await
+    }
+    /// Cards put by the admin stay `agent-unreviewed`, the class a merge can use.
+    pub(super) async fn untrusted(cards: &[(&str, &str)]) -> Self {
+        Self::build(cards, true).await
+    }
+    async fn build(cards: &[(&str, &str)], put: bool) -> Self {
         let h = Hub::with(clean(), None);
         attestation_tests::policy(&h);
         let hub = Connection::open(&h.hub).unwrap();
@@ -142,7 +149,8 @@ impl Real {
             })
             .unwrap();
         let mut policy: Json = serde_json::from_str(&raw).unwrap();
-        policy["memory"]["tier0_op_classes"] = json!(["append_evidence", "anchor_blocks"]);
+        policy["memory"]["tier0_op_classes"] =
+            json!(["append_evidence", "anchor_blocks", "merge_exact_duplicates"]);
         hub.execute(
             "UPDATE fleet_policy_revisions SET document=?1",
             [policy.to_string()],
@@ -150,7 +158,11 @@ impl Real {
         .unwrap();
         grant(&h, "fleet", &["read", "reflect"]).await;
         for (id, body) in cards {
-            let put = h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":id,"text":body,"client_event_id":h.id()})).await;
+            let put = if put {
+                h.put(ADMIN_TOKEN, "fleet", id, None, body).await
+            } else {
+                h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":id,"text":body,"client_event_id":h.id()})).await
+            };
             assert_eq!(put.status, 201, "{put:?}");
         }
         let db = Connection::open(h.memory()).unwrap();
@@ -188,7 +200,7 @@ impl Real {
         let op = json!({"type":"anchor_blocks","scope":"fleet","card_id":id,"base_revision":self.revision(id).await});
         submit(&self.h, ADMIN_TOKEN, vec![op]).await
     }
-    fn body(&self, opened: &Reply) -> Json {
+    pub(super) fn body(&self, opened: &Reply) -> Json {
         assert_eq!(opened.status, 201, "{opened:?}");
         let raw: String = self
             .db
@@ -200,7 +212,7 @@ impl Real {
             .unwrap();
         serde_json::from_str(&raw).unwrap()
     }
-    fn hold(
+    pub(super) fn hold(
         &self,
         body: &Json,
         applier: &'static str,
@@ -297,7 +309,10 @@ async fn gate_holds_everything_search_could_see() {
     assert_eq!(r.hold(&mixed, "admin", None), Some(PROJECTION));
     let mut merge = body.clone();
     merge["ops"][0]["type"] = json!("merge_exact_duplicates");
-    assert_eq!(r.hold(&merge, "admin", None), Some(PROJECTION));
+    assert_eq!(
+        r.hold(&merge, "admin", None),
+        Some("retrieval_eval_merge_shape")
+    );
     let mut stale = body.clone();
     stale["cards"][0]["base_revision"] = json!(999);
     assert_eq!(
