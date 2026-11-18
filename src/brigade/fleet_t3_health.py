@@ -13,6 +13,7 @@ the node is not reporting). The table is optional: it is created on the first re
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -25,21 +26,44 @@ from .fleet_hub_routing import _bounded, _machine_for_node, _parse_stamp
 # sessions could have expired because it stopped reporting, its count is unknown. With a 120 s
 # timer, a node is still known after two missed cycles (age 240 s) and unknown on the third (360 s).
 STALE_AFTER_SECONDS = 300
-_FIELDS = frozenset({"node_id", "ok"})
+_FIELDS = frozenset({"node_id", "ok", "memory_used"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fleet_t3_observations (
     node_id TEXT NOT NULL PRIMARY KEY,
     last_success_at TEXT,
     last_attempt_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    memory_used REAL
 );
 """
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Optional table, created on first report. Not part of the hub startup schema."""
+    """Optional table, created on first report. Not part of the hub startup schema.
+
+    A table created before node memory reporting (#2710) lacks ``memory_used``; it is added in place
+    here, on the first report, so the pre-memory shape stays a reviewed variant in required.json.
+    """
     conn.execute(_SCHEMA)
+    if "memory_used" not in {row[1] for row in conn.execute("PRAGMA table_info(fleet_t3_observations)")}:
+        conn.execute("ALTER TABLE fleet_t3_observations ADD COLUMN memory_used REAL")
+
+
+def _memory(payload: Mapping[str, Any]) -> float | None:
+    """The optional node-reported memory-used fraction. Anything but a finite number in 0..1 is refused."""
+    raw = payload.get("memory_used")
+    if raw is None:
+        return None
+    if type(raw) is bool or not isinstance(raw, (int, float)):
+        raise FleetHubError("t3 observation field 'memory_used' must be a number in 0..1")
+    try:
+        value = float(raw)
+    except OverflowError:  # a JSON integer too large for a float
+        raise FleetHubError("t3 observation field 'memory_used' must be a number in 0..1") from None
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise FleetHubError("t3 observation field 'memory_used' must be a number in 0..1")
+    return value
 
 
 def _now() -> datetime:
@@ -66,6 +90,7 @@ def observe_t3(conn: sqlite3.Connection, body: Any, caller_node: str) -> dict[st
     ok = payload.get("ok")
     if type(ok) is not bool:
         raise FleetHubError("t3 observation field 'ok' must be a boolean")
+    memory = _memory(payload)
     opened = False
     if conn.in_transaction is False:
         conn.execute("BEGIN IMMEDIATE")
@@ -77,13 +102,15 @@ def observe_t3(conn: sqlite3.Connection, body: Any, caller_node: str) -> dict[st
             raise FleetHubError(f"t3 observation node_id {node_id!r} is not a configured machine")
         ensure_schema(conn)
         stamp = _now().isoformat()
-        # A failed attempt keeps the previous success time, so health never moves backward by itself.
+        # A failed attempt keeps the previous success time and memory reading, so health never moves
+        # backward by itself. A success without memory clears it: an old reading must not outlive it.
         conn.execute(
-            "INSERT INTO fleet_t3_observations (node_id, last_success_at, last_attempt_at, updated_at) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET "
+            "INSERT INTO fleet_t3_observations (node_id, last_success_at, last_attempt_at, updated_at, memory_used) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET "
             "last_success_at=CASE WHEN ? THEN excluded.last_success_at ELSE last_success_at END, "
+            "memory_used=CASE WHEN ? THEN excluded.memory_used ELSE memory_used END, "
             "last_attempt_at=excluded.last_attempt_at, updated_at=excluded.updated_at",
-            (node_id, stamp if ok else None, stamp, stamp, 1 if ok else 0),
+            (node_id, stamp if ok else None, stamp, stamp, memory if ok else None, 1 if ok else 0, 1 if ok else 0),
         )
         if opened:
             conn.commit()
@@ -92,6 +119,16 @@ def observe_t3(conn: sqlite3.Connection, body: Any, caller_node: str) -> dict[st
         if opened:
             conn.rollback()
         raise
+
+
+def _is_fresh(last_success: Any, moment: datetime, ttl: int) -> bool:
+    """Whether a stored last-success stamp is younger than ``ttl``. A bad or missing stamp is not fresh."""
+    try:
+        success = _parse_stamp(last_success) if last_success is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return False  # An unparseable or non-text stamp is as unknown as a missing one.
+    # Session rows are published before the health post, so at exactly ``ttl`` they have expired.
+    return success is not None and moment - success < timedelta(seconds=ttl)
 
 
 def classify_nodes(
@@ -112,14 +149,35 @@ def classify_nodes(
     fresh: set[str] = set()
     stale: set[str] = set()
     for node_id, last_success in rows:
-        try:
-            success = _parse_stamp(last_success) if last_success is not None else None
-        except (ValueError, TypeError, AttributeError):
-            success = None  # An unparseable or non-text stamp is as unknown as a missing one.
-        # Session rows are published before the health post, so at exactly ``ttl`` they have expired.
-        known = success is not None and moment - success < timedelta(seconds=ttl)
-        (fresh if known else stale).add(str(node_id))
+        (fresh if _is_fresh(last_success, moment, ttl) else stale).add(str(node_id))
     return fresh, stale
+
+
+def memory_by_node(
+    conn: sqlite3.Connection, now: datetime | None = None, ttl: int = STALE_AFTER_SECONDS
+) -> dict[str, float] | None:
+    """Pure read: node id to its last reported memory-used fraction, for nodes whose observer is fresh.
+
+    Freshness is the same rule as ``classify_nodes``, so a reading can never outlive the session count it
+    sits beside. A node with a stale or missing success, no reading, or a stored value outside 0..1 is
+    absent: placement treats absence as unknown, never as zero. A missing table or a pre-memory table
+    (no column yet, before the first report upgrades it) is ``{}``. None means the read failed. Never writes.
+    """
+    moment = now or _now()
+    try:
+        rows = conn.execute("SELECT node_id, last_success_at, memory_used FROM fleet_t3_observations").fetchall()
+    except sqlite3.OperationalError as exc:
+        return {} if "no such table" in str(exc) or "no such column" in str(exc) else None
+    except sqlite3.Error:
+        return None
+    readings: dict[str, float] = {}
+    for node_id, last_success, memory in rows:
+        if type(memory) not in (int, float) or not _is_fresh(last_success, moment, ttl):
+            continue
+        value = float(memory)
+        if math.isfinite(value) and 0.0 <= value <= 1.0:
+            readings[str(node_id)] = value
+    return readings
 
 
 def stale_nodes(

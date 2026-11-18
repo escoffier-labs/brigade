@@ -192,6 +192,43 @@ posts its first health report, placement has `t3-health-missing` for it, so
 placement recommends nothing until every candidate machine has reported once
 (about one observer cycle after its upgrade).
 
+### Memory reading
+
+The same health report carries an optional `memory_used`: this node's memory-used
+fraction, `1 - available / total`, rounded to four decimals in 0 to 1. Linux
+reads `MemTotal` and `MemAvailable` from `/proc/meminfo`. Windows calls
+`GlobalMemoryStatusEx`. Any other platform, or any read error, sends no key at
+all, so an unreadable machine reads as unknown, never idle. The Hub refuses a
+value that is not a finite number in 0 to 1 (a boolean is not a number) with a
+400 and stores nothing. An explicit `"memory_used": null` behaves like an
+omitted key.
+
+The reading is only as good as `MemAvailable`. On a ZFS host, ARC cache does not
+count as available, so the reading can sit well above the memory a process could
+actually get. A container without lxcfs sees the host's `/proc/meminfo`, not its
+own cgroup limit. Compare a node's readings with its real headroom before relying
+on memory to shed it.
+
+The Hub keeps the reading in a `memory_used` column of `fleet_t3_observations`,
+written only when `ok` is true, so a failed attempt keeps the last good reading,
+and a success without memory clears it. A reading counts only while the node's
+last success is under 300 seconds old, the same rule as the session count, so it
+never outlives the session count beside it. A Hub whose table predates this
+column adds it on the first report that arrives, and `required.json` lists the
+pre-memory shape as a reviewed variant, so the Rust engine stays ready before
+and after that upgrade.
+
+Placement takes the maximum of CPU load, the session ratio and memory. A machine
+with no fresh reading is left out of that maximum and gets the informational
+reason `memory-unknown`, which never changes `eligible`. A machine over the
+threshold on memory alone is shed with `machine-load-shed`. The recommendation's
+`load_inputs.memory` is null when unknown.
+
+Rollout order: upgrade the Hub first, then each node's observer. An old Hub
+rejects the unknown `memory_used` field. If a node does run ahead of its Hub, the
+observer sees that exact refusal and resends the health report once without
+memory, so the node stays placeable on CPU and sessions instead of dropping out.
+
 Causes that keep a node unknown until fixed: an active thread that stays invalid
 (its `invalid_rows` count is non-zero every run, so `ok: true` is never posted), a
 `rotation_state_unavailable` error from an unreadable cursor file, and a host that
@@ -237,8 +274,9 @@ Placement reuses the routing candidate evaluator and adds three checks:
   `concurrency`. Missing or stale telemetry, or a null `load`, excludes the
   machine (`machine-unknown-telemetry`, `machine-stale-telemetry`,
   `machine-load-unknown`). If the Hub cannot read its live session counts, no
-  machine is eligible (`sessions-unknown`) rather than reading as zero. Node memory joins this maximum
-  once nodes report it.
+  machine is eligible (`sessions-unknown`) rather than reading as zero. A node's
+  reported memory-used fraction is a third input to the maximum (see Memory
+  reading above); a missing reading adds only the informational `memory-unknown`.
 - A machine at or over the threshold (default 0.70, range 0 to 1) is shed
   (`machine-load-shed`).
 
