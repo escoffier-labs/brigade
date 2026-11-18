@@ -4714,7 +4714,7 @@ def test_run_writes_handoff(monkeypatch, tmp_path, capsys):
         )
         == 0
     )
-    handoffs = list(inbox.glob("*-brigade-run-build-feature-task-heading.md"))
+    handoffs = list(inbox.glob("*-brigade-run-run.md"))
     assert len(handoffs) == 1
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "ok"
@@ -4724,11 +4724,62 @@ def test_run_writes_handoff(monkeypatch, tmp_path, capsys):
     assert "## Recommended memory action\n\nno-card" in body
     assert "## Target document\n\n.learnings/LEARNINGS.md" in body
     assert "- mode: read-only" in body
-    assert "final answer" in body
-    assert "\n## task heading" not in body
-    assert "\n## model heading" not in body
-    assert "\n### model heading" in body
+    assert "- run id: run" in body
+    assert "- status: ok" in body
+    assert "- workers: 1 ok, 0 failed" in body
+    assert "- task digest: hmac-sha256:" in body
+    assert "- run artifacts: `<run-dir>`" in body
+    assert "build feature" not in body
+    assert "final answer" not in body
+    assert "task heading" not in body
+    assert "model heading" not in body
+    assert str(output_dir) not in body
     assert "handoff:" in capsys.readouterr().err
+
+
+def test_handoff_note_carries_no_task_or_generated_text(tmp_path):
+    """Issue #2046: the memory note keeps identity and counts only."""
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "20260821-150000-private1"
+    run_dir.mkdir(parents=True)
+    inbox = workspace / "memory-handoffs"
+    task = "PRIVATE-TASK-TEXT under /home/someuser/project/task.py"  # content-guard: allow home-path
+    final_text = "PRIVATE-FINAL-TEXT under /home/someuser/project/final.txt"  # content-guard: allow home-path
+    worker_detail = "PRIVATE-WORKER-DETAIL under /home/someuser/project/out.py"  # content-guard: allow home-path
+
+    handoff = aboyeur.write_run_handoff(
+        inbox,
+        task=task,
+        cwd=Path("/home/someuser/project"),  # content-guard: allow home-path
+        output_dir=run_dir,
+        assignments=[run_transport.Assignment(stage=1, worker="coder", task="PRIVATE-ASSIGNMENT-TEXT")],
+        worker_results=[
+            run_transport.WorkerResult(
+                worker="coder", task="PRIVATE-WORKER-TASK", text="PRIVATE-WORKER-TEXT", ok=True, detail=worker_detail
+            ),
+            run_transport.WorkerResult(
+                worker="reviewer", task="review", text="PRIVATE-REVIEW-TEXT", ok=False, detail="PRIVATE-FAILURE-TEXT"
+            ),
+        ],
+        final_text=final_text,
+        status="ok",
+        now=datetime(2026, 8, 21, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert handoff.name == "2026-08-21-1500-brigade-run-20260821-150000-private1.md"
+    body = handoff.read_text()
+    assert "- run id: 20260821-150000-private1" in body
+    assert "- status: ok" in body
+    assert "- mode: normal" in body
+    assert "- workers: 1 ok, 1 failed" in body
+    assert "- recorded at: 2026-08-21T15:00:00Z" in body
+    assert "- task digest: hmac-sha256:" in body
+    assert body.count("worker hmac-sha256:") == 2
+    assert "- run artifacts: `<run-dir>`" in body
+    for leaked in (task, final_text, worker_detail, "PRIVATE-ASSIGNMENT-TEXT", "PRIVATE-FAILURE-TEXT"):
+        assert leaked not in body
+    assert "/home/someuser" not in body  # content-guard: allow home-path
+    assert str(run_dir) not in body
 
 
 def test_handoff_failure_preserves_final_artifacts(monkeypatch, tmp_path, capsys):

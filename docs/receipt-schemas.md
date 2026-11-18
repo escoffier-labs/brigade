@@ -1136,25 +1136,40 @@ when more results exist. Receipts must match the requested subject kind and ID.
 Verify receipts and parent manifests use their IDs for direct lookup.
 Text output includes diagnostics and a notice when a walk limit is reached.
 
-## Run View read contracts (#631)
+## Run View read contracts (#631, #2046)
 
 Versioned, read-only CLI JSON contracts for higher-level surfaces (the Center
 Runs view). Each payload is an explicit allowlist over run artifacts: it never
-includes environment values, auth or control tokens, secret references, full
-prompts, transcript bodies, raw stdout/stderr, log paths, or absolute
-workspace paths. Every string that enters a list, detail, or watch JSON
-contract passes through one `_clean_str` chokepoint: the value is bounded,
-then home-directory prefixes are rewritten to `~` as the last transform.
-That rewrite is universal. It is not limited to `failure.detail` or
-`commands[].command`. Matched prefixes are POSIX `/home/<user>` and
-`/Users/<user>` (including a doubled slash such as `/home//<user>`, and
-usernames that contain a space or an apostrophe) and Windows
-`C:\Users\<name>\` plus `C:/Users/<name>/`. The authoritative artifacts
-and human CLI output are never modified.
+includes environment values, auth or control tokens, secret references,
+transcript bodies, raw stdout/stderr, log paths, or absolute workspace paths.
+
+Prompt and generated text is private. `task`, assignment text, worker `detail`,
+failure `detail`, synthesis text, verify `command` text, and the roster `role`
+note become the closed keyed digest object `{"digest": "hmac-sha256:<hex>",
+"chars": N}`. The key is the per-host HMAC key the run export uses, so the digest
+is not portable across hosts and a short prompt cannot be reversed by guessing.
+A path-like string outside a text field also becomes a keyed digest, so a served
+payload never carries a filesystem location. The first projected read creates
+the per-host key at `.brigade/memory/search-log-key` in the owning workspace
+when it is missing, which is the same key `brigade runs export` uses.
+`brigade runs list --show-task` and
+`brigade runs show --show-task` add a bounded 80-character `task_preview` for a
+human at the local terminal. `brigade runs serve` never passes that flag, so the
+Run View and its watch stream stay digest-only.
+
+Every remaining string that enters a list, detail, or watch JSON contract passes
+through one `_clean_str` chokepoint: the value is bounded, then home-directory
+prefixes are rewritten to `~` as the last transform. Matched prefixes are POSIX
+`/home/<user>` and `/Users/<user>` (including a doubled slash such as
+`/home//<user>`, and usernames that contain a space or an apostrophe) and Windows
+`C:\Users\<name>\` plus `C:/Users/<name>/`. The authoritative local artifacts,
+`brigade runs watch --json`, and human `runs list`/`runs show` output are not
+projected, because resume and local operation need the raw values.
 
 `brigade runs serve` exposes the same three contracts on loopback as
 `GET /api/runs`, `GET /api/runs/<run-id>`, and `GET /api/runs/<run-id>/events`
-(SSE of watch records). It does not add a second artifact reader.
+(SSE of watch records). It does not add a second artifact reader, and it calls
+the same projection as the CLI JSON contract.
 
 <a id="brigaderuns-listv1--brigade-runs-list---json"></a>
 
@@ -1165,8 +1180,9 @@ and human CLI output are never modified.
 ```
 
 Each entry in `runs` carries browser-safe summary fields only: `run_id` (the
-run directory name, never an absolute path), `status`, bounded `task`,
-`started_at`, `finished_at`, `duration_seconds`, `failure_phase`, `mode`
+run directory name, never an absolute path), `status`, `task` (a keyed digest
+object), optional `task_preview` when `--show-task` was passed, `started_at`,
+`finished_at`, `duration_seconds`, `failure_phase`, `mode`
 (`normal` / `read-only`, with `, dry-run` appended), `resume_available`, and
 optional `parent_run_id` when the run is a durable child of another run.
 Invalid run directories are counted in `skipped_invalid` and skipped.
@@ -1192,20 +1208,21 @@ Both commands share one serializer:
 }
 ```
 
-- `run`: identifier, status, bounded task, mode, timestamps, duration,
-  `failure` (`phase` / `kind` / bounded `detail`), bounded `error`,
+- `run`: identifier, status, `task` digest object, optional `task_preview`,
+  mode, timestamps, duration,
+  `failure` (`phase` / `kind` / digested `detail`), digested `error`,
   `suspected_noop`, `resume_available`, and optional `lineage`
   (`kind`, `parent_run_id`, `branch_point_event_id`, `shared_prefix`,
   and `children` discovered from sibling receipts the same way as
   human `runs show`) when the run is a durable parent or child.
   Child `status` and `branch_point_event_id` are bounded.
 - `roster`: orchestrator, worker limits, allowed models, and per-seat `cli`,
-  `model`, `reasoning`, bounded `role`, and `timeout_seconds`.
-- `plan`: worker `assignments` with stage, worker, and bounded task.
-- `workers`: per-result state (ok/status, bounded detail, duration, exit code,
-  timeout flag, requested model, transport, failure class).
+  `model`, `reasoning`, digested `role`, and `timeout_seconds`.
+- `plan`: worker `assignments` with stage, worker, and digested task.
+- `workers`: per-result state (ok/status, digested detail, duration, exit code,
+  timeout flag, requested model, transport, digested failure class detail).
 - `verification`: verify receipt summaries (receipt run id, status, duration,
-  `command`, and exit code) from recorded ground truth.
+  digested `command`, and exit code) from recorded ground truth.
 - `briefs`: attachment markers for the Code Intelligence (`code-graph`),
   drift (`drift-impact`), and Evidence Ledger (`evidence`) briefs.
 
@@ -1224,12 +1241,18 @@ unknown future record types. `brigade runs events` keeps its own
   never an absolute path). The stale-lock `inspect_command` is
   `brigade runs show <run_id>`.
 - `run`, `plan`, `workers`, and `synthesis` reuse the detail-contract
-  field allowlists and bounded strings.
+  field allowlists and the same digest projection. The SSE stream that
+  `brigade runs serve` exposes uses this contract, so it carries no raw
+  prompt or generated text.
 - `event` records emit only `method` and `item_type`. Auth tokens,
   prompts, transcript bodies, raw stdout/stderr, log paths, and
   absolute paths in `params` are omitted.
-- `final` text is one-lined and bounded through the same `_clean_str`
-  chokepoint. A value that cannot be rendered safely is omitted.
+- `final` text is replaced by a keyed digest object. The one-line text
+  itself is never streamed.
+
+`brigade runs watch --json` writes the same record shapes for a local terminal
+and keeps bounded raw text, so it is not a privacy surface. Only the Run View
+SSE stream projects the records.
 
 
 

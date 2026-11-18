@@ -67,6 +67,10 @@ def _plant_run(
     resume: bool = False,
     briefs: bool = False,
     lineage: dict[str, object] | None = None,
+    plan_task: str | None = None,
+    worker_detail: str = "worker detail",
+    synthesis_detail: str = "merged",
+    command: str = "pytest -q planted-verify",
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     meta: dict[str, object] = {
@@ -118,14 +122,14 @@ def _plant_run(
     )
     _write_json(
         run_dir / "plan.json",
-        {"assignments": [{"stage": 1, "worker": "coder", "task": task}]},
+        {"assignments": [{"stage": 1, "worker": "coder", "task": plan_task or task}]},
     )
     result: dict[str, object] = {
         "worker": "coder",
         "ok": status == "ok",
         "status": "ok" if status == "ok" else ("interrupted" if resume else status),
         "task": task,
-        "detail": "worker detail",
+        "detail": worker_detail,
         "duration_seconds": 1.5,
         "exit_code": 0 if status == "ok" else 1,
     }
@@ -147,7 +151,7 @@ def _plant_run(
                         "duration_seconds": 0.4,
                         "commands": [
                             {
-                                "command": "pytest -q planted-verify",
+                                "command": command,
                                 "exit_code": 0 if status == "ok" else 1,
                                 "duration_seconds": 0.3,
                             }
@@ -159,7 +163,7 @@ def _plant_run(
     )
     _write_json(
         run_dir / "synthesis.json",
-        {"orchestrator": "chef", "mode": "merge", "result": {"ok": status == "ok", "detail": "merged"}},
+        {"orchestrator": "chef", "mode": "merge", "result": {"ok": status == "ok", "detail": synthesis_detail}},
     )
 
 
@@ -593,8 +597,9 @@ def test_planted_markup_is_text_not_html(server: ThreadingHTTPServer, planted: d
     run_id = planted["markup"].name
     status, detail, _ = _get_json(server, f"/api/runs/{run_id}")
     assert status == 200
-    assert detail["run"]["task"] == PLANTED_MARKUP
-    assert "<script>" in json.dumps(detail)
+    assert detail["run"]["task"]["chars"] == len(PLANTED_MARKUP)
+    assert PLANTED_MARKUP not in json.dumps(detail)
+    assert "<script>" not in json.dumps(detail)
     app = _raw_request(server, _host(server), path="/")
     _headers, body = _headers_and_body(app)
     assert PLANTED_MARKUP not in body
@@ -789,6 +794,87 @@ def test_list_and_detail_have_no_home_paths(server: ThreadingHTTPServer) -> None
         rendered = json.dumps(detail)
         assert "/home/" not in rendered
         assert "/Users/" not in rendered
+
+
+def test_served_views_and_stream_carry_no_prompt_text(server: ThreadingHTTPServer, workspace: Path) -> None:
+    """Issue #2046: every served endpoint and the SSE stream use the closed projection."""
+    private_home = "/home/someuser"  # content-guard: allow home-path
+    markers = {
+        "task": f"PRIVATE-TASK-MARKER under {private_home}/project",
+        "assignment": f"PRIVATE-ASSIGNMENT-MARKER under {private_home}/plan.py",
+        "worker": f"PRIVATE-WORKER-MARKER under {private_home}/worker.py",
+        "synthesis": f"PRIVATE-SYNTHESIS-MARKER under {private_home}/synthesis.md",
+        "command": f"{private_home}/.venv/bin/pytest -q PRIVATE-COMMAND-MARKER",
+        "failure": f"PRIVATE-FAILURE-MARKER under {private_home}/failure.py",
+        "final": f"PRIVATE-FINAL-MARKER under {private_home}/final.txt",
+    }
+    run_dir = _runs_root(workspace) / "20260821-140000-private"
+    _plant_run(
+        run_dir,
+        status="failed",
+        task=markers["task"],
+        plan_task=markers["assignment"],
+        started_at="2026-08-21T14:00:00Z",
+        finished_at="2026-08-21T14:00:02Z",
+        duration_seconds=2.0,
+        failure={"phase": "worker", "kind": "exit-error", "detail": markers["failure"]},
+        worker_detail=markers["worker"],
+        synthesis_detail=markers["synthesis"],
+        command=markers["command"],
+    )
+    (run_dir / "final.txt").write_text(markers["final"] + "\n")
+    local_files = {
+        path.name: path.read_bytes()
+        for path in (
+            run_dir / "run.json",
+            run_dir / "plan.json",
+            run_dir / "worker-results.json",
+            run_dir / "synthesis.json",
+            run_dir / "final.txt",
+        )
+    }
+    status, listed, _ = _get_json(server, "/api/runs?limit=50")
+    assert status == 200
+    status, detail, _ = _get_json(server, f"/api/runs/{run_dir.name}")
+    assert status == 200
+    response = _raw_request(server, _host(server), path=f"/api/runs/{run_dir.name}/events", timeout=5)
+    assert _status_code(response) == "200"
+    _headers, body = _headers_and_body(response)
+    streamed = [json.loads(block.strip()[5:]) for block in body.split("\n\n") if block.strip().startswith("data:")]
+
+    served = "\n".join((json.dumps(listed), json.dumps(detail), json.dumps(streamed)))
+    for marker in markers.values():
+        assert marker not in served
+    assert private_home not in served
+    assert "/home/" not in served
+    _assert_text_values_digested(listed)
+    _assert_text_values_digested(detail)
+    _assert_text_values_digested(streamed)
+    assert any(record.get("type") == "final" for record in streamed)
+
+    assert detail["run"]["task"]["chars"] == len(markers["task"])
+    assert listed["runs"][0]["task"] == detail["run"]["task"]
+    assert "task_preview" not in json.dumps(listed)
+    assert "task_preview" not in json.dumps(detail)
+
+    for name, content in local_files.items():
+        assert (run_dir / name).read_bytes() == content
+
+
+def _assert_text_values_digested(value: object) -> None:
+    """Every text-bearing key in a served payload holds the closed digest object."""
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            if key in {"task", "detail", "text", "command", "error", "failure_detail", "role"}:
+                if inner is not None:
+                    assert isinstance(inner, dict), f"{key} is not a digest object: {inner!r}"
+                    assert set(inner) == {"digest", "chars"}
+                    assert str(inner["digest"]).startswith("hmac-sha256:")
+                    assert isinstance(inner["chars"], int)
+            _assert_text_values_digested(inner)
+    elif isinstance(value, list):
+        for inner in value:
+            _assert_text_values_digested(inner)
 
 
 def _walk(value: object):

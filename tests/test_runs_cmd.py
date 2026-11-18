@@ -1422,6 +1422,15 @@ def _write_detail_run_artifacts(run_dir):
     )
 
 
+def _assert_closed_digest(value: object) -> int:
+    assert isinstance(value, dict)
+    assert set(value) == {"digest", "chars"}
+    assert isinstance(value["digest"], str) and value["digest"].startswith("hmac-sha256:")
+    assert len(value["digest"]) == len("hmac-sha256:") + 64
+    assert isinstance(value["chars"], int)
+    return value["chars"]
+
+
 def test_runs_show_json_emits_versioned_detail_contract(tmp_path, capsys):
     run_dir = tmp_path / "run"
     _write_detail_run_artifacts(run_dir)
@@ -1446,19 +1455,21 @@ def test_runs_show_json_emits_versioned_detail_contract(tmp_path, capsys):
     assert payload["run"]["resume_available"] is False
     assert payload["roster"]["orchestrator"] == "chef"
     assert payload["roster"]["agents"]["chef"]["cli"] == "codex"
-    assert payload["plan"]["assignments"] == [{"worker": "coder", "task": "implement it"}]
+    assignment = payload["plan"]["assignments"][0]
+    assert assignment["worker"] == "coder"
+    assert _assert_closed_digest(assignment["task"]) == len("implement it")
     assert payload["workers"]["results"][0]["worker"] == "coder"
     assert payload["workers"]["results"][0]["requested_model"] == "gpt-5.5"
     assert payload["synthesis"]["result"]["ok"] is True
-    assert payload["verification"] == [
-        {
-            "run_id": "verify-1",
-            "status": "ok",
-            "started_at": "2026-05-26T14:00:01Z",
-            "duration_seconds": 3.2,
-            "commands": [{"command": "./scripts/verify", "exit_code": 0, "duration_seconds": 3.0}],
-        }
-    ]
+    verification = payload["verification"][0]
+    assert verification["run_id"] == "verify-1"
+    assert verification["status"] == "ok"
+    assert verification["started_at"] == "2026-05-26T14:00:01Z"
+    assert verification["duration_seconds"] == 3.2
+    command = verification["commands"][0]
+    assert _assert_closed_digest(command["command"]) == len("./scripts/verify")
+    assert command["exit_code"] == 0
+    assert command["duration_seconds"] == 3.0
     assert payload["briefs"] == [
         {"name": "code-graph", "attached": True, "bytes": 1200},
         {"name": "drift-impact", "attached": False, "bytes": 0, "pending_count": 1},
@@ -1509,7 +1520,7 @@ def test_runs_view_contracts_omit_planted_token_path_and_prompt(tmp_path, capsys
     assert all(frame["schema"] == "brigade.run-watch.v1" for frame in frames)
 
 
-def test_runs_show_json_bounds_long_task_text(tmp_path, capsys):
+def test_runs_show_json_replaces_long_task_with_digest(tmp_path, capsys):
     run_dir = tmp_path / "run"
     _write_run_artifacts(run_dir)
     run_meta = json.loads((run_dir / "run.json").read_text())
@@ -1519,8 +1530,16 @@ def test_runs_show_json_bounds_long_task_text(tmp_path, capsys):
     assert runs_cmd.show(run_dir, json_output=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["run"]["task"]) <= 400
-    assert payload["run"]["task"].endswith("...")
+    task = payload["run"]["task"]
+    assert set(task) == {"digest", "chars"}
+    assert task["digest"].startswith("hmac-sha256:")
+    assert task["chars"] == 5_000
+    assert "x" * 400 not in json.dumps(payload)
+    assert "task_preview" not in payload["run"]
+
+    assert runs_cmd.show(run_dir, json_output=True, show_task=True) == 0
+    preview_payload = json.loads(capsys.readouterr().out)
+    assert preview_payload["run"]["task_preview"] == "x" * 77 + "..."
 
 
 def test_runs_show_json_cli_flag(tmp_path, capsys):
@@ -1664,7 +1683,8 @@ def test_runs_list_json_emits_versioned_contract(tmp_path, capsys):
     assert newest["mode"] == "normal, dry-run"
     assert newest["resume_available"] is False
     assert oldest["mode"] == "read-only"
-    assert len(oldest["task"]) <= 160
+    assert oldest["task"]["chars"] == 5_000
+    assert set(oldest["task"]) == {"digest", "chars"}
     assert str(runs_root) not in out
     assert "/repo" not in out
 

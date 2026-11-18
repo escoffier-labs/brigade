@@ -1,0 +1,3 @@
+- `brigade runs list --json` and `brigade runs show --json` replace task, assignment, worker, failure and synthesis text with a per-host keyed digest object and never emit an absolute path. Pass `--show-task` for a bounded 80-character task preview on the local terminal.
+- The loopback Run View and its `/api/runs/<id>/events` stream now serve the same digest-only projection, so the browser page shows a digest label instead of task, worker detail, failure detail or verify command text.
+- The Brigade run memory handoff note now records the run id, status, mode, counts, timestamps and keyed task digest only. Task text, assignment text, worker detail, generated text, cwd and absolute paths no longer enter the memory inbox.

@@ -17,7 +17,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-from . import runs_status
+from . import runs_privacy, runs_status
+from .runs_privacy import (
+    _allowlisted,
+    _clean_number,
+    _clean_str,
+    _clean_str_list,
+    _compact,
+    _merge_source,
+    _short,
+)
 
 # Status classification lives in ``runs_status`` so this frozen module does not
 # grow. External callers keep the historical attribute names.
@@ -39,6 +48,7 @@ RUN_SUMMARY_FIELDS = frozenset(
         "run_id",
         "status",
         "task",
+        "task_preview",
         "started_at",
         "finished_at",
         "duration_seconds",
@@ -65,6 +75,7 @@ _RUN_DETAIL_RUN_FIELDS = frozenset(
         "run_id",
         "status",
         "task",
+        "task_preview",
         "mode",
         "started_at",
         "finished_at",
@@ -101,7 +112,6 @@ _SHARED_PREFIX_FIELDS = frozenset(
     }
 )
 
-_LIST_TASK_LIMIT = 160
 _DETAIL_TASK_LIMIT = 400
 _DETAIL_TEXT_LIMIT = 400
 _DETAIL_COMMAND_LIMIT = 200
@@ -1617,13 +1627,6 @@ def _poll_watch_artifacts(
     return run_meta, None
 
 
-def _short(text: object, limit: int = 72) -> str:
-    rendered = " ".join(str(text or "").split())
-    if len(rendered) <= limit:
-        return rendered
-    return rendered[: limit - 3].rstrip() + "..."
-
-
 def _run_sort_key(item: tuple[Path, dict[str, Any]]) -> str:
     path, meta = item
     value = meta.get("started_at")
@@ -1761,71 +1764,6 @@ def _stale_timeout(run_dir: Path, meta: dict[str, Any]) -> float | None:
     return timeout if time.time() - started.timestamp() > timeout else None
 
 
-# Windows alternative is first so `C:/Users/<name>` is not left as `C:~`.
-# `/+` and `[/\\]+` accept doubled separators; `[^/\\]+` keeps spaces and apostrophes.
-_HOME_PREFIX_RE = re.compile(
-    r"(?:[A-Za-z]:[/\\]+(?i:Users)[/\\]+|/(?:home|Users)/+)[^/\\]+",
-)
-
-
-def _redact_home_prefixes(text: str) -> str:
-    """Rewrite POSIX and Windows home prefixes to `~` for JSON contracts."""
-    return _HOME_PREFIX_RE.sub("~", text)
-
-
-def _clean_str(value: object, limit: int | None = None) -> str | None:
-    """Bound, then home-prefix-redact, every string that enters a JSON contract."""
-    if not isinstance(value, str) or not value:
-        return None
-    cleaned = _short(value, limit) if limit is not None else value
-    return _redact_home_prefixes(cleaned)
-
-
-def _clean_str_list(value: object) -> list[str] | None:
-    """Clean every string in a JSON-contract list; drop non-strings and empties."""
-    if not isinstance(value, list):
-        return None
-    return [item for raw in value if (item := _clean_str(raw)) is not None]
-
-
-def _clean_number(value: object) -> int | float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return value
-
-
-def _compact(payload: dict[str, object]) -> dict[str, object]:
-    return {key: value for key, value in payload.items() if value is not None}
-
-
-class _MergedSource(dict[str, object]):
-    """Source overlay that records which keys passed through the cleaner."""
-
-    cleaned_keys: frozenset[str]
-
-    def __init__(self, data: Mapping[str, Any] | None = None) -> None:
-        super().__init__(data or {})
-        self.cleaned_keys = frozenset()
-
-
-def _merge_source(source: Mapping[str, Any] | None, cleaned: Mapping[str, object]) -> dict[str, object]:
-    """Overlay cleaned fields on the source mapping so `_allowlisted` must drop extras."""
-    payload = _MergedSource(source)
-    payload.update(cleaned)
-    payload.cleaned_keys = frozenset(cleaned)
-    return payload
-
-
-def _allowlisted(payload: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
-    """Keep only explicitly allowlisted keys; drop None the same way as `_compact`."""
-    if not isinstance(payload, _MergedSource):
-        raise AssertionError("JSON contract allowlist requires _merge_source overlay")
-    missing = allowed - payload.cleaned_keys
-    if missing:
-        raise AssertionError("allowlist keys have no cleaned counterpart: " + ", ".join(sorted(missing)))
-    return {key: value for key, value in payload.items() if key in allowed and value is not None}
-
-
 def _mode_text(meta: Mapping[str, Any]) -> str:
     mode = "read-only" if meta.get("read_only") else "normal"
     if meta.get("dry_run"):
@@ -1905,16 +1843,17 @@ def _parent_run_id_from_meta(meta: Mapping[str, Any]) -> str | None:
     return _clean_str(lineage.get("parent_run_id"))
 
 
-def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
+def _run_summary_payload(run_dir: Path, meta: dict[str, Any], *, show_task: bool = False) -> dict[str, object]:
     """Browser-safe run summary for brigade.runs-list.v1 (no absolute paths)."""
     phase, _, _ = _failure_fields(meta)
-    return _allowlisted(
+    payload = _allowlisted(
         _merge_source(
             meta,
             {
                 "run_id": _clean_str(run_dir.name),
                 "status": _clean_str(meta.get("status")) or "unknown",
-                "task": _clean_str(meta.get("task"), _LIST_TASK_LIMIT),
+                "task": runs_privacy.digest_value(run_dir, meta.get("task")),
+                "task_preview": None,
                 "started_at": _clean_str(meta.get("started_at")),
                 "finished_at": _clean_str(meta.get("finished_at")),
                 "duration_seconds": _clean_number(meta.get("duration_seconds")),
@@ -1926,6 +1865,7 @@ def _run_summary_payload(run_dir: Path, meta: dict[str, Any]) -> dict[str, objec
         ),
         RUN_SUMMARY_FIELDS,
     )
+    return runs_privacy.project_summary(payload, run_dir, task=meta.get("task"), show_task=show_task)
 
 
 def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
@@ -1943,7 +1883,8 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
             {
                 "run_id": _clean_str(run_dir.name),
                 "status": _clean_str(meta.get("status")) or "unknown",
-                "task": _clean_str(meta.get("task"), _DETAIL_TASK_LIMIT),
+                "task": runs_privacy.digest_value(run_dir, meta.get("task")),
+                "task_preview": None,
                 "mode": _clean_str(_mode_text(meta)),
                 "started_at": _clean_str(meta.get("started_at")),
                 "finished_at": _clean_str(meta.get("finished_at")),
@@ -2141,11 +2082,14 @@ def _run_detail_payload(
     plan: dict[str, Any] | None,
     worker_results: dict[str, Any] | None,
     synthesis: dict[str, Any] | None,
+    *,
+    show_task: bool = False,
 ) -> dict[str, object]:
     """Allowlisted brigade.run-detail.v1 payload shared by show/latest --json.
 
     Excludes environment values, tokens, full prompts, transcript bodies,
-    log paths, raw stdout/stderr, and absolute workspace paths.
+    log paths, raw stdout/stderr, and absolute workspace paths. Prompt and
+    generated text are projected to keyed digests by ``runs_privacy``.
     """
     payload = {
         "schema": RUN_DETAIL_SCHEMA,
@@ -2157,7 +2101,8 @@ def _run_detail_payload(
         "verification": _detail_verification_section(worker_results, synthesis),
         "briefs": _detail_briefs_section(run_meta),
     }
-    return {key: payload[key] for key in RUN_DETAIL_KEYS}
+    ordered = {key: payload[key] for key in RUN_DETAIL_KEYS}
+    return runs_privacy.project_detail(ordered, run_dir, task=run_meta.get("task"), show_task=show_task)
 
 
 def runs_list_contract(
@@ -2165,12 +2110,14 @@ def runs_list_contract(
     cwd: Path,
     runs_dir: Path | None = None,
     limit: int = 10,
+    show_task: bool = False,
 ) -> tuple[dict[str, object] | None, str | None, int]:
     """Return the brigade.runs-list.v1 payload used by ``runs list --json``.
 
     A missing runs directory is an empty list plus the CLI diagnostic (rc 2),
     so a higher-level surface can render the empty state without a second
-    artifact reader.
+    artifact reader. Task text is a keyed digest unless ``show_task`` asks for
+    a bounded preview, and the Run View never passes it.
     """
     if limit < 1:
         return None, "error: --limit must be a positive integer", 2
@@ -2189,7 +2136,7 @@ def runs_list_contract(
     return (
         {
             "schema": RUNS_LIST_SCHEMA,
-            "runs": [_run_summary_payload(path, meta) for path, meta in runs[:limit]],
+            "runs": [_run_summary_payload(path, meta, show_task=show_task) for path, meta in runs[:limit]],
             "skipped_invalid": skipped,
         },
         None,
@@ -2197,7 +2144,7 @@ def runs_list_contract(
     )
 
 
-def run_detail_contract(run_dir: Path) -> tuple[dict[str, object] | None, str | None, int]:
+def run_detail_contract(run_dir: Path, *, show_task: bool = False) -> tuple[dict[str, object] | None, str | None, int]:
     """Return the brigade.run-detail.v1 payload used by ``runs show --json``."""
     run_dir = run_dir.expanduser()
     if not run_dir.is_dir():
@@ -2213,7 +2160,7 @@ def run_detail_contract(run_dir: Path) -> tuple[dict[str, object] | None, str | 
         synthesis = _read_json(run_dir / "synthesis.json")
     except ValueError as exc:
         return None, f"error: {exc}", 2
-    payload = _run_detail_payload(run_dir, run_meta, roster, plan, worker_results, synthesis)
+    payload = _run_detail_payload(run_dir, run_meta, roster, plan, worker_results, synthesis, show_task=show_task)
     rc = _watch_return_code(run_meta.get("status")) if _is_terminal(run_meta) else 0
     return payload, None, rc
 
@@ -2224,13 +2171,18 @@ def iter_watch_records(
     interval: float = 1.0,
     should_stop: Callable[[], bool] | None = None,
 ) -> Iterator[dict[str, object]]:
-    """Yield brigade.run-watch.v1 records using the same emitters as ``watch --json``."""
+    """Yield brigade.run-watch.v1 records using the same emitters as ``watch --json``.
+
+    Every record is projected through ``runs_privacy`` because this stream feeds
+    the loopback Run View ``/api/runs/<id>/events`` endpoint.
+    """
     if interval < 0:
         return
     records: list[dict[str, object]] = []
+    project = runs_privacy.watch_record_projector(run_dir)
 
     def _sink(record: dict[str, object]) -> None:
-        records.append(record)
+        records.append(project(record))
 
     with _watch_record_sink(_sink):
         _emit_watch_json({"type": "watch", "run_id": _watch_run_id(run_dir)})
@@ -2266,9 +2218,16 @@ def iter_watch_records(
                 time.sleep(interval)
 
 
-def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_output: bool = False) -> int:
+def list_runs(
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    limit: int = 10,
+    json_output: bool = False,
+    show_task: bool = False,
+) -> int:
     if json_output:
-        payload, diagnostic, rc = runs_list_contract(cwd=cwd, runs_dir=runs_dir, limit=limit)
+        payload, diagnostic, rc = runs_list_contract(cwd=cwd, runs_dir=runs_dir, limit=limit, show_task=show_task)
         if payload is None or rc != 0:
             if diagnostic:
                 print(diagnostic, file=sys.stderr)
@@ -2812,7 +2771,7 @@ def _resume_durable_child(run_dir: Path, meta: Mapping[str, Any]) -> int:
         return 2
 
 
-def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = False) -> int:
+def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = False, show_task: bool = False) -> int:
     cwd = cwd.expanduser().resolve()
     if not cwd.is_dir():
         print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
@@ -2828,7 +2787,7 @@ def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = 
     if not runs:
         print(f"error: no runs found in {root}", file=sys.stderr)
         return 1
-    return show(runs[0][0], json_output=json_output)
+    return show(runs[0][0], json_output=json_output, show_task=show_task)
 
 
 def _resume_available(run_dir: Path) -> bool:
@@ -3464,10 +3423,10 @@ def audit(
     return 1
 
 
-def show(run_dir: Path, *, json_output: bool = False) -> int:
+def show(run_dir: Path, *, json_output: bool = False, show_task: bool = False) -> int:
     run_dir = run_dir.expanduser()
     if json_output:
-        payload, diagnostic, rc = run_detail_contract(run_dir)
+        payload, diagnostic, rc = run_detail_contract(run_dir, show_task=show_task)
         if payload is None:
             if diagnostic:
                 print(diagnostic, file=sys.stderr)

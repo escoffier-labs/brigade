@@ -41,6 +41,8 @@ _ABS_SEGMENT_RE = re.compile(r"/(?:home|Users|root|tmp)(?:/[^\s\"'`;,)]*)?")
 _FILE_URI_RE = re.compile(r"file://[^\s\"']*")
 
 _PROMPT_KEYS = frozenset("task text detail final error prompt stdout stderr output result content summary".split())
+# Served run views reuse the same text-key set as the export projection.
+PROMPT_KEYS = _PROMPT_KEYS
 _TOP_LEVEL_JSON = frozenset(
     "run.json roster.json plan.json worker-results.json synthesis.json batch-request.json".split()
 )
@@ -935,17 +937,20 @@ def project_payload_tree(
     return projected
 
 
-def _assert_safe_string(value: str, *, label: str, home: Path) -> None:
-    unsafe = (
+def is_path_like(value: str) -> bool:
+    """True when ``value`` looks like an absolute, home-relative, or file-URI path."""
+    return (
         value.startswith(("/", "~", "file://", "\\\\"))
         or _DRIVE_RE.match(value) is not None
-        or (bool(home) and str(home) in value)
         or _ABS_SEGMENT_RE.search(value) is not None
         or _FILE_URI_RE.search(value) is not None
         or _WIN_ABS_RE.search(value) is not None
         or _UNC_RE.search(value) is not None
     )
-    if unsafe:
+
+
+def _assert_safe_string(value: str, *, label: str, home: Path) -> None:
+    if is_path_like(value) or (bool(home) and str(home) in value):
         raise RunExportProjectionError(f"{label} must not contain an absolute path")
 
 

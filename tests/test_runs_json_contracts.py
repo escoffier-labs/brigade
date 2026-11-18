@@ -453,6 +453,21 @@ def _assert_artifacts_keep_home_needles(run_dir: Path) -> None:
         assert needle in disk_text or escaped in disk_text, f"artifact lost planted home path: {needle!r}"
 
 
+def _redacted_len(text: str) -> int:
+    """Length after the home-prefix rewrite the JSON contract applies."""
+    return len(text.replace(PLANTED_ABS_HOME, "~"))
+
+
+def _assert_prompt_digest(value: object, chars: int) -> None:
+    """Assert the closed keyed-digest shape from the export projection."""
+    assert isinstance(value, dict), f"expected a digest object, got {value!r}"
+    assert set(value) == {"digest", "chars"}
+    digest = value["digest"]
+    assert isinstance(digest, str) and digest.startswith("hmac-sha256:")
+    assert len(digest) == len("hmac-sha256:") + 64
+    assert value["chars"] == chars
+
+
 def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys):
     run_dir = tmp_path / ".brigade" / "runs" / "20260821-100000-planted"
     _plant_sensitive_run(run_dir)
@@ -464,8 +479,8 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_allowlist(listed)
     _assert_raw_clean(listed_raw)
     assert listed["schema"] == runs_cmd.RUNS_LIST_SCHEMA
-    assert listed["runs"][0]["task"]
-    assert PLANTED_VISIBLE in listed["runs"][0]["task"]
+    _assert_prompt_digest(listed["runs"][0]["task"], len(PLANTED_TASK))
+    assert "task_preview" not in listed["runs"][0]
 
     assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json"]) == 0
     shown_raw = capsys.readouterr().out
@@ -473,7 +488,8 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     _assert_allowlist(shown)
     _assert_raw_clean(shown_raw)
     assert shown["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
-    assert PLANTED_VISIBLE in shown["run"]["task"]
+    _assert_prompt_digest(shown["run"]["task"], len(PLANTED_TASK))
+    assert "task_preview" not in shown["run"]
     assert shown["briefs"]
     assert shown["briefs"][0]["name"] == "code-graph"
     assert shown["briefs"][0]["bytes"] == 32
@@ -501,19 +517,31 @@ def test_json_contracts_omit_planted_env_secret_home_and_prompt(tmp_path, capsys
     shown_run = shown["run"]
     assert "failure" in shown_run
     assert PLANTED_ABS_HOME not in json.dumps(shown)
-    assert shown_run["failure"]["detail"] == PLANTED_ABS_FAILURE.replace(PLANTED_ABS_HOME, "~")
-    assert shown_run["error"] == PLANTED_ERROR.replace(PLANTED_ABS_HOME, "~")
-    assert shown["plan"]["assignments"][0]["task"] == PLANTED_PLAN_TASK.replace(PLANTED_ABS_HOME, "~")
+    _assert_prompt_digest(shown_run["failure"]["detail"], _redacted_len(PLANTED_ABS_FAILURE))
+    _assert_prompt_digest(shown_run["error"], _redacted_len(PLANTED_ERROR))
+    _assert_prompt_digest(shown["plan"]["assignments"][0]["task"], _redacted_len(PLANTED_PLAN_TASK))
     worker = shown["workers"]["results"][0]
-    assert worker["detail"] == PLANTED_WORKER_DETAIL.replace(PLANTED_ABS_HOME, "~")
-    assert worker["failure"]["detail"] == PLANTED_WORKER_FAILURE.replace(PLANTED_ABS_HOME, "~")
-    assert shown["synthesis"]["result"]["detail"] == PLANTED_SYNTHESIS_DETAIL.replace(PLANTED_ABS_HOME, "~")
-    assert shown["roster"]["agents"]["chef"]["role"] == PLANTED_ROSTER_ROLE.replace(PLANTED_ABS_HOME, "~")
-    verify_command = shown["verification"][0]["commands"][0]["command"]
-    assert verify_command == PLANTED_ABS_COMMAND.replace(PLANTED_ABS_HOME, "~")
+    _assert_prompt_digest(worker["detail"], _redacted_len(PLANTED_WORKER_DETAIL))
+    _assert_prompt_digest(worker["failure"]["detail"], _redacted_len(PLANTED_WORKER_FAILURE))
+    _assert_prompt_digest(shown["synthesis"]["result"]["detail"], _redacted_len(PLANTED_SYNTHESIS_DETAIL))
+    _assert_prompt_digest(shown["roster"]["agents"]["chef"]["role"], _redacted_len(PLANTED_ROSTER_ROLE))
+    _assert_prompt_digest(shown["verification"][0]["commands"][0]["command"], _redacted_len(PLANTED_ABS_COMMAND))
     final_frames = [frame for frame in frames if frame.get("type") == "final"]
     assert final_frames
     assert final_frames[0]["text"] == PLANTED_ABS_FINAL.replace(PLANTED_ABS_HOME, "~")
+
+    assert cli.main(["runs", "list", "--cwd", str(tmp_path), "--json", "--show-task"]) == 0
+    preview_listed = json.loads(capsys.readouterr().out)
+    preview = preview_listed["runs"][0]["task_preview"]
+    assert PLANTED_VISIBLE in preview
+    assert len(preview) <= 80
+    assert "/home/" not in preview
+    assert preview_listed["runs"][0]["task"] == listed["runs"][0]["task"]
+
+    assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path), "--json", "--show-task"]) == 0
+    preview_shown = json.loads(capsys.readouterr().out)
+    assert PLANTED_VISIBLE in preview_shown["run"]["task_preview"]
+    assert preview_shown["run"]["task"] == shown["run"]["task"]
 
     _assert_artifacts_keep_home_needles(run_dir)
     assert cli.main(["runs", "show", run_dir.name, "--cwd", str(tmp_path)]) == 0

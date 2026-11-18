@@ -228,6 +228,16 @@
     return text.slice(0, DISPLAY_LIMIT - 3) + "...";
   }
 
+  function privacyText(value) {
+    if (value == null) return "";
+    if (typeof value === "object" && typeof value.digest === "string") {
+      var short = value.digest.length > 24 ? value.digest.slice(0, 24) + "..." : value.digest;
+      var chars = typeof value.chars === "number" ? " (" + value.chars + " chars)" : "";
+      return "digest " + short + chars;
+    }
+    return bounded(value);
+  }
+
   function setText(id, value) {
     var el = document.getElementById(id);
     if (el) el.textContent = value == null ? "" : String(value);
@@ -280,7 +290,7 @@
     return runs.filter(function (run) {
       if (status && run.status !== status) return false;
       if (!needle) return true;
-      var hay = [run.run_id, run.status, run.task, run.failure_phase].join(" ").toLowerCase();
+      var hay = [run.run_id, run.status, privacyText(run.task), run.failure_phase].join(" ").toLowerCase();
       return hay.indexOf(needle) !== -1;
     });
   }
@@ -342,7 +352,7 @@
       var title = el("strong", bounded(run.run_id));
       var status = el("span", bounded(run.status || "unknown"));
       status.className = statusClass(run.status);
-      var task = el("span", bounded(run.task));
+      var task = el("span", privacyText(run.task));
       var meta = el("span", [relativeTime(run.started_at), durationText(run.duration_seconds), run.failure_phase ? "failed in " + bounded(run.failure_phase) : ""].filter(Boolean).join(" · "));
       meta.className = "muted";
       button.appendChild(title);
@@ -378,7 +388,7 @@
       var agent = agents[seat] || {};
       var row = document.createElement("tr");
       [seat, agent.model, agent.reasoning, assignmentFor(seat, detail.plan), agent.timeout_seconds, resultFor(seat, detail.workers)].forEach(function (value) {
-        row.appendChild(el("td", bounded(value)));
+        row.appendChild(el("td", privacyText(value)));
       });
       body.appendChild(row);
     });
@@ -389,7 +399,7 @@
     clearNode(list);
     var assignments = detail.plan && detail.plan.assignments ? detail.plan.assignments : [];
     assignments.forEach(function (item) {
-      var li = el("li", "stage " + (item.stage == null ? "?" : item.stage) + " → " + bounded(item.worker) + ": " + bounded(item.task));
+      var li = el("li", "stage " + (item.stage == null ? "?" : item.stage) + " → " + bounded(item.worker) + ": " + privacyText(item.task));
       list.appendChild(li);
     });
   }
@@ -418,7 +428,7 @@
   function renderFailure(detail) {
     var run = detail.run || {};
     var failure = run.failure || {};
-    var parts = [failure.phase, failure.kind, failure.detail, run.error].filter(Boolean);
+    var parts = [failure.phase, failure.kind, privacyText(failure.detail), privacyText(run.error)].filter(Boolean);
     setText("failure-text", parts.length ? bounded(parts.join(" — ")) : "No failure recorded.");
   }
 
@@ -438,7 +448,7 @@
       }
       commands.forEach(function (command) {
         var row = document.createElement("tr");
-        [receipt.run_id, receipt.status, durationText(receipt.duration_seconds || command.duration_seconds), command.command, command.exit_code].forEach(function (value) {
+        [receipt.run_id, receipt.status, durationText(receipt.duration_seconds || command.duration_seconds), privacyText(command.command), command.exit_code].forEach(function (value) {
           row.appendChild(el("td", bounded(value)));
         });
         body.appendChild(row);
@@ -480,7 +490,7 @@
     lastDetail = detail;
     var run = detail.run || {};
     setText("detail-title", bounded(run.run_id || selectedId || "Run"));
-    setText("detail-task", bounded(run.task));
+    setText("detail-task", privacyText(run.task));
     fillDl(document.getElementById("detail-identity"), [
       ["Run", bounded(run.run_id)],
       ["Status", bounded(run.status)],

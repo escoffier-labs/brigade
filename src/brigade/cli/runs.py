@@ -41,6 +41,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Emit the versioned brigade.runs-list.v1 JSON contract.",
     )
+    p_runs_list.add_argument(
+        "--show-task",
+        action="store_true",
+        help="Add a bounded task preview to JSON output. Local terminal only, never served.",
+    )
     p_runs_latest = runs_sub.add_parser("latest", help="Show the most recent Brigade run.")
     p_runs_latest.add_argument(
         "--cwd",
@@ -77,6 +82,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--json",
         action="store_true",
         help="Emit the versioned brigade.run-detail.v1 JSON contract.",
+    )
+    p_runs_show.add_argument(
+        "--show-task",
+        action="store_true",
+        help="Add a bounded task preview to JSON output. Local terminal only, never served.",
     )
     p_runs_inspect = runs_sub.add_parser(
         "inspect",
@@ -485,7 +495,13 @@ def dispatch(args) -> int:
         return run_cassette.purge_cli(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
 
     if args.runs_command == "list":
-        return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit, json_output=args.json)
+        return runs_cmd.list_runs(
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            limit=args.limit,
+            json_output=args.json,
+            show_task=args.show_task,
+        )
     if args.runs_command == "latest":
         return runs_cmd.show_latest(cwd=args.cwd, runs_dir=args.runs_dir, json_output=args.json)
     if args.runs_command == "show":
@@ -494,7 +510,7 @@ def dispatch(args) -> int:
             print(error, file=sys.stderr)
             return 2
         assert run_dir is not None
-        result = runs_cmd.show(run_dir, json_output=args.json)
+        result = runs_cmd.show(run_dir, json_output=args.json, show_task=args.show_task)
         if not args.json:
             from .. import approval
 
