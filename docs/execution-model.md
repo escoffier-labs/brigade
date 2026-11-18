@@ -105,8 +105,10 @@ On a real scope, the retrieval evaluation holds every automatic reflection
 apply. It admits only all-`append_evidence` Tier 0 proposals and then requires
 each target card's search projection to stay unchanged. Any applied edit
 changes it, including an evidence append, so reflection's Tier 0 applies happen
-only on the evaluation fixture scope. Verifier applies and automatic
-compensations take their own gates instead.
+only on the evaluation fixture scope. An exact-duplicate merge is the one
+exception. It is admitted under the retrieval gate's bounded-drift checks, and
+the blast cap and evidence gates still hold it for a reviewer today. Verifier
+applies and automatic compensations take their own gates instead.
 
 External and handoff-only curation
 policies never pass the ownership gate. Local repository candidates stay
