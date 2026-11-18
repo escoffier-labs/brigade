@@ -1240,9 +1240,9 @@ jobs:
               exit 1
             fi
             base=$(git rev-parse HEAD^1)
-            # Name the actual change so the guard reads the head's own parents,
-            # never the synthetic test merge.
-            python3 scripts/changelog_fragments.py guard --base "$base" --head "$PR_HEAD_SHA"
+            # The checked tree stays HEAD, GitHub's post-merge result. The pull
+            # request head is only provenance for an inherited release.
+            python3 scripts/changelog_fragments.py guard --base "$base" --provenance "$PR_HEAD_SHA"
           else
             base=$EVENT_BASE_SHA
             if [ -z "$base" ]; then

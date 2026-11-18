@@ -15,16 +15,19 @@ Subcommands (stdlib only, no dependencies):
   assemble   append fragments to ``## [Unreleased]`` and delete them.
 
 A release commit is a diff that adds a new ``## [X.Y.Z] - YYYY-MM-DD`` heading
-to CHANGELOG.md. It must also leave no fragment behind. A change that merges an
-already released upstream may keep that upstream's fragments and the base
-branch's own fragments, but only when the caller names the change's own commit
-and the added release heading is found in a parent of that commit. Without that
-evidence the strict rule applies.
+to CHANGELOG.md. It must also leave no fragment behind. The guard checks the
+checked-out tree, GitHub's post-merge result, against the current base. A change
+that merges an already released upstream may keep that upstream's fragments and
+the base branch's own fragments, but only when the caller names the change's own
+commit, that commit is the post-merge's second parent, the added release heading
+is in one of its parents, and the post-merge changelog is exactly the base and
+upstream content. Without that evidence the strict rule applies.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import os
 from pathlib import Path
 import re
@@ -228,55 +231,100 @@ def _fragment_blobs(root: Path, revision: str) -> dict[str, str]:
     return blobs
 
 
-def _inherited_release(root: Path, head_commit: str, headings: list[str], base_commit: str) -> str | None:
-    """Return a parent of the head whose changelog already carried the release.
+def _changelog_additions(diff: str) -> list[str]:
+    """Return the non-blank lines a unified CHANGELOG diff adds."""
+    added: list[str] = []
+    in_hunk = False
+    for line in diff.splitlines():
+        if line.startswith("@@"):
+            in_hunk = True
+        elif line.startswith("diff --git"):
+            in_hunk = False
+        elif in_hunk and line.startswith("+"):
+            text = line[1:].strip()
+            if text:
+                added.append(text)
+    return added
 
-    Only a parent whose objects are in the checkout can prove inheritance. A
-    shallow clone that fetched just the head or the test merge has none, so the
-    caller stays on the strict rule instead of trusting a synthetic merge.
+
+def _changelog_lines(root: Path, commit: str) -> Counter[str] | None:
+    """Return the non-blank CHANGELOG lines at ``commit``, or None if absent."""
+    try:
+        text = _git(root, "show", f"{commit}:{CHANGELOG}")
+    except FragmentError:
+        return None
+    return Counter(line.strip() for line in text.splitlines() if line.strip())
+
+
+def _verified_inheritance(
+    root: Path, head_commit: str, base_commit: str, provenance: str | None, headings: list[str]
+) -> tuple[str, Counter[str]] | None:
+    """Prove the release came from an upstream merged into the change.
+
+    GitHub's pull request test merge has exactly ``[base, pull request head]``
+    as parents. A provenance that does not match that shape, a change that is
+    not a merge, or a parent missing from a shallow checkout proves nothing, so
+    incomplete evidence returns ``None`` and the caller stays strict.
     """
-    for parent in _commit_parents(root, head_commit):
+    if provenance is None:
+        return None
+    try:
+        provenance_commit = _resolve(root, provenance)
+    except FragmentError:
+        return None
+    if _commit_parents(root, head_commit) != [base_commit, provenance_commit]:
+        return None
+    parents = _commit_parents(root, provenance_commit)
+    if len(parents) < 2:
+        return None
+    for parent in parents:
         if parent == base_commit:
             continue
-        try:
-            text = _git(root, "show", f"{parent}:{CHANGELOG}")
-        except FragmentError:
-            continue
-        lines = {line.strip() for line in text.splitlines()}
-        if all(heading.strip() in lines for heading in headings):
-            return parent
+        lines = _changelog_lines(root, parent)
+        if lines is not None and all(heading.strip() in lines for heading in headings):
+            return parent, lines
     return None
 
 
-def guard(root: Path, base: str, head: str | None = None) -> list[str]:
+def guard(root: Path, base: str, provenance: str | None = None) -> list[str]:
     """Reject a CHANGELOG.md edit that is not part of a release commit.
 
-    ``head`` names the change's own commit. Without it the guard checks HEAD
-    under the strict rule only, because a caller that did not name the change
-    may have handed it a synthetic merge whose parents are not the change's own
-    history.
+    The checked tree is always ``HEAD``, GitHub's post-merge result, compared
+    with the current base. ``provenance`` names the change's own commit, the
+    pull request head, and is used only to prove that an added release heading
+    was inherited from a merged upstream. Without complete evidence the strict
+    rule applies.
     """
-    revision = head or "HEAD"
-    changed = _git(root, "diff", "--name-only", "--no-renames", base, revision).splitlines()
+    base_commit = _resolve(root, base)
+    head_commit = _resolve(root, "HEAD")
+    changed = _git(root, "diff", "--name-only", "--no-renames", base_commit, head_commit).splitlines()
     if CHANGELOG not in changed:
         return []
-    diff = _git(root, "diff", "-U0", "--no-color", "--no-renames", base, revision, "--", CHANGELOG)
-    added_headings = [line[1:] for line in diff.splitlines() if line.startswith("+## [")]
-    release_headings = [heading for heading in added_headings if RELEASE_HEADING_RE.match(heading)]
+    diff = _git(root, "diff", "-U0", "--no-color", "--no-renames", base_commit, head_commit, "--", CHANGELOG)
+    added = _changelog_additions(diff)
+    release_headings = [line for line in added if RELEASE_HEADING_RE.match(line)]
     if not release_headings:
         return [
             f"{CHANGELOG}: pull requests do not edit the changelog. Add a fragment as "
             f"{FRAGMENT_DIR}/<pr-number-or-slug>.md instead (see {FRAGMENT_DIR}/README.md). "
             "Only a release commit, which adds a '## [X.Y.Z] - YYYY-MM-DD' heading, may edit it."
         ]
-    head_commit = _resolve(root, revision)
-    base_commit = _resolve(root, base)
     at_head = _fragment_blobs(root, head_commit)
     # A change that merged an already released upstream inherits its release
     # heading, and the upstream may also carry fragments started after that
     # release. Both those and the base branch's own fragments are not this
     # change's to assemble, so only fragments it adds or rewrites must be gone.
-    upstream = None if head is None else _inherited_release(root, head_commit, release_headings, base_commit)
+    # The exemption needs verified provenance and a post-merge changelog that is
+    # exactly the inherited content: the multiset union of the base and upstream
+    # lines, with nothing added, removed or duplicated.
+    upstream: str | None = None
+    evidence = _verified_inheritance(root, head_commit, base_commit, provenance, release_headings)
+    if evidence is not None:
+        candidate, upstream_lines = evidence
+        base_lines = _changelog_lines(root, base_commit)
+        head_lines = _changelog_lines(root, head_commit)
+        if base_lines is not None and head_lines is not None and head_lines == base_lines | upstream_lines:
+            upstream = candidate
     if upstream is None:
         leftover = list(at_head)
     else:
@@ -312,9 +360,9 @@ def main(argv: list[str] | None = None) -> int:
     guard_parser = sub.add_parser("guard", help="fail on a CHANGELOG.md edit outside a release commit")
     guard_parser.add_argument("--base", required=True, help="revision the change is compared against")
     guard_parser.add_argument(
-        "--head",
+        "--provenance",
         default=None,
-        help="revision of the change's own commit; without it only the strict rule applies",
+        help="commit of the change itself, used only to prove an inherited release",
     )
     assemble_parser = sub.add_parser("assemble", help="fold fragments into [Unreleased] and delete them")
     assemble_parser.add_argument("--dry-run", action="store_true", help="validate and report without writing")
@@ -327,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
             if not problems:
                 print(f"{len(fragments)} changelog fragment(s) valid")
         elif args.command == "guard":
-            problems = guard(root, args.base, args.head)
+            problems = guard(root, args.base, args.provenance)
             if not problems:
                 print("changelog edit policy satisfied")
         else:
