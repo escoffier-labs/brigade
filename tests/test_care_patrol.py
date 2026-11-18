@@ -17,7 +17,7 @@ from brigade import care_cmd, care_schedules, runbook_cmd
 def test_selected_patrol_installs_report_only_runbook(tmp_path, monkeypatch, capsys, backend, schedule):
     target = tmp_path / "workspace"
     target.mkdir()
-    monkeypatch.setattr(care_cmd, "_ensure_memory_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", lambda *args: ({}, None))
     analyzed = []
     real_run = subprocess.run
@@ -65,7 +65,7 @@ def test_patrol_is_optional_except_in_atomic_crontab(tmp_path, monkeypatch, caps
     assert "run-patrol" not in {entry.entry_id for entry in care_cmd.CARE_ENTRIES}
     assert "run-patrol.json" in care_cmd._crontab_body(workspace=tmp_path)
     monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     assert care_cmd.install(target=tmp_path, backend="crontab", entry_ids=["run-patrol"]) == 2
     assert "atomic managed block" in capsys.readouterr().err
 
@@ -204,8 +204,7 @@ def test_explicit_crontab_selection_does_not_add_patrol(tmp_path):
 
 @pytest.mark.parametrize("backend", ["systemd", "launchd"])
 def test_unselected_patrol_does_not_write_or_pin_runbook(tmp_path, monkeypatch, capsys, backend):
-    monkeypatch.setattr(care_cmd, "_ensure_memory_care_runbooks", lambda target: 0)
-    monkeypatch.setattr(care_cmd, "_write_daily_observability_runbook", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
 
     def unexpected(*args):
         pytest.fail("unselected patrol must not pin its runbook")
