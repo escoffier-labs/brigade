@@ -42,12 +42,36 @@ def register(sub: argparse._SubParsersAction) -> None:
             decision.add_argument("--reject", dest="decision", action="store_const", const="reject")
             command.add_argument(
                 "--expected-policy-digest",
-                help="Current hub policy SHA-256, or none when absent. Required for accept and after a policy change.",
+                help=(
+                    "Current hub policy digest. Copy the policy_digest printed by "
+                    "'brigade memory proposals show <id>', for example sha256:4c31..., and pass it verbatim. "
+                    "Accepts sha256:<64 hex>, bare <64 hex>, or none when the policy is absent. "
+                    "Required for accept and after a policy change."
+                ),
             )
 
 
 def _id(value: str | None) -> bool:
     return isinstance(value, str) and hubc.event_id_ms(value) is not None
+
+
+def _policy_digest(value: str) -> str | None:
+    """Normalize an operator digest to the hub's ``sha256:<hex>`` form.
+
+    ``none`` means the hub currently has no policy and is sent as JSON null.
+    Both a prefixed and a bare 64-character lowercase digest are accepted; the
+    hub compares the digest by exact equality, so hex values are always sent
+    with the prefix that ``proposals show`` prints.
+    """
+    if value == "none":
+        return None
+    hex_value = value[len("sha256:") :] if value.startswith("sha256:") else value
+    if not re.fullmatch(r"[0-9a-f]{64}", hex_value):
+        raise ValueError(
+            "--expected-policy-digest must be sha256:<64 lowercase hex>, <64 lowercase hex>, or none. "
+            "Copy the policy_digest printed by 'brigade memory proposals show <id>' and pass it verbatim"
+        )
+    return f"sha256:{hex_value}"
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -59,15 +83,16 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("list needs --limit from 1 to 100 and an opaque --after cursor from list")
     elif not _id(args.proposal_id):
         raise ValueError("proposal_id must be a time-ordered id")
+    expected_digest: str | None = None
     if command == "decide" and args.decision == "accept" and args.expected_policy_digest is None:
         raise ValueError(
             "--accept requires --expected-policy-digest. "
-            f"Get policy_digest with brigade memory proposals show {args.proposal_id} --target <reflect-folder>, "
-            "then supply that digest, or none if show reports null"
+            f"Copy the policy_digest printed by 'brigade memory proposals show {args.proposal_id} "
+            "--target <reflect-folder>', for example sha256:4c31..., and pass it verbatim, "
+            "or none if show reports null"
         )
     if command == "decide" and args.expected_policy_digest is not None:
-        if args.expected_policy_digest != "none" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_policy_digest):
-            raise ValueError("--expected-policy-digest must be a lowercase SHA-256 digest or none")
+        expected_digest = _policy_digest(args.expected_policy_digest)
     pair = (args.hub_url, args.token_file) if args.hub_url else None
     try:
         settings = hubc.load_settings(args.target, credential_pair=pair)
@@ -94,9 +119,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "client_event_id": hubc.event_id(),
     }
     if args.expected_policy_digest is not None:
-        fields["expected_policy_digest"] = (
-            None if args.expected_policy_digest == "none" else args.expected_policy_digest
-        )
+        fields["expected_policy_digest"] = expected_digest
     # No automatic retry with a new policy digest. The operator must review that policy.
     result = client.call("decide", **fields)
     return {key: result[key] for key in ("proposal_id", "state", "reason") if key in result}
@@ -112,7 +135,7 @@ def dispatch(args: argparse.Namespace) -> int:
         if safe == "memory_policy_digest_mismatch":
             digest = exc.body.get("policy_digest")
             if "policy_digest" in exc.body and (
-                digest is None or isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+                digest is None or isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
             ):
                 payload["policy_digest"] = digest
             payload["reason"] = "review the current policy and supply --expected-policy-digest explicitly"
@@ -132,4 +155,9 @@ def dispatch(args: argparse.Namespace) -> int:
         print(_terminal_text(diff) if isinstance(diff, str) else "diff: redacted by hub review gate")
     else:
         print(_terminal_text(json.dumps(payload, sort_keys=True, indent=2)))
+        if args.hub_proposal_command == "list" and code == 0 and not payload.get("proposals"):
+            print(
+                "note: an empty list also means this credential lacks list_proposals on *. "
+                "Use proposals show <id> with a known id."
+            )
     return code
