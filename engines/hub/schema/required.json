@@ -1097,6 +1097,85 @@
         "foreign_keys": [],
         "indexes": {},
         "sql": "CREATE TABLE fleet_skill_review_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, recorded_at TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL)"
+      },
+      "fleet_t3_observations": {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "last_success_at",
+          "last_attempt_at",
+          "updated_at",
+          "memory_used"
+        ],
+        "columns": [
+          [
+            "last_attempt_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "last_success_at",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "memory_used",
+            "REAL",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_t3_observations_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_t3_observations (node_id TEXT NOT NULL PRIMARY KEY, last_success_at TEXT, last_attempt_at TEXT NOT NULL, updated_at TEXT NOT NULL, memory_used REAL)"
       }
     },
     "triggers": {
@@ -25330,6 +25409,157 @@
         "foreign_keys": [],
         "indexes": {},
         "sql": "CREATE TABLE fleet_skill_review_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, recorded_at TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL)"
+      }
+    ],
+    "fleet_t3_observations": [
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "last_success_at",
+          "last_attempt_at",
+          "updated_at"
+        ],
+        "columns": [
+          [
+            "last_attempt_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "last_success_at",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_t3_observations_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_t3_observations (node_id TEXT NOT NULL PRIMARY KEY, last_success_at TEXT, last_attempt_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+      },
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "last_success_at",
+          "last_attempt_at",
+          "updated_at",
+          "memory_used"
+        ],
+        "columns": [
+          [
+            "last_attempt_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "last_success_at",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "memory_used",
+            "REAL",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_t3_observations_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_t3_observations (node_id TEXT NOT NULL PRIMARY KEY, last_success_at TEXT, last_attempt_at TEXT NOT NULL, updated_at TEXT NOT NULL, memory_used REAL)"
       }
     ],
     "grokbot_actor_policy": [

@@ -341,14 +341,3 @@ pub(super) fn store(tx: &dyn WriteTx, raw: &Json, caller: Option<&str>, now: f64
     }
     Ok(Reply::new(200, &[("session", fetch(tx, &r.key, now)?)]))
 }
-pub(super) fn list(tx: &dyn ReadTx, all: bool, now: f64) -> Result<Option<Reply>> {
-    let rows = tx.query(&format!("SELECT {COLUMNS} FROM interactive_sessions WHERE (?=1 OR (state='active' AND expires_at>?)) AND NOT (harness='t3' AND provider_link_json IS NOT NULL AND state='active' AND expires_at>? AND EXISTS (SELECT 1 FROM interactive_sessions AS provider WHERE provider.node_id=interactive_sessions.node_id AND provider.harness=json_extract(interactive_sessions.provider_link_json,'$.harness') AND provider.session_id=json_extract(interactive_sessions.provider_link_json,'$.session_id') AND provider.checkout_path=interactive_sessions.checkout_path AND provider.state='active' AND provider.expires_at>?)) ORDER BY heartbeat_at DESC,started_at DESC,node_id,harness,session_id LIMIT ?"),&[Value::Integer(i64::from(all)),Value::Real(now),Value::Real(now),Value::Real(now),Value::Integer(if all {1000} else {500})])?;
-    let Some(sessions) = rows
-        .iter()
-        .map(|r| payload(r, now))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return Ok(None);
-    };
-    Ok(Some(Reply::new(200, &[("sessions", array(sessions))])))
-}

@@ -285,8 +285,15 @@ def _select_publication_batch(recent: list[RecentSession], *, harness: str, dead
 
 
 def _publish_recent(
-    recent: list[RecentSession], *, harness: str, deadline: float, batch: _PublicationBatch | None = None
+    recent: list[RecentSession],
+    *,
+    harness: str,
+    deadline: float,
+    batch: _PublicationBatch | None = None,
+    tail_reserve: float = 0,
 ) -> dict[str, object]:
+    """Publish one rotated batch. ``tail_reserve`` keeps that many seconds free after the loop for a
+    later call, such as the T3 health post. Stopping only because of it is truncation, not a timeout."""
     published = 0
     error = None
     cache: dict[Path, SessionSnapshot] = {}
@@ -300,16 +307,31 @@ def _publish_recent(
             "error": batch.error,
         }
     attempted = 0
+
+    def has_room() -> bool:
+        """False when only the tail reserve stops the loop. Raises observation_timeout at the real deadline."""
+        try:
+            _remaining(deadline, cap=1, reserve=fleet_client.REPORT_TIMEOUT_SECONDS + tail_reserve)
+        except ObservationError:
+            if not tail_reserve:
+                raise
+            _remaining(deadline, cap=1, reserve=fleet_client.REPORT_TIMEOUT_SECONDS)
+            return False
+        return True
+
     for session in batch.selected:
         try:
-            _remaining(deadline, cap=1, reserve=fleet_client.REPORT_TIMEOUT_SECONDS)
+            if not has_room():
+                break
             attempted += 1
             if session.workspace not in cache:
                 cache[session.workspace] = _workspace_snapshot(session.workspace, harness=harness, deadline=deadline)
             snapshot = replace(
                 cache[session.workspace], session_id=session.session_id, provider_link=session.provider_link
             )
-            _remaining(deadline, cap=1, reserve=fleet_client.REPORT_TIMEOUT_SECONDS)
+            if not has_room():
+                attempted -= 1  # Not sent, so the next run starts at this session.
+                break
             if not fleet_client.publish_session(snapshot).ok:
                 raise ObservationError("publication_failed")
             published += 1

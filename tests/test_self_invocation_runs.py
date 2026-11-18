@@ -134,7 +134,8 @@ def test_dashboard_reads_explicit_workspace_without_shadow_import(hostile_worksp
         _tasks(workspace, [["example.py"]])
         result = data.run_json(Path("."), ["work", "tasks"])
     else:
-        run_dir = workspace / ".brigade/runs/example"
+        # A Brigade-generated run id form, which the runs list keeps readable.
+        run_dir = workspace / ".brigade/runs/20260101-000000-abcdef12"
         run_dir.mkdir(parents=True)
         (run_dir / "run.json").write_text(json.dumps({"status": "ok", "cwd": str(workspace)}))
         result = data.run_json_cwd(Path("."), ["runs", "list"])
@@ -143,4 +144,4 @@ def test_dashboard_reads_explicit_workspace_without_shadow_import(hostile_worksp
     if scope == "target":
         assert result["tasks"][0]["id"] == "task-0"
     else:
-        assert result["runs"][0]["run_id"] == "example"
+        assert result["runs"][0]["run_id"] == "20260101-000000-abcdef12"

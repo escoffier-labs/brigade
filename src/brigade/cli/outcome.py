@@ -51,6 +51,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Also write the advisory .brigade/memory-care/outcome/ratchet-report.json summary.",
     )
+    p_reconcile.add_argument(
+        "--proposals",
+        action="store_true",
+        help=(
+            "File one skills inbox review request (requires_revision, with a behavioral contract) per "
+            "regression on a Brigade-bundled skill. Files in a dry run too; never changes the exit code."
+        ),
+    )
     p_reconcile.add_argument("--target", "-t", type=Path, default=Path("."))
     p_reconcile.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_reconcile.set_defaults(func=_dispatch_reconcile)
@@ -216,11 +224,19 @@ def _dispatch_capture(args) -> int:
 def _dispatch_reconcile(args) -> int:
     from .. import outcome_cmd
 
-    return outcome_cmd.reconcile(target=args.target, apply=args.apply, json_output=args.json, report=args.report)
+    return outcome_cmd.reconcile(
+        target=args.target,
+        apply=args.apply,
+        json_output=args.json,
+        report=args.report,
+        proposals=args.proposals,
+    )
 
 
 def _dispatch_ratchet(args) -> int:
-    from .. import outcome_ratchet_report
+    from datetime import datetime, timezone
+
+    from .. import outcome_ratchet_report, outcome_skill_exec
 
     report = outcome_ratchet_report.load_report(args.target)
     if args.json:
@@ -240,6 +256,23 @@ def _dispatch_ratchet(args) -> int:
         f"regression_holds={summary.get('regression_holds')} "
         f"regression_rollbacks={summary.get('regression_rollbacks')}"
     )
+    proposals = outcome_ratchet_report.proposal_counts(summary)
+    if proposals is not None:
+        print("outcome_proposals: " + " ".join(f"{key}={value}" for key, value in proposals.items()))
+    print(f"pending_physical_actions: {summary.get('pending_physical_actions') or 0}")
+    if summary.get("stale_physical_actions"):
+        print(f"stale_physical_actions: {summary['stale_physical_actions']} (status older than the pending window)")
+    now = datetime.now(timezone.utc)
+    for key, prefix in (("pending_physical", "operator: "), ("stale_physical", "")):
+        if key == "stale_physical" and report.get(key):
+            print("stale: older rollbacks, not pending actions (review before running any)")
+        for row in report.get(key) or []:
+            if isinstance(row, dict):
+                age = outcome_skill_exec.age_label(
+                    str(row.get("status") or "status"), row.get("status_changed_at"), now
+                )
+                for command in row.get("commands") or []:
+                    print(f"  {prefix}{command} ({age})")
     print(f"ineligibility_rate: {report.get('ineligibility_rate')}")
     if report.get("leading_ineligibility_reason"):
         print(f"leading_ineligibility_reason: {report['leading_ineligibility_reason']}")

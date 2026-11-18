@@ -1259,6 +1259,7 @@ def dispatch(
     on_result: Callable[[WorkerResult], None] | None = None,
     allow_reinvocation: bool = True,
     policy_workspace: Path | None = None,
+    recording_policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     from .. import run_transport
 
@@ -1313,4 +1314,5 @@ def dispatch(
         on_result=on_result,
         allow_reinvocation=allow_reinvocation,
         policy_workspace=policy_workspace,
+        recording_policy_workspace=recording_policy_workspace,
     )

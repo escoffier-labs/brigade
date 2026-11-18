@@ -128,7 +128,7 @@ def test_watch_json_outputs_ndjson_incrementally(tmp_path, capsys, monkeypatch):
         "final",
         "summary",
     ]
-    assert all(record["schema"] == "brigade.run-watch.v1" for record in records)
+    assert all(record["schema"] == "brigade.run-watch.v2" for record in records)
     assert records[0]["run_id"] == run_dir.name
     assert "run" not in records[0]
     assert records[2]["worker"] == "coder"
@@ -275,7 +275,7 @@ def test_watch_json_omits_planted_token_path_and_prompt(tmp_path, capsys):
     out = capsys.readouterr().out
     records = [json.loads(line) for line in out.splitlines()]
     assert records
-    assert all(record["schema"] == "brigade.run-watch.v1" for record in records)
+    assert all(record["schema"] == "brigade.run-watch.v2" for record in records)
     _assert_no_planted_secrets(out, leaks)
     for record in records:
         _assert_no_planted_secrets(json.dumps(record), leaks)

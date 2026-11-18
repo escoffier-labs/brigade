@@ -92,7 +92,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -122,7 +122,6 @@ from .fleet_claim_lifecycle import (
     CLEANUP_RETRY_REASONS,
     STALE_CLAIM_REFUSALS,
     TERMINAL_CLAIM_REFUSALS,
-    UNCERTAIN_CLEANUP_REASONS,
     _ConfirmedClaimLease as _ConfirmedClaimLease,
 )
 
@@ -310,16 +309,11 @@ def _read_fleet_section(config_path: Path, *, strict: bool = False) -> dict[str,
 
 
 def find_workspace_for_path(start: Path) -> Path | None:
-    """Nearest ancestor (or ``start`` itself) that holds ``.brigade/node.toml``."""
+    """Find a workspace identity without crossing an automatic worktree boundary."""
     from . import node as node_mod
+    from .worktree_lease import workspace_identity_ancestors
 
-    try:
-        current = Path(start).expanduser().resolve()
-    except OSError:
-        current = Path(start).expanduser()
-    if current.is_file():
-        current = current.parent
-    for candidate in (current, *current.parents):
+    for candidate in workspace_identity_ancestors(start):
         try:
             if node_mod.node_path(candidate).is_file():
                 return candidate
@@ -791,11 +785,15 @@ def report_journal_event(
     envelope: dict[str, Any], *, journal_path: Path | None = None, workspace: Path | None = None
 ) -> bool:
     """Report durable events using the trusted run workspace when supplied."""
+    from .worktree_lease import worktree_event_parent
+
     try:
         if not load_fleet_config()["hub_url"]:
             return False
         raw_payload = envelope.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        parent = worktree_event_parent(workspace) if workspace is not None else None
+        workspace = parent or workspace
         base_path = workspace if workspace is not None else journal_path
         event_workspace = find_workspace_for_path(base_path) if base_path is not None else None
         repo = event_workspace.name if event_workspace is not None else None
@@ -809,11 +807,12 @@ def report_journal_event(
             except _claim_target.ClaimTargetError:
                 _LOG.warning("repo-key-fallback: fleet event is using the previous workspace name")
         repo_identity = None
-        if event_workspace is not None:
+        identity_workspace = parent or event_workspace
+        if identity_workspace is not None:
             try:
                 from .fleet_session_presence import repository_identity
 
-                repo_identity = repository_identity(event_workspace).value
+                repo_identity = repository_identity(identity_workspace).value
             except Exception:
                 repo_identity = None
         event = {
@@ -1430,8 +1429,10 @@ def _read_bounded_response(response: object, *, limit: int) -> bytes:
     return bytes(data)
 
 
-def fetch_sessions(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
-    """GET /sessions from the hub; raises FleetClientError when unreachable."""
+def fetch_sessions(
+    *, hub_url: str | None = None, include_all: bool = False, extras: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """GET /sessions from the hub; raises FleetClientError when unreachable. ``extras`` receives the unknown-T3 fields."""
     config = load_fleet_config()
     hub = hub_url or config["hub_url"]
     if not hub:
@@ -1448,6 +1449,8 @@ def fetch_sessions(*, hub_url: str | None = None, include_all: bool = False) -> 
     except Exception as exc:
         raise FleetClientError(f"fleet hub sessions failed: {type(exc).__name__}") from exc
     sessions = payload.get("sessions") if isinstance(payload, dict) else None
+    if extras is not None and isinstance(payload, dict):
+        extras.update({k: payload[k] for k in ("nodes_unknown", "nodes_unknown_error") if k in payload})
     return list(sessions) if isinstance(sessions, list) else []
 
 
@@ -1725,6 +1728,7 @@ def repo_claim(
         "lock_owner": lock_owner,
         **connection(),
     }
+    pending_orphan_release = threading.Event()
     request_start = time.monotonic()
     decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     ambiguous_initial_acquire = not decision.granted and decision.reason == "hub-unavailable"
@@ -1799,195 +1803,182 @@ def repo_claim(
         raise FleetClaimHeldError(
             f"repo {target!r} is claimed by node {held_by} until {until}; {hint}", owner=decision.owner
         )
-    pending_orphan_release = threading.Event()
-    if ambiguous_initial_acquire:
-        # Successful retry admission does not account for the first request
-        # still in flight. Retain uncertainty until guarded work has ended.
-        pending_orphan_release.set()
+    join_timeout = 2 * CLAIM_TIMEOUT_SECONDS + max(1.0, CLAIM_TIMEOUT_SECONDS)
+    lease_for_cleanup: _ConfirmedClaimLease | None = None
 
-    def _release_on_exit(*, admission_refused: bool = False) -> None:
-        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
-        if ambiguous_initial_acquire or (
-            pending_orphan_release.is_set() and release_outcome.reason in UNCERTAIN_CLEANUP_REASONS
-        ):
-            # Inline cleanup survives imminent CLI exit: two further calls,
-            # each spaced by one request timeout and bounded by that timeout.
-            # For initial ambiguity even positive replies only delete the
-            # retry's row, not a first request that has yet to commit. Keep
-            # both retries. Pending re-acquire cleanup retains its early exit
-            # on a definitive reply when no initial uncertainty exists.
-            for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
-                time.sleep(CLAIM_TIMEOUT_SECONDS)
-                release_outcome = release_claim(
-                    target, holder=holder, node_id=node_id, conductor=conductor, **connection()
-                )
-                if not ambiguous_initial_acquire and release_outcome.reason not in UNCERTAIN_CLEANUP_REASONS:
-                    break
-            if release_outcome.reason in UNCERTAIN_CLEANUP_REASONS:
-                _LOG.warning(
-                    "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
-                    "(last answer: %s); the row lives until its TTL expires",
-                    target,
-                    release_outcome.reason,
-                )
-        if release_outcome.reason in CLEANUP_RETRY_REASONS:
-            # Retain the bound connection while retrying refused releases after exit or rejected admission.
-            _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
+    def _finish_claim() -> None:
+        try:
+            _claim_lifecycle.release_confirmed_claim(
+                target,
+                node_id=node_id,
+                holder=holder,
+                conductor=conductor,
+                ttl_seconds=ttl_seconds,
+                connect=connection,
+                initial_acquire_uncertain=ambiguous_initial_acquire,
+                reacquire_uncertain=pending_orphan_release.is_set(),
             )
-        # This window cannot fence a server request that commits beyond it
-        # (#1189), even when every release received a positive acknowledgement.
+        finally:
+            # A loss callback can outlive the heartbeat. Drain it after the
+            # fenced release so the callback cannot hold the claim open.
+            if lease_for_cleanup is not None:
+                lease_for_cleanup.drain_publication(timeout=join_timeout)
 
-    if time.monotonic() >= request_start + ttl_seconds:
-        # Admission must never lend authority from a response-receipt clock.
-        # This successful request has finished, so its row can be fenced off
-        # before either refusing admission or yielding the continue opt-out.
-        _release_on_exit(admission_refused=True)
-        if loss_policy == "abort":
-            raise FleetClaimExpiredError(f"fleet claim on {target!r}: lease-expired before admission")
-        _LOG.warning("fleet claim on %s: lease-expired before admission; continuing on the local run lock", target)
-        yield replace(decision, granted=False, reason="lease-expired")
-        return
-    if decision.superseded is not None:
-        _LOG.warning(
-            "fleet claim on %s superseded this node's unexpired claim (conductor %s, acquired %s): "
-            "the local lease reconcile found that run dead",
-            target,
-            decision.superseded.get("owner_conductor") or "-",
-            decision.superseded.get("acquired_at") or "-",
-        )
-    stop = threading.Event()
-    # Cooperative cancel channel (#1157 round 2): set on lost ownership so
-    # the owner thread's guarded block can observe it — the only abort path
-    # when repo_claim was entered off the main thread.
-    cancel_event = threading.Event()
-    owner_thread = threading.current_thread()
-    credential_details: list[str | None] = []
-
-    def _credential_loss(_reason: str | None) -> None:
-        if on_credential_failure is not None:
-            on_credential_failure(credential_details[0])
-
-    def _notify_loss(reason: str) -> None:
-        if loss_policy == "continue":
-            _LOG.warning(
-                "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock", target, reason
-            )
+    with ExitStack() as cleanup:
+        cleanup.callback(_finish_claim)
+        if ambiguous_initial_acquire:
+            pending_orphan_release.set()
+        if time.monotonic() >= request_start + ttl_seconds:
+            # Admission must never lend authority from a response-receipt clock.
+            # This successful request has finished, so its row can be fenced off
+            # before either refusing admission or yielding the continue opt-out.
+            cleanup.close()
+            if loss_policy == "abort":
+                raise FleetClaimExpiredError(f"fleet claim on {target!r}: lease-expired before admission")
+            _LOG.warning("fleet claim on %s: lease-expired before admission; continuing on the local run lock", target)
+            yield replace(decision, granted=False, reason="lease-expired")
             return
-        hint = "" if require_claim else f" (opt out with {CLAIM_LOSS_ENV}=continue)"
-        _LOG.warning(
-            "fleet claim heartbeat for %s lost ownership (%s); aborting the guarded run%s", target, reason, hint
-        )
-        _abort_claim_owner(
-            target,
-            reason,
-            owner_thread=owner_thread,
-            cancel_event=cancel_event,
-            on_claim_lost=_credential_loss if require_claim and reason == "auth-failed" else on_claim_lost,
-            stop_event=lease.stopped,
-            _interrupt_dispatcher=lease._dispatch_interrupt,
-        )
-
-    lease = _ConfirmedClaimLease(
-        request_start, ttl_seconds, cancel_event=cancel_event, abort=loss_policy == "abort", on_loss=_notify_loss
-    )
-
-    def _release_rejected_grant() -> None:
-        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
-        if release_outcome.reason in CLEANUP_RETRY_REASONS:
-            _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
+        if decision.superseded is not None:
+            _LOG.warning(
+                "fleet claim on %s superseded this node's unexpired claim (conductor %s, acquired %s): "
+                "the local lease reconcile found that run dead",
+                target,
+                decision.superseded.get("owner_conductor") or "-",
+                decision.superseded.get("acquired_at") or "-",
             )
+        stop = threading.Event()
+        # Cooperative cancel channel (#1157 round 2): set on lost ownership so
+        # the owner thread's guarded block can observe it — the only abort path
+        # when repo_claim was entered off the main thread.
+        cancel_event = threading.Event()
+        owner_thread = threading.current_thread()
+        credential_details: list[str | None] = []
 
-    def _renew_loop() -> None:
-        warned_unavailable = False
-        next_request = request_start + _claim_renew_interval(ttl_seconds)
-        while not stop.wait(max(0.0, next_request - time.monotonic())):
-            if not lease.active():
+        def _credential_loss(_reason: str | None) -> None:
+            if on_credential_failure is not None:
+                on_credential_failure(credential_details[0])
+
+        def _notify_loss(reason: str) -> None:
+            if loss_policy == "continue":
+                _LOG.warning(
+                    "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock", target, reason
+                )
                 return
-            attempt_start = time.monotonic()
-            outcome = renew_claim(
-                target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+            hint = "" if require_claim else f" (opt out with {CLAIM_LOSS_ENV}=continue)"
+            _LOG.warning(
+                "fleet claim heartbeat for %s lost ownership (%s); aborting the guarded run%s", target, reason, hint
             )
-            if not outcome.granted and outcome.reason == "missing":
-                # Check deadline and authority, and mark the possible orphan,
-                # together before sending. Shutdown cannot miss this request.
-                if not lease.active(pending_orphan=pending_orphan_release):
+            _abort_claim_owner(
+                target,
+                reason,
+                owner_thread=owner_thread,
+                cancel_event=cancel_event,
+                on_claim_lost=_credential_loss if require_claim and reason == "auth-failed" else on_claim_lost,
+                stop_event=lease.stopped,
+                _interrupt_dispatcher=lease._dispatch_interrupt,
+            )
+
+        lease = _ConfirmedClaimLease(
+            request_start, ttl_seconds, cancel_event=cancel_event, abort=loss_policy == "abort", on_loss=_notify_loss
+        )
+
+        lease_for_cleanup = lease
+
+        def _release_rejected_grant() -> None:
+            release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
+            if release_outcome.reason in CLEANUP_RETRY_REASONS:
+                _schedule_orphan_release(
+                    target,
+                    node_id=node_id,
+                    holder=holder,
+                    conductor=conductor,
+                    ttl_seconds=ttl_seconds,
+                    connect=connection,
+                )
+
+        def _renew_loop() -> None:
+            warned_unavailable = False
+            next_request = request_start + _claim_renew_interval(ttl_seconds)
+            while not stop.wait(max(0.0, next_request - time.monotonic())):
+                if not lease.active():
                     return
                 attempt_start = time.monotonic()
-                outcome = acquire_claim(target, **{**acquire_kwargs, **connection()})
-            next_request = attempt_start + _claim_renew_interval(ttl_seconds)
-            if outcome.granted:
-                if not lease.confirm(attempt_start, on_rejected=_release_rejected_grant):
+                outcome = renew_claim(
+                    target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+                )
+                if not outcome.granted and outcome.reason == "missing":
+                    # Check deadline and authority, and mark the possible orphan,
+                    # together before sending. Shutdown cannot miss this request.
+                    if not lease.active(pending_orphan=pending_orphan_release):
+                        return
+                    attempt_start = time.monotonic()
+                    outcome = acquire_claim(target, **{**acquire_kwargs, **connection()})
+                next_request = attempt_start + _claim_renew_interval(ttl_seconds)
+                if outcome.granted:
+                    if not lease.confirm(attempt_start, on_rejected=_release_rejected_grant):
+                        return
+                    warned_unavailable = False
+                    continue
+                if not lease.active():
                     return
-                warned_unavailable = False
-                continue
-            if not lease.active():
-                return
-            if outcome.reason == "hub-unavailable":
-                if not warned_unavailable:
-                    _LOG.warning("fleet claim heartbeat for %s: hub unreachable; retrying", target)
-                    warned_unavailable = True
-                continue
-            if outcome.reason == "auth-failed":
-                if require_claim:
-                    # Keep the credential channel, with the same bounded abort
-                    # that prevents a blocking loss callback from suppressing cancellation.
-                    credential_details.append(outcome.detail)
+                if outcome.reason == "hub-unavailable":
+                    if not warned_unavailable:
+                        _LOG.warning("fleet claim heartbeat for %s: hub unreachable; retrying", target)
+                        warned_unavailable = True
+                    continue
+                if outcome.reason == "auth-failed":
+                    if require_claim:
+                        # Keep the credential channel, with the same bounded abort
+                        # that prevents a blocking loss callback from suppressing cancellation.
+                        credential_details.append(outcome.detail)
+                        lease.terminate(outcome.reason, notify=True)
+                        return
+                    # Terminal credential failures disarm expiry without adding
+                    # library signaling. Preserve the caller's credential channel.
+                    if not lease.terminate(outcome.reason):
+                        return
+                    _LOG.warning(
+                        "fleet claim heartbeat for %s: the hub rejected this node's credentials (%s); "
+                        "canceling the guarded run",
+                        target,
+                        outcome.detail,
+                    )
+                    # terminate() admitted this callback under the authority lock;
+                    # subsequent shutdown cannot discard the committed failure.
+                    if on_credential_failure is not None:
+                        try:
+                            on_credential_failure(outcome.detail)
+                        except Exception:
+                            _LOG.warning(
+                                "fleet credential-failure callback raised; the run keeps unwinding", exc_info=True
+                            )
+                    return
+                if outcome.reason in ("held", "quota") or outcome.reason in TERMINAL_CLAIM_REFUSALS:
                     lease.terminate(outcome.reason, notify=True)
                     return
-                # Terminal credential failures disarm expiry without adding
-                # library signaling. Preserve the caller's credential channel.
-                if not lease.terminate(outcome.reason):
-                    return
-                _LOG.warning(
-                    "fleet claim heartbeat for %s: the hub rejected this node's credentials (%s); "
-                    "canceling the guarded run",
-                    target,
-                    outcome.detail,
-                )
-                # terminate() admitted this callback under the authority lock;
-                # subsequent shutdown cannot discard the committed failure.
-                if on_credential_failure is not None:
-                    try:
-                        on_credential_failure(outcome.detail)
-                    except Exception:
-                        _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
+                if lease.terminate(outcome.reason, notify=require_claim) and not require_claim:
+                    _LOG.warning(
+                        "fleet claim heartbeat for %s lost the claim (%s); continuing on the local run lock",
+                        target,
+                        outcome.reason,
+                    )
                 return
-            if outcome.reason in ("held", "quota") or outcome.reason in TERMINAL_CLAIM_REFUSALS:
-                lease.terminate(outcome.reason, notify=True)
-                return
-            if lease.terminate(outcome.reason, notify=require_claim) and not require_claim:
-                _LOG.warning(
-                    "fleet claim heartbeat for %s lost the claim (%s); continuing on the local run lock",
-                    target,
-                    outcome.reason,
-                )
-            return
 
-    heartbeat = threading.Thread(target=_renew_loop, name="brigade-fleet-claim-renew", daemon=True)
-    watcher = threading.Thread(target=lease.watch, name="brigade-fleet-claim-deadline", daemon=True)
-    try:
-        heartbeat.start()
-        watcher.start()
-        yield replace(decision, cancel_event=cancel_event)
-    finally:
-        lease.stop()
-        stop.set()
-        # Drain the heartbeat before releasing: an in-flight renew/acquire
-        # landing after the DELETE would resurrect the row for a full TTL.
-        # The join is bounded (one renew plus one acquire round-trip); a
-        # thread stuck longer than that is covered by the stop.is_set()
-        # guard above.
-        join_timeout = 2 * CLAIM_TIMEOUT_SECONDS + max(1.0, CLAIM_TIMEOUT_SECONDS)
-        if heartbeat.ident is not None:
-            heartbeat.join(timeout=join_timeout)
-        if watcher.ident is not None:
-            watcher.join(timeout=join_timeout)
+        heartbeat = threading.Thread(target=_renew_loop, name="brigade-fleet-claim-renew", daemon=True)
+        watcher = threading.Thread(target=lease.watch, name="brigade-fleet-claim-deadline", daemon=True)
         try:
-            _release_on_exit()
+            heartbeat.start()
+            watcher.start()
+            yield replace(decision, cancel_event=cancel_event)
         finally:
-            # Loss publication may outlive the heartbeat that committed it.
-            # Drain only after fenced cleanup, with the same bounded budget,
-            # so an arbitrary callback cannot hold the hub row during exit.
-            lease.drain_publication(timeout=join_timeout)
+            stop.set()
+            lease.stop()
+            # Drain the heartbeat before releasing: an in-flight renew/acquire
+            # landing after the DELETE would resurrect the row for a full TTL.
+            # The join is bounded (one renew plus one acquire round-trip); a
+            # thread stuck longer than that is covered by the stop.is_set()
+            # guard above.
+            if heartbeat.ident is not None:
+                heartbeat.join(timeout=join_timeout)
+            if watcher.ident is not None:
+                watcher.join(timeout=join_timeout)

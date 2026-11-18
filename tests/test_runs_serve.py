@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
@@ -13,6 +14,7 @@ import pytest
 
 from brigade import cli
 from brigade import runs_cmd
+from brigade import runs_privacy
 from brigade import runs_serve
 
 
@@ -43,6 +45,11 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
+def _view_id(run_dir: Path) -> str:
+    """Return the served id for a run: generated name or its keyed digest."""
+    return runs_privacy.view_run_id(run_dir.name, run_dir) or ""
+
+
 def _workspace(tmp_path: Path) -> Path:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -67,6 +74,10 @@ def _plant_run(
     resume: bool = False,
     briefs: bool = False,
     lineage: dict[str, object] | None = None,
+    plan_task: str | None = None,
+    worker_detail: str = "worker detail",
+    synthesis_detail: str = "merged",
+    command: str = "pytest -q planted-verify",
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     meta: dict[str, object] = {
@@ -118,14 +129,14 @@ def _plant_run(
     )
     _write_json(
         run_dir / "plan.json",
-        {"assignments": [{"stage": 1, "worker": "coder", "task": task}]},
+        {"assignments": [{"stage": 1, "worker": "coder", "task": plan_task or task}]},
     )
     result: dict[str, object] = {
         "worker": "coder",
         "ok": status == "ok",
         "status": "ok" if status == "ok" else ("interrupted" if resume else status),
         "task": task,
-        "detail": "worker detail",
+        "detail": worker_detail,
         "duration_seconds": 1.5,
         "exit_code": 0 if status == "ok" else 1,
     }
@@ -147,7 +158,7 @@ def _plant_run(
                         "duration_seconds": 0.4,
                         "commands": [
                             {
-                                "command": "pytest -q planted-verify",
+                                "command": command,
                                 "exit_code": 0 if status == "ok" else 1,
                                 "duration_seconds": 0.3,
                             }
@@ -159,7 +170,7 @@ def _plant_run(
     )
     _write_json(
         run_dir / "synthesis.json",
-        {"orchestrator": "chef", "mode": "merge", "result": {"ok": status == "ok", "detail": "merged"}},
+        {"orchestrator": "chef", "mode": "merge", "result": {"ok": status == "ok", "detail": synthesis_detail}},
     )
 
 
@@ -460,34 +471,37 @@ def test_http_layer_has_no_independent_artifact_reader() -> None:
     assert "iter_watch_records" in source
 
 
-def test_list_route_matches_cli_contract(server: ThreadingHTTPServer, workspace: Path) -> None:
+def test_list_route_matches_cli_contract(
+    server: ThreadingHTTPServer, workspace: Path, planted: dict[str, Path]
+) -> None:
     payload, diagnostic, rc = runs_cmd.runs_list_contract(cwd=workspace, limit=10)
     assert rc == 0
     assert diagnostic is None
     status, body, headers = _get_json(server, "/api/runs?limit=10")
     assert status == 200
     assert body == payload
-    assert body["schema"] == "brigade.runs-list.v1"
+    assert body["schema"] == "brigade.runs-list.v2"
     assert body["skipped_invalid"] == 1
     ids = {item["run_id"] for item in body["runs"]}
-    assert "20260821-100000-active1" in ids
-    assert "20260821-100100-success" in ids
-    assert "20260821-100200-failed1" in ids
-    assert "20260821-100300-resume1" in ids
-    assert "20260821-100400-invalid" not in ids
+    assert _view_id(planted["active"]) in ids
+    assert _view_id(planted["ok"]) in ids
+    assert _view_id(planted["failed"]) in ids
+    assert _view_id(planted["resumable"]) in ids
+    assert _view_id(planted["invalid"]) not in ids
+    assert "20260821-100100-success" not in ids
     assert "Cache-Control: no-store" in headers
     assert "Access-Control-Allow-Origin" not in headers
 
 
 def test_detail_route_matches_cli_contract(server: ThreadingHTTPServer, planted: dict[str, Path]) -> None:
     for key in ("active", "ok", "failed", "resumable", "markup"):
-        run_id = planted[key].name
+        run_id = _view_id(planted[key])
         expected, diagnostic, _rc = runs_cmd.run_detail_contract(planted[key])
         assert diagnostic is None
         status, body, _headers = _get_json(server, f"/api/runs/{run_id}")
         assert status == 200
         assert body == expected
-        assert body["schema"] == "brigade.run-detail.v1"
+        assert body["schema"] == "brigade.run-detail.v2"
         assert body["run"]["run_id"] == run_id
         for item in _walk(body):
             if isinstance(item, str):
@@ -498,31 +512,34 @@ def test_detail_includes_lineage_roster_verify_and_briefs(
     server: ThreadingHTTPServer,
     planted: dict[str, Path],
 ) -> None:
-    status, parent, _ = _get_json(server, f"/api/runs/{planted['parent'].name}")
+    status, parent, _ = _get_json(server, f"/api/runs/{_view_id(planted['parent'])}")
     assert status == 200
     children = parent["run"]["lineage"]["children"]
-    assert any(child["run_id"] == planted["child"].name for child in children)
+    assert any(child["run_id"] == _view_id(planted["child"]) for child in children)
 
-    status, child, _ = _get_json(server, f"/api/runs/{planted['child'].name}")
+    status, child, _ = _get_json(server, f"/api/runs/{_view_id(planted['child'])}")
     assert status == 200
-    assert child["run"]["lineage"]["parent_run_id"] == planted["parent"].name
+    assert child["run"]["lineage"]["parent_run_id"] == _view_id(planted["parent"])
 
-    status, success, _ = _get_json(server, f"/api/runs/{planted['ok'].name}")
+    status, success, _ = _get_json(server, f"/api/runs/{_view_id(planted['ok'])}")
     assert status == 200
-    assert success["roster"]["agents"]["coder"]["model"] == "gpt-5.5"
-    assert success["roster"]["agents"]["coder"]["reasoning"] == "low"
+    coder_agent = next(iter(success["roster"]["agents"].values()))
+    assert set(coder_agent["model"]) == {"digest", "chars"}
+    assert set(coder_agent["reasoning"]) == {"digest", "chars"}
     assert success["verification"]
     assert {brief["name"] for brief in success["briefs"]} >= {"code-graph", "drift-impact", "evidence"}
     assert success["run"]["resume_available"] is not True
 
-    status, resumable, _ = _get_json(server, f"/api/runs/{planted['resumable'].name}")
+    status, resumable, _ = _get_json(server, f"/api/runs/{_view_id(planted['resumable'])}")
     assert status == 200
     assert resumable["run"]["resume_available"] is True
 
-    status, failed, _ = _get_json(server, f"/api/runs/{planted['failed'].name}")
+    status, failed, _ = _get_json(server, f"/api/runs/{_view_id(planted['failed'])}")
     assert status == 200
     assert failed["run"]["failure"]["phase"] == "worker"
-    assert failed["run"]["failure"]["kind"] == "exit-error"
+    assert failed["run"]["failure"]["kind"]["chars"] == len("exit-error")
+    assert failed["workers"]["results"][0]["status"] == "failed"
+    assert failed["synthesis"]["mode"] == "merge"
 
 
 def test_missing_runs_dir_is_empty_state_with_diagnostic(tmp_path: Path) -> None:
@@ -534,9 +551,8 @@ def test_missing_runs_dir_is_empty_state_with_diagnostic(tmp_path: Path) -> None
     try:
         status, body, headers = _get_json(httpd, "/api/runs")
         assert status == 200
-        assert body == {"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0}
-        assert "X-Brigade-Diagnostic:" in headers
-        assert "runs directory not found" in headers
+        assert body == {"schema": "brigade.runs-list.v2", "runs": [], "skipped_invalid": 0}
+        assert "X-Brigade-Diagnostic: runs-directory-missing" in headers
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -546,15 +562,17 @@ def test_unreadable_selected_run_returns_stale_signal(
     server: ThreadingHTTPServer,
     planted: dict[str, Path],
 ) -> None:
-    run_id = planted["ok"].name
+    run_id = _view_id(planted["ok"])
     status, body, _ = _get_json(server, f"/api/runs/{run_id}")
     assert status == 200
     assert body["run"]["run_id"] == run_id
     planted["ok"].joinpath("run.json").write_text("{broken\n")
     response = _raw_request(server, _host(server), path=f"/api/runs/{run_id}")
     assert _status_code(response) == "502"
-    headers, _body = _headers_and_body(response)
-    assert "X-Brigade-Diagnostic:" in headers
+    headers, body = _headers_and_body(response)
+    assert body == "error: run unreadable\n"
+    assert str(planted["ok"]) not in response
+    assert "X-Brigade-Diagnostic: run-unreadable" in headers
 
 
 def test_app_route_is_embedded_and_same_origin(server: ThreadingHTTPServer) -> None:
@@ -590,11 +608,12 @@ def test_app_route_is_embedded_and_same_origin(server: ThreadingHTTPServer) -> N
 
 
 def test_planted_markup_is_text_not_html(server: ThreadingHTTPServer, planted: dict[str, Path]) -> None:
-    run_id = planted["markup"].name
+    run_id = _view_id(planted["markup"])
     status, detail, _ = _get_json(server, f"/api/runs/{run_id}")
     assert status == 200
-    assert detail["run"]["task"] == PLANTED_MARKUP
-    assert "<script>" in json.dumps(detail)
+    assert detail["run"]["task"]["chars"] == len(PLANTED_MARKUP)
+    assert PLANTED_MARKUP not in json.dumps(detail)
+    assert "<script>" not in json.dumps(detail)
     app = _raw_request(server, _host(server), path="/")
     _headers, body = _headers_and_body(app)
     assert PLANTED_MARKUP not in body
@@ -609,7 +628,7 @@ def test_planted_markup_is_text_not_html(server: ThreadingHTTPServer, planted: d
 
 
 def test_events_stream_uses_watch_contract(server: ThreadingHTTPServer, planted: dict[str, Path]) -> None:
-    run_id = planted["ok"].name
+    run_id = _view_id(planted["ok"])
     response = _raw_request(server, _host(server), path=f"/api/runs/{run_id}/events", timeout=4)
     assert _status_code(response) == "200"
     headers, body = _headers_and_body(response)
@@ -621,7 +640,7 @@ def test_events_stream_uses_watch_contract(server: ThreadingHTTPServer, planted:
         if line.startswith("data:"):
             records.append(json.loads(line[5:].strip()))
     assert records
-    assert all(record["schema"] == "brigade.run-watch.v1" for record in records)
+    assert all(record["schema"] == "brigade.run-watch.v2" for record in records)
     types = {record.get("type") for record in records}
     assert "watch" in types
     assert "run" in types
@@ -739,7 +758,7 @@ def test_symlinked_out_of_root_run_is_absent_from_list_and_cli_json(
         assert status == 200
         assert marker not in json.dumps(body)
         assert body["skipped_invalid"] == 1
-        assert [item["run_id"] for item in body["runs"]] == ["20260821-130000-inside1"]
+        assert [item["run_id"] for item in body["runs"]] == [_view_id(root / "20260821-130000-inside1")]
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -755,7 +774,7 @@ def test_symlinked_out_of_root_run_is_absent_from_list_and_cli_json(
     listed = json.loads(capsys.readouterr().out)
     assert marker not in json.dumps(listed)
     assert listed["skipped_invalid"] == 1
-    assert [item["run_id"] for item in listed["runs"]] == ["20260821-130000-inside1"]
+    assert [item["run_id"] for item in listed["runs"]] == [_view_id(root / "20260821-130000-inside1")]
 
 
 def test_absolute_and_alternate_root_ids_are_rejected(
@@ -775,7 +794,7 @@ def test_absolute_and_alternate_root_ids_are_rejected(
     assert runs_serve.resolve_served_run_id(other.name, root) is None
     assert runs_serve.resolve_served_run_id("/tmp/20260821-120000-other1", root) is None
     assert runs_serve.resolve_served_run_id("../" + other.name, root) is None
-    assert runs_serve.resolve_served_run_id(planted["ok"].name, root) == planted["ok"].resolve()
+    assert runs_serve.resolve_served_run_id(_view_id(planted["ok"]), root) == planted["ok"].resolve()
 
 
 def test_list_and_detail_have_no_home_paths(server: ThreadingHTTPServer) -> None:
@@ -789,6 +808,351 @@ def test_list_and_detail_have_no_home_paths(server: ThreadingHTTPServer) -> None
         rendered = json.dumps(detail)
         assert "/home/" not in rendered
         assert "/Users/" not in rendered
+
+
+def test_served_views_and_stream_carry_no_prompt_text(server: ThreadingHTTPServer, workspace: Path) -> None:
+    """Issue #2046: every served endpoint and the SSE stream use the closed projection."""
+    private_home = "/home/someuser"  # content-guard: allow home-path
+    markers = {
+        "task": f"PRIVATE-TASK-MARKER under {private_home}/project",
+        "assignment": f"PRIVATE-ASSIGNMENT-MARKER under {private_home}/plan.py",
+        "worker": f"PRIVATE-WORKER-MARKER under {private_home}/worker.py",
+        "synthesis": f"PRIVATE-SYNTHESIS-MARKER under {private_home}/synthesis.md",
+        "command": f"{private_home}/.venv/bin/pytest -q PRIVATE-COMMAND-MARKER",
+        "failure": f"PRIVATE-FAILURE-MARKER under {private_home}/failure.py",
+        "final": f"PRIVATE-FINAL-MARKER under {private_home}/final.txt",
+    }
+    run_dir = _runs_root(workspace) / "20260821-140000-private"
+    _plant_run(
+        run_dir,
+        status="failed",
+        task=markers["task"],
+        plan_task=markers["assignment"],
+        started_at="2026-08-21T14:00:00Z",
+        finished_at="2026-08-21T14:00:02Z",
+        duration_seconds=2.0,
+        failure={"phase": "worker", "kind": "exit-error", "detail": markers["failure"]},
+        worker_detail=markers["worker"],
+        synthesis_detail=markers["synthesis"],
+        command=markers["command"],
+    )
+    (run_dir / "final.txt").write_text(markers["final"] + "\n")
+    local_files = {
+        path.name: path.read_bytes()
+        for path in (
+            run_dir / "run.json",
+            run_dir / "plan.json",
+            run_dir / "worker-results.json",
+            run_dir / "synthesis.json",
+            run_dir / "final.txt",
+        )
+    }
+    status, listed, _ = _get_json(server, "/api/runs?limit=50")
+    assert status == 200
+    view_id = _view_id(run_dir)
+    status, detail, _ = _get_json(server, f"/api/runs/{view_id}")
+    assert status == 200
+    response = _raw_request(server, _host(server), path=f"/api/runs/{view_id}/events", timeout=5)
+    assert _status_code(response) == "200"
+    _headers, body = _headers_and_body(response)
+    streamed = [json.loads(block.strip()[5:]) for block in body.split("\n\n") if block.strip().startswith("data:")]
+
+    served = "\n".join((json.dumps(listed), json.dumps(detail), json.dumps(streamed)))
+    for marker in markers.values():
+        assert marker not in served
+    assert private_home not in served
+    assert "/home/" not in served
+    _assert_text_values_digested(listed)
+    _assert_text_values_digested(detail)
+    _assert_text_values_digested(streamed)
+    assert any(record.get("type") == "final" for record in streamed)
+
+    assert detail["run"]["task"]["chars"] == len(markers["task"])
+    assert listed["runs"][0]["task"] == detail["run"]["task"]
+    assert "task_preview" not in json.dumps(listed)
+    assert "task_preview" not in json.dumps(detail)
+
+    for name, content in local_files.items():
+        assert (run_dir / name).read_bytes() == content
+
+
+def _refuse_digest_key(workspace: Path) -> None:
+    key_dir = workspace / ".brigade" / "memory"
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key = key_dir / "search-log-key"
+    key.write_text("ab" * 32 + "\n")
+    key.chmod(0o644)
+
+
+def _block_digest_key(workspace: Path) -> None:
+    (workspace / ".brigade" / "memory").write_text("not a directory")
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param(
+            _refuse_digest_key,
+            marks=pytest.mark.skipif(os.name == "nt", reason="POSIX key mode refusal does not exist on Windows"),
+        ),
+        _block_digest_key,
+    ],
+)
+def test_served_endpoints_fail_closed_without_digest_key(tmp_path: Path, block) -> None:
+    """Issue #2046 review: a refused or unusable key yields 503, never raw text."""
+    workspace = _workspace(tmp_path)
+    run_dir = _runs_root(workspace) / "20260821-180000-abcdef12"
+    _plant_run(
+        run_dir,
+        status="ok",
+        task="PRIVATE-KEY-TASK-MARKER",
+        started_at="2026-08-21T18:00:00Z",
+        finished_at="2026-08-21T18:00:01Z",
+        duration_seconds=1.0,
+    )
+    block(workspace)
+
+    httpd = runs_serve.make_server(cwd=workspace, port=0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _wait_until_ready(httpd)
+    try:
+        for path in ("/api/runs", f"/api/runs/{run_dir.name}", f"/api/runs/{run_dir.name}/events"):
+            response = _raw_request(httpd, _host(httpd), path=path)
+            assert _status_code(response) == "503", path
+            headers, body = _headers_and_body(response)
+            assert body == "error: run view unavailable\n"
+            assert "X-Brigade-Diagnostic: digest-key-unavailable" in headers
+            assert "PRIVATE-KEY-TASK-MARKER" not in response
+            assert str(run_dir) not in response
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def test_watch_stream_sends_one_closed_error_record_without_key(tmp_path: Path) -> None:
+    """The serve-only watch feed degrades to one closed record and ends."""
+    workspace = _workspace(tmp_path)
+    run_dir = _runs_root(workspace) / "20260821-181000-abcdef13"
+    _plant_run(
+        run_dir,
+        status="ok",
+        task="PRIVATE-KEY-TASK-MARKER",
+        started_at="2026-08-21T18:10:00Z",
+        finished_at="2026-08-21T18:10:01Z",
+        duration_seconds=1.0,
+    )
+    _block_digest_key(workspace)
+
+    records = list(runs_cmd.iter_watch_records(run_dir, interval=0))
+
+    assert records == [
+        {
+            "schema": "brigade.run-watch.v2",
+            "type": "error",
+            "error": "digest-key-unavailable",
+        }
+    ]
+
+
+def test_served_detail_and_stream_close_roster_and_worker_text(server: ThreadingHTTPServer, workspace: Path) -> None:
+    """Issue #2046 review: roster, agent, worker and failure kind leaks stay closed."""
+    run_dir = _runs_root(workspace) / "20260821-190000-closed"
+    _plant_run(
+        run_dir,
+        status="failed",
+        task="PRIVATE-SERVED-TASK",
+        started_at="2026-08-21T19:00:00Z",
+        finished_at="2026-08-21T19:00:01Z",
+        duration_seconds=1.0,
+    )
+    (run_dir / "final.txt").write_text("PRIVATE-SERVED-FINAL\n")
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["failure"] = {
+        "phase": "dispatch",
+        "kind": "auth failed: sk-ant-secret",
+        "detail": "auth failed: sk-ant-secret",
+    }
+    _write_json(run_dir / "run.json", meta)
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "ORCH-MARKER",
+            "max_workers": 1,
+            "allow_models": ["MODEL-MARKER", "/etc/ssl/private/key.pem"],
+            "agents": {
+                "AGENT-MARKER": {
+                    "cli": "codex",
+                    "model": "MODEL-AGENT-MARKER",
+                    "reasoning": "Bearer tok_123",
+                    "role": "ROLE-MARKER /etc/ssl/private/key.pem",
+                }
+            },
+        },
+    )
+    _write_json(
+        run_dir / "plan.json",
+        {"assignments": [{"stage": 1, "worker": "PLAN-WORKER-MARKER", "task": "PLAN-TASK-MARKER"}]},
+    )
+    _write_json(
+        run_dir / "worker-results.json",
+        {
+            "results": [
+                {
+                    "worker": "WORKER-NAME-MARKER",
+                    "ok": False,
+                    "status": "failed",
+                    "task": "WORKER-TASK-MARKER",
+                    "detail": "WORKER-DETAIL-MARKER",
+                    "requested_model": "REQ-MODEL-MARKER",
+                    "transport": "cli",
+                    "failure": {
+                        "class": "auth failed: sk-ant-secret",
+                        "detail": "missing /etc/ssl/private/key.pem",
+                    },
+                }
+            ]
+        },
+    )
+
+    view_id = _view_id(run_dir)
+    status, detail, _ = _get_json(server, f"/api/runs/{view_id}")
+    assert status == 200
+    response = _raw_request(server, _host(server), path=f"/api/runs/{view_id}/events", timeout=5)
+    assert _status_code(response) == "200"
+    _headers, body = _headers_and_body(response)
+    streamed = [json.loads(block.strip()[5:]) for block in body.split("\n\n") if block.strip().startswith("data:")]
+    served = json.dumps(detail) + json.dumps(streamed)
+
+    for marker in (
+        "ORCH-MARKER",
+        "MODEL-MARKER",
+        "AGENT-MARKER",
+        "MODEL-AGENT-MARKER",
+        "Bearer tok_123",
+        "ROLE-MARKER",
+        "PLAN-WORKER-MARKER",
+        "PLAN-TASK-MARKER",
+        "WORKER-NAME-MARKER",
+        "WORKER-TASK-MARKER",
+        "WORKER-DETAIL-MARKER",
+        "REQ-MODEL-MARKER",
+        "auth failed: sk-ant-secret",
+        "/etc/ssl/private/key.pem",
+    ):
+        assert marker not in served, marker
+
+    agent_key = next(iter(detail["roster"]["agents"]))
+    assert agent_key.startswith("hmac-sha256:")
+    assert set(detail["run"]["failure"]["kind"]) == {"digest", "chars"}
+    assert detail["run"]["failure"]["phase"] == "dispatch"
+
+
+def test_custom_run_id_is_digested_and_reachable_by_digest(server: ThreadingHTTPServer, workspace: Path) -> None:
+    """Issue #2046 security review: a user-chosen --output-dir name is never echoed."""
+    run_dir = _runs_root(workspace) / "PRIVATE-MODEL-A"
+    _plant_run(
+        run_dir,
+        status="ok",
+        task="PRIVATE-CUSTOM-ID-TASK",
+        started_at="2026-08-21T20:00:00Z",
+        finished_at="2026-08-21T20:00:01Z",
+        duration_seconds=1.0,
+    )
+    view_id = _view_id(run_dir)
+    assert view_id.startswith("hmac-sha256:")
+
+    status, listed, _ = _get_json(server, "/api/runs?limit=100")
+    assert status == 200
+    listed_blob = json.dumps(listed)
+    assert "PRIVATE-MODEL-A" not in listed_blob
+    assert view_id in {item["run_id"] for item in listed["runs"]}
+
+    status, detail, _ = _get_json(server, f"/api/runs/{view_id}")
+    assert status == 200
+    assert detail["run"]["run_id"] == view_id
+    assert "PRIVATE-MODEL-A" not in json.dumps(detail)
+
+    response = _raw_request(server, _host(server), path=f"/api/runs/{view_id}/events", timeout=5)
+    assert _status_code(response) == "200"
+    _headers, body = _headers_and_body(response)
+    assert "PRIVATE-MODEL-A" not in body
+    streamed = [json.loads(block.strip()[5:]) for block in body.split("\n\n") if block.strip().startswith("data:")]
+    for record in streamed:
+        if "run_id" in record:
+            assert record["run_id"] == view_id
+
+    for path in (f"/api/runs/{run_dir.name}", f"/api/runs/{run_dir.name}/events"):
+        refusal = _raw_request(server, _host(server), path=path)
+        assert _status_code(refusal) == "404"
+        assert "PRIVATE-MODEL-A" not in refusal
+
+
+def test_generated_run_id_stays_readable_in_served_views(server: ThreadingHTTPServer, workspace: Path) -> None:
+    run_dir = _runs_root(workspace) / "20260821-200000-abcdef12"
+    _plant_run(
+        run_dir,
+        status="ok",
+        task="generated id task",
+        started_at="2026-08-21T20:10:00Z",
+        finished_at="2026-08-21T20:10:01Z",
+        duration_seconds=1.0,
+    )
+
+    status, listed, _ = _get_json(server, "/api/runs?limit=100")
+    assert status == 200
+    assert run_dir.name in {item["run_id"] for item in listed["runs"]}
+
+    status, detail, _ = _get_json(server, f"/api/runs/{run_dir.name}")
+    assert status == 200
+    assert detail["run"]["run_id"] == run_dir.name
+
+
+def test_runs_view_template_formats_every_projected_object() -> None:
+    """Issue #2046 review: projected objects must never reach string concatenation raw."""
+    source = Path("src/brigade/runs_view.html").read_text()
+    for raw in (
+        "bounded(item.worker)",
+        "bounded(failure.kind)",
+        "bounded(failure.phase)",
+        "bounded(item.status",
+        "bounded(run.run_id)",
+        "bounded(lineage.parent_run_id)",
+        "bounded(child.run_id)",
+        "bounded(receipt.run_id)",
+        "bounded(command.command)",
+    ):
+        assert raw not in source
+    for formatted in (
+        "privacyText(item.worker)",
+        "privacyText(failure.kind)",
+        "privacyText(failure.phase)",
+        "privacyText(value)",
+        "privacyText(lineage.parent_run_id)",
+        "privacyText(child.run_id)",
+    ):
+        assert formatted in source
+    assert "DIGEST_RE" in source
+    assert "digestValue(assignments[i].worker)" in source
+    assert "digestValue(results[i].worker)" in source
+
+
+def _assert_text_values_digested(value: object) -> None:
+    """Every text-bearing key in a served payload holds the closed digest object."""
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            if key in {"task", "detail", "text", "command", "error", "failure_detail", "role"}:
+                if inner is not None:
+                    assert isinstance(inner, dict), f"{key} is not a digest object: {inner!r}"
+                    assert set(inner) == {"digest", "chars"}
+                    assert str(inner["digest"]).startswith("hmac-sha256:")
+                    assert isinstance(inner["chars"], int)
+            _assert_text_values_digested(inner)
+    elif isinstance(value, list):
+        for inner in value:
+            _assert_text_values_digested(inner)
 
 
 def _walk(value: object):

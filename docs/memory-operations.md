@@ -166,7 +166,7 @@ it:
 |---|---|---|
 | `search` with `query_source: "push"` or `"connector"` and `card` with `push: true` (connector push, Dot and Duet `memory_search` and `memory_card`, S23) | Connector | Excluded. Only a clean scan receipt is eligible |
 | Push prompt-load scan | Connector | `{card_id, blocked: "<rule id>", code: "memory_content_private"}` |
-| Search with `query_source: "prompt"` (local recall in Claude Code and Codex hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
+| Search with `query_source: "prompt"` (local recall in Claude Code hooks) | Operator's harness provider | Returned, with U+034F and U+200C removed from the rendered fields |
 | Grok Bot, Dot and Duet `memory_search` and `memory_card` | Connector | Placeholder with `code: "memory_content_private"` |
 | `memory_hits` on `inbox_list` and `fleet_digest` | Connector | Dropped and counted, as for any finding, including a hub placeholder |
 | Embedder (S15a query, document and probe sends) | Loopback only | Sent only when the pinned address is loopback. Any other endpoint, a private-network one included, refuses with reason `content-private` before any lookup or connection. A stored `private` version embeds only for a loopback endpoint |
@@ -1158,9 +1158,8 @@ The hub rebuilds its index on the next start, and an older retrieval
 evaluation record holds with `retrieval_eval_index_format_mismatch` or
 `retrieval_eval_scorer_mismatch` until a new run is recorded. The local card
 search ranks the same text. Hybrid scopes, mixed op lists, stale base
-revisions, `merge_exact_duplicates` and any apply that would flip a card's
-`automated` value hold with `retrieval_eval_projection_changed` or
-`retrieval_eval_target_drifted`. A trusted card that declares lineage links, or
+revisions and any apply that would flip a card's `automated` value hold with
+`retrieval_eval_projection_changed` or `retrieval_eval_target_drifted`. A trusted card that declares lineage links, or
 that another live card in its scope names, is Tier 2 and stays a pending
 proposal held with `lineage_requires_review` for a reviewer to decide. The scan
 for a naming card looks at the lineage key names, never at the target id,
@@ -1175,6 +1174,87 @@ push and connector search until the next index snapshot publishes, because push
 requires the live revision and content hash to match the snapshot and the new
 content to be scanned clean. The reflect client asks for a proposal held for
 lineage review again after seven days.
+
+An exact-duplicate merge cannot keep a ranking digest, because retiring a card
+changes the scope's document count, token total and document frequencies. The
+gate admits a merge instead under bounded drift, and only when every invariant
+below holds at preflight and again inside the apply transaction. The proposal
+must hold `merge_exact_duplicates` ops and nothing else
+(`retrieval_eval_merge_mixed_ops`), in one scope, with each retired card named
+once (`retrieval_eval_merge_shape`). Each retired card then needs:
+
+- To be newer than the keeper (`retrieval_eval_merge_retires_older`). The gate
+  dates each card by when its current claim body first appeared, which is the
+  log sequence of the earliest revision in the unbroken run of live revisions
+  ending at the head that all hold that same claim body. The claim body is the
+  text below the front matter, without anchor suffixes. So a rewrite of
+  aliases, evidence or any other front-matter line keeps a card's date, while a
+  claim edit, a retirement, a revival, or an edit away from the text and back
+  starts a new run dated from that write. A card revived or edited into a copy
+  of another card is therefore as new as that write, and it cannot retire the
+  card it copied. The retired card's date must be strictly later than the
+  keeper's. A card whose history does not date it is held: a head with no live
+  revision row, a missing or unreadable revision text, or a run of more than 256
+  revisions.
+- The same trust class as the keeper (`retrieval_eval_merge_trust_mismatch`)
+  and the same `automated` value after the apply
+  (`retrieval_eval_merge_automated_mismatch`). When trust is
+  `agent-unreviewed`, its writer and class must also be the applier's
+  (`retrieval_eval_writer_changed`), the same rule the keeper meets.
+- No other live card that names its id as a front-matter value, wiki link,
+  markdown link or reference definition (`retrieval_eval_merge_inbound_link`),
+  because a retired card leaves the index and a link to it would dangle. One
+  pass parses every live card in the scope once and tests every retired id in
+  the proposal, in any front-matter key and at any list position, decoding
+  escapes and implicit concatenation the way search does. It ignores a leading
+  `./`, `../` or `/`, angle brackets and a `#fragment`. Names compare the way
+  the broken-link resolver compares them, folded for case with every run of
+  spaces or hyphens read as one space, so `[[Dup-Retired]]` and `[[dup retired]]`
+  both name `dup-retired`. A folder prefix, a scope prefix and a trailing `.md`
+  are ignored in any case.
+- At most eight retired cards per keeper (`retrieval_eval_merge_group_too_large`),
+  so the work for one proposal stays bounded.
+- Title tokens (`retrieval_eval_merge_title_uncovered`) and every search token
+  (`retrieval_eval_merge_tokens_lost`) held by the keeper's after text, counted
+  as a multiset. An untitled card's title is its id, which the alias the merge
+  adds carries.
+- Every punctuation substring literal search can match
+  (`retrieval_eval_merge_literal_lost`). Token counts do not carry those, so
+  each front-matter line of the retired card, except `aliases` and `evidence`,
+  must appear as a line of the keeper's text after the merge, and the retired
+  card's title, tags and summary must appear in the keeper's lowercased
+  indexed text.
+
+The retired card's own text must be unchanged by the proposal, and the keeper's
+`after_hash` must be the hash of its after text. Either forgery holds the merge.
+The keeper may then change only by the `aliases` and `evidence` fields the merge
+writes. The hub recomputes the merge from the live cards, and the keeper's
+ranking projection must match its old one once the `aliases` line is set aside
+(`retrieval_eval_merge_keeper_changed`). A principal applier flips `automated`
+on a keeper that was not automated, and that holds with
+`retrieval_eval_merge_automated_mismatch`. The history veto, the lineage rule
+and the published-index lineage check apply to both cards as before. The
+keeper's `aliases` line names the retired id as a predecessor. Only trusted
+cards form lineage edges, and the keeper of a merge that can apply today is not
+trusted, so no edge appears even when a new card later reuses the retired id.
+
+This bounds what a merge may remove from search. It does not freeze ranking.
+The retired card's matches move to the keeper, whose searchable content is a
+superset of the retired card's. Every other card's score shifts with the
+scope-wide statistics, because retiring a card changes the document count, each
+term's document frequency and the average document length, and the alias line
+lengthens the keeper's document. Near-ties between other cards can reorder, and
+a top-k cutoff can admit a card it excluded before, since the retired card
+frees a slot. Hybrid mode is out of scope. The gate holds any scope that is not
+lexical with `retrieval_eval_projection_changed`. The compensation watch
+reverses an automatic merge with its exact inverse.
+
+Three older gates still hold every merge before this one is the deciding hold.
+The one-card blast cap counts the keeper and the retired card
+(`blast_cap_exceeded`). The evidence floors need attested proof a merge does not
+carry. `card_trust` refuses `agent-unreviewed` cards, and a trusted keeper is
+Tier 2 because the merge adds an alias to a lineage-trusted card. Until a later
+change reconsiders those, a merge opens and waits for a reviewer.
 
 Operator procedure:
 

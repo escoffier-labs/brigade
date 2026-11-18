@@ -18,7 +18,8 @@ _EMPTY_MESSAGE = (
     "run verification through a registered verifier and capture outcomes."
 )
 _RATCHET_EMPTY_MESSAGE = (
-    "No outcome ratchet report yet. The weekly ratchet writes one with `brigade outcome reconcile --target . --report`."
+    "No outcome ratchet report yet. The weekly ratchet writes one with "
+    "`brigade outcome reconcile --target . --report --proposals`."
 )
 _RATCHET_STALE_DAYS = 7
 
@@ -76,6 +77,14 @@ def _ranking_panel(payload: dict) -> str:
     return html.panel(html.esc(TITLE), f"<p>{strip}</p>" + html.table(escaped_headers, rows))
 
 
+def _proposal_label(summary: dict) -> str:
+    """Summarize the inbox proposals the last ratchet run filed (counts persisted in the report)."""
+    counts = outcome_ratchet_report.proposal_counts(summary)
+    if counts is None:
+        return "not requested"
+    return ", ".join(f"{key} {counts[key]}" for key in ("filed", "existing", "flagged", "skipped"))
+
+
 def _ratchet_panel(raw: object) -> str:
     """Render the advisory weekly ratchet report, including how old it is."""
     title = html.esc("Outcome ratchet report")
@@ -93,7 +102,10 @@ def _ratchet_panel(raw: object) -> str:
     strip = (
         f"{stamp}; mode={mode}; decisions {summary.get('decisions', '-')}, "
         f"regression holds {summary.get('regression_holds', '-')}, "
-        f"regression rollbacks {summary.get('regression_rollbacks', '-')}; "
+        f"regression rollbacks {summary.get('regression_rollbacks', '-')}, "
+        f"pending physical actions {summary.get('pending_physical_actions') or 0}"
+        + (f" (stale {summary['stale_physical_actions']})" if summary.get("stale_physical_actions") else "")
+        + f"; inbox proposals {_proposal_label(summary)}; "
         f"ineligibility_rate {_fmt(ratchet.get('ineligibility_rate'))}"
     )
     leading = ratchet.get("leading_ineligibility_reason")

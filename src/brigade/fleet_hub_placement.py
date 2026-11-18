@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Iterator, Mapping
 
-from . import fleet_hub_policy, fleet_hub_routing, fleet_node_projects, fleet_policy
+from . import fleet_hub_policy, fleet_hub_routing, fleet_node_projects, fleet_policy, fleet_t3_health
 from .fleet_hub import FleetHubError
 from .fleet_hub_claims import ClaimFenceError
 from .fleet_hub_sessions import count_live_by_node
@@ -225,6 +225,13 @@ def _place(
     except Exception:
         # Fail closed: unreadable sessions must never read as zero sessions.
         live = None
+    # Only nodes whose T3 observer reported recently have a trustworthy count. Expired presence rows
+    # read as zero sessions, so a stale node is unknown, and so is one with no health row (every host
+    # runs the observer after rollout; the reason differs). None means the health read failed: all unknown.
+    health = fleet_t3_health.classify_nodes(conn, now)
+    # Node memory rides the same health report and the same freshness rule. None (unreadable) means no
+    # machine has a memory reading; that is informational and never changes eligibility by itself.
+    memory_readings = fleet_t3_health.memory_by_node(conn, now)
 
     loads: dict[str, dict[str, Any]] = {}
 
@@ -245,24 +252,35 @@ def _place(
         expiry = _telemetry_expiry(telemetry, routing)
         cpu = None if telemetry is None else telemetry.get("load")
         capacity = int(machine.get("concurrency") or 0)
-        sessions = None if live is None else int(live.get(str(machine.get("node_id")), 0))
-        if sessions is None:
+        node = str(machine.get("node_id"))
+        # A node with no health row at all is its own reason, so an operator can tell a node that has
+        # not posted health yet (rollout order) from one that is failing or stale.
+        sessions = None
+        if live is None or health is None or node in health[1]:
             reasons.append("sessions-unknown")
-        # Hub-counted sessions are a floor under the node-reported CPU load. Node memory joins this
-        # max in a follow-up once nodes report it.
+        elif node not in health[0]:
+            reasons.append("t3-health-missing")
+        else:
+            sessions = int(live.get(node, 0))
+        # Hub-counted sessions are a floor under the node-reported CPU load, and node memory is a third
+        # input. A missing memory reading leaves the max to the other two and is only reported
+        # (``memory-unknown``, added in the candidate rows), so an old node never becomes unplaceable.
         session_ratio = None if sessions is None else (sessions / capacity if capacity > 0 else 1.0)
+        memory = None if memory_readings is None else memory_readings.get(node)
         fresh = expiry is not None and now < expiry
-        effective = max(float(cpu), session_ratio) if fresh and cpu is not None and session_ratio is not None else None
+        effective = None
+        if fresh and cpu is not None and session_ratio is not None:
+            effective = max(float(cpu), session_ratio, 0.0 if memory is None else memory)
         loads[name] = {
             "effective_load": None if effective is None else round(effective, 4),
-            "load_inputs": {"cpu": cpu, "sessions": sessions, "concurrency": capacity},
+            "load_inputs": {"cpu": cpu, "sessions": sessions, "memory": memory, "concurrency": capacity},
             "telemetry_observed_at": None if telemetry is None else telemetry.get("observed_at"),
             "telemetry_expires_at": expiry,
         }
         if effective is None:
             # Fail closed on our own evidence: a machine with no usable load is never placeable, even if
-            # the routing evaluator's reasons change. ``sessions-unknown`` already names the session case.
-            if "sessions-unknown" not in reasons:
+            # the routing evaluator's reasons change. The two session reasons already name that case.
+            if "sessions-unknown" not in reasons and "t3-health-missing" not in reasons:
                 reasons.append("machine-load-unknown")
         elif effective >= threshold:
             reasons.append("machine-load-shed")
@@ -296,6 +314,8 @@ def _place(
                 reasons = list(dict.fromkeys("not-placeable" if r in _INVENTORY_REASONS else r for r in reasons))
             if len(usable.get(name, [])) > 1 and name in (origin, chosen):
                 reasons.append("multiple-projects")  # informational: never changes ``eligible``
+            if name in loads and loads[name]["load_inputs"]["memory"] is None:
+                reasons.append("memory-unknown")  # informational: never changes ``eligible``
             result.append(
                 {
                     "machine": name,

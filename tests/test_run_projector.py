@@ -164,6 +164,7 @@ def _full_base_snapshot() -> dict:
             "environment_fingerprint": "sha256:environment-fingerprint",
         },
         "artifact_collection": None,
+        "worktree_removal": {"status": "removed", "path": "/tmp/worktree", "reason": "clean and branch-backed"},
         "artifacts": [],
         "handoff": None,
         "handoff_inbox": "/tmp/memory-handoffs",

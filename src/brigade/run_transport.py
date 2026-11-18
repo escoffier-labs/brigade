@@ -614,6 +614,7 @@ def dispatch(
     on_result: Callable[[WorkerResult], None] | None = None,
     allow_reinvocation: bool = True,
     policy_workspace: Path | None = None,
+    recording_policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -1376,6 +1377,7 @@ def dispatch(
         roster=roster,
         run_dir=output_dir,
         workspace=policy_workspace or cwd,
+        policy_workspace=recording_policy_workspace,
         codex_transport=codex_transport or roster.codex_transport,
         read_only=read_only,
         sandbox=sandbox or ("read-only" if (read_only if sandbox_read_only is None else sandbox_read_only) else None),

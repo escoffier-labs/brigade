@@ -29,6 +29,18 @@ An OSError that is not a race (permission denied, a read-only or full disk, an
 I/O error) is a kept outcome too: it is reported with the path and errno, the
 skill is not recorded, and the remaining skills and the rest of init carry on.
 
+Pristine refresh: an installed copy that is identical to a text a past release
+shipped for the same skill (`shipped_history`, newline-folded) has no local
+edits, so it is replaced with the current bundled text and recorded in
+wired.json like a fresh write. Any other differing copy is never overwritten.
+The copy is re-read under a fresh no-follow descriptor and must still be the
+same bytes right before the publish (a changed, vanished or linked copy is
+kept and reported, never written), and the publish goes through the same
+temp/fsync path as a new file, now allowed to replace. The one window left is the
+instant between that re-read and the rename. Skills inbox proposals that init
+filed for the replaced file are marked superseded, and only after the publish
+succeeded.
+
 Newlines: bundled text is written as LF (the same policy as the template copy
 loop in `install.py`), and a comparison treats CRLF and LF as the same text so a
 Windows checkout, or a copy an older release wrote with CRLF, is not "edited".
@@ -47,9 +59,10 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 from . import __version__ as BRIGADE_VERSION
-from . import dirfd
+from . import dirfd, shipped_history
 
 WIRED_STATE_REL = ("skills", "wired.json")
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -61,8 +74,11 @@ _READ_FLAGS = os.O_RDONLY | _NOFOLLOW | _BINARY | _CLOEXEC | getattr(os, "O_NONB
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _BINARY | _CLOEXEC
 
 # Statuses that mean the destination already holds a skill and was not written.
+# (WRITTEN and REFRESHED are the two that did write.)
 WRITTEN = "written"
 IDENTICAL = "identical"
+REFRESHED = "refreshed"
+RACED = "changed-during-refresh"
 EDITED = "edited"
 PRISTINE_STALE = "pristine-stale"
 SYMLINKED = "symlinked"
@@ -76,6 +92,19 @@ def _sha256(data: bytes) -> str:
 def normalize_newlines(data: bytes) -> bytes:
     """Return ``data`` with CRLF folded to LF, the form SKILL.md text is compared in."""
     return data.replace(b"\r\n", b"\n")
+
+
+def _read_regular(fd: int) -> bytes | None:
+    """Read and close an opened destination; None when it is not a regular file."""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        while chunk := os.read(fd, 1 << 16):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 _RACE_ERRORS = (FileExistsError, FileNotFoundError, NotADirectoryError)
@@ -130,7 +159,7 @@ class SkillWirer:
         data = text.encode("utf-8")
         dst = self.target.joinpath(*rel_parts)
         try:
-            state, existing = self._walk(rel_parts, data)
+            state, existing = self._walk(rel_parts, data, self._pristine_check(skill_id, data))
         except OSError as exc:
             # Not a race (those are classified inside the walk): the destination could
             # not be read, created or published. Keep what is there, say why, move on.
@@ -138,7 +167,7 @@ class SkillWirer:
             print(f"warning: could not place {dst}: {exc.strerror or exc} ({code})", file=sys.stderr)
             print(f"brigade: kept ({BLOCKED}): {dst}")
             return BLOCKED
-        if state == WRITTEN:
+        if state in (WRITTEN, REFRESHED):
             self._written[rel] = {
                 "harness": harness,
                 "skill_id": skill_id,
@@ -146,7 +175,10 @@ class SkillWirer:
                 "brigade_version": BRIGADE_VERSION,
                 "template_sha256": _sha256(data),
             }
-            return WRITTEN
+            if state == REFRESHED:
+                print(f"brigade: refreshed (pristine): {dst}")
+                self._withdraw_proposals(skill_id, rel)
+            return state
         if state == "existing":
             assert existing is not None
             if normalize_newlines(existing) == normalize_newlines(data):
@@ -204,7 +236,9 @@ class SkillWirer:
             return {}
         return _parse_recorded(raw)[0]
 
-    def _walk(self, rel_parts: tuple[str, ...], data: bytes) -> tuple[str, bytes | None]:
+    def _walk(
+        self, rel_parts: tuple[str, ...], data: bytes, pristine: Callable[[bytes], bool] | None = None
+    ) -> tuple[str, bytes | None]:
         """Classify the destination and create it if missing, all under a held root descriptor.
 
         Returns ``(state, bytes)``: ``written`` (created now), ``existing`` (a
@@ -226,7 +260,7 @@ class SkillWirer:
                     return refusal or BLOCKED, None
                 held.append(child)
                 parent = child
-            return self._place_file(parent, rel_parts[-1], data)
+            return self._place_file(parent, rel_parts[-1], data, pristine)
         finally:
             for fd in reversed(held):
                 os.close(fd)
@@ -248,7 +282,9 @@ class SkillWirer:
                 return None, _refusal(parent, name, exc)
         return None, BLOCKED
 
-    def _place_file(self, parent: int, name: str, data: bytes) -> tuple[str, bytes | None]:
+    def _place_file(
+        self, parent: int, name: str, data: bytes, pristine: Callable[[bytes], bool] | None
+    ) -> tuple[str, bytes | None]:
         try:
             fd = dirfd.open_child_file(parent, name, _READ_FLAGS)
         except FileNotFoundError:
@@ -256,27 +292,89 @@ class SkillWirer:
         except OSError as exc:
             return _refusal(parent, name, exc), None
         if fd is not None:
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    return BLOCKED, None
-                chunks: list[bytes] = []
-                while chunk := os.read(fd, 1 << 16):
-                    chunks.append(chunk)
-            finally:
-                os.close(fd)
-            return "existing", b"".join(chunks)
+            existing = _read_regular(fd)
+            if existing is None:
+                return BLOCKED, None
+            if pristine is not None and pristine(existing) and normalize_newlines(existing) != normalize_newlines(data):
+                return self._refresh(parent, name, existing, data)
+            return "existing", existing
         return self._publish(parent, name, data)
 
-    def _publish(self, parent: int, name: str, data: bytes) -> tuple[str, bytes | None]:
-        """Write ``data`` to a temp sibling, then publish it under ``name`` without replacing anything."""
+    def _pristine_check(self, skill_id: str, data: bytes) -> Callable[[bytes], bool] | None:
+        """A test for "this installed text is a past bundled release of this skill", or None to never refresh.
+
+        Both the installed text and the text about to be written must be recorded
+        bundled texts of the skill, so a rendered or unrecorded text is never published.
+        """
+        known = shipped_history.digests(shipped_history.skill_key(skill_id))
+        if shipped_history.skill_digest(data) not in known:
+            return None
+        return lambda body: shipped_history.skill_digest(body) in known
+
+    def _refresh(self, parent: int, name: str, expected: bytes, data: bytes) -> tuple[str, bytes | None]:
+        """Replace a pristine past-release copy with ``data`` if it is still exactly ``expected``.
+
+        Returns ``(refreshed, None)``; ``(changed-during-refresh, None)`` when the
+        copy vanished or no longer holds ``expected``; a link or special file is
+        reported as such. A failed publish (not a race) falls back to the kept path
+        so the operator still gets the inbox proposal.
+        """
         temporary = f".{name}.{uuid.uuid4().hex}.tmp"
         try:
-            fd = dirfd.open_child_file(parent, temporary, _CREATE_FLAGS, 0o666)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            dirfd.replace_children(parent, temporary, name, replace=False)
+            # Slow disk I/O (write + fsync) happens before the compare, so the window
+            # between "still pristine" and the rename is only the re-read and the rename.
+            self._write_temp(parent, temporary, data)
+            try:
+                fd = dirfd.open_child_file(parent, name, _READ_FLAGS)
+            except FileNotFoundError:
+                return RACED, None
+            except OSError as exc:
+                return _refusal(parent, name, exc), None
+            current = _read_regular(fd)
+            if current is None:
+                return BLOCKED, None
+            if current != expected:
+                return RACED, None
+            dirfd.replace_children(parent, temporary, name, replace=True)
+        except _RACE_ERRORS as exc:
+            return _refusal(parent, name, exc), None
+        except OSError as exc:
+            code = f"errno {exc.errno}" if exc.errno is not None else type(exc).__name__
+            print(f"warning: could not refresh {name}: {exc.strerror or exc} ({code})", file=sys.stderr)
+            return "existing", expected
+        finally:
+            with contextlib.suppress(OSError):
+                dirfd.unlink_child(parent, temporary)
+        with contextlib.suppress(OSError):
+            dirfd.fsync_directory(parent)
+        return REFRESHED, None
+
+    @staticmethod
+    def _write_temp(parent: int, temporary: str, data: bytes) -> None:
+        fd = dirfd.open_child_file(parent, temporary, _CREATE_FLAGS, 0o666)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _withdraw_proposals(self, skill_id: str, rel: str) -> None:
+        """Mark inbox proposals init filed for this file superseded; the file now holds the bundled text."""
+        from .skills_cmd.inbox import supersede_pending
+
+        try:
+            ids = supersede_pending(self.target, f"init:{skill_id}:{rel}:", "refreshed to current bundled text")
+        except (OSError, ValueError) as exc:
+            print(f"warning: could not withdraw skills inbox proposals for {rel}: {exc}", file=sys.stderr)
+            return
+        for proposal_id in ids:
+            print(f"brigade: superseded skills inbox proposal {proposal_id}")
+
+    def _publish(self, parent: int, name: str, data: bytes, *, replace: bool = False) -> tuple[str, bytes | None]:
+        """Write ``data`` to a temp sibling, then publish it under ``name``; replaces only when ``replace`` is set."""
+        temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+        try:
+            self._write_temp(parent, temporary, data)
+            dirfd.replace_children(parent, temporary, name, replace=replace)
         except _RACE_ERRORS as exc:
             # Lost a race with another writer (the name now exists); that file is theirs to keep.
             return _refusal(parent, name, exc), None

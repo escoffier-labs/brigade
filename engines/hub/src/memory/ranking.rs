@@ -65,45 +65,91 @@ pub(super) const LINEAGE_KEYS: [&str; 4] =
 impl Links {
     pub fn parse(body: &str, scope: &str) -> Self {
         let mut out = Self::default();
-        for (key, value) in text::front_matter(body) {
-            if !LINEAGE_KEYS.contains(&key.as_str()) {
-                continue;
-            }
-            let values = match value {
-                text::Value::Str(s) => {
-                    match s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-                        Some(items) => items
-                            .split(',')
-                            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
-                            .collect(),
-                        None => vec![s],
-                    }
-                }
-                text::Value::Lit(text::Lit::List(items)) => {
-                    items.iter().map(text::Lit::py_str).collect()
-                }
-                _ => continue,
-            };
-            for value in values.into_iter().take(256) {
-                let path = value
-                    .strip_prefix("memory/cards/")
-                    .or_else(|| value.strip_prefix("cards/"));
-                let id = match path {
-                    Some(path) => path.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(path),
-                    None => value.strip_prefix(&format!("{scope}/")).unwrap_or(&value),
-                };
-                if !super::ids::valid_card_id(id) {
-                    continue;
-                }
-                match key.as_str() {
-                    "superseded_by" => out.successor = Some(id.into()),
-                    "supersedes" | "merged_from" | "aliases" => out.predecessors.push(id.into()),
-                    _ => (),
-                }
+        for (key, id) in front_targets(body, scope, |key| LINEAGE_KEYS.contains(&key)) {
+            match key.as_str() {
+                "superseded_by" => out.successor = Some(id),
+                "supersedes" | "merged_from" | "aliases" => out.predecessors.push(id),
+                _ => (),
             }
         }
         out
     }
+}
+
+/// Every card id a front-matter value names, with the key that names it, for
+/// the keys `keep` accepts. A value is a bare id, a `scope/id` name or a
+/// `cards/id.md` path.
+pub(super) fn front_targets(
+    body: &str,
+    scope: &str,
+    keep: impl Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    front_values(body, keep, 256)
+        .into_iter()
+        .filter_map(|(key, value)| link_id(&value, scope).map(|id| (key, id.to_string())))
+        .collect()
+}
+
+/// Every front-matter value, with its key, for the keys `keep` accepts. A list
+/// yields its first `cap` items. Search reads the same literal syntax, so an
+/// escaped or concatenated id decodes here as it does there.
+pub(super) fn front_values(
+    body: &str,
+    keep: impl Fn(&str) -> bool,
+    cap: usize,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (key, value) in text::front_matter(body) {
+        if !keep(&key) {
+            continue;
+        }
+        let values = match value {
+            text::Value::Str(s) => match s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                Some(items) => items
+                    .split(',')
+                    .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
+                    .collect(),
+                None => vec![s],
+            },
+            text::Value::Lit(text::Lit::List(items)) => {
+                items.iter().map(text::Lit::py_str).collect()
+            }
+            _ => continue,
+        };
+        out.extend(values.into_iter().take(cap).map(|v| (key.clone(), v)));
+    }
+    out
+}
+
+/// The card id a link target names, or None when it names no valid id.
+pub(super) fn link_id<'a>(value: &'a str, scope: &str) -> Option<&'a str> {
+    let path = value
+        .strip_prefix("memory/cards/")
+        .or_else(|| value.strip_prefix("cards/"));
+    let id = match path {
+        Some(path) => path.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(path),
+        None => value.strip_prefix(&format!("{scope}/")).unwrap_or(value),
+    };
+    super::ids::valid_card_id(id).then_some(id)
+}
+
+/// [`link_id`] for a scan that must not miss a link a reader could follow. It
+/// also drops angle brackets, a `#fragment` and leading `./`, `../` and `/`,
+/// and accepts a trailing `.md` on a bare id. Lineage parsing keeps the strict
+/// form, because it decides ranking.
+pub(super) fn mentioned_id<'a>(value: &'a str, scope: &str) -> Option<&'a str> {
+    let mut path = value.trim();
+    if let Some(inner) = path.strip_prefix('<') {
+        path = inner.strip_suffix('>').unwrap_or(inner);
+    }
+    path = path.split('#').next().unwrap_or("");
+    while let Some(rest) = ["./", "../", "/"]
+        .iter()
+        .find_map(|prefix| path.strip_prefix(prefix))
+    {
+        path = rest;
+    }
+    link_id(path, scope).or_else(|| link_id(path.trim_end_matches(".md"), scope))
 }
 
 /// Only reviewed relations may change another card's search identity.

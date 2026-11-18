@@ -80,6 +80,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_install.add_argument("--target", dest="install_target", required=True, help="Harness target or all.")
     p_skills_install.add_argument("--force", action="store_true", help="Overwrite an existing installed skill.")
     p_skills_install.add_argument(
+        "--discard-local-edits",
+        action="store_true",
+        help="With --force, also overwrite an installed copy that has local edits (a rollback snapshot is taken first).",
+    )
+    p_skills_install.add_argument(
         "--expected-binding-json",
         type=_expected_binding,
         default=None,
@@ -153,6 +158,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         type=_expected_binding,
         default=None,
         help="Require exact reviewed package identities before mutation.",
+    )
+    p_skills_rollback.add_argument(
+        "--discard-local-edits",
+        action="store_true",
+        help="Also roll back an installed copy that has local edits (the edited bytes are snapshotted first).",
     )
     p_skills_rollback.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_serve = skills_sub.add_parser("serve-mcp", help="Report the local MCP skills resource contract.")
@@ -305,6 +315,7 @@ def dispatch(args) -> int:
             skill=args.skill,
             harness=args.install_target,
             force=args.force,
+            discard_local_edits=args.discard_local_edits,
             expected_binding=args.expected_binding_json,
             json_output=args.json,
         )
@@ -352,6 +363,7 @@ def dispatch(args) -> int:
             workspace=args.workspace,
             skill=args.skill,
             harness=args.install_target,
+            discard_local_edits=args.discard_local_edits,
             expected_binding=args.expected_binding_json,
             json_output=args.json,
         )

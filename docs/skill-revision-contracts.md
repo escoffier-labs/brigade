@@ -44,12 +44,25 @@ root metadata and nested metadata file digests. Root metadata formatting and
 managed `imported_at`, `updated_at`, `created_at`, `fingerprint`, and `source`
 fields do not change identity. The source selector is bound separately.
 
-## `brigade init` never overwrites a wired SKILL.md
+## Outcome regression proposals
+
+`brigade outcome reconcile --proposals` files a proposal for a Brigade-bundled skill with a verified regression (see [Outcome scoring](outcome-scoring.md#regression-proposals)). It carries a complete contract filled only from observed evidence:
+
+- `reason` names the artifact, the ratchet reason code (`regression_hold` or `regression_rollback`), the decision reason and the helped and hurt counts.
+- `addressed_failure` names the failing receipt run ids and failing check ids.
+- `change_category` is `bugfix`.
+- `baseline_fingerprint` is the registry package identity at filing, or `null` when the skill is absent from the registry.
+- `expected_observable_behavior` has one assertion per failing check read back from the hurt receipts (`<run id>:<check id>`, with the recorded command), at most five receipts and five checks each. A receipt that is gone yields an assertion that says `command unavailable`. A readable receipt whose failing command has no check id cites that command instead (`<run id>:command-<n>`). Counts, run ids and assertions all come from the same receipt set, deduplicated by evidence unit exactly as the scorecard counts it. Brigade never invents a command.
+
+The proposal is filed with `dedupe_key` `outcome:<artifact_id>:<content fingerprint>` (the reason code stays in the contract, so one request exists per skill text and rejecting a hold also mutes a later rollback of the same text), the provenance `brigade://outcome-regression/<skill_id>`, and `requires_revision: true`. Its staged text is the current skill, unchanged, and it records that candidate as `unrevised_identity` and the body fingerprint (which ignores `skill.json`) as `unrevised_fingerprint`. `inbox accept` refuses a `requires_revision` proposal whose files still match `unrevised_fingerprint`, or that lacks the unrevised fields (exit 2, `--force` included). It also refuses any candidate whose files match the `unrevised_fingerprint` of an open `requires_revision` proposal for the same skill, and `inbox add` refuses to file one, so re-filing the same unrevised files under a different contract cannot get past the guard. Accepting would otherwise change nothing while still muting the dedupe key. To act on the request, file a revised candidate with `brigade skills inbox add` and a contract, then reject the review request. `inbox show` prints `requires_revision: yes` for it.
+
+## `brigade init` never overwrites an edited SKILL.md
 
 `brigade init`, `brigade reconfigure` and `--force` write a bundled `SKILL.md`
 (the wired `brigade-work` and `ultra-work-scout` skills in each harness skills
 directory, and the workspace-depth `skills/*/SKILL.md` files) only when the
-destination is missing. `--force`, including the force that reconfigure passes
+destination is missing, or holds a pristine copy of a past release (below).
+`--force`, including the force that reconfigure passes
 implicitly, still replaces other template files but never a `SKILL.md`. For an
 existing destination:
 
@@ -58,7 +71,8 @@ existing destination:
 | Missing | Written, and recorded in `.brigade/skills/wired.json`. |
 | Symlink, or a symlinked parent directory | Kept. Init prints `kept (symlinked): <path>` and writes and proposes nothing. |
 | Byte-identical regular file | Kept. No write and no proposal. |
-| Differing regular file | Kept untouched. Init files one inbox proposal with the bundled text and prints `kept (edited)` or `kept (pristine-stale)` with the proposal id. |
+| Regular file equal to a text a past release shipped for that skill (newline-folded) | Refreshed to the current bundled text. Init prints `refreshed (pristine): <path>`, records it in `wired.json` like a fresh write, leaves no `.bak`, and marks a pending inbox proposal it filed for that file `superseded` (reason `refreshed to current bundled text`). |
+| Any other differing regular file | Kept untouched. Init files one inbox proposal with the bundled text and prints `kept (edited)` or `kept (pristine-stale)` with the proposal id. |
 
 SKILL.md wiring walks, reads and creates the destination relative to a held
 descriptor for the target root (`brigade.dirfd`), one component at a time, so a
@@ -100,11 +114,47 @@ proposed for two installed copies is two proposals. A proposal's `source` is
 The proposal carries a behavioral contract only if the bundled `skill.json`
 ships one. Brigade does not infer a failure for it.
 
+### Refreshing a pristine copy
+
+`src/brigade/templates/shipped-file-history.json` records the digest of every
+text Brigade shipped for the wired skills (`brigade-work`, `ultra-work-scout`,
+`note`) and the care runbooks, one entry per distinct text with the first
+release tag that carried it. `scripts/shipped_file_history.py --write` builds it
+from every `v*` tag plus the working tree, and `--check` (part of
+`scripts/verify` and `scripts/verify-focused`) fails when a template changed
+without regenerating it, when an entry claims a tag that did not ship it, or when
+an entry recorded on the base ref was dropped. An untagged row is valid only when
+it is the current working-tree text or the base ref already recorded it; an
+untagged row for a text a release shipped must be promoted with `--write`. Tag
+provenance is what keeps a forged row from vouching for an edited file, so
+without local `v*` tags, or under strict mode without the base ref, the check
+fails under `--require-provenance` (used by CI, which fetches the tags and the
+base branch, and by `RELEASE.md`) and whenever `GITHUB_ACTIONS` is set; an
+unparsable manifest on the base ref is always a failure, and only an explicit
+local run without tags or a base ref warns and passes. `RELEASE.md` regenerates it before the version
+bump.
+
+At runtime, init refreshes an existing `SKILL.md` only when its newline-folded
+digest is in that record for the skill **and** the text it is about to write is a
+recorded text too. Anything else, including a missing, linked, oversized or
+malformed record, keeps today's behavior exactly. The copy is re-read under a
+fresh no-follow descriptor and must still be the same bytes right before the
+publish; a copy that changed, vanished or became a link is kept and reported
+(`kept (changed-during-refresh)`, `kept (symlinked)`), with no write and no
+proposal. The publish is the same fsynced temp-then-rename path a new file uses,
+now allowed to replace; the instant between the re-read and the rename is the one
+window left. A publish that fails (permission, disk) is a warning, the copy
+stays, and its proposal stays pending. Proposals are withdrawn only after a
+successful publish. A superseded proposal no longer counts for `dedupe_key`
+matching, so if the operator edits the refreshed file the bundled text is
+proposed afresh.
+
 `.brigade/skills/wired.json` records, per file init wrote, the harness, skill
 id, `sha256` of the installed bytes, `brigade_version` and `template_sha256`.
 Init uses it only to label a differing copy: a copy whose bytes still match the
 recorded `sha256` is `pristine-stale` (the bundled template moved on), anything
-else is `edited`. Nothing refreshes a file in place from it. The file is read
+else is `edited`. The label never authorizes a write; a refresh needs a
+shipped-history match (below). The file is read
 and written under the skills mutation lock, so concurrent inits keep each
 other's records, and an unreadable file is copied to
 `wired.json.corrupt-<digest>` before it is replaced. A failed record write is a

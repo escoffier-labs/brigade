@@ -64,7 +64,7 @@ from ..route_policy import (
 )
 
 from . import briefs, run_io, planning, prompts, artifacts, model_admission
-from . import direct_worker_finish
+from . import direct_worker_finish, isolation
 
 if TYPE_CHECKING:
     from ..run_batch_execute import BatchExecution
@@ -442,6 +442,8 @@ def run(
     verbose: bool = False,
     cwd: Path | None = None,
     lock_workspace: Path | None = None,
+    canonical_workspace: Path | None = None,
+    recording_policy_workspace: Path | None = None,
     output_dir: Path | None = None,
     handoff_inbox: Path | None = None,
     read_only: bool = False,
@@ -480,6 +482,7 @@ def run(
     transport_for_payload = codex_transport or roster.codex_transport
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     lock_workspace = lock_workspace.expanduser().resolve() if lock_workspace is not None else cwd
+    drift_workspace = canonical_workspace.expanduser().resolve() if canonical_workspace is not None else lock_workspace
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
@@ -709,16 +712,12 @@ def run(
     # rather than running without isolation attribution.
     try:
         pre_run_snapshot = runguard.capture_pre_run_snapshot(cwd)
-        # Branch/HEAD drift is checked against the resolved lock workspace, which
-        # may be a separate canonical checkout from the assigned cwd worktree.
-        # The cwd snapshot stays the ground-truth baseline for worker change
-        # attribution; a separate drift snapshot is captured from lock_workspace
-        # before dispatch when it differs, so movement of the canonical checkout
-        # is detected even though the assigned worktree never moved. When they
-        # are the same path, reuse the cwd snapshot to preserve explicit
-        # canonical-write behavior.
-        if lock_workspace != cwd:
-            drift_snapshot = runguard.capture_pre_run_snapshot(lock_workspace)
+        if drift_workspace != cwd:
+            drift_snapshot = runguard.capture_pre_run_snapshot(drift_workspace)
+        elif defer_artifact_collection:
+            # The CLI owns this checkout's patch and cleanup. Workers may
+            # branch or commit here while the parent checkout advances.
+            drift_snapshot = None
         else:
             drift_snapshot = pre_run_snapshot
     except runguard.RunGuardError as exc:
@@ -731,12 +730,12 @@ def run(
         """Centralized branch/HEAD drift check across every return path.
 
         Returns 2 (and records a run-isolation failure) when branch or HEAD
-        moved since the drift snapshot taken from the lock workspace, else
+        moved since the drift snapshot taken from the monitored checkout, else
         None so the caller can proceed. Call this after planning, before any
         dry-run return, after worker dispatch, after synthesis, and
         immediately before finalization.
         """
-        detail = runguard.detect_branch_head_drift(lock_workspace, drift_snapshot)
+        detail = runguard.detect_branch_head_drift(drift_workspace, drift_snapshot)
         if detail is None:
             return None
         if output_dir is not None:
@@ -750,30 +749,6 @@ def run(
             )
         print(f"error: {detail}", file=sys.stderr)
         return 2
-
-    def _run_isolation_check() -> str | None:
-        """Detect canonical-checkout escapes after dispatch without per-worker attribution."""
-
-        if lock_workspace == cwd or drift_snapshot is None:
-            return None
-        # Preserve the existing branch/HEAD drift classification. Working-tree
-        # mutations are what this post-dispatch check adds; committed or
-        # branch-moving interference remains caught by the run-level drift
-        # checkpoints.
-        if runguard.detect_branch_head_drift(lock_workspace, drift_snapshot) is not None:
-            return None
-        try:
-            changed, untracked = runguard.changes_relative_to_snapshot(lock_workspace, drift_snapshot)
-        except runguard.RunGuardError as exc:
-            runguard.raise_if_retained_run_lock(exc)
-            return f"isolation breach: could not verify canonical checkout: {exc}"
-        escaped = sorted(set(changed + untracked))
-        if not escaped:
-            return None
-        shown = ", ".join(escaped[:10])
-        if len(escaped) > 10:
-            shown += f", and {len(escaped) - 10} more"
-        return f"isolation breach: modified files outside assigned worktree: {shown}"
 
     if worker is not None:
         worker_error = artifacts._direct_worker_error(worker, roster, read_only=read_only)
@@ -1579,6 +1554,7 @@ def run(
                 roster,
                 cwd=cwd,
                 policy_workspace=lock_workspace,
+                recording_policy_workspace=recording_policy_workspace,
                 read_only=read_only,
                 sandbox_read_only=sandbox_read_only,
                 sandbox=sandbox,
@@ -1737,7 +1713,9 @@ def run(
                 producer_run_id=output_dir.name,
             ),
         )
-    isolation_detail = _run_isolation_check()
+    isolation_detail = isolation.parent_worktree_breach(
+        drift_workspace if drift_workspace != cwd else None, drift_snapshot, output_dir
+    )
     if isolation_detail is not None:
         if output_dir is not None:
             artifacts.record_run_termination(

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence, cast
 
-from . import fleet_client, fleet_client_policy, proc
+from . import fleet_client, fleet_client_policy, fleet_node_memory, proc
 from .fleet_openclaw_observer import (
     OBSERVATION_BUDGET_SECONDS,
     PUBLISH_LIMIT,
@@ -24,6 +24,7 @@ from .fleet_openclaw_observer import (
     ObservationError,
     RecentSession,
     _PublicationBatch,
+    _MARGIN_SECONDS,
     _absolute_workspace,
     _bounded_json,
     _opaque_id,
@@ -35,7 +36,11 @@ from .fleet_openclaw_observer import (
 
 from .fleet_session_presence import ProviderLinkState
 
+# The detail pass keeps this fixed cap. The first snapshot instead gets the rest of the observation
+# budget minus PUBLISH_RESERVE_SECONDS, so a slow shell read under load still fits.
 NATIVE_TIMEOUT_SECONDS = 8
+# Held back for the session publish and the health post that follow the snapshot.
+PUBLISH_RESERVE_SECONDS = fleet_client.REPORT_TIMEOUT_SECONDS + fleet_client_policy.POLICY_TIMEOUT_SECONDS
 INVENTORY_TTL_SECONDS = 900
 DETAIL_RESERVE_SECONDS = 1.5
 MAX_THREADS = 10_000
@@ -196,6 +201,18 @@ os._exit(0)
 """
 
 
+def _native_timeout(deadline: float, *, detail: bool) -> float:
+    """Seconds the native subprocess may run. Raises observation_timeout when none is left."""
+    if detail:
+        # A failed optional phase must leave time to publish the metadata batch.
+        reserve = (
+            fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS + fleet_client_policy.POLICY_TIMEOUT_SECONDS
+        )
+        return _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
+    # One extra margin, because the publish loop's first check needs its own margin on top of the reserve.
+    return _remaining(deadline, cap=float("inf"), reserve=PUBLISH_RESERVE_SECONDS + _MARGIN_SECONDS)
+
+
 def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: list[str] | None = None) -> object:
     path = Path(interpreter)
     if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
@@ -204,9 +221,7 @@ def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: li
         if len(detail_thread_ids) > PUBLISH_LIMIT:
             raise ObservationError("native_metadata_invalid")
         detail_thread_ids = [_native_id(value) for value in detail_thread_ids]
-    # A failed optional phase must leave time to publish the metadata batch.
-    reserve = fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS if detail_thread_ids is not None else 0
-    timeout = _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
+    timeout = _native_timeout(deadline, detail=detail_thread_ids is not None)
     from . import fleet_node_projects as inventory_rules
 
     program = (
@@ -427,13 +442,65 @@ def _link_publication_batch(
         return batch
 
 
+class _ObservationFailed(ObservationError):
+    """An observation error that also carries the outcome of the best-effort failure health post."""
+
+    def __init__(self, code: str, health: str) -> None:
+        super().__init__(code)
+        self.health = health
+
+
+def _publish_health(ok: bool, *, deadline: float) -> str:
+    """Tell the Hub whether this observation succeeded: (ok|error|skipped) is the post outcome. Never raises.
+
+    The Hub stamps its own receipt time, so no timestamp is sent. Success means the Hub accepted
+    current presence, so a caller sends ok=True only after the session publication returned cleanly.
+    """
+    try:
+        _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
+    except ObservationError:
+        return "skipped"
+    try:
+        node_id = fleet_client.resolve_node_id()
+        if node_id == "unknown":
+            return "error"
+        body: dict[str, object] = {"node_id": node_id, "ok": ok}
+        # Memory rides the health report so placement can treat it as a load input. A node that cannot
+        # read it omits the key; the Hub then records the reading as unknown, never as zero.
+        memory = fleet_node_memory.memory_used()
+        if memory is not None:
+            body["memory_used"] = memory
+        try:
+            fleet_client_policy.observe_t3(body)
+        except fleet_client_policy.FleetPolicyClientError as exc:
+            # A Hub older than this node refuses the unknown field and would otherwise reject every
+            # health report, dropping this node out of placement. Resend once without memory.
+            if "memory_used" not in body or "unknown field 'memory_used'" not in str(exc.message):
+                raise
+            body.pop("memory_used")
+            _remaining(deadline, cap=1, reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS)
+            fleet_client_policy.observe_t3(body)
+    except ObservationError:
+        return "skipped"
+    except Exception:
+        return "error"
+    return "ok"
+
+
 def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
     deadline = time.monotonic() + OBSERVATION_BUDGET_SECONDS
     if publish:
         _require_node_auth()
-    payload = _native_metadata(t3_python, deadline)
-    recent, total, invalid = _active_threads(payload)
-    _remaining(deadline, cap=1)
+    try:
+        payload = _native_metadata(t3_python, deadline)
+        recent, total, invalid = _active_threads(payload)
+        _remaining(deadline, cap=1)
+    except Exception as exc:
+        if not publish:
+            raise
+        # A failing observer reports so; a missing report is just as unknown, once the TTL passes.
+        code = str(exc) if isinstance(exc, ObservationError) else "observation_failed"
+        raise _ObservationFailed(code, _publish_health(False, deadline=deadline)) from exc
     report: dict[str, object] = {
         "ok": not invalid,
         "mode": "publish" if publish else "inspect",
@@ -452,9 +519,22 @@ def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
         batch = _select_publication_batch(recent, harness="t3", deadline=deadline)
         if len(cast(dict[str, list[object]], payload)["threads"]) > PUBLISH_LIMIT:
             batch = _link_publication_batch(batch, payload, interpreter=t3_python, deadline=deadline)
-        report.update(_publish_recent(recent, harness="t3", deadline=deadline, batch=batch))
+        report.update(
+            _publish_recent(
+                recent,
+                harness="t3",
+                deadline=deadline,
+                batch=batch,
+                # Leave room for the health post, so a full-cap snapshot still reports health.
+                tail_reserve=fleet_client_policy.POLICY_TIMEOUT_SECONDS,
+            )
+        )
         report["skipped"] = cast(int, report["skipped"]) + invalid
         report["ok"] = not (report["truncated"] or invalid or report.get("error"))
+        # Never changes ok or the exit code. Rotation truncation and the inventory do not matter:
+        # only a clean session publication over a fully valid snapshot counts as current presence,
+        # so an invalid (skipped) active thread means the count may be low and is not reported healthy.
+        report["health"] = _publish_health(not (report.get("error") or invalid), deadline=deadline)
         # After sessions, within the same deadline. Never changes ok or the exit code.
         report["inventory"], report["inventory_dropped"] = _publish_inventory(payload, deadline=deadline)
     return report
@@ -467,6 +547,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         report = observe(t3_python=args.t3_python, publish=args.publish)
+    except _ObservationFailed as exc:
+        report = {
+            "ok": False,
+            "error": str(exc),
+            "observed": 0,
+            "published": 0,
+            "skipped": 0,
+            "health": exc.health,
+        }
     except ObservationError as exc:
         report = {"ok": False, "error": str(exc), "observed": 0, "published": 0, "skipped": 0}
     except Exception:

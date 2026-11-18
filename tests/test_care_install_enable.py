@@ -38,7 +38,7 @@ def care_home(tmp_path, monkeypatch):
     target = tmp_path / "ws"
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_is_windows", lambda: False)
-    monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_install_shipped_specs", lambda: ([], 0))
     monkeypatch.setattr(care_schedules, "effective_systemd_calendar", lambda timer_name: (None, None))
     monkeypatch.setattr(extras, "enabled", lambda: True)
     # Callers that pass no home (doctor, work brief) must still inspect the tmp home.

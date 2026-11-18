@@ -42,8 +42,21 @@ def test_line_lists_holds_and_leading_reason():
     assert briefing._outcome_ratchet_line(payload) == (
         "outcome_ratchet: generated_at=2026-11-17T07:30:00+00:00 "
         "mode=dry-run regression_holds=2 (skill-a, skill-b) "
-        "ineligibility_rate=1.0 leading=unattributed"
+        "ineligibility_rate=1.0 leading=unattributed pending_physical_actions=0"
     )
+
+
+def test_line_shows_the_pending_physical_action_count():
+    payload = {"present": True, "generated_at": NOW.isoformat(), "mode": "applied", "pending_physical_actions": 3}
+    assert briefing._outcome_ratchet_line(payload).endswith("pending_physical_actions=3")
+
+
+def test_line_shows_stale_only_when_nonzero():
+    base = {"present": True, "generated_at": NOW.isoformat(), "mode": "applied", "pending_physical_actions": 2}
+    assert briefing._outcome_ratchet_line({**base, "stale_physical_actions": 62}).endswith(
+        "pending_physical_actions=2 stale=62"
+    )
+    assert "stale=" not in briefing._outcome_ratchet_line({**base, "stale_physical_actions": 0})
 
 
 def test_line_marks_an_applied_run():
@@ -107,3 +120,24 @@ def test_brief_payload_carries_one_bounded_summary(tmp_path):
     assert ratchet["regression_holds"] == 2
     assert ratchet["regression_hold_ids"] == ["skill-a", "skill-b"]
     assert "regressions" not in ratchet
+
+
+def test_proposals_line_reads_the_persisted_counts():
+    base = {"present": True, "generated_at": NOW.isoformat(), "mode": "dry-run"}
+    assert briefing._outcome_proposals_line({"present": False}) == "outcome_proposals: no report yet"
+    assert briefing._outcome_proposals_line(None) == "outcome_proposals: no report yet"
+    assert briefing._outcome_proposals_line(base).startswith("outcome_proposals: not requested")
+    counts = {"filed": 2, "existing": 1, "flagged": 3, "skipped": 0}
+    assert briefing._outcome_proposals_line({**base, "outcome_proposals": counts}) == (
+        "outcome_proposals: filed=2 existing=1 flagged=3 skipped=0"
+    )
+
+
+def test_brief_payload_carries_the_proposal_counts_from_the_report(tmp_path):
+    counts = {"filed": 1, "existing": 0, "flagged": 2, "skipped": 4}
+    report_mod.write_report(tmp_path, [_Item("skill-a")], apply=False, generated_at=NOW, proposal_counts=counts)
+    ratchet = briefing._brief_payload(tmp_path)["outcome_ratchet"]
+    assert ratchet["outcome_proposals"] == counts
+
+    report_mod.write_report(tmp_path, [_Item("skill-a")], apply=False, generated_at=NOW)
+    assert briefing._brief_payload(tmp_path)["outcome_ratchet"]["outcome_proposals"] is None

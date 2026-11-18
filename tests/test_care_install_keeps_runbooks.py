@@ -69,7 +69,7 @@ def test_memory_care_init_keeps_edited_runbook_without_force(tmp_path):
     _assert_missing_shipped_runbooks_added(runbooks, edited.name)
 
 
-def test_memory_care_force_init_keeps_edited_runbook(tmp_path):
+def test_memory_care_force_init_replaces_edited_shipped_runbook_only_after_a_backup(tmp_path):
     target = tmp_path / "ws"
     target.mkdir()
     assert memory_cmd.init(target=target) == 0
@@ -77,7 +77,8 @@ def test_memory_care_force_init_keeps_edited_runbook(tmp_path):
 
     assert memory_cmd.init(target=target, force=True, with_runbooks=True) == 0
 
-    assert edited.read_bytes() == original
+    assert edited.read_bytes() != original
+    assert [path.read_bytes() for path in runbooks.glob(f"{edited.name}.bak-*")] == [original]
     _assert_missing_shipped_runbooks_added(runbooks, edited.name)
 
 

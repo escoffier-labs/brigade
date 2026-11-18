@@ -35,6 +35,8 @@ from .. import run_checkpoint
 from .. import run_budget
 from .. import run_dirfd
 from .. import run_events
+from .. import run_export_projection
+from .. import runs_privacy
 from .. import run_journal
 from .. import run_lifecycle
 from .. import run_projector
@@ -629,37 +631,62 @@ def write_run_handoff(
     now: datetime | None = None,
     outcome_id: str | None = None,
     outcome_digest: str | None = None,
+    status: str = "ok",
 ) -> Path:
-    timestamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d-%H%M")
-    safe_task = _one_line(task)
-    path = inbox / f"{timestamp}-brigade-run-{_slug(safe_task)}.md"
-    worker_summary = (
-        "\n".join(
-            f"- {result.worker}: {'ok' if result.ok else 'failed'}"
-            + (f" ({_one_line(result.detail)})" if result.detail else "")
-            for result in worker_results
-        )
-        or "- no workers dispatched"
-    )
-    assignment_summary = (
-        "\n".join(
-            f"- stage {assignment.stage} -> {assignment.worker}: {_one_line(assignment.task)}"
-            for assignment in assignments
-        )
-        or "- no worker assignments"
-    )
-    artifact_line = f"- artifacts: `{output_dir}`" if output_dir is not None else "- artifacts: none"
-    cwd_line = f"- cwd: `{cwd}`" if cwd is not None else "- cwd: not set"
-    mode_line = "- mode: read-only" if read_only else "- mode: normal"
-    document_content = _safe_document_content(
-        f"""### Brigade run: {_slug(safe_task)}
-- task: {safe_task}
-{artifact_line}
-{cwd_line}
-{mode_line}
+    """Write the memory handoff note for a finished run.
 
-Final answer:
-{final_text}
+    The note is a readable surface, so it carries the run id, status, mode,
+    outcome counts and timestamps only. Task text, assignment text, worker
+    detail, final text, cwd and absolute paths stay in the local run directory
+    (#2046). The task and worker name digests reuse the export projection key so
+    they match a keyed export digest on the same host.
+    """
+    recorded_at = now or datetime.now(timezone.utc)
+    timestamp = recorded_at.strftime("%Y-%m-%d-%H%M")
+    recorded_iso = _utc_iso(recorded_at)
+    try:
+        key: bytes | None = run_export_projection.require_digest_key(
+            run_export_projection.digest_key_target(output_dir if output_dir is not None else inbox)
+        )
+    except run_export_projection.RunExportProjectionError:
+        # A refused digest key must not fail the run or leak raw text.
+        key = None
+    raw_run_id = output_dir.name if output_dir is not None and output_dir.name else "unknown"
+    if raw_run_id == "unknown" or runs_privacy.is_generated_run_id(raw_run_id):
+        run_id = raw_run_id
+    elif key is not None:
+        run_id = runs_privacy.digest_string(key, raw_run_id)
+    else:
+        run_id = "<run-id-digest-unavailable>"
+    status_text = _one_line(str(status)) or "unknown"
+    mode_text = "read-only" if read_only else "normal"
+    ok_count = sum(1 for result in worker_results if result.ok)
+    failed_count = len(worker_results) - ok_count
+    if key is None:
+        task_lines = "- task digest: unavailable (per-host digest key not readable)"
+        worker_summary = (
+            "- worker names withheld: per-host digest key not readable" if worker_results else "- no workers dispatched"
+        )
+    else:
+        task_digest = run_export_projection.digest_prompt(key, _one_line(task))
+        task_lines = f"- task digest: {task_digest['digest']}\n- task chars: {task_digest['chars']}"
+        worker_summary = (
+            "\n".join(
+                "- worker "
+                + run_export_projection.digest_prompt(key, _one_line(result.worker))["digest"]
+                + f": {'ok' if result.ok else 'failed'}"
+                for result in worker_results
+            )
+            or "- no workers dispatched"
+        )
+    path = inbox / f"{timestamp}-brigade-run-{_slug(run_id)}.md"
+    document_content = _safe_document_content(
+        f"""### Brigade run {run_id}
+- status: {status_text}
+- mode: {mode_text}
+- recorded at: {recorded_iso}
+- assignments: {len(assignments)}
+- workers: {ok_count} ok, {failed_count} failed
 """
     )
     body = f"""# Memory Handoff
@@ -670,27 +697,29 @@ project-context
 
 ## Title
 
-Brigade run completed: {_slug(safe_task)}
+Brigade run completed: {run_id}
 
 ## Summary
 
-Brigade completed a bounded plan-dispatch-synthesize run and produced a final answer. This handoff captures the task, assignments, worker status, artifact path, and final result for memory ingestion.
+Brigade completed a bounded plan-dispatch-synthesize run. This note records the
+run identity, outcome counts and timestamps for memory ingestion. Task text and
+generated text stay in the local run directory.
 
 ## Durable facts
 
-- task: {safe_task}
-{cwd_line}
-{artifact_line}
-{mode_line}
-- orchestrated assignments:
-{assignment_summary}
-- worker status:
+- run id: {run_id}
+- status: {status_text}
+- mode: {mode_text}
+- recorded at: {recorded_iso}
+{task_lines}
+- assignments: {len(assignments)}
+- workers: {ok_count} ok, {failed_count} failed
 {worker_summary}
 
 ## Evidence
 
-{artifact_line}
-- final answer captured in this handoff
+- run artifacts: `<run-dir>`
+- generated text: local run directory only
 
 ## Recommended memory action
 
@@ -708,7 +737,8 @@ no-card
     path.write_text(body)
     if output_dir is not None or outcome_id:
         parent_kind = "outcome" if outcome_id else "run"
-        parent_id = outcome_id if outcome_id else output_dir.name if output_dir is not None else ""
+        # The sidecar sits in the ingest inbox too, so it carries the same safe run id as the note.
+        parent_id = outcome_id if outcome_id else run_id if output_dir is not None else ""
         localio.write_json(
             causal_receipt.handoff_sidecar_path(path),
             causal_receipt.recorded_handoff(

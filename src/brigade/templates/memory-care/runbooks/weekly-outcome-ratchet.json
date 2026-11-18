@@ -9,7 +9,7 @@
     },
     {
       "id": "reconcile",
-      "run": "brigade outcome reconcile --target . --report"
+      "run": "brigade outcome reconcile --target . --report --proposals"
     }
   ]
 }

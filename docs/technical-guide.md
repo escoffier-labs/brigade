@@ -1748,7 +1748,11 @@ brigade security scan --target . --import-findings
 
 `brigade runs serve` is a foreground loopback Run View over the versioned
 runs JSON contracts. It is read-only, never installed as a service, and is
-not started by `run`, `doctor`, or `brief`.
+not started by `run`, `doctor`, or `brief`. The Run View, `runs list --json`,
+and `runs show --json` replace prompt and generated text with a keyed digest
+object and never carry an absolute path. Pass `--show-task` to `runs list` or
+`runs show` for a bounded 80-character task preview in JSON output. The Run
+View has no preview mode.
 
 When `.brigade/code-graph/code-graph.db` is present, `brigade run` can attach bounded brigade-code-graph context. If pending upstream drift state is available, it can also attach a drift impact brief. `run.json` records the shared brief budget, attached brief names, byte counts, and truncation flags.
 

@@ -517,8 +517,9 @@ pub fn hold<T: ReadTx + ?Sized>(
 }
 
 /// Recomputed at preflight and apply from current hub heads, never report metrics.
-/// Only `append_evidence` and `anchor_blocks` can pass. Both change bytes search
-/// never reads, so each target's ranking projection must come out identical.
+/// `append_evidence` and `anchor_blocks` change bytes search never reads, so each
+/// target's ranking projection must come out identical. An exact-duplicate merge
+/// cannot, so `merge_gate` admits it under bounded drift instead.
 fn real_scope_hold<T: ReadTx + ?Sized>(
     tx: &T,
     proposal: &Json,
@@ -536,12 +537,17 @@ fn real_scope_hold<T: ReadTx + ?Sized>(
     if proposal["tier"] != 0 {
         return Ok(Some("retrieval_eval_projection_changed"));
     }
-    if proposal["ops"].as_array().is_none_or(|ops| {
-        ops.is_empty()
-            || ops
+    let ops = proposal["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let merging = ops.iter().any(super::merge_gate::is_merge);
+    if merging && !ops.iter().all(super::merge_gate::is_merge) {
+        return Ok(Some(super::merge_gate::MIXED_OPS));
+    }
+    if ops.is_empty()
+        || (!merging
+            && ops
                 .iter()
-                .any(|op| !matches!(string(op, "type"), "append_evidence" | "anchor_blocks"))
-    }) {
+                .any(|op| !matches!(string(op, "type"), "append_evidence" | "anchor_blocks")))
+    {
         return Ok(Some("retrieval_eval_projection_changed"));
     }
     let cards = super::proposals::cards(proposal);
@@ -552,16 +558,23 @@ fn real_scope_hold<T: ReadTx + ?Sized>(
     if super::proposal_tiers::lineage_review(tx, proposal)? {
         return Ok(Some("retrieval_eval_lineage_exposed"));
     }
+    // Search answers from the published graph. The scan above reads the live
+    // store, which no longer shows an edge its owner has since dropped.
+    let published_lineage = |target: &Json| {
+        live.snapshot
+            .as_ref()
+            .is_some_and(|s| s.in_lineage(string(target, "scope"), string(target, "card_id")))
+    };
+    if merging {
+        if cards.iter().any(&published_lineage) {
+            return Ok(Some("retrieval_eval_lineage_exposed"));
+        }
+        return super::merge_gate::hold(tx, proposal, live);
+    }
     for target in cards {
         let scope = string(target, "scope");
         let id = string(target, "card_id");
-        // Search answers from the published graph. The scan above reads the live
-        // store, which no longer shows an edge its owner has since dropped.
-        if live
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.in_lineage(scope, id))
-        {
+        if published_lineage(target) {
             return Ok(Some("retrieval_eval_lineage_exposed"));
         }
         let rows = tx.query(&format!("SELECT c.revision,c.content_hash,c.trust,b.bytes,c.writer_class,{},c.state,c.writer FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", super::index::ORIGIN_AUTOMATED_SQL), &[ops::t(scope),ops::t(id)])?;

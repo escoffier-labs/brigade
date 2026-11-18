@@ -214,7 +214,7 @@ def test_render_ratchet_panel_marks_a_stale_report():
 def test_render_ratchet_panel_absent_and_error_states():
     absent = outcome_rank.render({"ranking": []}, "unused")
     assert "No outcome ratchet report yet" in absent
-    assert "outcome reconcile --target . --report" in absent
+    assert "outcome reconcile --target . --report --proposals" in absent
 
     failed = outcome_rank.render({"ranking": [], "ratchet": {"error": "ratchet boom"}}, "unused")
     assert "ratchet boom" in failed
@@ -252,3 +252,57 @@ def test_render_escapes_ratchet_values():
     assert "<b>boom</b>" not in fragment
     assert "&lt;script&gt;" in fragment
     assert "&lt;b&gt;boom&lt;/b&gt;" in fragment
+
+
+def test_render_ratchet_panel_shows_the_stale_pending_count():
+    base = {"version": 1, "generated_at": "2026-11-17T07:30:00+00:00", "regressions": []}
+    stale = outcome_rank.render(
+        {
+            "ranking": [],
+            "ratchet": {
+                **base,
+                "summary": {"decisions": 1, "pending_physical_actions": 2, "stale_physical_actions": 5},
+            },
+        },
+        "unused",
+    )
+    assert "pending physical actions 2 (stale 5)" in stale
+
+    quiet = outcome_rank.render(
+        {
+            "ranking": [],
+            "ratchet": {
+                **base,
+                "summary": {"decisions": 1, "pending_physical_actions": 2, "stale_physical_actions": 0},
+            },
+        },
+        "unused",
+    )
+    assert "pending physical actions 2;" in quiet
+    assert "(stale" not in quiet
+
+
+def test_render_ratchet_panel_shows_the_inbox_proposal_counts():
+    base = {
+        "version": 1,
+        "generated_at": "2026-11-17T07:30:00+00:00",
+        "apply": False,
+        "regressions": [],
+    }
+    filed = outcome_rank.render(
+        {
+            "ranking": [],
+            "ratchet": {
+                **base,
+                "summary": {
+                    "decisions": 3,
+                    "outcome_proposals": {"filed": 2, "existing": 1, "flagged": 4, "skipped": 0},
+                },
+            },
+        },
+        "unused",
+    )
+    assert "inbox proposals filed 2, existing 1, flagged 4, skipped 0" in filed
+
+    plain = outcome_rank.render({"ranking": [], "ratchet": {**base, "summary": {"decisions": 3}}}, "unused")
+    assert "inbox proposals not requested" in plain

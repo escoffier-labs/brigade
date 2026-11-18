@@ -10,7 +10,7 @@ def _iso(dt: datetime) -> str:
 
 
 def test_fetch_uses_runs_list_and_verify_runs_contracts(monkeypatch, tmp_path):
-    brigade_payload = {"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0}
+    brigade_payload = {"schema": "brigade.runs-list.v2", "runs": [], "skipped_invalid": 0}
     verify_payload = {"runs": []}
     calls: list[tuple[str, Path, list[str]]] = []
 
@@ -43,7 +43,7 @@ def test_fetch_uses_runs_list_and_verify_runs_contracts(monkeypatch, tmp_path):
 def test_render_brigade_runs_from_versioned_list_contract():
     payload = {
         "brigade": {
-            "schema": "brigade.runs-list.v1",
+            "schema": "brigade.runs-list.v2",
             "skipped_invalid": 2,
             "runs": [
                 {
@@ -77,6 +77,36 @@ def test_render_brigade_runs_from_versioned_list_contract():
     assert fragment.index("build the &lt;thing&gt;") < fragment.index("<summary>Run ID</summary>")
 
 
+def test_render_brigade_runs_renders_task_digest_cleanly():
+    """Issue #2046 review: the Task column shows a digest label, not the mapping repr."""
+    digest = "hmac-sha256:" + "a" * 64
+    payload = {
+        "brigade": {
+            "schema": "brigade.runs-list.v2",
+            "skipped_invalid": 0,
+            "runs": [
+                {
+                    "run_id": "20260101-090000-aaaa",
+                    "status": "ok",
+                    "task": {"digest": digest, "chars": 123},
+                    "started_at": "2026-01-01T09:00:00Z",
+                    "duration_seconds": 4.5,
+                    "mode": "normal",
+                    "resume_available": False,
+                }
+            ],
+        },
+        "verify": {"runs": []},
+    }
+
+    fragment = run_timeline.render(payload, "unused")
+
+    assert "digest aaaaaaaaaaaa (123 chars)" in fragment
+    assert "{&#x27;digest&#x27;" not in fragment
+    assert "'digest'" not in fragment
+    assert digest not in fragment
+
+
 def test_render_brigade_runs_error_is_empty_state_with_diagnostic():
     payload = {
         "brigade": {"error": "error: runs directory not found: <root>"},
@@ -94,8 +124,8 @@ def test_render_brigade_runs_error_is_empty_state_with_diagnostic():
 
 def test_run_detail_docs_name_verification_command_field():
     text = Path(__file__).resolve().parents[1].joinpath("docs", "receipt-schemas.md").read_text(encoding="utf-8")
-    start = text.index("### `brigade.run-detail.v1`")
-    end = text.index("### `brigade.run-watch.v1`")
+    start = text.index("### `brigade.run-detail.v2`")
+    end = text.index("### `brigade.run-watch.v2`")
     section = text[start:end]
     assert "`command`" in section
     assert "command label" not in section
@@ -121,7 +151,7 @@ def test_render_brigade_runs_cli_failure_is_error_state_not_empty():
 
 def test_render_lists_verify_runs_newest_first_with_bounded_receipts():
     payload = {
-        "brigade": {"schema": "brigade.runs-list.v1", "runs": [], "skipped_invalid": 0},
+        "brigade": {"schema": "brigade.runs-list.v2", "runs": [], "skipped_invalid": 0},
         "verify": {
             "runs": [
                 {
@@ -202,7 +232,7 @@ def test_summary_strip_counts_week_runs_failures_and_last_run(monkeypatch):
     old_run = now - timedelta(days=14)
     payload = {
         "brigade": {
-            "schema": "brigade.runs-list.v1",
+            "schema": "brigade.runs-list.v2",
             "runs": [
                 {
                     "run_id": "b-week",
@@ -239,7 +269,7 @@ def test_summary_strip_counts_unparseable_stamps_as_unknown_age(monkeypatch):
     now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(run_timeline, "_now", lambda: now)
     payload = {
-        "brigade": {"schema": "brigade.runs-list.v1", "runs": []},
+        "brigade": {"schema": "brigade.runs-list.v2", "runs": []},
         "verify": {"runs": [{"run_id": "v-bad", "status": "completed", "started_at": "not-a-timestamp"}]},
     }
 
@@ -269,7 +299,7 @@ def test_render_timestamps_use_relative_time_in_rows(monkeypatch):
     now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(run_timeline, "_now", lambda: now)
     payload = {
-        "brigade": {"schema": "brigade.runs-list.v1", "runs": []},
+        "brigade": {"schema": "brigade.runs-list.v2", "runs": []},
         "verify": {
             "runs": [
                 {

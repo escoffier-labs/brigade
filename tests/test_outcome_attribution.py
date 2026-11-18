@@ -586,9 +586,8 @@ def _append_unresolved_observed_hurt(target: Path, *, sessions: int, age_days: f
 
 
 def test_reconcile_holds_install_on_observed_hurt_and_never_rolls_back(scoreable_target, capsys, monkeypatch):
-    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready, _stub_execute
+    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready
 
-    _stub_execute(monkeypatch)
     _seed_dual_gate_promotion_ready(scoreable_target)
     _append_unresolved_observed_hurt(scoreable_target, sessions=2)
 
@@ -603,9 +602,8 @@ def test_reconcile_holds_install_on_observed_hurt_and_never_rolls_back(scoreable
 
 
 def test_reconcile_promoted_artifact_with_observed_hurt_is_not_rolled_back(scoreable_target, capsys, monkeypatch):
-    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready, _stub_execute
+    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready
 
-    _stub_execute(monkeypatch)
     _seed_dual_gate_promotion_ready(scoreable_target)
     # No cooldown and a one-clear bump threshold: the second pass really decides, and
     # without the observed row it would bump (control), so a veto is visible, not vacuous.
@@ -631,9 +629,8 @@ def test_reconcile_promoted_artifact_with_observed_hurt_is_not_rolled_back(score
 
 
 def test_one_observed_session_does_not_hold_reconcile(scoreable_target, capsys, monkeypatch):
-    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready, _stub_execute
+    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready
 
-    _stub_execute(monkeypatch)
     _seed_dual_gate_promotion_ready(scoreable_target)
     _append_unresolved_observed_hurt(scoreable_target, sessions=1)
     assert outcome_cmd.reconcile(target=scoreable_target, apply=False, json_output=True) == 0
@@ -642,9 +639,8 @@ def test_one_observed_session_does_not_hold_reconcile(scoreable_target, capsys, 
 
 
 def test_reconcile_hold_releases_once_the_hurt_ages_out(scoreable_target, capsys, monkeypatch):
-    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready, _stub_execute
+    from tests.test_scorecard_reconcile import _seed_dual_gate_promotion_ready
 
-    _stub_execute(monkeypatch)
     _seed_dual_gate_promotion_ready(scoreable_target)
     _append_unresolved_observed_hurt(scoreable_target, sessions=2, age_days=31)
     assert outcome_cmd.reconcile(target=scoreable_target, apply=False, json_output=True) == 0

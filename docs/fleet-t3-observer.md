@@ -69,9 +69,14 @@ fsmonitor disabled. No dirty paths are attributed to a thread. Non-repository
 workspaces use the existing node-scoped `local:` path-hash identity.
 `dirty_paths=()` and `dirty_truncated=True` mean dirty-file ownership is unknown.
 
-A poll has a total 15-second work budget, native timeout at most eight seconds,
-and up to 50 publication attempts while time permits. The caller should allow five
-additional seconds for process cleanup with an outer 20-second hard timeout.
+A poll has a total 15-second work budget. The first native snapshot may use the
+rest of it minus a reserve for publishing (the session call timeout plus the policy
+call timeout, plus one safety margin, so about 10 seconds), and the optional detail
+pass keeps its eight-second cap, less the policy call timeout. Up to 50 publication
+attempts while time permits, leaving the policy call timeout free after the loop for
+the health post. The observer finishes inside its own 15-second budget. The per-host
+telemetry script that runs it applies a subprocess timeout of its own (17 seconds in
+the reference script), which must stay above 15 seconds.
 Every native/Git call uses the remaining deadline. Publication starts only when
 the public client's fixed two-second call plus 250 ms fits. A fast Hub can
 refresh all 13 active threads in one pass. Slow calls or the 50-row cap leave
@@ -151,6 +156,86 @@ A machine without a binding is stored but read as unbound. Reads recompute the
 binding from the current policy, so a policy change applies without a
 republish, and placement must skip unbound rows.
 
+## Observer health
+
+Presence rows expire after 300 seconds, so a node whose observer is failing looks
+like a node with no sessions. Each `--publish` run therefore also sends the
+node-token `t3-observe` policy action, after sessions and before the inventory:
+`ok: true` only when the snapshot parsed, the session publication returned
+without an error and no active thread was skipped as invalid (rotation truncation
+and the inventory outcome do not matter),
+and `ok: false` when the observation failed and time remains. The report adds
+`health` with `ok`, `error` or `skipped` (the post outcome). A failed post never
+changes `ok`, the exit code or session publishing.
+
+The Hub stamps its own clock when it receives the report, never a node-supplied
+time, in the optional `fleet_t3_observations` table (created on the first
+report). A node with a row whose last success is missing or at least 300 seconds
+old, the same as the session TTL, has unknown T3 sessions. With a 120-second
+timer a node is still known after two missed cycles (age 240 seconds) and unknown
+on the third (age 360 seconds). `GET /sessions` adds `nodes_unknown`, and
+`brigade fleet sessions` prints a footer naming those nodes (with `--json`,
+stdout stays the bare session list and one warning line goes to stderr). If the
+health table cannot be read, `nodes_unknown_error` is set. Session views leave a
+node with no row alone.
+
+Placement is stricter: it trusts a session count only for a node whose observer
+succeeded within 300 seconds. A stale node, a node that only ever failed, a node
+with no health row (every host runs the observer, so a missing row means the node
+is not reporting) and an unreadable health table all make the machine ineligible.
+A node with no row at all gets its own reason, `t3-health-missing`, so it can be
+told apart from a failing or stale node, which gets `sessions-unknown`. A node can
+only write its own row.
+
+Rollout order: upgrade the Hub first, then each node's observer. Until a node
+posts its first health report, placement has `t3-health-missing` for it, so
+placement recommends nothing until every candidate machine has reported once
+(about one observer cycle after its upgrade).
+
+### Memory reading
+
+The same health report carries an optional `memory_used`: this node's memory-used
+fraction, `1 - available / total`, rounded to four decimals in 0 to 1. Linux
+reads `MemTotal` and `MemAvailable` from `/proc/meminfo`. Windows calls
+`GlobalMemoryStatusEx`. Any other platform, or any read error, sends no key at
+all, so an unreadable machine reads as unknown, never idle. The Hub refuses a
+value that is not a finite number in 0 to 1 (a boolean is not a number) with a
+400 and stores nothing. An explicit `"memory_used": null` behaves like an
+omitted key.
+
+The reading is only as good as `MemAvailable`. On a ZFS host, ARC cache does not
+count as available, so the reading can sit well above the memory a process could
+actually get. A container without lxcfs sees the host's `/proc/meminfo`, not its
+own cgroup limit. Compare a node's readings with its real headroom before relying
+on memory to shed it.
+
+The Hub keeps the reading in a `memory_used` column of `fleet_t3_observations`,
+written only when `ok` is true, so a failed attempt keeps the last good reading,
+and a success without memory clears it. A reading counts only while the node's
+last success is under 300 seconds old, the same rule as the session count, so it
+never outlives the session count beside it. A Hub whose table predates this
+column adds it on the first report that arrives, and `required.json` lists the
+pre-memory shape as a reviewed variant, so the Rust engine stays ready before
+and after that upgrade.
+
+Placement takes the maximum of CPU load, the session ratio and memory. A machine
+with no fresh reading is left out of that maximum and gets the informational
+reason `memory-unknown`, which never changes `eligible`. A machine over the
+threshold on memory alone is shed with `machine-load-shed`. The recommendation's
+`load_inputs.memory` is null when unknown.
+
+Rollout order: upgrade the Hub first, then each node's observer. An old Hub
+rejects the unknown `memory_used` field. If a node does run ahead of its Hub, the
+observer sees that exact refusal and resends the health report once without
+memory, so the node stays placeable on CPU and sessions instead of dropping out.
+
+Causes that keep a node unknown until fixed: an active thread that stays invalid
+(its `invalid_rows` count is non-zero every run, so `ok: true` is never posted), a
+`rotation_state_unavailable` error from an unreadable cursor file, and a host that
+has no T3 install or cannot reach the native client, because its observer fails
+every run and posts `ok: false`. Read the observer's JSON (`error`, `invalid_rows`,
+`health`) on that host to tell which.
+
 ## Placement
 
 `brigade fleet place --repo <canonical key> [--threshold 0.70] [--json]` asks the
@@ -189,8 +274,9 @@ Placement reuses the routing candidate evaluator and adds three checks:
   `concurrency`. Missing or stale telemetry, or a null `load`, excludes the
   machine (`machine-unknown-telemetry`, `machine-stale-telemetry`,
   `machine-load-unknown`). If the Hub cannot read its live session counts, no
-  machine is eligible (`sessions-unknown`) rather than reading as zero. Node memory joins this maximum
-  once nodes report it.
+  machine is eligible (`sessions-unknown`) rather than reading as zero. A node's
+  reported memory-used fraction is a third input to the maximum (see Memory
+  reading above); a missing reading adds only the informational `memory-unknown`.
 - A machine at or over the threshold (default 0.70, range 0 to 1) is shed
   (`machine-load-shed`).
 

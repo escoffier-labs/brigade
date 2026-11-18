@@ -68,6 +68,9 @@ class Heartbeat(unittest.TestCase):
                     compare("GET", path)
                     compare("GET", path, who="bogus")
                     compare("GET", path, who=None)
+                # GET /sessions is served by the Python upstream, so the native hub's body also
+                # carries the T3 observer health view (nodes_unknown) the Python hub adds.
+                self.assertIn("nodes_unknown", json.loads(compare("GET", "/sessions")))
                 for body in (
                     None,
                     [],

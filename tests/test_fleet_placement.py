@@ -21,6 +21,7 @@ from brigade import (
     fleet_node_projects,
     fleet_policy,
     fleet_quota,
+    fleet_t3_health,
 )
 from brigade.fleet_hub import FleetHubError
 from brigade.fleet_hub_claims import ClaimFenceError
@@ -102,6 +103,19 @@ def _place(conn, *, caller: str = NODE_LINUX, **body) -> dict:
     return fleet_hub_placement.place(conn, {"action": "place", "repo": REPO, **body}, caller)
 
 
+def _health(conn, node: str, success_age: float | None, memory: float | None = None) -> None:
+    """A health row whose last success is ``success_age`` seconds before the placement clock."""
+    fleet_t3_health.ensure_schema(conn)
+    stamp = _now()
+    success = None if success_age is None else (stamp - timedelta(seconds=success_age)).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO fleet_t3_observations "
+        "(node_id, last_success_at, last_attempt_at, updated_at, memory_used) VALUES (?, ?, ?, ?, ?)",
+        (node, success, stamp.isoformat(), stamp.isoformat(), memory),
+    )
+    conn.commit()
+
+
 @pytest.fixture()
 def conn(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_hub_routing, "_now", _now)
@@ -112,6 +126,8 @@ def conn(tmp_path, monkeypatch):
         fleet_hub_policy.save_policy(connection, _document(), expected_version=1, actor="operator", reason="routing")
         _save(connection)
         _fresh_quota(connection)
+        for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD):
+            _health(connection, node, 5)  # a healthy T3 observer: session counts are trusted by default
         yield connection
     finally:
         connection.close()
@@ -146,7 +162,7 @@ def test_origin_under_threshold_stays_local(fleet):
     assert chosen["machine"] == "worker-linux-1" and "node_id" not in chosen
     assert chosen["environment_id"] == ENV[NODE_LINUX] and chosen["project_id"] == PROJECT[NODE_LINUX]
     assert chosen["effective_load"] == 0.1
-    assert chosen["load_inputs"] == {"cpu": 0.1, "sessions": 0, "concurrency": 1}
+    assert chosen["load_inputs"] == {"cpu": 0.1, "sessions": 0, "memory": None, "concurrency": 1}
     assert chosen["telemetry_observed_at"] and chosen["inventory_observed_at"]
     assert result["policy_version"] == fleet_hub_policy.current_policy(fleet)["revision"]
     assert result["policy_digest"].startswith("sha256:")
@@ -228,7 +244,8 @@ def test_unbound_and_stale_inventory_are_excluded_with_named_reasons(conn):
     result = _place(conn, caller=NODE_LINUX_2)
     assert "inventory-unbound" in _reasons(result, "worker-linux-2")
     # Another machine's inventory detail is opaque to the caller; its own detail is kept.
-    assert _reasons(result, "worker-cloud-1") == ["not-placeable"]
+    # No node reports memory here, so memory-unknown is the only extra, informational reason.
+    assert _reasons(result, "worker-cloud-1") == ["not-placeable", "memory-unknown"]
     assert "inventory-stale" in _reasons(_place(conn, caller=NODE_CLOUD), "worker-cloud-1")
     assert result["recommended"]["machine"] == "worker-linux-1"
     assert result["origin_machine"] == "worker-linux-2" and result["reason"] == "peer-ranked"
@@ -573,10 +590,11 @@ def test_other_machines_inventory_detail_collapses_to_one_opaque_reason(conn):
     caller = _place(conn, caller=NODE_LINUX_2)
     assert caller["recommended"]["machine"] == "worker-linux-1"
     assert "inventory-unbound" in _reasons(caller, "worker-linux-2")  # its own machine keeps the detail
-    assert _reasons(caller, "worker-cloud-1") == ["not-placeable"]
+    # No node reports memory here, so memory-unknown is the only extra, informational reason.
+    assert _reasons(caller, "worker-cloud-1") == ["not-placeable", "memory-unknown"]
     outsider = _place(conn, caller=CONTROLLER)
     for machine in ("worker-linux-2", "worker-cloud-1"):
-        assert _reasons(outsider, machine) == ["not-placeable"]
+        assert _reasons(outsider, machine) == ["not-placeable", "memory-unknown"]
     detail = {"inventory-unbound", "inventory-stale", "inventory-invalid", "repo-not-placeable"}
     assert not detail & {r for row in outsider["candidates"] for r in row["reasons"]}
     # The caller still gets the recommended peer's ids, which is the feature.
@@ -677,3 +695,234 @@ def test_a_caller_transaction_is_refused_not_borrowed(fleet):
     finally:
         fleet.rollback()
     assert _place(fleet)["status"] == "recommended"
+
+
+# --- T3 observer health: a failing observer is unknown sessions, never zero (#2166 slice 6) ---------------
+
+
+def test_a_node_with_a_stale_observer_is_sessions_unknown_and_ineligible(fleet):
+    _health(fleet, NODE_LINUX, 301)
+    result = _place(fleet)
+    reasons = _reasons(result, "worker-linux-1")
+    row = next(r for r in result["candidates"] if r["machine"] == "worker-linux-1")
+    assert "sessions-unknown" in reasons and row["eligible"] is False and row["effective_load"] is None
+    # The origin was ineligible, so a healthy peer is chosen instead.
+    assert result["status"] != "none" and result["recommended"]["machine"] != "worker-linux-1"
+    for peer in ("worker-linux-2", "worker-cloud-1"):
+        assert "sessions-unknown" not in _reasons(result, peer)
+
+
+def test_a_failing_observer_with_no_live_rows_is_not_zero_sessions(fleet):
+    # No presence rows exist for this node, which is exactly what an expired T3 observer looks like.
+    assert fleet_hub_sessions.count_live_by_node(fleet, now_epoch=_now().timestamp()) == {}
+    baseline = _place(fleet)
+    assert baseline["recommended"]["load_inputs"]["sessions"] == 0
+    _health(fleet, NODE_LINUX, 9999)
+    _health(fleet, NODE_LINUX_2, 9999)
+    _health(fleet, NODE_CLOUD, 9999)
+    result = _place(fleet)
+    assert result["status"] == "none" and result["recommended"] is None
+    assert result["reason"] == "no-eligible-candidate"
+    for row in result["candidates"]:
+        assert "sessions-unknown" in row["reasons"] and row["eligible"] is False and row["effective_load"] is None
+
+
+def test_a_failed_attempt_with_no_success_is_unknown(fleet):
+    _health(fleet, NODE_LINUX, None)
+    assert "sessions-unknown" in _reasons(_place(fleet), "worker-linux-1")
+
+
+@pytest.mark.parametrize(("age", "unknown"), [(120, False), (240, False), (299, False), (300, True), (361, True)])
+def test_placement_trusts_a_count_below_the_ttl_and_not_from_it(fleet, age, unknown):
+    _health(fleet, NODE_LINUX, age)
+    assert ("sessions-unknown" in _reasons(_place(fleet), "worker-linux-1")) is unknown
+
+
+def test_an_idle_node_with_a_healthy_observer_stays_placeable(fleet):
+    _health(fleet, NODE_LINUX, 5)
+    result = _place(fleet)
+    assert result["status"] != "none" and result["recommended"]["machine"] == "worker-linux-1"
+    assert result["recommended"]["load_inputs"]["sessions"] == 0
+    assert "sessions-unknown" not in _reasons(result, "worker-linux-1")
+
+
+def test_a_node_with_no_health_row_gets_its_own_reason_in_placement(fleet):
+    # Every host runs the observer after rollout, so a missing row means the node is not reporting.
+    fleet.execute("DELETE FROM fleet_t3_observations WHERE node_id=?", (NODE_LINUX,))
+    fleet.commit()
+    result = _place(fleet)
+    row = next(r for r in result["candidates"] if r["machine"] == "worker-linux-1")
+    # Distinct from a stale or failing node, but just as ineligible.
+    assert "t3-health-missing" in row["reasons"] and "sessions-unknown" not in row["reasons"]
+    assert row["eligible"] is False and row["effective_load"] is None
+    assert result["recommended"]["machine"] != "worker-linux-1"
+    for peer in ("worker-linux-2", "worker-cloud-1"):
+        assert "t3-health-missing" not in _reasons(result, peer) and "sessions-unknown" not in _reasons(result, peer)
+
+
+def test_stale_and_missing_health_have_different_reasons(fleet):
+    _health(fleet, NODE_LINUX, 9999)
+    fleet.execute("DELETE FROM fleet_t3_observations WHERE node_id=?", (NODE_LINUX_2,))
+    fleet.commit()
+    result = _place(fleet)
+    assert "sessions-unknown" in _reasons(result, "worker-linux-1")
+    assert "t3-health-missing" not in _reasons(result, "worker-linux-1")
+    assert "t3-health-missing" in _reasons(result, "worker-linux-2")
+    assert "sessions-unknown" not in _reasons(result, "worker-linux-2")
+    assert result["recommended"]["machine"] == "worker-cloud-1"
+
+
+def test_a_hub_with_no_health_table_makes_every_machine_health_missing(fleet):
+    fleet.execute("DROP TABLE fleet_t3_observations")
+    fleet.commit()
+    before = _row_counts(fleet)
+    result = _place(fleet)
+    assert result["status"] == "none" and result["reason"] == "no-eligible-candidate"
+    for row in result["candidates"]:
+        assert "t3-health-missing" in row["reasons"] and row["eligible"] is False
+    # Reading creates nothing.
+    assert _row_counts(fleet) == before and "fleet_t3_observations" not in before
+
+
+def test_other_nodes_and_unconfigured_nodes_health_rows_change_nothing(fleet):
+    baseline = _place(fleet)
+    _health(fleet, "99999999-9999-4999-8999-999999999999", 9999)
+    assert _place(fleet) == baseline
+    _health(fleet, NODE_LINUX_2, 5)
+    assert _place(fleet) == baseline
+
+
+def test_a_healthy_busy_node_keeps_its_real_session_floor(fleet):
+    # The cloud machine has concurrency 2, so one live session is a 0.5 floor.
+    _health(fleet, NODE_CLOUD, 5)
+    _session(fleet, NODE_CLOUD, "live-session")
+    cloud = next(row for row in _place(fleet)["candidates"] if row["machine"] == "worker-cloud-1")
+    assert cloud["effective_load"] == 0.5 and cloud["eligible"] is True
+
+
+def test_stale_observer_hides_live_session_rows_instead_of_trusting_them(fleet):
+    # The node still has a live row, but its observer is failing: the count is not trusted either way.
+    _session(fleet, NODE_LINUX, "live-session")
+    _health(fleet, NODE_LINUX, 9999)
+    assert "sessions-unknown" in _reasons(_place(fleet), "worker-linux-1")
+
+
+def test_a_recovered_observer_makes_the_node_placeable_again(fleet):
+    _health(fleet, NODE_LINUX, 9999)
+    assert "sessions-unknown" in _reasons(_place(fleet), "worker-linux-1")
+    _health(fleet, NODE_LINUX, 0)
+    result = _place(fleet)
+    assert "sessions-unknown" not in _reasons(result, "worker-linux-1")
+    assert result["recommended"]["machine"] == "worker-linux-1"
+
+
+def test_an_unreadable_health_table_makes_every_machine_sessions_unknown(fleet, monkeypatch):
+    monkeypatch.setattr(fleet_t3_health, "classify_nodes", lambda *_a, **_k: None)
+    result = _place(fleet)
+    assert result["status"] == "none" and result["recommended"] is None
+    for row in result["candidates"]:
+        assert "sessions-unknown" in row["reasons"] and row["eligible"] is False
+
+
+def test_unknown_only_removes_eligibility(fleet):
+    before = {r["machine"] for r in _place(fleet)["candidates"] if r["eligible"]}
+    _health(fleet, NODE_LINUX, 9999)
+    after = {r["machine"] for r in _place(fleet)["candidates"] if r["eligible"]}
+    assert after <= before and before - after == {"worker-linux-1"}
+
+
+def test_placement_with_health_rows_still_writes_nothing(fleet):
+    _health(fleet, NODE_LINUX, 9999)
+    _health(fleet, NODE_LINUX_2, 5)
+    before = _row_counts(fleet)
+    _place(fleet)
+    assert _row_counts(fleet) == before
+
+
+# --- node memory as the third load input (#2710) ----------------------------------------------------------------
+
+
+def _row(result: dict, machine: str) -> dict:
+    return next(row for row in result["candidates"] if row["machine"] == machine)
+
+
+def test_effective_load_is_the_max_of_cpu_sessions_and_memory(fleet):
+    _observe(fleet, NODE_CLOUD, load=0.10, observed_at=_iso(_now() + timedelta(seconds=1)))
+    _session(fleet, NODE_CLOUD, "live-session-one")  # 1 of 2 slots: 0.5
+    _health(fleet, NODE_CLOUD, 5, memory=0.62)
+    assert _row(_place(fleet), "worker-cloud-1")["effective_load"] == 0.62
+    _health(fleet, NODE_CLOUD, 5, memory=0.30)  # lower memory never lowers the other floors
+    assert _row(_place(fleet), "worker-cloud-1")["effective_load"] == 0.5
+
+
+def test_a_machine_over_the_threshold_on_memory_alone_sheds(fleet):
+    _observe(fleet, NODE_LINUX, load=0.05, observed_at=_iso(_now() + timedelta(seconds=1)))
+    _health(fleet, NODE_LINUX, 5, memory=0.95)
+    result = _place(fleet)
+    row = _row(result, "worker-linux-1")
+    assert row["effective_load"] == 0.95 and row["eligible"] is False
+    assert "machine-load-shed" in row["reasons"] and "memory-unknown" not in row["reasons"]
+    assert result["recommended"]["machine"] != "worker-linux-1"
+
+
+def test_memory_is_reported_in_load_inputs_of_the_recommendation(fleet):
+    _health(fleet, NODE_LINUX, 5, memory=0.41)
+    chosen = _place(fleet)["recommended"]
+    assert chosen["machine"] == "worker-linux-1" and chosen["load_inputs"]["memory"] == 0.41
+
+
+def test_missing_memory_is_informational_and_never_changes_eligibility(fleet):
+    result = _place(fleet)  # no node reports memory yet
+    for row in result["candidates"]:
+        assert "memory-unknown" in row["reasons"]
+    baseline = {row["machine"]: (row["eligible"], row["effective_load"]) for row in result["candidates"]}
+    assert result["status"] != "none" and result["recommended"]["load_inputs"]["memory"] is None
+    for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD):
+        _health(fleet, node, 5, memory=0.01)
+    reporting = _place(fleet)
+    assert {row["machine"]: (row["eligible"], row["effective_load"]) for row in reporting["candidates"]} == baseline
+    assert all("memory-unknown" not in row["reasons"] for row in reporting["candidates"])
+
+
+def test_a_stale_memory_reading_is_unknown_not_trusted(fleet):
+    _health(fleet, NODE_LINUX, 9999, memory=0.99)  # an old success: the reading is as stale as the session count
+    row = _row(_place(fleet), "worker-linux-1")
+    assert "sessions-unknown" in row["reasons"] and "memory-unknown" in row["reasons"]
+    assert row["effective_load"] is None
+
+
+def test_an_unreadable_memory_read_is_unknown_for_every_machine_and_informational(fleet, monkeypatch):
+    for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD):
+        _health(fleet, node, 5, memory=0.99)
+    monkeypatch.setattr(fleet_t3_health, "memory_by_node", lambda conn, now=None, ttl=300: None)
+    result = _place(fleet)
+    for row in result["candidates"]:
+        assert "memory-unknown" in row["reasons"] and "machine-load-shed" not in row["reasons"]
+    assert result["status"] != "none" and result["recommended"]["load_inputs"]["memory"] is None
+
+
+def test_a_pre_memory_health_table_places_with_memory_unknown(fleet):
+    fleet.execute("DROP TABLE fleet_t3_observations")
+    fleet.execute(
+        "CREATE TABLE fleet_t3_observations (node_id TEXT NOT NULL PRIMARY KEY, last_success_at TEXT, "
+        "last_attempt_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    stamp = _now().isoformat()
+    for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD):
+        fleet.execute("INSERT INTO fleet_t3_observations VALUES (?, ?, ?, ?)", (node, stamp, stamp, stamp))
+    fleet.commit()
+    before = _row_counts(fleet)
+    result = _place(fleet)
+    assert result["status"] != "none"
+    assert all("memory-unknown" in row["reasons"] for row in result["candidates"])
+    # Reading never upgrades the old table: only a report does.
+    assert "memory_used" not in {row[1] for row in fleet.execute("PRAGMA table_info(fleet_t3_observations)")}
+    assert _row_counts(fleet) == before
+
+
+def test_placement_with_memory_stays_read_only_in_one_snapshot(fleet):
+    for node in (NODE_LINUX, NODE_LINUX_2, NODE_CLOUD):
+        _health(fleet, node, 5, memory=0.2)
+    before, changes = _row_counts(fleet), fleet.total_changes
+    _place(fleet)
+    assert _row_counts(fleet) == before and fleet.total_changes == changes and not fleet.in_transaction

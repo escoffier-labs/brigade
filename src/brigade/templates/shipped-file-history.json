@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "files": {
+    "runbook:.brigade/memory-care/runbooks/daily-care-pass.json": [
+      {
+        "sha256": "c65aa14cc90fa98f5f60176e920ef0f211394dc858259a38f0178f6558a8b7a8",
+        "tag": "v0.26.1"
+      },
+      {
+        "sha256": "5810fae8290e436eb842ee98a8705f49decd8ae785cbe05dbfb099eea759561c",
+        "tag": null
+      }
+    ],
+    "runbook:.brigade/memory-care/runbooks/daily-observability.json": [
+      {
+        "sha256": "d6ad3648dffcddafe9f09a5e1abc1fa9051422c8bf54c003b3b660af6010854e",
+        "tag": "v0.27.0"
+      }
+    ],
+    "runbook:.brigade/memory-care/runbooks/ingest-sweep.json": [
+      {
+        "sha256": "04debcfe24893f1ebcc6deb4b20dc18b5f1b44280b248f3b444da574f75adf95",
+        "tag": "v0.26.1"
+      }
+    ],
+    "runbook:.brigade/memory-care/runbooks/lesson-review.json": [
+      {
+        "sha256": "6100e49cc606d35a8aa776121d61553521c68c5951ffe33f823225d5006673cd",
+        "tag": null
+      }
+    ],
+    "runbook:.brigade/memory-care/runbooks/memory-closeout.json": [
+      {
+        "sha256": "0fcbd482fc3c3f300d56526cffb42fc92d27bf5cbe0c4184bbcb0dd502bf4d0d",
+        "tag": "v0.27.0"
+      },
+      {
+        "sha256": "84180626cd11512db9d2c869f3bdcc503f1f64cff306b3d40cb162952da590a5",
+        "tag": "v0.28.0"
+      }
+    ],
+    "runbook:.brigade/memory-care/runbooks/weekly-outcome-ratchet.json": [
+      {
+        "sha256": "433f15af182a10620ea8f4f403392ce0bd7299c94b294146463398126884c3d4",
+        "tag": "v0.26.1"
+      },
+      {
+        "sha256": "1ba29b5de264aebfb9937e7f123d0ace227da6108eeb99d88908599fcff0a295",
+        "tag": null
+      },
+      {
+        "sha256": "f7ca3f9660c085016bb14238d3da55169438646ae204122c3a82db0b5b00892d",
+        "tag": null
+      }
+    ],
+    "runbook:.brigade/runbooks/run-patrol.json": [
+      {
+        "sha256": "d411dc5ccec87c0e4f2f573db01eb5a12b777ee46af65af821daf6919053af41",
+        "tag": "v0.31.0"
+      }
+    ],
+    "skill:brigade-work": [
+      {
+        "sha256": "e70465a2381dbf661565e7a6afca0c89a111c865b3ad7666b1fcd8c331b6ea0f",
+        "tag": "v0.14.0"
+      },
+      {
+        "sha256": "b4e5caa2c38395dd57e500ae02e128996d12f37857d6300f3e2703684695724f",
+        "tag": "v0.15.0"
+      },
+      {
+        "sha256": "ccc0fd7c52da5f0f59d66478fbb5736e8fdb8c47ceb9c774cd22c42711f272e1",
+        "tag": "v0.21.1"
+      },
+      {
+        "sha256": "822ce10efce89c14964cacba6627728104f167bae0f065465bf5ff49af018261",
+        "tag": "v0.26.0"
+      },
+      {
+        "sha256": "957ad4650c42790128a23101b079c2569f91d810878c4d6a8e3df8c9ddc3127d",
+        "tag": "v0.31.0"
+      },
+      {
+        "sha256": "8714a7470bcb1f7ef8a85f0879559fdeb30e45855666c4784334a7c92579bbf0",
+        "tag": null
+      }
+    ],
+    "skill:note": [
+      {
+        "sha256": "457078ef56f4143910ba68729198285e204645d66ababc557e17b80496fe4cb1",
+        "tag": "v0.5.0"
+      }
+    ],
+    "skill:ultra-work-scout": [
+      {
+        "sha256": "dcac8b8a66195a861cb62d563b8f18a5b868b9d070d288e75f53d026d81445b5",
+        "tag": "v0.16.0"
+      }
+    ]
+  }
+}

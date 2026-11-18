@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import re
 import secrets
 import socket
 import sys
@@ -18,18 +17,26 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import runs_cmd
+from . import run_export_projection, runs_cmd, runs_privacy
 
 _LOOPBACK_HOST = "127.0.0.1"
+_UNAVAILABLE_BODY = "error: run view unavailable\n"
+_MISSING_DIAGNOSTIC = "runs-directory-missing"
+_UNREADABLE_DIAGNOSTIC = "run-unreadable"
+_UNAVAILABLE_DIAGNOSTIC = "run-view-unavailable"
 _DEFAULT_LIST_LIMIT = 10
 _MAX_LIST_LIMIT = 200
-_SERVED_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _API_RUNS_PREFIX = "/api/runs"
 _CSP_NONCE_PLACEHOLDER = "__BRIGADE_CSP_NONCE__"
 _INDEX_PATH = Path(__file__).with_name("runs_view.html")
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"})
 
 INDEX_HTML = _INDEX_PATH.read_text(encoding="utf-8")
+
+
+def _safe_entry_name(name: str) -> bool:
+    """True for a single directory entry name that may be matched by digest."""
+    return bool(name) and name not in {".", ".."} and "/" not in name and "\\" not in name
 
 
 def _bound_address(server: ThreadingHTTPServer) -> tuple[str, int]:
@@ -49,14 +56,40 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def resolve_served_run_id(run_id: str, runs_root: Path) -> Path | None:
-    """Resolve *run_id* strictly beneath *runs_root*.
+def _run_names_for_view_id(run_id: str, root: Path, workspace: Path) -> list[str] | None:
+    """Return directory names for a generated id or its keyed digest stand-in."""
+    if runs_privacy.is_generated_run_id(run_id):
+        from . import run_id as run_id_mod
 
-    Rejects absolute paths, parent traversal, symlink escape, alternate
-    roots, and malformed identifiers. This is a location check only; the
-    caller must still load the run through ``runs_cmd`` serializers.
+        return run_id_mod.lookup_names_for_workspace(run_id, workspace)
+    if not run_export_projection.is_valid_digest(run_id):
+        return None
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return None
+    names: list[str] = []
+    for entry in entries:
+        if not _safe_entry_name(entry.name):
+            continue
+        try:
+            if runs_privacy.view_run_id(entry.name, entry) == run_id:
+                names.append(entry.name)
+        except runs_privacy.DigestKeyUnavailable:
+            return None
+    return names
+
+
+def resolve_served_run_id(run_id: str, runs_root: Path) -> Path | None:
+    """Resolve a generated run id or its keyed digest strictly beneath *runs_root*.
+
+    A custom ``--output-dir`` name never travels in a URL. The list returns its
+    keyed digest and this function matches that digest against each directory
+    name server-side. Rejects absolute paths, parent traversal, symlink escape,
+    alternate roots, and malformed identifiers. This is a location check only;
+    the caller must still load the run through ``runs_cmd`` serializers.
     """
-    if not isinstance(run_id, str) or not _SERVED_RUN_ID.fullmatch(run_id):
+    if not runs_privacy.is_view_run_id(run_id):
         return None
     try:
         root = runs_root.resolve()
@@ -65,11 +98,13 @@ def resolve_served_run_id(run_id: str, runs_root: Path) -> Path | None:
     if not root.is_dir():
         return None
     from . import node as node_mod
-    from . import run_id as run_id_mod
 
     workspace = node_mod.infer_workspace_from_runs_dir(root)
-    for name in run_id_mod.lookup_names_for_workspace(run_id, workspace):
-        if not _SERVED_RUN_ID.fullmatch(name):
+    names = _run_names_for_view_id(run_id, root, workspace)
+    if names is None:
+        return None
+    for name in names:
+        if not _safe_entry_name(name):
             continue
         resolved = _resolve_contained_run_dir(root, name)
         if resolved is not None:
@@ -259,19 +294,19 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         if limit < 1 or limit > _MAX_LIST_LIMIT:
             self._write_response(400, "error: limit must be a positive integer\n")
             return
-        payload, diagnostic, _rc = runs_cmd.runs_list_contract(
+        payload, diagnostic, rc = runs_cmd.runs_list_contract(
             cwd=self._cwd,
             runs_dir=self._runs_dir,
             limit=limit,
         )
         if payload is None:
-            self._write_response(400, (diagnostic or "error: invalid list request") + "\n")
+            if rc in {3, 4}:
+                code = "digest-key-unavailable" if rc == 3 else _UNAVAILABLE_DIAGNOSTIC
+                self._write_response(503, _UNAVAILABLE_BODY, extra_headers={"X-Brigade-Diagnostic": code})
+                return
+            self._write_response(400, "error: invalid list request\n")
             return
-        extra = None
-        if diagnostic:
-            cleaned = runs_cmd._clean_str(diagnostic, 400)
-            if cleaned:
-                extra = {"X-Brigade-Diagnostic": cleaned}
+        extra = {"X-Brigade-Diagnostic": _MISSING_DIAGNOSTIC} if diagnostic else None
         self._write_json(200, payload, extra)
 
     def _resolved_run(self, run_id: str | None) -> Path | None:
@@ -285,14 +320,17 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         if run_dir is None:
             self._write_response(404, "error: run not found\n")
             return
-        payload, diagnostic, _rc = runs_cmd.run_detail_contract(run_dir)
+        payload, _diagnostic, rc = runs_cmd.run_detail_contract(run_dir)
         if payload is None:
-            extra = None
-            if diagnostic:
-                cleaned = runs_cmd._clean_str(diagnostic, 400)
-                if cleaned:
-                    extra = {"X-Brigade-Diagnostic": cleaned}
-            self._write_response(502, (diagnostic or "error: run unreadable") + "\n", extra_headers=extra)
+            if rc in {3, 4}:
+                code = "digest-key-unavailable" if rc == 3 else _UNAVAILABLE_DIAGNOSTIC
+                self._write_response(503, _UNAVAILABLE_BODY, extra_headers={"X-Brigade-Diagnostic": code})
+                return
+            self._write_response(
+                502,
+                "error: run unreadable\n",
+                extra_headers={"X-Brigade-Diagnostic": _UNREADABLE_DIAGNOSTIC},
+            )
             return
         self._write_json(200, payload)
 
@@ -302,6 +340,15 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         run_dir = self._resolved_run(run_id)
         if run_dir is None:
             self._write_response(404, "error: run not found\n")
+            return
+        try:
+            runs_privacy.digest_key(run_dir)
+        except runs_privacy.DigestKeyUnavailable:
+            self._write_response(
+                503,
+                _UNAVAILABLE_BODY,
+                extra_headers={"X-Brigade-Diagnostic": "digest-key-unavailable"},
+            )
             return
         headers, _nonce = self._security_headers()
         self.send_response(200)
@@ -319,11 +366,18 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         def _should_stop() -> bool:
             return closed
 
+        def _write_record(record: dict[str, object]) -> None:
+            line = f"data: {json.dumps(record, sort_keys=True)}\n\n"
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+
         try:
             for record in runs_cmd.iter_watch_records(run_dir, interval=0.25, should_stop=_should_stop):
-                line = f"data: {json.dumps(record, sort_keys=True)}\n\n"
-                self.wfile.write(line.encode("utf-8"))
-                self.wfile.flush()
+                _write_record(record)
+        except runs_privacy.DigestKeyUnavailable:
+            _write_record(runs_privacy.error_record("digest-key-unavailable"))
+        except run_export_projection.RunExportProjectionError:
+            _write_record(runs_privacy.error_record("run-view-unavailable"))
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
             closed = True
             self.close_connection = True
