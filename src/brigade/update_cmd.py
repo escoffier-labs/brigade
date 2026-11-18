@@ -21,11 +21,15 @@ from brigade import component_manifest, component_paths, distribution, localio
 
 REPOSITORY = "escoffier-labs/brigade"
 RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
+# Both names resolve to one immutable GitHub repository ID. A rename changes the name
+# and keeps the ID, so the alias slug is trusted only while it reports this ID and its
+# own exact full name.
+REPOSITORY_ID = 1238165856
 # The GitHub repository may be renamed to RENAMED_REPOSITORY. Requests try REPOSITORY
-# first and fall back to the other slug: the name GitHub currently serves answers
-# directly and the other one redirects, which the exact-URL rule rejects. Release
-# URLs, component sources and stored update state are accepted under either slug so
-# an install keeps updating across the rename.
+# first and move to the other slug only when GitHub answers with a verified rename
+# redirect to this repository ID. Any other failure is raised from the first slug.
+# Release URLs, component sources and stored update state are accepted under either
+# slug so an install keeps updating across the rename.
 _RELEASE_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
@@ -57,6 +61,15 @@ _STATE_KEYS = frozenset(
 
 class UpdateError(RuntimeError):
     """Raised when an update cannot safely complete."""
+
+
+class RepositoryRenamedError(UpdateError):
+    """Raised only when GitHub reports the known repository under its immutable ID.
+
+    The rename redirect is never followed for content. It is a signal that the
+    requested slug is the repository's former name, which is the one case where
+    another known slug may be tried.
+    """
 
 
 class UpdateHttp(Protocol):
@@ -99,6 +112,11 @@ class ResolvedRelease:
     manifest_bytes: bytes
 
 
+def _plain_redirect_error(message: str) -> Callable[[str], UpdateError]:
+    """Build the refusal for a final URL outside the exact expected URL."""
+    return lambda final: UpdateError(f"{message}: {final}")
+
+
 class _DefaultHttp:
     def _read(
         self,
@@ -107,7 +125,7 @@ class _DefaultHttp:
         accept: str,
         github_token: str | None = None,
         final_url_is_allowed: Callable[[str], bool],
-        redirect_error: str,
+        redirect_error_for: Callable[[str], UpdateError],
         request_error: str,
     ) -> bytes:
         tokens: tuple[str | None, ...] = (github_token, None) if github_token else (None,)
@@ -120,7 +138,7 @@ class _DefaultHttp:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     final = response.geturl()
                     if not final_url_is_allowed(final):
-                        raise UpdateError(f"{redirect_error}: {final}")
+                        raise redirect_error_for(final)
                     return response.read()
             except urllib.error.HTTPError as exc:
                 if token is not None and exc.code in {401, 403} and index + 1 < len(tokens):
@@ -131,6 +149,7 @@ class _DefaultHttp:
         raise AssertionError("HTTP request attempts unexpectedly exhausted")
 
     def json(self, url: str) -> Any:
+        redirect_error_for: Callable[[str], UpdateError]
         if _is_github_api_url(url):
             accept = "application/vnd.github+json"
             github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -138,7 +157,12 @@ class _DefaultHttp:
             def final_url_is_allowed(final: str) -> bool:
                 return final == url and _is_github_api_url(final)
 
-            redirect_error = "GitHub API request redirected outside its exact expected URL"
+            def github_redirect_error_for(final: str) -> UpdateError:
+                if _is_verified_rename_redirect(url, final):
+                    return RepositoryRenamedError(f"GitHub reports the repository was renamed: {url} -> {final}")
+                return UpdateError(f"GitHub API request redirected outside its exact expected URL: {final}")
+
+            redirect_error_for = github_redirect_error_for
             request_error = "GitHub request failed"
             invalid_json = f"GitHub request returned invalid JSON: {url}"
         elif _is_pypi_project_json_url(url):
@@ -148,7 +172,9 @@ class _DefaultHttp:
             def final_url_is_allowed(final: str) -> bool:
                 return final == url and _is_pypi_project_json_url(final)
 
-            redirect_error = "PyPI project JSON request redirected outside its exact expected URL"
+            redirect_error_for = _plain_redirect_error(
+                "PyPI project JSON request redirected outside its exact expected URL"
+            )
             request_error = "PyPI request failed"
             invalid_json = f"PyPI request returned invalid JSON: {url}"
         else:
@@ -160,7 +186,7 @@ class _DefaultHttp:
                     accept=accept,
                     github_token=github_token,
                     final_url_is_allowed=final_url_is_allowed,
-                    redirect_error=redirect_error,
+                    redirect_error_for=redirect_error_for,
                     request_error=request_error,
                 ).decode("utf-8")
             )
@@ -178,7 +204,7 @@ class _DefaultHttp:
             url,
             accept="application/octet-stream",
             final_url_is_allowed=final_url_is_allowed,
-            redirect_error="GitHub release asset redirected outside trusted HTTPS CDN hosts",
+            redirect_error_for=_plain_redirect_error("GitHub release asset redirected outside trusted HTTPS CDN hosts"),
             request_error="GitHub request failed",
         )
 
@@ -297,6 +323,8 @@ def _is_repository_api_path(parsed: Any, repository: str) -> bool:
     if parsed.query:
         return False
     prefix = f"/repos/{repository}/"
+    if parsed.path == f"/repos/{repository}":
+        return True
     if parsed.path == f"{prefix}releases/latest":
         return True
     tag = parsed.path.removeprefix(f"{prefix}releases/tags/")
@@ -307,6 +335,42 @@ def _is_repository_api_path(parsed: Any, repository: str) -> bool:
         return True
     tag_object = parsed.path.removeprefix(f"{prefix}git/tags/")
     return parsed.path == f"{prefix}git/tags/{tag_object}" and _SHA.fullmatch(tag_object) is not None
+
+
+def _github_repository_api_suffix(url: str) -> str | None:
+    """Return the `<suffix>` of `/repos/<known slug>/<suffix>`, else None."""
+    parsed = urlparse(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "api.github.com"
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    for repository in _RELEASE_REPOSITORIES:
+        prefix = f"/repos/{repository}/"
+        if parsed.path.startswith(prefix) and len(parsed.path) > len(prefix):
+            return parsed.path[len(prefix) :]
+    return None
+
+
+def _is_verified_rename_redirect(original: str, final: str) -> bool:
+    """True only for a rename redirect to this repository's immutable ID and same suffix."""
+    suffix = _github_repository_api_suffix(original)
+    if suffix is None:
+        return False
+    parsed = urlparse(final)
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "api.github.com"
+        and parsed.path == f"/repositories/{REPOSITORY_ID}/{suffix}"
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.username is None
+        and parsed.password is None
+    )
 
 
 def _is_pypi_project_json_url(url: Any) -> bool:
@@ -393,21 +457,34 @@ def resolve_tag_commit(http: UpdateHttp, tag: str, repository: str = REPOSITORY)
     return sha
 
 
+def _verify_repository_identity(http: UpdateHttp, repository: str) -> None:
+    """Require a slug to name the same immutable repository before trusting its release."""
+    raw = http.json(f"https://api.github.com/repos/{repository}")
+    if not isinstance(raw, dict):
+        raise UpdateError(f"GitHub repository lookup is not an object: {repository}")
+    if raw.get("id") != REPOSITORY_ID or raw.get("full_name") != repository:
+        raise UpdateError(f"GitHub repository {repository} is not repository ID {REPOSITORY_ID}")
+
+
 def _lookup_release(http: UpdateHttp, suffix: str) -> tuple[Any, str]:
     """Fetch a release under the repository's current GitHub name.
 
-    A request under a name GitHub no longer serves redirects and is refused by the
-    exact-URL rule, so a failure moves on to the next slug. When every slug fails the
-    first error is raised.
+    Only a verified rename redirect from the first known slug moves on to the next
+    slug, and that slug must report this exact repository ID and its own exact full
+    name. Every other failure is raised from the first slug, so a transient error or
+    an unrelated redirect can never transfer authority to another repository name.
     """
-    first_error: UpdateError | None = None
-    for repository in _RELEASE_REPOSITORIES:
-        try:
-            return http.json(f"https://api.github.com/repos/{repository}/releases/{suffix}"), repository
-        except UpdateError as exc:
-            first_error = first_error or exc
-    assert first_error is not None
-    raise first_error
+    first, *aliases = _RELEASE_REPOSITORIES
+    rename_error: RepositoryRenamedError | None = None
+    try:
+        return http.json(f"https://api.github.com/repos/{first}/releases/{suffix}"), first
+    except RepositoryRenamedError as exc:
+        rename_error = exc
+    for repository in aliases:
+        _verify_repository_identity(http, repository)
+        return http.json(f"https://api.github.com/repos/{repository}/releases/{suffix}"), repository
+    assert rename_error is not None
+    raise rename_error
 
 
 def resolve_release(http: UpdateHttp, *, latest: bool, tag: str | None = None) -> ResolvedRelease:

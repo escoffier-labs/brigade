@@ -1108,12 +1108,20 @@ RENAMED_SLUG = "escoffier-labs/brigadestack"
 
 
 class _GithubServing:
-    """GitHub serving the repository under one name: the other name only redirects."""
+    """GitHub serving the repository under one name.
 
-    def __init__(self, serving: str, manifest_slug: str):
+    A request under the name GitHub does not serve is answered with the typed
+    rename signal, exactly as a redirect to the immutable repository ID is. The
+    repository identity endpoint reports the serving name unless a test overrides
+    it to model a different repository answering on that slug.
+    """
+
+    def __init__(self, serving: str, manifest_slug: str, *, repository_id=None, full_name=None):
         self.serving = serving
         self.manifest = _manifest().replace(CURRENT_SLUG.encode(), manifest_slug.encode())
         self.base = f"https://github.com/{serving}/releases/download/{TAG}/"
+        self.repository_id = update_cmd.REPOSITORY_ID if repository_id is None else repository_id
+        self.full_name = serving if full_name is None else full_name
         self.urls: list[str] = []
 
     def release(self) -> dict:
@@ -1123,8 +1131,10 @@ class _GithubServing:
 
     def json(self, url):
         self.urls.append(url)
+        if url == f"https://api.github.com/repos/{self.serving}":
+            return {"id": self.repository_id, "full_name": self.full_name}
         if f"/repos/{self.serving}/" not in url:
-            raise update_cmd.UpdateError(f"GitHub API request redirected outside its exact expected URL: {url}")
+            raise update_cmd.RepositoryRenamedError(f"GitHub reports the repository was renamed: {url}")
         if url.endswith("/releases/latest"):
             return self.release()
         if url == f"https://api.github.com/repos/{self.serving}/git/ref/tags/{TAG}":
@@ -1185,9 +1195,11 @@ def test_update_works_under_either_repository_name_and_either_stored_state(tmp_p
     assert state is not None
     assert state.component_tag == TAG
     assert state.component_manifest_url == http.base + "component-manifest-v1.json"
-    # The current name is requested first. Under the renamed repository that first request is refused
-    # as a redirect and the next slug answers.
+    # The current name is requested first. Under the renamed repository that first request is
+    # reported as a rename and the next slug answers only after its repository identity is checked.
     assert http.urls[0] == f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
+    if serving != CURRENT_SLUG:
+        assert f"https://api.github.com/repos/{serving}" in http.urls
 
 
 def test_release_lookup_reports_the_first_error_when_no_slug_answers():
@@ -1203,15 +1215,75 @@ def test_release_lookup_reports_the_first_error_when_no_slug_answers():
     "final_url",
     [
         "https://api.github.com/repos/escoffier-labs/brigade-site/releases/latest",
-        "https://api.github.com/repositories/1238165856/releases/latest",
         "https://api.github.com/repos/someone-else/brigade/releases/latest",
     ],
 )
 def test_redirect_to_an_unrelated_repository_is_still_refused(final_url):
+    # A redirect to the pinned repository ID is covered separately: it is the only
+    # redirect treated as a rename signal, and only for the known slugs and suffix.
     url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
     with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
         with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
             update_cmd._DefaultHttp().json(url)
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+def test_default_http_http_status_failure_is_not_a_rename_signal(status):
+    url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
+
+    def urlopen(request, *, timeout):
+        raise urllib.error.HTTPError(url, status, "failure", None, None)
+
+    with patch("urllib.request.urlopen", side_effect=urlopen):
+        with pytest.raises(update_cmd.UpdateError) as raised:
+            update_cmd._DefaultHttp().json(url)
+
+    assert type(raised.value) is update_cmd.UpdateError
+
+
+def test_default_http_url_error_and_timeout_are_not_rename_signals():
+    url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
+    for error in (urllib.error.URLError("connection refused"), TimeoutError("timed out")):
+        with patch("urllib.request.urlopen", side_effect=error):
+            with pytest.raises((update_cmd.UpdateError, OSError)) as raised:
+                update_cmd._DefaultHttp().json(url)
+        assert not isinstance(raised.value, update_cmd.RepositoryRenamedError)
+
+
+def test_default_http_invalid_json_is_not_a_rename_signal():
+    url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
+    with patch("urllib.request.urlopen", return_value=_Response(b"not json", url)):
+        with pytest.raises(update_cmd.UpdateError, match="invalid JSON") as raised:
+            update_cmd._DefaultHttp().json(url)
+    assert type(raised.value) is update_cmd.UpdateError
+
+
+@pytest.mark.parametrize("slug", [CURRENT_SLUG, RENAMED_SLUG])
+def test_default_http_reports_a_verified_rename_redirect_as_the_typed_signal(slug):
+    url = f"https://api.github.com/repos/{slug}/releases/latest"
+    final_url = "https://api.github.com/repositories/1238165856/releases/latest"
+    with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
+        with pytest.raises(update_cmd.RepositoryRenamedError, match="repository was renamed"):
+            update_cmd._DefaultHttp().json(url)
+
+
+@pytest.mark.parametrize(
+    "final_url",
+    [
+        "https://api.github.com/repos/escoffier-labs/brigade-site/releases/latest",
+        "https://api.github.com/repos/someone-else/brigade/releases/latest",
+        "https://api.github.com/repositories/1238165855/releases/latest",
+        "https://api.github.com/repositories/1238165856/releases/tags/v9.9.9",
+        "https://api.github.com/repositories/1238165856/releases/latest?page=2",
+        "https://api.github.com/repositories/1238165856/releases/latest#fragment",
+    ],
+)
+def test_default_http_keeps_every_other_redirect_as_a_plain_refusal(final_url):
+    url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
+    with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
+        with pytest.raises(update_cmd.UpdateError, match="redirected outside its exact expected URL") as raised:
+            update_cmd._DefaultHttp().json(url)
+    assert type(raised.value) is update_cmd.UpdateError
 
 
 def test_redirect_between_the_two_slugs_is_refused_by_the_exact_url_rule():
@@ -1224,6 +1296,8 @@ def test_redirect_between_the_two_slugs_is_refused_by_the_exact_url_rule():
 
 def test_api_and_release_url_checks_accept_both_slugs_and_no_others():
     for slug in (CURRENT_SLUG, RENAMED_SLUG):
+        assert update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}")
+        assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}?x=1")
         assert update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/releases/latest")
         assert update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/git/ref/tags/{TAG}")
         assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/commits/main")
@@ -1234,6 +1308,7 @@ def test_api_and_release_url_checks_accept_both_slugs_and_no_others():
             "component-manifest-v1.json",
         )
     for slug in ("escoffier-labs/brigade-site", "someone-else/brigade"):
+        assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}")
         assert not update_cmd._is_github_api_url(f"https://api.github.com/repos/{slug}/releases/latest")
         assert not update_cmd._is_release_url(
             f"https://github.com/{slug}/releases/download/{TAG}/component-manifest-v1.json",
@@ -1277,3 +1352,192 @@ def test_stored_state_under_either_slug_for_the_same_release_compares_equal():
         )
 
     assert update_cmd._same_coordinates(state(CURRENT_SLUG), state(RENAMED_SLUG))
+
+
+class _FailingHttp:
+    def __init__(self, error):
+        self.error = error
+        self.urls: list[str] = []
+
+    def json(self, url):
+        self.urls.append(url)
+        raise self.error
+
+    def bytes(self, url):
+        raise AssertionError(url)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(update_cmd.UpdateError("GitHub request failed: HTTP 401"), id="http-401"),
+        pytest.param(update_cmd.UpdateError("GitHub request failed: HTTP 403"), id="http-403"),
+        pytest.param(update_cmd.UpdateError("GitHub request failed: HTTP 429"), id="http-429"),
+        pytest.param(update_cmd.UpdateError("GitHub request failed: HTTP 500"), id="http-500"),
+        pytest.param(urllib.error.URLError("connection refused"), id="url-error"),
+        pytest.param(TimeoutError("timed out"), id="timeout"),
+        pytest.param(update_cmd.UpdateError("GitHub request returned invalid JSON"), id="invalid-json"),
+        pytest.param(
+            update_cmd.UpdateError(
+                "GitHub API request redirected outside its exact expected URL: "
+                "https://api.github.com/repos/escoffier-labs/brigade-site/releases/latest"
+            ),
+            id="redirect-other-repository",
+        ),
+        pytest.param(
+            update_cmd.UpdateError(
+                "GitHub API request redirected outside its exact expected URL: "
+                "https://api.github.com/repositories/1238165855/releases/latest"
+            ),
+            id="redirect-different-id",
+        ),
+        pytest.param(
+            update_cmd.UpdateError(
+                "GitHub API request redirected outside its exact expected URL: "
+                "https://api.github.com/repositories/1238165856/releases/tags/v9.9.9"
+            ),
+            id="redirect-different-suffix",
+        ),
+        pytest.param(
+            update_cmd.UpdateError(
+                "GitHub API request redirected outside its exact expected URL: "
+                "https://api.github.com/repositories/1238165856/releases/latest?page=2"
+            ),
+            id="redirect-with-query",
+        ),
+    ],
+)
+def test_release_lookup_raises_the_first_slug_error_without_trying_the_second(error):
+    http = _FailingHttp(error)
+
+    with pytest.raises(type(error)) as raised:
+        update_cmd._lookup_release(http, "latest")
+
+    assert raised.value is error
+    assert http.urls == [f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"]
+
+
+class _RenamedHttp:
+    """First slug reports a rename; the second slug reports the supplied identity."""
+
+    def __init__(self, identity):
+        self.identity = identity
+        self.urls: list[str] = []
+
+    def json(self, url):
+        self.urls.append(url)
+        if url == f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest":
+            raise update_cmd.RepositoryRenamedError("GitHub reports the repository was renamed")
+        if url == f"https://api.github.com/repos/{RENAMED_SLUG}":
+            return self.identity
+        if url == f"https://api.github.com/repos/{RENAMED_SLUG}/releases/latest":
+            return {"tag_name": TAG}
+        raise AssertionError(url)
+
+    def bytes(self, url):
+        raise AssertionError(url)
+
+
+def test_release_lookup_verifies_the_second_slug_identity_before_using_its_release():
+    http = _RenamedHttp({"id": 1238165856, "full_name": RENAMED_SLUG})
+
+    raw, repository = update_cmd._lookup_release(http, "latest")
+
+    assert (raw, repository) == ({"tag_name": TAG}, RENAMED_SLUG)
+    assert http.urls == [
+        f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest",
+        f"https://api.github.com/repos/{RENAMED_SLUG}",
+        f"https://api.github.com/repos/{RENAMED_SLUG}/releases/latest",
+    ]
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        pytest.param({"id": 1238165855, "full_name": RENAMED_SLUG}, id="different-id"),
+        pytest.param({"id": 1238165856, "full_name": CURRENT_SLUG}, id="different-full-name"),
+        pytest.param({"id": 1238165856, "full_name": "Escoffier-Labs/brigadestack"}, id="full-name-case"),
+        pytest.param({"id": 1238165856}, id="missing-full-name"),
+        pytest.param("not-an-object", id="not-an-object"),
+    ],
+)
+def test_release_lookup_refuses_the_second_slug_when_its_identity_differs(identity):
+    http = _RenamedHttp(identity)
+
+    with pytest.raises(update_cmd.UpdateError, match="GitHub repository"):
+        update_cmd._lookup_release(http, "latest")
+
+    assert f"https://api.github.com/repos/{RENAMED_SLUG}/releases/latest" not in http.urls
+
+
+def test_rename_retry_checks_the_identity_then_uses_the_second_slug(tmp_path):
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    http = _GithubServing(RENAMED_SLUG, RENAMED_SLUG)
+
+    result = update_cmd.run_update(
+        channel="stable",
+        paths=paths,
+        http=http,
+        runner=lambda argv: 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+
+    assert result == 0
+    assert http.urls == [
+        f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest",
+        f"https://api.github.com/repos/{RENAMED_SLUG}",
+        f"https://api.github.com/repos/{RENAMED_SLUG}/releases/latest",
+        f"https://api.github.com/repos/{RENAMED_SLUG}/git/ref/tags/{TAG}",
+        http.base + "component-manifest-v1.json",
+    ]
+    state = update_cmd.load_update_state(paths.data_root / "brigade" / "update-state.json")
+    assert state is not None
+    assert state.component_release_id == 42
+    assert state.component_manifest_url == http.base + "component-manifest-v1.json"
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        pytest.param({"repository_id": 1238165855}, id="different-id"),
+        pytest.param({"full_name": "someone-else/brigadestack"}, id="different-full-name"),
+        pytest.param({"full_name": "Escoffier-Labs/brigadestack"}, id="full-name-case"),
+    ],
+)
+def test_rename_retry_refuses_a_second_slug_with_a_different_identity(tmp_path, identity):
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    http = _GithubServing(RENAMED_SLUG, RENAMED_SLUG, **identity)
+    commands = []
+
+    result = update_cmd.run_update(
+        channel="stable",
+        paths=paths,
+        http=http,
+        runner=lambda argv: commands.append(argv) or 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+
+    assert result == 1
+    assert commands == []
+    assert not (paths.data_root / "brigade" / "update-state.json").exists()
+    assert f"https://api.github.com/repos/{RENAMED_SLUG}/releases/latest" not in http.urls
+
+
+def test_current_name_makes_exactly_the_same_requests_as_before(tmp_path):
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    http = _GithubServing(CURRENT_SLUG, CURRENT_SLUG)
+
+    result = update_cmd.run_update(
+        channel="stable",
+        paths=paths,
+        http=http,
+        runner=lambda argv: 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+
+    assert result == 0
+    assert http.urls == [
+        f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest",
+        f"https://api.github.com/repos/{CURRENT_SLUG}/git/ref/tags/{TAG}",
+        BASE + "component-manifest-v1.json",
+    ]
