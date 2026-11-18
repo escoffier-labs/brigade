@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from contextlib import closing
@@ -96,6 +97,35 @@ class Client(unittest.TestCase):
             if page["next_seq"] <= after:
                 return events
             after = page["next_seq"]
+
+    def indexed_seq(self) -> int:
+        """The last log seq the hub's published search index covers."""
+        body = hc.request(self.hub.url, "GET", "/metrics", token=self.hub.admin_token).body.decode("utf-8")
+        for line in body.splitlines():
+            if line.startswith("brigade_hub_memory_indexed_seq "):
+                return int(line.split(" ", 1)[1])
+        raise AssertionError("the hub did not report brigade_hub_memory_indexed_seq in /metrics")
+
+    def wait_for_index(self, revision: int, timeout: float = 10.0) -> None:
+        """Wait until the hub's published index covers `revision`.
+
+        A write answers before the writer publishes its index delta, and the
+        `search` action only waits for that when it is sent `min_seq`, which
+        this client does not send. A search issued straight after a push can
+        therefore read the older snapshot and miss the card (#2723). Waiting on
+        the published `indexed_seq` keeps the assertion below exact without
+        retrying it.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            indexed = self.indexed_seq()
+            if indexed >= revision:
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"the hub index stayed at seq {indexed} for {timeout:g}s after the write at {revision}"
+                )
+            time.sleep(0.02)
 
     def test_production_verifier_proposal_automatic_admission(self):
         """A _propose correction applies only when its class has a hub go record."""
@@ -231,6 +261,7 @@ class Client(unittest.TestCase):
         self.assertEqual((first["needs_confirmation"], first["card_count"]), (True, 1))
         report = sync.push(writer, hubc.client_for(settings), settings, yes=True)
         self.assertEqual([p["card_id"] for p in report["published"]], ["kiwi"], report)
+        revision = report["published"][0]["revision"]
         reader = self.workspace("reader", "read")
         settings = hubc.load_settings(reader)
         pulled = sync.pull(reader, hubc.client_for(settings), settings)
@@ -239,8 +270,10 @@ class Client(unittest.TestCase):
         self.assertGreater(len(head["text"]), 30_000)
         self.assertEqual(head["text"], (writer / "memory/cards/kiwi.md").read_text(encoding="utf-8"))
         self.assertEqual(pulled["log_epoch"], self.client().call("status")["log_epoch"])
+        self.wait_for_index(revision)
         found = hub_search.search_payload(reader, "kiwifruit", settings=settings)
         self.assertFalse(found["retrieval"]["degraded"], found)
+        self.assertFalse(found["retrieval"]["stale"], found)
         self.assertEqual([(m["card_id"], m["source"], m["scope"]) for m in found["matches"]], [("kiwi", "hub", SCOPE)])
 
     def test_spool_replays_after_an_outage_without_duplicates(self):
