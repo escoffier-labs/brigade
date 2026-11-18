@@ -256,10 +256,9 @@ def _place(
         # A node with no health row at all is its own reason, so an operator can tell a node that has
         # not posted health yet (rollout order) from one that is failing or stale.
         sessions = None
-        unknown = (
-            fleet_t3_health.SESSIONS_UNKNOWN if live is None else fleet_t3_health.sessions_unknown_reason(health, node)
-        )
-        if unknown is not None:
+        if live is None:
+            reasons.append(fleet_t3_health.SESSIONS_UNKNOWN)
+        elif (unknown := fleet_t3_health.sessions_unknown_reason(health, node)) is not None:
             reasons.append(unknown)
         else:
             sessions = int(live.get(node, 0))
