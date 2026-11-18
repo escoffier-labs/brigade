@@ -34,6 +34,7 @@ from .worktree_lease import (
     brigade_worktree_root as brigade_worktree_root,
     discard_incomplete_worktree as discard_incomplete_worktree,
     is_upstream_fast_forward,
+    remove_worktree_directory,
     reserved_worktree_lock_dir as reserved_worktree_lock_dir,
     worktree_lock_dir as worktree_lock_dir,
 )
@@ -1562,7 +1563,7 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     args.append(str(worktree_path))
     result = _git(root, *args, timeout=120.0)
     if result.code != 0:
-        shutil.rmtree(worktree_path, ignore_errors=True)
+        remove_worktree_directory(root, worktree_path)
 
 
 def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:

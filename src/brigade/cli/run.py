@@ -1137,7 +1137,6 @@ def dispatch(args) -> int:
                                 keep_reasons.append("detached HEAD with unreachable commits")
                         except runguard.RunGuardError:
                             keep_reasons.append("detached HEAD with unreachable commits")
-                    keep_worktree = bool(keep_reasons)
                     if summary.changed:
                         print(
                             f"changes: {summary.path} ({summary.tracked_count + summary.untracked_count} file(s))",
@@ -1145,7 +1144,7 @@ def dispatch(args) -> int:
                         )
                     else:
                         print(f"changes: none ({summary.path})", file=sys.stderr)
-                    if keep_worktree:
+                    if keep_reasons:
                         print(
                             f"worktree kept for recovery: {worktree_cwd} ({', '.join(keep_reasons)})",
                             file=sys.stderr,
@@ -1155,10 +1154,10 @@ def dispatch(args) -> int:
                             runguard.remove_worktree(run_cwd, worktree_cwd)
                         except (runguard.RunGuardError, OSError) as exc:
                             keep_reasons.append(f"removal failed: {exc}")
-                        if worktree_cwd.exists():
+                        keep_worktree = worktree_cwd.exists()
+                        if keep_worktree and not keep_reasons:
                             keep_reasons.append("removal failed: directory still exists")
-                        keep_worktree = bool(keep_reasons)
-                        if keep_worktree:
+                        if keep_reasons:
                             print(
                                 f"worktree kept for recovery: {worktree_cwd} ({', '.join(keep_reasons)})",
                                 file=sys.stderr,
@@ -1214,7 +1213,10 @@ def dispatch(args) -> int:
     finally:
         if not keep_worktree:
             if not dispatch_started and worktree_cwd is not None and worktree_cwd.exists():
-                runguard.discard_incomplete_worktree(run_cwd, worktree_cwd)
+                try:
+                    runguard.discard_incomplete_worktree(run_cwd, worktree_cwd)
+                except OSError as exc:
+                    print(f"warning: could not discard incomplete worktree {worktree_cwd}: {exc}", file=sys.stderr)
             if worktree_lock_dir is not None:
                 try:
                     worktree_lock_dir.rmdir()

@@ -13,7 +13,19 @@ from typing import Any
 
 import pytest
 
-from brigade import aboyeur, agent_request, agents, cli, doctor, fleet_client, fleet_home_guard, proc, runguard
+from brigade import (
+    aboyeur,
+    agent_request,
+    agents,
+    cli,
+    doctor,
+    fleet_client,
+    fleet_home_guard,
+    handoff_worktrees,
+    proc,
+    runguard,
+    worktree_lease,
+)
 from brigade.fleet_claim_target import ClaimTargetError
 
 
@@ -335,6 +347,66 @@ def test_startup_refusal_discards_checkout(tmp_path, monkeypatch, module, method
     assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree", *extra_args]) == 2
     assert not checkout.exists()
     assert not runguard.worktree_lock_dir(checkout).exists()
+    assert str(checkout) not in _git(repo, "worktree", "list", "--porcelain").stdout
+
+
+def test_interrupt_during_handoff_rescue_keeps_checkout(tmp_path, monkeypatch, capsys):
+    repo = _git_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    checkout = _checkout_path(tmp_path, repo, output_dir)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def fake_run(task, loaded_roster, *, cwd, output_dir, **kwargs):
+        _write_successful_worktree_run(output_dir, cwd)
+        return 0
+
+    def interrupted_rescue(source, dest, *, dest_fd):
+        # A pending handoff appeared after the clean check, before removal.
+        handoff = source / ".claude" / "memory-handoffs" / "pending.md"
+        handoff.parent.mkdir(parents=True)
+        handoff.write_text("undelivered")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(handoff_worktrees, "rescue_pending_handoffs", interrupted_rescue)
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"]) == 130
+    assert (checkout / ".claude" / "memory-handoffs" / "pending.md").read_text() == "undelivered"
+    assert f"worktree kept for recovery: {checkout}" in capsys.readouterr().err
+
+
+def test_startup_cleanup_oserror_preserves_exit_code(tmp_path, monkeypatch, capsys):
+    repo = _git_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def fail_creation(repo, path):
+        raise runguard.RunGuardError("checkout setup failed")
+
+    def fail_cleanup(path, **kwargs):
+        raise PermissionError("checkout is busy")
+
+    monkeypatch.setattr(runguard, "create_detached_worktree", fail_creation)
+    monkeypatch.setattr(worktree_lease.shutil, "rmtree", fail_cleanup)
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"]) == 2
+    assert "checkout is busy" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_rmtree_fallback_prunes_git_registration(tmp_path, monkeypatch, dispatched):
+    repo = _git_repo(tmp_path)
+    checkout = tmp_path / "checkout"
+    runguard.create_detached_worktree(repo, checkout)
+    run = proc.run
+
+    def refuse_git_remove(argv, **kwargs):
+        if argv[:3] == ["git", "worktree", "remove"]:
+            return proc.Result(1, "", "simulated Git removal refusal")
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(proc, "run", refuse_git_remove)
+    remove = runguard.remove_worktree if dispatched else runguard.discard_incomplete_worktree
+    remove(repo, checkout)
+    assert not checkout.exists()
     assert str(checkout) not in _git(repo, "worktree", "list", "--porcelain").stdout
 
 
