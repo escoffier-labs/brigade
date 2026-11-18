@@ -88,7 +88,7 @@ init = {
     "mcp_servers": [{"name": "brigade-paired", "status": "connected", "source": "dynamic"}],
     "model": "claude-opus-5-5", "permissionMode": "dontAsk", "slash_commands": [], "apiKeySource": "none",
     "claude_code_version": SC.get("version", "2.1.327"), "skills": [], "plugins": [],
-    "agents": ["general-purpose", "Explore", "Plan"], "additional_directories": [],
+    "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"], "additional_directories": [],
     "uuid": str(uuid.uuid4()),
 }
 init.update(SC.get("init", {}))

@@ -34,7 +34,7 @@ CLI reports, never on what the model says:
   `--disable-slash-commands` and `--no-session-persistence`. It writes
   `stream-json`, and every call is refused unless its init event reports no
   tools, MCP servers, plugins, skills or slash commands, no agent beyond the
-  four built-ins (unreachable without the Agent tool), no extra directories,
+  CLI built-ins (unreachable without the Agent tool), no extra directories,
   the call's own working directory and the pinned model. A tool use or hook
   event anywhere in the stream also refuses the call. The init event does not
   list loaded memory files, so the working directory sits under a temporary
@@ -152,7 +152,8 @@ CLAUDE_BUILTIN_PLUGINS = (
     "cc-plugin-tips",
     "cc-plugin-you-should-know",
 )
-CLAUDE_BUILTIN_AGENTS = frozenset({"claude", "Explore", "general-purpose", "Plan"})
+# Agents compiled into the CLI. 2.1.327 also reports statusline-setup in every init event.
+CLAUDE_BUILTIN_AGENTS = frozenset({"claude", "Explore", "general-purpose", "Plan", "statusline-setup"})
 CLAUDE_SETTINGS = json.dumps(
     {"enabledPlugins": {f"{name}@builtin": False for name in CLAUDE_BUILTIN_PLUGINS}},
     sort_keys=True,
