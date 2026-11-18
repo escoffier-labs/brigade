@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from . import proc
@@ -24,10 +25,27 @@ def worktree_lock_dir(checkout: Path) -> Path:
 
 def reserved_worktree_lock_dir(checkout: Path) -> Path | None:
     if checkout.parent == brigade_worktree_root().resolve():
-        reservation = worktree_lock_dir(checkout)
-        if reservation.is_dir():
-            return reservation
+        return worktree_lock_dir(checkout)
     return None
+
+
+@contextmanager
+def run_lock_parent(checkout: Path, lock: Path) -> Iterator[None]:
+    """Create only lease storage when operating on a removed checkout."""
+    parent = lock.parent
+    temporary = not checkout.exists() and reserved_worktree_lock_dir(checkout.resolve()) == parent
+    try:
+        parent.mkdir(parents=True, exist_ok=not temporary)
+    except FileExistsError:
+        if not temporary or not parent.is_dir():
+            raise
+        temporary = False
+    try:
+        yield
+    finally:
+        if temporary:
+            with suppress(OSError):
+                parent.rmdir()
 
 
 def workspace_for_lock_path(path: Path) -> Path:

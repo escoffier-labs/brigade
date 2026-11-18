@@ -36,6 +36,7 @@ from .worktree_lease import (
     is_upstream_fast_forward,
     remove_worktree_directory,
     reserved_worktree_lock_dir as reserved_worktree_lock_dir,
+    run_lock_parent,
     workspace_for_lock_path,
     worktree_lock_dir as worktree_lock_dir,
 )
@@ -1516,29 +1517,29 @@ def run_lock(
     if stale_action == "claim" and run_dir is None:
         raise ValueError("run lock stale_action=claim requires run_dir")
     path = lock_path(cwd)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ownership = _wait_to_acquire_lock(
-        path,
-        run_dir=run_dir,
-        wait_seconds=wait_seconds,
-        poll_interval=poll_interval,
-        on_reconcile=on_reconcile,
-        stale_action=stale_action,
-    )
-    retain_lock = False
-    context_token = _active_run_lock.set((path, ownership)) if ownership is not None else None
-    try:
-        yield path
-    except BaseException as exc:
-        retain_lock = retained_run_lock_error(exc) is not None
-        if retain_lock:
-            raise_if_retained_run_lock(exc)
-        raise
-    finally:
-        if context_token is not None:
-            _active_run_lock.reset(context_token)
-        if ownership is not None and not retain_lock:
-            _release_lock(path, ownership)
+    with run_lock_parent(cwd, path):
+        ownership = _wait_to_acquire_lock(
+            path,
+            run_dir=run_dir,
+            wait_seconds=wait_seconds,
+            poll_interval=poll_interval,
+            on_reconcile=on_reconcile,
+            stale_action=stale_action,
+        )
+        retain_lock = False
+        context_token = _active_run_lock.set((path, ownership)) if ownership is not None else None
+        try:
+            yield path
+        except BaseException as exc:
+            retain_lock = retained_run_lock_error(exc) is not None
+            if retain_lock:
+                raise_if_retained_run_lock(exc)
+            raise
+        finally:
+            if context_token is not None:
+                _active_run_lock.reset(context_token)
+            if ownership is not None and not retain_lock:
+                _release_lock(path, ownership)
 
 
 def create_detached_worktree(repo: Path, worktree_path: Path) -> Path:

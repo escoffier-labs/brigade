@@ -13,8 +13,8 @@ def _workspace_from_run_dir(raw_run_dir: str | None) -> tuple[Path | None, str]:
     Resolution is ``runguard.resolve_run_lock_workspace`` so this CLI path
     cannot drift from every other run-lock caller (#1159). Existence on
     this machine is CLI-only: a missing run directory or a resolved path
-    that is not a directory is ``None`` and a refusal reason, never a
-    guessed ancestor.
+    that is unavailable is refused. Automatic worktrees can be gone while
+    their external lease is still inspectable.
     """
     import json as _json
 
@@ -30,7 +30,7 @@ def _workspace_from_run_dir(raw_run_dir: str | None) -> tuple[Path | None, str]:
     except (OSError, ValueError):
         meta = None
     resolved = runguard.resolve_run_lock_workspace(meta if isinstance(meta, dict) else {}, run_dir)
-    if resolved is not None and resolved.is_dir():
+    if resolved is not None and (resolved.is_dir() or runguard.reserved_worktree_lock_dir(resolved) is not None):
         return resolved, "ok"
     if resolved is not None:
         return None, f"its recorded workspace {resolved} does not exist on this machine"

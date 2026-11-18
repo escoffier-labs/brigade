@@ -54,3 +54,17 @@ def test_retained_lease_requires_recovery_after_checkout_removed(checkout, tmp_p
     assert not checkout.exists()
     assert runguard.run_recovery_status(checkout, run_dir) == "required"
     assert runguard.run_recovery_status(checkout, tmp_path / "other-run") == "cleared"
+
+
+def test_cassette_purge_locks_removed_checkout_without_recreating_it(checkout, tmp_path):
+    from brigade import run_cassette
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"lock_workspace": str(checkout)}))
+    lease_dir = runguard.worktree_lock_dir(checkout)
+
+    assert runguard.lock_path(checkout) == lease_dir / "run.lock"
+    assert run_cassette.purge_cli(str(run_dir), cwd=tmp_path) == 0
+    assert not checkout.exists()
+    assert not lease_dir.exists()
