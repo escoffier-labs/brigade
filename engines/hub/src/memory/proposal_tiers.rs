@@ -214,19 +214,31 @@ pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlit
         if !super::ranking::trusted(&head.trust) {
             continue;
         }
-        // The alias a merge adds names the retired card, so its after text
-        // would flag every trusted keeper. Only links that existed before the
-        // merge count. A forged after text is caught by `merge_gate::hold`.
         let (before, after) = (string(card, "before_text"), string(card, "after_text"));
-        let texts: &[&str] = if super::merge_gate::in_merge(body, card) {
-            &[before]
-        } else {
-            &[before, after]
-        };
-        let declares = texts.iter().any(|text| {
-            let links = super::ranking::Links::parse(text, scope);
-            links.successor.is_some() || !links.predecessors.is_empty()
-        });
+        // A merge card's aliases must read the same to the merge and to lineage
+        // review. A spelling only one of them decodes would hide a link here
+        // that the merge then writes out in plain form.
+        if super::merge_gate::in_merge(body, card)
+            && [before, after]
+                .iter()
+                .any(|text| super::merge_gate::aliases_ambiguous(text, scope))
+        {
+            return Ok(true);
+        }
+        // The keeper of an all-merge proposal gains one alias per retired card.
+        // Its after text is judged whole, less exactly those aliases, so a link
+        // the merge did not add still counts, however the before text spells it.
+        let mut links = super::ranking::Links::parse(after, scope);
+        for retired in super::merge_gate::aliases_added(body, card) {
+            if let Some(at) = links.predecessors.iter().position(|p| p == retired) {
+                links.predecessors.remove(at);
+            }
+        }
+        let was = super::ranking::Links::parse(before, scope);
+        let declares = links.successor.is_some()
+            || !links.predecessors.is_empty()
+            || was.successor.is_some()
+            || !was.predecessors.is_empty();
         let named = named_by(tx, scope, id, false, |text| {
             let links = super::ranking::Links::parse(text, scope);
             links.successor.as_deref() == Some(id) || links.predecessors.iter().any(|p| p == id)

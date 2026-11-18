@@ -1,5 +1,6 @@
 //! Exact-duplicate merges auto-apply on a real scope under bounded drift (#2591).
-//! Every hub here uses the real scope `fleet`, never the fixture scope.
+//! Every hub here uses the real scope `fleet`, except the one test that pins
+//! the fixture scope's lack of any relaxation.
 use super::{
     index::{self, Builder, Card},
     proposal_blocks,
@@ -336,9 +337,17 @@ async fn anything_but_one_exact_pair_keeps_the_blast_cap_and_evidence_floors() {
     let evidence = json!({"type":"append_evidence","scope":"fleet","card_id":"other-card",
         "base_revision":other["revision"],"block_id":pin["block_id"],
         "expected_block_hash":pin["hash"],"evidence_ids":["ns/one/two"]});
+    // The alias excuse covers an all-merge proposal only, so beside another op
+    // the keeper's new alias is lineage and the proposal opens at tier 2.
     let ops = vec![merge_op(&r, KEEP, GONE).await, evidence];
-    let opened = submit_ops(&r, ops, 0).await;
-    held_gates(&preflight_report(&r, &opened).await, 3);
+    let opened = submit_ops(&r, ops, 2).await;
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(
+        gate(&report, "delta"),
+        (json!("held"), json!("delta_requires_review"))
+    );
+    assert_eq!(report["changed_path_count"], 3);
+    assert_eq!(report["structural_merge_proof"], false);
     assert_not_applied(&r, &opened, "mixed").await;
     // The proposal says the claims match. The live bytes of the retired card do not.
     let r = trusted().await;
@@ -747,13 +756,69 @@ async fn only_lineage_that_existed_before_the_merge_routes_to_review() {
     link(&r, "---\nsupersedes: [dup-keeper]\n---\nBody.\n").await;
     assert_eq!(held(&r, &body), Some(LINEAGE));
     // A forged after text that smuggles in a lineage link is not excused by the
-    // merge rule. The recomputed keeper text catches it.
+    // merge rule. Lineage review judges the after text, less only the alias the
+    // merge adds, so it names the link before the recomputed keeper text does.
     let r = trusted().await;
     let body = r.body(&open(&r).await);
     let forged = edit(&body, KEEP, |t| {
         t.replacen("aliases: [", "aliases: [\"fleet/older\",", 1)
     });
-    assert_eq!(held(&r, &forged), Some(KEEPER));
+    assert_eq!(held(&r, &forged), Some(LINEAGE));
+}
+
+/// Pre-existing lineage that only a JSON spelling shows. `literal_eval` reads
+/// `fleet\/victim` as an id no card has, while the merge decodes it to
+/// `fleet/victim` and writes it back plain, which would add a live link to
+/// `victim`. Both the keeper's and the retired card's before text hide it.
+#[tokio::test]
+async fn lineage_hidden_by_a_json_escape_is_still_lineage_for_the_merge() {
+    let escaped = "---\naliases: [\"fleet\\/victim\"]\n---\n";
+    let plain = "---\naliases: [\"fleet/victim\"]\n---\n";
+    let own = "---\naliases: [\"fleet\\/dup-retired\"]\n---\n";
+    let cases = [
+        (
+            "escaped alias on the keeper",
+            dup(escaped, "aaaaaa"),
+            dup("", "bbbbbb"),
+        ),
+        (
+            "escaped alias on the retired card",
+            dup("", "aaaaaa"),
+            dup(escaped, "bbbbbb"),
+        ),
+        (
+            "plain alias on the keeper",
+            dup(plain, "aaaaaa"),
+            dup("", "bbbbbb"),
+        ),
+        // An escaped alias naming the retired card itself is no new link, but the
+        // two parsers still disagree about it, so a reviewer decides.
+        (
+            "escaped alias to the retired id",
+            dup(own, "aaaaaa"),
+            dup("", "bbbbbb"),
+        ),
+    ];
+    for (name, keeper, retired) in cases {
+        let r = Real::new(&[
+            (KEEP, &keeper),
+            (GONE, &retired),
+            ("victim", "Another topic entirely. ^c-cccccc\n"),
+        ])
+        .await;
+        let op = merge_op(&r, KEEP, GONE).await;
+        let opened = submit(&r.h, ADMIN_TOKEN, vec![op]).await;
+        assert_eq!(opened.body["tier"], 2, "{name}: {opened:?}");
+        let attempt = auto(&r, &opened).await;
+        assert_ne!(attempt.body["state"], "applied", "{name}: {attempt:?}");
+        assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live", "{name}");
+    }
+    // The same escape that slips into a tier 0 body after tiering is held at
+    // preflight and apply, by the lineage backstop.
+    let r = trusted().await;
+    let body = r.body(&open(&r).await);
+    let forged = retext(&body, KEEP, &dup(escaped, "aaaaaa"));
+    assert_eq!(held(&r, &forged), Some(LINEAGE));
 }
 
 /// The older gates a merge relaxes all pass for one trusted exact pair, so the
@@ -1288,6 +1353,55 @@ async fn forged_bodies_are_held() {
         .unwrap();
     keeper["after_hash"] = json!("0".repeat(64));
     assert_eq!(held(&r, &forged), Some(KEEPER));
+}
+
+/// Lineage review reads the keeper's before text, so a before text that is not
+/// the live one is a forgery, whatever hash it carries.
+#[tokio::test]
+async fn a_forged_keeper_before_text_is_held() {
+    let r = trusted().await;
+    let body = r.body(&open(&r).await);
+    assert_eq!(held(&r, &body), None);
+    let mut forged = body.clone();
+    let keeper = forged["cards"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|c| c["card_id"] == KEEP)
+        .unwrap();
+    keeper["before_text"] = json!("Forged claim. ^c-aaaaaa\n");
+    assert_eq!(held(&r, &forged), Some(SHAPE));
+}
+
+/// The one scope that is not real. Its proposals skip the merge gate and take
+/// the stored fixture report, so an exact pair there gets no relaxation.
+#[tokio::test]
+async fn an_exact_pair_on_the_fixture_scope_keeps_the_blast_cap() {
+    use super::retrieval_eval::FIXTURE_SCOPE;
+    let r = Real::fixture(&[(KEEP, &dup("", "aaaaaa")), (GONE, &dup("", "bbbbbb"))]).await;
+    let (k, o) = (
+        card(&r.h, FIXTURE_SCOPE, KEEP).await,
+        card(&r.h, FIXTURE_SCOPE, GONE).await,
+    );
+    let pin = proposal_blocks::pins(k["text"].as_str().unwrap()).remove(0);
+    let op = json!({"type":"merge_exact_duplicates","scope":FIXTURE_SCOPE,"card_id":KEEP,
+        "base_revision":k["revision"],"block_id":pin["block_id"],"expected_block_hash":pin["hash"],
+        "other_card":{"scope":FIXTURE_SCOPE,"card_id":GONE,"base_revision":o["revision"]}});
+    let opened = submit_ops(&r, vec![op], 0).await;
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(
+        gate(&report, "delta"),
+        (json!("held"), json!("blast_cap_exceeded")),
+        "{report:?}"
+    );
+    assert_ne!(
+        gate(&report, "evidence_floor").0,
+        json!("satisfied"),
+        "{report:?}"
+    );
+    assert_eq!(report["changed_path_count"], 2);
+    assert_eq!(report["structural_merge_proof"], false);
+    assert!(!preflight::all_satisfied(&report));
 }
 
 /// Token counts do not carry punctuation, and literal search matches it.

@@ -14,7 +14,7 @@ use super::{
     ops, proposal_metadata,
     proposals::{cards, string},
     ranking,
-    retrieval_eval::Live,
+    retrieval_eval::{self, Live},
     text,
 };
 use crate::writer::ReadTx;
@@ -165,8 +165,9 @@ struct Head {
     first_seq: Option<i64>,
 }
 
-/// The live head, or None when it moved or is no longer live.
-fn load<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<Head>> {
+/// The live head without its history, or None when it moved or is no longer
+/// live. `first_seq` is left empty for [`load`] to fill.
+fn read<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<Head>> {
     let (scope, id) = (string(target, "scope"), string(target, "card_id"));
     let rows = tx.query(&format!("SELECT c.revision,c.content_hash,c.trust,b.bytes,c.writer_class,{},c.state,c.writer FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2", index::ORIGIN_AUTOMATED_SQL), &[ops::t(scope), ops::t(id)])?;
     let Some(row) = rows.first() else {
@@ -182,15 +183,13 @@ fn load<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<He
         return Ok(None);
     }
     let origin = matches!(row[5], Value::Integer(n) if n != 0);
-    let text = String::from_utf8_lossy(bytes).into_owned();
-    let first_seq = content_start(tx, scope, id, (*revision, &ops::s(&row[1]), &text))?;
     let card = Card {
         scope: scope.into(),
         card_id: id.into(),
         revision: *revision,
         content_hash: ops::s(&row[1]),
         trust: ops::s(&row[2]),
-        text,
+        text: String::from_utf8_lossy(bytes).into_owned(),
         automated: ops::s(&row[4]) == "principal" || origin,
     };
     Ok(Some(Head {
@@ -198,8 +197,24 @@ fn load<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<He
         origin,
         writer: ops::s(&row[7]),
         writer_class: ops::s(&row[4]),
-        first_seq,
+        first_seq: None,
     }))
+}
+
+/// The live head with the date of its current claim body, or None when it
+/// moved or is no longer live.
+fn load<T: ReadTx + ?Sized>(tx: &T, target: &Json) -> rusqlite::Result<Option<Head>> {
+    let Some(mut head) = read(tx, target)? else {
+        return Ok(None);
+    };
+    let card = &head.card;
+    head.first_seq = content_start(
+        tx,
+        &card.scope,
+        &card.card_id,
+        (card.revision, &card.content_hash, &card.text),
+    )?;
+    Ok(Some(head))
 }
 
 /// Whether `have` holds every token of `need` at least as many times.
@@ -382,9 +397,18 @@ struct Kept<'a> {
 /// it read, and their claim bodies are identical. It is recomputed from the
 /// live heads here, so nothing in the proposal body can supply it. Preflight
 /// relaxes the blast cap and the attested evidence floors on this fact alone.
+///
+/// The reserved fixture scope never qualifies. Its proposals skip this gate
+/// and take the stored fixture report path, so a relaxation there would have
+/// nothing behind it.
 pub(super) fn exact_pair<T: ReadTx + ?Sized>(tx: &T, proposal: &Json) -> rusqlite::Result<bool> {
     let ops = proposal["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    if !matches!(ops, [op] if is_merge(op)) || cards(proposal).len() != 2 {
+    if !matches!(ops, [op] if is_merge(op))
+        || cards(proposal).len() != 2
+        || cards(proposal)
+            .iter()
+            .any(|c| c["scope"] == retrieval_eval::FIXTURE_SCOPE)
+    {
         return Ok(false);
     }
     let Some(plan) = plan(proposal) else {
@@ -396,7 +420,7 @@ pub(super) fn exact_pair<T: ReadTx + ?Sized>(tx: &T, proposal: &Json) -> rusqlit
     let [(_, retired)] = merges.as_slice() else {
         return Ok(false);
     };
-    let (Some(keeper), Some(retired)) = (load(tx, keeper)?, load(tx, retired)?) else {
+    let (Some(keeper), Some(retired)) = (read(tx, keeper)?, read(tx, retired)?) else {
         return Ok(false);
     };
     Ok(proposal_metadata::same_claims(
@@ -414,6 +438,40 @@ pub(super) fn in_merge(proposal: &Json, card: &Json) -> bool {
                 || is(&op["other_card"]["scope"], &op["other_card"]["card_id"])
         })
     })
+}
+
+/// The ids a merge retires into `card`. Each adds one alias, `{scope}/{id}`, to
+/// the keeper, and nothing else about its lineage changes. Empty unless every
+/// op in `proposal` is a merge, so a merge beside any other op earns no excuse.
+pub(super) fn aliases_added<'a>(proposal: &'a Json, card: &Json) -> Vec<&'a str> {
+    let Some(ops) = proposal["ops"]
+        .as_array()
+        .filter(|o| o.iter().all(is_merge))
+    else {
+        return Vec::new();
+    };
+    ops.iter()
+        .filter(|op| card["scope"] == op["scope"] && card["card_id"] == op["card_id"])
+        .filter_map(|op| op["other_card"]["card_id"].as_str())
+        .collect()
+}
+
+/// Whether `text` lists aliases that `proposal_metadata::list`, which the merge
+/// reads and rewrites with, and `Links::parse`, which search and lineage review
+/// read, decode to different cards. A spelling only one of them understands,
+/// such as a JSON `\/` escape, would let the rewrite publish a link that
+/// review never saw. A list the merge cannot read counts as ambiguous too.
+pub(super) fn aliases_ambiguous(text: &str, scope: &str) -> bool {
+    let Ok(listed) = proposal_metadata::list(text, "aliases") else {
+        return true;
+    };
+    let listed: BTreeSet<&str> = listed
+        .iter()
+        .filter_map(|alias| ranking::link_id(alias, scope))
+        .collect();
+    let parsed = ranking::front_targets(text, scope, |key| key == "aliases");
+    let parsed: BTreeSet<&str> = parsed.iter().map(|(_, id)| id.as_str()).collect();
+    listed != parsed
 }
 
 /// Decide a proposal whose ops are all `merge_exact_duplicates`.
@@ -453,6 +511,10 @@ pub(super) fn hold<T: ReadTx + ?Sized>(
             return Ok(Some(DRIFTED));
         };
         let scope = keeper.scope.as_str();
+        // Lineage review reads the keeper's before text, so it must be the live one.
+        if string(target, "before_text") != keeper.text {
+            return Ok(Some(SHAPE));
+        }
         let after_text = string(target, "after_text");
         // The apply stores the blob under `after_hash`, so it must name this text.
         if string(target, "after_hash") != ids::sha256_hex(after_text.as_bytes()) {

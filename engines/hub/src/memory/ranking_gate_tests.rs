@@ -133,13 +133,17 @@ pub(super) struct Real {
 }
 impl Real {
     pub(super) async fn new(cards: &[(&str, &str)]) -> Self {
-        Self::build(cards, false).await
+        Self::build("fleet", cards, false).await
+    }
+    /// Trusted cards on the reserved fixture scope, which the merge gate never sees.
+    pub(super) async fn fixture(cards: &[(&str, &str)]) -> Self {
+        Self::build(super::retrieval_eval::FIXTURE_SCOPE, cards, false).await
     }
     /// Cards put by the admin stay `agent-unreviewed`, the class a merge can use.
     pub(super) async fn untrusted(cards: &[(&str, &str)]) -> Self {
-        Self::build(cards, true).await
+        Self::build("fleet", cards, true).await
     }
-    async fn build(cards: &[(&str, &str)], put: bool) -> Self {
+    async fn build(scope: &str, cards: &[(&str, &str)], put: bool) -> Self {
         let h = Hub::with(clean(), None);
         attestation_tests::policy(&h);
         let hub = Connection::open(&h.hub).unwrap();
@@ -156,12 +160,12 @@ impl Real {
             [policy.to_string()],
         )
         .unwrap();
-        grant(&h, "fleet", &["read", "reflect"]).await;
+        grant(&h, scope, &["read", "reflect"]).await;
         for (id, body) in cards {
             let put = if put {
-                h.put(ADMIN_TOKEN, "fleet", id, None, body).await
+                h.put(ADMIN_TOKEN, scope, id, None, body).await
             } else {
-                h.call(ADMIN_TOKEN, json!({"action":"import","scope":"fleet","card_id":id,"text":body,"client_event_id":h.id()})).await
+                h.call(ADMIN_TOKEN, json!({"action":"import","scope":scope,"card_id":id,"text":body,"client_event_id":h.id()})).await
             };
             assert_eq!(put.status, 201, "{put:?}");
         }
