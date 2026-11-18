@@ -181,6 +181,14 @@ def test_list_session_states_still_returns_full_rows(conn):
     assert len(json.dumps(first)) > 5 * len(json.dumps(fleet_status_sessions.status_session(first)))
 
 
+def test_status_drops_exactly_the_heavy_fields(conn):
+    """A new light field on the full row must be added to status on purpose, not dropped silently."""
+    _seed_hub(conn)
+    full = fleet_hub_policy.list_session_states(conn)[0]
+    assert set(full) - set(fleet_status_sessions.STATUS_SESSION_FIELDS) == set(HEAVY_FIELDS)
+    assert set(fleet_status_sessions.STATUS_SESSION_FIELDS) <= set(full)
+
+
 def test_deck_keeps_the_session_section_from_status(conn):
     _seed_hub(conn)
     status = fleet_hub_routing.control_plane_status(conn)

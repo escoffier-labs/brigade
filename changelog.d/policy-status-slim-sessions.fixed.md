@@ -1,2 +1,1 @@
-- `brigade fleet policy status --json` now returns slim session records, about 0.8 KB each instead of about 18 KB, so the status body fits the bounded client again on a Hub with many stale sessions.
-- `brigade fleet policy` page and the session endpoints still show the full loaded and pending policy snapshots.
+- `brigade fleet policy status --json` (`GET /policy/status`) now returns slim session records, about 0.8 KB each instead of about 18 KB, so the status body fits the bounded client again on a Hub with many stale sessions. The status sessions no longer carry `loaded_snapshot`, `pending_snapshot`, `sources`, `effective` or `selected`; read those from the policy page or the session endpoints, which still return full rows.
