@@ -176,6 +176,8 @@ A check record shows what ran. It does not show that the tests are good. A hando
   <a href="https://github.com/escoffier-labs/brigade/blob/main/LICENSE">MIT license</a>
 </p>
 
+Questions and ideas: [Discussions](https://github.com/escoffier-labs/brigade/discussions).
+
 The Python CLI may send a passive version request. [Telemetry](https://github.com/escoffier-labs/brigade/blob/main/docs/telemetry.md) lists its fields and opt-outs.
 
 <details>

@@ -322,6 +322,17 @@ The audit table for the #739 sweep lives at
 [`docs/audit/2026-08-09-error-refusal-copy.md`](docs/audit/2026-08-09-error-refusal-copy.md).
 High-traffic contracts are pinned in `tests/test_error_refusal_copy.py`.
 
+## Where things go
+
+Questions (setup, behavior, how do I) and ideas go to [Discussions](https://github.com/escoffier-labs/brigade/discussions). Reproducible bugs go to Issues, using the bug form under `.github/ISSUE_TEMPLATE/`. Security reports follow [SECURITY.md](SECURITY.md) and never go in a public thread.
+
+For agents:
+
+- Never open a discussion. Leave that to a person.
+- While triaging, an agent may read a discussion and cite it in an issue or a handoff.
+- An idea becomes an issue only when the maintainer promotes it, or the thread contains a reproducible failure.
+- Never post or reply in Announcements.
+
 ## Filing issues
 
 Please use the templates under `.github/ISSUE_TEMPLATE/` - they exist to save you from re-typing the version and install shape every time.

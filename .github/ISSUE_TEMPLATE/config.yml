@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions (setup, behavior, how do I)
+    url: https://github.com/escoffier-labs/brigade/discussions/new?category=q-a
+    about: Ask in Discussions. Answers stay searchable for the next person with the same question.
+  - name: Ideas and feature requests
+    url: https://github.com/escoffier-labs/brigade/discussions/new?category=ideas
+    about: Propose a change in Discussions. The maintainer promotes accepted ideas to issues.
   - name: Cookbook (longer-form guidance + worked examples)
     url: https://github.com/solomonneas/solos-cookbook
     about: Brigade is the kit. The cookbook is the why. Browse there for guidance and patterns rather than filing an issue here.
