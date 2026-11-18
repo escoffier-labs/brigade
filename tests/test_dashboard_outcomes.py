@@ -214,7 +214,7 @@ def test_render_ratchet_panel_marks_a_stale_report():
 def test_render_ratchet_panel_absent_and_error_states():
     absent = outcome_rank.render({"ranking": []}, "unused")
     assert "No outcome ratchet report yet" in absent
-    assert "outcome reconcile --target . --report" in absent
+    assert "outcome reconcile --target . --report --proposals" in absent
 
     failed = outcome_rank.render({"ranking": [], "ratchet": {"error": "ratchet boom"}}, "unused")
     assert "ratchet boom" in failed

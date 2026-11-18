@@ -9,7 +9,9 @@ slice, because its session attribution is not verified.
 A proposal here is a review request, never authorization. It stages the current
 skill text unchanged and is marked ``requires_revision``: Brigade drafts no
 text and calls no model, and ``inbox accept`` refuses it until the operator files
-a revised candidate. The contract is filled only from observed evidence: the
+a revised candidate. Only a copy whose own install receipt is a reviewed
+``brigade-bundle`` is staged; a skill whose copies come from different sources is
+flagged ``mixed-source`` instead. The contract is filled only from observed evidence: the
 artifact id, the reason code, the receipt run ids and paths from the scorecard
 receipt trail, and the failing check ids and commands read back from those
 receipts. A receipt that is gone yields ``command unavailable``, never an
@@ -32,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import outcome
+from . import outcome, scorecard
 from .skills_cmd import registry as _registry_mod
 from .skills_cmd.adapters import _fleet_receipts
 from .skills_cmd.inbox import inbox_add, proposal_for_dedupe_key
@@ -81,7 +83,8 @@ class ProposalOutcome:
 class _FailedReceipt:
     run_id: str
     receipt: str
-    checks: tuple[tuple[str, str], ...]  # (check_id, command), empty when the receipt is gone
+    readable: bool
+    checks: tuple[tuple[str | None, str], ...]  # (check_id or None, command) per failing effectiveness command
 
 
 def count_proposals(outcomes: Sequence[ProposalOutcome]) -> dict[str, int]:
@@ -125,31 +128,48 @@ def file_regression_proposals(target: Path, items: Sequence[Any]) -> list[Propos
     return sorted(outcomes, key=lambda row: (row.artifact_id, row.reason_code))
 
 
-def _source_kind(skill_id: str, receipts: dict[tuple[str, str], dict[str, Any]]) -> str:
-    """Classify a skill as ``bundled``, ``registry`` or ``other`` from its install receipts.
+def _receipt_kind(skill_id: str, receipt: dict[str, Any]) -> str:
+    """Classify one install receipt as ``bundled``, ``registry`` or ``other``.
 
-    Only a Brigade bundle with a reviewed identity counts as bundled. Nothing
-    here guesses an upstream for a registry or path skill.
+    Only a Brigade bundle with a reviewed identity counts as bundled. A path
+    install, or a receipt that does not parse as a source, is ``other``; nothing
+    here guesses an upstream for it.
     """
-    kinds: set[str] = set()
-    for (receipt_skill, _harness), receipt in receipts.items():
-        if receipt_skill != skill_id:
-            continue
-        source = receipt.get("source")
-        if not isinstance(source, dict):
-            continue
-        kind = source.get("kind")
-        if (
-            kind == "brigade-bundle"
-            and source.get("reviewed") is True
-            and source.get("identity") == f"{_registry_mod.BUNDLED_SOURCE_PREFIX}{skill_id}"
-        ):
-            kinds.add("bundled")
-        elif kind == "registry":
-            kinds.add("registry")
-    if "bundled" in kinds:
+    source = receipt.get("source")
+    if not isinstance(source, dict):
+        return "other"
+    kind = source.get("kind")
+    if (
+        kind == "brigade-bundle"
+        and source.get("reviewed") is True
+        and source.get("identity") == f"{_registry_mod.BUNDLED_SOURCE_PREFIX}{skill_id}"
+    ):
         return "bundled"
-    return "registry" if "registry" in kinds else "other"
+    return "registry" if kind == "registry" else "other"
+
+
+def _copy_harness(content: Path) -> str | None:
+    """Harness key of an installed copy at ``<root>/.<harness>/skills/<id>/SKILL.md``, else None."""
+    skills_dir = content.parent.parent
+    harness_dir = skills_dir.parent.name
+    if skills_dir.name != "skills" or not harness_dir.startswith("."):
+        return None
+    return harness_dir[1:] or None
+
+
+def _classify(skill_id: str, content: Path, receipts: dict[tuple[str, str], dict[str, Any]]) -> tuple[str, str | None]:
+    """Return ``(kind, mixed)`` for the copy at ``content``.
+
+    ``kind`` comes from that copy's own receipt (``other`` when it has none, as for
+    a registry master). ``mixed`` is set when the skill's receipts disagree about
+    their source, so a bundle copy in one harness never vouches for a registry or
+    path copy in another.
+    """
+    kinds = {_receipt_kind(skill_id, receipt) for (name, _harness), receipt in receipts.items() if name == skill_id}
+    harness = _copy_harness(content)
+    receipt = receipts.get((skill_id, harness)) if harness else None
+    copy_kind = _receipt_kind(skill_id, receipt) if receipt is not None else "other"
+    return copy_kind, ("mixed-source" if len(kinds) > 1 else None)
 
 
 def _propose(target: Path, item: Any, receipts: dict[tuple[str, str], dict[str, Any]]) -> ProposalOutcome:
@@ -159,7 +179,12 @@ def _propose(target: Path, item: Any, receipts: dict[tuple[str, str], dict[str, 
     artifact_id = str(decision.artifact_id)
     code = str(decision.code)
     skill_id = _registry_mod._slug(artifact_id)
-    kind = _source_kind(skill_id, receipts)
+    content = outcome_cmd._artifact_content_path(target, artifact_id, "skill")
+    if content is None or not content.parent.is_dir():
+        return ProposalOutcome(artifact_id, code, SKIPPED, "skill text unavailable")
+    kind, mixed = _classify(skill_id, content, receipts)
+    if mixed:
+        return ProposalOutcome(artifact_id, code, FLAGGED, mixed)
     if kind == "registry":
         return ProposalOutcome(artifact_id, code, FLAGGED, "registry")
     if kind != "bundled":
@@ -174,13 +199,10 @@ def _propose(target: Path, item: Any, receipts: dict[tuple[str, str], dict[str, 
     prior = proposal_for_dedupe_key(target, key)
     if prior is not None:
         return ProposalOutcome(artifact_id, code, EXISTING, str(prior.get("status") or ""), _proposal_id(prior))
-    content = outcome_cmd._artifact_content_path(target, artifact_id, "skill")
-    if content is None or not content.parent.is_dir():
-        return ProposalOutcome(artifact_id, code, SKIPPED, "skill text unavailable")
     with _registry_mod._held_state_root(target, writable=False) as anchor:
         baseline = _registry_mod._baseline_identity(anchor, skill_id)
     contract = build_contract(target, item, baseline=baseline)
-    helped, hurt = _effectiveness_counts(card)
+    evidence = _evidence(card)
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         rc = inbox_add(
@@ -188,7 +210,7 @@ def _propose(target: Path, item: Any, receipts: dict[tuple[str, str], dict[str, 
             source=content.parent,
             skill_id=skill_id,
             summary=(
-                f"Outcome ratchet {code} for {artifact_id} (helped={helped} hurt={hurt}); "
+                f"Outcome ratchet {code} for {artifact_id} (helped={evidence.helped} hurt={evidence.hurt}); "
                 "review request only, the staged text is the unrevised skill."
             ),
             behavioral_contract=contract,
@@ -200,6 +222,9 @@ def _propose(target: Path, item: Any, receipts: dict[tuple[str, str], dict[str, 
     if rc not in (0, 1):
         return ProposalOutcome(artifact_id, code, SKIPPED, f"inbox refused the proposal (rc={rc})")
     filed = json.loads(out.getvalue())
+    if filed.get("deduped"):
+        # A concurrent run filed this key between the pre-check and the held write.
+        return ProposalOutcome(artifact_id, code, EXISTING, str(filed.get("status") or ""), _proposal_id(filed))
     return ProposalOutcome(artifact_id, code, FILED, "", _proposal_id(filed))
 
 
@@ -208,31 +233,42 @@ def _proposal_id(proposal: dict[str, Any]) -> str | None:
     return str(value) if value else None
 
 
-def _effectiveness_counts(card: Any) -> tuple[int, int]:
-    effectiveness = card.dimensions.get("effectiveness") if isinstance(card.dimensions, dict) else None
-    if not isinstance(effectiveness, dict):
-        return 0, 0
-    return int(effectiveness.get("helped", 0) or 0), int(effectiveness.get("hurt", 0) or 0)
+@dataclass(frozen=True)
+class _Evidence:
+    """The one deduped receipt set that the card's helped and hurt counts come from."""
+
+    helped: int
+    hurt: int
+    failed: tuple[scorecard.ReceiptAudit, ...]  # every deduped hurt receipt, oldest first
+
+
+def _evidence(card: Any) -> _Evidence:
+    """Dedupe the receipt trail by evidence unit exactly as the scorecard does."""
+    eligible = [audit for audit in card.receipt_trail if audit.eligible and not audit.reused]
+    deduped = scorecard._dedupe_audits(eligible)
+    failed = tuple(audit for audit in deduped if audit.effectiveness == -1)
+    return _Evidence(sum(1 for audit in deduped if audit.effectiveness == 1), len(failed), failed)
 
 
 def build_contract(target: Path, item: Any, *, baseline: str | None) -> dict[str, Any]:
     """Build the version 1 behavioral contract from observed evidence only."""
     decision = item.decision
     artifact_id = str(decision.artifact_id)
-    helped, hurt = _effectiveness_counts(item.scorecard)
-    failed = _failed_receipts(target, item.scorecard)
+    evidence = _evidence(item.scorecard)
+    failed = _failed_receipts(target, evidence)
     run_ids = ", ".join(row.run_id for row in failed) or "none readable"
-    check_ids = sorted({check_id for row in failed for check_id, _command in row.checks})
-    checks = ", ".join(check_ids) if check_ids else COMMAND_UNAVAILABLE
+    shown = f" (newest {len(failed)} of {evidence.hurt})" if len(failed) < evidence.hurt else ""
+    labels = sorted({_check_label(check_id, command) for row in failed for check_id, command in row.checks})
+    checks = ", ".join(labels) if labels else COMMAND_UNAVAILABLE
     return {
         "schema_version": 1,
         "reason": (
             f"The outcome ratchet decided {decision.code} for {artifact_id} ({decision.reason}); "
-            f"verified effectiveness for its current text is helped={helped} hurt={hurt}."
+            f"verified effectiveness for its current text is helped={evidence.helped} hurt={evidence.hurt}."
         ),
         "addressed_failure": (
-            f"{hurt} verified effectiveness failure(s) against the current text of {artifact_id}. "
-            f"Failing receipt run(s): {run_ids}. Failing check(s): {checks}."
+            f"{evidence.hurt} verified effectiveness failure(s) against the current text of {artifact_id}. "
+            f"Failing receipt run(s){shown}: {run_ids}. Failing check(s): {checks}."
         ),
         "change_category": "bugfix",
         "baseline_fingerprint": baseline,
@@ -240,11 +276,15 @@ def build_contract(target: Path, item: Any, *, baseline: str | None) -> dict[str
     }
 
 
+def _check_label(check_id: str | None, command: str) -> str:
+    return check_id if check_id else f"command `{command}` (no check id recorded)"
+
+
 def _expectations(artifact_id: str, failed: Sequence[_FailedReceipt]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
     for receipt in failed:
-        if not receipt.checks:
+        if not receipt.readable:
             entries = [
                 (
                     f"{receipt.run_id}:receipt-unavailable",
@@ -252,14 +292,19 @@ def _expectations(artifact_id: str, failed: Sequence[_FailedReceipt]) -> list[di
                     f"against the revised skill; {COMMAND_UNAVAILABLE}, the receipt could not be read.",
                 )
             ]
-        else:
+        elif not receipt.checks:
             entries = [
                 (
-                    f"{receipt.run_id}:{check_id}",
-                    f"Check {check_id} (command: {command}) completes with exit code 0 against the revised "
-                    f"skill; it failed in receipt run {receipt.run_id} ({receipt.receipt}).",
+                    f"{receipt.run_id}:no-failing-command",
+                    f"The effectiveness checks recorded by receipt run {receipt.run_id} ({receipt.receipt}) "
+                    f"pass against the revised skill; the receipt lists no failing effectiveness command, "
+                    f"{COMMAND_UNAVAILABLE}.",
                 )
-                for check_id, command in receipt.checks
+            ]
+        else:
+            entries = [
+                _check_entry(receipt, check_id, command, number)
+                for number, (check_id, command) in enumerate(receipt.checks, start=1)
             ]
         for entry_id, description in entries:
             if entry_id not in seen:
@@ -278,15 +323,28 @@ def _expectations(artifact_id: str, failed: Sequence[_FailedReceipt]) -> list[di
     return rows[:100]
 
 
-def _failed_receipts(target: Path, card: Any) -> list[_FailedReceipt]:
-    """Newest hurt receipts from the scorecard trail, with failing checks read back from each."""
-    hurt = [audit for audit in card.receipt_trail if audit.eligible and not audit.reused and audit.effectiveness == -1]
+def _check_entry(receipt: _FailedReceipt, check_id: str | None, command: str, number: int) -> tuple[str, str]:
+    where = f"it failed in receipt run {receipt.run_id} ({receipt.receipt})"
+    if check_id:
+        return (
+            f"{receipt.run_id}:{check_id}",
+            f"Check {check_id} (command: {command}) completes with exit code 0 against the revised skill; {where}.",
+        )
+    return (
+        f"{receipt.run_id}:command-{number}",
+        f"The command `{command}` completes with exit code 0 against the revised skill; {where} "
+        "and the receipt records no check id for it.",
+    )
+
+
+def _failed_receipts(target: Path, evidence: _Evidence) -> list[_FailedReceipt]:
+    """Newest deduped hurt receipts, with failing commands read back from each."""
     rows: list[_FailedReceipt] = []
-    for audit in hurt[-_MAX_RECEIPTS:]:
+    for audit in evidence.failed[-_MAX_RECEIPTS:]:
         path = Path(audit.receipt_path)
         receipt = _read_receipt(target, path)
         run_id = str(audit.run_id or path.parent.name)
-        rows.append(_FailedReceipt(run_id, _relative(target, path), _failing_checks(receipt)))
+        rows.append(_FailedReceipt(run_id, _relative(target, path), receipt is not None, _failing_checks(receipt)))
     return rows
 
 
@@ -312,19 +370,18 @@ def _read_receipt(target: Path, path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _failing_checks(receipt: dict[str, Any] | None) -> tuple[tuple[str, str], ...]:
+def _failing_checks(receipt: dict[str, Any] | None) -> tuple[tuple[str | None, str], ...]:
     commands = receipt.get("commands") if receipt else None
     if not isinstance(commands, list):
         return ()
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str | None, str]] = []
     for command in commands:
         if not isinstance(command, dict) or command.get("check_role") != "effectiveness":
             continue
         if command.get("status") == "completed" and command.get("exit_code") == 0:
             continue
         check_id = command.get("check_id")
-        if isinstance(check_id, str) and check_id:
-            rows.append((check_id[:120], _command_text(command)))
+        rows.append((check_id[:120] if isinstance(check_id, str) and check_id else None, _command_text(command)))
     return tuple(rows[:_MAX_CHECKS_PER_RECEIPT])
 
 

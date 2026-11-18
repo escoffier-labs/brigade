@@ -244,8 +244,12 @@ def inbox_add(
 
     ``requires_revision`` marks a review request whose staged text is the current,
     unrevised skill (an outcome regression proposal). The proposal records that
-    candidate identity as ``unrevised_identity`` and ``inbox_accept`` refuses it
-    until a revised candidate is filed, because accepting it would change nothing.
+    candidate identity as ``unrevised_identity`` and its body fingerprint (which
+    ignores ``skill.json``, so a changed contract cannot disguise it) as
+    ``unrevised_fingerprint``. ``inbox_accept`` refuses it until a revised
+    candidate is filed, because accepting it would change nothing. For the same
+    reason a plain proposal whose body matches an open review request's
+    unrevised body is refused here and again at accept time.
     """
     try:
         if behavioral_contract is not None:
@@ -291,6 +295,11 @@ def inbox_add(
                         valid=bool((prior.get("lint") or {}).get("valid")),
                         deduped=True,
                     )
+            if not requires_revision and _open_unrevised_request(
+                state_anchor, resolved_skill_id, _registry_mod._files_fingerprint(collected_files)
+            ):
+                print(_UNREVISED_BODY_ERROR, file=sys.stderr)
+                return 2
             baseline = _registry_mod._baseline_identity(state_anchor, resolved_skill_id)
             if behavioral_contract is not None and behavioral_contract["baseline_fingerprint"] != baseline:
                 print("error: behavioral_contract baseline does not match current registry", file=sys.stderr)
@@ -338,6 +347,7 @@ def inbox_add(
             if requires_revision:
                 proposal["requires_revision"] = True
                 proposal["unrevised_identity"] = proposal["candidate_identity"]
+                proposal["unrevised_fingerprint"] = proposal["fingerprint"]
             _registry_mod._write_state_file(
                 state_anchor, *proposal_rel, "proposal.json", data=_registry_mod._json_bytes(proposal)
             )
@@ -345,6 +355,36 @@ def inbox_add(
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return _report_proposal(proposal, json_output=json_output, valid=bool(lint_payload["valid"]))
+
+
+_UNREVISED_BODY_ERROR = (
+    "error: skill proposal needs a revised candidate: its files match the unrevised skill of an open "
+    "review request; revise the skill text, then file it with `brigade skills inbox add`"
+)
+
+
+def _open_unrevised_request(state_anchor: Any, skill_id: str, fingerprint: str, *, skip: str | None = None) -> bool:
+    """True when a pending ``requires_revision`` proposal for ``skill_id`` stages exactly these files.
+
+    The body fingerprint ignores ``skill.json``, so a different behavioral contract
+    over the same unrevised files still matches.
+    """
+    for name in _registry_mod._plain_subdirs_under_anchor(state_anchor, "skills", "inbox") or []:
+        if name == skip:
+            continue
+        try:
+            meta = _load_anchored_proposal(state_anchor, name)
+        except _registry_mod.SkillsStatePathError:
+            continue
+        if (
+            meta is not None
+            and meta.get("status") == "pending"
+            and meta.get("requires_revision")
+            and _registry_mod._slug(str(meta.get("skill_id") or "")) == skill_id
+            and meta.get("unrevised_fingerprint") == fingerprint
+        ):
+            return True
+    return False
 
 
 def _find_proposal_by_dedupe_key(state_anchor: Any, dedupe_key: str) -> dict[str, Any] | None:
@@ -372,7 +412,8 @@ def proposal_for_dedupe_key(target: Path, dedupe_key: str) -> dict[str, Any] | N
 
 def _report_proposal(proposal: dict[str, Any], *, json_output: bool, valid: bool = True, deduped: bool = False) -> int:
     if json_output:
-        print(json.dumps(proposal, indent=2, sort_keys=True))
+        # ``deduped`` marks an existing proposal returned instead of a new filing; it is never stored.
+        print(json.dumps({**proposal, "deduped": True} if deduped else proposal, indent=2, sort_keys=True))
     else:
         print(f"skill_proposal: {proposal['proposal_id']}")
         print(f"skill_id: {proposal.get('skill_id')}")
@@ -491,13 +532,29 @@ def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_ou
             if proposal.get("candidate_identity") != candidate_identity:
                 print("error: candidate changed or proposal identity missing; review a new proposal", file=sys.stderr)
                 return 2
-            if proposal.get("requires_revision") and proposal.get("unrevised_identity") == candidate_identity:
-                # Accepting the unrevised text would be a silent no-op that still mutes the dedupe key.
+            candidate_fingerprint = _registry_mod._files_fingerprint(proposal_files)
+            if proposal.get("requires_revision") and not (
+                proposal.get("unrevised_identity") and proposal.get("unrevised_fingerprint")
+            ):
+                # Fail closed: without the recorded unrevised text the no-op cannot be ruled out.
                 print(
-                    "error: skill proposal needs a revised candidate: its staged text is the unrevised skill; "
-                    "file a revised candidate with `brigade skills inbox add` and reject this request",
+                    "error: skill proposal is marked requires_revision but records no unrevised identity; "
+                    "reject it and file a revised candidate",
                     file=sys.stderr,
                 )
+                return 2
+            if (
+                proposal.get("requires_revision")
+                and proposal.get("unrevised_fingerprint") == candidate_fingerprint
+                or _open_unrevised_request(
+                    state_anchor,
+                    _registry_mod._slug(str(proposal.get("skill_id") or name)),
+                    candidate_fingerprint,
+                    skip=name,
+                )
+            ):
+                # Accepting the unrevised text would be a silent no-op that still mutes the dedupe key.
+                print(_UNREVISED_BODY_ERROR, file=sys.stderr)
                 return 2
             skill_id = _registry_mod._slug(str(proposal.get("skill_id") or name))
             if "baseline_identity" not in proposal or proposal["baseline_identity"] != _registry_mod._baseline_identity(

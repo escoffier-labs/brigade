@@ -18,7 +18,8 @@ _EMPTY_MESSAGE = (
     "run verification through a registered verifier and capture outcomes."
 )
 _RATCHET_EMPTY_MESSAGE = (
-    "No outcome ratchet report yet. The weekly ratchet writes one with `brigade outcome reconcile --target . --report`."
+    "No outcome ratchet report yet. The weekly ratchet writes one with "
+    "`brigade outcome reconcile --target . --report --proposals`."
 )
 _RATCHET_STALE_DAYS = 7
 
