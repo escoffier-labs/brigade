@@ -25,7 +25,8 @@ def _sel() -> Selection:
 
 
 def _bundled(skill_id: str = "brigade-work") -> bytes:
-    return (template_root() / "skills" / skill_id / "SKILL.md").read_bytes()
+    # A Windows checkout may hold the template with CRLF; the installed copy is always LF.
+    return (template_root() / "skills" / skill_id / "SKILL.md").read_bytes().replace(b"\r\n", b"\n")
 
 
 def _publish_history(tmp_path: Path, monkeypatch, files: dict[str, list[bytes]]) -> Path:
@@ -165,6 +166,22 @@ def test_the_proposal_init_filed_for_a_stale_copy_is_superseded_by_the_refresh(t
     assert statuses == ["pending", "pending", "superseded"]
 
 
+def test_the_stale_skill_hint_ignores_a_superseded_proposal(tmp_path, monkeypatch):
+    from brigade.skills_cmd import inbox
+
+    assert install_selection(tmp_path, _sel()) == 0
+    (tmp_path / BRIGADE_WORK).write_bytes(OLD)
+    _history_for_skill(tmp_path, monkeypatch)
+    assert install_selection(tmp_path, _sel()) == 0
+    rel = BRIGADE_WORK.as_posix()
+    assert "differs from the kept copy" in inbox.stale_skill_hint(tmp_path, rel)
+
+    inbox.supersede_pending(tmp_path, "init:brigade-work:", "test")
+
+    assert [p["status"] for p in _proposals(tmp_path)] == ["superseded"]
+    assert inbox.stale_skill_hint(tmp_path, rel) == ""
+
+
 def test_a_failed_publish_keeps_the_copy_and_the_pending_proposal(tmp_path, monkeypatch, capsys):
     assert install_selection(tmp_path, _sel()) == 0
     (tmp_path / BRIGADE_WORK).write_bytes(OLD)
@@ -277,6 +294,55 @@ def test_a_pristine_past_release_runbook_is_refreshed_without_a_backup(tmp_path,
     assert capsys.readouterr().out == ""
 
 
+def _with_installed_pins(path: Path, edit) -> None:
+    payload = json.loads(path.read_text())
+    edit(payload["pins"])
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def test_a_refresh_keeps_an_operators_version_pin_and_only_refreshes_the_hashes(tmp_path, monkeypatch, capsys):
+    path = _seed_runbooks(tmp_path, monkeypatch)
+    _with_installed_pins(path, lambda pins: pins[0].update(version_cmd="--version", version="stale", sha256="0" * 64))
+    capsys.readouterr()
+
+    assert memory_cmd._write_memory_care_runbooks(tmp_path) == 0
+
+    assert f"refreshed (pristine): {path}" in capsys.readouterr().out
+    (pin,) = json.loads(path.read_text())["pins"]
+    assert pin["version_cmd"] == "--version"  # the operator's field survives the refresh
+    assert pin["version"] and pin["version"] != "stale"  # re-observed, not carried over
+    assert pin["sha256"] != "0" * 64  # the hash is what refreshes
+    assert _backups(path) == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"note": "operator pinned this by hand"},
+        {"command": "git", "path": "/usr/bin/git", "sha256": "1" * 64, "version_cmd": "--version"},
+    ],
+    ids=["unknown-field", "version-pin-for-a-command-the-template-lacks"],
+)
+def test_a_runbook_whose_pins_the_template_cannot_reproduce_is_kept_as_drifted(tmp_path, monkeypatch, capsys, extra):
+    path = _seed_runbooks(tmp_path, monkeypatch)
+
+    def edit(pins):
+        if "command" in extra:
+            pins.append(extra)
+        else:
+            pins[0].update(extra)
+
+    _with_installed_pins(path, edit)
+    before = path.read_bytes()
+    capsys.readouterr()
+
+    assert memory_cmd._write_memory_care_runbooks(tmp_path) == 0
+
+    assert f"kept (drifted): {path}" in capsys.readouterr().out
+    assert path.read_bytes() == before
+    assert _backups(path) == []
+
+
 def test_a_customized_or_unknown_runbook_is_kept_and_reported_once(tmp_path, monkeypatch, capsys):
     path = _seed_runbooks(tmp_path, monkeypatch, known_old=False)
     before = path.read_bytes()
@@ -349,8 +415,8 @@ def test_a_runbook_edited_between_the_compare_and_the_publish_is_kept(tmp_path, 
     raced = b'{"id": "daily-care-pass", "operator": "typed during install"}\n'
     real_stage = care_runbooks._stage
 
-    def staging_then_edit(target, spec, stage_dir):
-        result = real_stage(target, spec, stage_dir)
+    def staging_then_edit(target, spec, stage_dir, *rest):
+        result = real_stage(target, spec, stage_dir, *rest)
         if Path(spec.rel).name == DAILY:
             path.write_bytes(raced)
         return result
@@ -372,8 +438,8 @@ def test_a_runbook_swapped_for_a_link_before_the_publish_is_never_replaced(tmp_p
     elsewhere.write_bytes(path.read_bytes())
     real_stage = care_runbooks._stage
 
-    def staging_then_link(target, spec, stage_dir):
-        result = real_stage(target, spec, stage_dir)
+    def staging_then_link(target, spec, stage_dir, *rest):
+        result = real_stage(target, spec, stage_dir, *rest)
         if Path(spec.rel).name == DAILY:
             path.unlink()
             path.symlink_to(elsewhere)

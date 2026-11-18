@@ -77,6 +77,39 @@ def _say(line: str, *, quiet: bool) -> None:
     print(line, file=sys.stderr if quiet else sys.stdout)
 
 
+# The only fields a pin carries when ``brigade`` wrote it or an operator added a version check to it.
+_PIN_FIELDS = frozenset({"command", "path", "sha256", "version_cmd", "version"})
+
+
+def _installed_pins(raw: bytes) -> list[Any]:
+    """The top-level ``pins`` list of an installed runbook (empty when it has none or is not one)."""
+    try:
+        pins = json.loads(raw).get("pins")
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return []
+    return pins if isinstance(pins, list) else []
+
+
+def _pins_survive_refresh(spec: RunbookSpec, raw: bytes) -> bool:
+    """True when every installed pin is one the refresh rebuilds or merges without losing operator data.
+
+    The refresh re-derives pins from the template's steps and re-applies an installed ``version_cmd``.
+    A pin with another field, or a ``version_cmd`` for a command the template no longer runs, would
+    be dropped silently, so such a runbook is treated as drifted and kept.
+    """
+    commands = set()
+    for step in spec.payload.get("steps") or []:
+        tokens = runbook_cmd._command_tokens(str(step.get("run") or "")) if isinstance(step, dict) else None
+        if tokens:
+            commands.add(Path(tokens[0]).name)
+    for pin in _installed_pins(raw):
+        if not isinstance(pin, dict) or not set(pin) <= _PIN_FIELDS:
+            return False
+        if pin.get("version_cmd") and Path(str(pin.get("command") or "")).name not in commands:
+            return False
+    return True
+
+
 def _classify(spec: RunbookSpec, dest: Path) -> tuple[str, bytes | None]:
     """Compare an existing shipped file with the spec: ``same``, ``pristine`` (a past release) or ``drifted``."""
     try:
@@ -91,7 +124,9 @@ def _classify(spec: RunbookSpec, dest: Path) -> tuple[str, bytes | None]:
         return "same", raw
     known = shipped_history.digests(shipped_history.runbook_key(spec.rel))
     # Both the installed text and the one about to be written must be recorded shipped texts.
-    return ("pristine" if digest in known and wanted in known else "drifted"), raw
+    if digest in known and wanted in known and _pins_survive_refresh(spec, raw):
+        return "pristine", raw
+    return "drifted", raw
 
 
 def shipped_specs(template_dir: Path, rel_dir: str, names: Iterable[str]) -> tuple[list[RunbookSpec] | None, int]:
@@ -142,13 +177,17 @@ def _is_regular_file(path: Path) -> bool | None:
         return None
 
 
-def _stage(target: Path, spec: RunbookSpec, stage_dir: Path) -> Path | int:
+def _stage(target: Path, spec: RunbookSpec, stage_dir: Path, installed: bytes | None = None) -> Path | int:
     staged = stage_dir / Path(spec.rel).name
     localio.write_json(staged, dict(spec.payload))
     validated, error = runbook_cmd._read_runbook(staged, require_pin_hashes=False)
     if validated is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    if installed is not None:
+        # Refreshing a pristine copy: hand the installed pins to the rebuild so an operator's
+        # version_cmd survives and only the hashes (and the observed version) change.
+        validated["pins"] = _installed_pins(installed)
     pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
     if pins is None:
         print(f"error: {pin_error}", file=sys.stderr)
@@ -312,7 +351,7 @@ def _ensure(target: Path, specs: list[RunbookSpec], *, refresh: bool, dry_run: b
                     print(f"error: {problem}", file=sys.stderr)
                     return 2
                 stage_dirs[dest.parent] = Path(tempfile.mkdtemp(dir=dest.parent.parent, prefix=".runbooks-"))
-            result = _stage(target, spec, stage_dirs[dest.parent])
+            result = _stage(target, spec, stage_dirs[dest.parent], item.expected)
             if isinstance(result, int):
                 return result
             staged.append((result, item))

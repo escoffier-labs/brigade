@@ -165,6 +165,31 @@ def _load_committed(path: Path) -> dict[str, tuple[shipped_history.Entry, ...]]:
         return {}
 
 
+def _base_manifest(base_ref: str, *, strict: bool) -> tuple[dict[str, frozenset[str]] | None, str | None]:
+    """Digests the base ref's manifest recorded, per key, plus a problem when the comparison cannot be trusted.
+
+    A base ref that exists but has no manifest yet means there is nothing to compare. A ref that
+    cannot be resolved, or a manifest that cannot be parsed, is a problem in strict mode (CI and
+    releases); an explicit local run without strictness reports the skipped comparison and passes.
+    """
+    if _git("rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}") is None:
+        if strict:
+            return None, f"base ref {base_ref} not found, so the append-only comparison cannot run; fetch it"
+        print(
+            f"shipped file history: base ref {base_ref} not found; append-only comparison SKIPPED",
+            file=sys.stderr,
+        )
+        return None, None
+    raw = _git("show", f"{base_ref}:{MANIFEST_REL}")
+    if raw is None:
+        return None, None
+    try:
+        parsed = shipped_history.parse_manifest(raw)
+    except ValueError as exc:
+        return None, f"manifest on {base_ref} is unparsable ({exc}), so the append-only comparison cannot run"
+    return {key: frozenset(e.sha256 for e in entries) for key, entries in parsed.items()}, None
+
+
 def check(path: Path, *, require_provenance: bool = False) -> list[str]:
     """Every reason the committed manifest is not acceptable (empty when it is).
 
@@ -185,6 +210,11 @@ def check(path: Path, *, require_provenance: bool = False) -> list[str]:
     for source_key in [shipped_history.skill_key(s) for s in SKILLS]:
         if source_key not in current:
             problems.append(f"{source_key}: bundled source file is missing")
+    strict = require_provenance or bool(os.environ.get("GITHUB_ACTIONS"))
+    base_ref = os.environ.get(BASE_REF_ENV, DEFAULT_BASE_REF)
+    base, base_problem = _base_manifest(base_ref, strict=strict)
+    if base_problem is not None:
+        problems.append(base_problem)
     tags = release_tags()
     if tags:
         first, _ = first_tags(tags)
@@ -195,26 +225,36 @@ def check(path: Path, *, require_provenance: bool = False) -> list[str]:
                     problems.append(f"{key}: text shipped in {tag} is not recorded; run --write")
         for key, entries in sorted(manifest.items()):
             for entry in entries:
-                if entry.tag is not None and first.get(key, {}).get(entry.sha256) != entry.tag:
-                    problems.append(f"{key}: {entry.sha256[:12]} claims tag {entry.tag}, which did not ship it")
-    elif require_provenance or os.environ.get("GITHUB_ACTIONS"):
+                if entry.tag is not None:
+                    if first.get(key, {}).get(entry.sha256) != entry.tag:
+                        problems.append(f"{key}: {entry.sha256[:12]} claims tag {entry.tag}, which did not ship it")
+                    continue
+                # An unreleased row skips tag provenance, so it must be the text in the working
+                # tree or one the base ref already recorded; anything else is an unchecked claim.
+                shipped_tag = first.get(key, {}).get(entry.sha256)
+                if shipped_tag is not None:
+                    problems.append(
+                        f"{key}: {entry.sha256[:12]} shipped in {shipped_tag} but has no tag; run --write to promote it"
+                    )
+                elif entry.sha256 != current.get(key) and base is not None and entry.sha256 not in base.get(key, ()):
+                    problems.append(
+                        f"{key}: {entry.sha256[:12]} is an unreleased text that is neither the current one nor "
+                        f"recorded on {base_ref}; remove the row or restore that text and run --write"
+                    )
+    elif strict:
         problems.append("no v* tags available, so tag provenance cannot be checked; run git fetch origin --tags")
     else:
         print(
             "shipped file history: no v* tags available; tag provenance SKIPPED (CI and releases use --require-provenance)",
             file=sys.stderr,
         )
-    base_ref = os.environ.get(BASE_REF_ENV, DEFAULT_BASE_REF)
-    base_raw = _git("show", f"{base_ref}:{MANIFEST_REL}")
-    if base_raw is not None:
-        try:
-            base = shipped_history.parse_manifest(base_raw)
-        except ValueError:
-            base = {}
-        for key, entries in sorted(base.items()):
+    if base is not None:
+        for key, digests in sorted(base.items()):
             kept = {e.sha256 for e in manifest.get(key, ())}
             problems.extend(
-                f"{key}: {e.sha256[:12]} recorded on {base_ref} was dropped" for e in entries if e.sha256 not in kept
+                f"{key}: {digest[:12]} recorded on {base_ref} was dropped"
+                for digest in sorted(digests)
+                if digest not in kept
             )
     return problems
 

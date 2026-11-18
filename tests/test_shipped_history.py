@@ -290,6 +290,7 @@ def test_write_is_append_only_and_check_rejects_dropped_entries(repo, monkeypatc
     _git(root, "commit", "-qm", "manifest")
 
     # The working tree moves on; a regenerate keeps the earlier unreleased text.
+    monkeypatch.setenv(script.BASE_REF_ENV, "HEAD")  # the base recorded the earlier unreleased text
     _write_sources(root, "four")
     again = script.build(shipped_history.load(manifest))
     assert [e["tag"] for e in again["skill:note"]] == ["v0.1.0", "v0.2.0", None, None]
@@ -297,7 +298,6 @@ def test_write_is_append_only_and_check_rejects_dropped_entries(repo, monkeypatc
     assert script.check(manifest) == []
 
     # Dropping an entry the base ref recorded fails the gate.
-    monkeypatch.setenv(script.BASE_REF_ENV, "HEAD")
     pruned = json.loads(manifest.read_text(encoding="utf-8"))
     del pruned["files"]["skill:note"][2]
     manifest.write_text(json.dumps(pruned), encoding="utf-8")
@@ -330,16 +330,24 @@ def test_check_without_tags_skips_provenance_and_says_so(repo, capsys):
     assert "tag provenance SKIPPED" in capsys.readouterr().err
 
 
+def _commit_base(script, root, monkeypatch):
+    """Commit the manifest and make that commit the base ref, as origin/main is for a real check."""
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "manifest")
+    monkeypatch.setenv(script.BASE_REF_ENV, "HEAD")
+
+
 def _drop_tags(root):
     for tag in ("v0.1.0", "v0.2.0"):
         _git(root, "tag", "-d", tag)
 
 
-def test_check_fails_without_tags_when_provenance_is_required(repo, capsys):
+def test_check_fails_without_tags_when_provenance_is_required(repo, monkeypatch, capsys):
     script, root = repo
     manifest = root / script.MANIFEST_REL
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    _commit_base(script, root, monkeypatch)
     assert script.check(manifest, require_provenance=True) == []
     _drop_tags(root)
 
@@ -359,12 +367,14 @@ def test_check_fails_without_tags_under_github_actions(repo, monkeypatch):
     assert any("no v* tags available" in p for p in script.check(manifest))
 
 
-def test_a_row_tagged_as_a_release_with_an_unshipped_text_fails_when_tags_exist(repo):
+def test_a_row_tagged_as_a_release_with_an_unshipped_text_fails_when_tags_exist(repo, monkeypatch):
     # The attack the provenance check exists for: an operator's edited text recorded as a release.
     script, root = repo
     manifest = root / script.MANIFEST_REL
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    body = json.loads(script.render(script.build({})))
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    _commit_base(script, root, monkeypatch)
+    body = json.loads(manifest.read_text(encoding="utf-8"))
     forged = shipped_history.skill_digest(b"# an operator's edited SKILL.md\n")
     body["files"]["skill:brigade-work"].append({"sha256": forged, "tag": "v0.2.0"})
     manifest.write_text(json.dumps(body), encoding="utf-8")
@@ -372,6 +382,109 @@ def test_a_row_tagged_as_a_release_with_an_unshipped_text_fails_when_tags_exist(
     problems = script.check(manifest, require_provenance=True)
 
     assert any("skill:brigade-work" in p and "claims tag v0.2.0" in p for p in problems)
+
+
+def _manifest_with_null_row(script, root, monkeypatch, digest):
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    _commit_base(script, root, monkeypatch)
+    body = json.loads(manifest.read_text(encoding="utf-8"))
+    body["files"]["skill:brigade-work"].append({"sha256": digest, "tag": None})
+    manifest.write_text(json.dumps(body), encoding="utf-8")
+    return manifest
+
+
+def test_an_untagged_row_for_an_arbitrary_text_fails_when_tags_exist(repo, monkeypatch):
+    # A null tag used to skip provenance, so a PR could vouch for any digest with it.
+    script, root = repo
+    forged = shipped_history.skill_digest(b"# an operator's edited SKILL.md\n")
+    manifest = _manifest_with_null_row(script, root, monkeypatch, forged)
+
+    problems = script.check(manifest, require_provenance=True)
+
+    assert any("skill:brigade-work" in p and forged[:12] in p and "unreleased" in p for p in problems)
+
+
+def test_an_untagged_row_for_a_text_that_shipped_in_a_tag_must_be_promoted(repo, monkeypatch):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    _commit_base(script, root, monkeypatch)
+    body = json.loads(manifest.read_text(encoding="utf-8"))
+    assert body["files"]["skill:brigade-work"][0]["tag"] == "v0.1.0"
+    body["files"]["skill:brigade-work"][0]["tag"] = None  # the text that shipped in v0.1.0, left unpromoted
+    manifest.write_text(json.dumps(body), encoding="utf-8")
+
+    problems = script.check(manifest, require_provenance=True)
+
+    assert any("skill:brigade-work" in p and "shipped in v0.1.0" in p and "--write" in p for p in problems)
+
+
+def test_an_untagged_row_the_base_already_recorded_is_accepted(repo, monkeypatch):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    earlier = shipped_history.skill_digest(b"# brigade-work earlier unreleased\n")
+    body = json.loads(script.render(script.build({})))
+    body["files"]["skill:brigade-work"].insert(-1, {"sha256": earlier, "tag": None})
+    manifest.write_text(json.dumps(body), encoding="utf-8")
+    _commit_base(script, root, monkeypatch)
+
+    assert script.check(manifest, require_provenance=True) == []
+
+
+def test_the_current_working_tree_digest_may_be_untagged(repo, monkeypatch):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    # base is the repo's own parent commit: it has no manifest yet, so only the current-text rule applies
+    monkeypatch.setenv(script.BASE_REF_ENV, "HEAD")
+
+    assert script.check(manifest, require_provenance=True) == []
+
+
+# --- the base ref the append-only comparison needs ---
+
+
+def test_a_missing_base_ref_fails_under_require_provenance_and_skips_otherwise(repo, monkeypatch, capsys):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    monkeypatch.setenv(script.BASE_REF_ENV, "no-such-ref")
+
+    strict = script.check(manifest, require_provenance=True)
+    assert any("no-such-ref" in p and "not found" in p for p in strict)
+    assert script.check(manifest) == []
+    assert "append-only comparison SKIPPED" in capsys.readouterr().err
+
+
+def test_an_unparsable_base_manifest_is_a_problem(repo, monkeypatch):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{not json", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "broken base manifest")
+    monkeypatch.setenv(script.BASE_REF_ENV, "HEAD")
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+
+    problems = script.check(manifest, require_provenance=True)
+
+    assert any("HEAD" in p and "unparsable" in p for p in problems)
+
+
+def test_a_base_ref_without_a_manifest_yet_has_nothing_to_compare(repo, monkeypatch):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    monkeypatch.setenv(script.BASE_REF_ENV, "v0.2.0")  # a real ref that predates the manifest
+
+    assert script.check(manifest, require_provenance=True) == []
 
 
 def test_main_exposes_the_require_provenance_flag(repo, monkeypatch, capsys):
@@ -386,6 +499,9 @@ def test_main_exposes_the_require_provenance_flag(repo, monkeypatch, capsys):
     assert "no v* tags available" in capsys.readouterr().err
 
 
-def test_the_repository_manifest_passes_its_own_check():
+def test_the_repository_manifest_passes_its_own_check(monkeypatch):
+    # CI test shards hold a shallow checkout with no tags; the lint job enforces the
+    # real provenance, so this test must not turn that absence into a failure.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     script = _script()
     assert script.check(ROOT / script.MANIFEST_REL) == []

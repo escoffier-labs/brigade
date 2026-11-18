@@ -840,7 +840,7 @@ without the top-level `pins` block (and only that block):
 | Installed copy | Result |
 | --- | --- |
 | Same as the bundled text | Left alone. A different `pins` block alone is not a difference. |
-| Same as a text a past release shipped for that runbook | Replaced with the current text and fresh pins, no backup. Printed as `refreshed (pristine): <path>`. |
+| Same as a text a past release shipped for that runbook | Replaced with the current text and fresh pin hashes, no backup. An installed `version_cmd` on a pin is kept and its `version` re-observed. Printed as `refreshed (pristine): <path>`. A pin with any other field, or a `version_cmd` for a command the template no longer runs, would be lost, so such a copy is kept as `kept (drifted)`. |
 | Anything else (edited, unparseable, unknown) | Never overwritten. Printed once as `kept (drifted): <path>`. |
 
 The past-release record is `src/brigade/templates/shipped-file-history.json`,
