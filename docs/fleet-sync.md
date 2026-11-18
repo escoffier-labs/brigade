@@ -747,6 +747,14 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   is refused with the two ways out named in the error, and so is a
   same-node claim with no dead lock to vouch for it (a sibling run, or a run
   already recovered with `brigade runs recover`).
+- Automatic worktree runs claim `<repo>@<checkout>` so sibling checkouts
+  can run concurrently. Claim listings also show the parent repo. A run
+  releases its claim when it exits, including a refusal after acquiring
+  the claim during startup. If the process is killed or the hub cannot
+  confirm release, the claim expires at the end of its TTL (900 seconds
+  by default). You can also use the fenced release below with the full
+  worktree claim key.
+
 - `brigade fleet claims --release <key> [--path] [--node NODE_ID] [--force] [--json]`
   frees a claim without its holder token (`POST /claims` `release` with
   `scope: "node"`): the hub deletes the row only if the given node owns it;
@@ -757,8 +765,9 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   `POST /claims` `inspect` returns the recorded run directory to the owner
   node only, the CLI maps it to a workspace on this machine through
   `runguard.resolve_run_lock_workspace` (`run.json` `lock_workspace`, the
-  `.brigade/runs/<id>` layout, then `cwd`; a resolved path that is not a
-  directory here is refused; with `--path` it must be the workspace given)
+  `.brigade/runs/<id>` layout, then `cwd`; an unavailable workspace is
+  refused unless Brigade stores its worktree lease outside the checkout.
+  With `--path` the workspace must be the directory given)
   and refuses while that `run.lock` has a live owner or is malformed, or
   when it cannot resolve the run at all, or when the probe finds no claim
   owned by this node.

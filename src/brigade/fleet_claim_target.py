@@ -197,6 +197,13 @@ def git_claim_key(start: Path) -> str | None:
     toplevel, linked = layout
     remote = _origin_remote(toplevel)
     if remote is None:
+        from .handoff_worktrees import main_checkout
+        from .worktree_lease import reserved_worktree_lock_dir
+
+        if linked and reserved_worktree_lock_dir(toplevel) is not None:
+            parent = main_checkout(toplevel)
+            if parent is not None:
+                return f"{parent.name}@{toplevel.name}"
         return toplevel.name or None
     key = _remote_key(_parse_remote(remote) or _normalized_remote(remote, cwd))
     return f"{key}@{toplevel.name}" if linked and toplevel.name else key

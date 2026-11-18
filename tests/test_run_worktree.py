@@ -351,6 +351,40 @@ def test_startup_refusal_discards_checkout(tmp_path, monkeypatch, module, method
     assert str(checkout) not in _git(repo, "worktree", "list", "--porcelain").stdout
 
 
+def test_requester_signing_failure_releases_worktree_claim(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    checkout = _checkout_path(tmp_path, repo, output_dir)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda **kw: {"hub_url": "https://hub.example.invalid"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path: "11111111-1111-4111-8111-111111111111")
+    monkeypatch.setattr(fleet_client, "report_journal_event", lambda *args, **kwargs: False)
+    active = set()
+
+    def acquire(target, *, holder, **kwargs):
+        active.add((target, holder))
+        return fleet_client.ClaimDecision(True, "granted")
+
+    def release(target, *, holder, **kwargs):
+        active.remove((target, holder))
+        return fleet_client.ClaimDecision(True, "released")
+
+    def fail_signing(**kwargs):
+        assert len(active) == 1
+        raise agent_request.AgentRequestError("simulated signing failure")
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    monkeypatch.setattr(agent_request, "record_request", fail_signing)
+    rc = cli.main(
+        ["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree", "--requester-key", "test-key"]
+    )
+    assert rc == 2
+    assert not active
+    assert not checkout.exists()
+    assert not runguard.worktree_lock_dir(checkout).exists()
+
+
 def test_interrupt_during_handoff_rescue_keeps_checkout(tmp_path, monkeypatch, capsys):
     repo = _git_repo(tmp_path)
     output_dir = tmp_path / "run"
