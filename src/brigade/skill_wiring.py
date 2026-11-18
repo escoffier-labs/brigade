@@ -319,24 +319,43 @@ class SkillWirer:
         reported as such. A failed publish (not a race) falls back to the kept path
         so the operator still gets the inbox proposal.
         """
+        temporary = f".{name}.{uuid.uuid4().hex}.tmp"
         try:
-            fd = dirfd.open_child_file(parent, name, _READ_FLAGS)
-        except FileNotFoundError:
-            return RACED, None
-        except OSError as exc:
+            # Slow disk I/O (write + fsync) happens before the compare, so the window
+            # between "still pristine" and the rename is only the re-read and the rename.
+            self._write_temp(parent, temporary, data)
+            try:
+                fd = dirfd.open_child_file(parent, name, _READ_FLAGS)
+            except FileNotFoundError:
+                return RACED, None
+            except OSError as exc:
+                return _refusal(parent, name, exc), None
+            current = _read_regular(fd)
+            if current is None:
+                return BLOCKED, None
+            if current != expected:
+                return RACED, None
+            dirfd.replace_children(parent, temporary, name, replace=True)
+        except _RACE_ERRORS as exc:
             return _refusal(parent, name, exc), None
-        current = _read_regular(fd)
-        if current is None:
-            return BLOCKED, None
-        if current != expected:
-            return RACED, None
-        try:
-            state, _ = self._publish(parent, name, data, replace=True)
         except OSError as exc:
             code = f"errno {exc.errno}" if exc.errno is not None else type(exc).__name__
             print(f"warning: could not refresh {name}: {exc.strerror or exc} ({code})", file=sys.stderr)
             return "existing", expected
-        return (REFRESHED, None) if state == WRITTEN else (state, None)
+        finally:
+            with contextlib.suppress(OSError):
+                dirfd.unlink_child(parent, temporary)
+        with contextlib.suppress(OSError):
+            dirfd.fsync_directory(parent)
+        return REFRESHED, None
+
+    @staticmethod
+    def _write_temp(parent: int, temporary: str, data: bytes) -> None:
+        fd = dirfd.open_child_file(parent, temporary, _CREATE_FLAGS, 0o666)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def _withdraw_proposals(self, skill_id: str, rel: str) -> None:
         """Mark inbox proposals init filed for this file superseded; the file now holds the bundled text."""
@@ -354,11 +373,7 @@ class SkillWirer:
         """Write ``data`` to a temp sibling, then publish it under ``name``; replaces only when ``replace`` is set."""
         temporary = f".{name}.{uuid.uuid4().hex}.tmp"
         try:
-            fd = dirfd.open_child_file(parent, temporary, _CREATE_FLAGS, 0o666)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
+            self._write_temp(parent, temporary, data)
             dirfd.replace_children(parent, temporary, name, replace=replace)
         except _RACE_ERRORS as exc:
             # Lost a race with another writer (the name now exists); that file is theirs to keep.

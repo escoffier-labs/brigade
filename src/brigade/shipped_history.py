@@ -103,6 +103,10 @@ def read_regular_file(path: Path, limit: int) -> bytes:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OSError(f"not a regular file: {path}")
+        # Windows has no O_NOFOLLOW: require the opened file to be the path itself, not a link's target.
+        named = os.lstat(path)
+        if stat.S_ISLNK(named.st_mode) or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
+            raise OSError(f"path is a link, not the opened file: {path}")
         if info.st_size > limit:
             raise OSError(f"file exceeds {limit} bytes: {path}")
         chunks: list[bytes] = []

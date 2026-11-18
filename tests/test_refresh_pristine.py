@@ -407,3 +407,103 @@ def test_every_runbook_spec_has_its_current_text_recorded():
     ]:
         known = shipped_history.digests(shipped_history.runbook_key(spec.rel))
         assert shipped_history.runbook_payload_digest(spec.payload) in known, spec.rel
+
+
+@POSIX_ONLY
+def test_a_runbook_link_is_never_followed_by_the_pristine_publish_without_o_nofollow(tmp_path, monkeypatch):
+    # Windows has no O_NOFOLLOW: the opened file must be the path itself, not a link's target.
+    monkeypatch.setattr(shipped_history, "_READ_FLAGS", shipped_history._READ_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))
+    expected = b'{"id": "old"}\n'
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_bytes(expected)
+    dest = tmp_path / "runbook.json"
+    dest.symlink_to(elsewhere)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(b'{"id": "new"}\n')
+
+    assert care_runbooks._publish_pristine(staged, dest, expected) is None
+
+    assert dest.is_symlink() and elsewhere.read_bytes() == expected and staged.exists()
+
+
+def test_a_regular_runbook_is_still_refreshed_without_o_nofollow(tmp_path, monkeypatch):
+    monkeypatch.setattr(shipped_history, "_READ_FLAGS", shipped_history._READ_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))
+    expected = b'{"id": "old"}\n'
+    dest = tmp_path / "runbook.json"
+    dest.write_bytes(expected)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(b'{"id": "new"}\n')
+
+    assert care_runbooks._publish_pristine(staged, dest, expected) == f"refreshed (pristine): {dest}"
+
+    assert dest.read_bytes() == b'{"id": "new"}\n'
+
+
+def test_the_proposal_supersede_runs_under_the_skills_mutation_lock(tmp_path, monkeypatch):
+    from brigade.skills_cmd import inbox
+    from brigade.skills_cmd import mutation
+
+    held: list[str] = []
+    real = mutation.skill_mutation
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def tracking(workspace):
+        with real(workspace):
+            held.append("enter")
+            try:
+                yield
+            finally:
+                held.append("exit")
+
+    monkeypatch.setattr(inbox, "skill_mutation", tracking)
+    real_write = inbox._registry_mod._write_state_file
+    writes: list[list[str]] = []
+
+    def writing(*args, **kwargs):
+        writes.append(list(held))
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(inbox._registry_mod, "_write_state_file", writing)
+    assert install_selection(tmp_path, _sel()) == 0
+    (tmp_path / BRIGADE_WORK).write_bytes(OLD)
+    _history_for_skill(tmp_path, monkeypatch)
+    assert install_selection(tmp_path, _sel()) == 0  # files a pending proposal
+    assert [p["status"] for p in _proposals(tmp_path)] == ["pending"]
+    writes.clear()
+    held.clear()
+
+    ids = inbox.supersede_pending(tmp_path, "init:brigade-work:", "test")
+
+    assert len(ids) == 1
+    assert [p["status"] for p in _proposals(tmp_path)] == ["superseded"]
+    assert writes == [["enter"]], "the proposal write must happen while the mutation lock is held"
+    assert held == ["enter", "exit"]
+
+
+def test_the_refresh_writes_its_temp_file_before_it_rereads_the_destination(tmp_path, monkeypatch):
+    assert install_selection(tmp_path, _sel()) == 0
+    skill = tmp_path / BRIGADE_WORK
+    skill.write_bytes(OLD)
+    _history_for_skill(tmp_path, monkeypatch, OLD)
+    events: list[str] = []
+    real_create, real_replace = dirfd.open_child_file, dirfd.replace_children
+
+    def creating(parent, name, flags, *args, **kwargs):
+        events.append("create-temp" if flags & os.O_CREAT and name.endswith(".tmp") else "read-dest")
+        return real_create(parent, name, flags, *args, **kwargs)
+
+    def replacing(parent, source, destination, *, replace=True):
+        events.append("rename")
+        return real_replace(parent, source, destination, replace=replace)
+
+    monkeypatch.setattr(dirfd, "open_child_file", creating)
+    monkeypatch.setattr(dirfd, "replace_children", replacing)
+    events.clear()
+
+    assert install_selection(tmp_path, _sel()) == 0
+
+    window = events[events.index("create-temp") :]
+    assert window[:3] == ["create-temp", "read-dest", "rename"]
+    assert skill.read_bytes() == _bundled()

@@ -111,8 +111,12 @@ release tag that carried it. `scripts/shipped_file_history.py --write` builds it
 from every `v*` tag plus the working tree, and `--check` (part of
 `scripts/verify` and `scripts/verify-focused`) fails when a template changed
 without regenerating it, when an entry claims a tag that did not ship it, or when
-an entry recorded on the base ref was dropped. `RELEASE.md` regenerates it before
-the version bump.
+an entry recorded on the base ref was dropped. Tag provenance is what keeps a
+forged row from vouching for an edited file, so without local `v*` tags the check
+fails under `--require-provenance` (used by CI, which fetches the tags, and by
+`RELEASE.md`) and whenever `GITHUB_ACTIONS` is set; only an explicit local run
+without tags warns and passes. `RELEASE.md` regenerates it before the version
+bump.
 
 At runtime, init refreshes an existing `SKILL.md` only when its newline-folded
 digest is in that record for the skill **and** the text it is about to write is a

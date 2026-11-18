@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from .mutation import skill_command
+from .mutation import skill_command, skill_mutation
 
 import contextlib
 import difflib
@@ -576,21 +576,25 @@ def supersede_pending(target: Path, key_prefix: str, reason: str) -> list[str]:
         return meta.get("status") == "pending" and str(meta.get("dedupe_key") or "").startswith(key_prefix)
 
     done: list[str] = []
-    for name, meta in _anchored_proposals(target):
-        if not matches(meta):
-            continue
-        try:
-            with _registry_mod._held_state_root(target) as state_anchor:
-                current = _load_anchored_proposal(state_anchor, name)
-                if current is None or not matches(current):
+    try:
+        # Same discipline as inbox_accept/inbox_reject: the skills mutation lock and one
+        # state-root anchor span the whole read-check-write.
+        with skill_mutation(target), _registry_mod._held_state_root(target) as state_anchor:
+            names = _registry_mod._plain_subdirs_under_anchor(state_anchor, "skills", "inbox") or []
+            for name in names:
+                try:
+                    current = _load_anchored_proposal(state_anchor, name)
+                    if current is None or not matches(current):
+                        continue
+                    current.update({"status": "superseded", "superseded_at": _now(), "reason": reason})
+                    _registry_mod._write_state_file(
+                        state_anchor, "skills", "inbox", name, "proposal.json", data=_registry_mod._json_bytes(current)
+                    )
+                    done.append(str(current.get("proposal_id") or name))
+                except (OSError, _registry_mod.SkillsStatePathError):
                     continue
-                current.update({"status": "superseded", "superseded_at": _now(), "reason": reason})
-                _registry_mod._write_state_file(
-                    state_anchor, "skills", "inbox", name, "proposal.json", data=_registry_mod._json_bytes(current)
-                )
-                done.append(str(current.get("proposal_id") or name))
-        except (OSError, _registry_mod.SkillsStatePathError):
-            continue
+    except (OSError, _registry_mod.SkillsStatePathError):
+        return done
     return done
 
 

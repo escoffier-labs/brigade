@@ -97,11 +97,36 @@ def test_parse_manifest_rejects_malformed_records(raw):
         shipped_history.parse_manifest(raw)
 
 
-def test_the_committed_manifest_loads_and_covers_every_shipped_file():
-    manifest = shipped_history.load()
-    assert "skill:brigade-work" in manifest and "runbook:.brigade/memory-care/runbooks/daily-care-pass.json" in manifest
-    assert shipped_history.digests("skill:brigade-work")
+def test_the_committed_manifest_loads_and_unknown_keys_have_no_digests():
+    assert shipped_history.load()
     assert shipped_history.digests("skill:unknown") == frozenset()
+
+
+@pytest.mark.parametrize("skill_id", ["brigade-work", "ultra-work-scout", "note"])
+def test_the_current_bundled_skill_text_is_recorded(skill_id):
+    bundled = (ROOT / "src/brigade/templates/skills" / skill_id / "SKILL.md").read_bytes()
+    assert shipped_history.skill_digest(bundled) in shipped_history.digests(shipped_history.skill_key(skill_id))
+
+
+def _current_runbook_keys():
+    script = _script()
+    return sorted(key for key in script.digests_at(None) if key.startswith("runbook:"))
+
+
+@pytest.mark.parametrize("key", _current_runbook_keys())
+def test_the_current_text_of_every_runbook_and_python_payload_is_recorded(key):
+    script = _script()
+    assert script.digests_at(None)[key] in shipped_history.digests(key)
+
+
+def test_every_shipped_file_the_script_walks_has_a_recorded_current_digest():
+    # Guards the guard: the walked set must include the three skills and every runbook source.
+    current = _script().digests_at(None)
+    for skill_id in ("brigade-work", "ultra-work-scout", "note"):
+        assert shipped_history.skill_key(skill_id) in current
+    assert len(_current_runbook_keys()) >= 5
+    for key, digest in current.items():
+        assert digest in shipped_history.digests(key), key
 
 
 def test_the_loader_gives_no_digests_for_a_missing_oversized_or_special_file(tmp_path):
@@ -127,6 +152,21 @@ def test_the_loader_refuses_a_symlinked_manifest_and_a_fifo(tmp_path):
     fifo = tmp_path / "fifo.json"
     os.mkfifo(fifo)
     assert shipped_history.digests("skill:x", fifo) == frozenset()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX symlinks")
+def test_a_symlink_is_refused_even_without_o_nofollow(tmp_path, monkeypatch):
+    # Windows has no O_NOFOLLOW: the opened file must still be the path itself.
+    real = tmp_path / "real.json"
+    real.write_bytes(_manifest({"skill:x": [{"sha256": GOOD, "tag": None}]}))
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    monkeypatch.setattr(shipped_history, "_READ_FLAGS", shipped_history._READ_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))
+
+    assert shipped_history.digests("skill:x", real) == frozenset({GOOD})
+    assert shipped_history.digests("skill:x", link) == frozenset()
+    with pytest.raises(OSError):
+        shipped_history.read_regular_file(link, 1 << 20)
 
 
 # --- generator and check against a throwaway repository ---
@@ -173,6 +213,7 @@ def repo(tmp_path, monkeypatch):
     script = _script()
     monkeypatch.setattr(script, "ROOT", root)
     monkeypatch.setenv(script.BASE_REF_ENV, "no-such-ref")
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)  # tests choose when provenance is mandatory
     return script, root
 
 
@@ -286,7 +327,63 @@ def test_check_without_tags_skips_provenance_and_says_so(repo, capsys):
         _git(root, "tag", "-d", tag)
 
     assert script.check(manifest) == []
-    assert "tag provenance not checked" in capsys.readouterr().err
+    assert "tag provenance SKIPPED" in capsys.readouterr().err
+
+
+def _drop_tags(root):
+    for tag in ("v0.1.0", "v0.2.0"):
+        _git(root, "tag", "-d", tag)
+
+
+def test_check_fails_without_tags_when_provenance_is_required(repo, capsys):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    assert script.check(manifest, require_provenance=True) == []
+    _drop_tags(root)
+
+    problems = script.check(manifest, require_provenance=True)
+
+    assert any("no v* tags available" in p for p in problems)
+
+
+def test_check_fails_without_tags_under_github_actions(repo, monkeypatch):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    _drop_tags(root)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+
+    assert any("no v* tags available" in p for p in script.check(manifest))
+
+
+def test_a_row_tagged_as_a_release_with_an_unshipped_text_fails_when_tags_exist(repo):
+    # The attack the provenance check exists for: an operator's edited text recorded as a release.
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    body = json.loads(script.render(script.build({})))
+    forged = shipped_history.skill_digest(b"# an operator's edited SKILL.md\n")
+    body["files"]["skill:brigade-work"].append({"sha256": forged, "tag": "v0.2.0"})
+    manifest.write_text(json.dumps(body), encoding="utf-8")
+
+    problems = script.check(manifest, require_provenance=True)
+
+    assert any("skill:brigade-work" in p and "claims tag v0.2.0" in p for p in problems)
+
+
+def test_main_exposes_the_require_provenance_flag(repo, monkeypatch, capsys):
+    script, root = repo
+    manifest = root / script.MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(script.render(script.build({})), encoding="utf-8")
+    _drop_tags(root)
+    monkeypatch.setattr("sys.argv", ["shipped_file_history.py", "--check", "--require-provenance"])
+
+    assert script.main() == 1
+    assert "no v* tags available" in capsys.readouterr().err
 
 
 def test_the_repository_manifest_passes_its_own_check():

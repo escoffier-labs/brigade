@@ -26,7 +26,7 @@ Regenerate the shipped-file history, which records every released text of the bu
 ```bash
 git fetch origin --tags
 .venv/bin/python scripts/shipped_file_history.py --write
-.venv/bin/python scripts/shipped_file_history.py --check
+.venv/bin/python scripts/shipped_file_history.py --check --require-provenance
 ```
 
 The file is append-only. The release cut leaves the new texts marked unreleased, and the first `--write` after the tag exists records the tag.
