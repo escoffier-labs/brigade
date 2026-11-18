@@ -514,15 +514,20 @@ def admit_pool(
     *,
     routing: Mapping[str, Any] | None = None,
     now: datetime | None = None,
+    read_only: bool = False,
 ) -> dict[str, Any]:
     """Admit only when every required window is known, fresh, and above reserve.
+
+    ``read_only`` is for advisory callers: it skips ``ensure_schema`` (so no table or
+    singleton row is created) and reports ``quota-unknown`` when the store is absent.
 
     Remaining is never summed across windows. Latest measurement per
     account/pool/window is selected first; a newer error does not keep an
     older current reading. Missing, stale, reset, error, mismatch, or
     conflicting current readings are ``quota-unknown``.
     """
-    ensure_schema(conn)
+    if not read_only:
+        ensure_schema(conn)
     stamp = now or _now()
     pools = dict((routing or {}).get("quota_pools") or {})
     config = pools.get(pool_id)
@@ -536,9 +541,15 @@ def admit_pool(
     account_id = config["account_id"]
     provider = config.get("provider")
     configured_windows = dict(config.get("windows") or {})
+    try:
+        loaded = _load_rows(conn)
+    except sqlite3.OperationalError:
+        if not read_only:
+            raise
+        return empty
     rows = [
         row
-        for row in _load_rows(conn)
+        for row in loaded
         if row.get("pool_id") == pool_id
         and row.get("account_id") == account_id
         and (provider is None or row.get("provider") == provider)
