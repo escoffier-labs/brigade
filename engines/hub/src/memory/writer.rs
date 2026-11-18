@@ -604,8 +604,12 @@ fn prepare_auto(
             .db
             .pragma_query_value(None, "data_version", |r| r.get::<_, i64>(0))?;
         let mut a = Authority::read(&worker::Tx(&hub.db))?;
+        let snapshot = config.index.as_ref().map(|i| i.current());
         a.retrieval = Some(super::retrieval_eval::Live {
-            indexed_seq: config.index.as_ref().map_or(0, |i| i.current().indexed_seq),
+            applier: who.class(),
+            principal: who.principal().into(),
+            indexed_seq: snapshot.as_ref().map_or(0, |s| s.indexed_seq),
+            snapshot,
             embedder_id: config.dense.as_ref().and_then(|d| d.active_id()),
             weights: config.eval_weights.read().unwrap().clone(),
         });
@@ -908,10 +912,16 @@ pub(crate) fn run(
                             config
                                 .index
                                 .as_ref()
-                                .map(|index| super::retrieval_eval::Live {
-                                    indexed_seq: index.current().indexed_seq,
+                                .map(|index| {
+                                    let snapshot = index.current();
+                                    super::retrieval_eval::Live {
+                                    applier: p.command.credential.class(),
+                                    principal: p.command.credential.principal().into(),
+                                    indexed_seq: snapshot.indexed_seq,
+                                    snapshot: Some(snapshot),
                                     embedder_id: config.dense.as_ref().and_then(|d| d.active_id()),
                                     weights: config.eval_weights.read().unwrap().clone(),
+                                    }
                                 });
                         // Proof freshness and cooldown use transaction time,
                         // including requests that waited after preparation.

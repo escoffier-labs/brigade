@@ -18,7 +18,7 @@ MAX_SEEN_FILES = 2048
 MAX_CHECKS = 32
 GRAPH_TIMEOUT_SECONDS = 2.0
 CONTENT_TIMEOUT_SECONDS = 0.5
-_STATE_KEYS = ("read_files", "brief_files", "dependency_checks")
+_STATE_KEYS = ("read_files", "brief_files", "dependency_checks", "invoked_skills")
 
 
 def _collection(source: dict[str, Any], key: str) -> list[Any]:
@@ -60,7 +60,7 @@ def merge_observations(
     if state.get("task_epoch") != current.get("task_epoch"):
         return
     seen: set[str] = set()
-    for key in ("read_files", "brief_files"):
+    for key in ("read_files", "brief_files", "invoked_skills"):
         files = dict.fromkeys(item for item in _collection(current, key) if isinstance(item, str))
         if key in observed_fields:
             for item in _collection(state, key):
@@ -68,7 +68,8 @@ def merge_observations(
                     files.pop(item, None)
                     files[item] = None
         state[key] = list(files)[-MAX_SEEN_FILES:]
-        seen.update(files)
+        if key != "invoked_skills":  # skill names are not files the dependency check can see
+            seen.update(files)
     existing = {_check_key(check): check for check in _checks(current)}
     checks = dict(existing)
     for check in _checks(state):

@@ -48,7 +48,7 @@ FULL_SECTIONS: tuple[str, ...] = (
 
 HANDOFF_CLOSE_ITEM = "Memory Handoff written only for durable knowledge, or closed with `Nothing durable: <reason>`?"
 _SESSION_CLOSE_ITEMS: tuple[str, ...] = (
-    'Verify captured through Brigade? (`brigade work verify run --target . --command "..." --capture brigade-work`)',
+    'Verify captured through Brigade? (`brigade work verify run --target . --command "..." --capture auto`)',
     "Outcome recorded? (`brigade outcome capture <skill-or-card-id> --run-id latest`)",
     HANDOFF_CLOSE_ITEM,
 )
@@ -143,7 +143,7 @@ def render_work_loop_section() -> str:
         "Route worker-sized or parallelizable implementation through `brigade run` "
         "and keep the frontier session on planning, dispatch, review, and synthesis.\n\n"
         "Run counting checks through "
-        '`brigade work verify run --target . --command "<command>" --capture brigade-work`, '
+        '`brigade work verify run --target . --command "<command>" --capture auto`, '
         "capturing failures as evidence so the outcome ledger stays honest.\n\n"
         "Write a Memory Handoff only when the session produced knowledge a later session cannot get "
         "from the repo, git history or an existing card: a root cause, a decision with its reason, a "

@@ -92,10 +92,8 @@ async fn preflight_uses_hub_facts_without_writes_or_fabricated_proof() {
         check(&r, "evidence_authority"),
         "evidence_authority_unbound"
     );
-    assert_eq!(
-        check(&r, "retrieval_eval"),
-        "retrieval_eval_projection_changed"
-    );
+    // Evidence never reaches search, so the real-scope gate is satisfied.
+    assert_eq!(check(&r, "retrieval_eval"), "retrieval_eval_satisfied");
     assert_eq!(before, snapshot(&h));
     assert_eq!(
         r,

@@ -437,6 +437,9 @@ async fn retrieval_eval_late_stale_reply_never_claims_an_unpersisted_transition(
     hub.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut a = ops::Authority::with_credentials(&Tx(&hub), &digest(ADMIN_TOKEN)).unwrap();
     a.retrieval = Some(retrieval_eval::Live {
+        applier: "admin",
+        principal: super::ADMIN.into(),
+        snapshot: Some(store.index.current()),
         indexed_seq: store.index.current().indexed_seq,
         embedder_id: None,
         weights: store.rrf.json(),
@@ -1857,11 +1860,8 @@ async fn retrieval_eval_fixture_report_cannot_authorize_real_scope() {
     let h = Hub::with(clean(), None);
     policy(&h);
     let put = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
-    let mut operation = op("fleet", "a", rev(&put));
-    operation["type"] = json!("append_evidence");
-    operation.as_object_mut().unwrap().remove("text");
-    operation["evidence_ids"] = json!(["node-1/workspace-a/one"]);
-    let proposed=h.call(ADMIN_TOKEN,json!({"action":"propose","workspace_id":"workspace-a","base_epoch":h.epoch().await,"ops":[operation],"client_event_id":h.id()})).await;
+    // A claim rewrite changes what search reads, so only a report could admit it.
+    let proposed = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", rev(&put))]).await;
     assert_eq!(proposed.status, 201, "{proposed:?}");
     let id = &proposed.body["proposal_id"];
     let before = card(&h, "fleet", "a").await;
@@ -1958,6 +1958,9 @@ async fn retrieval_eval_invariant_projection_passes_without_any_measurement() {
     let hub = Connection::open(&h.hub).unwrap();
     let mut authority = ops::Authority::with_credentials(&Tx(&hub), &digest(ADMIN_TOKEN)).unwrap();
     authority.retrieval = Some(retrieval_eval::Live {
+        applier: "admin",
+        principal: super::ADMIN.into(),
+        snapshot: None,
         indexed_seq: h.events(),
         embedder_id: None,
         weights: json!({"lexical":1.0,"dense":1.0}),

@@ -52,6 +52,10 @@ NON_PROMOTING_SOURCES = frozenset(
 )
 
 
+CALLER_TYPED = "caller_typed"
+SESSION_OBSERVED = "session_observed"
+
+
 @dataclass(frozen=True)
 class OutcomeRecord:
     """One verified (or neutral) signal for an artifact on a single task.
@@ -100,6 +104,14 @@ class OutcomeRecord:
     pruning instead of living only in the receipts directory (#650). ``None``
     when the capture was not reused, and on rows written before this field.
     """
+    attribution_source: str = CALLER_TYPED
+    """Who named the artifact: ``caller_typed`` (explicit id) or ``session_observed``.
+
+    ``session_observed`` rows come from ``--capture auto`` reading the hook session
+    state. That is forgeable, so they count toward hurt only and can only hold
+    (see ``outcome_attribution``). Rows written before this field read as
+    ``caller_typed``; they are never reclassified.
+    """
 
 
 @dataclass(frozen=True)
@@ -110,6 +122,8 @@ class OutcomeScore:
     neutral: int
     score: float
     last_signal_ts: str | None
+    observed_hurt: int = 0
+    """Hurt rows that came from ``session_observed`` attribution (already inside ``hurt``)."""
 
 
 @dataclass(frozen=True)
@@ -121,12 +135,19 @@ class ReconcileConfig:
     z: float = 1.96
     effective_wilson_min: float = 0.15
     utility_min_passing_units: int = 2
+    observed_hurt_window_days: int = 30
+    """Session-observed hurt older than this never counts toward the observed veto (veto only)."""
+    observed_hurt_min_sessions: int = 2
+    """Distinct sessions with unresolved observed hurt needed before the veto holds."""
 
 
 REGRESSION_HOLD = "regression_hold"
 """Decision code: a candidate stays down because verified regressions are present."""
 REGRESSION_ROLLBACK = "regression_rollback"
 """Decision code: a promoted artifact is demoted because a verified regression was measured."""
+OBSERVED_REGRESSION_HOLD = "observed_regression_hold"
+"""Decision code: observed-session hurt withholds an install or bump (veto only)."""
+HOLD_CODES = frozenset({REGRESSION_HOLD, OBSERVED_REGRESSION_HOLD})
 
 
 @dataclass(frozen=True)
@@ -200,22 +221,29 @@ def scored_records(records: list[OutcomeRecord]) -> list[OutcomeRecord]:
     signals for one artifact would all collapse to the empty key and the artifact
     could never reach install_min_helped no matter how many real clears occurred.
     """
-    seen: set[tuple] = set()
+    slots: dict[tuple, int] = {}
     deduped: list[OutcomeRecord] = []
     for idx, r in enumerate(records):
-        key: tuple = (r.source, r.evidence_ref, r.task_id) if r.evidence_ref else ("__unkeyed__", idx)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(r)
+        # One physical receipt scores once per artifact. attribution_source is not
+        # part of the key (an observed row plus a later caller-typed capture of the
+        # same receipt would score twice); the caller-typed row wins the slot.
+        key: tuple = (r.artifact_id, r.source, r.evidence_ref, r.task_id) if r.evidence_ref else ("__unkeyed__", idx)
+        slot = slots.get(key)
+        if slot is None:
+            slots[key] = len(deduped)
+            deduped.append(r)
+        elif deduped[slot].attribution_source == SESSION_OBSERVED and r.attribution_source != SESSION_OBSERVED:
+            deduped[slot] = r
     return deduped
 
 
 def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScore:
     """Fold an artifact's records into counts plus a Wilson lower-bound score."""
     deduped = scored_records(records)
-    helped = sum(1 for r in deduped if r.signal_value > 0)
+    # session_observed attribution is forgeable: it may lower a rank, never raise it.
+    helped = sum(1 for r in deduped if r.signal_value > 0 and r.attribution_source != SESSION_OBSERVED)
     hurt = sum(1 for r in deduped if r.signal_value < 0)
+    observed_hurt = sum(1 for r in deduped if r.signal_value < 0 and r.attribution_source == SESSION_OBSERVED)
     neutral = sum(1 for r in deduped if r.signal_value == 0)
     total = helped + hurt
     last_ts = max((r.ts for r in records), default=None)
@@ -226,6 +254,7 @@ def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScor
         neutral=neutral,
         score=wilson_lower_bound(helped, total),
         last_signal_ts=last_ts,
+        observed_hurt=observed_hurt,
     )
 
 
@@ -366,6 +395,8 @@ def recency_weighted_counts(
         if record.signal_value == 0:
             continue
         weight = recency_weight(_record_age_seconds(now, record.ts), half_life_seconds)
+        if record.signal_value > 0 and record.attribution_source == SESSION_OBSERVED:
+            continue  # observed attribution never counts toward helped
         weighted_total += weight
         if record.signal_value > 0:
             weighted_helped += weight
@@ -506,8 +537,11 @@ def decide(
     if last_action_ts is not None and (now - last_action_ts).total_seconds() < config.cooldown_seconds:
         return Decision(score.artifact_id, "hold", current_status, "cooldown active")
 
+    # session_observed hurt is forgeable and bounded elsewhere (outcome_attribution
+    # recency, session count and fixed-later rules), so the decision core ignores it.
+    hurt = score.hurt - score.observed_hurt
     if current_status == "candidate":
-        if candidate_regression_withheld(score.helped, score.hurt):
+        if candidate_regression_withheld(score.helped, hurt):
             return Decision(
                 score.artifact_id,
                 "hold",
@@ -516,7 +550,7 @@ def decide(
                 code=REGRESSION_HOLD,
             )
         if score.helped >= config.install_min_helped and not candidate_install_margin_met(
-            score.helped, score.hurt, install_min_helped=config.install_min_helped
+            score.helped, hurt, install_min_helped=config.install_min_helped
         ):
             return Decision(
                 score.artifact_id,
@@ -524,17 +558,17 @@ def decide(
                 "candidate",
                 f"withheld: verified helped margin over regressions below {config.install_min_helped}",
             )
-        if score.helped >= config.install_min_helped and score.helped > score.hurt:
+        if score.helped >= config.install_min_helped and score.helped > hurt:
             return Decision(
                 score.artifact_id,
                 "install",
                 "promoted",
-                candidate_install_reason(score.helped, score.hurt),
+                candidate_install_reason(score.helped, hurt),
             )
         return Decision(score.artifact_id, "hold", "candidate", "insufficient verified evidence")
 
     if current_status == "promoted":
-        if score.hurt >= config.revert_min_hurt:
+        if hurt >= config.revert_min_hurt:
             return Decision(
                 score.artifact_id,
                 "rollback",

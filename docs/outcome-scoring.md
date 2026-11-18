@@ -41,6 +41,9 @@ brigade work verify run --manifest verify/manifests/work-cmd-verification.json -
 # audit-only evidence: a receipt a human can read, never a scoreable trial
 brigade work verify run --target . --command "pytest -q" --capture brigade-work
 
+# let Brigade name the skills this session read (no hand-typed id; veto-only, see below)
+brigade work verify run --target . --command "pytest -q" --capture auto
+
 # or, after a verify without --capture:
 brigade outcome capture brigade-work --run-id latest --kind skill
 
@@ -75,6 +78,72 @@ Why: every local input to a physical change is writable by the agent being gated
 The commands you run by hand keep their own guards (see `docs/skill-registry.md`): `install --force` and `rollback` refuse an installed copy with local edits unless `--discard-local-edits` is passed, in which case the edit is snapshotted first, and both re-verify the copy's bytes immediately before they remove it.
 
 Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
+
+## Attribution sources
+
+Every ledger row carries `attribution_source`:
+
+| Source | Written by | Trust |
+| --- | --- | --- |
+| `caller_typed` | `--capture <id>`, `brigade outcome capture <id>`, the `--capture auto` fallback | The caller named the artifact. Rows without the field read as `caller_typed` and are never reclassified. |
+| `session_observed` | `--capture auto`, `brigade outcome capture auto` | Brigade read the Claude Code hook session state ([session-state containment](claude-hook-session-state.md#skills-read-by-the-session)) and found a skill the session read (`SKILL.md`) or invoked (`Skill` tool). |
+
+`--capture auto` resolves once, before the capture-before-retry gate, to the
+ordered unique skill ids the current session read or invoked through the `Skill`
+tool that the registry or an installed harness actually has. It writes one row
+per skill and never persists the literal `auto`. When nothing resolves (no
+session identity, no matching state, no known skill, as in a Codex repo or a plain
+shell) it falls back to the previous default: one `brigade-work` row recorded as
+`caller_typed`, plus one stderr note, so the loop never silently records nothing.
+The verification result and exit code are unchanged.
+
+Session-observed attribution is caller-side: the agent chooses what it reads,
+so it is forgeable. It may only veto, never promote:
+
+- `outcome rank` and `outcome score` count a `session_observed` row toward
+  `hurt` only. It can lower a rank and never raises `helped`.
+- One physical receipt scores once per artifact. A `session_observed` row and a
+  later caller-typed row for the same receipt collapse to the caller-typed row.
+- `outcome reconcile`, `outcome fork` and the fleet skills report (the dry-run
+  projections) apply the same bounded veto, so they agree. It can turn a
+  candidate install or a promoted bump into a hold with
+  `reason_code: observed_regression_hold`. The hold is surfaced for any prior
+  status and counted with the regression holds in the ratchet report. It never
+  produces an install, a bump or a rollback from these rows, skills and cards
+  alike: observed hurt is excluded from every rollback decision and from the
+  decision core. Rollback policy for observed rows needs its own
+  security-reviewed change.
+- The veto is bounded so one noisy session cannot pin a skill forever. A
+  `session_observed` failing row counts toward the hold only when all of these
+  hold:
+  - it is current content (not proven stale against the skill's fingerprint);
+  - it is inside `observed_hurt_window_days` (default 30);
+  - no later passing receipt for the same verify command or manifest exists in
+    the same session, because a failure fixed later in that session is
+    iteration, not regression;
+  - the hold needs unresolved observed hurt from at least
+    `observed_hurt_min_sessions` distinct sessions (default 2). A receipt whose
+    session cannot be read counts as its own session and is never treated as
+    fixed.
+
+  The count is recomputed on every run, so the hold releases on its own once
+  the hurt ages out of the window or a later pass in its session fixes it, in
+  the spirit of the verified-regression hold that clears when clears outnumber
+  hurts. Both thresholds are `ReconcileConfig` fields; `outcome fork` takes
+  `--observed-hurt-window-days` and `--observed-hurt-min-sessions` to project
+  other values.
+- A `--capture auto` receipt stamps `outcome_capture.attribution_source`, every
+  `observed_artifact_ids` entry and the `session_fingerprint`.
+  `outcome_capture.artifact_id` still names only the first id, so the
+  capture-before-retry hint reads the stamp and suggests
+  `brigade outcome capture auto --run-id <run>` (which resolves skills again and
+  writes `session_observed` rows) instead of a caller-typed
+  `brigade outcome capture <observed-id>`.
+- Route and capability breakdowns in `outcome explain` leave out
+  `session_observed` helped rows, as the score does.
+- Scorecards are built from receipts only, with verifier-authored
+  `subject_binding`. They never read `session_observed` rows, and promotion
+  stays verifier-only (see [skill scorecards](proposals/skill-scorecards.md)).
 
 ## Weekly ratchet report
 

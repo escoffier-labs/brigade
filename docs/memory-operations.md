@@ -1148,6 +1148,34 @@ future sequence, target drift, excess corpus drift, missing snapshot, epoch,
 format, scorer, policy, embedder, weights, scope or corpus mismatches. Missing
 records retain `retrieval_eval_unbound`.
 
+Real scopes have no report to bind. There the gate admits only Tier 0
+proposals made entirely of `append_evidence` and `anchor_blocks`, and only when
+each target's ranking digest is unchanged by the apply. Search indexes the card
+without its `evidence:` front-matter line and without ` ^c-xxxxxx` anchor
+suffixes, so evidence refs and anchor ids are stored and shown but never
+searchable. Index format `2` and scorer `lineage-source-v4` introduced this.
+The hub rebuilds its index on the next start, and an older retrieval
+evaluation record holds with `retrieval_eval_index_format_mismatch` or
+`retrieval_eval_scorer_mismatch` until a new run is recorded. The local card
+search ranks the same text. Hybrid scopes, mixed op lists, stale base
+revisions, `merge_exact_duplicates` and any apply that would flip a card's
+`automated` value hold with `retrieval_eval_projection_changed` or
+`retrieval_eval_target_drifted`. A trusted card that declares lineage links, or
+that another live card in its scope names, is Tier 2 and stays a pending
+proposal held with `lineage_requires_review` for a reviewer to decide. The scan
+for a naming card looks at the lineage key names, never at the target id,
+because values can spell an id with escapes or implicit concatenation. The
+gate also holds a target that is an end of a trusted edge in the published
+index, with `retrieval_eval_lineage_exposed`, since search answers from that
+graph. A target with `agent-unreviewed` trust holds with
+`retrieval_eval_writer_changed` when the applier is not the head's writer,
+because an apply rewrites the writer and push search shows such a head only to
+its writer. An admitted automatic apply, like any write, removes the card from
+push and connector search until the next index snapshot publishes, because push
+requires the live revision and content hash to match the snapshot and the new
+content to be scanned clean. The reflect client asks for a proposal held for
+lineage review again after seven days.
+
 Operator procedure:
 
 1. Explicitly switch automatic apply off before enabling policy:

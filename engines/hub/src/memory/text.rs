@@ -656,6 +656,25 @@ fn radix_int(digits: &str, radix: u32) -> Option<String> {
     (out.len() <= INT_MAX_STR_DIGITS).then_some(out)
 }
 
+/// What follows the closing fence of the front matter `front_matter` reads: the
+/// first line after the opener that is `---` once trimmed, whatever whitespace
+/// or line break surrounds it. None when there is no such fence.
+pub fn front_matter_body(text: &str) -> Option<&str> {
+    if !text.starts_with("---\n") {
+        return None;
+    }
+    let lines = py_splitlines(text);
+    let fence = lines[1..].iter().find(|line| py_trim(line) == "---")?;
+    let after = fence.as_ptr() as usize - text.as_ptr() as usize + fence.len();
+    let rest = &text[after..];
+    let mut chars = rest.chars();
+    Some(match chars.next() {
+        None => rest,
+        Some('\r') if chars.next() == Some('\n') => &rest[2..],
+        Some(c) => &rest[c.len_utf8()..],
+    })
+}
+
 /// `memory_cmd._parse_frontmatter`: keys in order, the last duplicate wins.
 pub fn front_matter(text: &str) -> Vec<(String, Value)> {
     let mut data: Vec<(String, Value)> = Vec::new();
@@ -729,6 +748,14 @@ pub fn fields(text: &str, card_id: &str) -> Fields {
         summary: first_truthy(&["description", "summary"]).unwrap_or_default(),
     }
 }
+/// `memory_bm25.ranking_text`: the card as search sees it. The `evidence`
+/// front-matter line and the ` ^c-xxxxxx` anchor suffixes are stored and
+/// shown but never searched, so adding either cannot move any ranking.
+/// The evidence line goes first, because a reference holding `<` would
+/// otherwise make the whole card opaque to the anchor parser.
+pub fn ranking_text(text: &str) -> String {
+    super::proposal_blocks::strip_anchors(&super::proposal_metadata::without_key(text, "evidence"))
+}
 /// `memory_bm25.card_text`: the single BM25 field.
 pub fn card_text(fields: &Fields, body: &str) -> String {
     format!(
@@ -736,7 +763,7 @@ pub fn card_text(fields: &Fields, body: &str) -> String {
         fields.title,
         fields.tags.join(" "),
         fields.summary,
-        body
+        ranking_text(body)
     )
 }
 /// Python's `round(x, 4)`: the correctly rounded decimal, read back.

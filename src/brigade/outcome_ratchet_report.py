@@ -31,7 +31,7 @@ from . import localio, outcome
 REPORT_VERSION = 1
 REPORT_MAX_BYTES = 64 * 1024
 REPORT_RELATIVE_PATH = Path(".brigade") / "memory-care" / "outcome" / "ratchet-report.json"
-_REGRESSION_CODES = frozenset({outcome.REGRESSION_HOLD, outcome.REGRESSION_ROLLBACK})
+_REGRESSION_CODES = outcome.HOLD_CODES | {outcome.REGRESSION_ROLLBACK}
 _BRIEF_MAX_IDS = 6
 _PENDING_MAX_ARTIFACTS = 20
 _PENDING_MAX_COMMANDS = 8
@@ -139,14 +139,14 @@ def build_report(
         )
     audit = _receipt_audit(target)
     pending = {str(key): [str(c) for c in cmds] for key, cmds in (pending_commands or {}).items() if cmds}
-    hold_ids = [row["artifact_id"] for row in regressions if row["reason_code"] == outcome.REGRESSION_HOLD]
+    hold_ids = [row["artifact_id"] for row in regressions if row["reason_code"] in outcome.HOLD_CODES]
     report: dict[str, Any] = {
         "version": REPORT_VERSION,
         "generated_at": generated_at.isoformat(),
         "apply": bool(apply),
         "summary": {
             "decisions": len(items),
-            "regression_holds": sum(1 for row in regressions if row["reason_code"] == outcome.REGRESSION_HOLD),
+            "regression_holds": sum(1 for row in regressions if row["reason_code"] in outcome.HOLD_CODES),
             "regression_rollbacks": sum(1 for row in regressions if row["reason_code"] == outcome.REGRESSION_ROLLBACK),
             # Computed before ``_fit`` can drop trailing rows, so the brief names
             # holds the size cap removed from the list itself.
@@ -232,7 +232,7 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     derived_ids = [
         str(row.get("artifact_id"))
         for row in regressions
-        if isinstance(row, dict) and row.get("reason_code") == outcome.REGRESSION_HOLD
+        if isinstance(row, dict) and row.get("reason_code") in outcome.HOLD_CODES
     ]
     raw_ids = summary.get("regression_hold_ids")
     ids = [str(item) for item in raw_ids] if isinstance(raw_ids, list) else derived_ids

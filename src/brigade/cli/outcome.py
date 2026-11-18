@@ -25,7 +25,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_explain.set_defaults(func=_dispatch_explain)
 
     p_capture = outcome_sub.add_parser("capture", help="Record a receipt outcome for a learned artifact.")
-    p_capture.add_argument("artifact_id", help="Artifact id (card or skill) the run exercised.")
+    p_capture.add_argument(
+        "artifact_id",
+        help="Artifact id (card or skill) the run exercised, or `auto` to resolve skills read in this session "
+        "(session-observed, veto only).",
+    )
     p_capture.add_argument("--kind", default="skill", choices=["skill", "card"], help="Artifact kind.")
     p_capture.add_argument("--task-id", default=None, help="Task id to correlate the signal with.")
     p_capture.add_argument("--run-id", default=None, help="Verify run id to read (default: latest).")
@@ -115,6 +119,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_fork.add_argument("--install-min-helped", type=int, default=None, help="Override install_min_helped.")
     p_fork.add_argument("--revert-min-hurt", type=int, default=None, help="Override revert_min_hurt.")
     p_fork.add_argument("--bump-min-helped", type=int, default=None, help="Override bump_min_helped.")
+    p_fork.add_argument(
+        "--observed-hurt-window-days", type=int, default=None, help="Override observed_hurt_window_days."
+    )
+    p_fork.add_argument(
+        "--observed-hurt-min-sessions", type=int, default=None, help="Override observed_hurt_min_sessions."
+    )
     p_fork.add_argument("--z", type=float, default=None, help="Override the Wilson z score.")
     p_fork.add_argument(
         "--effective-wilson-min",
@@ -186,8 +196,12 @@ def _dispatch_explain(args) -> int:
 
 
 def _dispatch_capture(args) -> int:
-    from .. import outcome_cmd
+    from .. import outcome_attribution, outcome_cmd
 
+    if args.artifact_id == outcome_attribution.AUTO_CAPTURE:
+        return outcome_attribution.capture_auto(
+            target=args.target, artifact_kind=args.kind, run_id=args.run_id, run_receipt=args.run_receipt
+        )
     return outcome_cmd.capture(
         target=args.target,
         artifact_id=args.artifact_id,
@@ -301,6 +315,12 @@ def _dispatch_fork(args) -> int:
         utility_min_passing_units=args.utility_min_passing_units
         if args.utility_min_passing_units is not None
         else defaults.utility_min_passing_units,
+        observed_hurt_window_days=args.observed_hurt_window_days
+        if args.observed_hurt_window_days is not None
+        else defaults.observed_hurt_window_days,
+        observed_hurt_min_sessions=args.observed_hurt_min_sessions
+        if args.observed_hurt_min_sessions is not None
+        else defaults.observed_hurt_min_sessions,
     )
     return outcome_cmd.fork(target=args.target, out=args.out, config=config, json_output=args.json)
 
