@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from brigade import aboyeur, agents, cli, doctor, fleet_client, proc, runguard
+from brigade import aboyeur, agent_request, agents, cli, doctor, fleet_client, fleet_home_guard, proc, runguard
+from brigade.fleet_claim_target import ClaimTargetError
 
 
 def _git(repo: Path, *args: str) -> proc.Result:
@@ -306,6 +307,35 @@ def test_failed_worktree_creation_does_not_take_a_lock_or_leave_a_checkout(tmp_p
     assert not runguard.worktree_lock_dir(checkout).exists()
     assert _git(repo, "worktree", "list", "--porcelain").stdout == before
     assert "simulated checkout hook failure" in (output_dir / "run.json").read_text()
+
+
+@pytest.mark.parametrize(
+    "module, method, error, extra_args",
+    [
+        (fleet_client, "repo_claim", fleet_client.FleetClaimHeldError, []),
+        (fleet_client, "repo_claim", fleet_client.FleetClaimQuotaError, []),
+        (fleet_client, "repo_claim", fleet_client.FleetClaimAuthError, []),
+        (fleet_client, "resolve_claim_target", ClaimTargetError, []),
+        (fleet_client, "resolve_claim_target", fleet_home_guard.RelativeBrigadeHomeError, ["--require-fleet-claim"]),
+        (agent_request, "record_request", agent_request.AgentRequestError, ["--requester-key", "test-key"]),
+        (runguard, "run_lock", runguard.RunLockError, []),
+    ],
+)
+def test_startup_refusal_discards_checkout(tmp_path, monkeypatch, module, method, error, extra_args):
+    repo = _git_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    checkout = _checkout_path(tmp_path, repo, output_dir)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def fail(*args, **kwargs):
+        assert (checkout / ".git").is_file()
+        raise error("simulated startup refusal")
+
+    monkeypatch.setattr(module, method, fail)
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree", *extra_args]) == 2
+    assert not checkout.exists()
+    assert not runguard.worktree_lock_dir(checkout).exists()
+    assert str(checkout) not in _git(repo, "worktree", "list", "--porcelain").stdout
 
 
 def test_removal_receipt_failure_retains_the_worktree_lock(tmp_path, monkeypatch):

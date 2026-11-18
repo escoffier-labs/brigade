@@ -718,6 +718,7 @@ def dispatch(args) -> int:
     effective_cwd = run_cwd
     worktree_lock_dir = None
     keep_worktree = False
+    dispatch_started = False
     lifecycle_seat = args.worker or loaded_roster.orchestrator
     # Set when the fleet heartbeat reports a mid-run credential refusal
     # (#1161): the outer KeyboardInterrupt handler turns the resulting
@@ -847,7 +848,6 @@ def dispatch(args) -> int:
                 )
             if worktree_cwd is not None:
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
-                keep_worktree = True
                 print(f"worktree: {effective_cwd}", file=sys.stderr)
             # The local lease's verdict on the previous run at this lock
             # (issue #1141): each dead owner it reconciled on the way in.
@@ -989,6 +989,8 @@ def dispatch(args) -> int:
                 run_kwargs["batch_execution"] = args.batch_execution
             try:
                 claim_cancellation.raise_if_requested()
+                dispatch_started = True
+                keep_worktree = worktree_cwd is not None
                 rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
                 claim_cancellation.raise_if_requested()
             except runguard.RetainRunLockError:
@@ -1211,7 +1213,7 @@ def dispatch(args) -> int:
         return 2
     finally:
         if not keep_worktree:
-            if worktree_cwd is not None and worktree_cwd.exists():
+            if not dispatch_started and worktree_cwd is not None and worktree_cwd.exists():
                 runguard.discard_incomplete_worktree(run_cwd, worktree_cwd)
             if worktree_lock_dir is not None:
                 try:
