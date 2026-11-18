@@ -737,7 +737,8 @@ no-card
     path.write_text(body)
     if output_dir is not None or outcome_id:
         parent_kind = "outcome" if outcome_id else "run"
-        parent_id = outcome_id if outcome_id else output_dir.name if output_dir is not None else ""
+        # The sidecar sits in the ingest inbox too, so it carries the same safe run id as the note.
+        parent_id = outcome_id if outcome_id else run_id if output_dir is not None else ""
         localio.write_json(
             causal_receipt.handoff_sidecar_path(path),
             causal_receipt.recorded_handoff(

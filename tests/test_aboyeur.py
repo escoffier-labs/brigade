@@ -4811,6 +4811,11 @@ def test_handoff_note_digests_a_custom_run_id(tmp_path):
     assert f"- run id: {view_id}" in body
     assert "PRIVATE-MODEL-A" not in body
     assert "PRIVATE-MODEL-A" not in handoff.name
+    from brigade import causal_receipt
+
+    sidecar = causal_receipt.handoff_sidecar_path(handoff).read_text()
+    assert "PRIVATE-MODEL-A" not in sidecar
+    assert view_id in sidecar
 
     generated = workspace / ".brigade" / "runs" / "20260821-210000-abcdef12"
     generated.mkdir()
