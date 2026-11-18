@@ -270,6 +270,46 @@ class _ConfirmedClaimLease:
                 _client()._thread.interrupt_main()
 
 
+def release_confirmed_claim(
+    target: str,
+    *,
+    node_id: str,
+    holder: str,
+    conductor: str | None,
+    ttl_seconds: int,
+    connect: Callable[[], dict[str, Any]],
+    initial_acquire_uncertain: bool,
+    reacquire_uncertain: bool,
+) -> None:
+    """Release the exact holder and retry while a late acquire could still land."""
+    client = _client()
+
+    def release() -> Any:
+        return client.release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connect())
+
+    outcome = release()
+    if initial_acquire_uncertain or (reacquire_uncertain and outcome.reason in UNCERTAIN_CLEANUP_REASONS):
+        # An earlier request whose response was lost could commit after this
+        # holder's successful retry. Even a positive release reply cannot
+        # account for that request, so keep both bounded retries.
+        for _ in range(client.EXIT_ORPHAN_RELEASE_RETRIES):
+            client.time.sleep(client.CLAIM_TIMEOUT_SECONDS)
+            outcome = release()
+            if not initial_acquire_uncertain and outcome.reason not in UNCERTAIN_CLEANUP_REASONS:
+                break
+        if outcome.reason in UNCERTAIN_CLEANUP_REASONS:
+            client._LOG.warning(
+                "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
+                "(last answer: %s); the row lives until its TTL expires",
+                target,
+                outcome.reason,
+            )
+    if outcome.reason in CLEANUP_RETRY_REASONS:
+        client._schedule_orphan_release(
+            target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connect
+        )
+
+
 def _schedule_orphan_release(
     target: str,
     *,

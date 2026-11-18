@@ -1168,7 +1168,17 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
     if args.json:
         print(_json.dumps({"claims": claims}, indent=2, sort_keys=True))
         return 0
-    headers = ("target", "node", "conductor", "harness", "session", "acquired", "expires")
+    has_parent_repos = any(claim.get("parent_repo") for claim in claims)
+    headers = (
+        "target",
+        *(("parent repo",) if has_parent_repos else ()),
+        "node",
+        "conductor",
+        "harness",
+        "session",
+        "acquired",
+        "expires",
+    )
     rows = []
     for claim in claims:
         expires = str(claim.get("expires_at") or "-")
@@ -1177,6 +1187,7 @@ def _dispatch_claims(args: argparse.Namespace) -> int:
         rows.append(
             [
                 _safe_table_cell(str(claim.get("target") or "-")),
+                *([_safe_table_cell(str(claim.get("parent_repo") or "-"))] if has_parent_repos else []),
                 _safe_table_cell(str(claim.get("owner_node") or "-"))[:12],
                 _safe_table_cell(str(claim.get("owner_conductor") or "-")),
                 _safe_table_cell(str(claim.get("harness") or "-")),

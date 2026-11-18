@@ -117,6 +117,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "transport_warning",
         "cloud_environment",
         "artifact_collection",
+        "worktree_removal",
         # Artifact references
         "artifacts",
         "handoff",

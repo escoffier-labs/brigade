@@ -30,6 +30,16 @@ from .runguard_gate import _recovery_gate_busy_error, _RecoveryGate, _stale_reco
 from .runguard_gate import _recovery_gate_path as _recovery_gate_path
 from .runguard_gate import _try_lock_descriptor as _try_lock_descriptor
 
+from .worktree_lease import (
+    brigade_worktree_root as brigade_worktree_root,
+    discard_incomplete_worktree as discard_incomplete_worktree,
+    remove_worktree_directory,
+    reserved_worktree_lock_dir as reserved_worktree_lock_dir,
+    run_lock_parent,
+    workspace_for_lock_path,
+    worktree_lock_dir as worktree_lock_dir,
+)
+
 # Separate from journal-owned run.json; bounded even for many failing siblings.
 RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
 RETENTION_DIAGNOSTICS_LIMIT = 16
@@ -213,6 +223,9 @@ def require_clean_worktree(cwd: Path) -> list[str]:
 
 def lock_path(cwd: Path) -> Path:
     base = git_root(cwd) if is_git_worktree(cwd) else cwd.resolve()
+    reserved = reserved_worktree_lock_dir(base)
+    if reserved is not None:
+        return reserved / "run.lock"
     return base / ".brigade" / "run.lock"
 
 
@@ -340,7 +353,7 @@ def _owner_with_workspace(owner: dict[str, object] | None, path: Path) -> dict[s
     if owner is None:
         return None
     enriched = dict(owner)
-    enriched["_lock_workspace"] = str(path.parent.parent.resolve())
+    enriched["_lock_workspace"] = str(workspace_for_lock_path(path))
     return enriched
 
 
@@ -1092,9 +1105,9 @@ def recover_stale_run(
 def run_recovery_status(cwd: Path, run_dir: Path) -> str:
     cwd = cwd.expanduser().resolve()
     run_dir = run_dir.expanduser().resolve()
-    if not cwd.is_dir():
-        return "unknown"
     path = lock_path(cwd)
+    if not cwd.is_dir() and not path.parent.is_dir():
+        return "unknown"
     try:
         lock_is_directory = _lock_path_is_directory(path)
     except RunLockError:
@@ -1284,7 +1297,7 @@ def _retained_claim_wait_error(path: Path) -> RunLockError | None:
     run_id = Path(run_dir).name
     if not run_id:
         return None
-    workspace = path.parent.parent.resolve()
+    workspace = workspace_for_lock_path(path)
     return RunLockError(
         "retained stale run lock claim requires explicit recovery: "
         f"{claim}; owner run_dir {run_dir}; owner pid {pid} is dead; "
@@ -1503,29 +1516,29 @@ def run_lock(
     if stale_action == "claim" and run_dir is None:
         raise ValueError("run lock stale_action=claim requires run_dir")
     path = lock_path(cwd)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ownership = _wait_to_acquire_lock(
-        path,
-        run_dir=run_dir,
-        wait_seconds=wait_seconds,
-        poll_interval=poll_interval,
-        on_reconcile=on_reconcile,
-        stale_action=stale_action,
-    )
-    retain_lock = False
-    context_token = _active_run_lock.set((path, ownership)) if ownership is not None else None
-    try:
-        yield path
-    except BaseException as exc:
-        retain_lock = retained_run_lock_error(exc) is not None
-        if retain_lock:
-            raise_if_retained_run_lock(exc)
-        raise
-    finally:
-        if context_token is not None:
-            _active_run_lock.reset(context_token)
-        if ownership is not None and not retain_lock:
-            _release_lock(path, ownership)
+    with run_lock_parent(cwd, path):
+        ownership = _wait_to_acquire_lock(
+            path,
+            run_dir=run_dir,
+            wait_seconds=wait_seconds,
+            poll_interval=poll_interval,
+            on_reconcile=on_reconcile,
+            stale_action=stale_action,
+        )
+        retain_lock = False
+        context_token = _active_run_lock.set((path, ownership)) if ownership is not None else None
+        try:
+            yield path
+        except BaseException as exc:
+            retain_lock = retained_run_lock_error(exc) is not None
+            if retain_lock:
+                raise_if_retained_run_lock(exc)
+            raise
+        finally:
+            if context_token is not None:
+                _active_run_lock.reset(context_token)
+            if ownership is not None and not retain_lock:
+                _release_lock(path, ownership)
 
 
 def create_detached_worktree(repo: Path, worktree_path: Path) -> Path:
@@ -1551,7 +1564,7 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     args.append(str(worktree_path))
     result = _git(root, *args, timeout=120.0)
     if result.code != 0:
-        shutil.rmtree(worktree_path, ignore_errors=True)
+        remove_worktree_directory(root, worktree_path)
 
 
 def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
@@ -1585,10 +1598,6 @@ def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
     if failed:
         print(f"brigade: kept worktree {worktree_path} so {len(failed)} pending handoff(s) survive", file=sys.stderr)
     return not failed
-
-
-def brigade_worktree_root() -> Path:
-    return Path.home() / ".cache" / "brigade" / "worktrees"
 
 
 def is_brigade_created_worktree(path: Path, repo_root: Path) -> bool:

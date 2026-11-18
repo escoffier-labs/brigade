@@ -436,3 +436,17 @@ def test_release_path_reports_an_unresolvable_target_instead_of_a_traceback(tmp_
     )
     assert cli.main(["fleet", "claims", "--release", str(repo), "--path"]) == 1
     assert "cannot determine the claim target" in capsys.readouterr().err
+
+
+def test_automatic_worktree_without_origin_claims_under_parent_name(tmp_path, monkeypatch):
+    from brigade import worktree_lease
+
+    home = _make_home(tmp_path, "homeA", monkeypatch)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    main = _make_repo(home / "repos", "repo", None)
+    checkout = worktree_lease.brigade_worktree_root() / "repo-run"
+    checkout.parent.mkdir(parents=True)
+    _git(main, "worktree", "add", "-q", "--detach", str(checkout))
+
+    assert fleet_client.resolve_claim_target(main) == "repo"
+    assert fleet_client.resolve_claim_target(checkout) == "repo@repo-run"

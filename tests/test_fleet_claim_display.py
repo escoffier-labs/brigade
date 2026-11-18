@@ -202,3 +202,35 @@ def test_preserves_ordinary_claims_without_changing_core_occupancy(tmp_path):
         assert display_claims[1]["job"] == "grokbot-" + "f" * 24
     finally:
         conn.close()
+
+
+def test_sibling_worktree_claims_show_the_parent_repo(tmp_path, monkeypatch, capsys):
+    conn = _conn(tmp_path)
+    try:
+        for run in ("run-a", "run-b"):
+            status, _payload = fleet_hub.handle_claim(
+                conn,
+                {
+                    "action": "acquire",
+                    "target": f"example/repo@checkout-{run}",
+                    "node_id": "ordinary-node",
+                    "holder": run,
+                    "lock": {
+                        "token": f"lease-{run}",
+                        "acquired_at": NOW.isoformat(),
+                        "run_dir": str(tmp_path / run),
+                    },
+                },
+            )
+            assert status == 200
+        rows = fleet_claim_display.list_display_claims(conn)
+    finally:
+        conn.close()
+
+    assert [row["parent_repo"] for row in rows] == ["example/repo", "example/repo"]
+    assert len({row["target"] for row in rows}) == 2
+    monkeypatch.setattr(fleet_client, "fetch_claims", lambda **kwargs: rows)
+    assert cli.main(["fleet", "claims"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "parent repo" in lines[0]
+    assert all(line.split()[1] == "example/repo" for line in lines[1:])

@@ -288,3 +288,26 @@ def test_required_claim_revocation_aborts_with_bounded_credential_callback(machi
             assert lost == [], "credential rejection was also published as generic claim loss"
         finally:
             unblock.set()
+
+
+def test_confirmed_claim_is_released_when_heartbeat_setup_is_interrupted(machine, monkeypatch):
+    active = set()
+
+    def acquire(target, *, holder, **kwargs):
+        active.add((target, holder))
+        return fleet_client.ClaimDecision(True, "granted")
+
+    def release(target, *, holder, **kwargs):
+        active.remove((target, holder))
+        return fleet_client.ClaimDecision(True, "released")
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    monkeypatch.setattr(fleet_client.threading, "Thread", interrupt)
+
+    with pytest.raises(KeyboardInterrupt), fleet_client.repo_claim("example/repo@repo-run"):
+        pytest.fail("an interrupted heartbeat must prevent entering the guarded block")
+    assert not active

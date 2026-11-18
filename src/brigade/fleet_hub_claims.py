@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from pathlib import PureWindowsPath
 from typing import Any
 
 from . import fleet_hub as hub
@@ -452,7 +453,7 @@ def _stale(
 
 
 def payload(row: tuple[Any, ...]) -> dict[str, Any]:
-    return {
+    claim = {
         "target": row[0],
         "owner_node": row[1],
         "owner_conductor": row[2],
@@ -467,6 +468,13 @@ def payload(row: tuple[Any, ...]) -> dict[str, Any]:
         "generation": _checked_generation(row[15]),
         "protocol": "legacy",
     }
+
+    repo, separator, checkout = row[0].partition("@")
+    if separator and repo and isinstance(row[14], str):
+        run_id = PureWindowsPath(row[14]).name
+        if run_id and checkout.endswith(f"-{run_id}"):
+            claim["parent_repo"] = repo
+    return claim
 
 
 def fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None:
