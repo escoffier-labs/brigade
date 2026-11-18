@@ -1,0 +1,14 @@
+{
+  "schema": "brigade.paired_trial.v2",
+  "baseline": "baseline",
+  "candidate": "candidate",
+  "model": "claude-opus-5-5",
+  "settings": {
+    "reasoning": "medium",
+    "claude_cli_model": "opus"
+  },
+  "repetitions": 1,
+  "cases": [
+    "passing-verify"
+  ]
+}

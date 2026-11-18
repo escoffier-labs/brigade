@@ -1155,6 +1155,18 @@ def paired_execute(path: Path, output: Path, session: Any, *, cases: list[str] |
 
 
 def paired_validate(output: Path, expected_digest: str) -> dict[str, Any]:
+    from .model_trial_claude import LIVE_SCHEMA, validate_live
     from .model_trial_paired import validate
 
-    return validate(output, expected_digest)
+    try:
+        schema = json.loads((output / "evidence.json").read_text(encoding="utf-8")).get("schema")
+    except (OSError, ValueError, AttributeError):
+        schema = None
+    # Each validator re-checks the whole tree; this only picks the one that owns the schema.
+    return (validate_live if schema == LIVE_SCHEMA else validate)(output, expected_digest)
+
+
+def paired_live(path: Path, output: Path, **kwargs: Any) -> dict[str, Any]:
+    from .model_trial_claude import execute_live
+
+    return execute_live(path, output, **kwargs)
