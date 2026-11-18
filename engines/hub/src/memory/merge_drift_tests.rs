@@ -784,6 +784,22 @@ async fn a_merge_card_in_the_published_lineage_graph_is_held_for_review() {
     }
 }
 
+/// The before-text rule drops only the alias the merge itself adds. A trusted
+/// pair that already sits in the published lineage graph still goes to review,
+/// whether the card at the end of the edge is the keeper or the retired one.
+#[tokio::test]
+async fn a_trusted_merge_pair_in_the_published_lineage_graph_still_routes_to_review() {
+    let r = trusted().await;
+    let body = r.body(&open(&r).await);
+    let hold = |snapshot| r.hold_as(&body, "admin", ADMIN, None, Some(snapshot));
+    // The alias the merge adds is not in the published graph, so it is no exposure.
+    assert_eq!(held(&r, &body), None);
+    assert_eq!(hold(published("other-card")), None);
+    for (name, id) in [("keeper", KEEP), ("retired", GONE)] {
+        assert_eq!(hold(published(id)), Some(LINEAGE), "{name}");
+    }
+}
+
 /// An apply rewrites the keeper's writer and class, and a connector sees an
 /// agent-unreviewed head only for its writer. The ranking digest cannot see
 /// that, so a different applier holds the merge.

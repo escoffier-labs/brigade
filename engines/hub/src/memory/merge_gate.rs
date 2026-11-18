@@ -396,10 +396,13 @@ pub(super) fn exact_pair<T: ReadTx + ?Sized>(tx: &T, proposal: &Json) -> rusqlit
     let [(_, retired)] = merges.as_slice() else {
         return Ok(false);
     };
-    let (Some((keeper, _)), Some((retired, _))) = (load(tx, keeper)?, load(tx, retired)?) else {
+    let (Some(keeper), Some(retired)) = (load(tx, keeper)?, load(tx, retired)?) else {
         return Ok(false);
     };
-    Ok(proposal_metadata::same_claims(&keeper.text, &retired.text))
+    Ok(proposal_metadata::same_claims(
+        &keeper.card.text,
+        &retired.card.text,
+    ))
 }
 
 /// Whether `card` is the keeper or the retired card of a merge op in `proposal`.
