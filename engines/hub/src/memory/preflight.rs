@@ -219,13 +219,29 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         "held",
     );
     let trust = input_blocker(tx, body)?;
+    // One exact pair that `exact_pair` proved, which includes that the applier
+    // wrote both heads, may be agent-unreviewed on both sides (#2591). Mixed
+    // trust, a flagged card and every other op class stay on the list below.
+    // The shape is restated here on purpose: this trust relaxation must not
+    // widen if `exact_pair` ever does. It needs exactly one op, that op a
+    // `merge_exact_duplicates`, and exactly two cards.
+    let one_pair = matches!(
+        body["ops"].as_array().map(Vec::as_slice),
+        Some([op]) if string(op, "type") == "merge_exact_duplicates"
+    ) && cards.len() == 2;
+    let unreviewed_merge = merged
+        && one_pair
+        && cards
+            .iter()
+            .all(|c| string(c, "before_trust") == "agent-unreviewed");
     let mut known_trust = true;
     let mut clean = true;
     for card in cards {
-        known_trust &= matches!(
-            string(card, "before_trust"),
-            "reviewed" | "imported" | "policy-promoted"
-        );
+        known_trust &= unreviewed_merge
+            || matches!(
+                string(card, "before_trust"),
+                "reviewed" | "imported" | "policy-promoted"
+            );
         let rows = tx.query("SELECT scan_state FROM memory_card_revisions WHERE scope=?1 AND card_id=?2 AND revision=?3", &[
             ops::t(string(card,"scope")), ops::t(string(card,"card_id")), rusqlite::types::Value::Integer(card["base_revision"].as_i64().unwrap_or(0))
         ])?;

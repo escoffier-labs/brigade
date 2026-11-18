@@ -1,0 +1,474 @@
+//! A same-writer exact pair of `agent-unreviewed` cards applies automatically
+//! (#2591). Every hub here uses the real scope `fleet`. The merge gate's own
+//! writer rule decides, so each hold below is either the card_trust gate or a
+//! code the merge gate already had.
+use super::{merge_drift_tests::*, proposal_tests::*, ranking_gate_tests::Real, tests::*, *};
+use serde_json::{Value as Json, json};
+
+fn trust_gate(report: &Json) -> (Json, Json) {
+    gate(report, "card_trust")
+}
+const DENIED: (&str, &str) = ("held", "card_trust_denied");
+
+/// The pair the admin wrote and the admin applies: no reviewer, no trust change.
+#[tokio::test]
+async fn an_unreviewed_same_writer_exact_pair_applies_and_rolls_back_exactly() {
+    let r = pair().await;
+    let before = [
+        card(&r.h, "fleet", KEEP).await,
+        card(&r.h, "fleet", GONE).await,
+    ];
+    assert_eq!(before[0]["trust"], "agent-unreviewed");
+    let opened = open(&r).await;
+    let report = preflight_report(&r, &opened).await;
+    assert!(preflight::all_satisfied(&report), "{report:?}");
+    assert_eq!(
+        trust_gate(&report),
+        (json!("satisfied"), json!("card_trust_satisfied"))
+    );
+    assert_eq!(report["structural_merge_proof"], true);
+    let id = opened.body["proposal_id"].clone();
+    let applied = auto(&r, &opened).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let (keeper, retired) = (
+        card(&r.h, "fleet", KEEP).await,
+        card(&r.h, "fleet", GONE).await,
+    );
+    assert_eq!(retired["state"], "retired");
+    assert_eq!(
+        (&keeper["state"], &keeper["trust"]),
+        (&json!("live"), &json!("agent-unreviewed"))
+    );
+    let aliases = proposal_metadata::list(keeper["text"].as_str().unwrap(), "aliases").unwrap();
+    assert!(aliases.contains("fleet/dup-retired"), "{aliases:?}");
+    r.h.set_clock(r.h.now() + 1);
+    let undo = r.h.call(ADMIN_TOKEN, json!({"action":"rollback","proposal_id":id,"base_epoch":r.h.epoch().await,"client_event_id":r.h.id()})).await;
+    assert_eq!(undo.body["state"], "applied", "{undo:?}");
+    for (id, was) in [KEEP, GONE].into_iter().zip(&before) {
+        let now = card(&r.h, "fleet", id).await;
+        assert_eq!(
+            (&now["text"], &now["state"], &now["trust"]),
+            (&was["text"], &json!("live"), &json!("agent-unreviewed")),
+            "{id}"
+        );
+        assert_eq!(now["text"], was["text"], "{id}");
+    }
+}
+
+/// Another credential applying turns the same pair into a hold, because the
+/// apply would rewrite each card's writer to the applier's.
+#[tokio::test]
+async fn the_same_writer_pair_is_held_when_another_principal_applies() {
+    let r = pair().await;
+    for id in [KEEP, GONE] {
+        sql(&r, OTHER_WRITER, id);
+    }
+    let opened = open(&r).await;
+    let body = r.body(&opened);
+    // The writer itself applying is the one clean case.
+    let own = r.evaluate_as(&body, "node", "node:one");
+    assert_eq!(
+        trust_gate(&own),
+        (json!("satisfied"), json!("card_trust_satisfied"))
+    );
+    assert_eq!(own["structural_merge_proof"], true);
+    for (class, principal) in [
+        ("admin", ADMIN),
+        ("node", "node:two"),
+        ("admin", "node:one"),
+    ] {
+        let report = r.evaluate_as(&body, class, principal);
+        assert_eq!(
+            (
+                trust_gate(&report),
+                report["structural_merge_proof"].clone()
+            ),
+            ((json!(DENIED.0), json!(DENIED.1)), json!(false)),
+            "{principal} {class}"
+        );
+        assert!(!preflight::all_satisfied(&report), "{principal} {class}");
+    }
+    // The ADMIN credential applies for real here, and it wrote neither card.
+    let attempt = assert_not_applied(&r, &opened, "applier is not the writer").await;
+    assert!(
+        codes(&attempt).contains(&json!("card_trust_denied")),
+        "{attempt:?}"
+    );
+}
+
+/// Cards written by two credentials stay a review, whichever card is foreign,
+/// and a person can still accept the open proposal.
+#[tokio::test]
+async fn a_cross_writer_unreviewed_pair_is_held_and_stays_reviewable() {
+    for (side, foreign) in [("retired", GONE), ("keeper", KEEP)] {
+        let r = pair().await;
+        sql(&r, OTHER_WRITER, foreign);
+        let opened = open(&r).await;
+        // The merge gate's own writer hold comes first for an unreviewed pair.
+        assert_eq!(held(&r, &r.body(&opened)), Some(WRITER), "{side}");
+        let report = preflight_report(&r, &opened).await;
+        assert_eq!(report["structural_merge_proof"], false, "{side}");
+        assert_eq!(
+            trust_gate(&report),
+            (json!(DENIED.0), json!(DENIED.1)),
+            "{side}"
+        );
+        held_by_merge_gate(&r, &opened, &[GONE], WRITER, side).await;
+        let decided = decide(&r.h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+        assert_eq!(decided.body["state"], "applied", "{side}: {decided:?}");
+        assert_eq!(
+            card(&r.h, "fleet", GONE).await["state"],
+            "retired",
+            "{side}"
+        );
+    }
+}
+
+/// A flagged card or a mixed pair never gets the relaxation.
+#[tokio::test]
+async fn flagged_and_mixed_trust_pairs_stay_held() {
+    let cases = [
+        ("flagged pair", "UPDATE memory_cards SET trust='flagged'"),
+        (
+            "flagged retired",
+            "UPDATE memory_cards SET trust='flagged' WHERE card_id='dup-retired'",
+        ),
+        (
+            "reviewed keeper",
+            "UPDATE memory_cards SET trust='reviewed' WHERE card_id='dup-keeper'",
+        ),
+        (
+            "reviewed retired",
+            "UPDATE memory_cards SET trust='reviewed' WHERE card_id='dup-retired'",
+        ),
+    ];
+    for (name, statement) in cases {
+        // Changed after the proposal opens, so the live trust no longer matches.
+        let r = pair().await;
+        let opened = open(&r).await;
+        r.db.execute(statement, []).unwrap();
+        let report = preflight_report(&r, &opened).await;
+        assert_eq!(report["structural_merge_proof"], false, "{name}");
+        assert_eq!(trust_gate(&report).0, json!("held"), "{name}: {report:?}");
+        assert_not_applied(&r, &opened, name).await;
+        // Changed before it opens, so the proposal itself carries the trust.
+        let r = pair().await;
+        r.db.execute(statement, []).unwrap();
+        let reply = submit(&r.h, ADMIN_TOKEN, vec![merge_op(&r, KEEP, GONE).await]).await;
+        assert_eq!(reply.status, 201, "{name}: {reply:?}");
+        let report = preflight_report(&r, &reply).await;
+        assert!(!preflight::all_satisfied(&report), "{name}: {report:?}");
+        assert_not_applied(&r, &reply, name).await;
+    }
+}
+
+/// Several pairs, a larger group and a pair beside another op keep every
+/// relaxation off, so the unreviewed cards stay out of automatic apply.
+#[tokio::test]
+async fn only_a_single_exact_pair_qualifies() {
+    let cards = [
+        (KEEP, dup("", "aaaaaa")),
+        (GONE, dup("", "bbbbbb")),
+        ("dup-keeper-2", "Second claim. ^c-cccccc\n".to_string()),
+        ("dup-retired-2", "Second claim. ^c-dddddd\n".to_string()),
+    ];
+    let refs: Vec<_> = cards.iter().map(|(id, t)| (*id, t.as_str())).collect();
+    // Two pairs in one proposal.
+    let r = Real::untrusted(&refs).await;
+    let ops = vec![
+        merge_op(&r, KEEP, GONE).await,
+        merge_op(&r, "dup-keeper-2", "dup-retired-2").await,
+    ];
+    let opened = submit(&r.h, ADMIN_TOKEN, ops).await;
+    assert_eq!(opened.body["tier"], 0, "{opened:?}");
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(trust_gate(&report), (json!(DENIED.0), json!(DENIED.1)));
+    assert_eq!(report["structural_merge_proof"], false);
+    assert_not_applied(&r, &opened, "two pairs").await;
+    // A pair beside append_evidence on another card.
+    let other = card(&r.h, "fleet", "dup-keeper-2").await;
+    let pin = proposal_blocks::pins(other["text"].as_str().unwrap()).remove(0);
+    let evidence = json!({"type":"append_evidence","scope":"fleet","card_id":"dup-keeper-2",
+        "base_revision":other["revision"],"block_id":pin["block_id"],
+        "expected_block_hash":pin["hash"],"evidence_ids":["ns/one/two"]});
+    // Beside another op the merge earns no alias excuse, so the keeper's new
+    // alias is lineage and the proposal opens as a review.
+    let ops = vec![merge_op(&r, KEEP, GONE).await, evidence];
+    let opened = submit(&r.h, ADMIN_TOKEN, ops).await;
+    assert_eq!(opened.body["tier"], 2, "{opened:?}");
+    assert_not_applied(&r, &opened, "pair beside evidence").await;
+    // One keeper retiring seven cards, the most a proposal carries. A group of
+    // nine is refused at submit, before any gate sees it.
+    let texts: Vec<(String, String)> = (0..9)
+        .map(|i| (format!("big-{i}"), dup("", &format!("{i:06}"))))
+        .collect();
+    let refs: Vec<_> = texts
+        .iter()
+        .map(|(i, t)| (i.as_str(), t.as_str()))
+        .collect();
+    let r = Real::untrusted(&refs).await;
+    let ids: Vec<_> = texts.iter().map(|(id, _)| id.as_str()).collect();
+    let mut ops = Vec::new();
+    for id in &ids[1..] {
+        ops.push(merge_op(&r, ids[0], id).await);
+    }
+    let refused = submit(&r.h, ADMIN_TOKEN, ops).await;
+    assert_eq!(refused.status, 422, "{refused:?}");
+    let opened = open_ops(&r, ids[0], &ids[1..8]).await;
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(trust_gate(&report), (json!(DENIED.0), json!(DENIED.1)));
+    assert_eq!(report["structural_merge_proof"], false);
+    let attempt = auto(&r, &opened).await;
+    assert_ne!(attempt.body["state"], "applied", "{attempt:?}");
+    assert_eq!(card(&r.h, "fleet", "big-1").await["state"], "live");
+}
+
+/// Evidence and anchoring on an unreviewed card keep their card_trust hold.
+#[tokio::test]
+async fn evidence_and_anchoring_on_unreviewed_cards_stay_denied() {
+    let r = Real::untrusted(&[(
+        "a",
+        "---\ntitle: Alpha\n---\nClaim one. ^c-abcdef\n\nClaim two.\n",
+    )])
+    .await;
+    let opened = r.evidence("a", &["ns/one/two"]).await;
+    assert_eq!(opened.body["tier"], 0, "{opened:?}");
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(trust_gate(&report), (json!(DENIED.0), json!(DENIED.1)));
+    r.auto_authored("a");
+    let opened = r.anchor("a").await;
+    assert_eq!(opened.body["tier"], 0, "{opened:?}");
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(trust_gate(&report), (json!(DENIED.0), json!(DENIED.1)));
+    assert!(!preflight::all_satisfied(&report));
+}
+
+/// The other merge gate rules and the older controls still hold the pair.
+#[tokio::test]
+async fn the_merge_gate_and_older_controls_still_hold_an_unreviewed_pair() {
+    // A copy never retires the card it copied.
+    let r = pair().await;
+    let reversed = open_ops(&r, GONE, &[KEEP]).await;
+    assert_eq!(held(&r, &r.body(&reversed)), Some(RETIRES_OLDER));
+    assert_not_applied(&r, &reversed, "retires older").await;
+    // A live card naming the retired one would dangle.
+    let r = pair().await;
+    let linked = r.h.put(
+        ADMIN_TOKEN,
+        "fleet",
+        "linker",
+        None,
+        "See [[dup-retired]].\n",
+    );
+    assert_eq!(linked.await.status, 201);
+    let opened = open(&r).await;
+    assert_eq!(held(&r, &r.body(&opened)), Some(INBOUND));
+    assert_not_applied(&r, &opened, "inbound link").await;
+    // Policy listing, the master switch and the kill switch.
+    let r = pair().await;
+    let opened = open(&r).await;
+    policy(&r, |m| m["tier0_op_classes"] = json!(["append_evidence"]));
+    let attempt = assert_not_applied(&r, &opened, "class unlisted").await;
+    assert!(
+        codes(&attempt).contains(&json!("class_disabled")),
+        "{attempt:?}"
+    );
+    let r = pair().await;
+    let opened = open(&r).await;
+    let off =
+        r.h.call(
+            ADMIN_TOKEN,
+            json!({"action":"auto_apply_switch","enabled":false,"client_event_id":r.h.id()}),
+        )
+        .await;
+    assert_eq!(off.status, 200, "{off:?}");
+    let attempt = assert_not_applied(&r, &opened, "kill switch").await;
+    assert!(
+        codes(&attempt).contains(&json!("auto_apply_killed")),
+        "{attempt:?}"
+    );
+    // Either card of the pair in the cooldown.
+    let r = pair().await;
+    let opened = open(&r).await;
+    r.db.execute("INSERT INTO memory_events(seq,event_id,client_event_id,kind,principal,scope,card_id,revision,content_hash,trust,payload,created_at) SELECT 900001,'recent-apply','recent-apply','proposal.apply',writer,scope,card_id,900001,content_hash,trust,'{}',?2 FROM memory_cards WHERE scope='fleet' AND card_id=?1", rusqlite::params![KEEP, ids::isoformat(r.h.now())]).unwrap();
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(
+        gate(&report, "cooldown_history").1,
+        json!("cooldown_active")
+    );
+    assert_not_applied(&r, &opened, "cooldown").await;
+}
+
+const LINEAGE: &str = "retrieval_eval_lineage_exposed";
+
+/// An unreviewed pair on the real scope beside one unrelated card.
+async fn lineage_pair(keeper: &str, retired: &str) -> Real {
+    Real::untrusted(&[
+        (KEEP, keeper),
+        (GONE, retired),
+        ("victim", "Another topic entirely. ^c-cccccc\n"),
+    ])
+    .await
+}
+/// The proposal opens as a review, no automatic path applies it, and a person
+/// can still accept it.
+async fn review_only(r: &Real, name: &str) {
+    let opened = submit(&r.h, ADMIN_TOKEN, vec![merge_op(r, KEEP, GONE).await]).await;
+    assert_eq!(opened.body["tier"], 2, "{name}: {opened:?}");
+    let attempt = auto(r, &opened).await;
+    assert_ne!(attempt.body["state"], "applied", "{name}: {attempt:?}");
+    assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live", "{name}");
+    let decided = decide(&r.h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+    assert_eq!(decided.body["state"], "applied", "{name}: {decided:?}");
+    assert_eq!(
+        card(&r.h, "fleet", GONE).await["state"],
+        "retired",
+        "{name}"
+    );
+}
+
+/// Before #2591 an unreviewed card never reached automatic apply, so lineage
+/// review skipped it. A merge card now gets the same review at any trust: lineage
+/// the cards already carry, a `\/` escape, and a live card that names the keeper
+/// each send an unreviewed pair to a person.
+#[tokio::test]
+async fn lineage_on_an_unreviewed_pair_routes_to_review_and_a_person_can_accept() {
+    let aliased = "---\naliases: [\"fleet/victim\"]\n---\n";
+    let successor = "---\nsuperseded_by: victim\n---\n";
+    let escaped = "---\naliases: [\"fleet\\/victim\"]\n---\n";
+    let cases = [
+        (
+            "retired card with an alias",
+            dup("", "aaaaaa"),
+            dup(aliased, "bbbbbb"),
+        ),
+        (
+            "keeper with an alias",
+            dup(aliased, "aaaaaa"),
+            dup("", "bbbbbb"),
+        ),
+        (
+            "keeper with superseded_by",
+            dup(successor, "aaaaaa"),
+            dup("", "bbbbbb"),
+        ),
+        (
+            "escaped alias on the keeper",
+            dup(escaped, "aaaaaa"),
+            dup("", "bbbbbb"),
+        ),
+        (
+            "escaped alias on the retired card",
+            dup("", "aaaaaa"),
+            dup(escaped, "bbbbbb"),
+        ),
+    ];
+    for (name, keeper, retired) in cases {
+        review_only(&lineage_pair(&keeper, &retired).await, name).await;
+    }
+}
+
+async fn plant(r: &Real, text: &str, reviewed: bool) {
+    let request = if reviewed {
+        json!({"action":"import","scope":"fleet","card_id":"linker","text":text,"client_event_id":r.h.id()})
+    } else {
+        json!({"action":"put","scope":"fleet","card_id":"linker","base_revision":null,"base_epoch":null,"text":text,"client_event_id":r.h.id()})
+    };
+    assert_eq!(r.h.call(ADMIN_TOKEN, request).await.status, 201);
+}
+
+/// Another live card naming the keeper, reviewed or not, is inbound lineage the
+/// merge does not excuse. It is caught at submit, and by the preflight backstop
+/// when the link arrives after the proposal opened at tier 0.
+#[tokio::test]
+async fn a_card_naming_the_keeper_routes_an_unreviewed_pair_to_review() {
+    let names = "---\nsupersedes: [dup-keeper]\n---\nBody.\n";
+    for reviewed in [false, true] {
+        let who = if reviewed { "reviewed" } else { "unreviewed" };
+        // The card exists before the proposal does.
+        let r = pair().await;
+        plant(&r, names, reviewed).await;
+        review_only(&r, who).await;
+        // The card arrives after tiering.
+        let r = pair().await;
+        let opened = open(&r).await;
+        let body = r.body(&opened);
+        assert_eq!(held(&r, &body), None, "{who}");
+        plant(&r, names, reviewed).await;
+        assert_eq!(held(&r, &body), Some(LINEAGE), "{who}");
+        assert_not_applied(&r, &opened, who).await;
+        let decided = decide(&r.h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+        assert_eq!(decided.body["state"], "applied", "{who}: {decided:?}");
+    }
+}
+
+/// The relaxation is for the pair the writer applies itself, whatever the
+/// credential class. An agent token with write and reflect goes put, put,
+/// propose, auto_apply and rollback, with no admin credential in the path.
+#[tokio::test]
+async fn a_non_admin_writer_merges_and_rolls_back_its_own_unreviewed_pair() {
+    let r = Real::untrusted(&[]).await;
+    grant(&r.h, "fleet", &["read", "write", "reflect"]).await;
+    for (id, anchor) in [(KEEP, "aaaaaa"), (GONE, "bbbbbb")] {
+        let put =
+            r.h.put(AGENT_TOKEN, "fleet", id, None, &dup("", anchor))
+                .await;
+        assert_eq!(put.status, 201, "{id}: {put:?}");
+    }
+    let before = [
+        card(&r.h, "fleet", KEEP).await,
+        card(&r.h, "fleet", GONE).await,
+    ];
+    assert_eq!(before[0]["trust"], "agent-unreviewed");
+    let opened = submit(&r.h, AGENT_TOKEN, vec![merge_op(&r, KEEP, GONE).await]).await;
+    assert_eq!((opened.status, &opened.body["tier"]), (201, &json!(0)));
+    let request = attestation_tests::auto_request(&r.h, &opened.body["proposal_id"]).await;
+    let applied = r.h.call(AGENT_TOKEN, request).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    assert_eq!(card(&r.h, "fleet", GONE).await["state"], "retired");
+    r.h.set_clock(r.h.now() + 1);
+    let undo = r.h.call(AGENT_TOKEN, json!({"action":"rollback","proposal_id":opened.body["proposal_id"],"base_epoch":r.h.epoch().await,"client_event_id":r.h.id()})).await;
+    assert_eq!(undo.body["state"], "applied", "{undo:?}");
+    for (id, was) in [KEEP, GONE].into_iter().zip(&before) {
+        let now = card(&r.h, "fleet", id).await;
+        assert_eq!(
+            (&now["text"], &now["state"], &now["trust"]),
+            (&was["text"], &json!("live"), &json!("agent-unreviewed")),
+            "{id}"
+        );
+    }
+    // The same agent is not the writer of a card another credential wrote.
+    let r = pair().await;
+    grant(&r.h, "fleet", &["read", "write", "reflect"]).await;
+    let opened = submit(&r.h, AGENT_TOKEN, vec![merge_op(&r, KEEP, GONE).await]).await;
+    let request = attestation_tests::auto_request(&r.h, &opened.body["proposal_id"]).await;
+    let attempt = r.h.call(AGENT_TOKEN, request).await;
+    assert_ne!(attempt.body["state"], "applied", "{attempt:?}");
+    assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live");
+}
+
+/// A card whose stored revision did not scan clean never gets the relaxation,
+/// whether it went stale before the proposal opened or after.
+#[tokio::test]
+async fn an_unreviewed_pair_that_did_not_scan_clean_is_held() {
+    let state = "UPDATE memory_card_revisions SET scan_state=?1 WHERE card_id=?2";
+    for scan in ["private", "flagged", "pending"] {
+        for id in [KEEP, GONE] {
+            let name = format!("{scan} on {id}");
+            // After the proposal opened at tier 0, preflight and apply hold it.
+            let r = pair().await;
+            let opened = open(&r).await;
+            r.db.execute(state, [scan, id]).unwrap();
+            let report = preflight_report(&r, &opened).await;
+            assert_eq!(gate(&report, "scan").1, json!("scan_not_clean"), "{name}");
+            assert!(!preflight::all_satisfied(&report), "{name}: {report:?}");
+            assert_not_applied(&r, &opened, &name).await;
+            // Before it opened, tiering already sends it to a reviewer.
+            let r = pair().await;
+            r.db.execute(state, [scan, id]).unwrap();
+            let opened = submit(&r.h, ADMIN_TOKEN, vec![merge_op(&r, KEEP, GONE).await]).await;
+            assert_ne!(opened.body["tier"], 0, "{name}: {opened:?}");
+            assert_not_applied(&r, &opened, &name).await;
+        }
+    }
+}

@@ -198,8 +198,8 @@ pub(super) fn named_by<T: ReadTx + ?Sized>(
     }))
 }
 
-/// A trusted card that declares lineage links, or that another live card in
-/// its scope names, can change search order when its revision moves. Lineage
+/// A trusted card, or any card of a merge, that declares lineage links, or that
+/// another live card in its scope names, can change search order when its revision moves. Lineage
 /// recency compares head revisions, so any apply there needs a human decision.
 /// The reserved fixture scope keeps its report-bound gate.
 pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
@@ -211,7 +211,11 @@ pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlit
         let Some(head) = ops::head(tx, scope, id)? else {
             continue;
         };
-        if !super::ranking::trusted(&head.trust) {
+        // An unreviewed card only reaches automatic apply as half of one exact
+        // merge pair (#2591), so a merge card gets the full lineage review at
+        // any trust. Skipping it would let declared or inbound lineage apply
+        // without a reviewer. Every other untrusted card stays skipped.
+        if !super::ranking::trusted(&head.trust) && !super::merge_gate::in_merge(body, card) {
             continue;
         }
         let (before, after) = (string(card, "before_text"), string(card, "after_text"));

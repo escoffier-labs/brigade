@@ -98,8 +98,11 @@ The digest covers ranking and literal search only. Push and connector search
 also read `writer` and `writer_class`, and an apply writes the applier's onto
 the head. A target with `agent-unreviewed` trust whose head writer differs from
 the applier's principal or class holds with `retrieval_eval_writer_changed`.
-The automatic path denies such a target earlier, with `card_trust_denied`, so
-this hold is the backstop for a later change to that check. The literal scan
+The automatic path denies such a target earlier, with `card_trust_denied`, for
+every op except `merge_exact_duplicates`. A single exact-duplicate pair of
+`agent-unreviewed` cards passes `card_trust` when the merge gate proves one
+writer wrote both and is applying, so for that op this hold, with
+`retrieval_eval_merge_cross_writer`, is the check that decides. The literal scan
 spends its byte budget on the text it searches, so an admitted append cannot
 push later matching cards past it.
 
