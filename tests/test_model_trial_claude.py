@@ -1039,7 +1039,7 @@ def test_remove_work_dir_retries_only_on_windows_and_only_a_few_times(tmp_path, 
 
 def test_kill_sends_nothing_for_a_reaped_child(monkeypatch):
     sent = []
-    monkeypatch.setattr(model_trial_claude.os, "killpg", lambda *args: sent.append(args))
+    monkeypatch.setattr(model_trial_claude.os, "killpg", lambda *args: sent.append(args), raising=False)
 
     class Reaped:
         pid = 4242
@@ -1058,7 +1058,7 @@ def test_kill_sends_nothing_for_a_reaped_child(monkeypatch):
 
 def test_kill_signals_an_unreaped_child_group_on_posix_and_the_child_on_windows(monkeypatch):
     sent = []
-    monkeypatch.setattr(model_trial_claude.os, "killpg", lambda *args: sent.append(("killpg", *args)))
+    monkeypatch.setattr(model_trial_claude.os, "killpg", lambda *args: sent.append(("killpg", *args)), raising=False)
 
     class Live:
         pid = 4242
@@ -1068,7 +1068,8 @@ def test_kill_signals_an_unreaped_child_group_on_posix_and_the_child_on_windows(
             sent.append(("kill",))
 
     model_trial_claude._kill(Live())  # type: ignore[arg-type]
-    assert sent == [("killpg", 4242, model_trial_claude.signal.SIGKILL)] if os.name == "posix" else [("kill",)]
+    expected = [("killpg", 4242, model_trial_claude.signal.SIGKILL)] if os.name == "posix" else [("kill",)]
+    assert sent == expected
 
 
 def test_the_version_probe_timer_firing_after_completion_does_not_kill(monkeypatch, tmp_path):
