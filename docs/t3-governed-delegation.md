@@ -66,8 +66,13 @@ workspace refuses.
   creation in owner-only mode (`0600` on POSIX), and the write never replaces
   an existing file. Publish replay and readback bind the run directory
   descriptor-relative and require a single-link regular file with mode `0600`
-  before any bytes are trusted. Windows is refused because its asset would
-  inherit the parent directory ACL instead of an owner-only DACL.
+  before any bytes are trusted.
+- On Windows the run directory and each asset are created with a protected
+  DACL granting the current user only, bound at creation through
+  `work_cmd.nt_private`. The DACL is verified on the held handle before any
+  bytes are written, and readback opens the asset once, relative to the held
+  run-directory handle, without following a reparse point. An existing object
+  with an inherited or widened DACL is refused and never repaired.
 - One task batch acceptance.
 - One `task.native-enrolled` fact per task carrying only the task ID, the asset
   relative name, the asset SHA-256 digest, the template digest and the
@@ -204,11 +209,14 @@ Claim and correlation refusals use the same one-line form. Codes include
   default `app-server` is not one of the native runtime mode literals. The
   result projection does not echo those fields, so acceptance validates
   provider, model and options only.
-- Windows is refused for now. `brigade t3 open` exits with
-  `unsupported-platform` before any state is written, and asset readback
-  refuses too, because an asset there would inherit the parent directory ACL
-  instead of an owner-only DACL. An owner-only DACL is not implemented or
-  verified in this slice.
+- Windows is supported with an owner-only DACL that grants the current user
+  only. The policy accepts only unflagged allow ACEs for the current token
+  user, refuses NULL, inherited, deny and object ACEs, and refuses thread
+  impersonation. A platform where `work_cmd.nt_private` cannot bind its API
+  still refuses with `unsupported-platform` before any state is written.
+- Administrators using backup, restore or take-ownership rights are outside
+  this discretionary access boundary. They can read or replace the retained
+  input without the DACL refusing them, and Brigade does not claim otherwise.
 - T3 deduplicates delegate requests only within one request namespace, and the
   caller can never see or prove that namespace. Brigade does not assume
   cross-session idempotence or authoritative absence.

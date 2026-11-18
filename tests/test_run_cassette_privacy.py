@@ -114,8 +114,16 @@ def test_export_with_cassette_journal_reference_validates_imports_and_audits(tmp
     work_run_archive.export_run(run, destination)
     assert work_run_archive.validate_cli(destination) == 0
     assert b"adversarial-cassette-secret" not in b"".join(p.read_bytes() for p in destination.rglob("*") if p.is_file())
+    assert not (destination / "payload" / "events" / "lifecycle.jsonl").exists()
+    manifest = json.loads((destination / "work-run.json").read_text(encoding="utf-8"))
+    assert manifest["compatibility"]["journal_authority"] == "withheld"
+    assert manifest["journal_withheld"]["event_count"] == len(
+        run_journal.read_journal(run / "events" / "lifecycle.jsonl").events
+    )
     imported = work_run_archive.import_archive(destination, runs_dir=tmp_path / "imported")
-    assert run_audit.audit_run(Path(imported["run_dir"])).result == "match"
+    audit = run_audit.audit_run(Path(imported["run_dir"]))
+    assert audit.result == run_audit.RESULT_JOURNAL_WITHHELD
+    assert "withheld" in audit.not_auditable_reason
 
 
 def test_purge_command_keeps_journal_and_audit_unchanged(tmp_path):

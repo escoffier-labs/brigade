@@ -661,10 +661,11 @@ def _write_crontab(text: str) -> str | None:
 def _ensure_memory_care_runbooks(target: Path) -> int:
     """Write shipped memory-care runbooks when any are missing."""
     runbook_dir = memory_cmd._memory_care_runbooks_dir(target)
-    missing = [name for name in memory_cmd.MEMORY_CARE_RUNBOOK_NAMES if not (runbook_dir / name).is_file()]
+    missing = tuple(name for name in memory_cmd.MEMORY_CARE_RUNBOOK_NAMES if not (runbook_dir / name).is_file())
     if not missing:
         return 0
-    return memory_cmd._write_memory_care_runbooks(target)
+    # Write only the missing templates. Existing and operator-written runbooks stay untouched.
+    return memory_cmd._write_memory_care_runbooks(target, missing)
 
 
 def _write_daily_observability_runbook(target: Path) -> int:
@@ -1074,10 +1075,12 @@ def install(
                 return rc
         return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
-    rc = _ensure_care_runbooks(target) or care_patrol.ensure_selected(target, entries)
-    if rc != 0:
-        return rc
-    if any(entry.entry_id == "memory-closeout" for entry in entries):
+    if not dry_run:
+        # A dry run writes nothing, runbooks included.
+        rc = _ensure_care_runbooks(target) or care_patrol.ensure_selected(target, entries)
+        if rc != 0:
+            return rc
+    if not dry_run and any(entry.entry_id == "memory-closeout" for entry in entries):
         rc = _write_memory_closeout_runbook(target)
         if rc != 0:
             return rc

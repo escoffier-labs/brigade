@@ -60,6 +60,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "codex_transport",
         "lifecycle_journal_requested",
         "run_journal_authority_requested",
+        "journal_withheld",
         "approval_reference",
         "approval",
         "requester_principal",

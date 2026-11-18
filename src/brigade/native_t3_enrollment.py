@@ -9,13 +9,15 @@ publishes reference-only enrollment facts.
 Custody is descriptor-bound. The run directory is bound before any asset read,
 each asset is created with exclusive no-follow creation in owner-only mode, and
 publish replay plus readback require a single-link regular file with mode 0600.
-Windows is refused with a bounded ``unsupported-platform`` error because the
-asset would inherit the parent directory ACL instead of an owner-only DACL.
-Owner-only DACLs are not implemented in this slice.
+Windows binds a protected owner-only DACL at creation through
+``work_cmd.nt_private`` and verifies it on the held handle, because NTFS has no
+POSIX mode bits. Statements about administrators, backup and restore rights stay
+outside this discretionary access boundary.
 """
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -320,9 +322,71 @@ def _check_marker(plan: EnrollmentPlan) -> None:
         raise EnrollmentError("request-conflict", "request_id already belongs to a different enrollment")
 
 
+def _nt_private() -> Any | None:
+    """The Windows owner-only helper when this platform can actually bind it."""
+    if os.name != "nt" or not dirfd.nt_available():
+        return None
+    try:
+        from .work_cmd import nt_private
+
+        # Bind both lazy API namespaces now, so a missing DLL or symbol refuses
+        # before any lock or run state is written.
+        nt_private._security_api()
+        nt_private.nt._require_api()
+    except (ImportError, OSError, AttributeError):
+        return None
+    return nt_private
+
+
+def _windows_private_helper() -> Any:
+    helper = _nt_private()
+    if helper is None:
+        raise EnrollmentError(
+            "unsupported-platform",
+            "native T3 enrollment needs owner-only file custody that this platform does not provide",
+        )
+    return helper
+
+
+def _create_windows_run_dir(run_dir: Path) -> None:
+    """Create or reopen the run directory under a protected owner-only DACL."""
+    helper = _windows_private_helper()
+    try:
+        parent = dirfd.open_directory_nofollow(run_dir.parent)
+    except OSError:
+        raise EnrollmentError("run-dir", "the run directory is not bindable") from None
+    try:
+        try:
+            descriptor = helper.open_child_directory(parent, run_dir.name, create=True)
+        except FileExistsError:
+            # An existing object is inspected, never repaired. Verification is
+            # part of the reopen, so an inherited or widened DACL refuses here.
+            try:
+                descriptor = helper.open_child_directory(parent, run_dir.name)
+            except OSError:
+                raise EnrollmentError("run-dir", "the run directory custody is not owner-only") from None
+        except OSError:
+            raise EnrollmentError("run-dir", "the run directory could not be created owner-only") from None
+        try:
+            try:
+                helper.verify_fd(descriptor, directory=True)
+            except OSError:
+                raise EnrollmentError("run-dir", "the run directory custody is not owner-only") from None
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise EnrollmentError("run-dir", "the run directory is not a directory")
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+    run_journal._fsync_directory(run_dir.parent)
+
+
 def _create_run_dir(run_dir: Path) -> None:
     """Create the run directory owner-only, refusing a symlink at the name."""
     run_dir.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        _create_windows_run_dir(run_dir)
+        return
     run_dir.mkdir(mode=0o700, exist_ok=True)
     try:
         descriptor = dirfd.open_directory_nofollow(run_dir)
@@ -343,16 +407,20 @@ def _create_run_dir(run_dir: Path) -> None:
 
 
 def _require_supported_platform() -> None:
-    """Owner-only asset custody is POSIX-only in this slice."""
-    if os.name == "nt":
+    """Owner-only custody needs POSIX modes or the Windows NT private helper."""
+    if os.name == "nt" and _nt_private() is None:
         raise EnrollmentError(
             "unsupported-platform",
-            "native T3 enrollment needs owner-only file custody that Windows does not provide yet",
+            "native T3 enrollment needs owner-only file custody that this platform does not provide",
         )
 
 
 def _private_asset(info: os.stat_result) -> bool:
     """Owner-only single-link regular file: the custody shape we can trust."""
+    if os.name == "nt":
+        # NTFS has no POSIX mode bits. The owner-only DACL is verified on the
+        # held handle; this shape check still refuses links and non-files.
+        return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
     return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
 
 
@@ -361,8 +429,73 @@ def _require_private_asset(info: os.stat_result) -> None:
         raise EnrollmentError("asset-custody", "delegation input asset is not a private regular file")
 
 
+def _discard_held_asset(descriptor: int, name: str) -> None:
+    """Mark the opened asset for deletion without re-resolving its name.
+
+    The handle carries DELETE, so the mark applies to the exact object that was
+    verified. A swapped directory entry cannot redirect it. When the mark fails,
+    the empty object stays for inspection, which is the fail-closed alternative
+    to an identity-free unlink.
+    """
+    try:
+        from .work_cmd import nt_dirfd
+
+        api = nt_dirfd._require_api()
+        disposition = api.FILE_DISPOSITION_INFORMATION()
+        disposition.DeleteFile = True
+        nt_dirfd._nt_set_info(
+            api,
+            nt_dirfd._handle_from_fd(descriptor),
+            ctypes.byref(disposition),
+            ctypes.sizeof(disposition),
+            nt_dirfd._FileDispositionInformation,
+            name=name,
+        )
+    except (OSError, AttributeError):
+        return
+
+
+def _create_windows_asset(bound: run_dirfd.BoundRunDir, name: str, content: bytes) -> None:
+    """Create one asset, verify its DACL, then write and flush the bytes."""
+    helper = _windows_private_helper()
+    try:
+        descriptor = helper.open_file(bound.dir_fd(), name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        raise EnrollmentError("asset-conflict", "delegation input asset already exists") from None
+    except PermissionError:
+        # open_file verified the new object, refused it and closed its handle.
+        # Without a held identity the object is left for inspection, not unlinked.
+        raise EnrollmentError("asset-custody", "delegation input asset custody was not established") from None
+    except OSError:
+        raise EnrollmentError("asset-write", "delegation input asset could not be created") from None
+    complete = False
+    try:
+        try:
+            helper.verify_fd(descriptor, directory=False)
+        except OSError:
+            raise EnrollmentError("asset-custody", "delegation input asset custody was not established") from None
+        if not _private_asset(os.fstat(descriptor)):
+            raise EnrollmentError("asset-custody", "delegation input asset custody was not established")
+        try:
+            with os.fdopen(os.dup(descriptor), "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            raise EnrollmentError("asset-write", "delegation input asset could not be written") from None
+        complete = True
+    finally:
+        if not complete:
+            _discard_held_asset(descriptor, name)
+        os.close(descriptor)
+    dirfd.fsync_directory(bound.dir_fd())
+
+
 def _create_asset(bound: run_dirfd.BoundRunDir, name: str, content: bytes) -> None:
-    """Publish one asset with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600."""
+    """Publish one asset with exclusive no-follow creation and owner-only custody."""
+    if os.name == "nt":
+        _create_windows_asset(bound, name, content)
+        return
     try:
         descriptor = bound.open_file((), name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -408,8 +541,52 @@ def write_delegation_asset(run_dir: Path, name: str, content: bytes) -> None:
         raise EnrollmentError("asset-custody", "run directory could not be bound") from None
 
 
+def _read_windows_asset(bound: run_dirfd.BoundRunDir, name: str, *, missing_ok: bool) -> bytes | None:
+    """Open the asset once, verify custody on that handle, then read it."""
+    helper = _windows_private_helper()
+    try:
+        descriptor = helper.open_file(bound.dir_fd(), name, os.O_RDONLY)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise EnrollmentError("asset-missing", "retained delegation input is missing") from None
+    except OSError:
+        raise EnrollmentError("asset-custody", "delegation input asset is not a private regular file") from None
+    try:
+        try:
+            info = os.fstat(descriptor)
+        except OSError:
+            raise EnrollmentError("asset-custody", "delegation input asset custody was not established") from None
+        if not _private_asset(info):
+            raise EnrollmentError("asset-custody", "delegation input asset is not a private regular file")
+        try:
+            helper.verify_fd(descriptor, directory=False)
+        except OSError:
+            raise EnrollmentError("asset-custody", "delegation input asset custody was not established") from None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > run_dirfd.MAX_READ_BYTES:
+                raise EnrollmentError("asset-custody", "delegation input asset exceeds the read limit")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
 def _existing_asset(bound: run_dirfd.BoundRunDir, name: str, content: bytes) -> bool:
     """True when an already published asset matches; refuses unsafe custody."""
+    if os.name == "nt":
+        existing = _read_windows_asset(bound, name, missing_ok=True)
+        if existing is None:
+            return False
+        if existing != content:
+            raise EnrollmentError("asset-conflict", "retained delegation input already differs")
+        return True
     try:
         info = bound.stat((), name)
     except FileNotFoundError:
@@ -507,14 +684,21 @@ def read_delegation_input(run_dir: Path, *, task_id: str) -> DelegationInput:
     name = result.enrollment.asset_path
     try:
         with run_dirfd.bound_run_dir(run_dir) as bound:
-            try:
-                info = bound.stat((), name)
-            except FileNotFoundError:
-                raise EnrollmentError("asset-missing", "retained delegation input is missing") from None
-            _require_private_asset(info)
-            raw = bound.read_bytes(name)
-            if raw is None:
-                raise EnrollmentError("asset-missing", "retained delegation input is missing")
+            if os.name == "nt":
+                read = _read_windows_asset(bound, name, missing_ok=False)
+                if read is None:
+                    raise EnrollmentError("asset-missing", "retained delegation input is missing")
+                raw = read
+            else:
+                try:
+                    info = bound.stat((), name)
+                except FileNotFoundError:
+                    raise EnrollmentError("asset-missing", "retained delegation input is missing") from None
+                _require_private_asset(info)
+                existing = bound.read_bytes(name)
+                if existing is None:
+                    raise EnrollmentError("asset-missing", "retained delegation input is missing")
+                raw = existing
             if not bound.still_bound():
                 raise EnrollmentError("asset-custody", "run directory changed during readback")
     except OSError:

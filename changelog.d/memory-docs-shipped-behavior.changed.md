@@ -1,0 +1,1 @@
+- Describe the shipped memory reflection, proposal tier, compensation and verification autonomy behavior in the execution model, outcome scoring and roadmap.

@@ -1,0 +1,2 @@
+- `brigade t3 open` now runs on Windows, creating the run directory and each retained delegation input with a protected DACL that grants the current user only.
+- On Windows an existing run directory or asset with an inherited or widened DACL refuses instead of being repaired, and readback opens each asset once relative to the held run directory.

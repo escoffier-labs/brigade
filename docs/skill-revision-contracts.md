@@ -44,6 +44,81 @@ root metadata and nested metadata file digests. Root metadata formatting and
 managed `imported_at`, `updated_at`, `created_at`, `fingerprint`, and `source`
 fields do not change identity. The source selector is bound separately.
 
+## `brigade init` never overwrites a wired SKILL.md
+
+`brigade init`, `brigade reconfigure` and `--force` write a bundled `SKILL.md`
+(the wired `brigade-work` and `ultra-work-scout` skills in each harness skills
+directory, and the workspace-depth `skills/*/SKILL.md` files) only when the
+destination is missing. `--force`, including the force that reconfigure passes
+implicitly, still replaces other template files but never a `SKILL.md`. For an
+existing destination:
+
+| Destination | Result |
+| --- | --- |
+| Missing | Written, and recorded in `.brigade/skills/wired.json`. |
+| Symlink, or a symlinked parent directory | Kept. Init prints `kept (symlinked): <path>` and writes and proposes nothing. |
+| Byte-identical regular file | Kept. No write and no proposal. |
+| Differing regular file | Kept untouched. Init files one inbox proposal with the bundled text and prints `kept (edited)` or `kept (pristine-stale)` with the proposal id. |
+
+SKILL.md wiring walks, reads and creates the destination relative to a held
+descriptor for the target root (`brigade.dirfd`), one component at a time, so a
+skill installed as a link (the shape in #2677), a linked parent directory or a
+Windows junction is never reached through it, and a parent swapped mid-run
+cannot redirect the write. The read is non-blocking and requires a regular
+file, so a FIFO at the destination cannot hang init. A race (a component
+vanishing or changing type) resolves to a kept outcome, never to a write. This
+guarantee covers SKILL.md wiring only; the other template files keep their own
+write path. Line endings do not count as an edit: bundled text is written as LF
+and a CRLF copy compares equal to it.
+
+A new `SKILL.md` is published whole or not at all. The text is written and
+fsynced to a temporary sibling (`.SKILL.md.<random>.tmp`) under the same held
+directory, then moved to its name with `dirfd.replace_children(replace=False)`,
+the module's portable no-replace publish (a hard link then unlink on POSIX, a
+rename with replacement disabled on Windows; `dirfd.link_child` is POSIX-only,
+so it is not used). It never replaces an existing name: a name taken during the
+publish is the lost-race kept outcome. A failed or interrupted write (a full
+disk, an I/O error, Ctrl-C, a killed process) leaves no `SKILL.md`, and the temp
+file is removed, so the next run writes the bundled text instead of treating a
+truncated file as `edited`.
+
+An error that is not a race (permission denied, a read-only or full disk while
+creating a directory or the temp file, an I/O error while reading) does not
+abort init. That skill is a `kept (not-a-regular-file)` outcome with a warning
+naming the path and errno, it is not recorded, and the remaining skills, the
+`wired.json` write and the rest of init still run. `wired.json` is written in a
+`finally`, so files already placed are recorded even when a later step fails.
+
+The proposal is filed with a `dedupe_key` of
+`init:<skill_id>:<destination path>:<sha256 of the proposed files>`. `inbox_add`
+accepts the key on any caller: when a proposal in any status already carries it,
+the existing id is returned, with the same exit code the first filing gave (0
+when its lint passed), and nothing new is written, so a repeated init does not
+pile up proposals. The destination path is part of the key, so the same text
+proposed for two installed copies is two proposals. A proposal's `source` is
+`brigade://bundled-skills/<skill_id>@<brigade version>`, not a temporary path.
+The proposal carries a behavioral contract only if the bundled `skill.json`
+ships one. Brigade does not infer a failure for it.
+
+`.brigade/skills/wired.json` records, per file init wrote, the harness, skill
+id, `sha256` of the installed bytes, `brigade_version` and `template_sha256`.
+Init uses it only to label a differing copy: a copy whose bytes still match the
+recorded `sha256` is `pristine-stale` (the bundled template moved on), anything
+else is `edited`. Nothing refreshes a file in place from it. The file is read
+and written under the skills mutation lock, so concurrent inits keep each
+other's records, and an unreadable file is copied to
+`wired.json.corrupt-<digest>` before it is replaced. A failed record write is a
+warning. `brigade skills install` and `brigade skills sync` keep their own
+semantics and are unchanged. Review a filed proposal with
+`brigade skills inbox diff <id>`. When the installed `brigade-work` copy is kept
+and `brigade doctor` reports `stale skill`, doctor adds a pointer to
+`brigade skills inbox list` if init filed a proposal for that file. The
+classification itself is unchanged.
+
+`brigade reconfigure --prune` still removes a pruned harness directory whole.
+Before it does, it prints a warning naming each `SKILL.md` under it that differs
+from the bundled text, so an operator edit is not deleted silently.
+
 ## Fleet report and review compatibility
 
 Report schema 2 carries a closed, versioned `binding` object per copy. Schema 1

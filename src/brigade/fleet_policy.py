@@ -124,6 +124,17 @@ def reject_json_tree(value: Any, where: str = "document") -> None:
     raise FleetPolicyError(f"fleet policy {where} is not a JSON value")
 
 
+def normalize_repository_key(identity: str) -> str:
+    """The comparison form of a repository identity: casefolded, one trailing ``.git`` removed.
+
+    Placement and the node project inventory key repositories the same way
+    (``fleet_node_projects.normalize_repo_key``, which adds a shape check), so a policy
+    entry and an inventory row for one repository always meet on one key.
+    """
+    key = identity.casefold()
+    return key[: -len(".git")] if key.endswith(".git") else key
+
+
 def parse_json_object(raw: bytes | str, *, limit: int = MAX_DOCUMENT_BYTES) -> dict[str, Any]:
     """Decode one bounded JSON object. Rejects non-objects, NaN/Inf, and controls."""
     if isinstance(raw, str):
@@ -907,6 +918,17 @@ def parse_document(raw: Any) -> dict[str, Any]:
                 f"{previous!r} and {machine_name!r}"
             )
         seen_environments[str(environment_id).casefold()] = machine_name
+    seen_repositories: dict[str, str] = {}
+    for identity in sorted(repositories):
+        name = _identity(identity, "repository identity")
+        normalized = normalize_repository_key(name)
+        previous = seen_repositories.get(normalized)
+        if previous is not None:
+            # Two records for one repository would let a caller pick the weaker one by spelling it differently.
+            raise FleetPolicyError(
+                f"fleet policy repository identities {previous!r} and {name!r} collide after normalization"
+            )
+        seen_repositories[normalized] = name
     document: dict[str, Any] = {
         "schema": POLICY_SCHEMA,
         "defaults": parse_settings(body.get("defaults") or {}, "defaults"),
