@@ -94,6 +94,35 @@ def test_held_exact_merge_stays_a_pending_proposal_for_review(setup, capsys, cod
     assert hub.cards == before
 
 
+def test_scheduled_run_opens_a_merge_and_the_hub_applies_it_without_a_reviewer(setup, capsys):
+    target, hub, _ = setup
+    policy.set_enabled(target, True)
+    applied = []
+
+    def apply_merge(body):
+        # The hub decides. Model what its automatic apply writes for a clean merge.
+        applied.append(body)
+        keeper, retired = hub.cards[("fleet", "a")], hub.cards[("fleet", "b")]
+        alias = 'aliases: ["fleet/b"]\n'
+        hub._commit(
+            "proposal.apply", "fleet", "a", keeper["text"].replace("---\n", "---\n" + alias, 1), "live", "auto-a"
+        )
+        hub._commit("proposal.apply", "fleet", "b", retired["text"], "retired", "auto-b")
+        return 200, {"state": "applied", "auto_apply_gates": []}
+
+    hub.do_auto_apply = apply_merge
+    code, report = run(target, capsys, "run", "--scheduled", "--apply")
+    assert code == 0
+    assert [op["type"] for op in report["ops"]] == ["merge_exact_duplicates"]
+    assert report["proposals"][0]["automatic"]["state"] == "applied"
+    assert "withdrawal" not in report["proposals"][0]
+    # One proposal, one automatic attempt, and no human decision in between.
+    assert [c["action"] for c in writes(hub)] == ["propose", "auto_apply"]
+    assert len(applied) == 1
+    assert hub.cards[("fleet", "b")]["state"] == "retired"
+    assert "fleet/b" in hub.cards[("fleet", "a")]["text"]
+
+
 def test_off_switch_read_at_each_candidate(tmp_path):
     policy.set_enabled(tmp_path, True)
     assert policy.allowed(tmp_path, [{"type": "append_evidence"}]) is None

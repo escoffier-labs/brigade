@@ -377,6 +377,42 @@ struct Kept<'a> {
     lowered: String,
 }
 
+/// The structural fact that makes one merge safe to treat as a single change:
+/// the proposal holds exactly one merge pair, both live heads still match what
+/// it read, and their claim bodies are identical. It is recomputed from the
+/// live heads here, so nothing in the proposal body can supply it. Preflight
+/// relaxes the blast cap and the attested evidence floors on this fact alone.
+pub(super) fn exact_pair<T: ReadTx + ?Sized>(tx: &T, proposal: &Json) -> rusqlite::Result<bool> {
+    let ops = proposal["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if !matches!(ops, [op] if is_merge(op)) || cards(proposal).len() != 2 {
+        return Ok(false);
+    }
+    let Some(plan) = plan(proposal) else {
+        return Ok(false);
+    };
+    let [(keeper, merges)] = plan.as_slice() else {
+        return Ok(false);
+    };
+    let [(_, retired)] = merges.as_slice() else {
+        return Ok(false);
+    };
+    let (Some((keeper, _)), Some((retired, _))) = (load(tx, keeper)?, load(tx, retired)?) else {
+        return Ok(false);
+    };
+    Ok(proposal_metadata::same_claims(&keeper.text, &retired.text))
+}
+
+/// Whether `card` is the keeper or the retired card of a merge op in `proposal`.
+pub(super) fn in_merge(proposal: &Json, card: &Json) -> bool {
+    let is = |scope: &Json, id: &Json| card["scope"] == *scope && card["card_id"] == *id;
+    proposal["ops"].as_array().is_some_and(|ops| {
+        ops.iter().filter(|op| is_merge(op)).any(|op| {
+            is(&op["scope"], &op["card_id"])
+                || is(&op["other_card"]["scope"], &op["other_card"]["card_id"])
+        })
+    })
+}
+
 /// Decide a proposal whose ops are all `merge_exact_duplicates`.
 pub(super) fn hold<T: ReadTx + ?Sized>(
     tx: &T,

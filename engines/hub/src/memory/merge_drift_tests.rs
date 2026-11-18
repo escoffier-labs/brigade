@@ -39,27 +39,36 @@ async fn pair() -> Real {
     let other = "Another topic entirely. ^c-cccccc\n";
     Real::untrusted(&[(KEEP, &keeper), (GONE, &retired), ("other-card", other)]).await
 }
-async fn open(r: &Real) -> Reply {
-    open_ops(r, KEEP, &[GONE]).await
-}
-/// One proposal that merges each of `retired` into `keeper`.
-async fn open_ops(r: &Real, keeper: &str, retired: &[&str]) -> Reply {
-    let k = card(&r.h, "fleet", keeper).await;
+async fn merge_op(r: &Real, keep: &str, gone: &str) -> Json {
+    let (k, o) = (
+        card(&r.h, "fleet", keep).await,
+        card(&r.h, "fleet", gone).await,
+    );
     let pin = proposal_blocks::pins(k["text"].as_str().unwrap()).remove(0);
-    let mut ops = Vec::new();
-    for id in retired {
-        let o = card(&r.h, "fleet", id).await;
-        ops.push(json!({"type":"merge_exact_duplicates","scope":"fleet","card_id":keeper,
-            "base_revision":k["revision"],"block_id":pin["block_id"],"expected_block_hash":pin["hash"],
-            "other_card":{"scope":"fleet","card_id":id,"base_revision":o["revision"]}}));
-    }
+    json!({"type":"merge_exact_duplicates","scope":"fleet","card_id":keep,
+        "base_revision":k["revision"],"block_id":pin["block_id"],"expected_block_hash":pin["hash"],
+        "other_card":{"scope":"fleet","card_id":gone,"base_revision":o["revision"]}})
+}
+/// Submit `ops` and assert the proposal opens at `tier`.
+async fn submit_ops(r: &Real, ops: Vec<Json>, tier: u8) -> Reply {
     let opened = submit(&r.h, ADMIN_TOKEN, ops).await;
     assert_eq!(
         (opened.status, &opened.body["tier"]),
-        (201, &json!(0)),
+        (201, &json!(tier)),
         "{opened:?}"
     );
     opened
+}
+/// One proposal that merges each of `retired` into `keeper`.
+async fn open_ops(r: &Real, keeper: &str, retired: &[&str]) -> Reply {
+    let mut ops = Vec::new();
+    for id in retired {
+        ops.push(merge_op(r, keeper, id).await);
+    }
+    submit_ops(r, ops, 0).await
+}
+async fn open(r: &Real) -> Reply {
+    open_ops(r, KEEP, &[GONE]).await
 }
 /// The proposal with one card's after text rewritten.
 fn edit(body: &Json, id: &str, f: impl Fn(&str) -> String) -> Json {
@@ -104,57 +113,107 @@ async fn link(r: &Real, text: &str) {
     );
 }
 
-/// The retrieval gate admits a clean merge. Three older gates still hold every
-/// merge, so none can apply automatically yet: the one-card blast cap counts the
-/// keeper and the retired card, evidence floors want attested proof a merge
-/// never carries, and `card_trust` refuses the only class that can be Tier 0.
-/// Pinned here so lifting one of them is a deliberate change.
-#[tokio::test]
-async fn a_clean_merge_passes_the_retrieval_gate_and_meets_the_older_holds() {
-    let r = pair().await;
-    let opened = open(&r).await;
-    assert_eq!(held(&r, &r.body(&opened)), None);
-    let report = attestation_tests::report(&r.h, &opened.body["proposal_id"]).await;
-    let state = |gate: &str| {
-        let checks = report.body["checks"].as_array().unwrap();
-        let c = checks.iter().find(|c| c["gate"] == gate).unwrap();
-        (c["state"].clone(), c["code"].clone())
-    };
-    let (ok, no) = (json!("satisfied"), json!("held"));
-    assert_eq!(
-        state("retrieval_eval"),
-        (ok, json!("retrieval_eval_satisfied"))
-    );
-    assert_eq!(state("delta"), (no.clone(), json!("blast_cap_exceeded")));
-    assert_eq!(
-        state("card_trust"),
-        (no.clone(), json!("card_trust_denied"))
-    );
-    assert_eq!(state("evidence_floor").0, no);
+/// Two trusted (imported) exact duplicates and one unrelated card.
+async fn trusted() -> Real {
+    let other = "Another topic entirely. ^c-cccccc\n";
+    let r = Real::new(&[
+        (KEEP, &dup("", "aaaaaa")),
+        (GONE, &dup("", "bbbbbb")),
+        ("other-card", other),
+    ])
+    .await;
+    assert_eq!(card(&r.h, "fleet", KEEP).await["trust"], "imported");
+    r
+}
+async fn auto(r: &Real, opened: &Reply) -> Reply {
     let request = attestation_tests::auto_request(&r.h, &opened.body["proposal_id"]).await;
-    let automatic = r.h.call(ADMIN_TOKEN, request).await;
-    assert_eq!(automatic.body["state"], "pending", "{automatic:?}");
-    assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live");
+    r.h.call(ADMIN_TOKEN, request).await
+}
+/// Every gate code an automatic attempt reported, passing or held.
+fn codes(reply: &Reply) -> Vec<Json> {
+    [
+        &reply.body["preflight"]["checks"],
+        &reply.body["auto_apply_gates"],
+    ]
+    .iter()
+    .filter_map(|c| c.as_array())
+    .flatten()
+    .map(|c| c["code"].clone())
+    .collect()
+}
+async fn preflight_report(r: &Real, opened: &Reply) -> Json {
+    attestation_tests::report(&r.h, &opened.body["proposal_id"])
+        .await
+        .body
+}
+fn gate(report: &Json, name: &str) -> (Json, Json) {
+    let checks = report["checks"].as_array().unwrap();
+    let c = checks.iter().find(|c| c["gate"] == name).unwrap();
+    (c["state"].clone(), c["code"].clone())
+}
+/// Rewrite the hub policy's memory section.
+fn policy(r: &Real, edit: impl FnOnce(&mut Json)) {
+    let db = rusqlite::Connection::open(&r.h.hub).unwrap();
+    let raw: String = db
+        .query_row("SELECT document FROM fleet_policy_revisions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut doc: Json = serde_json::from_str(&raw).unwrap();
+    edit(&mut doc["memory"]);
+    db.execute(
+        "UPDATE fleet_policy_revisions SET document=?1",
+        [doc.to_string()],
+    )
+    .unwrap();
+}
+async fn assert_not_applied(r: &Real, opened: &Reply, why: &str) -> Reply {
+    let attempt = auto(r, opened).await;
+    assert_ne!(attempt.body["state"], "applied", "{why}: {attempt:?}");
+    assert_eq!(card(&r.h, "fleet", GONE).await["state"], "live", "{why}");
+    attempt
 }
 
-/// A reviewed accept stands in for an automatic apply, then the stored proposal
-/// is marked automatic so the compensation path sees the merge it would see.
+/// A clean merge of two trusted duplicates meets every gate, so the hub applies
+/// it with no reviewer. The retired card is retired and the keeper carries its id
+/// as an alias. The relaxations are spelled out in the report.
 #[tokio::test]
-async fn the_compensation_inverse_of_a_merge_restores_both_cards_exactly() {
-    let r = pair().await;
+async fn a_clean_merge_of_trusted_duplicates_applies_automatically() {
+    let r = trusted().await;
+    let opened = open(&r).await;
+    assert_eq!(held(&r, &r.body(&opened)), None);
+    let report = preflight_report(&r, &opened).await;
+    assert!(preflight::all_satisfied(&report), "{report:?}");
+    assert_eq!(report["changed_path_count"], 1);
+    assert_eq!(report["structural_merge_proof"], true);
+    assert_eq!(report["structural_anchor_proof"], false);
+    let applied = auto(&r, &opened).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let (keeper, retired) = (
+        card(&r.h, "fleet", KEEP).await,
+        card(&r.h, "fleet", GONE).await,
+    );
+    assert_eq!(retired["state"], "retired");
+    assert_eq!(
+        (keeper["state"].clone(), keeper["trust"].clone()),
+        (json!("live"), json!("imported"))
+    );
+    let aliases = proposal_metadata::list(keeper["text"].as_str().unwrap(), "aliases").unwrap();
+    assert!(aliases.contains("fleet/dup-retired"), "{aliases:?}");
+}
+
+/// A real automatic apply is reversed by the exact inverse, restoring both cards.
+#[tokio::test]
+async fn the_compensation_inverse_of_an_automatic_merge_restores_both_cards_exactly() {
+    let r = trusted().await;
     let before = [
         card(&r.h, "fleet", KEEP).await,
         card(&r.h, "fleet", GONE).await,
     ];
-    let id = open(&r).await.body["proposal_id"].clone();
-    assert_eq!(
-        decide(&r.h, ADMIN_TOKEN, &id).await.body["state"],
-        "applied"
-    );
+    let opened = open(&r).await;
+    let id = opened.body["proposal_id"].clone();
+    assert_eq!(auto(&r, &opened).await.body["state"], "applied");
     assert_eq!(card(&r.h, "fleet", GONE).await["state"], "retired");
-    let mark =
-        "UPDATE memory_proposals SET body=json_set(body,'$.decision_mode','automatic') WHERE ?1=?1";
-    sql(&r, mark, "");
     r.h.set_clock(r.h.now() + 1);
     let undo = r.h.call(ADMIN_TOKEN, json!({"action":"rollback","proposal_id":id,"base_epoch":r.h.epoch().await,"client_event_id":r.h.id()})).await;
     assert_eq!(
@@ -165,10 +224,190 @@ async fn the_compensation_inverse_of_a_merge_restores_both_cards_exactly() {
     for (id, was) in [KEEP, GONE].into_iter().zip(&before) {
         let now = card(&r.h, "fleet", id).await;
         assert_eq!(
-            (&now["text"], &now["state"]),
-            (&was["text"], &json!("live"))
+            (&now["text"], &now["state"], &now["trust"]),
+            (&was["text"], &json!("live"), &was["trust"])
         );
     }
+}
+
+/// Kill switch, policy, class listing, ownership and cooldown still gate a merge.
+#[tokio::test]
+async fn the_older_controls_still_hold_a_merge() {
+    type Setup = fn(&Real);
+    let cases: [(&str, &str, Setup); 4] = [
+        ("auto_apply off", "auto_apply_disabled", |r| {
+            policy(r, |m| m["auto_apply"] = json!(false))
+        }),
+        ("class unlisted", "class_disabled", |r| {
+            policy(r, |m| m["tier0_op_classes"] = json!(["append_evidence"]))
+        }),
+        ("owner not hub", "owner_not_hub", |r| {
+            policy(r, |m| m["curation_owner"] = json!("operator"))
+        }),
+        ("principal unlisted", "reflect_principal_disabled", |r| {
+            policy(r, |m| m["reflect_principals"] = json!(["agent:dot"]))
+        }),
+    ];
+    for (name, code, setup) in cases {
+        let r = trusted().await;
+        let opened = open(&r).await;
+        setup(&r);
+        let attempt = assert_not_applied(&r, &opened, name).await;
+        assert!(
+            codes(&attempt).contains(&json!(code)),
+            "{name}: {attempt:?}"
+        );
+    }
+    let r = trusted().await;
+    let opened = open(&r).await;
+    let off =
+        r.h.call(
+            ADMIN_TOKEN,
+            json!({"action":"auto_apply_switch","enabled":false,"client_event_id":r.h.id()}),
+        )
+        .await;
+    assert_eq!(off.status, 200, "{off:?}");
+    let attempt = assert_not_applied(&r, &opened, "kill switch").await;
+    assert!(
+        codes(&attempt).contains(&json!("auto_apply_killed")),
+        "{attempt:?}"
+    );
+}
+
+/// Both cards of the pair stay in the 24 hour cooldown.
+#[tokio::test]
+async fn either_card_of_the_pair_in_the_cooldown_holds_the_merge() {
+    for id in [KEEP, GONE] {
+        let r = trusted().await;
+        let opened = open(&r).await;
+        r.db.execute("INSERT INTO memory_events(seq,event_id,client_event_id,kind,principal,scope,card_id,revision,content_hash,trust,payload,created_at) SELECT 900001,'recent-apply','recent-apply','proposal.apply',writer,scope,card_id,900001,content_hash,trust,'{}',?2 FROM memory_cards WHERE scope='fleet' AND card_id=?1", rusqlite::params![id, ids::isoformat(r.h.now())]).unwrap();
+        let report = preflight_report(&r, &opened).await;
+        assert_eq!(
+            gate(&report, "cooldown_history").1,
+            json!("cooldown_active"),
+            "{id}"
+        );
+        assert_not_applied(&r, &opened, id).await;
+    }
+}
+
+/// Only one clean exact pair gets the relaxations. Anything else keeps the
+/// blast cap and the attested evidence floors.
+#[tokio::test]
+async fn anything_but_one_exact_pair_keeps_the_blast_cap_and_evidence_floors() {
+    let held_gates = |report: &Json, count: u64| {
+        assert_eq!(
+            gate(report, "delta"),
+            (json!("held"), json!("blast_cap_exceeded"))
+        );
+        assert_ne!(
+            gate(report, "evidence_floor").0,
+            json!("satisfied"),
+            "{report:?}"
+        );
+        assert_ne!(
+            gate(report, "source_group_floor").0,
+            json!("satisfied"),
+            "{report:?}"
+        );
+        assert_eq!(report["changed_path_count"], count);
+        assert_eq!(report["structural_merge_proof"], false);
+    };
+    // Two pairs in one proposal.
+    let two = [
+        (KEEP, dup("", "aaaaaa")),
+        (GONE, dup("", "bbbbbb")),
+        ("dup-keeper-2", "Second claim. ^c-cccccc\n".to_string()),
+        ("dup-retired-2", "Second claim. ^c-dddddd\n".to_string()),
+    ];
+    let cards: Vec<_> = two.iter().map(|(id, text)| (*id, text.as_str())).collect();
+    let r = Real::new(&cards).await;
+    let ops = vec![
+        merge_op(&r, KEEP, GONE).await,
+        merge_op(&r, "dup-keeper-2", "dup-retired-2").await,
+    ];
+    let opened = submit_ops(&r, ops, 0).await;
+    held_gates(&preflight_report(&r, &opened).await, 4);
+    assert_not_applied(&r, &opened, "two pairs").await;
+    // One pair beside another op class.
+    let r = trusted().await;
+    let other = card(&r.h, "fleet", "other-card").await;
+    let pin = proposal_blocks::pins(other["text"].as_str().unwrap()).remove(0);
+    let evidence = json!({"type":"append_evidence","scope":"fleet","card_id":"other-card",
+        "base_revision":other["revision"],"block_id":pin["block_id"],
+        "expected_block_hash":pin["hash"],"evidence_ids":["ns/one/two"]});
+    let ops = vec![merge_op(&r, KEEP, GONE).await, evidence];
+    let opened = submit_ops(&r, ops, 0).await;
+    held_gates(&preflight_report(&r, &opened).await, 3);
+    assert_not_applied(&r, &opened, "mixed").await;
+    // The proposal says the claims match. The live bytes of the retired card do not.
+    let r = trusted().await;
+    let opened = open(&r).await;
+    let hash = card(&r.h, "fleet", GONE).await["content_hash"].clone();
+    r.db.execute(
+        "UPDATE memory_blobs SET bytes=CAST('Different claim. ^c-bbbbbb' || char(10) AS BLOB) WHERE content_hash=?1",
+        [hash.as_str().unwrap()],
+    )
+    .unwrap();
+    held_gates(&preflight_report(&r, &opened).await, 2);
+    assert_not_applied(&r, &opened, "live bytes differ").await;
+}
+
+/// `agent-unreviewed` merges stay out of automatic apply.
+#[tokio::test]
+async fn an_unreviewed_pair_still_fails_the_card_trust_gate() {
+    let r = pair().await;
+    let opened = open(&r).await;
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(
+        gate(&report, "card_trust"),
+        (json!("held"), json!("card_trust_denied"))
+    );
+    assert_eq!(
+        gate(&report, "delta"),
+        (json!("satisfied"), json!("delta_satisfied"))
+    );
+    assert_not_applied(&r, &opened, "agent-unreviewed").await;
+}
+
+/// The relaxations are for merges alone. Evidence needs attested proof and two
+/// changed cards still exceed the cap.
+#[tokio::test]
+async fn other_op_classes_are_as_strict_as_before() {
+    let cards = [
+        ("a", "---\ntitle: Alpha\n---\nClaim one. ^c-abcdef\n"),
+        ("b", "---\ntitle: Beta\n---\nClaim two. ^c-fedcba\n"),
+    ];
+    let r = Real::new(&cards).await;
+    let evidence = |c: &Json, id: &str| {
+        let pin = proposal_blocks::pins(c["text"].as_str().unwrap()).remove(0);
+        json!({"type":"append_evidence","scope":"fleet","card_id":id,
+            "base_revision":c["revision"],"block_id":pin["block_id"],
+            "expected_block_hash":pin["hash"],"evidence_ids":["ns/one/two"]})
+    };
+    let (a, b) = (
+        card(&r.h, "fleet", "a").await,
+        card(&r.h, "fleet", "b").await,
+    );
+    let opened = submit_ops(&r, vec![evidence(&a, "a")], 0).await;
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(gate(&report, "delta").0, json!("satisfied"));
+    assert_eq!(
+        gate(&report, "evidence_floor"),
+        (json!("held"), json!("proof_binding_incomplete"))
+    );
+    assert_eq!(
+        gate(&report, "evidence_authority"),
+        (json!("held"), json!("evidence_authority_unbound"))
+    );
+    assert_eq!(report["structural_merge_proof"], false);
+    let opened = submit_ops(&r, vec![evidence(&a, "a"), evidence(&b, "b")], 0).await;
+    let report = preflight_report(&r, &opened).await;
+    assert_eq!(
+        gate(&report, "delta"),
+        (json!("held"), json!("blast_cap_exceeded"))
+    );
+    assert_eq!(report["changed_path_count"], 2);
 }
 
 #[tokio::test]
@@ -466,22 +705,54 @@ async fn a_link_added_between_preflight_and_apply_is_caught_at_apply() {
     assert_eq!(held(&r, &r.body(&opened)), Some(INBOUND));
 }
 
+/// The alias the merge adds is not lineage. A link that existed before it is.
 #[tokio::test]
-async fn a_lineage_exposed_pair_stays_with_the_lineage_review_rule() {
+async fn only_lineage_that_existed_before_the_merge_routes_to_review() {
     let older = "---\nsupersedes: [older]\n---\n";
-    for (name, front) in [
-        ("keeper gains a predecessor", ""),
-        ("both declare lineage", older),
-    ] {
-        let r =
-            Real::untrusted(&[(KEEP, &dup(front, "aaaaaa")), (GONE, &dup(front, "bbbbbb"))]).await;
-        let body = r.body(&open(&r).await);
-        assert_eq!(held(&r, &body), None, "{name}");
-        // Both cards became trusted after tiering, so lineage recency applies.
-        r.db.execute("UPDATE memory_cards SET trust='reviewed'", [])
-            .unwrap();
-        assert_eq!(held(&r, &body), Some(LINEAGE), "{name}");
+    let aliased = "---\naliases: [\"fleet/earlier-duplicate\"]\n---\n";
+    let pairs = [
+        (
+            "both declare lineage",
+            dup(older, "aaaaaa"),
+            dup(older, "bbbbbb"),
+        ),
+        (
+            "keeper declares lineage",
+            dup(older, "aaaaaa"),
+            dup("", "bbbbbb"),
+        ),
+        (
+            "retired card already has an alias",
+            dup("", "aaaaaa"),
+            dup(aliased, "bbbbbb"),
+        ),
+    ];
+    for (name, keeper, retired) in pairs {
+        let r = Real::new(&[(KEEP, &keeper), (GONE, &retired)]).await;
+        let op = merge_op(&r, KEEP, GONE).await;
+        let opened = submit(&r.h, ADMIN_TOKEN, vec![op]).await;
+        assert_eq!(opened.body["tier"], 2, "{name}: {opened:?}");
     }
+    // Another live card that names the keeper as a predecessor.
+    let r = trusted().await;
+    link(&r, "---\nsupersedes: [dup-keeper]\n---\nBody.\n").await;
+    let op = merge_op(&r, KEEP, GONE).await;
+    let opened = submit(&r.h, ADMIN_TOKEN, vec![op]).await;
+    assert_eq!(opened.body["tier"], 2, "{opened:?}");
+    // The same link arriving after tiering is caught by the preflight backstop.
+    let r = trusted().await;
+    let body = r.body(&open(&r).await);
+    assert_eq!(held(&r, &body), None);
+    link(&r, "---\nsupersedes: [dup-keeper]\n---\nBody.\n").await;
+    assert_eq!(held(&r, &body), Some(LINEAGE));
+    // A forged after text that smuggles in a lineage link is not excused by the
+    // merge rule. The recomputed keeper text catches it.
+    let r = trusted().await;
+    let body = r.body(&open(&r).await);
+    let forged = edit(&body, KEEP, |t| {
+        t.replacen("aliases: [", "aliases: [\"fleet/older\",", 1)
+    });
+    assert_eq!(held(&r, &forged), Some(KEEPER));
 }
 
 /// A published index whose trusted lineage graph holds `linked` as an edge end.

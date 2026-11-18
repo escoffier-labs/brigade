@@ -214,12 +214,19 @@ pub(super) fn lineage_review<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlit
         if !super::ranking::trusted(&head.trust) {
             continue;
         }
-        let declares = [string(card, "before_text"), string(card, "after_text")]
-            .iter()
-            .any(|text| {
-                let links = super::ranking::Links::parse(text, scope);
-                links.successor.is_some() || !links.predecessors.is_empty()
-            });
+        // The alias a merge adds names the retired card, so its after text
+        // would flag every trusted keeper. Only links that existed before the
+        // merge count. A forged after text is caught by `merge_gate::hold`.
+        let (before, after) = (string(card, "before_text"), string(card, "after_text"));
+        let texts: &[&str] = if super::merge_gate::in_merge(body, card) {
+            &[before]
+        } else {
+            &[before, after]
+        };
+        let declares = texts.iter().any(|text| {
+            let links = super::ranking::Links::parse(text, scope);
+            links.successor.is_some() || !links.predecessors.is_empty()
+        });
         let named = named_by(tx, scope, id, false, |text| {
             let links = super::ranking::Links::parse(text, scope);
             links.successor.as_deref() == Some(id) || links.predecessors.iter().any(|p| p == id)

@@ -132,7 +132,7 @@ pub(super) struct Real {
     hub: Connection,
 }
 impl Real {
-    async fn new(cards: &[(&str, &str)]) -> Self {
+    pub(super) async fn new(cards: &[(&str, &str)]) -> Self {
         Self::build(cards, false).await
     }
     /// Cards put by the admin stay `agent-unreviewed`, the class a merge can use.
