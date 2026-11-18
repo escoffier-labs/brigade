@@ -84,6 +84,7 @@ Thumbs.db
 !/scripts/check_size_ratchet_baseline.py
 !/scripts/benchmark_issue266_work_status_memory.py
 !/scripts/managed_snapshot.py
+!/scripts/shipped_file_history.py
 !/scripts/measure_run_journal.py
 !/scripts/prepare_dev_wheel.py
 !/scripts/record-quickstart-demo.sh

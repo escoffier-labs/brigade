@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from .mutation import skill_command
+from .mutation import skill_command, skill_mutation
 
 import contextlib
 import difflib
@@ -345,7 +345,9 @@ def _find_proposal_by_dedupe_key(state_anchor: Any, dedupe_key: str) -> dict[str
             meta = _load_anchored_proposal(state_anchor, name)
         except _registry_mod.SkillsStatePathError:
             continue
-        if meta is not None and meta.get("dedupe_key") == dedupe_key:
+        # A superseded proposal (the installed file was refreshed past it) is history, not a
+        # reason to mute a new one if the same bundled text is proposed again later.
+        if meta is not None and meta.get("dedupe_key") == dedupe_key and meta.get("status") != "superseded":
             return meta
     return None
 
@@ -560,14 +562,53 @@ def inbox_reject(*, target: Path, proposal_id: str, reason: str, json_output: bo
     return 0
 
 
+def supersede_pending(target: Path, key_prefix: str, reason: str) -> list[str]:
+    """Mark pending proposals whose dedupe key starts with ``key_prefix`` as superseded; return their ids.
+
+    Used when the file a proposal was filed for was replaced with the bundled
+    text, so the proposal no longer describes a difference. Each proposal is
+    re-read through the held state-root anchor and updated only while it is
+    still pending; any other status, or a read or write problem, leaves it as it is.
+    """
+    target = target.expanduser().resolve()
+
+    def matches(meta: dict[str, Any]) -> bool:
+        return meta.get("status") == "pending" and str(meta.get("dedupe_key") or "").startswith(key_prefix)
+
+    done: list[str] = []
+    try:
+        # Same discipline as inbox_accept/inbox_reject: the skills mutation lock and one
+        # state-root anchor span the whole read-check-write.
+        with skill_mutation(target), _registry_mod._held_state_root(target) as state_anchor:
+            names = _registry_mod._plain_subdirs_under_anchor(state_anchor, "skills", "inbox") or []
+            for name in names:
+                try:
+                    current = _load_anchored_proposal(state_anchor, name)
+                    if current is None or not matches(current):
+                        continue
+                    current.update({"status": "superseded", "superseded_at": _now(), "reason": reason})
+                    _registry_mod._write_state_file(
+                        state_anchor, "skills", "inbox", name, "proposal.json", data=_registry_mod._json_bytes(current)
+                    )
+                    done.append(str(current.get("proposal_id") or name))
+                except (OSError, _registry_mod.SkillsStatePathError):
+                    continue
+    except (OSError, _registry_mod.SkillsStatePathError):
+        return done
+    return done
+
+
 def stale_skill_hint(target: Path, rel: str) -> str:
-    """Doctor suffix pointing at the inbox when init filed a proposal for *rel*.
+    """Doctor suffix pointing at the inbox when init filed a pending proposal for *rel*.
 
     Lives here, not in doctor.py, to keep doctor under its size cap.
     """
     prefix = f"init:brigade-work:{rel}:"
     try:
-        filed = any(str(meta.get("dedupe_key") or "").startswith(prefix) for _name, meta in _anchored_proposals(target))
+        filed = any(
+            meta.get("status") == "pending" and str(meta.get("dedupe_key") or "").startswith(prefix)
+            for _name, meta in _anchored_proposals(target)
+        )
     except OSError:
         return ""
     if not filed:

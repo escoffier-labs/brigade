@@ -381,7 +381,8 @@ def test_the_default_writer_never_refreshes_but_refresh_does(tmp_path, capsys):
 
     assert memory_cmd._write_memory_care_runbooks(tmp_path) == 0
     assert customized.read_bytes() == custom_bytes
-    assert capsys.readouterr().out == ""
+    # The customized copy is reported as drifted (once); nothing else is printed.
+    assert capsys.readouterr().out == f"kept (drifted): {customized}\n"
 
     assert memory_cmd._write_memory_care_runbooks(tmp_path, refresh=True) == 0
     assert customized.read_bytes() != custom_bytes

@@ -371,6 +371,8 @@ def test_force_never_overwrites_skill_md_but_still_overwrites_other_files(tmp_pa
 
 
 def test_stale_but_unedited_copy_is_labelled_pristine_stale(tmp_path, capsys):
+    # An unedited copy whose text is not a recorded release text (see tests/test_refresh_pristine.py
+    # for the refresh of a recorded one) is kept, labelled and proposed, as before.
     assert install_selection(tmp_path, _claude_sel()) == 0
     # Simulate an older bundled template: the installed copy is what init once wrote.
     old = b"# older bundled brigade-work\n"
@@ -472,6 +474,7 @@ def test_crlf_copy_of_the_bundled_skill_reads_as_identical(tmp_path, capsys):
 
 
 def test_a_crlf_pristine_stale_copy_is_labelled_by_its_normalized_hash(tmp_path, capsys):
+    # Unrecorded text again: labelled, not refreshed.
     assert install_selection(tmp_path, _claude_sel()) == 0
     old_lf = b"# older bundled brigade-work\n"
     (tmp_path / BRIGADE_WORK).write_bytes(old_lf.replace(b"\n", b"\r\n"))

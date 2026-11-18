@@ -17,4 +17,5 @@ PY=${PY:-.venv/bin}
 "$PY/python" scripts/version_sync.py --check
 "$PY/python" scripts/managed_snapshot.py --check
 "$PY/python" scripts/template_profile_snapshot.py --check
+"$PY/python" scripts/shipped_file_history.py --check
 "$PY/pytest" -q "$@"
