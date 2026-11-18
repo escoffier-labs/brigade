@@ -505,3 +505,14 @@ def test_the_repository_manifest_passes_its_own_check(monkeypatch):
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     script = _script()
     assert script.check(ROOT / script.MANIFEST_REL) == []
+
+
+def test_the_weekly_ratchet_runbook_passes_proposals_and_keeps_its_previous_text_recorded():
+    key = "runbook:.brigade/memory-care/runbooks/weekly-outcome-ratchet.json"
+    path = ROOT / "src/brigade/templates/memory-care/runbooks/weekly-outcome-ratchet.json"
+    steps = {step["id"]: step["run"] for step in json.loads(path.read_text())["steps"]}
+    assert steps["reconcile"] == "brigade outcome reconcile --target . --report --proposals"
+    assert shipped_history.runbook_bytes_digest(path.read_bytes()) in shipped_history.digests(key)
+    # The text before --proposals stays recorded, so an untouched installed copy refreshes instead of being kept.
+    previous = path.read_text().replace(" --proposals", "").encode()
+    assert shipped_history.runbook_bytes_digest(previous) in shipped_history.digests(key)

@@ -2114,6 +2114,7 @@ def reconcile(
     config: core.ReconcileConfig | None = None,
     json_output: bool = False,
     report: bool = False,
+    proposals: bool = False,
 ) -> int:
     """Run the autonomous ratchet over every scored artifact.
 
@@ -2124,6 +2125,9 @@ def reconcile(
     change is reported as an operator command instead. No human approval is
     consulted. ``report`` additionally
     writes the advisory ratchet report; it never changes a decision or status.
+    ``proposals`` files one skills inbox review request per bundled-skill
+    regression (see ``outcome_skill_proposals``), in a dry run too, and never
+    changes the exit code.
 
     Skills promote only through the receipt scorecard dual gate (#503); legacy
     ``records.jsonl`` signals never advance skill promotion. Cards still use the
@@ -2286,6 +2290,13 @@ def reconcile(
         "decisions": decisions_payload,
         "applied": applied,
     }
+    proposal_rows = proposal_counts = None
+    if proposals:
+        from . import outcome_skill_proposals
+
+        proposal_rows = outcome_skill_proposals.file_regression_proposals(target, audited)
+        proposal_counts = outcome_skill_proposals.count_proposals(proposal_rows)
+        payload["outcome_proposals"] = outcome_skill_proposals.payload_rows(proposal_rows)
     if report:
         from . import outcome_ratchet_report
 
@@ -2294,6 +2305,7 @@ def reconcile(
             audited,
             apply=apply,
             generated_at=now,
+            proposal_counts=proposal_counts,
             pending=outcome_skill_exec.pending_by_artifact(
                 target,
                 status_map,
@@ -2308,6 +2320,8 @@ def reconcile(
         return 0
     mode = "apply" if apply else "dry-run"
     print(f"outcome reconcile: {target} ({mode})")
+    if proposal_rows is not None:
+        print(*outcome_skill_proposals.text_lines(proposal_rows, apply=apply), sep="\n")
     output_items = [*results, *reported]
     if not output_items:
         print("decisions: none")

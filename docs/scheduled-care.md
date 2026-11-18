@@ -464,6 +464,8 @@ brigade outcome rank --target .
 brigade outcome reconcile --target . --report
 ```
 
+The shipped weekly runbook also passes `--proposals`, which files one skills inbox review request per verified regression on a Brigade-bundled skill (see [Outcome scoring](outcome-scoring.md#regression-proposals)). It is a review request only and never changes a status or a skill file.
+
 `--report` writes `.brigade/memory-care/outcome/ratchet-report.json`, a versioned summary of that run: decision counts by action, regression holds and rollbacks with their reason codes and helped/hurt counts, the receipt ineligibility rate, and the leading ineligibility reason. It stays a dry run; the flag adds an advisory file, never a status change. `brigade outcome ratchet --target .` prints the last report without ranking or reconciling, `brigade work brief` adds one `outcome_ratchet:` line, and the Center dashboard outcomes view shows the same summary below the ranking and marks a report older than seven days as stale. See [Outcome scoring](outcome-scoring.md#weekly-ratchet-report).
 
 Deliberate promotion or demotion (status and routing only):
