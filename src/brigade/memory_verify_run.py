@@ -971,6 +971,11 @@ class Sender:
             tally.stop = "proposal_quota"
             tally.skip("proposal_quota")
             return UNRESOLVED
+        if sent.outcome == ledger.RESERVED:
+            # Verify proposals never anchor, so a repair-reserve refusal is quota back pressure too.
+            tally.stop = "proposal_quota"
+            tally.skip("proposal_quota")
+            return UNRESOLVED
         if sent.outcome in (ledger.DENIED, ledger.UNAVAILABLE):
             raise VerifyRunError(sent.code or "hub_unavailable", "hub refused the verify request")
         if replay and sent.outcome == ledger.FAILED and sent.code == BINDING_INVALID and current is not None:
