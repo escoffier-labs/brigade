@@ -15,6 +15,7 @@ import stat
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
@@ -429,7 +430,22 @@ class SessionStateUnreadable(OSError):
     """A session state file is not a readable regular JSON object. Never read this as absence."""
 
 
-def read_states_strict(target: Path, *, modified_since: datetime | None = None, max_bytes: int) -> list[dict[str, Any]]:
+def _read_stale_state(anchor: Any, name: str, max_bytes: int) -> dict[str, Any] | None:
+    try:
+        raw = anchor.read_bytes(name, max_bytes + 1)
+        value = json.loads(raw) if len(raw) <= max_bytes else None
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def read_states_strict(
+    target: Path,
+    *,
+    modified_since: datetime | None = None,
+    max_bytes: int,
+    keep_stale: Callable[[dict[str, Any]], bool] | None = None,
+) -> list[dict[str, Any]]:
     """Every session state modified since ``modified_since``, or an ``OSError`` naming what could not be read.
 
     ``iter_states`` skips what it cannot stat, read or parse, which suits a listing. A caller that
@@ -437,6 +453,9 @@ def read_states_strict(target: Path, *, modified_since: datetime | None = None, 
     afford that, so here a listing error, a stat failure, a non-regular ``.json`` entry, a file over
     ``max_bytes``, an unreadable file and a malformed one all raise. A file last modified before
     ``modified_since`` is not read: a session's writes always refresh its state file's mtime.
+    ``keep_stale`` names an exception: a file older than ``modified_since`` is still read, and kept
+    when the predicate accepts it. A stale file that cannot be read, parsed or accepted is skipped,
+    as it is without the predicate, so only the fresh files are held to the strict rule.
     """
     states: list[dict[str, Any]] = []
     with session_directory(target) as anchor:
@@ -448,6 +467,10 @@ def read_states_strict(target: Path, *, modified_since: datetime | None = None, 
             if not stat.S_ISREG(info.st_mode):
                 raise SessionStateUnreadable(f"session state is not a regular file: {name}")
             if threshold is not None and info.st_mtime < threshold:
+                if keep_stale is not None:
+                    stale = _read_stale_state(anchor, name, max_bytes)
+                    if stale is not None and keep_stale(stale):
+                        states.append(stale)
                 continue
             raw = anchor.read_bytes(name, max_bytes + 1)
             if len(raw) > max_bytes:

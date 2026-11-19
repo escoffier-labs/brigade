@@ -329,15 +329,28 @@ def _maybe_same_file(recorded: object, subject_path: str) -> bool:
     return left == right or left.endswith(f"/{right}") or right.endswith(f"/{left}")
 
 
+def _bash_in_flight(state: Mapping[str, Any]) -> bool:
+    """Whether the session announced a Bash command at PreToolUse that no PostToolUse has closed.
+
+    A Bash write is recorded as a pathless event only when the command completes, so until then the
+    marker is the one sign the command may be changing the subject. It counts however long ago the
+    command started: a long build still running is exactly the case.
+    """
+    return state.get("pending_bash_started_at") is not None or state.get("pending_bash_fingerprint") is not None
+
+
 def _foreign_wrote(state: Mapping[str, Any], subject_path: str, since: datetime) -> bool:
     """Whether another session may have written the subject, or could have, at or after ``since``.
 
     True when its event list names the subject or names no path in the window, when the list
-    lost events inside the window, when it reports a write that has no event, or when one of its
-    file-tool writes to the subject is still in flight or was announced since ``since``.
+    lost events inside the window, when it reports a write that has no event, when one of its
+    file-tool writes to the subject is still in flight or was announced since ``since``, or when
+    a Bash command of its own is still running.
     """
     from . import dependencies
 
+    if _bash_in_flight(state):
+        return True
     events = _valid_events(state.get(EVENTS_KEY))
     evicted = localio.parse_iso_datetime(state.get(EVICTED_KEY))
     if evicted is not None and evicted >= since:
@@ -371,7 +384,8 @@ def ownership_reason(target: Path, session_id: str, subject_path: str, start_id:
 
     ``concurrent_session_ownership`` when another session in the target has a write event, since
     the bound start, that names the subject or names no path, when its events cannot cover that
-    window, or when any session state in the target cannot be read. ``no_owned_work`` when this
+    window, when it has a Bash command still running (whenever it started), or when any session
+    state in the target cannot be read. ``no_owned_work`` when this
     session has no Edit, Write or NotebookEdit event on the subject itself. A change made only
     through Bash has none, so it fails closed. The events come from live hook state, so the check
     reruns at projection time and a later foreign write still counts.
@@ -385,7 +399,11 @@ def ownership_reason(target: Path, session_id: str, subject_path: str, start_id:
     resolved = target.expanduser().resolve()
     try:
         others = anchored_io.read_states_strict(
-            resolved, modified_since=started - _MTIME_SLACK, max_bytes=outcome_attribution.MAX_STATE_BYTES
+            resolved,
+            modified_since=started - _MTIME_SLACK,
+            max_bytes=outcome_attribution.MAX_STATE_BYTES,
+            # A long Bash command leaves its state untouched while it runs, so age cannot clear it.
+            keep_stale=_bash_in_flight,
         )
     except (OSError, ValueError):
         # Another session's state cannot be listed, read or parsed, so its writes cannot be ruled out.

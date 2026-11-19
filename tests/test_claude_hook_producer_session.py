@@ -703,6 +703,80 @@ def test_a_foreign_write_that_has_no_event_fails_closed(hook_target: Path, monke
     assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
 
 
+def _bash_event(session_id: str, target: Path, command: str) -> dict:
+    return {"session_id": session_id, "cwd": str(target), "tool_name": "Bash", "tool_input": {"command": command}}
+
+
+def test_a_foreign_bash_still_running_vetoes_before_its_post_tool_use(hook_target: Path, monkeypatch) -> None:
+    """The other session's Bash changed the subject but has not completed, so no event records it yet."""
+    subject = hook_target / "skills" / "brigade-work" / "SKILL.md"
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    bash = _bash_event(OTHER_SESSION_ID, hook_target, "printf 'by shell\\n' >> skills/brigade-work/SKILL.md")
+    _pre(bash)
+    with subject.open("a") as handle:
+        handle.write("by shell\n")
+    state = json.loads(_state_path(hook_target, OTHER_SESSION_ID).read_text())
+    assert state["pending_bash_started_at"]
+    assert not state.get("write_events")
+    assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
+
+
+def test_a_foreign_bash_that_started_before_the_scan_window_still_vetoes(hook_target: Path, monkeypatch) -> None:
+    """A long command leaves its state file untouched, so an old mtime must not hide the marker."""
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    _pre(_bash_event(OTHER_SESSION_ID, hook_target, "sleep 600"))
+    other_path = _state_path(hook_target, OTHER_SESSION_ID)
+    old = other_path.stat().st_mtime - 3600
+    os.utime(other_path, (old, old))
+    assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
+
+
+def test_a_stale_foreign_state_without_a_pending_bash_stays_unread(hook_target: Path, monkeypatch) -> None:
+    """Age still excludes a state that has nothing in flight, so a corrupt old one does not veto."""
+    _session_start(hook_target, SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    junk = runtime._sessions_root(hook_target.resolve()) / "stale-junk.json"
+    junk.write_text("{not json")
+    old = junk.stat().st_mtime - 3600
+    os.utime(junk, (old, old))
+    reason = producer_session.ownership_reason(
+        hook_target, producer_session.producer_id(_fingerprint()), "skills/brigade-work/SKILL.md"
+    )
+    assert reason is None
+
+
+def test_this_sessions_own_pending_bash_does_not_veto_it(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    _pre(_bash_event(SESSION_ID, hook_target, "sleep 600"))
+    assert json.loads(_state_path(hook_target, SESSION_ID).read_text())["pending_bash_started_at"]
+    reason = producer_session.ownership_reason(
+        hook_target, producer_session.producer_id(_fingerprint()), "skills/brigade-work/SKILL.md"
+    )
+    assert reason is None
+
+
+def test_a_finished_foreign_bash_that_left_the_subject_alone_does_not_veto(hook_target: Path, monkeypatch) -> None:
+    """PostToolUse clears the marker; a Bash that wrote nothing detectable leaves no event, so it behaves as before."""
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    bash = _bash_event(OTHER_SESSION_ID, hook_target, "true")
+    _pre(bash)
+    _post(bash)
+    state = json.loads(_state_path(hook_target, OTHER_SESSION_ID).read_text())
+    assert "pending_bash_started_at" not in state
+    assert "pending_bash_fingerprint" not in state
+    reason = producer_session.ownership_reason(
+        hook_target, producer_session.producer_id(_fingerprint()), "skills/brigade-work/SKILL.md"
+    )
+    assert reason is None
+
+
 def test_write_events_survive_a_task_epoch_reset(hook_target: Path) -> None:
     _session_start(hook_target, SESSION_ID, source="startup")
     _foreign_file_write(hook_target, SESSION_ID)
