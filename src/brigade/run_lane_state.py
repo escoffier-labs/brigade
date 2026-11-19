@@ -16,7 +16,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import proc, run_journal, run_reap, runs_cmd, runs_status, runguard, worker_failure
+from . import (
+    nt_process,
+    proc,
+    run_journal,
+    run_reap,
+    runs_cmd,
+    runs_status,
+    runguard,
+    worker_failure,
+)
 from .work_cmd.claiming import claim_record
 
 # An externally controlled run waits on its native parent between verbs.
@@ -128,8 +137,13 @@ def _read_json(path: Path) -> tuple[dict[str, Any], str]:
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_size > FILE_BYTE_CAP:
         raise ValueError("not a bounded regular JSON file")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    fd = os.open(path, flags)
+    if os.name == "nt":
+        # A holder releases the lock by unlinking this name, and Windows refuses
+        # that while an ordinary reader holds it open (issue #2747).
+        fd = nt_process.open_shared_delete(path)
+    else:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):

@@ -1,0 +1,351 @@
+"""Release a Windows run lock while a waiter holds its metadata open (issue #2747).
+
+NTFS refuses to rename a directory while any handle to a file inside it is open,
+even a handle opened with ``FILE_SHARE_DELETE``, and waiters poll ``pid`` and
+``owner.json`` inside the lock directory. A contended release therefore removes
+those names with POSIX-semantics delete before the directory moves.
+
+These tests drive the Windows branch from any host through a fake kernel32. The
+last one needs a real NTFS volume and is skipped everywhere else.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from brigade import nt_process, runguard, runguard_release, run_lane_state
+
+FILE_DISPOSITION_INFO_EX = 21
+ERROR_INVALID_PARAMETER = 87
+ERROR_SHARING_VIOLATION = 32
+_SHARE_DELETE = nt_process.FILE_SHARE_READ | nt_process.FILE_SHARE_WRITE | nt_process.FILE_SHARE_DELETE
+
+
+class _Entry:
+    """Win32 callable that also accepts the ``argtypes``/``restype`` assignments."""
+
+    def __init__(self, func: Any) -> None:
+        self._func = func
+        self.argtypes: Any = None
+        self.restype: Any = None
+
+    def __call__(self, *args: Any) -> Any:
+        return self._func(*args)
+
+
+class FakeKernel32:
+    """Kernel32 stand-in that unlinks the name it is asked to dispose of."""
+
+    def __init__(self, *, posix_delete: bool = True) -> None:
+        self.posix_delete = posix_delete
+        self.next_handle = 0x100
+        self.paths: dict[int, Path] = {}
+        self.create_calls: list[tuple[Any, ...]] = []
+        self.disposition_calls: list[tuple[int, int, int, int]] = []
+        self.close_calls: list[int] = []
+        self.CreateFileW = _Entry(self._create_file)  # noqa: N815 - Win32 name
+        self.SetFileInformationByHandle = _Entry(self._set_information)  # noqa: N815 - Win32 name
+        self.CloseHandle = _Entry(self._close_handle)  # noqa: N815 - Win32 name
+
+    def _create_file(self, name: str, access: int, share: int, *rest: Any) -> int:
+        self.create_calls.append((name, access, share, *rest))
+        handle = self.next_handle
+        self.next_handle += 1
+        self.paths[handle] = Path(name[len("\\\\?\\") :] if name.startswith("\\\\?\\") else name)
+        return handle
+
+    def _set_information(self, handle: int, information_class: int, info: Any, size: int) -> int:
+        disposition = info._obj
+        self.disposition_calls.append((handle, information_class, disposition.Flags, size))
+        if not self.posix_delete:
+            return 0
+        os.unlink(self.paths[handle])
+        return 1
+
+    def _close_handle(self, handle: int) -> int:
+        self.close_calls.append(handle)
+        return 1
+
+
+class _FakeClock:
+    """Retry clock that advances only when the release sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _fake_kernel32(monkeypatch: pytest.MonkeyPatch, fake: FakeKernel32) -> None:
+    monkeypatch.setattr(nt_process, "load_kernel32", lambda: fake)
+
+
+def _windows_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runguard_release, "_WINDOWS", True)
+
+
+class _NtOs:
+    """``os`` stand-in that reports nt without switching pathlib to Windows paths."""
+
+    name = "nt"
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(os, item)
+
+
+def _spy_rename(monkeypatch: pytest.MonkeyPatch, watched: Path) -> list[list[str]]:
+    """Names still inside ``watched`` at every rename of it."""
+    seen: list[list[str]] = []
+    original = Path.rename
+
+    def spy(self: Path, target: Path) -> Path:
+        if self == watched:
+            seen.append(sorted(entry.name for entry in self.iterdir()))
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "rename", spy)
+    return seen
+
+
+def _deny_rename(monkeypatch: pytest.MonkeyPatch) -> None:
+    def denied(self: Path, target: Path) -> Path:
+        error = PermissionError(13, "sharing violation")
+        error.winerror = ERROR_SHARING_VIOLATION
+        raise error
+
+    monkeypatch.setattr(Path, "rename", denied)
+
+
+def _release_with_fake_clock(
+    monkeypatch: pytest.MonkeyPatch, lock_path: Path, ownership: Any, clock: _FakeClock
+) -> None:
+    """Run the release through ``runguard._release_lock`` with a clock the test drives."""
+    monkeypatch.setattr(runguard.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(runguard.time, "sleep", clock.sleep)
+    runguard._release_lock(lock_path, ownership)
+
+
+def _dead_owner_lock(lock_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Publish a lock, then make its recorded owner pid read as dead."""
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    owner = json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))
+    owner["pid"] = 99999999
+    (lock_path / "owner.json").write_text(json.dumps(owner), encoding="utf-8")
+    (lock_path / "pid").write_text("99999999\n", encoding="utf-8")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != 99999999)
+    return ownership
+
+
+def test_release_deletes_the_metadata_names_before_it_renames_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The names a waiter holds open are gone, so the directory rename cannot lose to a reader."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    fake = FakeKernel32()
+    _fake_kernel32(monkeypatch, fake)
+    _windows_release(monkeypatch)
+    seen = _spy_rename(monkeypatch, lock_path)
+
+    runguard._release_lock(lock_path, ownership)
+
+    assert seen == [[]], "the release must unlink pid and owner.json before renaming the directory"
+    assert [call[1] for call in fake.create_calls] == [nt_process.DELETE, nt_process.DELETE]
+    assert [call[2] for call in fake.create_calls] == [_SHARE_DELETE, _SHARE_DELETE], (
+        "a reader without FILE_SHARE_DELETE would keep the name occupied"
+    )
+    assert [call[4] for call in fake.create_calls] == [nt_process.OPEN_EXISTING, nt_process.OPEN_EXISTING]
+    assert [call[5] for call in fake.create_calls] == [
+        nt_process.FILE_FLAG_OPEN_REPARSE_POINT,
+        nt_process.FILE_FLAG_OPEN_REPARSE_POINT,
+    ]
+    assert list(fake.paths.values()) == [lock_path / "pid", lock_path / "owner.json"]
+    expected_flags = nt_process.FILE_DISPOSITION_FLAG_DELETE | nt_process.FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+    assert [call[1:] for call in fake.disposition_calls] == [
+        (FILE_DISPOSITION_INFO_EX, expected_flags, ctypes.sizeof(nt_process._FileDispositionInfoEx))
+    ] * 2
+    assert fake.close_calls == list(fake.paths), "every opened handle is closed exactly once"
+    assert not lock_path.exists()
+
+
+def test_release_leaves_a_lock_it_no_longer_owns_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock_path = tmp_path / "run.lock"
+    runguard._publish_lock(lock_path, run_dir=None)
+    fake = FakeKernel32()
+    _fake_kernel32(monkeypatch, fake)
+    _windows_release(monkeypatch)
+
+    runguard._release_lock(lock_path, runguard._LockOwnership("someone-else", 0, 0))
+
+    assert fake.create_calls == []
+    assert sorted(entry.name for entry in lock_path.iterdir()) == ["owner.json", "pid"]
+
+
+def test_release_falls_back_to_the_rename_when_posix_delete_is_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Older Windows and non-NTFS volumes keep the pre-existing rename-only release."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    fake = FakeKernel32(posix_delete=False)
+    _fake_kernel32(monkeypatch, fake)
+    _windows_release(monkeypatch)
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_INVALID_PARAMETER)
+    seen = _spy_rename(monkeypatch, lock_path)
+
+    runguard._release_lock(lock_path, ownership)
+
+    assert seen == [["owner.json", "pid"]], "the fallback must not have removed any metadata"
+    assert len(fake.create_calls) == 1, "one unsupported answer is enough to stop deleting"
+    assert fake.close_calls == [0x100]
+    assert not lock_path.exists()
+
+
+def test_delete_closes_the_handle_and_reports_a_sharing_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "owner.json"
+    target.write_text("{}", encoding="utf-8")
+    fake = FakeKernel32(posix_delete=False)
+    _fake_kernel32(monkeypatch, fake)
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_SHARING_VIOLATION)
+
+    with pytest.raises(PermissionError) as raised:
+        nt_process.delete_file_sharing_readers(target)
+
+    assert raised.value.winerror == ERROR_SHARING_VIOLATION
+    assert fake.close_calls == [0x100]
+    assert target.exists()
+
+
+def test_release_restores_the_metadata_it_removed_when_it_gives_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lock that is still published must still describe its live owner."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    published = {name: (lock_path / name).read_bytes() for name in ("pid", "owner.json")}
+    _fake_kernel32(monkeypatch, FakeKernel32())
+    _windows_release(monkeypatch)
+    _deny_rename(monkeypatch)
+    clock = _FakeClock()
+
+    with pytest.raises(PermissionError):
+        _release_with_fake_clock(monkeypatch, lock_path, ownership, clock)
+
+    assert {name: (lock_path / name).read_bytes() for name in ("pid", "owner.json")} == published
+    assert clock.now <= 1.0, "the release budget must not grow when POSIX delete is available"
+
+
+def test_release_backoff_starts_near_a_millisecond_and_grows_to_the_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release retry that sleeps 25 ms at first spends the budget on a handful of attempts."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    _fake_kernel32(monkeypatch, FakeKernel32())
+    _windows_release(monkeypatch)
+    _deny_rename(monkeypatch)
+    clock = _FakeClock()
+
+    with pytest.raises(PermissionError):
+        _release_with_fake_clock(monkeypatch, lock_path, ownership, clock)
+
+    assert clock.sleeps[0] == pytest.approx(0.001)
+    assert clock.sleeps[0] < 0.025, "the first retry must not wait a fixed 25 ms"
+    assert clock.sleeps[:-1] == sorted(clock.sleeps[:-1]), "the backoff must grow"
+    assert len(clock.sleeps) > 3
+    assert clock.now <= 1.0
+
+
+def test_claim_stale_lock_reads_the_owner_metadata_once_per_stale_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The judge and the re-judge each need one read, not one per question they ask."""
+    lock_path = tmp_path / "tasks.json.lock"
+    _dead_owner_lock(lock_path, monkeypatch)
+    reads: list[Path] = []
+    original = runguard._read_lock_owner
+
+    def counting(path: Path) -> dict[str, object] | None:
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(runguard, "_read_lock_owner", counting)
+
+    claimed = runguard._claim_stale_lock(lock_path)
+
+    assert claimed is not None
+    assert len(reads) == 4, "one owner.json read per snapshot, plus one for the claimed lock's owner"
+
+
+def test_posix_release_never_deletes_metadata_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """POSIX renames a directory with readers inside it, so its release must not change."""
+    if os.name == "nt":
+        pytest.skip("POSIX release path")
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    monkeypatch.setattr(
+        nt_process,
+        "delete_file_sharing_readers",
+        lambda path: pytest.fail("a POSIX release must rename the directory as it always did"),
+    )
+    seen = _spy_rename(monkeypatch, lock_path)
+
+    runguard._release_lock(lock_path, ownership)
+
+    assert seen == [["owner.json", "pid"]]
+    assert not lock_path.exists()
+
+
+def test_run_lane_state_reads_run_lock_owner_through_the_shared_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "owner.json"
+    target.write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+    opened: list[Path] = []
+    original = nt_process.open_shared_delete
+
+    def spy(path: Path | str) -> int:
+        opened.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(run_lane_state.nt_process, "open_shared_delete", spy)
+    monkeypatch.setattr(run_lane_state, "os", _NtOs())
+
+    payload, _digest = run_lane_state._read_json(target)
+
+    assert payload == {"pid": 4242}
+    assert opened == [target], "a plain os.open here would block the holder's release on Windows"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs NTFS POSIX-semantics delete and a real share-delete reader")
+def test_release_succeeds_while_a_waiter_holds_the_metadata_open(tmp_path: Path) -> None:
+    """The Windows failure from issue #2747, reproduced without a second process."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    readers = [nt_process.open_shared_delete(lock_path / name) for name in ("pid", "owner.json")]
+    try:
+        assert [len(os.read(reader, 1)) for reader in readers] == [1, 1]
+        runguard._release_lock(lock_path, ownership)
+    finally:
+        for reader in readers:
+            os.close(reader)
+
+    assert not lock_path.exists(), "a release under an open reader must not strand the lock"
+    held = runguard._acquire_lock(lock_path)
+    assert lock_path.is_dir()
+    runguard._release_lock(lock_path, held)
+    assert not lock_path.exists()
