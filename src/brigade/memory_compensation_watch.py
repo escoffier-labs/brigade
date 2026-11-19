@@ -34,8 +34,13 @@ def run(
             after = response.get("next_after")
             if after is None:
                 break
-            if not isinstance(after, str) or hubc.event_id_ms(after) is None or after in seen:
+            if not isinstance(after, str) or hubc.event_id_ms(after) is None:
                 raise ValueError("invalid compensation watch cursor")
+            # A cursor this poll already used means the hub did not advance the
+            # page. That is a quiet scope, not a failure: the hub owns progress,
+            # so the next scheduled run resumes from its committed continuation.
+            if after in seen:
+                break
             seen.add(after)
             fields["after"] = after
         # Exhausting the budget is a successful poll. The hub commits each

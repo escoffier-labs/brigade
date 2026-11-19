@@ -831,6 +831,61 @@ async fn compensation_stale_watch_is_final_after_one_attempt() {
 }
 
 #[tokio::test]
+async fn compensation_stale_watch_skips_the_manifest_rescan_until_a_distinct_trip() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(Arc<AtomicUsize>);
+    impl Scanner for Counting {
+        fn scan(&self, _: &str) -> Scan {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Scan::Clean {
+                ruleset: "test-v7".into(),
+            }
+        }
+        fn describe(&self) -> (bool, Option<String>) {
+            (true, Some("test-v7".into()))
+        }
+    }
+    let (mut h, id, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "contradiction-one", "active", false, "").await;
+    verifier_signal(&h, NODE_TOKEN, "contradiction-two", "active", false, "").await;
+    let c = card(&h, FIXTURE_SCOPE, "a").await;
+    h.put(
+        ADMIN_TOKEN,
+        FIXTURE_SCOPE,
+        "a",
+        c["revision"].as_i64(),
+        "Human correction. ^c-abcdef",
+    )
+    .await;
+    let scans = Arc::new(AtomicUsize::new(0));
+    h.store.take();
+    h.open(Arc::new(Counting(scans.clone())), None);
+    let first = watch(&h).await;
+    assert_eq!(first.body["results"][0]["result"], "failed");
+    assert!(
+        scans.load(Ordering::SeqCst) > 0,
+        "the first stale evaluation scans its manifests"
+    );
+    scans.store(0, Ordering::SeqCst);
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    assert_eq!(
+        scans.load(Ordering::SeqCst),
+        0,
+        "a known stale watch must not re-scan unchanged manifests"
+    );
+    let one = verifier_signal(&h, AGENT_TOKEN, "negative-one", "active", true, "").await;
+    let two = verifier_signal(&h, NODE_TOKEN, "negative-two", "active", true, "").await;
+    scans.store(0, Ordering::SeqCst);
+    let later = watch_negative(&h, vec![one, two]).await;
+    assert_eq!(later.body["results"][0]["rollback_of"], id, "{later:?}");
+    assert_eq!(later.body["results"][0]["trigger"], "negative-outcome");
+    assert!(
+        scans.load(Ordering::SeqCst) > 0,
+        "a distinct trip must re-scan the changed manifests"
+    );
+}
+
+#[tokio::test]
 async fn compensation_watch_scan_refusal_retries_after_scanner_recovers() {
     let (mut h, id, before) = applied().await;
     verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;

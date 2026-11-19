@@ -80,6 +80,21 @@ def test_watch_ignores_local_evidence_history(tmp_path):
     assert len(calls) == 1
 
 
+def test_watch_treats_a_repeated_cursor_as_the_end_of_the_poll():
+    cursor = "01MCER5BZ8B2Y78ED29HAFZZ10"
+    calls = []
+
+    class Client:
+        def call(self, action, **fields):
+            if action == "status":
+                return {"capabilities": [watch.CAPABILITY]}
+            calls.append(fields)
+            return {"results": [{"result": "applied"}], "next_after": cursor}
+
+    assert watch.run(Client(), ("repo",), "epoch") == [{"result": "applied"}, {"result": "applied"}]
+    assert [call.get("after") for call in calls] == [None, cursor]
+
+
 def test_watch_budget_is_success_and_next_run_continues():
     from brigade import memory_hub_client as hubc
 
