@@ -150,7 +150,12 @@ def test_two_writable_worktree_tasks_run_in_separate_worktrees(site, capsys, mon
         assert _git(path, "symbolic-ref", "--short", "HEAD").startswith(workspace.BRANCH_PREFIX)
     # The caller checkout is untouched, and both checkouts and branches survive the run.
     assert _files(site.repo) == before
-    assert _git(site.repo, "status", "--porcelain") == ""
+    # Brigade's own run-lock files under .brigade/ (Windows keeps a recovery
+    # gate there) are not worker writes; every other path must be untouched.
+    changed = [
+        line for line in _git(site.repo, "status", "--porcelain").splitlines() if not line[3:].startswith(".brigade/")
+    ]
+    assert changed == []
     assert _git(site.repo, "rev-parse", "HEAD") == site.base_sha
     assert first.is_dir() and second.is_dir()
     assert result["tasks"]["a"]["workspace"] == "worktree"
