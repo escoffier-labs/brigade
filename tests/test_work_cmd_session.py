@@ -724,12 +724,12 @@ def test_work_brief_reports_morning_entrypoint(tmp_path, monkeypatch, capsys):
     assert "Memory Handoff written" in out
     assert "active_session: none" in out
     assert "latest_session:" in out
-    assert "latest_session_title: Ended\\x20Work" in out
+    assert "latest_session_title: Ended Work" in out
     assert "dogfood_ready: True" in out
-    assert "latest_run: 2026-05-26T12\\x3a10\\x3a00Z [ok]" in out
+    assert "latest_run: 2026-05-26T12:10:00Z [ok]" in out
     assert "next_source: latest_dogfood_run" in out
-    assert "next: Build\\x20the\\x20morning\\x20brief." in out
-    assert "suggested_command: withheld (unsafe characters; see --json)" in out
+    assert "next: Build the morning brief." in out
+    assert "suggested_command: brigade work run 'Build the morning brief.'" in out
     assert "recent_sessions:" in out
 
 
@@ -2276,7 +2276,7 @@ def test_work_brief_fleet_routing_from_hub(tmp_path, monkeypatch, capsys):
     assert work_cmd.brief(target=tmp_path, limit=2) == 0
     out = capsys.readouterr().out
     assert "fleet_routing: impl=agy_flash security=daybreak" in out
-    assert "fleet_routing_notes: cursor\\x20via\\x20Other\\x20Models\\x20only" in out
+    assert "fleet_routing_notes: cursor via Other Models only" in out
     assert "fleet_disabled_seats: coder, cursor_grok" in out
     assert "fleet_cloud_lanes: codex=off cursor=on" in out
     assert "fleet_routing_source: hub revision 16" in out
@@ -2314,7 +2314,7 @@ def test_work_brief_fleet_routing_hub_down_uses_cache(tmp_path, monkeypatch, cap
     out = capsys.readouterr().out
     assert "fleet_routing: scout=cursor_scout" in out
     assert "fleet_cloud_lanes: unknown (hub unreachable)" in out
-    assert "fleet_routing_source: cache revision 15 (hub unreachable, cached 2026-09-02T00\\x3a00\\x3a00Z)" in out
+    assert "fleet_routing_source: cache revision 15 (hub unreachable, cached 2026-09-02T00:00:00Z)" in out
 
 
 def test_work_brief_fleet_routing_budget_and_unconfigured(tmp_path, monkeypatch, capsys):

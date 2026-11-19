@@ -504,7 +504,7 @@ conflict_window = "02:00-02:10"
     assert work_cmd.brief(target=tmp_path) == 0
     out = capsys.readouterr().out
     assert "scanner_unreviewed_sweep: stale-review" in out
-    assert f"scanner_sweep_import: {item['id']} repo-scan Review\\x20stale\\x20sweep\\x20import" in out
+    assert f"scanner_sweep_import: {item['id']} repo-scan Review stale sweep import" in out
 
     assert work_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out

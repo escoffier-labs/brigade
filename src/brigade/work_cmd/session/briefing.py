@@ -1012,7 +1012,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
 
     target = target.expanduser().resolve()
     if not target.is_dir():
-        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        print(f"error: --target is not a directory: {brief_values.line(str(target))}", file=sys.stderr)
         return 2
 
     if json_output:
@@ -1020,17 +1020,21 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
 
-    # One choke point for the text brief: every line printed here passes the stream
-    # sanitizer, so a value a call site forgot to encode still cannot start a line,
-    # hide text or reorder it. JSON is data and keeps its real values.
-    with brief_values.sanitized_stdout():
-        return _render_brief_text(target=target, limit=limit)
+    # The header goes out before collection, so an outer timeout still leaves a
+    # non-empty brief instead of a silent hang. The rest is rendered into one buffer
+    # and written once, so `sys.stdout` is never swapped and every line passes the
+    # sanitizer even at a site nobody encoded. JSON is data and keeps its real values.
+    sys.stdout.write(brief_values.line(f"work brief: {brief_values.name(target)}") + "\n")
+    sys.stdout.flush()
+    output = brief_values.BriefOutput()
+    _render_brief_text(target=target, limit=limit, emit=output)
+    sys.stdout.write(output.render())
+    return 0
 
 
-def _render_brief_text(*, target: Path, limit: int) -> int:
-    # Print the header before collecting, so an outer timeout still leaves
-    # a non-empty brief instead of a silent hang.
-    print(f"work brief: {brief_values.name(target)}", flush=True)
+def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
+    # Every line of the brief, including a stderr line, goes through the sanitizer.
+    print = emit  # noqa: A001 - the brief's own line printer
     payload = _brief_payload(target, limit=limit, include_code_graph=False)
 
     from ... import brief_sections
@@ -1136,7 +1140,7 @@ def _render_brief_text(*, target: Path, limit: int) -> int:
     if isinstance(routing, dict):
         from . import fleet_routing
 
-        fleet_routing.print_fleet_routing(routing)
+        fleet_routing.print_fleet_routing(routing, emit=print)
 
     outcome_loop = payload.get("outcome_loop") if isinstance(payload.get("outcome_loop"), dict) else {}
     if outcome_loop:
@@ -1679,9 +1683,7 @@ def _render_brief_text(*, target: Path, limit: int) -> int:
                 f"{brief_values.name(top_research.get('status'))}"
             )
             if top_research.get("suggested_next_command"):
-                command = brief_values.command_text(
-                    top_research.get("suggested_next_command"), top_research.get("run_id")
-                )
+                command = brief_values.record_command_text(top_research.get("suggested_next_command"))
                 print(f"research_handoff_command: {command}")
 
     operator_report = payload.get("operator_report") if isinstance(payload.get("operator_report"), dict) else {}
@@ -1719,7 +1721,7 @@ def _render_brief_text(*, target: Path, limit: int) -> int:
                 f"{brief_values.text(top_action.get('safe_summary', ''))}"
             )
             if top_action.get("suggested_command"):
-                command = brief_values.command_text(top_action.get("suggested_command"), top_action.get("action_id"))
+                command = brief_values.record_command_text(top_action.get("suggested_command"))
                 print(f"operator_action_command: {command}")
 
     code_review = payload.get("code_review")

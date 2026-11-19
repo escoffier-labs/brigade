@@ -440,9 +440,9 @@ def test_work_brief_and_doctor_include_roadmap_and_repo_fleet_health(tmp_path, m
     assert work_cmd.brief(target=tmp_path) == 0
     out = capsys.readouterr().out
     assert "roadmap_completion: 1 issue(s)" in out
-    assert "roadmap_top_issue: roadmap_example needs\\x20review" in out
+    assert "roadmap_top_issue: roadmap_example needs review" in out
     assert "repo_fleet: 1 issue(s)" in out
-    assert "repo_fleet_top_issue: repo_example missing\\x20setup" in out
+    assert "repo_fleet_top_issue: repo_example missing setup" in out
 
     assert work_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -3872,7 +3872,7 @@ no-card
     out = capsys.readouterr().out
     assert "handoff_drafts_pending: 1" in out
     assert "handoff_drafts_reviewed: 1" in out
-    assert "handoff_ingest_latest: run-brief completed=2026-05-28T10\\x3a01\\x3a00\\x2b00\\x3a00" in out
+    assert "handoff_ingest_latest: run-brief completed=2026-05-28T10:01:00+00:00" in out
     assert "handoff_draft_next_command: brigade handoff show" in out
 
     assert work_cmd.doctor(target=tmp_path) == 1

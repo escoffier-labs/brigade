@@ -40,7 +40,7 @@ def test_line_lists_holds_and_leading_reason():
         "leading_reason": "unattributed",
     }
     assert briefing._outcome_ratchet_line(payload) == (
-        "outcome_ratchet: generated_at=2026-11-17T07\\x3a30\\x3a00\\x2b00\\x3a00 "
+        "outcome_ratchet: generated_at=2026-11-17T07:30:00+00:00 "
         "mode=dry-run regression_holds=2 (skill-a, skill-b) "
         "ineligibility_rate=1.0 leading=unattributed pending_physical_actions=0"
     )

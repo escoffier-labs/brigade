@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -318,7 +319,10 @@ def _write_suppression_health_cache_from_report(
 
 
 def _suppression_full_scan_next_command(target: Path) -> str:
-    return f"brigade security scan --target {target} --output-dir {default_artifacts_dir(target)}"
+    return (
+        f"brigade security scan --target {shlex.quote(str(target))} "
+        f"--output-dir {shlex.quote(str(default_artifacts_dir(target)))}"
+    )
 
 
 def suppression_health_cache(target: Path) -> dict[str, Any]:
