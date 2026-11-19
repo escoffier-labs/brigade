@@ -264,6 +264,19 @@ seat `max_live`. Non-authoritative occupancy is `unknown` and zero free
 capacity is blocked. Readiness never takes the native capacity lock or a run
 lock.
 
+The T3 route reads Hub authority exactly once per inspection through
+`native_t3_admission.read_hub_authority`, the same read-only contract the
+Brigade route uses. It reads the enrollment high-water mark under
+`<BRIGADE_HOME>/fleet-spool/`, which takes `_spool_lock` with the shared
+2.5-second client timeout. That lock can create `<BRIGADE_HOME>/fleet-spool/`,
+`chmod` it to `0700`, and create an empty
+`model-roster.high-water.lock` file. On an unenrolled node with no `hub_url`
+and no observed activation it stops there and makes no network call. When a
+Hub URL is configured or activation was observed, it also reads
+`GET /policy` with the same 2.5-second client timeout. A spool-lock timeout or
+any unreadable authority is `admission` unknown, never unenrolled and never
+ready. No cache content is written and no capacity or run lock is taken.
+
 Route t3 output always carries `assurance: parent-reported`,
 `launch_guaranteed: false`, `capacity_reserved: false` and
 `parent_active: unverified`. A ready result without every qualifier becomes
@@ -292,8 +305,14 @@ evaluate_readiness(roster, request, *, workspace, health=None,
                    observations=None, now=None, t3_context=None,
                    hub_discovery_possible=False) -> dict
 inspect_readiness(roster, request, *, workspace, health_probe=None,
-                  hub_discovery_possible=False) -> dict
+                  hub_discovery_possible=False, t3_report=None) -> dict
 ```
+
+For `route == "t3"`, `t3_report` is the parsed
+`brigade.t3_capabilities_report.v1` envelope from
+`roster_readiness_t3.load_capabilities`. `Observation.source` is required and
+must be `parent-reported` for route support or `brigade-governance` for
+isolation, admission and capacity.
 
 `health` maps selected seat names to existing `SeatHealthResult` instances.
 Their fingerprints must match the current seat declaration. Health uses the

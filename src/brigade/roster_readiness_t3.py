@@ -155,9 +155,18 @@ class _V:
 
     def number(self) -> float:
         value = self.value
-        if type(value) not in (int, float):
+        if type(value) is int:
+            # Compare before float() so a huge JSON integer cannot raise
+            # OverflowError and escape the bounded parser.
+            if value < 0 or value > MAX_COUNT:
+                raise _Malformed()
+            return float(value)
+        if type(value) is not float:
             raise _Malformed()
-        result = float(value)  # type: ignore[arg-type]
+        try:
+            result = float(value)
+        except OverflowError:
+            raise _Malformed() from None
         if not math.isfinite(result) or result < 0 or result > float(MAX_COUNT):
             raise _Malformed()
         return result
@@ -438,7 +447,7 @@ def load_capabilities(source: str | Path, *, now: float | None = None) -> T3Capa
         payload = json.loads(data.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
         _scan_tree(payload)
         return _parse_payload(payload, received_at)
-    except (OSError, UnicodeDecodeError, ValueError, RecursionError, _Malformed):
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError, OverflowError, _Malformed):
         return _malformed(received_at)
 
 
@@ -550,6 +559,11 @@ def scope_projection(
             "origin_environment": report.origin_environment,
             "origin_project": report.origin_project,
             "parent_thread": report.parent_thread,
+            "inherited_provider": report.inherited_provider,
+            "runtime_mode": report.runtime_mode,
+            "interaction_mode": report.interaction_mode,
+            "app_owned_subagents": report.app_owned_subagents,
+            "cancellation": report.cancellation,
             "reported_at": report.reported_at,
             "projection": dict(report.projection),
         },
@@ -675,11 +689,7 @@ def _route_refusal(target: NativeTarget, report: T3Capabilities) -> tuple[str, s
     if target.provider_instance != report.inherited_provider and not provider.can_run_cross:
         return "failed", "cross-provider-disabled"
     model = _model(provider, target.launch_model)
-    if model is None:
-        if provider.omitted > 0:
-            return "unknown", "model-not-observed"
-        return "failed", "model-unavailable"
-    if model.options is not None:
+    if model is not None and model.options is not None:
         descriptors = {option.id: option for option in model.options}
         for key, value in target.options:
             descriptor = descriptors.get(key)
@@ -687,6 +697,10 @@ def _route_refusal(target: NativeTarget, report: T3Capabilities) -> tuple[str, s
                 return "failed", "option-undeclared"
             if _value_key(value) not in {_value_key(allowed) for allowed in descriptor.values}:
                 return "failed", "option-value-undeclared"
+    if model is None and provider.omitted == 0:
+        return "failed", "model-unavailable"
+    # Hard blockers take precedence over an unobserved model, so a refusal is
+    # never hidden behind model-not-observed.
     if (
         target.runtime_mode != INHERIT_MODE
         and provider.runtime_modes is not None
@@ -697,6 +711,8 @@ def _route_refusal(target: NativeTarget, report: T3Capabilities) -> tuple[str, s
         return "failed", "app-owned-subagents-disabled"
     if not report.cancellation:
         return "failed", "cancellation-disabled"
+    if model is None:
+        return "unknown", "model-not-observed"
     return None
 
 
@@ -800,12 +816,14 @@ def _capacity(roster: roster_mod.Roster, workers: tuple[str, ...], workspace: Pa
                 source=SOURCE_BRIGADE_GOVERNANCE,
             )
         free = seat_free if free is None else min(free, seat_free)
+    # A lowered limit can make live occupancy exceed it. Clamp so readiness
+    # reports zero free capacity and blocks, like the brigade route.
     return Observation(
         "passed",
         now,
         "",
         detail="native-t3-capacity governed occupancy",
-        capacity=free,
+        capacity=max(0, free or 0),
         source=SOURCE_BRIGADE_GOVERNANCE,
     )
 
@@ -827,6 +845,10 @@ def t3_route_readiness(
     moment = time.time() if now is None else now
     workers = tuple(dict.fromkeys(request.workers))
     targets = resolve_seat_targets(roster, workers, workspace)
+    # The same bounded, read-only authority read the brigade route uses: the
+    # spool lock and the policy GET share the 2.5-second client bound, one read
+    # serves both admission and scope, and a timeout reads as unavailable,
+    # which admission reports as unknown.
     hub = native_t3_admission.read_hub_authority(workspace)
     projection = scope_projection(
         roster,

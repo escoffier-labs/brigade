@@ -115,6 +115,16 @@ def test_stale_future_or_wrong_scope_observations_cannot_establish_ready(declare
     assert any(item["category"] == category and item["status"] == "unknown" for item in result["evidence"])
 
 
+def test_empty_observation_sequence_is_malformed(declared, tmp_path):
+    request = readiness.ReadinessRequest(("worker",))
+    evidence = observed(declared, request, tmp_path)
+    evidence["admission"] = ()
+    result = evaluate(declared, request, tmp_path, observations=evidence)
+    assert result["status"] == "unverified"
+    row = next(item for item in result["evidence"] if item["category"] == "admission")
+    assert (row["status"], row["reason"]) == ("unknown", "observation-malformed")
+
+
 @pytest.mark.parametrize("status", ["unsupported", "denied"])
 def test_t3_support_or_policy_refusal_never_falls_back(declared, tmp_path, status):
     request = readiness.ReadinessRequest(("worker",), route="t3")

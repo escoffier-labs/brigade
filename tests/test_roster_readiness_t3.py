@@ -116,12 +116,11 @@ def workspace(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def unenrolled(monkeypatch):
-    monkeypatch.setattr(
-        native_t3_admission,
-        "read_hub_authority",
-        lambda _workspace: native_t3_admission.HubAuthority(state="unenrolled"),
-    )
+def isolated_home(tmp_path: Path, monkeypatch):
+    """Every test reads a real, empty Brigade home, so Hub reads are honest."""
+    home = tmp_path / "brigade-home"
+    home.mkdir()
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
 
 
 def _roster(workspace: Path, text: str | None = None) -> roster_mod.Roster:
@@ -147,15 +146,18 @@ def _inspect(
     roster_text: str | None = None,
     isolation: str = "worktree",
     concurrency: int = 1,
+    workers: tuple[str, ...] = ("coder",),
+    hub_discovery_possible: bool = False,
 ) -> dict:
     report = t3.load_capabilities(caps_path) if caps_path is not None else None
     if payload is not None:
         report = t3.load_capabilities(_write(tmp_path, payload))
     return readiness.inspect_readiness(
         _roster(workspace, roster_text),
-        readiness.ReadinessRequest(("coder",), concurrency=concurrency, route="t3", isolation=isolation),
+        readiness.ReadinessRequest(workers, concurrency=concurrency, route="t3", isolation=isolation),
         workspace=workspace,
         t3_report=report,
+        hub_discovery_possible=hub_discovery_possible,
     )
 
 
@@ -445,16 +447,196 @@ def test_inspection_writes_nothing_and_takes_no_lock(workspace, tmp_path, monkey
     monkeypatch.setenv("BRIGADE_HOME", str(home))
 
     def _forbidden(*_args, **_kwargs):
-        raise AssertionError("readiness must not take a lock")
+        raise AssertionError("readiness must not take a capacity or run lock")
+
+    def _no_network(*_args, **_kwargs):
+        raise AssertionError("unenrolled readiness must not call the Hub")
 
     monkeypatch.setattr(native_t3_capacity, "capacity_lock", _forbidden)
     monkeypatch.setattr("brigade.runguard._wait_to_acquire_lock", _forbidden)
-    before = sorted((str(path.relative_to(workspace)), path.stat().st_size) for path in workspace.rglob("*"))
-    home_before = sorted((str(path.relative_to(home)), path.stat().st_size) for path in home.rglob("*"))
+    monkeypatch.setattr("brigade.fleet_client._hub_open", _no_network)
+    before = {str(path.relative_to(workspace)) for path in workspace.rglob("*")}
     report = _inspect(workspace, tmp_path, payload=_payload())
     assert report["status"] == "ready"
-    assert sorted((str(path.relative_to(workspace)), path.stat().st_size) for path in workspace.rglob("*")) == before
-    assert sorted((str(path.relative_to(home)), path.stat().st_size) for path in home.rglob("*")) == home_before
+    assert {str(path.relative_to(workspace)) for path in workspace.rglob("*")} == before
+    # The documented spool read creates only its private directory and lock.
+    from brigade import fleet_model_admission
+
+    home_after = {str(path.relative_to(home)) for path in home.rglob("*")}
+    if fleet_model_admission.nofollow_supported():
+        assert home_after == {"fleet-spool", "fleet-spool/model-roster.high-water.lock"}
+        assert (home / "fleet-spool" / "model-roster.high-water.lock").read_bytes() == b""
+    else:
+        assert home_after == set()
+
+
+def test_read_hub_authority_is_called_once_per_inspection(workspace, tmp_path, monkeypatch):
+    calls: list[int] = []
+
+    def _authority(_workspace):
+        calls.append(1)
+        return native_t3_admission.HubAuthority(state="unenrolled")
+
+    monkeypatch.setattr(native_t3_admission, "read_hub_authority", _authority)
+    report = _inspect(workspace, tmp_path, payload=_payload())
+    assert report["status"] == "ready"
+    assert len(calls) == 1
+
+
+def test_spool_lock_timeout_is_admission_unknown(workspace, tmp_path, monkeypatch):
+    from brigade import fleet_client, fleet_model_admission
+
+    def _timeout(**_kwargs):
+        raise fleet_client.FleetSpoolLockTimeout("fleet spool lock timed out")
+
+    monkeypatch.setattr(fleet_model_admission, "enrollment_activation_observed", _timeout)
+    monkeypatch.setattr(
+        "brigade.fleet_client._hub_open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("timeout must not reach the Hub")),
+    )
+    report = _inspect(workspace, tmp_path, payload=_payload())
+    assert report["status"] == "unverified"
+    assert _row(report, "admission")["status"] == "unknown"
+
+
+def test_over_limit_occupancy_clamps_to_zero_and_blocks(workspace, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        native_t3_capacity,
+        "governed_occupancy",
+        lambda _workspace: native_t3_capacity.Occupancy(6, (("coder", 6),), True),
+    )
+    report = _inspect(workspace, tmp_path, payload=_payload())
+    assert report["status"] == "blocked"
+    assert report["admitted_capacity"] == 0
+    assert _row(report, "capacity")["reason"] == "insufficient-capacity"
+
+
+def test_huge_integer_is_malformed_without_a_traceback(workspace, tmp_path, capsys):
+    from brigade import cli
+
+    payload = _payload()
+    payload["capabilities"]["features"]["maxBatchThreads"] = 10**400
+    caps_path = _write(tmp_path, payload)
+    code = cli.main(
+        [
+            "roster",
+            "ready",
+            "--target",
+            str(workspace),
+            "--worker",
+            "coder",
+            "--route",
+            "t3",
+            "--isolation",
+            "worktree",
+            "--t3-capabilities",
+            str(caps_path),
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "Traceback" not in captured.out + captured.err
+    report = json.loads(captured.out)
+    assert report["limiting_reason"] == "t3-capabilities-malformed"
+
+
+def test_scope_binds_inherited_provider_and_features(workspace, tmp_path):
+    loaded = _roster(workspace)
+    request = readiness.ReadinessRequest(("coder",), route="t3", isolation="worktree")
+    base = _payload()
+    scopes = {}
+    for name, mutate in {
+        "base": lambda payload: None,
+        "inherited-provider": lambda payload: payload["capabilities"].update(
+            inheritedProviderInstanceId="other-provider"
+        ),
+        "app-owned-subagents": lambda payload: payload["capabilities"]["features"].update(appOwnedSubagents=False),
+        "cancellation": lambda payload: payload["capabilities"]["features"].update(cancellation=False),
+        "runtime-mode": lambda payload: payload["capabilities"].update(runtimeMode="full-access"),
+        "interaction-mode": lambda payload: payload["capabilities"].update(interactionMode="plan"),
+    }.items():
+        payload = copy.deepcopy(base)
+        mutate(payload)
+        report = t3.load_capabilities(_write(tmp_path, payload, f"{name}.json"))
+        context, _ = t3.t3_route_readiness(loaded, request, workspace=workspace, report=report)
+        scopes[name] = readiness.operation_scope(loaded, request, workspace, t3_context=context)
+    assert len(set(scopes.values())) == len(scopes)
+    assert scopes["base"] != scopes["inherited-provider"]
+
+
+def test_hard_blocker_wins_over_unobserved_model(workspace, tmp_path):
+    payload = _payload()
+    provider = payload["capabilities"]["providers"][0]
+    provider["models"] = []
+    provider["omittedModels"] = 4
+    payload["capabilities"]["features"]["cancellation"] = False
+    report = _inspect(workspace, tmp_path, payload=payload)
+    assert report["status"] == "blocked"
+    assert _row(report, "route-support")["reason"] == "cancellation-disabled"
+
+
+def test_malformed_envelope_survives_missing_seat_hub_discovery(workspace, tmp_path):
+    payload = _payload()
+    payload["schema"] = "wrong"
+    report = _inspect(
+        workspace,
+        tmp_path,
+        payload=payload,
+        workers=("coder", "ghost"),
+        hub_discovery_possible=True,
+    )
+    rows = [item for item in report["evidence"] if item["category"] == "route-support"]
+    assert rows
+    assert {item["reason"] for item in rows} == {"t3-capabilities-malformed"}
+
+
+def test_empty_observation_sequence_is_malformed(workspace, tmp_path):
+    loaded = _roster(workspace)
+    request = readiness.ReadinessRequest(("coder",), route="t3", isolation="worktree")
+    parsed = t3.load_capabilities(_write(tmp_path, _payload()))
+    context, observations = t3.t3_route_readiness(loaded, request, workspace=workspace, report=parsed)
+    observations = dict(observations)
+    observations["admission"] = ()
+    result = readiness.evaluate_readiness(
+        loaded, request, workspace=workspace, observations=observations, t3_context=context
+    )
+    assert result["status"] == "unverified"
+    row = next(item for item in result["evidence"] if item["category"] == "admission")
+    assert (row["status"], row["reason"]) == ("unknown", "observation-malformed")
+
+
+def test_route_t3_ignores_the_run_preference_orchestrator_overlay(workspace, tmp_path, capsys):
+    from brigade import cli, run_preference
+
+    (workspace / ".brigade" / "roster.toml").write_text(
+        ROSTER.replace('orchestrator = "lead"', 'orchestrator = "coder"'), encoding="utf-8"
+    )
+    run_preference.write_cached(run_preference.RunPreference(orchestrator="lead"))
+    caps_path = _write(tmp_path, _payload())
+    code = cli.main(
+        [
+            "roster",
+            "ready",
+            "--target",
+            str(workspace),
+            "--worker",
+            "coder",
+            "--route",
+            "t3",
+            "--isolation",
+            "worktree",
+            "--t3-capabilities",
+            str(caps_path),
+            "--json",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert report["status"] == "blocked"
+    assert any(
+        item["category"] == "selection" and item["reason"] == "orchestrator-selected" for item in report["evidence"]
+    )
 
 
 def test_cli_refuses_capabilities_outside_route_t3(workspace, tmp_path, capsys):

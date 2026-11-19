@@ -429,6 +429,16 @@ def evaluate_readiness(
                 add(category, "unknown", reason, action, freshness="missing", source=SOURCE_BRIGADE_GOVERNANCE)
             continue
         items = tuple(raw) if isinstance(raw, (tuple, list)) else (raw,)
+        if not items:
+            add(
+                category,
+                "unknown",
+                "observation-malformed",
+                "Obtain well-formed evidence for this exact operation.",
+                freshness="missing",
+                source="unknown",
+            )
+            continue
         for observation in items:
             if (
                 not isinstance(observation, Observation)
@@ -585,7 +595,10 @@ def inspect_readiness(
             )
         from .roster_readiness_t3 import t3_route_readiness
 
-        if any(seat not in roster.agents and hub_discovery_possible for seat in request.workers):
+        malformed_report = t3_report is not None and getattr(t3_report, "state", None) == "malformed"
+        if not malformed_report and any(
+            seat not in roster.agents and hub_discovery_possible for seat in request.workers
+        ):
             return evaluate_readiness(
                 roster, request, workspace=workspace, hub_discovery_possible=hub_discovery_possible
             )

@@ -178,6 +178,18 @@ reuses the same predicates `t3 claim` applies, including live Hub policy when
 the node is enrolled. Capacity reads governed occupancy without taking the
 capacity lock or a run lock.
 
+The readiness inspection reads Hub authority once through
+`native_t3_admission.read_hub_authority`, the same read-only contract the
+Brigade route uses. It reads the enrollment high-water mark under
+`<BRIGADE_HOME>/fleet-spool/` with the shared 2.5-second spool-lock timeout,
+which can create that owner-only directory and an empty
+`model-roster.high-water.lock` file. On an unenrolled node with no `hub_url` and
+no observed activation it makes no network call. When a Hub URL is configured
+or activation was observed, it also reads `GET /policy` with the same
+2.5-second client timeout. A spool-lock timeout or unreadable authority leaves
+admission unknown. No cache content is written and no capacity or run lock is
+taken.
+
 A ready result always carries `assurance: parent-reported`,
 `launch_guaranteed: false`, `capacity_reserved: false` and
 `parent_active: unverified`. It is a snapshot, not a reservation. It cannot

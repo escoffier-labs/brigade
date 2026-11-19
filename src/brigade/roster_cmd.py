@@ -406,7 +406,11 @@ def ready(
         try:
             resolution = roster_mod.resolve_roster(target, roster_path)
             loaded = replace(roster_mod.load_roster(resolution.path), resolution=resolution)
-            loaded = run_preference.apply_to_roster(loaded, run_preference.load_cached())
+            # Governed T3 claim admission reads the roster without the cached
+            # run-preference overlay. Evaluate route t3 against that same roster
+            # so readiness and claim cannot disagree about the orchestrator.
+            if route != "t3":
+                loaded = run_preference.apply_to_roster(loaded, run_preference.load_cached())
             request = roster_readiness.ReadinessRequest(
                 workers, concurrency, route, isolation, capability, read_only=False
             )
