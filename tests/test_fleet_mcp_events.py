@@ -1139,6 +1139,48 @@ def test_claim_expired_when_a_lapsed_claim_is_released_before_the_sweep(stations
     assert delivery["payload"]["name"] == "claim.expired"
 
 
+def test_subscription_created_after_expiry_does_not_receive_it(stations, receiver, hub, monkeypatch) -> None:
+    """A lazily recorded expiry must not reach a subscription created after the lease lapsed."""
+    _base, _ta, _tb, db = hub
+    real_now = fleet_hub._now_epoch()
+    # The lease lapses while there is no claim.expired subscriber at all.
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: real_now - 30)
+    _claim(db, "repo-old")
+    # Only now does a client subscribe, so its cursor starts after the lapse.
+    subscribe(stations[1], receiver.url, name="claim.expired")
+    # An unrelated claim operation prunes the old lease and records the expiry late.
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: real_now - 28)
+    _claim(db, "repo-trigger", holder="holder-two")
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE name='claim.expired'")[0][0] >= 1
+    assert tick(db, clock=lambda: real_now + 60) == 0
+    assert receiver.events == [], "an expiry predating the subscription is never delivered"
+
+
+def test_subscription_existing_at_expiry_receives_it_once(stations, receiver, hub, monkeypatch) -> None:
+    """The same lazily recorded expiry is still delivered to a subscription that predates it."""
+    _base, _ta, _tb, db = hub
+    subscribe(stations[1], receiver.url, name="claim.expired")
+    real_now = fleet_hub._now_epoch()
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: real_now)
+    _claim(db, "repo-live")
+    # Release after the lapse records the expiry through the claim path, not the sweep.
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: real_now + 30)
+    conn = fleet_hub.open_db(db)
+    try:
+        status, payload = fleet_hub.handle_claim(
+            conn,
+            {"action": "release", "node_id": NODE_A, "target": "repo-live", "holder": "holder-one", "scope": "holder"},
+            caller_node=NODE_A,
+        )
+    finally:
+        conn.close()
+    assert status == 200 and payload["released"], payload
+    assert tick(db, clock=lambda: real_now + 60) == 1
+    assert tick(db, clock=lambda: real_now + 61) == 0
+    assert len(receiver.events) == 1
+    assert receiver.events[0]["payload"]["name"] == "claim.expired"
+
+
 def test_claim_target_text_is_never_forwarded(stations, receiver, hub) -> None:
     _base, _ta, _tb, db = hub
     subscribe(stations[1], receiver.url, name="claim.expired")

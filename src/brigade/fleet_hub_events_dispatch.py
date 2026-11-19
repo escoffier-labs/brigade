@@ -107,11 +107,11 @@ def _materialize(conn: sqlite3.Connection, now: float) -> None:
     shared = MAX_PENDING_DELIVERIES - sum(pending.values())
     newest = conn.execute("SELECT COALESCE(MAX(seq),0) FROM fleet_events").fetchone()[0]
     subscriptions = conn.execute(
-        "SELECT id, name, filter_value, cursor_seq, principal_id FROM fleet_event_subscriptions WHERE cursor_seq<? "
-        "ORDER BY cursor_seq, id",
+        "SELECT id, name, filter_value, cursor_seq, created_at, principal_id FROM fleet_event_subscriptions "
+        "WHERE cursor_seq<? ORDER BY cursor_seq, id",
         (newest,),
     ).fetchall()
-    for sid, name, filter_value, cursor, principal in _round_robin(subscriptions):
+    for sid, name, filter_value, cursor, subscribed_at, principal in _round_robin(subscriptions):
         held = pending.get(principal, 0)
         room = max(
             RESERVED_PENDING_PER_PRINCIPAL - held,
@@ -120,12 +120,15 @@ def _materialize(conn: sqlite3.Connection, now: float) -> None:
         limit = min(FAN_OUT_PER_SUBSCRIPTION, room)
         if limit <= 0:
             continue
+        # A subscription only sees facts that happened after it was created. The cursor covers events already
+        # in the outbox; this floor also excludes a lazily recorded event whose fact predates the subscription.
+        floor = max(now - EVENT_RETENTION_SECONDS, subscribed_at)
         seqs = [
             row[0]
             for row in conn.execute(
                 "SELECT seq FROM fleet_events WHERE name=? AND seq>? AND created_at>=? "
                 "AND (? IS NULL OR subject=?) ORDER BY seq LIMIT ?",
-                (name, cursor, now - EVENT_RETENTION_SECONDS, filter_value, filter_value, limit),
+                (name, cursor, floor, filter_value, filter_value, limit),
             )
         ]
         conn.executemany(

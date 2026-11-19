@@ -1,0 +1,1 @@
+- A `claim.expired` event is no longer delivered to a Fleet Hub subscription created after the lease expired, even when the expiry is recorded later by a claim prune or release (#1967).
