@@ -475,8 +475,14 @@ def test_cancelled_inbox_releases_its_hub_wait_slot(stations, hub, monkeypatch):
         for worker in workers:
             worker.start()
         _wait_for_active_waiters(NODE_B, 2, timeout=30)
-        # The per-caller cap of 2 is real: a third wait is refused.
-        assert hub_wait()[0] == 429
+        # The per-caller cap of 2 is real: a third wait is refused. Each inbox call
+        # reopens its 300 ms chunk, so a probe can land in that gap and be admitted;
+        # probe until the cap is observed rather than asserting on one attempt.
+        deadline = time.monotonic() + 30
+        statuses = [hub_wait()[0]]
+        while statuses[-1] != 429 and time.monotonic() < deadline:
+            statuses.append(hub_wait()[0])
+        assert statuses[-1] == 429, statuses
 
         for request_id in (1, 2):
             status, _headers, _body = station.rpc(
