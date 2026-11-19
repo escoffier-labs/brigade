@@ -98,6 +98,8 @@ mod push_scopes;
 mod push_tests;
 #[cfg(test)]
 mod push_withheld_tests;
+#[cfg(test)]
+mod quota_index_tests;
 use push_scopes::push_scopes;
 #[cfg(test)]
 mod tests;
