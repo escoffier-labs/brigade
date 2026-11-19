@@ -1,0 +1,2 @@
+- Hold only the content classes of a compensated verifier proposal, so one compensated verifier correction no longer refuses every later verifier proposal or an ordinary Tier 0 evidence append in that scope.
+- Name the matched `<scope>/<op_type>` pair in the `compensation_class_held` refusal.

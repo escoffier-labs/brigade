@@ -503,11 +503,12 @@ async fn compensation_holds_are_scoped_and_go_releases_only_one_pair() {
     .unwrap();
     let tx = crate::writer::worker::Tx(&db);
     assert!(
-        !compensation::class_held(
+        compensation::class_held(
             &tx,
             &json!({"ops":[{"scope":"unheld","type":"append_evidence"}]})
         )
         .unwrap()
+        .is_none()
     );
     h.call(
         ADMIN_TOKEN,
@@ -533,19 +534,54 @@ async fn compensation_holds_are_scoped_and_go_releases_only_one_pair() {
         .unwrap(),
         2
     );
-    assert!(
-        !compensation::class_held(
-            &tx,
-            &json!({"ops":[{"scope":FIXTURE_SCOPE,"type":"append_evidence"}]})
-        )
-        .unwrap()
+    let matched = |body: Json| compensation::class_held(&tx, &body).unwrap();
+    assert!(matched(json!({"ops":[{"scope":FIXTURE_SCOPE,"type":"append_evidence"}]})).is_none());
+    // The refusal names the pair it matched.
+    assert_eq!(
+        matched(json!({"ops":[{"scope":"other","type":"append_evidence"}]})).as_deref(),
+        Some("other/append_evidence")
     );
-    assert!(
-        compensation::class_held(
-            &tx,
-            &json!({"ops":[{"scope":"other","type":"append_evidence"}]})
-        )
-        .unwrap()
+}
+
+#[tokio::test]
+async fn compensation_holds_every_class_of_a_non_verifier_proposal() {
+    let (h, id, _) = applied().await;
+    assert_eq!(
+        compensate(&h, &id, ADMIN_TOKEN).await.body["state"],
+        "applied"
+    );
+    let held = || -> Vec<String> {
+        let db = rusqlite::Connection::open(h.memory()).unwrap();
+        let mut st = db
+            .prepare(
+                "SELECT key FROM memory_meta WHERE key LIKE 'compensation_hold:%' ORDER BY key",
+            )
+            .unwrap();
+        st.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        held(),
+        vec![compensation::hold_key(FIXTURE_SCOPE, "append_evidence")]
+    );
+    // The same hold covers every op class when the proposal has more than one.
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    compensation::hold(
+        &crate::writer::worker::Tx(&db),
+        &json!({"proposal_id":"fixture","ops":[
+            {"scope":FIXTURE_SCOPE,"type":"replace_block"},
+            {"scope":FIXTURE_SCOPE,"type":"add_previously"}]}),
+    )
+    .unwrap();
+    assert_eq!(
+        held(),
+        vec![
+            compensation::hold_key(FIXTURE_SCOPE, "add_previously"),
+            compensation::hold_key(FIXTURE_SCOPE, "append_evidence"),
+            compensation::hold_key(FIXTURE_SCOPE, "replace_block"),
+        ]
     );
 }
 

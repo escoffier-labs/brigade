@@ -341,7 +341,7 @@ pub fn cheap<T: ReadTx + ?Sized>(
     {
         return Ok(Some("auto_apply_killed"));
     }
-    if super::compensation::class_held(tx, body)? {
+    if super::compensation::class_held(tx, body)?.is_some() {
         return Ok(Some("compensation_class_held"));
     }
     // Named apart from the generic tier hold, so the reflect client leaves a

@@ -102,6 +102,22 @@ with `compensation_result: failed`, the watch journal ends retries for that trip
 and the card bytes stay unchanged. A later, distinct trip with another
 `rollback_of` is unaffected.
 
+### Compensation class holds
+
+A successful automatic compensation holds the compensated proposal's operation
+classes, one `compensation_hold:<scope>/<op_type>` key per class. A later
+automatic change of a held class in that scope is refused until an administrator
+releases that exact pair with `auto_apply_switch` and its `scope` and `op_type`,
+which deletes only that key. A verifier proposal is a content correction plus a
+trailing authenticated manifest binding, and class admission exempts that
+binding, so the hold covers the content classes only: compensating a verifier
+correction in a scope holds `replace_block` but not `append_evidence`. Ordinary
+Tier 0 `append_evidence` in that scope still applies, and a later verifier
+proposal is stopped only by the class it actually changes. A verifier apply is
+refused with `memory_verify_auto_held`, `memory_card_cooldown_active`, or
+`compensation_class_held`, in that order. `compensation_class_held` names the
+`<scope>/<op_type>` pair it matched.
+
 ## Deterministic reflection candidates
 
 `brigade memory reflect run --dry-run` derives `stale-newer-evidence`, `duplicate`,

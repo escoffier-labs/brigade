@@ -95,7 +95,7 @@ pub fn evaluate<T: ReadTx + ?Sized>(
         Some("policy_missing")
     } else if memory.get("auto_apply").is_some_and(|v| !v.is_boolean()) {
         Some("policy_invalid")
-    } else if super::compensation::class_held(tx, body)? {
+    } else if super::compensation::class_held(tx, body)?.is_some() {
         Some("compensation_class_held")
     } else if ops.is_empty()
         || ops
