@@ -1,8 +1,8 @@
 """Reserve, create and validate one per-task worktree for an explicit batch.
 
 This module is workspace plumbing only. It never launches a worker, appends a
-journal fact, or removes a directory, and the batch executor does not call it
-yet (issue #2050, slice S4a).
+journal fact, or removes a directory. The batch executor calls it to prepare one
+checkout per isolated task before any launch (issue #2050).
 
 A per-task worktree promises separation between cooperative workers. It is not
 a security boundary: a worker with full filesystem access can still reach the

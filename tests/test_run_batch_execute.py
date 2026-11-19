@@ -388,11 +388,13 @@ def test_worktree_retry_is_not_blocked_by_its_own_request_marker(setup, capsys):
     subprocess.run(["git", "-C", str(root), "add", ".brigade/roster.toml"], check=True)
     _commit(root, "base")
     tasks = [{**task("a"), "isolation": "worktree"}]
-    for _ in range(2):
-        rc, result, _ = invoke(setup, capsys, tasks)
-        assert rc == 2
-        assert result["error"]["code"] == "isolation-worktree-not-implemented"
-    assert setup[1] == []
+    rc, first, err = invoke(setup, capsys, tasks)
+    assert rc == 0, err
+    assert first["tasks"]["a"]["workspace"] == "worktree"
+    assert len(setup[1]) == 1
+    # The replay is fenced by the journal, not refused as a dirty base or a conflict.
+    assert invoke(setup, capsys, tasks)[:2] == (0, first)
+    assert len(setup[1]) == 1
 
 
 def test_all_read_only_batch_records_a_read_only_run(setup, capsys):
@@ -434,7 +436,7 @@ def _commit(repo, message, *, allow_empty=False):
     subprocess.run(argv, check=True)
 
 
-def test_worktree_batch_records_pin_and_refuses_before_launch(setup, capsys):
+def test_worktree_batch_records_pin_and_executes(setup, capsys):
     root = setup[0]
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     (root / ".git" / "info" / "exclude").write_text("batch.json\n.brigade/\n")
@@ -447,10 +449,11 @@ def test_worktree_batch_records_pin_and_refuses_before_launch(setup, capsys):
         text=True,
     ).stdout.strip()
     tasks = [{**task("a"), "isolation": "worktree"}, task("b", read_only=True)]
-    rc, result, _ = invoke(setup, capsys, tasks)
-    assert rc == 2
-    assert result["error"]["code"] == "isolation-worktree-not-implemented"
-    assert setup[1] == []
+    rc, result, err = invoke(setup, capsys, tasks)
+    assert rc == 0, err
+    assert result["tasks"]["a"]["workspace"] == "worktree"
+    assert result["tasks"]["b"]["workspace"] == "shared"
+    assert len(setup[1]) == 2
     run_dir = next((root / ".brigade" / "runs").glob("batch-*"))
     marker = json.loads((run_dir / "batch-request.json").read_text())
     assert marker["base_sha"] == sha
@@ -462,7 +465,7 @@ def test_worktree_batch_records_pin_and_refuses_before_launch(setup, capsys):
     rc, result, _ = invoke(setup, capsys, tasks)
     assert rc == 2
     assert result["error"]["code"] == "request-conflict"
-    assert setup[1] == []
+    assert len(setup[1]) == 2
 
 
 @pytest.mark.parametrize("explicit_cwd", [False, True])

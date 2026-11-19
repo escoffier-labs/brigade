@@ -1,4 +1,4 @@
 - Add optional per-task `isolation` (`shared` or `worktree`) and `read_only` fields to explicit batches, refusing two shared writable tasks in the same dependency layer with `shared-writable-concurrency`.
 - Pin a clean 40-character `base_sha` when any batch task requests `worktree` isolation, record it with each task's isolation in `batch-request.json` and the dry-run plan, and include it in the request fingerprint so a retry against a different HEAD is a conflict (#2050).
-- Honor per-task `read_only` through the existing worker read-only path, and refuse worktree execution with `isolation-worktree-not-implemented` until the following slice creates worktrees (#2050).
+- Honor per-task `read_only` through the existing worker read-only path (#2050).
 - Refuse a read-only batch task whose seat cannot hard-enforce read-only under the roster sandbox, refuse writable batch tasks under a read-only sandbox, keep batches on the wave scheduler, and ignore `.brigade/` state when pinning the base (#2050).

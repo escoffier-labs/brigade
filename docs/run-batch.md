@@ -115,16 +115,50 @@ fingerprint includes `base_sha`. A retry against a different HEAD is therefore a
 request without a base with `base-unpinned`, and a malformed base with
 `invalid-base-sha`.
 
-Worktree execution is not implemented yet. Validation and `--dry-run` accept
-the field. An execution attempt records the request marker with its pinned base
-and each task's isolation, then is refused before any launch with
-`isolation-worktree-not-implemented`. Creating the worktrees is a following
-slice.
+Worktree execution is wired: each isolated task runs in its own reserved
+checkout, described in [Per-task worktrees](#per-task-worktrees). Execution
+checks the pin again before it launches anything. When the caller workspace's
+clean source revision no longer equals `base_sha`, whether HEAD moved or content
+appeared since acceptance, the whole batch is refused with `source-changed` and
+no worker starts. Brigade's own `.brigade/` state is ignored by that check, so
+the request marker never dirties the base.
 
 ## Per-task worktrees
 
-`brigade.run_batch_workspace` (not wired into execution yet) reserves, creates
-and validates one checkout per isolated task:
+`brigade.run_batch_workspace` reserves, creates and validates one checkout per
+isolated task, and batch execution uses it before any worker is submitted:
+
+- Before any worker is submitted, and in plan order, each isolated task is
+  prepared. A task whose journal already records a binding replays it: the path
+  is recomputed, the binding is rebuilt, the digests must match, and the
+  checkout is validated before reuse. A task without one is checked for overlap,
+  reserved, created at the pinned base, validated, and recorded as a
+  `task.workspace-bound` fact. A task whose journal already shows an attempt is
+  left to the existing relaunch fence and gets no checkout at all.
+- Immediately before each launch the checkout is validated again, including a
+  pristine status. A file that appeared between creation and launch refuses that
+  task.
+- A workspace refusal refuses only its own task: the closed code is reported at
+  the launch fence, its journal state is untouched, and nothing launches for it.
+  No refusal deletes or repairs anything.
+- Each task checkout holds its own run lock from creation through worker exit,
+  so `brigade runs prune-worktrees` skips a live task worktree. A `brigade` run
+  started inside a task checkout while the batch holds that lock waits or
+  refuses it like any other live run.
+- The worker process runs in its task checkout. Cassettes, receipts, the task
+  journal, the run budget coordinator and caller run-lock resolution stay on the
+  caller workspace, and so do the run-level HEAD and drift checks.
+- Task checkouts and their `brigade/batch/...` branches are kept after the run,
+  on success, failure, cancellation and crash. Nothing in this path removes a
+  checkout or a branch. A later `brigade runs prune-worktrees` reads Git status
+  without ignored files, so a task checkout holding only ignored files can look
+  clean to it.
+- Fleet Hub remote routing hands the task text to another machine, which cannot
+  see a checkout reserved on this one. A batch that declares worktree isolation
+  and would route remotely is refused with `isolation-remote-unsupported`
+  before any launch.
+
+The path, reservation and validation rules are unchanged:
 
 - The path is always recomputed from the caller repository, run ID and task ID
   as `<worktree-cache>/<repo-slug>-batch-<task-slug>-<digest12>`, where the
@@ -146,12 +180,24 @@ and validates one checkout per isolated task:
   SHA-256 digests). The fact proves custody of a checkout, never launch
   permission: the task stays queued and never attempted.
 
-Isolation separates cooperative workers. It is not a security boundary: a
+Isolation separates cooperative workers. It is not a security boundary. A
 worker with full filesystem access can still reach the caller checkout by
-absolute path, and every worktree shares the repository's Git common
-directory. Uncommitted parent edits are never copied either — the worktree
-starts at the pinned base revision, so a dirty checkout is refused before a
-worker starts.
+absolute path, and every worktree shares the repository's Git common directory.
+Only a seat confined to its own folder — a `codex` seat on the
+`workspace-write` sandbox — is actually restricted to the task checkout; every
+other writable seat can write outside it. Uncommitted parent edits are never
+copied either: the worktree starts at the pinned base revision, so a dirty
+checkout is refused before a worker starts.
+
+Known limits:
+
+- Resuming an approval pause for an app-server worker in a task worktree is not
+  yet correlated: the request is bound in the task checkout, while the resume
+  handoff reads the caller workspace.
+- An enrolled Fleet session bootstrap binds its launch receipt to the caller
+  checkout, which shares the same repository.
+- A batch with any remote route refuses all worktree tasks
+  (`isolation-remote-unsupported`).
 
 | Code | Refusal |
 | --- | --- |
@@ -172,7 +218,12 @@ worker starts.
 | `unexpected-base-sha` | A base was supplied but no task requests worktree isolation |
 | `base-dirty` | Worktree isolation requested in a checkout with uncommitted content |
 | `base-unavailable` | Worktree isolation requested without a readable 40-character HEAD |
-| `isolation-worktree-not-implemented` | Execution requested for a worktree task |
+| `source-changed` | The caller workspace no longer matches the pinned base when execution starts |
+| `isolation-remote-unsupported` | Worktree tasks in a batch that Fleet Hub routing would run on another machine |
+| `workspace-overlap` | A task checkout would overlap the caller repository, another worktree, or another task |
+| `workspace-exists` | A task checkout path or reservation already exists |
+| `workspace-invalid` | A task checkout is missing, dirty, or not the reserved checkout |
+| `workspace-unavailable` | A task checkout or its Git state could not be read or created |
 | `invalid-dependencies` | Malformed, duplicate, or excessive dependency list |
 | `unknown-dependency` | Reference outside this batch |
 | `self-dependency` | Task depends on itself |
@@ -284,8 +335,12 @@ codex-cloud does, through its task ID. Original run and result IDs stay empty
 until a transport documents them.
 
 JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
-`tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`, and
-`result_ref` (relative to the run directory, or null). Completed results persist
+`tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`,
+`result_ref` (relative to the run directory, or null), `workspace`
+(`worktree` for a task that ran in its own reserved checkout, `shared` for one
+that ran in the caller workspace), and `refusal` (`{code, reason}` for a task
+refused at its launch point, otherwise null). Human mode also prints each
+refusal to stderr as `task <id>: <code> (<reason>)`. Completed results persist
 as each worker finishes, as the same sanitized projection the run receipt uses
 (no raw stdout or stderr captures). Failed workers retain their result receipt too. Skipped
 tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation

@@ -17,6 +17,7 @@ from . import (
     inbox_lock,
     localio,
     run_batch_launch,
+    run_batch_workspace,
     run_journal,
     run_lifecycle,
     run_receipts,
@@ -78,9 +79,162 @@ class BatchExecution:
         self.read_only = {t["task_id"]: bool(t.get("read_only", False)) for t in plan["tasks"]}
         # Tasks refused at the launch point keep their journal state untouched.
         self.refused: set[str] = set()
+        # Per-task worktrees created and validated before any launch, by task ID.
+        self.workspaces: dict[str, run_batch_workspace.Binding] = {}
+        # Per-task launch refusals, as (code, reason), including every workspace
+        # refusal. They are raised at the existing build_prompt fence, so nothing
+        # launches for them, and reported in the CLI result.
+        self.workspace_refusals: dict[str, tuple[str, str]] = {}
+        # A whole-batch refusal raised during dispatch, so the CLI can report its code.
+        self.refusal: tuple[str, str] | None = None
+        self.writable_worktree = {
+            t["task_id"]: t.get("isolation") == "worktree" and not t.get("read_only", False) for t in plan["tasks"]
+        }
 
     def read_only_for(self, assignment: Assignment) -> bool:
         return self.read_only[str(assignment.task_id)]
+
+    def cwd_for(self, assignment: Assignment) -> Path:
+        """The directory one worker runs in: its task worktree, else the caller workspace."""
+        binding = self.workspaces.get(str(assignment.task_id))
+        return self.workspace if binding is None else binding.path
+
+    def writable_worktree_for(self, assignment: Assignment) -> bool:
+        """Only a writable worktree task owns a checkout Brigade created for it."""
+        return self.writable_worktree.get(str(assignment.task_id), False)
+
+    def _isolated(self) -> list[str]:
+        return [t["task_id"] for t in self.plan["tasks"] if t.get("isolation") == "worktree"]
+
+    def check_pinned_base(self) -> None:
+        """Refuse the whole batch when the caller checkout no longer matches its pinned base."""
+        from .fleet_t3_transport import SourceRevisionError, clean_source_revision
+
+        expected = self.plan.get("base_sha")
+        message = None
+        try:
+            current = clean_source_revision(self.workspace, ignore_prefixes=(".brigade/",))
+        except SourceRevisionError as exc:
+            message = f"worktree isolation needs the pinned base revision: {exc}"
+        else:
+            if current != expected:
+                message = f"caller workspace source moved since acceptance: pinned {expected}, found {current}"
+        if message is not None:
+            self.refusal = ("source-changed", message)
+            raise BatchError(*self.refusal)
+
+    def _reuse_or_create(
+        self, task_id: str, state: run_tasks.TaskResult | None, others: list[Path]
+    ) -> run_batch_workspace.Binding:
+        """Return the validated binding for one task, replaying a recorded one without repair."""
+        base_sha = str(self.plan["base_sha"])
+        run_id = self.run_dir.name
+        path = run_batch_workspace.expected_path(self.workspace, run_id, task_id)
+        branch = run_batch_workspace.branch_name(run_id, task_id)
+        if state is not None and state.workspace is not None:
+            # Crash replay: the path is recomputed from identities, never read back.
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise run_batch_workspace.WorkspaceError(run_batch_workspace.WORKSPACE_INVALID, "missing") from exc
+            binding = run_batch_workspace.Binding(
+                task_id=task_id,
+                run_id=run_id,
+                base_sha=base_sha,
+                branch=branch,
+                path=path,
+                dev=info.st_dev,
+                ino=info.st_ino,
+            )
+            fact = run_batch_workspace.binding_fact(binding)
+            recorded = run_tasks.TaskWorkspaceBinding(
+                base_sha=fact["base_sha"],
+                branch_digest=fact["branch_digest"],
+                path_digest=fact["path_digest"],
+                dev_ino_digest=fact["dev_ino_digest"],
+            )
+            if recorded != state.workspace:
+                raise run_batch_workspace.WorkspaceError(run_batch_workspace.WORKSPACE_INVALID, "binding-digest")
+            run_batch_workspace.validate(binding, self.workspace, pristine=True)
+            return binding
+        run_batch_workspace.check_disjoint(path, self.workspace, others)
+        reservation = run_batch_workspace.reserve(path)
+        binding = run_batch_workspace.create(
+            self.workspace,
+            base_sha,
+            reservation,
+            branch,
+            task_id=task_id,
+            run_id=run_id,
+        )
+        fact = run_batch_workspace.binding_fact(binding)
+        run_tasks.record_workspace_binding(
+            self.run_dir,
+            workspace=self.workspace,
+            task_id=task_id,
+            binding=run_tasks.TaskWorkspaceBinding(
+                base_sha=fact["base_sha"],
+                branch_digest=fact["branch_digest"],
+                path_digest=fact["path_digest"],
+                dev_ino_digest=fact["dev_ino_digest"],
+            ),
+        )
+        return binding
+
+    def prepare_workspaces(self, stack: contextlib.ExitStack) -> None:
+        """Reserve, create, validate and bind every isolated task before any launch.
+
+        The base is checked once for the whole batch and refuses it outright. A
+        single task's workspace refusal is retained and refuses only that task at
+        the launch fence. Each checkout holds its run lock from creation through
+        worker exit, so ``brigade runs prune-worktrees`` skips a live task
+        worktree. Nothing is ever deleted, here or later.
+        """
+        isolated = self._isolated()
+        if not isolated:
+            return
+        self.check_pinned_base()
+        states = {r.handle.spec.task_id: r for r in run_tasks.read_tasks(self.run_dir)}
+        paths = [run_batch_workspace.expected_path(self.workspace, self.run_dir.name, task_id) for task_id in isolated]
+        for index, task_id in enumerate(isolated):
+            state = states.get(task_id)
+            if state is not None and (state.handle.attempt_id is not None or state.status != "queued"):
+                # The existing relaunch fence owns this task. Never prepare a checkout for it.
+                continue
+            others = [path for position, path in enumerate(paths) if position != index]
+            try:
+                binding = self._reuse_or_create(task_id, state, others)
+            except run_batch_workspace.WorkspaceError as exc:
+                self.workspace_refusals[task_id] = (exc.code, exc.reason)
+                continue
+            except run_tasks.TaskJournalError:
+                self.workspace_refusals[task_id] = (run_batch_workspace.WORKSPACE_INVALID, "binding")
+                continue
+            try:
+                # Claim mode takes over a dead owner's lock only when that owner's
+                # recorded run_dir is this batch run, re-verified inside the atomic
+                # claim (run_lock_state(path, self.run_dir) == "stale"). A live
+                # owner, or a dead owner from a different run, still refuses. It
+                # writes no stale-lock-recovery receipt and never terminalizes the
+                # batch run.json, so a SIGKILLed dispatch replays instead of
+                # refusing the task forever.
+                stack.enter_context(runguard.run_lock(binding.path, run_dir=self.run_dir, stale_action="claim"))
+            except (runguard.RunLockError, OSError):
+                # A checkout another process already owns is refused, never adopted.
+                self.workspace_refusals[task_id] = (run_batch_workspace.WORKSPACE_UNAVAILABLE, "run-lock")
+                continue
+            self.workspaces[task_id] = binding
+
+    def _validate_at_launch(self, task_id: str) -> None:
+        """Re-validate the task checkout once more immediately before its launch."""
+        binding = self.workspaces.get(task_id)
+        if binding is None:
+            return
+        try:
+            run_batch_workspace.validate(binding, self.workspace, pristine=True)
+        except run_batch_workspace.WorkspaceError as exc:
+            self.workspace_refusals[task_id] = (exc.code, exc.reason)
+            raise BatchError(exc.code, f"task {task_id} workspace {exc.code}: {exc.reason}") from exc
 
     def current(self, task_id: str) -> run_tasks.TaskResult:
         found = next((r for r in run_tasks.read_tasks(self.run_dir) if r.handle.spec.task_id == task_id), None)
@@ -176,6 +330,14 @@ class BatchExecution:
         from .aboyeur import planning
 
         _refuse_externally_controlled(self.run_dir)
+        # A remote route hands the task text to another machine, which has no
+        # access to a checkout reserved on this one. Refuse before any launch.
+        if kwargs.get("remote_transport") is not None and self._isolated():
+            self.refusal = (
+                "isolation-remote-unsupported",
+                "worktree isolation cannot be combined with Fleet Hub remote routing; run the batch on one machine",
+            )
+            raise BatchError(*self.refusal)
 
         # Reuse the wave scheduler and its fail-fast behavior. No wave exceeds
         # the effective roster limit, even before transport admission is applied.
@@ -194,6 +356,12 @@ class BatchExecution:
             # journal shows as attempted is never invoked again. The request and
             # run locks serialize dispatchers, so this read cannot race a launch.
             try:
+                refusal = self.workspace_refusals.get(task_id)
+                if refusal is not None:
+                    raise BatchError(refusal[0], f"task {task_id} workspace {refusal[0]}: {refusal[1]}")
+                # An isolated task's checkout is re-validated immediately before
+                # its launch, so a file added since creation refuses that task.
+                self._validate_at_launch(task_id)
                 current = self.current(task_id)
                 if current.handle.attempt_id is not None or current.status != "queued":
                     raise BatchError(
@@ -203,7 +371,13 @@ class BatchExecution:
                 # reservation needs this as the last task event and moves the task to unknown.
                 handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
                 self.prepared[task_id] = (handle, self.current(task_id).version or "")
-            except (BatchError, run_tasks.TaskJournalError):
+            except BatchError as exc:
+                # The wave executor folds this into a WorkerResult, so keep the
+                # closed code here for the CLI result and its human report.
+                self.refused.add(task_id)
+                self.workspace_refusals.setdefault(task_id, (exc.code, str(exc)))
+                raise
+            except run_tasks.TaskJournalError:
                 self.refused.add(task_id)
                 raise
             return original_prompt(agent, assignment, **prompt_kwargs)
@@ -214,7 +388,11 @@ class BatchExecution:
         # Layers are ordered by stage. The DAG scheduler ignores stage, so it is never used here.
         kwargs["scheduler"] = "waves"
         kwargs["read_only_for"] = self.read_only_for
-        return planning.dispatch(waves, roster, **kwargs)
+        kwargs["cwd_for"] = self.cwd_for
+        kwargs["writable_worktree_for"] = self.writable_worktree_for
+        with contextlib.ExitStack() as stack:
+            self.prepare_workspaces(stack)
+            return planning.dispatch(waves, roster, **kwargs)
 
     def resolve_model_policy(self, roster: Roster, **kwargs: Any) -> Any:
         from .aboyeur import orchestrator
@@ -267,8 +445,11 @@ class BatchExecution:
         )
 
 
-def stored_result(plan: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+def stored_result(
+    plan: dict[str, Any], run_dir: Path, refusals: dict[str, tuple[str, str]] | None = None
+) -> dict[str, Any]:
     tasks = {}
+    refusals = refusals or {}
     journal_path = run_lifecycle._journal_path(run_dir)
     # A crash before journal enrollment is still an accepted request and must
     # never be interpreted as permission to launch a replacement run.
@@ -285,11 +466,14 @@ def stored_result(plan: dict[str, Any], run_dir: Path) -> dict[str, Any]:
         task_id = task["task_id"]
         state = states.get(task_id)
         path = run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
+        refusal = refusals.get(task_id)
         tasks[task_id] = {
             "status": state.status if state else "unknown",
             "not_run": bool(state and state.status == "queued"),
             "result_id": state.result_id if state else None,
             "result_ref": str(path.relative_to(run_dir)) if path.is_file() else None,
+            "workspace": "worktree" if task.get("isolation") == "worktree" else "shared",
+            "refusal": {"code": refusal[0], "reason": refusal[1]} if refusal is not None else None,
         }
     return {
         "schema": "brigade.run_batch_result.v1",
@@ -359,6 +543,7 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     except FileExistsError:
         pass
     dispatch_rc = None
+    execution: BatchExecution | None = None
     # Serialize retry eligibility with dispatch, including preflight. The
     # workspace run lock remains the authority for executing worker processes.
     with request_lock(run_dir):
@@ -388,14 +573,11 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
         else:
             localio.write_json(marker_path, plan)
             run_journal._fsync_directory(run_dir)
-            if any(task.get("isolation", "shared") == "worktree" for task in plan["tasks"]):
-                # The request is accepted with its pinned base and recorded
-                # isolation, then refused before any launch. Creating the
-                # worktrees lands in a following slice.
-                raise BatchError(
-                    "isolation-worktree-not-implemented",
-                    "batch worktree isolation execution is not implemented yet",
-                )
+            execution = BatchExecution(plan, run_dir, workspace)
+            # The base is checked once before the run starts, so a caller that
+            # moved HEAD is refused with its own code and no run artifacts.
+            if plan.get("base_sha") is not None:
+                execution.check_pinned_base()
             argv = [
                 "run",
                 f"Explicit batch {plan['request_id']}",
@@ -414,19 +596,25 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
             if args.roster is not None:
                 argv.extend(["--roster", str(args.roster)])
             normal = cli._build_parser_for(argv).parse_args(argv)
-            normal.batch_execution = BatchExecution(plan, run_dir, workspace)
+            normal.batch_execution = execution
             try:
                 with contextlib.redirect_stdout(sys.stderr):
                     dispatch_rc = dispatch(normal)
             except (KeyboardInterrupt, TimeoutError):
                 dispatch_rc = 1
-    result = stored_result(plan, run_dir)
+            # A refusal raised inside dispatch still belongs to the request, so
+            # report its closed code instead of a generic run failure.
+            if execution.refusal is not None:
+                raise BatchError(*execution.refusal)
+    result = stored_result(plan, run_dir, execution.workspace_refusals if execution is not None else None)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
         print(f"run {result['run_id']}")
         for task_id, task in result["tasks"].items():
             print(f"{task_id}: {task['status']} {task['result_ref'] or ''}".rstrip())
+            if task["refusal"] is not None:
+                print(f"task {task_id}: {task['refusal']['code']} ({task['refusal']['reason']})", file=sys.stderr)
     if dispatch_rc:
         if any(t["status"] == "failed" for t in result["tasks"].values()):
             return 1
