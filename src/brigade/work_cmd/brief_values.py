@@ -28,13 +28,13 @@ expansion or a control character.
 from __future__ import annotations
 
 import re
-import shlex
 import sys
 import unicodedata
 from typing import Any
 
 from ..memory_care_instructions import TRUNCATED, VALUE_MAX, _SAFE_CHARS, _escape as _escape_char
 from ..memory_care_instructions import code  # noqa: F401
+from ..shell_quote import quote_argument
 
 __all__ = [
     "TRUNCATED",
@@ -46,6 +46,7 @@ __all__ = [
     "is_plain",
     "line",
     "name",
+    "quote_argument",
     "record_command_text",
     "status_entry",
     "text",
@@ -166,9 +167,9 @@ def command_text(command: object, *untrusted: object) -> str:
     """A command Brigade composed, with each untrusted argument shell quoted.
 
     The command is withheld when an argument holds a character that can break a line
-    or hide text. A space, a quote or a shell metacharacter is fine: `shlex.quote`
-    puts the argument in single quotes, where none of them is interpreted. An
-    argument the producer already quoted is left as it is.
+    or hide text. A space, a quote or a shell metacharacter is fine: the argument is
+    quoted for this platform's shell, where none of them is interpreted. An argument
+    the producer already quoted is left as it is.
     """
     rendered = "" if command is None else str(command)
     for raw in untrusted:
@@ -177,7 +178,7 @@ def command_text(command: object, *untrusted: object) -> str:
             continue
         if not is_plain(token):
             return WITHHELD
-        quoted = shlex.quote(token)
+        quoted = quote_argument(token)
         if quoted == token or quoted in rendered:
             continue
         rendered = rendered.replace(token, quoted)

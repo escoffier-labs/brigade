@@ -197,7 +197,7 @@ def _suggested_command_parts(
         return "brigade work ready --explain --json", None
     if isinstance(next_text, str) and next_text.strip() and source != "default_review":
         text = next_text.strip()
-        return f"brigade work run {shlex.quote(text)}", text
+        return f"brigade work run {brief_values.quote_argument(text)}", text
     return "brigade work run", None
 
 

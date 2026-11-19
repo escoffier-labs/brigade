@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +18,7 @@ from urllib.parse import urlparse
 
 from .. import work_cmd
 from ..selection import WRITER_INBOXES
+from ..shell_quote import quote_argument
 from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
@@ -320,8 +320,8 @@ def _write_suppression_health_cache_from_report(
 
 def _suppression_full_scan_next_command(target: Path) -> str:
     return (
-        f"brigade security scan --target {shlex.quote(str(target))} "
-        f"--output-dir {shlex.quote(str(default_artifacts_dir(target)))}"
+        f"brigade security scan --target {quote_argument(str(target))} "
+        f"--output-dir {quote_argument(str(default_artifacts_dir(target)))}"
     )
 
 

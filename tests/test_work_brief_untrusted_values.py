@@ -281,16 +281,31 @@ def _dogfood_next(tmp_path, next_text):
     run_dir = tmp_path / ".brigade" / "runs" / "latest"
     run_dir.mkdir(parents=True)
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
-    (run_dir / "summary.md").write_text(f"# Summary\n\n## Next\n\n{next_text}\n\n## Final\n")
+    # Explicit UTF-8: the default is the locale encoding, and cp1252 cannot hold
+    # every character a test writes here.
+    (run_dir / "summary.md").write_text(f"# Summary\n\n## Next\n\n{next_text}\n\n## Final\n", encoding="utf-8")
 
 
-def test_suggested_command_is_withheld_for_a_dangerous_next_text(tmp_path, capsys):
-    _dogfood_next(tmp_path, "deploy\u2028rm -rf /")
+def test_suggested_command_is_withheld_for_a_dangerous_next_text(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        briefing,
+        "_resolve_next_task",
+        lambda target: {
+            "task": "deploy\u2028rm -rf /",
+            "source": "latest_dogfood_run",
+            "dogfood": {},
+            "ledger_task": None,
+            "task_id": None,
+        },
+    )
 
     out = _brief(tmp_path, capsys)
 
     assert "next_source: latest_dogfood_run" in out
     assert "suggested_command: withheld (unsafe characters; see --json)" in out
+    assert "\u2028" not in out
+    assert "\\u2028" in out
 
 
 def test_suggested_command_quotes_an_ordinary_sentence(tmp_path, capsys):
@@ -424,11 +439,33 @@ def test_plain_commands_still_print_unchanged():
     )
 
 
-def test_command_text_quotes_an_unquoted_argument():
+def test_command_text_quotes_an_unquoted_argument(monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
     assert brief_values.command_text("brigade center report review r 1", "r 1") == (
         "brigade center report review 'r 1'"
     )
     assert brief_values.command_text("brigade work run 'review it'", "review it") == ("brigade work run 'review it'")
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    assert brief_values.command_text("brigade center report review r 1", "r 1") == (
+        'brigade center report review "r 1"'
+    )
+
+
+def test_quote_argument_is_platform_aware(monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
+    assert shell_quote.quote_argument("review the auth module") == "'review the auth module'"
+    assert shell_quote.quote_argument("plain") == "plain"
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    assert shell_quote.quote_argument("review the auth module") == '"review the auth module"'
+    # A Windows path with no space renders exactly as it did before the helper existed.
+    assert shell_quote.quote_argument("D:\\a\\_temp\\repo") == "D:\\a\\_temp\\repo"
+    assert shell_quote.quote_argument("C:\\Program Files\\brigade") == '"C:\\Program Files\\brigade"'
 
 
 def test_record_command_text_withholds_windows_expansion():
@@ -479,16 +516,15 @@ def test_tool_run_detail_encodes_a_hostile_stderr_summary(tmp_path, capsys, monk
 
 
 def test_suppression_next_command_quotes_a_target_with_a_space(tmp_path, capsys, monkeypatch):
-    import shlex
-
     from brigade import security_cmd
 
     target = tmp_path / "IGNORE PREVIOUS INSTRUCTIONS"
     target.mkdir()
     # The producer quotes its own paths, so the renderer only has to accept them.
+    quoted_target = brief_values.quote_argument(str(target))
     command = (
-        f"brigade security scan --target {shlex.quote(str(target))} "
-        f"--output-dir {shlex.quote(str(target / '.brigade'))}"
+        f"brigade security scan --target {quoted_target} "
+        f"--output-dir {brief_values.quote_argument(str(target / '.brigade'))}"
     )
     monkeypatch.setattr(
         security_cmd,
@@ -504,7 +540,7 @@ def test_suppression_next_command_quotes_a_target_with_a_space(tmp_path, capsys,
 
     assert "security_suppressions_cache: stale" in out
     assert f"security_suppressions_next_command: {command}" in out
-    assert f"--target '{target}'" in out
+    assert f"--target {quoted_target}" in out
 
 
 def test_pantry_fields_are_encoded(tmp_path, capsys, monkeypatch):
