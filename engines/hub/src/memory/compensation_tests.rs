@@ -1385,3 +1385,151 @@ async fn compensation_pending_referral_survives_disabled_apply_until_retry() {
     assert_eq!(superseded_events(), 1);
     assert_eq!(watch(&h).await.body["results"], json!([]));
 }
+
+fn pending_limits(h: &mut Hub, limits: Json) {
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({ "proposal_limits": limits }))
+        .unwrap();
+}
+
+async fn reject(h: &Hub, id: &str) -> Reply {
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"decide","proposal_id":id,"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()}),
+    )
+    .await
+}
+
+async fn review_referral(h: &Hub) -> String {
+    verifier_signal(h, AGENT_TOKEN, "one", "active", true, "").await;
+    verifier_signal(h, NODE_TOKEN, "two", "active", true, "").await;
+    // Toggle verifier authority without advancing the card head or digest.
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"verifier","principal":"node-1","verifier":false,"client_event_id":h.id()}),
+    )
+    .await;
+    let first = watch(h).await;
+    assert_eq!(
+        first.body["results"][0]["result"], "review_required",
+        "{first:?}"
+    );
+    first.body["results"][0]["proposal_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn compensation_referral_at_pending_quota_still_lets_the_quorum_apply() {
+    let (mut h, id, before) = applied().await;
+    let referral = review_referral(&h).await;
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let pending: i64 = db
+        .query_row(
+            "SELECT count(*) FROM memory_proposals WHERE state IN ('pending','held')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 1);
+    // The referral owns the only pending slot for its principal and scope. The
+    // automatic upgrade closes that row in the same savepoint when it applies,
+    // so admission must discount it instead of refusing with a 429.
+    pending_limits(
+        &mut h,
+        json!({"pending_per_principal": 1, "pending_per_scope": 1}),
+    );
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"verifier","principal":"node-1","verifier":true,"client_event_id":h.id()}),
+    )
+    .await;
+    let second = watch(&h).await;
+    assert_eq!(second.body["results"][0]["result"], "applied", "{second:?}");
+    assert_eq!(second.body["results"][0]["rollback_of"], id);
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
+    let closed = proposals::load(&crate::writer::worker::Tx(&db), &referral)
+        .unwrap()
+        .unwrap();
+    assert_eq!(closed["state"], "rejected");
+    assert_eq!(closed["reason"], "superseded_by_automatic_compensation");
+}
+
+#[tokio::test]
+async fn compensation_reviewer_rejection_vetoes_the_held_automatic_inverse() {
+    let (h, id, _) = applied().await;
+    let referral = review_referral(&h).await;
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"verifier","principal":"node-1","verifier":true,"client_event_id":h.id()}),
+    )
+    .await;
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
+    )
+    .await;
+    let snapshot = card(&h, FIXTURE_SCOPE, "a").await;
+    assert_eq!(watch(&h).await.body["results"][0]["result"], "failed");
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let held: i64 = db
+        .query_row(
+            "SELECT count(*) FROM memory_proposals WHERE state='held' AND json_extract(body,'$.decision_mode')='automatic' AND json_extract(body,'$.rollback_of')=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, 1);
+    // A reviewer's rejection is a decision for this trip, not only for the
+    // referral row the reviewer saw.
+    assert_eq!(reject(&h, &referral).await.body["state"], "rejected");
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
+    )
+    .await;
+    let retried = watch(&h).await;
+    assert_eq!(
+        retried.body["results"][0]["result"], "failed",
+        "{retried:?}"
+    );
+    assert_eq!(retried.body["results"][0]["reason"], "compensation_vetoed");
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await, snapshot);
+    let applied_count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM memory_proposals WHERE state='applied' AND json_extract(body,'$.rollback_of')=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(applied_count, 0);
+    let vetoed = db
+        .query_row(
+            "SELECT proposal_id FROM memory_proposals WHERE state='rejected' AND json_extract(body,'$.reason')='compensation_vetoed' AND json_extract(body,'$.rollback_of')=?1",
+            [id.as_str().unwrap()],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap();
+    let vetoed = proposals::load(&crate::writer::worker::Tx(&db), &vetoed)
+        .unwrap()
+        .unwrap();
+    assert_eq!(vetoed["decision_mode"], "automatic");
+    // The veto ends retries of this trip. Nothing mutates the card afterwards.
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await, snapshot);
+
+    // A later, distinct trip (a different `rollback_of`) still compensates.
+    let (later, later_id, later_before) = applied().await;
+    verifier_signal(&later, AGENT_TOKEN, "one", "active", true, "").await;
+    verifier_signal(&later, NODE_TOKEN, "two", "active", true, "").await;
+    let applied_later = watch(&later).await;
+    assert_eq!(
+        applied_later.body["results"][0]["result"], "applied",
+        "{applied_later:?}"
+    );
+    assert_eq!(applied_later.body["results"][0]["rollback_of"], later_id);
+    assert_eq!(card(&later, FIXTURE_SCOPE, "a").await["text"], later_before);
+}

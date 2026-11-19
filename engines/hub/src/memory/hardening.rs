@@ -172,7 +172,7 @@ pub(super) fn admit_excluding(
         reply.body["tier"] = json!(number(&row[1]));
         return Ok(Some(reply));
     }
-    quota(tx, body, limits, false)
+    quota_excluding(tx, body, limits, referral.unwrap_or(""))
 }
 /// A dimension passes when its usage stays within the limit or does not grow.
 /// Admission always grows pending count and bytes, so it stays strict, while a
@@ -193,6 +193,17 @@ pub fn quota(
     } else {
         ""
     };
+    quota_excluding(tx, body, limits, own)
+}
+/// `excluded` names one stored row left out of both totals: the row this body
+/// replaces, or the review referral an exact compensation closes in the same
+/// savepoint when it applies.
+fn quota_excluding(
+    tx: &dyn WriteTx,
+    body: &Json,
+    limits: &Limits,
+    excluded: &str,
+) -> rusqlite::Result<Option<Reply>> {
     let pending = i64::from(matches!(
         proposals::string(body, "state"),
         "pending" | "held"
@@ -210,7 +221,7 @@ pub fn quota(
         within(total_pending, pending_after, pending_limit)
             && within(total_bytes, bytes_after, bytes_limit)
     };
-    let usage=tx.query("SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0),COALESCE(SUM(proposal_id=?2 AND state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN proposal_id=?2 THEN retained_bytes ELSE 0 END),0) FROM memory_proposals WHERE principal=?1", &[ops::t(proposals::string(body,"proposer")),ops::t(own)])?;
+    let usage=tx.query("SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0),COALESCE(SUM(proposal_id=?2 AND state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN proposal_id=?2 THEN retained_bytes ELSE 0 END),0) FROM memory_proposals WHERE principal=?1", &[ops::t(proposals::string(body,"proposer")),ops::t(excluded)])?;
     if !allowed(
         &usage[0],
         limits.pending_per_principal,
@@ -227,7 +238,7 @@ pub fn quota(
         .map(|c| proposals::string(c, "scope"))
         .collect();
     for scope in scopes {
-        let usage=tx.query("SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0),COALESCE(SUM(p.proposal_id=?2 AND p.state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN p.proposal_id=?2 THEN p.retained_bytes ELSE 0 END),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1", &[ops::t(scope),ops::t(own)])?;
+        let usage=tx.query("SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0),COALESCE(SUM(p.proposal_id=?2 AND p.state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN p.proposal_id=?2 THEN p.retained_bytes ELSE 0 END),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1", &[ops::t(scope),ops::t(excluded)])?;
         if !allowed(&usage[0], limits.pending_per_scope, limits.bytes_per_scope) {
             return Ok(Some(ops::error(
                 429,

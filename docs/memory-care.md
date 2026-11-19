@@ -67,6 +67,23 @@ ownership, retrieval and cooldown authority contracts are unbound. Their
 latest automatic results in `schedule.json`. Tier 1 and Tier 2 application is
 outside this Tier 0 change.
 
+### Automatic compensation review referrals
+
+An independent verifier signal can require review before an automatic
+compensation applies. The hub keeps that review referral pending and closes it
+as `superseded_by_automatic_compensation` only when the matching automatic
+inverse applies in the same savepoint. Admission discounts the excluded referral
+row against `pending_per_principal` and `pending_per_scope` for that attempt, so
+a referral at either limit cannot block a quorum-authorized inverse.
+
+Recorded decision: a human rejection of the review referral vetoes every
+automatic inverse for the same `rollback_of`. The hub reads the rejection in the
+transaction that would apply the inverse, so no client retry can apply it. A
+refused inverse records `reason: compensation_vetoed` with
+`compensation_result: failed`, the watch journal ends retries for that trip, and
+the card bytes stay unchanged. A later, distinct trip with another
+`rollback_of` is unaffected.
+
 ## Deterministic reflection candidates
 
 `brigade memory reflect run --dry-run` derives `stale-newer-evidence`, `duplicate`,

@@ -738,6 +738,13 @@ fn apply_cards(
     // scans would move scan work before those checks or need a second report path.
     let compensation = automatic && !verify_automatic && !body["rollback_of"].is_null();
     if compensation {
+        // A reviewer's rejection of this trip vetoes every automatic inverse for
+        // it, including one already held while a stop control was engaged.
+        if super::compensation::reviewer_veto(tx, body)? {
+            body["state"] = json!("rejected");
+            body["reason"] = json!("compensation_vetoed");
+            return Ok(None);
+        }
         if let Some(reason) = super::compensation::automatic_blocker(tx, authority)? {
             body["state"] = json!("held");
             body["reason"] = json!(reason);

@@ -191,6 +191,22 @@ pub fn exact<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> 
     Ok(proposals::stale_reason(tx, body)?.is_none())
 }
 
+/// A human decision rejecting a rollback proposal records `reject`, while every
+/// automatic attempt records `failed`. The hub reads that decision in the same
+/// transaction that would apply an inverse, so a rejected referral vetoes every
+/// automatic inverse of the same trip regardless of which client retries it.
+pub fn reviewer_veto<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
+    let Some(id) = body["rollback_of"].as_str() else {
+        return Ok(false);
+    };
+    Ok(!tx
+        .query(
+            "SELECT 1 FROM memory_proposals WHERE compacted=0 AND state='rejected' AND json_extract(body,'$.decision')='reject' AND json_extract(body,'$.rollback_of')=?1 LIMIT 1",
+            &[t(id)],
+        )?
+        .is_empty())
+}
+
 pub fn actor(body: &Json, who: &Credential, a: &Authority) -> bool {
     string(body, "proposer") == who.principal()
         && a.policy_document["memory"]["curation_owner"] == "hub"
@@ -612,6 +628,7 @@ pub fn watch(
                 | "pinned_content_changed"
                 | "pinned_block_changed"
                 | "compensation_not_exact"
+                | "compensation_vetoed"
         );
         if outcome != "failed" || permanent {
             let journal_result = if permanent { "stale" } else { outcome };
