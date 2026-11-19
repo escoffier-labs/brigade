@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -100,7 +101,11 @@ def test_uncommitted_work_becomes_one_candidate_commit(site, capsys, tmp_path, m
     assert patch.stat().st_size == record["patch_bytes"]
     clone = scratch_clone(site, tmp_path)
     _git(clone, "checkout", "-q", site.base_sha)
-    _git(clone, "apply", "--check", str(patch))
+    # Fed on stdin: the run-dir path exceeds the Windows path limit for git.
+    applied = subprocess.run(
+        ["git", "apply", "--check", "-"], cwd=clone, input=patch.read_bytes(), capture_output=True, check=False
+    )
+    assert applied.returncode == 0, applied.stderr
 
     # The journal names the commit artifact by its sidecar digest.
     event = observation(site)
