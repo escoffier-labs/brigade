@@ -189,6 +189,16 @@ other writable seat can write outside it. Uncommitted parent edits are never
 copied either: the worktree starts at the pinned base revision, so a dirty
 checkout is refused before a worker starts.
 
+Known limits:
+
+- Resuming an approval pause for an app-server worker in a task worktree is not
+  yet correlated: the request is bound in the task checkout, while the resume
+  handoff reads the caller workspace.
+- An enrolled Fleet session bootstrap binds its launch receipt to the caller
+  checkout, which shares the same repository.
+- A batch with any remote route refuses all worktree tasks
+  (`isolation-remote-unsupported`).
+
 | Code | Refusal |
 | --- | --- |
 | `invalid-payload` | Wrong object shape, unknown fields, or invalid text Unicode |
@@ -326,9 +336,11 @@ until a transport documents them.
 
 JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`,
-`result_ref` (relative to the run directory, or null), and `workspace`
+`result_ref` (relative to the run directory, or null), `workspace`
 (`worktree` for a task that ran in its own reserved checkout, `shared` for one
-that ran in the caller workspace). Completed results persist
+that ran in the caller workspace), and `refusal` (`{code, reason}` for a task
+refused at its launch point, otherwise null). Human mode also prints each
+refusal to stderr as `task <id>: <code> (<reason>)`. Completed results persist
 as each worker finishes, as the same sanitized projection the run receipt uses
 (no raw stdout or stderr captures). Failed workers retain their result receipt too. Skipped
 tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation

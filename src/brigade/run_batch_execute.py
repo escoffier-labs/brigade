@@ -81,8 +81,9 @@ class BatchExecution:
         self.refused: set[str] = set()
         # Per-task worktrees created and validated before any launch, by task ID.
         self.workspaces: dict[str, run_batch_workspace.Binding] = {}
-        # Tasks whose checkout could not be prepared, as (code, reason). They are
-        # refused at the existing build_prompt fence, so nothing launches for them.
+        # Per-task launch refusals, as (code, reason), including every workspace
+        # refusal. They are raised at the existing build_prompt fence, so nothing
+        # launches for them, and reported in the CLI result.
         self.workspace_refusals: dict[str, tuple[str, str]] = {}
         # A whole-batch refusal raised during dispatch, so the CLI can report its code.
         self.refusal: tuple[str, str] | None = None
@@ -210,7 +211,14 @@ class BatchExecution:
                 self.workspace_refusals[task_id] = (run_batch_workspace.WORKSPACE_INVALID, "binding")
                 continue
             try:
-                stack.enter_context(runguard.run_lock(binding.path, run_dir=self.run_dir))
+                # Claim mode takes over a dead owner's lock only when that owner's
+                # recorded run_dir is this batch run, re-verified inside the atomic
+                # claim (run_lock_state(path, self.run_dir) == "stale"). A live
+                # owner, or a dead owner from a different run, still refuses. It
+                # writes no stale-lock-recovery receipt and never terminalizes the
+                # batch run.json, so a SIGKILLed dispatch replays instead of
+                # refusing the task forever.
+                stack.enter_context(runguard.run_lock(binding.path, run_dir=self.run_dir, stale_action="claim"))
             except (runguard.RunLockError, OSError):
                 # A checkout another process already owns is refused, never adopted.
                 self.workspace_refusals[task_id] = (run_batch_workspace.WORKSPACE_UNAVAILABLE, "run-lock")
@@ -363,7 +371,13 @@ class BatchExecution:
                 # reservation needs this as the last task event and moves the task to unknown.
                 handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
                 self.prepared[task_id] = (handle, self.current(task_id).version or "")
-            except (BatchError, run_tasks.TaskJournalError):
+            except BatchError as exc:
+                # The wave executor folds this into a WorkerResult, so keep the
+                # closed code here for the CLI result and its human report.
+                self.refused.add(task_id)
+                self.workspace_refusals.setdefault(task_id, (exc.code, str(exc)))
+                raise
+            except run_tasks.TaskJournalError:
                 self.refused.add(task_id)
                 raise
             return original_prompt(agent, assignment, **prompt_kwargs)
@@ -431,8 +445,11 @@ class BatchExecution:
         )
 
 
-def stored_result(plan: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+def stored_result(
+    plan: dict[str, Any], run_dir: Path, refusals: dict[str, tuple[str, str]] | None = None
+) -> dict[str, Any]:
     tasks = {}
+    refusals = refusals or {}
     journal_path = run_lifecycle._journal_path(run_dir)
     # A crash before journal enrollment is still an accepted request and must
     # never be interpreted as permission to launch a replacement run.
@@ -449,12 +466,14 @@ def stored_result(plan: dict[str, Any], run_dir: Path) -> dict[str, Any]:
         task_id = task["task_id"]
         state = states.get(task_id)
         path = run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
+        refusal = refusals.get(task_id)
         tasks[task_id] = {
             "status": state.status if state else "unknown",
             "not_run": bool(state and state.status == "queued"),
             "result_id": state.result_id if state else None,
             "result_ref": str(path.relative_to(run_dir)) if path.is_file() else None,
             "workspace": "worktree" if task.get("isolation") == "worktree" else "shared",
+            "refusal": {"code": refusal[0], "reason": refusal[1]} if refusal is not None else None,
         }
     return {
         "schema": "brigade.run_batch_result.v1",
@@ -524,6 +543,7 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     except FileExistsError:
         pass
     dispatch_rc = None
+    execution: BatchExecution | None = None
     # Serialize retry eligibility with dispatch, including preflight. The
     # workspace run lock remains the authority for executing worker processes.
     with request_lock(run_dir):
@@ -586,13 +606,15 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
             # report its closed code instead of a generic run failure.
             if execution.refusal is not None:
                 raise BatchError(*execution.refusal)
-    result = stored_result(plan, run_dir)
+    result = stored_result(plan, run_dir, execution.workspace_refusals if execution is not None else None)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
         print(f"run {result['run_id']}")
         for task_id, task in result["tasks"].items():
             print(f"{task_id}: {task['status']} {task['result_ref'] or ''}".rstrip())
+            if task["refusal"] is not None:
+                print(f"task {task_id}: {task['refusal']['code']} ({task['refusal']['reason']})", file=sys.stderr)
     if dispatch_rc:
         if any(t["status"] == "failed" for t in result["tasks"].values()):
             return 1

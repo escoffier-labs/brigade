@@ -303,9 +303,98 @@ def test_file_added_after_creation_refuses_that_task(site, capsys, monkeypatch):
     assert refusals == {"a": (workspace.WORKSPACE_INVALID, "dirty")}
     assert result["tasks"]["a"]["status"] == "queued"
     assert result["tasks"]["a"]["not_run"] is True
+    # The refusal code reaches the CLI result, not only the folded worker receipt.
+    assert result["tasks"]["a"]["refusal"] == {"code": workspace.WORKSPACE_INVALID, "reason": "dirty"}
     assert site.path_for("a").is_dir()
     receipts = json.loads((site.run_dir() / "worker-results.json").read_text())
     assert [r["detail"] for r in receipts["results"]] == ["task a workspace workspace-invalid: dirty"]
+    assert cli.main(["run", "batch", str(site.home / "batch.json"), "--cwd", str(site.repo)]) == 2
+    assert "task a: workspace-invalid (dirty)" in capsys.readouterr().err
+
+
+_DEAD_PID = 99999999
+
+
+def publish_dead_owner_lock(checkout: Path, run_dir: Path, monkeypatch) -> Path:
+    """Publish a per-task run lock, then mark its owner dead the way a SIGKILLed dispatch leaves it."""
+    path = runguard.lock_path(checkout)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    runguard._publish_lock(path, run_dir=run_dir)
+    (path / "pid").write_text(f"{_DEAD_PID}\n")
+    owner = json.loads((path / "owner.json").read_text())
+    owner["pid"] = _DEAD_PID
+    (path / "owner.json").write_text(json.dumps(owner))
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != _DEAD_PID)
+    return path
+
+
+def crash_after_binding(site, capsys, monkeypatch) -> tuple[Path, Path]:
+    """Run once and stop after the workspace binding, so a replay is allowed."""
+    real_dispatch = aboyeur.planning.dispatch
+    monkeypatch.setattr(aboyeur.planning, "dispatch", Mock(side_effect=KeyboardInterrupt))
+    rc, _, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 1, err
+    run_dir = site.run_dir()
+    checkout = site.path_for("a")
+    state = run_tasks.read_tasks(run_dir)[0]
+    assert state.workspace is not None and state.handle.attempt_id is None
+    monkeypatch.setattr(aboyeur.planning, "dispatch", real_dispatch)
+    return run_dir, checkout
+
+
+def test_replay_takes_over_a_dead_owner_lock_for_this_run(site, capsys, monkeypatch):
+    run_dir, checkout = crash_after_binding(site, capsys, monkeypatch)
+    publish_dead_owner_lock(checkout, run_dir, monkeypatch)
+    # A SIGKILLed dispatch leaves a non-terminal receipt, unlike an interrupt.
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta.pop("finished_at", None)
+    meta["status"] = "dispatching"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    # This is the stale same-run lock recover mode refuses: enrolled journal, live run.
+    assert runguard.run_lock_state(checkout, run_dir) == "stale"
+    assert (run_dir / "events" / "lifecycle.jsonl").is_file()
+    seen = record_cwd(monkeypatch)
+    rc, result, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    assert seen == {"a": checkout}
+    assert result["tasks"]["a"]["status"] == "completed"
+    run_meta = (run_dir / "run.json").read_text()
+    assert "stale-lock-recovery" not in run_meta
+    assert json.loads(run_meta)["status"] == "ok"
+    # The takeover claimed and removed the dead lock; nothing was quarantined.
+    assert runguard.run_lock_state(checkout, run_dir) == "absent"
+    assert list(runguard.lock_path(checkout).parent.glob(".*.stale")) == []
+
+
+def test_foreign_dead_owner_lock_still_refuses_the_task(site, capsys, monkeypatch):
+    run_dir, checkout = crash_after_binding(site, capsys, monkeypatch)
+    foreign = site.home / "another-run"
+    publish_dead_owner_lock(checkout, foreign, monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(agents, "run_agent", lambda *a, **k: calls.append("launched"))
+    rc, result, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 2, err
+    assert calls == []
+    assert result["tasks"]["a"]["refusal"] == {"code": workspace.WORKSPACE_UNAVAILABLE, "reason": "run-lock"}
+    # A lock that belongs to another run is restored, never claimed or deleted.
+    assert runguard.lock_path(checkout).is_dir()
+    state = run_tasks.read_tasks(run_dir)[0]
+    assert (state.status, state.handle.attempt_id) == ("queued", None)
+
+
+def test_replay_refuses_a_rebuilt_binding_digest_mismatch(site, capsys, monkeypatch):
+    run_dir, checkout = crash_after_binding(site, capsys, monkeypatch)
+    # A different directory now occupies the recorded path, so its dev/inode differs.
+    checkout.rename(checkout.with_name(checkout.name + "-moved"))
+    checkout.mkdir()
+    calls: list[str] = []
+    monkeypatch.setattr(agents, "run_agent", lambda *a, **k: calls.append("launched"))
+    rc, result, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 2, err
+    assert calls == []
+    assert result["tasks"]["a"]["refusal"] == {"code": workspace.WORKSPACE_INVALID, "reason": "binding-digest"}
+    assert result["tasks"]["a"]["status"] == "queued"
+    assert (checkout.with_name(checkout.name + "-moved")).is_dir()
 
 
 def test_remote_routing_refuses_worktree_tasks_before_any_launch(site, capsys, monkeypatch):

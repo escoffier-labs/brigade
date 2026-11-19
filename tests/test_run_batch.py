@@ -292,7 +292,8 @@ def test_worktree_dry_run_refuses_a_checkout_without_a_revision(tmp_path, capsys
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "base-unavailable"
 
 
-def test_worktree_batch_is_accepted_and_pinned_before_run_preflight(tmp_path, capsys, no_models, monkeypatch):
+def test_worktree_batch_is_accepted_and_pinned_before_run_preflight(tmp_path, capsys, monkeypatch):
+    from brigade import run_batch_workspace, run_tasks
     from tests._home import set_home
 
     home = tmp_path / "home"
@@ -301,17 +302,37 @@ def test_worktree_batch_is_accepted_and_pinned_before_run_preflight(tmp_path, ca
     repo = tmp_path / "repo"
     repo.mkdir()
     sha = _git_checkout(repo)
+    # Brigade state is never part of the pinned base, so the roster stays untracked.
+    (repo / ".brigade").mkdir()
+    (repo / ".brigade" / "roster.toml").write_text(
+        'orchestrator = "chef"\n[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.coder]\ncli = "codex"\nrole = "implement"\n'
+    )
+    # The launch point refuses this task after acceptance: its path is already taken.
+    cache = run_batch_workspace.cache_root()
+    cache.mkdir(parents=True)
+    taken = cache / "taken"
+    taken.mkdir()
+    monkeypatch.setattr(run_batch_workspace, "expected_path", lambda repo_root, run_id, task_id: taken)
+    launched = Mock(side_effect=AssertionError("worker launched"))
+    monkeypatch.setattr(agents, "run_agent", launched)
+
     path = tmp_path / "batch.json"
     path.write_text(json.dumps(batch(task("a", isolation="worktree"))))
-    # No roster here, so the run stops at its own preflight. The request is still
-    # accepted with its pinned base, so a repaired roster can launch it later.
-    for _ in range(2):
-        assert cli.main(["run", "batch", str(path), "--cwd", str(repo), "--json"]) == 2
-        assert "isolation-worktree-not-implemented" not in capsys.readouterr().err
-    marker = json.loads((next((repo / ".brigade" / "runs").glob("batch-*")) / "batch-request.json").read_text())
+    assert cli.main(["run", "batch", str(path), "--cwd", str(repo), "--json"]) == 2
+    result = json.loads(capsys.readouterr().out)
+    # Acceptance and the pinned base are durable before the run preflight, not an
+    # artifact of the exit code: the request marker and the journal both hold them.
+    run_dir = next((repo / ".brigade" / "runs").glob("batch-*"))
+    marker = json.loads((run_dir / "batch-request.json").read_text())
     assert marker["base_sha"] == sha
     assert marker["tasks"][0]["isolation"] == "worktree"
-    assert not (home / ".cache" / "brigade" / "worktrees").exists()
+    assert [(s.handle.spec.task_id, s.status, s.handle.attempt_id) for s in run_tasks.read_tasks(run_dir)] == [
+        ("a", "queued", None)
+    ]
+    assert result["tasks"]["a"]["refusal"] == {"code": run_batch_workspace.WORKSPACE_EXISTS, "reason": "path"}
+    launched.assert_not_called()
+    assert sorted(p.name for p in cache.iterdir()) == ["taken"]
 
 
 @pytest.mark.parametrize("raw", [b'{"schema":"x","schema":"y"}', b"[" * 2000])
