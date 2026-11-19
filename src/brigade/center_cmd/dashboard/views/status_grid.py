@@ -36,6 +36,18 @@ _TILES = (
     ("pending_tasks", "Pending tasks"),
 )
 
+# The brief names each provider check ``work_brief_section:<label>``. A tile
+# whose provider did not finish has no payload key, so the check is the only
+# remaining evidence that it is unknown rather than healthy.
+_TILE_SECTION_CHECKS = {
+    "handoff_issues": "handoff-issues",
+    "memory_care": "memory-care-health",
+    "scheduled_care": "scheduled-care",
+    "outcome_loop": "outcome-loop",
+    "inbox_hygiene": "inbox-hygiene",
+    "pending_tasks": "pending-tasks",
+}
+
 
 def fetch(target: Path) -> dict:
     return data.run_json(target, ["work", "brief"], timeout=60.0)
@@ -81,9 +93,7 @@ def _tile_counts(payload: dict, key: str) -> tuple[int | None, dict]:
         return _int(section, "issue_count"), section
     if key == "scheduled_care":
         section = _section(payload, key)
-        count = _int(section, "count")
-        # Absent key is "no repeated failures", not a missing fetch — old briefs omit it.
-        return (0 if count is None else count), section
+        return _int(section, "count"), section
     if key == "inbox_hygiene":
         section = _section(payload, key)
         return _int(section, "issue_count"), section
@@ -99,11 +109,26 @@ def _tile_counts(payload: dict, key: str) -> tuple[int | None, dict]:
     return None, {}
 
 
-def _status_word(section: dict, count: int | None) -> str:
+def _section_check(payload: dict, key: str) -> dict | None:
+    """Return the brief's non-ok provider check for this tile, if any."""
+    label = _TILE_SECTION_CHECKS.get(key)
+    if not label:
+        return None
+    checks = payload.get("status_section_checks")
+    if not isinstance(checks, list):
+        return None
+    name = f"work_brief_section:{label}"
+    for check in checks:
+        if isinstance(check, dict) and check.get("name") == name and check.get("status") != "ok":
+            return check
+    return None
+
+
+def _status_word(section: dict, count: int | None, *, check: dict | None = None) -> str:
     """Plain operator word for a chip: OK / ATTENTION / MISSING / TIMED OUT."""
-    if bool(section.get("timed_out")):
+    if bool(section.get("timed_out")) or (check is not None and "timed out" in str(check.get("detail") or "")):
         return "TIMED OUT"
-    if count is None:
+    if check is not None or count is None:
         return "MISSING"
     return "ATTENTION" if count > 0 else "OK"
 
@@ -156,7 +181,9 @@ def _tile_meaning(key: str, section: dict, count: int | None) -> str:
         detail = _top_issue_detail(section)
         return f"{base} Top issue: {detail}." if detail else base
     if key == "scheduled_care":
-        if count is None or count <= 0:
+        if count is None:
+            return "Scheduled-care status is not available."
+        if count <= 0:
             return "No care entries are failing repeatedly."
         names = _scheduled_care_names(section)
         suffix = f" ({names})" if names else ""
@@ -215,7 +242,7 @@ def _health_tiles(payload: dict) -> str:
     tiles = []
     for key, label in _TILES:
         count, section = _tile_counts(payload, key)
-        word = _status_word(section, count)
+        word = _status_word(section, count, check=_section_check(payload, key))
         role, icon, _ = _status_role(word)
         meaning = _tile_meaning(key, section, count)
         debug = ""

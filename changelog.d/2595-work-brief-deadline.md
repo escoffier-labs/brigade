@@ -1,2 +1,4 @@
 - Bound `brigade work brief` with a per-section deadline and a total budget, so a slow provider reports the section that timed out instead of hanging silently, and print the header before collecting so an outer timeout still leaves output.
+- Make the section deadline survive providers that catch `except Exception`, and bound the remaining blocking providers (`runs patrol`, work-mode pinning) so no section runs unbounded.
+- Report a timed-out or failed section as missing instead of a healthy empty value in both the JSON payload and the status dashboard, and keep a corrupt task ledger failing closed with exit 2.
 - Share one GitHub observation budget across the brief's cloud tracker reads, and allow `BRIGADE_WORK_BRIEF_SECTION_TIMEOUT` and `BRIGADE_WORK_BRIEF_BUDGET` to tighten the brief deadlines.

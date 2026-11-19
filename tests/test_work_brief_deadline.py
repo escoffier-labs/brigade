@@ -6,7 +6,9 @@ import json
 import threading
 import time
 
-from brigade import cloud_tracker, memory_cmd, work_cmd
+import pytest
+
+from brigade import cli, cloud_tracker, memory_cmd, work_cmd
 
 
 def _stalled_health(event: threading.Event, *, run_seconds: float = 15.0):
@@ -19,11 +21,15 @@ def _stalled_health(event: threading.Event, *, run_seconds: float = 15.0):
     return health
 
 
+def _brief_env(monkeypatch, *, section: str = "1", budget: str = "20") -> None:
+    monkeypatch.setenv("BRIGADE_WORK_BRIEF_SECTION_TIMEOUT", section)
+    monkeypatch.setenv("BRIGADE_WORK_BRIEF_BUDGET", budget)
+
+
 def test_work_brief_degrades_a_stalled_section_within_its_deadline(tmp_path, monkeypatch, capsys):
     event = threading.Event()
     monkeypatch.setattr(memory_cmd, "health", _stalled_health(event))
-    monkeypatch.setenv("BRIGADE_WORK_BRIEF_SECTION_TIMEOUT", "1")
-    monkeypatch.setenv("BRIGADE_WORK_BRIEF_BUDGET", "20")
+    _brief_env(monkeypatch)
 
     started = time.monotonic()
     try:
@@ -40,7 +46,42 @@ def test_work_brief_degrades_a_stalled_section_within_its_deadline(tmp_path, mon
     assert "dogfood_ready:" in out
     assert "suggested_command:" in out
     assert "status_section_issues: 1" in out
-    assert "work_brief_section:memory-care-health timed out after 1" in out
+    assert "work_brief_section:memory-care-health timed out after 1s" in out
+
+
+@pytest.mark.parametrize("threaded", [False, True])
+def test_work_brief_times_out_a_provider_that_swallows_exceptions(tmp_path, monkeypatch, capsys, threaded):
+    """A provider's own ``except Exception`` must not eat the section deadline."""
+    from brigade.daily_cmd import config
+
+    if threaded:
+        monkeypatch.delattr(config.signal, "SIGALRM", raising=False)
+
+    event = threading.Event()
+
+    def stalled_github(target, **_kwargs):
+        try:
+            event.wait(15)
+        except Exception:  # mirrors providers that degrade their own transport errors
+            pass
+        return {"branches": [], "prs": []}
+
+    monkeypatch.setattr(cloud_tracker, "observe_github", stalled_github)
+    _brief_env(monkeypatch)
+
+    started = time.monotonic()
+    try:
+        assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    finally:
+        event.set()
+    elapsed = time.monotonic() - started
+
+    payload = json.loads(capsys.readouterr().out)
+    check = next(c for c in payload["status_section_checks"] if c["name"] == "work_brief_section:cloud-tracker")
+    assert check["status"] == "warn"
+    assert "timed out after 1s" in check["detail"]
+    assert "cloud_tracker" not in payload
+    assert elapsed < 10
 
 
 def test_work_brief_stops_calling_sections_after_its_total_budget(tmp_path, monkeypatch, capsys):
@@ -49,8 +90,7 @@ def test_work_brief_stops_calling_sections_after_its_total_budget(tmp_path, monk
     monkeypatch.setattr(memory_cmd, "health", _stalled_health(first))
     # The stalled section consumes the whole budget, so later sections are
     # skipped instead of starting another provider call.
-    monkeypatch.setenv("BRIGADE_WORK_BRIEF_SECTION_TIMEOUT", "2")
-    monkeypatch.setenv("BRIGADE_WORK_BRIEF_BUDGET", "1")
+    _brief_env(monkeypatch, section="2", budget="1")
 
     calls: list[str] = []
 
@@ -81,6 +121,85 @@ def test_work_brief_stops_calling_sections_after_its_total_budget(tmp_path, monk
     assert calls == []
 
 
+def test_work_brief_bounds_patrol_and_work_mode_pin(tmp_path, monkeypatch, capsys):
+    from brigade import runs_patrol, work_mode
+
+    patrol_event = threading.Event()
+    pin_event = threading.Event()
+
+    def stalled_patrol(*_args, **_kwargs):
+        patrol_event.wait(15)
+        return None
+
+    def stalled_pin(*_args, **_kwargs):
+        pin_event.wait(15)
+        return None
+
+    monkeypatch.setattr(runs_patrol, "brief_summary", stalled_patrol)
+    monkeypatch.setattr(work_mode, "pin_explicit_mode", stalled_pin)
+    _brief_env(monkeypatch)
+
+    started = time.monotonic()
+    try:
+        assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    finally:
+        patrol_event.set()
+        pin_event.set()
+    elapsed = time.monotonic() - started
+
+    payload = json.loads(capsys.readouterr().out)
+    checks = {check["name"]: check for check in payload["status_section_checks"]}
+    for name in ("work_brief_section:patrol", "work_brief_section:work-mode-pin"):
+        assert checks[name]["status"] == "warn"
+        assert "timed out after 1s" in checks[name]["detail"]
+    # A timed-out patrol must be named in the checks, not serialize as a
+    # healthy-looking "no local lanes" payload.
+    assert "patrol" not in payload
+    assert elapsed < 10
+
+
+def test_work_brief_json_omits_a_timed_out_section(tmp_path, monkeypatch, capsys):
+    from brigade import handoff_cmd, pantry_cmd
+
+    handoff_event = threading.Event()
+    pantry_event = threading.Event()
+
+    def stalled_handoffs(*_args, **_kwargs):
+        handoff_event.wait(15)
+        return []
+
+    def stalled_pantry(*_args, **_kwargs):
+        pantry_event.wait(15)
+        return {}
+
+    monkeypatch.setattr(handoff_cmd, "collect_issues", stalled_handoffs)
+    monkeypatch.setattr(pantry_cmd, "status_payload", stalled_pantry)
+    _brief_env(monkeypatch)
+
+    try:
+        assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    finally:
+        handoff_event.set()
+        pantry_event.set()
+
+    payload = json.loads(capsys.readouterr().out)
+    checks = {check["name"]: check for check in payload["status_section_checks"]}
+    assert checks["work_brief_section:handoff-issues"]["status"] == "warn"
+    assert checks["work_brief_section:pantry"]["status"] == "warn"
+    # A timed-out handoff check must not serialize as a healthy zero count.
+    assert "handoff_issues" not in payload
+    assert "pantry" not in payload
+
+
+def test_work_brief_fails_closed_on_corrupt_task_ledger(tmp_path, capsys):
+    tasks_path = tmp_path / ".brigade" / "work" / "tasks.json"
+    tasks_path.parent.mkdir(parents=True)
+    tasks_path.write_text("{not valid json")
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path)]) == 2
+    assert "task ledger is corrupt" in capsys.readouterr().err
+
+
 def test_brief_cloud_observation_keeps_one_github_deadline(tmp_path, monkeypatch):
     calls: list[float] = []
 
@@ -98,5 +217,5 @@ def test_brief_cloud_observation_keeps_one_github_deadline(tmp_path, monkeypatch
     assert result["branches"] == []
     assert result["prs"] == []
     assert calls, "observe_github should still attempt the first GitHub read"
-    assert max(calls) <= 0.3
+    assert max(calls) <= 0.3 + 1e-6
     assert elapsed < 1.0

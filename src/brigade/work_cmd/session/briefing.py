@@ -91,6 +91,9 @@ class _BriefSections:
                 fallback,
                 timeout_seconds=min(self.section_timeout, remaining),
                 check_prefix="work_brief_section",
+                # A corrupt or unsupported ledger must keep failing closed with
+                # exit 2 for the session-start hooks, not degrade to a warning.
+                raise_types=(ledger_mod.TaskLedgerError,),
             )
         self.checks.append(check)
         if check.get("status") != "ok" and key:
@@ -371,8 +374,13 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
 
     target = target.expanduser().resolve()
     sections = _BriefSections()
-    active = sections.call("active-session", lambda: helpers._active_session_info(target), None)
-    session_rows = sections.call("sessions", lambda: helpers._collect_sessions(helpers._work_root(target)), ([], 0))
+    active = sections.call("active-session", lambda: helpers._active_session_info(target), None, key="active_session")
+    session_rows = sections.call(
+        "sessions",
+        lambda: helpers._collect_sessions(helpers._work_root(target)),
+        ([], 0),
+        key="recent_sessions",
+    )
     sessions, skipped = session_rows
     latest_session = helpers._session_info(sessions[0][0], sessions[0][1]) if sessions else None
     recent_sessions = [helpers._session_info(path, payload) for path, payload in sessions[:limit]]
@@ -388,20 +396,35 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         else None
     )
     ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
-    git = sections.call("git", lambda: helpers._git_snapshot(target), {})
+    git = sections.call("git", lambda: helpers._git_snapshot(target), {}, key="git")
     from ... import run_reap, runs_patrol
 
-    orphaned_runs = sections.call("orphaned-runs", lambda: run_reap.list_orphaned_runs(target), [])
+    orphaned_runs = sections.call("orphaned-runs", lambda: run_reap.list_orphaned_runs(target), [], key="orphaned_runs")
+    patrol = sections.call("patrol", lambda: runs_patrol.brief_summary(target), {}, key="patrol")
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
-    pending = sections.call("pending-tasks", lambda: ledger_mod._pending_tasks(target), [])
-    ready_tasks = sections.call("ready-tasks", lambda: ledger_mod._ready_tasks(target), [])
+    pending = sections.call("pending-tasks", lambda: ledger_mod._pending_tasks(target), [], key="pending_tasks")
+    ready_tasks = sections.call("ready-tasks", lambda: ledger_mod._ready_tasks(target), [], key="ready_tasks")
     readiness = sections.call(
-        "readiness", lambda: ledger_mod._readiness_payload(target, explain=False), _UnavailableSection()
+        "readiness",
+        lambda: ledger_mod._readiness_payload(target, explain=False),
+        _UnavailableSection(),
+        key="ready",
     )
-    pending_imports = sections.call("pending-imports", lambda: ledger_mod._pending_imports(target), [])
-    pending_import_counts = sections.call(
-        "pending-import-counts", lambda: ledger_mod._import_counts(pending_imports), _UnavailableSection()
+    pending_imports = sections.call(
+        "pending-imports", lambda: ledger_mod._pending_imports(target), [], key="pending_imports"
     )
+    if "pending_imports" in sections.unavailable_keys:
+        # Counting a fallback empty inbox would report zero pending imports
+        # when the inbox was never read; the pending-imports check carries it.
+        pending_import_counts = _UnavailableSection()
+        sections.unavailable_keys.add("pending_import_counts")
+    else:
+        pending_import_counts = sections.call(
+            "pending-import-counts",
+            lambda: ledger_mod._import_counts(pending_imports),
+            _UnavailableSection(),
+            key="pending_import_counts",
+        )
     scanner_candidate = sections.call("scanner-candidate", lambda: ledger_mod._scanner_candidate(pending_imports), None)
     handoff_candidate = sections.call("handoff-candidate", lambda: ledger_mod._handoff_candidate(pending_imports), None)
     inbox_hygiene = sections.call(
@@ -449,9 +472,11 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         _UnavailableSection(),
         key="repo_fleet",
     )
-    pantry_health = sections.call("pantry", lambda: pantry_cmd.status_payload(target), _UnavailableSection())
+    pantry_health = sections.call(
+        "pantry", lambda: pantry_cmd.status_payload(target), _UnavailableSection(), key="pantry"
+    )
     notification_health = sections.call(
-        "notifications", lambda: notifications_cmd.health(target), _UnavailableSection()
+        "notifications", lambda: notifications_cmd.health(target), _UnavailableSection(), key="notifications"
     )
     context_health = sections.call(
         "context-packs", lambda: context_cmd.health(target), _UnavailableSection(), key="context_packs"
@@ -482,8 +507,11 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "outcome-ratchet",
         lambda: outcome_ratchet_report.brief_payload(outcome_ratchet_report.load_report(target)),
         _UnavailableSection(),
+        key="outcome_ratchet",
     )
-    handoff_issues = sections.call("handoff-issues", lambda: handoff_cmd.collect_issues(target), [])
+    handoff_issues = sections.call(
+        "handoff-issues", lambda: handoff_cmd.collect_issues(target), [], key="handoff_issues"
+    )
     known_handoff_issue_ids = sections.call(
         "handoff-known-issues", lambda: handoff_cmd._known_local_issue_ids(target), set()
     )
@@ -502,7 +530,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     from ... import brief_sections, work_mode
 
     pin_errors: list[str] = []
-    work_mode.pin_explicit_mode(target, errors=pin_errors)
+    sections.call("work-mode-pin", lambda: work_mode.pin_explicit_mode(target, errors=pin_errors), None)
     work = sections.call("work-mode", lambda: work_mode.summary(target), {"mode": "unknown", "rails": "unknown"})
     if pin_errors:
         work["pin_error"] = pin_errors[0]
@@ -758,7 +786,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "next": str(resolved["task"]),
         "suggested_command": suggested,
         "orphaned_runs": orphaned_runs,
-        "patrol": runs_patrol.brief_summary(target),
+        "patrol": patrol,
         "update": update,
         "cloud_tracker": cloud_tracker,
         "fleet_routing": fleet_routing,
@@ -882,6 +910,17 @@ def _outcome_ratchet_line(ratchet: object) -> str:
     )
 
 
+def _brief_section_failed(payload: dict[str, Any], label: str) -> bool:
+    """True when the brief recorded a non-ok check for ``label``."""
+    checks = payload.get("status_section_checks")
+    if not isinstance(checks, list):
+        return False
+    name = f"work_brief_section:{label}"
+    return any(
+        isinstance(check, dict) and check.get("name") == name and check.get("status") != "ok" for check in checks
+    )
+
+
 def _outcome_proposals_line(ratchet: object) -> str:
     """Return the one-line brief summary of inbox proposals filed by the last ratchet run."""
     report = ratchet if isinstance(ratchet, dict) else {}
@@ -915,11 +954,14 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
 
     from ... import brief_sections
 
-    for line in brief_sections.render_brief_session_close_lines(mode=payload["work_mode"]["mode"]):
+    work_mode_payload = payload.get("work_mode")
+    if not isinstance(work_mode_payload, dict):
+        work_mode_payload = {"mode": "unknown", "rails": "unknown"}
+    for line in brief_sections.render_brief_session_close_lines(mode=str(work_mode_payload.get("mode") or "unknown")):
         print(line)
-    if "pin_error" in payload["work_mode"]:
-        print(f"work_mode_pin: {payload['work_mode']['pin_error']}")
-    if payload["work_mode"]["rails"] == "off":
+    if "pin_error" in work_mode_payload:
+        print(f"work_mode_pin: {work_mode_payload['pin_error']}")
+    if work_mode_payload.get("rails") == "off":
         print("safety_rails: off (pre-push content guard and secret scanning are skipped)")
     section_issues = payload.get("status_section_issue_count")
     if section_issues:
@@ -930,7 +972,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     update = payload.get("update")
     if isinstance(update, dict):
         print(f'update_available: {update.get("latest")} (installed {update.get("installed")}); run "brigade update"')
-    git = payload["git"]
+    git = payload.get("git")
     if isinstance(git, dict) and git.get("available"):
         print(f"branch: {git.get('branch')}")
         raw_dirty = git.get("dirty_files")
@@ -956,7 +998,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"{warning.get('session_id')} {' '.join(shown)}"
             )
 
-    active = payload["active_session"]
+    active = payload.get("active_session")
     if isinstance(active, dict):
         if active.get("valid"):
             print(f"active_session: {active.get('path')}")
@@ -964,10 +1006,12 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 print(f"active_session_title: {helpers._short(str(active['title']))}")
         else:
             print(f"active_session: invalid ({active.get('path')})")
+    elif _brief_section_failed(payload, "active-session"):
+        print("active_session: unavailable (section timed out or failed)")
     else:
         print("active_session: none")
 
-    latest_session = payload["latest_session"]
+    latest_session = payload.get("latest_session")
     if isinstance(latest_session, dict):
         print(f"latest_session: {latest_session.get('path')}")
         if latest_session.get("title"):
@@ -976,10 +1020,14 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"latest_session_note: {helpers._short(str(latest_session['note']))}")
         if latest_session.get("handoff"):
             print(f"latest_session_handoff: {latest_session['handoff']}")
+    elif _brief_section_failed(payload, "sessions"):
+        print("latest_session: unavailable (section timed out or failed)")
     else:
         print(f"latest_session: none ({helpers._work_root(target)})")
 
-    dogfood = payload["dogfood"]
+    dogfood = payload.get("dogfood")
+    if not isinstance(dogfood, dict):
+        dogfood = {}
     print(f"dogfood_ready: {dogfood.get('ready')}")
     if dogfood.get("error"):
         print(f"dogfood_error: {dogfood['error']}")
@@ -1029,8 +1077,12 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
         if top_outcome:
             print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")
-    print(_outcome_ratchet_line(payload.get("outcome_ratchet")))
-    print(_outcome_proposals_line(payload.get("outcome_ratchet")))
+    ratchet = payload.get("outcome_ratchet")
+    if isinstance(ratchet, dict):
+        print(_outcome_ratchet_line(ratchet))
+        print(_outcome_proposals_line(ratchet))
+    elif _brief_section_failed(payload, "outcome-ratchet"):
+        print("outcome_ratchet: unavailable (section timed out or failed)")
 
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:
@@ -1061,7 +1113,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"branch={row.get('branch') or ((row.get('artifact_refs') or {}).get('branch') if isinstance(row.get('artifact_refs'), dict) else None)}"
             )
 
-    print(f"next_source: {payload['next_source']}")
+    print(f"next_source: {payload.get('next_source')}")
     if payload.get("task_id"):
         print(f"task_id: {payload['task_id']}")
     next_task = payload.get("next_task") if isinstance(payload.get("next_task"), dict) else None
@@ -1082,8 +1134,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         labels = next_issue.get("labels")
         if isinstance(labels, list) and labels:
             print(f"issue_labels: {', '.join(str(label) for label in labels)}")
-    print(f"next: {helpers._short(str(payload['next']))}")
-    print(f"suggested_command: {payload['suggested_command']}")
+    print(f"next: {helpers._short(str(payload.get('next') or ''))}")
+    print(f"suggested_command: {payload.get('suggested_command')}")
 
     patrol = payload.get("patrol")
     if isinstance(patrol, dict):
@@ -1105,7 +1157,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 print(f"  {command}")
         print("orphaned_trap: recorded dirty count only; inspect before assuming the tree is clean")
 
-    pending = payload["pending_tasks"]
+    pending = payload.get("pending_tasks")
     if isinstance(pending, list) and pending:
         print("pending_tasks:")
         for task in pending[:5]:
@@ -1131,7 +1183,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         else:
             print("plans: significant pending tasks have plan artifacts")
 
-    pending_imports = payload["pending_imports"]
+    pending_imports = payload.get("pending_imports")
     if isinstance(pending_imports, list) and pending_imports:
         counts = payload.get("pending_import_counts")
         if isinstance(counts, dict):
@@ -1596,7 +1648,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 print(f"handoff_draft_next: {first.get('id')} {first.get('status')} {first.get('path')}")
                 print(f"handoff_draft_next_command: brigade handoff show {first.get('id')}")
 
-    recent = payload["recent_sessions"]
+    recent = payload.get("recent_sessions")
     if isinstance(recent, list) and recent:
         print("recent_sessions:")
         for item in recent:

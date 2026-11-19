@@ -132,7 +132,7 @@ def test_daily_status_includes_bounded_grokbot_cloud_summary(tmp_path, capsys, m
     # gh uses ambient credentials/config and subprocesses shared with xdist peers.
     # Discovery can exhaust center-status's deadline and yield the work-only fallback.
     # Keep real queue classification and sanitization, with an offline GitHub snapshot.
-    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target, **_kwargs: {"branches": [], "prs": []})
     _seed_ready_repo(tmp_path, capsys)
     now = datetime.now(timezone.utc)
     grokbot_jobs.enqueue(

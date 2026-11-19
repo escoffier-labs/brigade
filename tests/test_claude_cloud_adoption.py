@@ -191,7 +191,7 @@ def offline(monkeypatch):
     monkeypatch.setattr(cloud_tracker.subprocess, "run", partial(forbidden, "subprocess.run"))
     for name in ("admit_cloud", "bind_cloud", "renew_cloud", "release_cloud", "fetch_cloud"):
         monkeypatch.setattr(fleet_client, name, partial(forbidden, f"fleet_client.{name}"))
-    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target, **_kwargs: {"branches": [], "prs": []})
     from brigade import grokbot_jobs
 
     monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda target: False)

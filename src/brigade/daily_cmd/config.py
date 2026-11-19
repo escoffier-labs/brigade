@@ -68,7 +68,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
 DEFAULT_STATUS_SECTION_TIMEOUT_SECONDS = 8
 
 
-class _DailyStatusSectionTimeout(Exception):
+class _DailyStatusSectionTimeout(BaseException):
+    """Section deadline expiry.
+
+    Deliberately not an ``Exception``: providers commonly wrap their work in
+    ``except Exception`` to stay fail-open, and that would swallow a one-shot
+    SIGALRM deadline and let the section run unbounded.
+    """
+
     def __init__(self, label: str):
         super().__init__(label)
         self.label = label
@@ -518,11 +525,14 @@ def _bounded_status_call(
     *,
     timeout_seconds: float | None = None,
     check_prefix: str = "daily_status_section",
+    raise_types: tuple[type[BaseException], ...] = (),
 ) -> tuple[Any, dict[str, Any]]:
     """Run one status section under a deadline and report a warn check on expiry.
 
     ``check_prefix`` names the owning surface so ``work brief`` can reuse this
-    bound without claiming daily-status section names.
+    bound without claiming daily-status section names. ``raise_types`` names
+    failures that must propagate instead of degrading, such as a corrupt task
+    ledger that has to keep failing closed.
     """
     timeout = timeout_seconds or _status_section_timeout_seconds()
     start = time.monotonic()
@@ -532,7 +542,13 @@ def _bounded_status_call(
         # worker thread so a slow section still reports warn instead of
         # stalling the whole status run.
         return _thread_bounded_status_call(
-            label, func, fallback, timeout=timeout, start=start, check_prefix=check_prefix
+            label,
+            func,
+            fallback,
+            timeout=timeout,
+            start=start,
+            check_prefix=check_prefix,
+            raise_types=raise_types,
         )
     previous_handler = None
     previous_timer = None
@@ -551,9 +567,11 @@ def _bounded_status_call(
     except _DailyStatusSectionTimeout:
         elapsed = int((time.monotonic() - start) * 1000)
         return fallback, _status_section_check(
-            label, "warn", f"timed out after {timeout}s", elapsed, prefix=check_prefix
+            label, "warn", f"timed out after {timeout:g}s", elapsed, prefix=check_prefix
         )
     except Exception as exc:
+        if isinstance(exc, raise_types):
+            raise
         elapsed = int((time.monotonic() - start) * 1000)
         return fallback, _status_section_check(
             label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed, prefix=check_prefix
@@ -567,7 +585,14 @@ def _bounded_status_call(
 
 
 def _thread_bounded_status_call(
-    label: str, func, fallback: Any, *, timeout: float, start: float, check_prefix: str = "daily_status_section"
+    label: str,
+    func,
+    fallback: Any,
+    *,
+    timeout: float,
+    start: float,
+    check_prefix: str = "daily_status_section",
+    raise_types: tuple[type[BaseException], ...] = (),
 ) -> tuple[Any, dict[str, Any]]:
     """Run ``func`` in a worker thread and bound it with ``join(timeout)``."""
     outcomes: list[Any] = []
@@ -585,16 +610,18 @@ def _thread_bounded_status_call(
     if worker.is_alive():
         elapsed = int((time.monotonic() - start) * 1000)
         return fallback, _status_section_check(
-            label, "warn", f"timed out after {timeout}s", elapsed, prefix=check_prefix
+            label, "warn", f"timed out after {timeout:g}s", elapsed, prefix=check_prefix
         )
     if errors:
         exc = errors[0]
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise exc
+        if isinstance(exc, raise_types):
+            raise exc
         elapsed = int((time.monotonic() - start) * 1000)
         if isinstance(exc, _DailyStatusSectionTimeout):
             return fallback, _status_section_check(
-                label, "warn", f"timed out after {timeout}s", elapsed, prefix=check_prefix
+                label, "warn", f"timed out after {timeout:g}s", elapsed, prefix=check_prefix
             )
         return fallback, _status_section_check(
             label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed, prefix=check_prefix
