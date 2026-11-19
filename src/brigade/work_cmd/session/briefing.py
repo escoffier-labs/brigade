@@ -180,16 +180,29 @@ def _next_payload(target: Path) -> dict[str, Any]:
     }
 
 
-def _suggested_command(active: dict[str, Any] | None, next_text: object, source: object) -> str:
+def _suggested_command_parts(
+    active: dict[str, Any] | None, next_text: object, source: object
+) -> tuple[str, str | None]:
+    """The suggested command and the untrusted text it embeds, if it embeds one.
+
+    The text is returned beside the command because `shlex.quote` rewrites a quote,
+    so the quoted argument is not a substring of the raw text. The renderer needs
+    the raw value to decide whether the command may be printed at all.
+    """
     if active is not None:
-        return 'brigade work end --note "..." --handoff'
+        return 'brigade work end --note "..." --handoff', None
     if source == "task_ledger":
-        return "brigade work run"
+        return "brigade work run", None
     if source == "task_ledger_blocked":
-        return "brigade work ready --explain --json"
+        return "brigade work ready --explain --json", None
     if isinstance(next_text, str) and next_text.strip() and source != "default_review":
-        return f"brigade work run {shlex.quote(next_text.strip())}"
-    return "brigade work run"
+        text = next_text.strip()
+        return f"brigade work run {shlex.quote(text)}", text
+    return "brigade work run", None
+
+
+def _suggested_command(active: dict[str, Any] | None, next_text: object, source: object) -> str:
+    return _suggested_command_parts(active, next_text, source)[0]
 
 
 def _pick_fields(payload: object, fields: list[str]) -> dict[str, Any] | None:
@@ -902,11 +915,15 @@ def _outcome_ratchet_line(ratchet: object) -> str:
     return (
         f"outcome_ratchet: generated_at={brief_values.name(report.get('generated_at'))} "
         f"mode={brief_values.name(report.get('mode') or 'dry-run')} "
-        f"regression_holds={report.get('regression_holds')} ({listed}) "
-        f"ineligibility_rate={report.get('ineligibility_rate')} "
+        f"regression_holds={brief_values.name(report.get('regression_holds'))} ({listed}) "
+        f"ineligibility_rate={brief_values.name(report.get('ineligibility_rate'))} "
         f"leading={brief_values.name(report.get('leading_reason') or 'none')} "
-        f"pending_physical_actions={report.get('pending_physical_actions') or 0}"
-        + (f" stale={report['stale_physical_actions']}" if report.get("stale_physical_actions") else "")
+        f"pending_physical_actions={brief_values.name(report.get('pending_physical_actions') or 0)}"
+        + (
+            f" stale={brief_values.name(report['stale_physical_actions'])}"
+            if report.get("stale_physical_actions")
+            else ""
+        )
     )
 
 
@@ -934,9 +951,13 @@ def _outcome_proposals_line(ratchet: object) -> str:
 
 
 def _top_issue_line(label: str, issue: object) -> str:
-    """A health row's top issue: the name encoded, the detail Brigade's own text."""
+    """A health row's top issue: the name and the detail both encoded.
+
+    A detail carries exception text, a stderr summary, a blocker reason or a path,
+    so it is data even when Brigade assembled the sentence around it.
+    """
     row = issue if isinstance(issue, dict) else {}
-    return f"{label}: {brief_values.name(row.get('name'))} {helpers._short(str(row.get('detail', '')))}"
+    return f"{label}: {brief_values.name(row.get('name'))} {brief_values.text(row.get('detail'))}"
 
 
 def _next_line(payload: dict[str, Any]) -> str:
@@ -946,10 +967,42 @@ def _next_line(payload: dict[str, Any]) -> str:
     return f"next: {shown}"
 
 
+def _pin_error_line(raw: object) -> str:
+    """The pin failure: Brigade's fixed prefix readable, the exception text encoded."""
+    from ... import work_mode
+
+    error = str(raw)
+    if not error.startswith(work_mode.PIN_ERROR_PREFIX):
+        return f"work_mode_pin: {brief_values.text(error)}"
+    detail = error[len(work_mode.PIN_ERROR_PREFIX) :]
+    return f"work_mode_pin: {work_mode.PIN_ERROR_PREFIX}{brief_values.text(detail)}"
+
+
+def _pantry_line(pantry: dict[str, Any]) -> str:
+    """The pantry summary with the external role, peer and last sync encoded in place."""
+    shown = str(pantry.get("summary") or "")
+    raw_status = pantry.get("status")
+    status: dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
+    raw_reported = status.get("stdout_json")
+    reported: dict[str, Any] = raw_reported if isinstance(raw_reported, dict) else {}
+    for field in ("role", "peer", "last_sync"):
+        value = reported.get(field)
+        if isinstance(value, str) and value and not brief_values.is_plain(value):
+            shown = shown.replace(value, brief_values.name(value))
+    return f"pantry: {shown}"
+
+
 def _suggested_command_line(payload: dict[str, Any]) -> str:
-    """The suggested command, with any untrusted task text encoded where it is quoted."""
-    command = brief_values.encoded_command(payload.get("suggested_command"), payload.get("next"))
-    return f"suggested_command: {command}"
+    """The suggested command, or the withheld marker when its task text is not plain.
+
+    `shlex.quote` rewrites a quote, so an unsafe token cannot be encoded in place; a
+    task text that is not plain enough to survive quoting untouched withholds the
+    command instead. The JSON payload keeps the real command.
+    """
+    command, untrusted = _suggested_command_parts(
+        payload.get("active_session"), payload.get("next"), payload.get("next_source")
+    )
+    return f"suggested_command: {brief_values.command_text(command, untrusted)}"
 
 
 def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
@@ -962,14 +1015,23 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
 
-    if not json_output:
-        # Print the header before collecting, so an outer timeout still leaves
-        # a non-empty brief instead of a silent hang.
-        print(f"work brief: {brief_values.name(target)}", flush=True)
-    payload = _brief_payload(target, limit=limit, include_code_graph=json_output)
     if json_output:
+        payload = _brief_payload(target, limit=limit, include_code_graph=True)
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+
+    # One choke point for the text brief: every line printed here passes the stream
+    # sanitizer, so a value a call site forgot to encode still cannot start a line,
+    # hide text or reorder it. JSON is data and keeps its real values.
+    with brief_values.sanitized_stdout():
+        return _render_brief_text(target=target, limit=limit)
+
+
+def _render_brief_text(*, target: Path, limit: int) -> int:
+    # Print the header before collecting, so an outer timeout still leaves
+    # a non-empty brief instead of a silent hang.
+    print(f"work brief: {brief_values.name(target)}", flush=True)
+    payload = _brief_payload(target, limit=limit, include_code_graph=False)
 
     from ... import brief_sections
 
@@ -979,7 +1041,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     for line in brief_sections.render_brief_session_close_lines(mode=str(work_mode_payload.get("mode") or "unknown")):
         print(line)
     if "pin_error" in work_mode_payload:
-        print(f"work_mode_pin: {brief_values.text(work_mode_payload['pin_error'])}")
+        print(_pin_error_line(work_mode_payload["pin_error"]))
     if work_mode_payload.get("rails") == "off":
         print("safety_rails: off (pre-push content guard and secret scanning are skipped)")
     section_issues = payload.get("status_section_issue_count")
@@ -987,7 +1049,11 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"status_section_issues: {section_issues}")
         top_section_issue = payload.get("top_status_section_issue")
         if isinstance(top_section_issue, dict):
-            print(f"top_status_section_issue: {top_section_issue.get('name')} {top_section_issue.get('detail')}")
+            print(
+                "top_status_section_issue: "
+                f"{brief_values.code(str(top_section_issue.get('name') or ''))} "
+                f"{brief_values.text(top_section_issue.get('detail'))}"
+            )
     update = payload.get("update")
     if isinstance(update, dict):
         print(
@@ -1109,10 +1175,13 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
 
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:
-        print(f"pantry: {pantry.get('summary')}")
+        print(_pantry_line(pantry))
     notifications = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else {}
     if notifications:
-        print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
+        print(
+            f"notifications: {brief_values.name(notifications.get('status'))} "
+            f"configured={notifications.get('configured')}"
+        )
         top_notification = notifications.get("top_issue") if isinstance(notifications.get("top_issue"), dict) else None
         if top_notification:
             print(_top_issue_line("notifications_top_issue", top_notification))
@@ -1181,7 +1250,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             )
             command = row.get("suggested_command")
             if isinstance(command, str) and command.strip():
-                print(f"  {brief_values.encoded_command(command, row.get('run_id'))}")
+                print(f"  {brief_values.command_text(command, row.get('run_id'))}")
         print("orphaned_trap: recorded dirty count only; inspect before assuming the tree is clean")
 
     pending = payload.get("pending_tasks")
@@ -1347,7 +1416,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if top_memory:
             memory_issue = brief_values.name(top_memory.get("issue_type") or top_memory.get("name"))
             memory_subject = brief_values.name(top_memory["file"]) if top_memory.get("file") else ""
-            memory_subject = memory_subject or helpers._short(str(top_memory.get("detail", "")))
+            memory_subject = memory_subject or brief_values.text(top_memory.get("detail"))
             print(f"memory_care_top_issue: {memory_issue} {memory_subject}")
         raw_autofix_plan = memory_care.get("autofix_plan")
         autofix_plan: dict[str, Any] = raw_autofix_plan if isinstance(raw_autofix_plan, dict) else {}
@@ -1380,7 +1449,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(
             f"care_schedule_warning: {brief_values.name(warning.get('entry'))} "
             f"{warning.get('code')} "
-            f"fix={brief_values.encoded_command(warning.get('fix_command'), warning.get('entry'))}"
+            f"fix={brief_values.command_text(warning.get('fix_command'), warning.get('entry'))}"
         )
 
     raw_instruction_budget = payload.get("instruction_budget")
@@ -1404,10 +1473,11 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if suppression_cache and suppression_cache.get("status") != "ok":
             print(
                 "security_suppressions_cache: "
-                f"{suppression_cache.get('status')} {helpers._short(str(suppression_cache.get('detail', '')))}"
+                f"{suppression_cache.get('status')} {brief_values.text(suppression_cache.get('detail'))}"
             )
             if suppression_cache.get("next_command"):
-                print(f"security_suppressions_next_command: {suppression_cache.get('next_command')}")
+                command = brief_values.command_text(suppression_cache.get("next_command"), target)
+                print(f"security_suppressions_next_command: {command}")
         top_security = (
             security_health.get("top_finding") if isinstance(security_health.get("top_finding"), dict) else None
         )
@@ -1434,7 +1504,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 "backup_top_issue: "
                 f"{brief_values.name(top_backup.get('destination'))}/"
                 f"{brief_values.name(top_backup.get('issue_type'))} "
-                f"{helpers._short(str(top_backup.get('detail', '')))}"
+                f"{brief_values.text(top_backup.get('detail'))}"
             )
 
     raw_daily_driver = payload.get("daily_driver")
@@ -1513,7 +1583,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 "tool_top_issue: "
                 f"{brief_values.name(top_tool.get('tool_id') or 'catalog')}/"
                 f"{brief_values.name(top_tool.get('issue_type'))} "
-                f"{helpers._short(str(top_tool.get('detail', '')))}"
+                f"{brief_values.text(top_tool.get('detail'))}"
             )
         call_queue = tool_catalog.get("call_queue") if isinstance(tool_catalog.get("call_queue"), dict) else {}
         if call_queue:
@@ -1524,7 +1594,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                     "tool_call_top_issue: "
                     f"{brief_values.name(call_top.get('call_id'))} "
                     f"{brief_values.name(call_top.get('issue_type'))} "
-                    f"{helpers._short(str(call_top.get('detail', '')))}"
+                    f"{brief_values.text(call_top.get('detail'))}"
                 )
         run_history = tool_catalog.get("run_history") if isinstance(tool_catalog.get("run_history"), dict) else {}
         if run_history:
@@ -1535,7 +1605,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                     "tool_run_top_issue: "
                     f"{brief_values.name(run_top.get('run_id'))} "
                     f"{brief_values.name(run_top.get('issue_type'))} "
-                    f"{helpers._short(str(run_top.get('detail', '')))}"
+                    f"{brief_values.text(run_top.get('detail'))}"
                 )
         checkpoints = tool_catalog.get("checkpoints") if isinstance(tool_catalog.get("checkpoints"), dict) else {}
         if checkpoints:
@@ -1546,7 +1616,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                     "tool_checkpoint_top_issue: "
                     f"{brief_values.name(checkpoint_top.get('checkpoint_id'))} "
                     f"{brief_values.name(checkpoint_top.get('issue_type'))} "
-                    f"{helpers._short(str(checkpoint_top.get('detail', '')))}"
+                    f"{brief_values.text(checkpoint_top.get('detail'))}"
                 )
 
     roadmap_completion = (
@@ -1609,10 +1679,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"{brief_values.name(top_research.get('status'))}"
             )
             if top_research.get("suggested_next_command"):
-                print(
-                    f"research_handoff_command: "
-                    f"{brief_values.encoded_command(top_research.get('suggested_next_command'), top_research.get('run_id'))}"
+                command = brief_values.command_text(
+                    top_research.get("suggested_next_command"), top_research.get("run_id")
                 )
+                print(f"research_handoff_command: {command}")
 
     operator_report = payload.get("operator_report") if isinstance(payload.get("operator_report"), dict) else {}
     if operator_report:
@@ -1628,10 +1698,13 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if top_report:
             print(_top_issue_line("operator_report_top_issue", top_report))
             if top_report.get("suggested_next_command"):
-                print(
-                    f"operator_report_command: "
-                    f"{brief_values.encoded_command(top_report.get('suggested_next_command'), top_report.get('report_id'))}"
+                raw_latest = operator_report.get("latest")
+                latest: dict[str, Any] = raw_latest if isinstance(raw_latest, dict) else {}
+                report_id = latest.get("report_id")
+                command = brief_values.command_text(
+                    top_report.get("suggested_next_command"), report_id, top_report.get("report_id")
                 )
+                print(f"operator_report_command: {command}")
 
     operator_actions = payload.get("operator_actions") if isinstance(payload.get("operator_actions"), dict) else {}
     if operator_actions:
@@ -1646,10 +1719,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"{brief_values.text(top_action.get('safe_summary', ''))}"
             )
             if top_action.get("suggested_command"):
-                print(
-                    f"operator_action_command: "
-                    f"{brief_values.encoded_command(top_action.get('suggested_command'), top_action.get('action_id'))}"
-                )
+                command = brief_values.command_text(top_action.get("suggested_command"), top_action.get("action_id"))
+                print(f"operator_action_command: {command}")
 
     code_review = payload.get("code_review")
     if isinstance(code_review, dict):

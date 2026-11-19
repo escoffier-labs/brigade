@@ -49,7 +49,7 @@ def test_work_brief_degrades_a_stalled_section_within_its_deadline(tmp_path, mon
     # stalled section is reported rather than that it is the only issue.
     assert "status_section_issues: " in out
     assert "status_section_issues: 0" not in out
-    assert "work_brief_section:memory-care-health timed out after 1s" in out
+    assert "work_brief_section:memory-care-health timed\\x20out\\x20after\\x201s" in out
 
 
 @pytest.mark.parametrize("threaded", [False, True])

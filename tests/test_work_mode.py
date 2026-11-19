@@ -1094,7 +1094,7 @@ def test_brief_reports_pin_write_failure(tmp_path, monkeypatch, capsys, json_out
     if json_output:
         assert json.loads(output)["work_mode"]["pin_error"] == "unable to pin work.mode: write denied"
     else:
-        assert "work_mode_pin: unable to pin work.mode: write denied" in output
+        assert "work_mode_pin: unable to pin work.mode: write\\x20denied" in output
     assert config.config_path(target).read_bytes() == before
 
 

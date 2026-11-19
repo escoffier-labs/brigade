@@ -729,7 +729,7 @@ def test_work_brief_reports_morning_entrypoint(tmp_path, monkeypatch, capsys):
     assert "latest_run: 2026-05-26T12\\x3a10\\x3a00Z [ok]" in out
     assert "next_source: latest_dogfood_run" in out
     assert "next: Build\\x20the\\x20morning\\x20brief." in out
-    assert "suggested_command: brigade work run 'Build\\x20the\\x20morning\\x20brief.'" in out
+    assert "suggested_command: withheld (unsafe characters; see --json)" in out
     assert "recent_sessions:" in out
 
 
