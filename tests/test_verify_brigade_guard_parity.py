@@ -22,9 +22,9 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is requ
 
 # Fixture lines that must produce findings, with their counts, and lines where
 # a lookaround or a mismatched backreference must stop every match. Line 14 is
-# the recorded windows-home-path recall gap (see features/guard-parity.md).
-POSITIVE_LINES = {2: 1, 4: 1, 6: 1, 8: 2, 10: 1, 12: 1, 13: 1, 16: 1, 17: 1, 18: 1}
-NEGATIVE_LINES = (3, 5, 7, 9, 11, 14, 15, 19)
+# the windows-home-path mismatched-quote fallback fixed in #2200.
+POSITIVE_LINES = {2: 1, 4: 1, 6: 1, 8: 2, 10: 1, 12: 1, 13: 1, 14: 1, 16: 1, 17: 1, 18: 1}
+NEGATIVE_LINES = (3, 5, 7, 9, 11, 15, 19)
 RULE_IDS = [
     "example-phone-555",
     "home-path",

@@ -1,0 +1,1 @@
+- A Windows home path that opens with one quote and closes with another is now found and redacted by the content guard in both the Python and native backends, matching the `root-path` fallback (#2200).

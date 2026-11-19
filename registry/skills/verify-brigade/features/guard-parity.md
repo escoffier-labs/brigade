@@ -82,16 +82,17 @@ Proof, from the helper's output:
 - helper exit 0, `"ok": true`, `"mismatches": []`
 - `"rule_ids"` is `example-phone-555`, `home-path`, `localhost-bare`,
   `private-hostname`, `root-path`, `us-phone`, `windows-home-path`
-- `"findings"` has 11 rows
+- `"findings"` has 12 rows
 
 A drift is helper exit 3, `"ok": false`, and a `mismatches` entry per failed
 check: `scan findings` with `missing` and `unexpected` rows, `scan match`,
 `redact stdout`, `redact stdin stdout`, `redact --in-place bytes`, or
 `<call> exit code`.
 
-Observed on main `b18e6f51d`, and again on `31d5c549d`: exit 0,
-`"mismatches": []`, 11 findings. The
-goldens were pasted from that run and checked by hand against each rule.
+Observed on main `b18e6f51d`, again on `31d5c549d`, and after the #2200 fix:
+exit 0, `"mismatches": []`. The main runs had 11 findings; after #2200, line 14
+joins them for 12. Every golden was pasted from a CLI run and checked by hand
+against its rule.
 
 ### What the fixture covers
 
@@ -112,8 +113,8 @@ fragments, so this page describes the cases instead of quoting them.
 | 10 | `private-hostname` | `(?<![\w.-])` lookbehind | `.internal` host in prose | redacted |
 | 11 | `private-hostname` | lookbehind and `(?!\.[\w-])` lookahead | hyphen before; a further dotted label after | no finding |
 | 12 | `windows-home-path` | `(?P=windows_quote)` backreference | double-quoted path with spaces | redacted, quotes kept |
-| 13 | `windows-home-path` | `(?(windows_quote)...)` unquoted branch | unquoted path | redacted |
-| 14 | `windows-home-path` | `(?P=windows_quote)` backreference | opens with `"`, closes with `'` | **no finding** (see Gotchas) |
+| 13 | `windows-home-path` | unquoted branch | unquoted path | redacted |
+| 14 | `windows-home-path` | unquoted-branch fallback | opens with `"`, closes with `'` | redacted, quotes kept |
 | 15 | `windows-home-path` | `(?<![\w.-])` lookbehind | word character before the drive letter | no finding |
 | 16 | `root-path` | `(?P=root_quote)` backreference | single-quoted path with spaces | redacted, quotes kept |
 | 17 | `root-path` | unquoted alternative | unquoted path | redacted |
@@ -122,14 +123,6 @@ fragments, so this page describes the cases instead of quoting them.
 
 ## Gotchas
 
-- **Line 14 is a recall gap in the guard, recorded as observed.** A Windows
-  home path that opens with one quote character and closes with another gets
-  no finding at all, so the username in it is not redacted. The quoted branch
-  needs the same quote to close the path, and the unquoted branch is ruled out
-  by `(?<![\"'\`])` because a quote precedes the drive letter. `root-path`
-  handles the same input by falling back to its unquoted branch (line 18). The
-  golden keeps the observed miss; the drive does not fix guard rules. A fix
-  changes line 14 in the scan golden and the redact golden together.
 - Line 18 redacts the path only up to its first space and leaves the rest of
   the spaced path in the text. That follows the rule's documented
   intent, where unquoted paths stop at whitespace, but it is still a partial
