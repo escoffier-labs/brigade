@@ -16,6 +16,7 @@ from brigade import security_cmd
 from brigade import work_cmd
 from brigade.install import install_selection
 from brigade.selection import Selection
+from brigade.work_cmd import brief_values
 from brigade.work_cmd.session import briefing
 
 from tests.work_cmd_test_helpers import (
@@ -729,7 +730,8 @@ def test_work_brief_reports_morning_entrypoint(tmp_path, monkeypatch, capsys):
     assert "latest_run: 2026-05-26T12:10:00Z [ok]" in out
     assert "next_source: latest_dogfood_run" in out
     assert "next: Build the morning brief." in out
-    assert "suggested_command: brigade work run 'Build the morning brief.'" in out
+    quoted_next = brief_values.quote_argument("Build the morning brief.")
+    assert f"suggested_command: brigade work run {quoted_next}" in out
     assert "recent_sessions:" in out
 
 

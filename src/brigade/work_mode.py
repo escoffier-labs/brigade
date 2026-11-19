@@ -45,6 +45,8 @@ from .config import (
 )
 
 MODE_STRICT = "strict"
+# Fixed text around a pin failure; the exception after it is data, not text.
+PIN_ERROR_PREFIX = "unable to pin work.mode: "
 MODE_OBSERVE = "observe"
 MODE_OFF = "off"
 RAILS_STATES = ("on", "off")
@@ -156,7 +158,7 @@ def pin_explicit_mode(target: Path, *, errors: list[str] | None = None) -> str |
         os.chmod(path, permissions)
     except (OSError, ValueError) as exc:
         if errors is not None:
-            errors.append(f"unable to pin work.mode: {exc}")
+            errors.append(f"{PIN_ERROR_PREFIX}{exc}")
         return None
     return MODE_STRICT
 

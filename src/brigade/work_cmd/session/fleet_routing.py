@@ -8,6 +8,7 @@ hub prints the cache, an unconfigured fleet prints nothing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 BUDGET_SECONDS = 3.0
@@ -99,25 +100,40 @@ def fleet_routing_for_brief() -> dict[str, Any] | None:
     return result
 
 
-def print_fleet_routing(block: dict[str, Any]) -> None:
+def print_fleet_routing(block: dict[str, Any], emit: Callable[..., None] = print) -> None:
+    """Print the routing block with every hub-supplied value encoded (#2555).
+
+    A role, a seat, a lane or a note is text a hub or a cached snapshot supplies, and
+    the brief is read by a model, so each one is escaped. `emit` is the brief's own
+    line printer, so these lines pass the same sanitizer as the rest of the brief.
+    """
+    from .. import brief_values
+
     roles = block.get("roles") or {}
-    rendered = " ".join(f"{role}={seat}" for role, seat in roles.items()) or "(unset)"
-    print(f"fleet_routing: {rendered}")
-    print(f"fleet_routing_notes: {block.get('notes') or '(none)'}")
+    rendered = (
+        " ".join(f"{brief_values.name(role)}={brief_values.name(seat)}" for role, seat in roles.items()) or "(unset)"
+    )
+    emit(f"fleet_routing: {rendered}")
+    emit(f"fleet_routing_notes: {brief_values.text(block.get('notes'), max_len=200) or '(none)'}")
     disabled = block.get("disabled_seats") or []
-    print(f"fleet_disabled_seats: {', '.join(disabled) if disabled else '(none)'}")
+    emit("fleet_disabled_seats: " + (", ".join(brief_values.name(seat) for seat in disabled) if disabled else "(none)"))
     lanes = block.get("cloud_lanes") or {}
     if lanes:
-        print("fleet_cloud_lanes: " + " ".join(f"{name}={'on' if on else 'off'}" for name, on in sorted(lanes.items())))
+        emit(
+            "fleet_cloud_lanes: "
+            + " ".join(f"{brief_values.name(name)}={'on' if on else 'off'}" for name, on in sorted(lanes.items()))
+        )
     else:
-        print("fleet_cloud_lanes: unknown (hub unreachable)")
+        emit("fleet_cloud_lanes: unknown (hub unreachable)")
     source = block.get("source")
     revision = block.get("revision")
     if source == "hub":
-        print(f"fleet_routing_source: hub revision {revision}")
+        emit(f"fleet_routing_source: hub revision {brief_values.name(revision)}")
     elif source == "lkg":
-        print(
-            f"fleet_routing_source: cache revision {revision} (hub unreachable, cached {block.get('cached_at') or 'unknown'})"
+        emit(
+            "fleet_routing_source: cache revision "
+            f"{brief_values.name(revision)} (hub unreachable, cached "
+            f"{brief_values.name(block.get('cached_at') or 'unknown')})"
         )
     else:
-        print("fleet_routing_source: unavailable (hub unreachable, no cache)")
+        emit("fleet_routing_source: unavailable (hub unreachable, no cache)")
