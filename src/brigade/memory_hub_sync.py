@@ -28,9 +28,11 @@ LOG_PAGE = 500
 SAVE_EVERY_PAGES = 50
 # A push holds the state lock for its whole run, one `put` after another (each
 # up to 10s), so a pull's state writes wait it out instead of failing the pull
-# after the ordinary deadline. The lock's own deadline bounds each attempt; the
-# pull tries this many times and reports the busy lock when they are spent.
-PULL_STATE_LOCK_ATTEMPTS = 5
+# after the ordinary deadline. One deadline covers the whole wait, below the 90
+# second start timeout a sync oneshot gets; each attempt is shorter so the wait
+# is re-checked, and the busy lock is still reported when the deadline passes.
+PULL_STATE_LOCK_WAIT_SECONDS = 60.0
+PULL_STATE_LOCK_ATTEMPT_SECONDS = 30.0
 PULL_STATE_LOCK_PAUSE_SECONDS = 0.5
 # Refusals that mean "this exact write can never apply": review it as a proposal.
 CONFLICT_CODES = {
@@ -76,20 +78,33 @@ def _state_lock_pause(seconds: float) -> None:
 def _state_lock(target: Path) -> Iterator[None]:
     """`store.locked` for a pull's state writes, waiting out a concurrent push.
 
-    Each attempt keeps the lock's own deadline, so a busy lock is still
-    reported as `InboxLockTimeout` once the attempts are spent, and the pull
-    can simply be run again. The retry only covers acquiring the lock; an
-    error inside the protected write is never retried.
+    One deadline bounds the whole wait, and each attempt re-checks it, so a
+    busy lock is still reported as `InboxLockTimeout` after a bounded wait and
+    the pull can simply be run again. The retry only covers acquiring the
+    lock; an error inside the protected write is never retried.
     """
+    deadline = time.monotonic() + PULL_STATE_LOCK_WAIT_SECONDS
+    last: InboxLockTimeout | None = None
     with contextlib.ExitStack() as stack:
-        for attempt in range(1, PULL_STATE_LOCK_ATTEMPTS + 1):
-            try:
-                stack.enter_context(store.locked(target))
+        acquired = False
+        while not acquired:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            except InboxLockTimeout:
-                if attempt == PULL_STATE_LOCK_ATTEMPTS:
-                    raise
-                _state_lock_pause(PULL_STATE_LOCK_PAUSE_SECONDS)
+            try:
+                stack.enter_context(
+                    store.locked(target, deadline_seconds=min(remaining, PULL_STATE_LOCK_ATTEMPT_SECONDS))
+                )
+                acquired = True
+            except InboxLockTimeout as exc:
+                last = exc
+                pause = min(PULL_STATE_LOCK_PAUSE_SECONDS, deadline - time.monotonic())
+                if pause > 0:
+                    _state_lock_pause(pause)
+        if not acquired:
+            raise last or InboxLockTimeout(
+                f"hub state lock stayed busy for {PULL_STATE_LOCK_WAIT_SECONDS:g}s: {store.root(target) / store.LOCK}"
+            )
         yield
 
 
@@ -117,7 +132,7 @@ def forget_other_principal(target: Path, hub: str, principal: object) -> bool:
 
 def forget_hub_replica(target: Path, hub: str) -> None:
     """Discard the live replica and any rebuild pulled from `hub`. Takes the state lock."""
-    with store.locked(target):
+    with _state_lock(target):
         if store.replica(target).meta.get("hub") == hub:
             store.discard_replica(target)
         if store.building(target).meta.get("hub") == hub:

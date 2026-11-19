@@ -21,6 +21,8 @@
   `proposals/dropped/`, so its text is never lost.
 - `published.json`: the revision and epoch each published card was last
   written at, which the next `push` names as its base.
+- `refused-scopes.json`: search scopes the hub refused for a missing grant,
+  with when each is tried again, so later searches leave them out up front.
 - `lock`: held by `push` and proposal changes for their whole run, and by
   `pull` only while it changes the replica, so two writers never interleave.
 - `pull.lock`: held by `pull` for its whole run, network calls included, so
@@ -56,6 +58,7 @@ BUILDING = "replica.building"
 SPOOL = "spool"
 PROPOSALS = "proposals"
 PUBLISHED = "published.json"
+REFUSED_SCOPES = "refused-scopes.json"
 LEGACY_HEADS = "heads.json"
 _HEX = frozenset("0123456789abcdef")
 LOCK = "lock"
@@ -64,6 +67,11 @@ DROPPED = "dropped"
 IGNORE_MARKER = "*\n"
 SPOOL_CAP = 10_000
 LOCK_DEADLINE_SECONDS = 30.0
+# A search scope the hub refused stays out of later searches for this long, so a
+# revoked grant costs one refusal and the steady state is one request. After it,
+# the scope is sent again, so a re-issued grant comes back.
+REFUSED_SCOPES_TTL_SECONDS = 600.0
+REFUSED_SCOPES_MAX = 64
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 # Windows cannot open a directory to sync it.
@@ -579,3 +587,55 @@ def published(target: Path) -> dict[str, Any]:
 def save_published(target: Path, value: dict[str, Any]) -> None:
     ensure_root(target)
     write_json(root(target) / PUBLISHED, value)
+
+
+# --- refused search scopes -----------------------------------------------------------
+
+
+def refused_scopes(target: Path, *, now: float) -> dict[str, float]:
+    """Scopes the hub refused for a missing grant that are still inside their TTL, with their expiry.
+
+    Only names and expiries are kept: no card, query or grant detail. A missing
+    or unreadable file means no memory, never a failed search.
+    """
+    try:
+        value = read_json(root(target) / REFUSED_SCOPES)
+    except (OSError, ValueError):
+        return {}
+    entries = value.get("scopes") if isinstance(value, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    live: dict[str, float] = {}
+    for name, expires in entries.items():
+        if not isinstance(name, str) or isinstance(expires, bool):
+            continue
+        if isinstance(expires, (int, float)) and expires > now:
+            live[name] = float(expires)
+    return live
+
+
+def remember_refused_scopes(
+    target: Path, scopes: tuple[str, ...], *, now: float, ttl: float = REFUSED_SCOPES_TTL_SECONDS
+) -> None:
+    """Remember `scopes` as refused for `ttl`, bounded to the newest entries."""
+    expires = now + ttl
+    remembered = refused_scopes(target, now=now)
+    for name in scopes:
+        remembered[name] = expires
+    kept = dict(sorted(remembered.items(), key=lambda item: item[1], reverse=True)[:REFUSED_SCOPES_MAX])
+    ensure_root(target)
+    write_json(root(target) / REFUSED_SCOPES, {"scopes": kept})
+
+
+def forget_refused_scopes(target: Path, scopes: tuple[str, ...], *, now: float) -> None:
+    """Drop remembered refusals for scopes the hub has just answered."""
+    remembered = refused_scopes(target, now=now)
+    kept = {name: expires for name, expires in remembered.items() if name not in scopes}
+    if kept == remembered:
+        return
+    path = root(target) / REFUSED_SCOPES
+    if not kept:
+        path.unlink(missing_ok=True)
+        return
+    ensure_root(target)
+    write_json(path, {"scopes": kept})
