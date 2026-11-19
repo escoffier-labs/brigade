@@ -38,6 +38,10 @@ CONTAINMENT = frozenset({"unknown", "active", "quiescent"})
 ARTIFACT_KINDS = frozenset({"commit", "patch", "receipt", "unavailable"})
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*", re.ASCII)
 _PROVIDER_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:%~+/@=-]*", re.ASCII)
+# A pinned base revision is already public; it is the only non-digest string a
+# workspace binding carries.
+_BASE_SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
+_WORKSPACE_DIGEST_FIELDS = ("branch_digest", "path_digest", "dev_ino_digest")
 # Run-local delegation input assets are flat names derived from the task ID.
 # The name is reloadable and never carries task text.
 _NATIVE_ASSET_PATH = re.compile(r"native-input-[0-9a-f]{64}\.json", re.ASCII)
@@ -67,6 +71,10 @@ def provider_reference(value: object) -> bool:
 
 def digest(value: object) -> bool:
     return isinstance(value, str) and bool(run_events._HEX64.fullmatch(value))
+
+
+def base_sha(value: object) -> bool:
+    return isinstance(value, str) and bool(_BASE_SHA.fullmatch(value))
 
 
 def native_asset_path(value: object) -> bool:
@@ -141,6 +149,16 @@ def _validate_native_enrollment_payload(payload: Mapping[str, Any]) -> None:
         raise run_events.CanonicalizationError("invalid native enrollment reference")
 
 
+def _validate_workspace_binding_payload(payload: Mapping[str, Any]) -> None:
+    """Closed binding shape: one public base revision and three digests."""
+    if not task_id(payload["task_id"]):
+        raise run_events.CanonicalizationError("invalid task workspace binding identity")
+    if not base_sha(payload["base_sha"]):
+        raise run_events.CanonicalizationError("invalid task workspace binding base revision")
+    if any(not digest(payload[field]) for field in _WORKSPACE_DIGEST_FIELDS):
+        raise run_events.CanonicalizationError("invalid task workspace binding digest")
+
+
 def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
     """Validate exact closed task shapes, also used by envelope readers."""
     fields = TASK_FIELDS[event_type]
@@ -151,6 +169,9 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
         return
     if event_type == "task.native-enrolled":
         _validate_native_enrollment_payload(payload)
+        return
+    if event_type == "task.workspace-bound":
+        _validate_workspace_binding_payload(payload)
         return
     optional = (
         {"provider_task_id", "original_run_id", "provider_result_id", "result_id", "artifact_kind", "artifact_digest"}

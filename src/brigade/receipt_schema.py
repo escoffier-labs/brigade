@@ -56,7 +56,11 @@ SYNTHESIS_SCHEMA = "brigade.synthesis.v1"
 SYNTHESIS_SCHEMA_VERSION = 1
 
 RUN_EVENT_SCHEMA = "brigade.run_event.v1"
+# The default envelope version for every event. Version 3 is reserved for the
+# single ``task.workspace-bound`` fact so journals without per-task worktrees
+# stay readable by older binaries.
 RUN_EVENT_SCHEMA_VERSION = 2
+RUN_EVENT_WORKSPACE_SCHEMA_VERSION = 3
 
 CAUSAL_RECEIPT_SCHEMA = "brigade.causal_receipt.v1"
 CAUSAL_RECEIPT_SCHEMA_VERSION = 1

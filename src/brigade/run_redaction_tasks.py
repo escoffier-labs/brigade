@@ -9,7 +9,9 @@ from typing import Any, Sequence
 from brigade import run_checkpoint, run_events, run_journal, run_task_journal, run_tasks as tasks
 
 # Closed classifications describe state, not private correlation references.
-STRUCTURAL_FIELDS = frozenset({"status", "containment", "artifact_kind", "dispatch_attempt"})
+# ``base_sha`` is a public Git revision, and a workspace binding's payload must
+# keep it a 40-hex revision through redaction.
+STRUCTURAL_FIELDS = frozenset({"status", "containment", "artifact_kind", "dispatch_attempt", "base_sha"})
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
 _DERIVED_FIELDS = frozenset({"spec_digest", "attempt_id", "result_id"})
 
@@ -251,6 +253,10 @@ def prepare_requests(
                     launch_claim=tasks.TaskLaunchBinding(payload["seat"], payload["dispatch_attempt"]),
                     status="unknown",
                 )
+            elif event.event_type == "task.workspace-bound":
+                # Reference-only custody fact: digests map through, state is
+                # unchanged, and no derived identity is recomputed.
+                pass
             elif event.event_type == "task.observed":
                 current = states[task_id]
                 observation = tasks.TaskObservation(

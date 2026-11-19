@@ -27,12 +27,17 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION
+from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION, RUN_EVENT_WORKSPACE_SCHEMA_VERSION
 
 SCHEMA = RUN_EVENT_SCHEMA
 SCHEMA_VERSION = RUN_EVENT_SCHEMA_VERSION
 LEGACY_SCHEMA_VERSION = 1
-SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
+# Schema version 3 introduces ``task.workspace-bound`` and nothing else. It is
+# reserved for journals that record per-task batch worktrees, so an older
+# binary refuses only those journals instead of every journal written after
+# this change.
+WORKSPACE_SCHEMA_VERSION = RUN_EVENT_WORKSPACE_SCHEMA_VERSION
+SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION})
 
 MAX_LINE_BYTES = 16384
 MAX_IDEMPOTENCY_KEY_LEN = 128
@@ -196,7 +201,8 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     ),
 }
 # Durable assignment facts use closed reference-only shapes, without changing
-# existing envelope bounds or the schema version.
+# existing envelope bounds. ``task.workspace-bound`` is the one fact that is
+# written under the version 3 envelope; the rest stay readable at version 2.
 _TASK_EVENT_TYPES = frozenset(
     {
         "task.accepted",
@@ -206,6 +212,7 @@ _TASK_EVENT_TYPES = frozenset(
         "task.observed",
         "task.acknowledged",
         "task.native-enrolled",
+        "task.workspace-bound",
     }
 )
 EVENT_TYPES.update(
@@ -258,6 +265,9 @@ EVENT_TYPES.update(
         ),
         "task.accepted": frozenset({"task_id", "request_id", "seat", "payload_digest", "spec_digest"}),
         "task.attempt-prepared": frozenset({"task_id", "attempt_id"}),
+        # One per-task worktree binding. Only digests and the pinned base
+        # revision enter the journal: never the checkout path or branch text.
+        "task.workspace-bound": frozenset({"task_id", "base_sha", "branch_digest", "path_digest", "dev_ino_digest"}),
         "task.launch-claimed": frozenset({"task_id", "attempt_id", "seat", "dispatch_attempt"}),
         "task.observed": frozenset(
             {
@@ -292,7 +302,12 @@ _NATIVE_T3_EVENT_TYPES = frozenset(
         "task.native-hold-resolved",
     }
 )
-_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
+# The only event type written under schema version 3. A v3 envelope must carry
+# one of these, and every other event type keeps the v2 envelope.
+_SCHEMA_V3_EVENT_TYPES = frozenset({"task.workspace-bound"})
+_SCHEMA_V2_EVENT_TYPES = (
+    frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
+) - _SCHEMA_V3_EVENT_TYPES
 _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "approval": frozenset(
         {
@@ -469,6 +484,16 @@ def make_event_id(*, run_id: str, sequence: int, event_digest: str) -> str:
     return f"{run_id}-{sequence:06d}-{event_digest[:12]}"
 
 
+def schema_version_for_event(event_type: str) -> int:
+    """The envelope version that introduced ``event_type``.
+
+    Only ``task.workspace-bound`` advances a journal to version 3; every other
+    event type keeps the version 2 envelope so older binaries still read runs
+    that never isolated a task.
+    """
+    return WORKSPACE_SCHEMA_VERSION if event_type in _SCHEMA_V3_EVENT_TYPES else SCHEMA_VERSION
+
+
 def build_event(
     *,
     run_id: str,
@@ -509,7 +534,7 @@ def build_event(
 
     base = {
         "schema": SCHEMA,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version_for_event(event_type),
         "run_id": run_id,
         "sequence": sequence,
         "event_type": event_type,
@@ -688,7 +713,14 @@ def validate_event(env: Any) -> list[str]:
     event_type = env.get("event_type")
     if event_type not in EVENT_TYPES:
         errors.append(_bound(f"unknown event_type {event_type!r}"))
-    elif schema_version == LEGACY_SCHEMA_VERSION and event_type in _SCHEMA_V2_EVENT_TYPES:
+    elif schema_version == LEGACY_SCHEMA_VERSION and (
+        event_type in _SCHEMA_V2_EVENT_TYPES or event_type in _SCHEMA_V3_EVENT_TYPES
+    ):
+        # Version 1 predates every later fact, so it refuses all of them.
+        errors.append(_bound(f"unknown event_type {event_type!r}"))
+    elif schema_version == SCHEMA_VERSION and event_type in _SCHEMA_V3_EVENT_TYPES:
+        errors.append(_bound(f"unknown event_type {event_type!r}"))
+    elif schema_version == WORKSPACE_SCHEMA_VERSION and event_type not in _SCHEMA_V3_EVENT_TYPES:
         errors.append(_bound(f"unknown event_type {event_type!r}"))
     else:
         try:
