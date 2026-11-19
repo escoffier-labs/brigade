@@ -16,6 +16,7 @@ from . import (
     fleet_client,
     inbox_lock,
     localio,
+    run_batch_artifacts,
     run_batch_launch,
     run_batch_workspace,
     run_journal,
@@ -311,14 +312,38 @@ class BatchExecution:
         localio.write_json(path, run_receipts.worker_payload_one(result))
         run_journal._fsync_directory(self.run_dir)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        artifact_kind, artifact_digest = "receipt", digest
+        binding = self.workspaces.get(task_id)
+        if binding is not None:
+            # Collection runs inside the per-task run lock the batch holds from
+            # creation through worker exit, so nothing else can be writing the
+            # checkout while its candidate is committed and patched.
+            artifact = run_batch_artifacts.collect(
+                binding,
+                self.workspace,
+                self.run_dir,
+                execution=run_batch_artifacts.execution_state(result),
+                attempt_id=handle.attempt_id,
+            )
+            try:
+                _, artifact_digest = run_batch_artifacts.write_sidecar(self.run_dir, artifact)
+            except OSError:
+                # The terminal observation still stands on the receipt alone.
+                artifact_digest = digest
+            else:
+                run_journal._fsync_directory(self.run_dir)
+                if artifact.get("candidate_commit") is not None:
+                    # A candidate exists: the artifact is the commit, and its
+                    # digest names the sidecar that records it.
+                    artifact_kind = "commit"
         run_tasks.observe_task(
             self.run_dir,
             workspace=self.workspace,
             handle=handle,
             observation=run_tasks.TaskObservation(
                 status="completed" if result.ok else "failed",
-                artifact_kind="receipt",
-                artifact_digest=digest,
+                artifact_kind=artifact_kind,
+                artifact_digest=artifact_digest,
                 containment="quiescent",
                 provider_task_id=_reference(result.provider_task_id),
                 original_run_id=_reference(result.original_run_id),
@@ -467,12 +492,15 @@ def stored_result(
         state = states.get(task_id)
         path = run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
         refusal = refusals.get(task_id)
+        worktree = task.get("isolation") == "worktree"
+        artifact = run_batch_artifacts.summary(run_batch_artifacts.read(run_dir, task_id)) if worktree else None
         tasks[task_id] = {
             "status": state.status if state else "unknown",
             "not_run": bool(state and state.status == "queued"),
             "result_id": state.result_id if state else None,
             "result_ref": str(path.relative_to(run_dir)) if path.is_file() else None,
-            "workspace": "worktree" if task.get("isolation") == "worktree" else "shared",
+            "workspace": "worktree" if worktree else "shared",
+            "artifact": artifact,
             "refusal": {"code": refusal[0], "reason": refusal[1]} if refusal is not None else None,
         }
     return {

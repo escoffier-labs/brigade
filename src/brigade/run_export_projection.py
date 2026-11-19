@@ -34,6 +34,10 @@ BATCH_RESULT_ENTRY_SCHEMA = "brigade.run_batch_result_entry.v1"
 
 _DIGEST_RE = re.compile(r"^hmac-sha256:[0-9a-f]{64}$")
 _BATCH_RESULT_RE = re.compile(r"^batch-result-[0-9a-f]{64}\.json$")
+# Per-task batch artifacts are local-only. The patch can carry the contents of
+# untracked files a worker created, so it never enters an export or archive, and
+# the sidecar that names the candidate stays beside it (#2050).
+_LOCAL_ONLY_ARTIFACT_RE = re.compile(r"^batch-artifact-[0-9a-f]{64}\.(?:json|patch)$")
 _DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _WIN_ABS_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'`;,)]*")
 _UNC_RE = re.compile(r"\\\\[^\s\"'`;,)]*")
@@ -615,6 +619,10 @@ def _is_source_exportable_rel(rel: str) -> bool:
         return True
     if _BATCH_RESULT_RE.fullmatch(rel):
         return True
+    if _LOCAL_ONLY_ARTIFACT_RE.fullmatch(rel):
+        # A candidate patch can carry untracked file contents, so it is never
+        # exported, and its sidecar stays with it (#2050).
+        return False
     pure = PurePosixPath(rel)
     if pure.is_absolute() or ".." in pure.parts or "\\" in rel:
         return False

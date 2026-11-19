@@ -32,7 +32,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from . import proc, runguard, worktree_lease
 
@@ -63,6 +63,10 @@ _GIT_ENV_DROP = (
 )
 # A task worktree is written by a worker. Probes must not run its hooks or fsmonitor.
 _GIT_SAFE_FLAGS = ("--no-optional-locks", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}")
+# Collection commits a worker's leftovers. The identity is Brigade's own and is
+# pinned through the environment, so a caller's Git config is never consulted.
+GIT_IDENTITY_NAME = "Brigade"
+GIT_IDENTITY_EMAIL = "brigade@localhost"
 
 
 def _git_env() -> dict[str, str]:
@@ -72,11 +76,30 @@ def _git_env() -> dict[str, str]:
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_AUTHOR_NAME"] = GIT_IDENTITY_NAME
+    env["GIT_AUTHOR_EMAIL"] = GIT_IDENTITY_EMAIL
+    env["GIT_COMMITTER_NAME"] = GIT_IDENTITY_NAME
+    env["GIT_COMMITTER_EMAIL"] = GIT_IDENTITY_EMAIL
     return env
 
 
-def _git(args: list[str], *, cwd: Path, timeout: float = _GIT_TIMEOUT) -> proc.Result:
-    return proc.run(["git", *_GIT_SAFE_FLAGS, *args], cwd=cwd, timeout=timeout, env=_git_env())
+def git(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: float = _GIT_TIMEOUT,
+    stdout_file: Any = None,
+) -> proc.Result:
+    """Run one Git command against a checkout through the hardened environment.
+
+    Every Git probe or write on a task worktree goes through this runner, never
+    a plain ``git``. ``stdout_file`` streams an unbounded result (a binary
+    patch) to an already-open file instead of the bounded pipe capture.
+    """
+    argv = ["git", *_GIT_SAFE_FLAGS, *args]
+    if stdout_file is not None:
+        return proc.run_to_file(argv, stdout_file, cwd=cwd, timeout=timeout, env=_git_env())
+    return proc.run(argv, cwd=cwd, timeout=timeout, env=_git_env())
 
 
 class WorkspaceError(RuntimeError):
@@ -156,7 +179,7 @@ def registered_worktree_roots(repo_root: Path) -> list[Path]:
     """Every worktree root Git has registered for the caller's repository."""
     repo = Path(repo_root).expanduser().resolve()
     try:
-        result = _git(["worktree", "list", "--porcelain"], cwd=repo)
+        result = git(["worktree", "list", "--porcelain"], cwd=repo)
     except OSError as exc:
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "git-worktree-list") from exc
     if result.code != 0:
@@ -281,7 +304,7 @@ def create(
     check_disjoint(binding.path, repo)
     _check_identity(binding)
     try:
-        result = _git(
+        result = git(
             ["worktree", "add", "-b", binding.branch, str(binding.path), base_sha],
             cwd=repo,
             timeout=_GIT_WORKTREE_TIMEOUT,
@@ -305,7 +328,7 @@ def _lstat(path: Path) -> os.stat_result:
 
 def _git_line(checkout: Path, *args: str) -> str:
     try:
-        result = _git(list(args), cwd=checkout)
+        result = git(list(args), cwd=checkout)
     except OSError as exc:
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "git") from exc
     if result.code != 0:
@@ -321,7 +344,7 @@ def _git_state(checkout: Path, *args: str) -> str | None:
     refuse with their own reason token.
     """
     try:
-        result = _git(list(args), cwd=checkout)
+        result = git(list(args), cwd=checkout)
     except OSError as exc:
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "git") from exc
     if result.code != 0:
@@ -349,7 +372,13 @@ def _check_identity(binding: Binding) -> None:
         raise WorkspaceError(WORKSPACE_INVALID, "identity-changed")
 
 
-def validate(binding: Binding, repo_root: Path, *, pristine: bool = True) -> None:
+def validate(
+    binding: Binding,
+    repo_root: Path,
+    *,
+    pristine: bool = True,
+    allow_head_moved: bool = False,
+) -> None:
     """Refuse a worktree that is not exactly the reserved, isolated checkout.
 
     Checks, in order: a real directory (never a symlink), the reserved
@@ -358,6 +387,11 @@ def validate(binding: Binding, repo_root: Path, *, pristine: bool = True) -> Non
     bound branch, ``HEAD`` equal to the pinned base, and — when ``pristine`` —
     no tracked, untracked, or ignored files. The first mismatch raises
     ``workspace-invalid`` with a reason token and deletes nothing.
+
+    ``allow_head_moved`` keeps the bound branch requirement and drops only the
+    ``HEAD``-at-base comparison, for collection after a worker may have
+    committed on its branch. The default stays strict, so every pre-launch and
+    replay validation still requires the pinned base.
     """
     repo = Path(repo_root).expanduser().resolve()
     if not isinstance(binding, Binding):
@@ -382,7 +416,7 @@ def validate(binding: Binding, repo_root: Path, *, pristine: bool = True) -> Non
         raise WorkspaceError(WORKSPACE_INVALID, "foreign-common-dir")
     if _git_state(binding.path, "symbolic-ref", "--short", "HEAD") != binding.branch:
         raise WorkspaceError(WORKSPACE_INVALID, "branch")
-    if _git_state(binding.path, "rev-parse", "HEAD") != binding.base_sha:
+    if not allow_head_moved and _git_state(binding.path, "rev-parse", "HEAD") != binding.base_sha:
         raise WorkspaceError(WORKSPACE_INVALID, "head")
     if pristine:
         # A failed status is never read as clean.

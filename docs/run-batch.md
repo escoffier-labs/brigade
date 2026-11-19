@@ -199,6 +199,75 @@ Known limits:
 - A batch with any remote route refuses all worktree tasks
   (`isolation-remote-unsupported`).
 
+## Task artifacts
+
+Successful execution and successful artifact delivery are separate facts. A
+worker finishing says only that it finished. After every terminal worker result,
+successful or failed, and while that task's own run lock is still held,
+`brigade.run_batch_artifacts` collects what the worker left in its reserved
+checkout. A failed task's work is collected too, so it stays recoverable.
+
+Collection checks identity first: the checkout must still be the reserved one,
+on its bound `brigade/batch/...` branch, with the same toplevel and Git common
+directory. Only the `HEAD`-at-base comparison is relaxed, because the worker may
+have committed on its branch. A checkout that fails that check is recorded as
+`collection-failed` and nothing is touched.
+
+Collection then produces a candidate commit, and never deletes, resets, cleans
+or checks anything out:
+
+- If anything tracked or untracked (but not ignored) changed, collection runs
+  `git add -A` and commits with the fixed identity `Brigade <brigade@localhost>`,
+  the message "brigade batch task <task_id>", and no hooks. The identity is
+  pinned through the environment, so the caller's Git config is never used.
+  The candidate is then the checkout's `HEAD`.
+- If the worker committed and left nothing behind, its own commit is the
+  candidate.
+- If `HEAD` is still the pinned base and nothing changed, there is no candidate
+  and the delivery is `no-changes`.
+
+A candidate must descend from the pinned base (`git merge-base --is-ancestor`).
+When it does, collection writes a bounded patch, `git diff --binary <base>
+<candidate>`, so it applies to a base checkout. A candidate that does not
+descend is recorded as `base-diverged` with the commit and no patch: a diff
+against an unrelated history is not a result of this base.
+
+Ignored files are counted, not collected. They are left exactly where the worker
+put them, they are never committed, and they never appear in the patch.
+
+| Delivery | Meaning |
+| --- | --- |
+| `retained` | A candidate commit exists and is kept on the task branch |
+| `no-changes` | `HEAD` is the pinned base and nothing changed; no candidate |
+| `base-diverged` | The candidate does not descend from the pinned base; the commit is recorded, no patch is written |
+| `collection-failed` | The checkout could not be collected; a closed reason says why and nothing was changed |
+
+Each worktree task gets one sidecar, `<run_dir>/batch-artifact-<sha256 of task
+id>.json`, with the schema in
+[receipt schemas](receipt-schemas.md#brigadebatch_task_artifactv1). It records
+the execution state, the delivery, the base, the branch, the candidate
+(if any), the patch reference, digest and size, the changed-path count and the
+ignored-file count. It contains no absolute paths, file contents, or diff text.
+The patch itself is `<run_dir>/batch-artifact-<sha256 of task id>.patch`, created
+exclusively with mode `0600`.
+
+Patches are local-only. A patch can carry the contents of untracked files a
+worker created, so `batch-artifact-*` files are excluded from every
+`brigade runs export` and archive surface. Copy a patch out yourself if you need
+one, and treat it as sensitive.
+
+A patch is capped at 32 MiB. Above that, no patch file is written and the
+sidecar records `patch-oversize` as its reason; the candidate commit on the task
+branch is still the retained copy. Nothing in this path removes a checkout, a
+branch or a commit. Applying a candidate to a base and disposing of the
+checkouts are later work.
+
+The journal links the artifact: `task.observed` uses `artifact_kind="commit"`
+and the artifact sidecar's SHA-256 as `artifact_digest` when a candidate exists,
+and keeps `artifact_kind="receipt"` otherwise. The sanitized result receipt is
+written either way. `brigade runs tasks show` reports both sidecar references
+and digests.
+
 | Code | Refusal |
 | --- | --- |
 | `invalid-payload` | Wrong object shape, unknown fields, or invalid text Unicode |
@@ -338,7 +407,9 @@ JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `ru
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`,
 `result_ref` (relative to the run directory, or null), `workspace`
 (`worktree` for a task that ran in its own reserved checkout, `shared` for one
-that ran in the caller workspace), and `refusal` (`{code, reason}` for a task
+that ran in the caller workspace), `artifact` (`{delivery, candidate_commit,
+patch_ref, patch_sha256}` for a worktree task, null for a shared one), and
+`refusal` (`{code, reason}` for a task
 refused at its launch point, otherwise null). Human mode also prints each
 refusal to stderr as `task <id>: <code> (<reason>)`. Completed results persist
 as each worker finishes, as the same sanitized projection the run receipt uses

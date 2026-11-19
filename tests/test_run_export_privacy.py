@@ -161,6 +161,50 @@ def _rewrite_payload(archive: Path, rel: str, payload: dict) -> None:
     _write_json(archive / "work-run.json", manifest)
 
 
+def test_export_never_includes_batch_task_artifact_patches(tmp_path: Path):
+    """A candidate patch can carry untracked file contents, so it stays local (#2050)."""
+    workspace, run_dir = _seed_privacy_run(tmp_path)
+    digest = hashlib.sha256(b"t1").hexdigest()
+    leaked = "LEAKED-UNTRACKED-CONTENT"
+    patch = run_dir / f"batch-artifact-{digest}.patch"
+    patch.write_text(
+        "diff --git a/scratch b/scratch\nnew file mode 100644\n--- /dev/null\n+++ b/scratch\n+" + leaked + "\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        run_dir / f"batch-artifact-{digest}.json",
+        {
+            "schema": "brigade.batch_task_artifact.v1",
+            "task_id": "t1",
+            "attempt_id": "attempt-1",
+            "execution": "completed",
+            "delivery": "retained",
+            "reason": None,
+            "base_sha": "a" * 40,
+            "branch": "brigade/batch/t1-000000000000",
+            "candidate_commit": "b" * 40,
+            "patch_ref": patch.name,
+            "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+            "patch_bytes": patch.stat().st_size,
+            "changed_paths": 1,
+            "ignored_left": 0,
+        },
+    )
+
+    archive = tmp_path / "archive"
+    exported = work_run_archive.export_run(run_dir, archive)
+
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    paths = [entry["path"] for entry in manifest["files"]]
+    assert not [path for path in paths if "batch-artifact" in path]
+    assert not list(archive.rglob("batch-artifact-*"))
+    assert not (archive / "payload" / patch.name).exists()
+    assert leaked.encode() not in _archive_bytes(archive)
+    assert exported["dropped_file_count"] >= 2
+    # The run still exports, and its result receipt stays.
+    assert any(path.startswith("batch-result-") for path in paths)
+
+
 def test_export_drops_markers_paths_and_unknown_files(tmp_path: Path):
     workspace, run_dir = _seed_privacy_run(tmp_path)
     archive = tmp_path / "archive"
