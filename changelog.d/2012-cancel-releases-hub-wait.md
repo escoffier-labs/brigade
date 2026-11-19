@@ -1,0 +1,2 @@
+- Stop a cancelled `fleet_inbox` MCP call from opening new hub waits, so an abandoned call releases its hub waiter slot within one wait chunk and the next wait from the same principal is admitted instead of failing with `message_wait_capped`.
+- Honour MCP `notifications/cancelled` for running tool calls over both the stdio and loopback HTTP transports, answer the cancelled request with error `-32800`, and keep the session serving.

@@ -17,13 +17,20 @@ probe with ``server/discover``, and HTTP requests carry ``Mcp-Method`` and
 ``Mcp-Name`` headers that must match the body. Older versions keep working and
 need none of that. A station can add capabilities and JSON-RPC methods (for
 example MCP Events) through ``McpExtension`` without touching this module.
+
+Both transports honour ``notifications/cancelled``: a running call is signalled
+through ``current_cancellation()`` and answered with error ``-32800`` instead of
+a result, so a station's long wait can stop opening new work for a caller that
+has gone away.
 """
 
 from __future__ import annotations
 
+import contextvars
 import hmac
 import json
 import os
+import queue
 import signal
 import socket
 import sys
@@ -46,6 +53,11 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2026-0
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 STATELESS_PROTOCOL_VERSION = "2026-07-28"
 HEADER_MISMATCH_CODE = -32020
+# MCP cancellation: a cancelled request may be answered with this error instead of a result.
+CANCELLED_ERROR_CODE = -32800
+CANCELLED_ERROR_MESSAGE = "request cancelled"
+# The one notification the transports deliver on its own; everything else id-less is dropped.
+CANCELLED_NOTIFICATION = "notifications/cancelled"
 # Stateless requests carry their protocol version per request in params._meta.
 PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 RESULT_TYPE_COMPLETE = "complete"
@@ -100,6 +112,102 @@ def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, sort_keys=True), flush=True)
 
 
+def _request_key(request_id: object) -> tuple[str, object] | None:
+    """Return a hashable key for a JSON-RPC id, or None when the id cannot be matched."""
+    if isinstance(request_id, bool):
+        return None
+    if isinstance(request_id, (int, float)):
+        return ("number", request_id)
+    if isinstance(request_id, str):
+        return ("string", request_id)
+    return None
+
+
+class RequestCancellation:
+    """Cancellation state for one in-flight request.
+
+    A tool handler that can stop early reads the token for its own request from
+    ``current_cancellation()`` and checks ``cancelled`` between units of work, or
+    waits on ``wait()`` so a backoff ends as soon as the caller cancels.
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until cancelled or ``timeout`` passes; True means cancelled."""
+        return self._event.wait(timeout)
+
+
+class CancellationRegistry:
+    """Track request ids so ``notifications/cancelled`` can reach them.
+
+    An id is held from the moment its request is accepted until the response is
+    produced, so a cancellation for an unknown or already-finished request is
+    ignored instead of reaching a later request that reuses the id. A transport
+    that queues requests registers the token when it queues the message, so a
+    cancellation that arrives while the request waits behind another call is
+    kept rather than dropped.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._inflight: dict[tuple[str, object], RequestCancellation] = {}
+
+    def begin(self, request_id: object, token: RequestCancellation | None = None) -> RequestCancellation | None:
+        """Register a request id and return its token, reusing ``token`` when given."""
+        key = _request_key(request_id)
+        if key is None:
+            return None
+        cancellation = token if token is not None else RequestCancellation()
+        with self._lock:
+            self._inflight[key] = cancellation
+        return cancellation
+
+    def finish(self, request_id: object, token: RequestCancellation | None) -> None:
+        key = _request_key(request_id)
+        if key is None or token is None:
+            return
+        with self._lock:
+            if self._inflight.get(key) is token:
+                del self._inflight[key]
+
+    def cancel(self, request_id: object) -> bool:
+        """Cancel one running request; an unknown or finished id returns False."""
+        key = _request_key(request_id)
+        if key is None:
+            return False
+        with self._lock:
+            token = self._inflight.get(key)
+        if token is None:
+            return False
+        token.cancel()
+        return True
+
+
+_CURRENT_CANCELLATION: contextvars.ContextVar[RequestCancellation | None] = contextvars.ContextVar(
+    "brigade_mcp_cancellation", default=None
+)
+
+
+def current_cancellation() -> RequestCancellation | None:
+    """Return the cancellation token of the tool call this thread is handling."""
+    return _CURRENT_CANCELLATION.get()
+
+
+def _cancelled_request_id(params: object) -> object:
+    if not isinstance(params, dict):
+        return None
+    return params.get("requestId")
+
+
 def negotiate_protocol_version(requested: object) -> str:
     """Echo a supported client protocol version, otherwise offer the newest one."""
     if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS:
@@ -144,6 +252,8 @@ def handle_message(
     call_tool: ToolCaller,
     extension: McpExtension | None = None,
     protocol_version: str | None = None,
+    registry: CancellationRegistry | None = None,
+    cancellation: RequestCancellation | None = None,
 ) -> dict[str, Any] | None:
     """Handle one decoded JSON-RPC message and return its response.
 
@@ -154,16 +264,38 @@ def handle_message(
     stdio ``initialize``); a per-request ``_meta`` version overrides it. Every
     successful result of a 2026-07-28 request gets ``resultType: "complete"``
     unless the method already set one (for example ``input_required``).
+
+    ``registry`` tracks request ids so an id-less ``notifications/cancelled``
+    notification can reach the call it targets. A transport that queues a
+    request may pass the ``cancellation`` token it already registered, so a
+    cancellation received while the request waited is kept. A cancelled request
+    is answered with error ``-32800`` (request cancelled) instead of its result;
+    a cancellation for an unknown or finished id is ignored.
     """
-    reply = _dispatch_message(
-        message,
-        server_name=server_name,
-        list_resources=list_resources,
-        read_resource=read_resource,
-        list_tools=list_tools,
-        call_tool=call_tool,
-        extension=extension,
-    )
+    if registry is not None and isinstance(message, dict):
+        if "id" not in message and message.get("method") == CANCELLED_NOTIFICATION:
+            registry.cancel(_cancelled_request_id(message.get("params")))
+            return None
+        cancellation = registry.begin(message.get("id"), cancellation)
+    try:
+        reply = _dispatch_message(
+            message,
+            server_name=server_name,
+            list_resources=list_resources,
+            read_resource=read_resource,
+            list_tools=list_tools,
+            call_tool=call_tool,
+            extension=extension,
+            cancellation=cancellation,
+        )
+    finally:
+        if registry is not None and isinstance(message, dict):
+            registry.finish(message.get("id"), cancellation)
+    if reply is not None and cancellation is not None and cancellation.cancelled:
+        return response(
+            message.get("id") if isinstance(message, dict) else None,
+            error={"code": CANCELLED_ERROR_CODE, "message": CANCELLED_ERROR_MESSAGE},
+        )
     if reply is None or not isinstance(message, dict):
         return reply
     result = reply.get("result")
@@ -186,14 +318,26 @@ def _dispatch_message(
     list_tools: ToolLister,
     call_tool: ToolCaller,
     extension: McpExtension | None = None,
+    cancellation: RequestCancellation | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(message, dict):
         return response(None, error={"code": -32600, "message": "invalid request"})
     request_id = message.get("id")
     method = str(message.get("method") or "")
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
-    if request_id is None and method.startswith("notifications/"):
+    if "id" not in message:
+        # Only a notification is valid without an id. Any other id-less message is
+        # never executed: nobody can receive its result, so an id-less tools/call
+        # or extension method must not run on any transport. An explicit
+        # ``"id": null`` is present, so it is answered as on earlier releases.
+        if method.startswith("notifications/"):
+            return None
+        if not isinstance(message.get("method"), str):
+            return response(request_id, error={"code": -32600, "message": "invalid request"})
         return None
+    if cancellation is not None and cancellation.cancelled:
+        # Cancelled before it started: run nothing and answer cancelled.
+        return response(request_id, error={"code": CANCELLED_ERROR_CODE, "message": CANCELLED_ERROR_MESSAGE})
     if not isinstance(message.get("method"), str):
         return response(request_id, error={"code": -32600, "message": "invalid request"})
     capabilities: dict[str, Any] = {"resources": {}, "tools": {}, **(extension.capabilities if extension else {})}
@@ -232,7 +376,11 @@ def _dispatch_message(
     if method == "tools/call":
         name = str(params.get("name") or "")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
-        payload, failed = call_tool(name, arguments)
+        context = _CURRENT_CANCELLATION.set(cancellation)
+        try:
+            payload, failed = call_tool(name, arguments)
+        finally:
+            _CURRENT_CANCELLATION.reset(context)
         text = payload if isinstance(payload, str) else json.dumps(payload, indent=2, sort_keys=True)
         return response(request_id, result={"content": [{"type": "text", "text": text}], "isError": failed})
     if extension is not None and method in extension.methods:
@@ -249,6 +397,61 @@ def _dispatch_message(
     return response(request_id, error={"code": -32601, "message": f"method not found: {method}"})
 
 
+_STDIO_MESSAGE = "message"
+_STDIO_PARSE_ERROR = "parse_error"
+_STDIO_EOF = "eof"
+
+
+@dataclass(frozen=True)
+class _StdioItem:
+    """One queued stdin line, with the cancellation token registered when it was queued."""
+
+    kind: str
+    message: object = None
+    cancellation: RequestCancellation | None = None
+
+
+def _read_stdio(stream: Any, pending: queue.Queue[_StdioItem], registry: CancellationRegistry) -> None:
+    """Read stdin for ``serve_stdio``, signalling cancellations as they arrive.
+
+    The loop thread cannot read stdin while it runs a tool call, so this thread
+    reads ahead and hands messages over. Only an id-less
+    ``notifications/cancelled`` is handled here, because it has to reach a call
+    that is running or queued. Every other message keeps its place in the queue
+    and stays strictly sequential. A request's token is registered here, at the
+    moment it is queued, so a cancellation for a request still waiting behind
+    another call is kept instead of dropped.
+    """
+    try:
+        for line in stream:
+            if not line.strip():
+                continue
+            try:
+                request = json.loads(line)
+            except (ValueError, RecursionError):
+                # Deeply nested JSON raises RecursionError, not JSONDecodeError;
+                # either way answer a parse error instead of ending the session.
+                pending.put(_StdioItem(_STDIO_PARSE_ERROR))
+                continue
+            if isinstance(request, dict) and "id" not in request and request.get("method") == CANCELLED_NOTIFICATION:
+                registry.cancel(_cancelled_request_id(request.get("params")))
+                continue
+            # Only a message that will run as a request gets a cancellation token.
+            # Client responses and an id-bearing cancellation (answered -32601)
+            # must not take a running request's place in the registry.
+            token = (
+                registry.begin(request.get("id"))
+                if isinstance(request, dict)
+                and "id" in request
+                and isinstance(request.get("method"), str)
+                and request.get("method") != CANCELLED_NOTIFICATION
+                else None
+            )
+            pending.put(_StdioItem(_STDIO_MESSAGE, request, token))
+    finally:
+        pending.put(_StdioItem(_STDIO_EOF))
+
+
 def serve_stdio(
     *,
     server_name: str,
@@ -258,16 +461,29 @@ def serve_stdio(
     call_tool: ToolCaller,
     extension: McpExtension | None = None,
 ) -> int:
-    """Run a read-only MCP server over stdin/stdout until EOF."""
+    """Run a read-only MCP server over stdin/stdout until EOF.
+
+    Stdin is read on a helper thread so a ``notifications/cancelled``
+    notification is handled while the call it targets is still running.
+    Requests themselves stay sequential, in the order the client sent them.
+    """
+    registry = CancellationRegistry()
+    pending: queue.Queue[_StdioItem] = queue.Queue()
+    threading.Thread(
+        target=_read_stdio,
+        args=(sys.stdin, pending, registry),
+        name="brigade-mcp-stdin",
+        daemon=True,
+    ).start()
     negotiated: str | None = None
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
+    while True:
+        item = pending.get()
+        if item.kind == _STDIO_EOF:
+            break
+        if item.kind == _STDIO_PARSE_ERROR:
             _emit(response(None, error={"code": -32700, "message": "parse error"}))
             continue
+        request = item.message
         reply = handle_message(
             request,
             server_name=server_name,
@@ -277,6 +493,8 @@ def serve_stdio(
             call_tool=call_tool,
             extension=extension,
             protocol_version=negotiated,
+            registry=registry,
+            cancellation=item.cancellation,
         )
         if isinstance(request, dict) and request.get("method") == "initialize" and reply is not None:
             version = (reply.get("result") or {}).get("protocolVersion")
@@ -508,6 +726,13 @@ def _make_handler(
                     return HEADER_MISMATCH_CODE, "Mcp-Method or Mcp-Name header mismatch"
             return None
 
+        def _dispatch_one(self, message: object, protocol_version: str | None) -> dict[str, Any] | None:
+            try:
+                return handle_message(message, server_name=server_name, protocol_version=protocol_version, **callbacks)
+            except Exception:  # noqa: BLE001 - never leak internals or kill the handler thread
+                request_id = message.get("id") if isinstance(message, dict) else None
+                return response(request_id, error={"code": -32603, "message": "internal error"})
+
         def _handle_mcp_post(self, protocol_version: str | None = None) -> None:
             body = self._read_body()
             if body is None:
@@ -537,9 +762,12 @@ def _make_handler(
                 return
             replies: list[dict[str, Any]] = []
             for message in messages:
-                # Notifications (method, no id) and client responses (result or
-                # error, no method) never get a reply. A methodless object with an
-                # id that is not a response falls through to an invalid-request error.
+                # Client responses never get a reply. An id-less message is only
+                # dispatched when it is a cancellation, which has to reach the call
+                # it targets on another handler thread; every other id-less message
+                # is dropped before dispatch, so it cannot run a tool for a caller
+                # that would never see the result. A methodless object with an id
+                # that is not a response falls through to an invalid-request error.
                 if isinstance(message, dict) and message.get("jsonrpc") != "2.0":
                     # Enforced over HTTP only; stdio keeps accepting legacy clients
                     # that omit the version field.
@@ -548,15 +776,13 @@ def _make_handler(
                 if isinstance(message, dict):
                     is_notification = "id" not in message and isinstance(message.get("method"), str)
                     is_response = "method" not in message and ("result" in message or "error" in message)
-                    if is_notification or is_response:
+                    if is_response:
                         continue
-                try:
-                    reply = handle_message(
-                        message, server_name=server_name, protocol_version=protocol_version, **callbacks
-                    )
-                except Exception:  # noqa: BLE001 - never leak internals or kill the handler thread
-                    request_id = message.get("id") if isinstance(message, dict) else None
-                    reply = response(request_id, error={"code": -32603, "message": "internal error"})
+                    if is_notification:
+                        if message.get("method") == CANCELLED_NOTIFICATION:
+                            self._dispatch_one(message, protocol_version)
+                        continue
+                reply = self._dispatch_one(message, protocol_version)
                 if reply is not None:
                     replies.append(reply)
             if not replies:
@@ -626,6 +852,9 @@ def make_http_server(
             "list_tools": list_tools,
             "call_tool": call_tool,
             "extension": extension,
+            # Handler threads run concurrently, so a cancellation POST on another
+            # connection can reach the call that is still running.
+            "registry": CancellationRegistry(),
         },
     )
     return _LoopbackHTTPServer((config.host, config.port), handler, ipv6=config.host == "::1")
