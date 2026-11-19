@@ -47,6 +47,26 @@ def _sidecar_revisions(run_dir: Path, sidecar: str) -> list[Path]:
     return sorted((run_dir / "revisions" / sidecar).glob("*.json"))
 
 
+def _fake_seat_launcher(command: str) -> str:
+    """Fake resolved launcher path that the seat resolver accepts everywhere.
+
+    The Windows resolver refuses extensionless paths as unsupported npm shims
+    before dispatch (``brigade.proc._windows_executable_kind``), so the fixture
+    has to look like a native ``.exe`` there while POSIX keeps the bare name.
+    """
+    return f"C:/x/{command}.exe" if os.name == "nt" else f"/x/{command}"
+
+
+# Windows has no deliverable SIGTERM: Popen.send_signal(SIGTERM) maps to
+# TerminateProcess, so the child's terminal_sigterm_handler never runs and
+# cannot write the canceled receipt these subprocess tests assert.
+requires_posix_sigterm = pytest.mark.skipif(
+    os.name != "posix",
+    reason="deliverable SIGTERM with handler execution is POSIX-only; "
+    "on Windows Popen.send_signal(SIGTERM) terminates the process instead",
+)
+
+
 def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_path):
     results = [
         aboyeur.WorkerResult(
@@ -219,11 +239,12 @@ def _stub_grok_process(monkeypatch, *results):
     real_run = agents.proc.run
     outputs = iter(results)
     calls = []
+    grok_launcher = _fake_seat_launcher("grok")
 
     monkeypatch.setattr(run_transport.uuid, "uuid4", lambda: _GROK_SESSION_ID)
 
     def fake_run(argv, **kwargs):
-        if argv and Path(argv[0]).name == "grok":
+        if argv and Path(argv[0]) == Path(grok_launcher):
             calls.append(argv)
             if len(calls) == 1:
                 assert "--session-id" in argv
@@ -236,7 +257,7 @@ def _stub_grok_process(monkeypatch, *results):
             return next(outputs)
         return real_run(argv, **kwargs)
 
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "which", _fake_seat_launcher)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     return calls
 
@@ -3020,6 +3041,7 @@ def test_run_terminalizes_unexpected_synthesis_error_without_cli(monkeypatch, tm
     }
 
 
+@requires_posix_sigterm
 def test_direct_run_terminalizes_sigterm_in_subprocess(tmp_path):
     output_dir = tmp_path / "run"
     script = f"""
@@ -3867,13 +3889,21 @@ def test_write_sidecar_revision_fsyncs_revision_directory_before_projection_writ
 
     aboyeur.write_sidecar_revision(output_dir, "worker-results.json", {"ok": True})
 
-    assert events == [
-        "fsync:run-directory",
-        "fsync:revisions-directory",
-        "fsync:revision-file",
-        "fsync:sidecar-directory",
-        "projection-write",
-    ]
+    if os.name == "posix":
+        assert events == [
+            "fsync:run-directory",
+            "fsync:revisions-directory",
+            "fsync:revision-file",
+            "fsync:sidecar-directory",
+            "projection-write",
+        ]
+    else:
+        # Windows skips directory fsync (os.O_RDONLY on a directory is not a
+        # durable flush there); only the revision file itself is synced.
+        assert events == [
+            "fsync:revision-file",
+            "projection-write",
+        ]
 
 
 def test_write_sidecar_revision_skips_directory_fsync_off_posix(tmp_path, monkeypatch):
@@ -4934,6 +4964,7 @@ def test_handoff_escape_terminalizes_nonterminal_receipt(monkeypatch, tmp_path, 
     assert run_meta["tree_fingerprint_head"] == "f" * 40
 
 
+@requires_posix_sigterm
 def test_handoff_sigterm_terminalizes_nonterminal_receipt(tmp_path):
     output_dir = tmp_path / "run"
     script = f"""
@@ -5200,7 +5231,13 @@ def test_worker_event_writer_truncates_before_persist(tmp_path, monkeypatch):
         }
     )
     payload = (tmp_path / "cook.jsonl").read_bytes()
-    assert len(payload) <= 256 + 1
+    # The byte cap applies to the JSON payload; the file then adds exactly one
+    # line terminator, which text-mode writes emit as LF on POSIX and CRLF on
+    # Windows. Assert the cap on the line content, not on a POSIX newline width.
+    lines = payload.splitlines()
+    assert len(lines) == 1
+    assert len(lines[0]) <= 256
+    assert payload == lines[0] + os.linesep.encode()
 
 
 @pytest.mark.parametrize(
@@ -6176,7 +6213,7 @@ def test_plan_codex_orchestrator_feeds_prompt_on_stdin_for_both_transports(monke
         captured.append({"argv": list(argv), "stdin": kw.get("stdin")})
         return proc.Result(0, plan_json, "")
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/bin/" + c)
+    monkeypatch.setattr(agents.proc, "which", _fake_seat_launcher)
     monkeypatch.setattr(agents.proc, "run", fake_run)
 
     for transport in ("exec", "app-server"):
@@ -6194,7 +6231,7 @@ def test_plan_codex_orchestrator_feeds_prompt_on_stdin_for_both_transports(monke
         assert len(assignments) == 1
         assert len(captured) == 1
         call = captured[0]
-        assert call["argv"][0:2] == ["/bin/codex", "exec"]
+        assert call["argv"][0:2] == [_fake_seat_launcher("codex"), "exec"]
         assert call["argv"][-1] == "-"
         assert "-m" in call["argv"]
         assert call["argv"][call["argv"].index("-m") + 1] == "gpt-5.5"
@@ -6214,7 +6251,7 @@ def test_plan_codex_stdin_hang_names_seat_and_transport(monkeypatch):
             "workdir: /tmp\nmodel: gpt-5.5\nprovider: openai\napproval: never\n",
         )
 
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/bin/" + c)
+    monkeypatch.setattr(agents.proc, "which", _fake_seat_launcher)
     monkeypatch.setattr(agents.proc, "run", fake_run)
 
     roster = Roster(
