@@ -783,7 +783,7 @@ def _assert_archived_receipt_integrity(archived_receipt: Path) -> None:
     """Re-verify a copied receipt's self-declared digest against its archived bytes."""
     try:
         payload = json.loads(archived_receipt.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, RecursionError) as exc:
         raise OSError(f"verify archive receipt is unreadable: {archived_receipt}: {exc}") from exc
     if not isinstance(payload, dict):
         raise OSError(f"verify archive receipt is not a JSON object: {archived_receipt}")

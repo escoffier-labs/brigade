@@ -377,7 +377,7 @@ def session_directory(target: Path, *, create: bool = False) -> Iterator[Session
 def _read_json(anchor: SessionDirectory, name: str) -> dict[str, Any] | None:
     try:
         value = json.loads(anchor.read_bytes(name))
-    except (FileNotFoundError, UnicodeError, ValueError):
+    except (FileNotFoundError, UnicodeError, ValueError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -454,7 +454,7 @@ def read_states_strict(target: Path, *, modified_since: datetime | None = None, 
                 raise SessionStateUnreadable(f"session state is over {max_bytes} bytes: {name}")
             try:
                 value = json.loads(raw)
-            except (UnicodeError, ValueError) as exc:
+            except (UnicodeError, ValueError, RecursionError) as exc:
                 raise SessionStateUnreadable(f"session state is malformed: {name}") from exc
             if not isinstance(value, dict):
                 raise SessionStateUnreadable(f"session state is not an object: {name}")

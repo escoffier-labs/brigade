@@ -1,0 +1,1 @@
+- JSON nested past the parser recursion limit now reads as malformed on the hook session-state, verify receipt, scorecard, run.json and parent-manifest reads instead of raising RecursionError.

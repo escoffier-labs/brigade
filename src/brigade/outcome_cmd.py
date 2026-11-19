@@ -498,7 +498,7 @@ def _route_coverage(run_json_path: Path | None) -> str | None:
         if not isinstance(attempts, list) or not attempts:
             return None
         final = attempts[-1]
-    except (OSError, json.JSONDecodeError, AttributeError, IndexError):
+    except (OSError, json.JSONDecodeError, AttributeError, IndexError, RecursionError):
         return None
     if not isinstance(final, dict):
         return None
@@ -1185,7 +1185,7 @@ def _read_run_receipt(run_dir: Path) -> tuple[dict[str, Any] | None, Path]:
         return None, run_json
     try:
         payload = json.loads(run_json.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, RecursionError):
         return None, run_json
     if not isinstance(payload, dict):
         return None, run_json

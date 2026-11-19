@@ -55,7 +55,7 @@ def _read_last_run(target: Path, source: str) -> dict[str, Any] | None:
         return None
     try:
         data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError, ValueError):
+    except (json.JSONDecodeError, OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
