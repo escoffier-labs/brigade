@@ -292,17 +292,26 @@ def test_worktree_dry_run_refuses_a_checkout_without_a_revision(tmp_path, capsys
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "base-unavailable"
 
 
-def test_worktree_execution_is_refused_before_any_launch(tmp_path, capsys, no_models):
+def test_worktree_batch_is_accepted_and_pinned_before_run_preflight(tmp_path, capsys, no_models, monkeypatch):
+    from tests._home import set_home
+
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
     repo = tmp_path / "repo"
     repo.mkdir()
     sha = _git_checkout(repo)
     path = tmp_path / "batch.json"
     path.write_text(json.dumps(batch(task("a", isolation="worktree"))))
-    assert cli.main(["run", "batch", str(path), "--cwd", str(repo), "--json"]) == 2
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "isolation-worktree-not-implemented"
+    # No roster here, so the run stops at its own preflight. The request is still
+    # accepted with its pinned base, so a repaired roster can launch it later.
+    for _ in range(2):
+        assert cli.main(["run", "batch", str(path), "--cwd", str(repo), "--json"]) == 2
+        assert "isolation-worktree-not-implemented" not in capsys.readouterr().err
     marker = json.loads((next((repo / ".brigade" / "runs").glob("batch-*")) / "batch-request.json").read_text())
     assert marker["base_sha"] == sha
     assert marker["tasks"][0]["isolation"] == "worktree"
+    assert not (home / ".cache" / "brigade" / "worktrees").exists()
 
 
 @pytest.mark.parametrize("raw", [b'{"schema":"x","schema":"y"}', b"[" * 2000])

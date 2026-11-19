@@ -579,6 +579,8 @@ def dispatch(
     cwd: Path | None = None,
     read_only: bool = False,
     read_only_for: Callable[[Assignment], bool] | None = None,
+    cwd_for: Callable[[Assignment], Path] | None = None,
+    writable_worktree_for: Callable[[Assignment], bool] | None = None,
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     direct: bool = False,
@@ -624,6 +626,13 @@ def dispatch(
     ``read_only_for`` overrides the run-level ``read_only`` per assignment, so
     one dispatcher can enforce a mixed batch where only some tasks declared
     read-only. ``sandbox_read_only`` still wins when it is set for the run.
+
+    ``cwd_for`` and ``writable_worktree_for`` override the worker's working
+    directory and writable-worktree authorization per assignment, so an explicit
+    batch can run each isolated task in its own reserved checkout. They reach
+    only the per-worker invocation sites: cassette publication, the process
+    registry, receipts, the task journal, the budget coordinator, retained-error
+    notes and run-lock resolution keep ``cwd``, the caller workspace.
 
     ``on_scheduler_resolved`` receives the scheduler that actually ran and the
     fallback reason, so a receipt can distinguish a real DAG dispatch from a
@@ -766,6 +775,12 @@ def dispatch(
             return preflight
         # A batch task may declare read-only independently of the run-level flag.
         worker_read_only = read_only if read_only_for is None else bool(read_only_for(assignment))
+        # An isolated batch task runs in its own reserved checkout; the run-level
+        # cwd still owns cassettes, receipts, the journal and lock resolution.
+        worker_cwd = cwd if cwd_for is None else cwd_for(assignment)
+        worker_writable_worktree = (
+            authorized_writable_worktree if writable_worktree_for is None else bool(writable_worktree_for(assignment))
+        )
         prompt = build_prompt(
             agent,
             assignment,
@@ -844,7 +859,7 @@ def dispatch(
                     selected_prompt,
                     cli_ref=cli_ref,
                     model=selected_agent.model,
-                    cwd=cwd,
+                    cwd=worker_cwd,
                 )
             except fleet_session_bootstrap.PreflightDenial as exc:
                 return agents.AgentResult(
@@ -863,12 +878,12 @@ def dispatch(
                 from . import acpx_adapter
 
                 acpx_kwargs: dict[str, Any] = {
-                    "cwd": cwd or Path.cwd(),
+                    "cwd": worker_cwd or Path.cwd(),
                     "timeout": timeout_for(selected_agent, roster),
                     "model": selected_agent.model or "",
                     "version": selected_agent.transport_version or "",
                     "read_only": effective_read_only,
-                    "writable_worktree": authorized_writable_worktree,
+                    "writable_worktree": worker_writable_worktree,
                     "process_registry": seat_process_registry,
                 }
                 worker_env = _with_orchestrator_run_id(
@@ -882,7 +897,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout_for(selected_agent, roster),
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     model=selected_agent.model,
@@ -907,7 +922,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout_for(selected_agent, roster),
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     env=dict(selected_agent.env),
                     process_registry=seat_process_registry,
@@ -928,7 +943,7 @@ def dispatch(
                         events_dir,
                         selected_agent.name,
                         verbose=verbose,
-                        workspace=cwd,
+                        workspace=worker_cwd,
                         correlation_marker=approval_correlation_marker,
                     )
                 except TypeError as exc:
@@ -941,7 +956,7 @@ def dispatch(
                     selected_agent.name,
                     approval_prompt,
                     timeout=timeout_for(selected_agent, roster),
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     registry=control_registry,
@@ -975,7 +990,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     process_registry=seat_process_registry,
                     **cloud_dispatch_kwargs,
@@ -987,7 +1002,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     process_registry=seat_process_registry,
@@ -1000,7 +1015,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
@@ -1013,7 +1028,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
@@ -1026,7 +1041,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     model=selected_agent.model,
@@ -1040,7 +1055,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     reasoning=selected_agent.reasoning,
@@ -1054,7 +1069,7 @@ def dispatch(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
-                    cwd=cwd,
+                    cwd=worker_cwd,
                     read_only=effective_read_only,
                     model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
@@ -1070,7 +1085,7 @@ def dispatch(
                 cli_ref,
                 selected_prompt,
                 timeout=timeout,
-                cwd=cwd,
+                cwd=worker_cwd,
                 read_only=effective_read_only,
                 sandbox=sandbox,
                 model=selected_agent.model,

@@ -134,3 +134,37 @@ without their durable history. Refusal preserves the original recoverable bytes
 and never substitutes a different attempt.
 An interrupt observation acknowledges delivery. Task completion, execution
 quiescence, and capacity release still require their own lifecycle evidence.
+
+
+## Per-task worktrees
+
+An explicit batch task may declare `isolation: "worktree"`. Before any worker
+in that batch is submitted, and in plan order, execution reserves, creates,
+validates and records one checkout for the task, then runs that worker in it.
+Shared tasks, and everything the run itself writes, keep the caller workspace:
+cassettes, receipts, the task journal, the run budget, retained-error notes and
+caller run-lock resolution.
+
+`task.workspace-bound` records the binding as SHA-256 digests only, at run event
+schema version 3. A binding is custody of a checkout, not launch permission: the
+task stays queued and attempt-free, so the relaunch fence treats it as never
+attempted. A crash after the binding and before the attempt replays: the path is
+recomputed, the digests and checkout are re-validated, and the same checkout is
+reused. A crash after the attempt is refused by the existing fence, and no
+second checkout is prepared.
+
+Immediately before each launch the checkout is validated again with a pristine
+status, so a file added after creation refuses that task. A workspace refusal
+never deletes anything and refuses only its own task. A batch whose caller
+workspace no longer matches the pinned base is refused whole with
+`source-changed`, and one that would route through Fleet Hub is refused with
+`isolation-remote-unsupported`, both before any launch. Each task checkout holds
+its own run lock from creation through worker exit, so `brigade runs
+prune-worktrees` skips it. Task checkouts and their branches are kept after the
+run on every outcome.
+
+This separates cooperative workers. It is not a security boundary: a worker with
+full filesystem access can still reach the caller checkout by absolute path, and
+every checkout shares the repository's Git common directory. Only a `codex` seat
+on the `workspace-write` sandbox is confined to its folder. Uncommitted parent
+edits are never copied; a task starts at the pinned commit.
