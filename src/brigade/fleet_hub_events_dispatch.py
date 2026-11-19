@@ -118,8 +118,9 @@ def _round_robin(subscriptions: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
 def _materialize(conn: sqlite3.Connection, now: float) -> None:
     """Create delivery rows for new events, a bounded window per subscription and a bounded pending total.
 
-    A subscription's cursor moves only past events it was given a delivery row for (or past the end of the
-    outbox when nothing more matches), so whatever does not fit this tick waits for the next one. Capacity is
+    A subscription's cursor moves only past events it was given a delivery row for, ``claim.expired`` events it
+    skips because the lease lapsed before it subscribed, or the end of the outbox when nothing more matches, so
+    whatever does not fit this tick waits for the next one. Capacity is
     shared by principal, not by subscription: subscriptions are served round-robin across principals, each
     principal is capped, and each keeps a small reserve, so one subscriber's failing callbacks cannot fill the
     outbox and hold other principals' events back.

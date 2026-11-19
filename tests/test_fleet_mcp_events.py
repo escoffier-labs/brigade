@@ -1244,6 +1244,7 @@ def test_1967_after_expiry_release_no_delivery(stations, receiver, hub, monkeypa
     finally:
         conn.close()
     assert status == 200 and payload["released"], payload
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE name='claim.expired'") == [(1,)]
     assert tick(db, clock=lambda: state["dispatch"]) == 0
     assert receiver.events == []
 
@@ -1273,6 +1274,26 @@ def test_1967_existing_at_expiry_delivered_once(stations, receiver, hub, monkeyp
     assert tick(db, clock=lambda: state["dispatch"] + 1) == 0
     assert len(receiver.events) == 1
     assert receiver.events[0]["payload"]["name"] == "claim.expired"
+
+
+def test_1967_stale_expiry_does_not_starve_a_later_one(stations, receiver, hub, monkeypatch) -> None:
+    """A skipped expiry ahead of a deliverable one still advances the cursor, so the later one arrives."""
+    _base, _ta, _tb, db = hub
+    state = _new_clock()
+    _inject_time(monkeypatch, state)
+    state["epoch"] = state["insert"] - 30  # this lease lapses before the subscription exists
+    _claim(db, "repo-stale")
+    subscribe(stations[1], receiver.url, name="claim.expired")
+    state["epoch"] = state["insert"]  # this lease lapses after the subscription exists
+    _claim(db, "repo-fresh", holder="holder-two")
+    assert tick(db, clock=lambda: state["dispatch"]) == 1
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE name='claim.expired'") == [(2,)]
+    assert tick(db, clock=lambda: state["dispatch"] + 1) == 0
+    [delivery] = receiver.events
+    fresh = fleet_hub_events._reference(
+        SECRET, delivery["headers"]["X-MCP-Subscription-Id"], "claim-target", "repo-fresh"
+    )
+    assert delivery["payload"]["data"]["target_ref"] == fresh
 
 
 def test_1967_late_record_past_retention_delivered(stations, receiver, hub, monkeypatch) -> None:
