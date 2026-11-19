@@ -10,6 +10,53 @@ from . import memory_cmd
 from .memory_care_plan import format_block_reasons
 
 
+def _lifecycle_summary(target: Path) -> dict[str, object]:
+    """The last lifecycle stage, with its two stop conditions kept apart.
+
+    ``blocked`` means the stage did nothing. ``archive_blocked`` means only
+    archiving stopped, while stale transitions still committed.
+    """
+    from . import memory_care_tend
+    from .memory_hub_store import read_json
+
+    try:
+        state = read_json(target / memory_care_tend.STATE_REL) or {}
+        stage = state.get("stages", {}).get("lifecycle")
+    except (OSError, ValueError, AttributeError):
+        stage = None
+    if not isinstance(stage, dict):
+        return {}
+    transitions, skipped = stage.get("transitions"), stage.get("skipped")
+    return {
+        "blocked": stage.get("blocked"),
+        "archive_blocked": stage.get("archive_blocked"),
+        "error": bool(stage.get("error")),
+        "policy_adjusted": stage.get("policy_adjusted") or {},
+        "transitions": len(transitions) if isinstance(transitions, list) else 0,
+        "skipped": len(skipped) if isinstance(skipped, list) else 0,
+    }
+
+
+def _render_lifecycle(summary: dict[str, object]) -> None:
+    if not summary:
+        return
+    count = f"transitions={summary['transitions']}"
+    if summary.get("blocked"):
+        print(f"lifecycle_stage: blocked={summary['blocked']} {count}")
+    elif summary.get("archive_blocked"):
+        print(f"lifecycle_stage: archive_blocked={summary['archive_blocked']} {count}")
+    else:
+        print(f"lifecycle_stage: {count}")
+    adjusted = summary.get("policy_adjusted")
+    if isinstance(adjusted, dict) and adjusted:
+        rendered = ", ".join(
+            f"{key}={values.get('configured')}->{values.get('applied')}"
+            for key, values in sorted(adjusted.items())
+            if isinstance(values, dict)
+        )
+        print(f"lifecycle_policy_adjusted: {rendered}")
+
+
 def status(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -18,6 +65,7 @@ def status(*, target: Path, json_output: bool = False) -> int:
     from .memory_reflect_hub import care_status_payload
 
     payload = care_status_payload(target, memory_cmd.health(target))
+    payload["lifecycle"] = _lifecycle_summary(target)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["valid"] else 1
@@ -28,6 +76,7 @@ def status(*, target: Path, json_output: bool = False) -> int:
     for check in payload.get("checks", []):
         if check["name"] == "memory_lifecycle_authority":
             print(f"lifecycle: {check['detail']}")
+    _render_lifecycle(payload["lifecycle"])
     if payload.get("read_only_paths"):
         print(f"read_only_paths: {', '.join(payload['read_only_paths'])}")
     issue_count = payload["issue_count"]

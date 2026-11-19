@@ -6,9 +6,11 @@ from contextlib import contextmanager, ExitStack
 from collections.abc import Iterator
 
 import string
+import bisect
 import html
 import hashlib
 import json
+import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 import re
@@ -37,9 +39,11 @@ class InstalledSchedulesUnreadable(ValueError):
 # Match the shipped defaults. Workspace edits cannot authorize earlier edges.
 MIN_STALE_AFTER_DAYS = 30
 MIN_ARCHIVE_AFTER_DAYS = 90
+FLOORS = {"stale_after_days": MIN_STALE_AFTER_DAYS, "archive_after_days": MIN_ARCHIVE_AFTER_DAYS}
 
 
-def policy(target: Path) -> dict[str, Any]:
+def _resolve_policy(target: Path) -> tuple[dict[str, Any], dict[str, dict[str, int]]]:
+    """Effective policy values, plus the workspace values that the floors raised."""
     defaults = Path(__file__).parent / "templates/memory/lifecycle-policy.json"
     values = json.loads(defaults.read_text(encoding="utf-8"))
     path = target / ".brigade/memory-care.toml"
@@ -51,11 +55,48 @@ def policy(target: Path) -> dict[str, Any]:
         if type(value) is not type(default) or (type(value) is int and value < 1):
             raise ValueError(f"invalid lifecycle.{key}")
         values[key] = value
-    values["stale_after_days"] = max(values["stale_after_days"], MIN_STALE_AFTER_DAYS)
-    values["archive_after_days"] = max(values["archive_after_days"], MIN_ARCHIVE_AFTER_DAYS)
+    adjusted = {
+        key: {"configured": values[key], "applied": floor} for key, floor in FLOORS.items() if values[key] < floor
+    }
+    for key, floor in FLOORS.items():
+        values[key] = max(values[key], floor)
     if values["archive_after_days"] <= values["stale_after_days"]:
         raise ValueError("lifecycle archive window must exceed stale window")
-    return values
+    return values, adjusted
+
+
+def policy(target: Path) -> dict[str, Any]:
+    return _resolve_policy(target)[0]
+
+
+# Path starts are a slash preceded by a component boundary, and a "//" breaks
+# the chain of non-empty components before a name. Both are matched in one
+# pass per line, so a long line costs its own length instead of length squared.
+_PATH_START = re.compile(r"(?<![\w./-])/")
+_PATH_BREAK = re.compile(r"(?<=/)/")
+_PATH_CHAR = re.compile(r"[\w./-]")
+
+
+def _absolute_path_mentioned(text: str, name: str) -> bool:
+    """Match ``/component/.../name`` at component boundaries without backtracking."""
+    suffix = "/" + name
+    for line in text.splitlines():
+        position = line.find(suffix)
+        if position == -1:
+            continue
+        starts = [match.start() for match in _PATH_START.finditer(line)]
+        breaks = [match.start() for match in _PATH_BREAK.finditer(line)]
+        while position != -1:
+            after = position + len(suffix)
+            if after == len(line) or not _PATH_CHAR.match(line[after]):
+                index = bisect.bisect_right(starts, position)
+                start = starts[index - 1] if index else -1
+                index = bisect.bisect_right(breaks, position)
+                gap = breaks[index - 1] if index else -1
+                if start > gap:
+                    return True
+            position = line.find(suffix, position + 1)
+    return False
 
 
 def _mentioned(
@@ -73,7 +114,7 @@ def _mentioned(
         if not name:
             continue
         # Absolute runbook paths protect any component-boundary suffix.
-        if "/" in name and re.search(r"(?<![\w./-])/(?:[^\r\n/]+/)*" + re.escape(name) + r"(?![\w./-])", text):
+        if "/" in name and _absolute_path_mentioned(text, name):
             return True
         path_shaped = "/" in name or name.endswith(".md")
         endings = r"(?![\w./-])" if path_shaped else r"(?![\w/-]|\.[\w./-])"
@@ -405,8 +446,10 @@ def _card_read_lock(target: Path) -> Iterator[bool]:
 
 @journal.serialized
 def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
-    rules = policy(target)
+    rules, adjusted = _resolve_policy(target)
     payload: dict[str, Any] = {"enabled": rules["enabled"], "transitions": [], "skipped": []}
+    if adjusted:
+        payload["policy_adjusted"] = adjusted
     if not rules["enabled"]:
         return payload
     if receipt_signing.workspace_key(target) is None:
@@ -428,7 +471,8 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
     opens = memory_review._opens(target)
     hub_reads = memory_card_reads.hub_last_reads(target, unused_after_days=rules["archive_after_days"])
     if hub_reads is None:
-        payload["blocked"] = "hub read coverage unavailable"
+        # Archiving alone stops here. Stale marking still runs on local coverage.
+        payload["archive_blocked"] = "hub read coverage unavailable"
     if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
         return {**payload, "blocked": "local read coverage incomplete"}
     keys = {rel: _keys(text, rel) for rel, text in cards.items()}
@@ -460,160 +504,169 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
     digest = hashlib.sha256(json.dumps(rules, sort_keys=True).encode()).hexdigest()
     archived_cards: set[str] = set()
     for rel, text in sorted(cards.items()):
-        with _card_read_lock(target) as acquired:
-            if not acquired:
-                payload["skipped"].append({"path": rel, "reason": "local read ledger busy"})
-                continue
-            ledger = memory_card_reads.load(target)
-            if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
-                return {**payload, "blocked": "local read coverage incomplete"}
-            last_use = _last_use(
-                target, rel, text, ledger, signals, opens, hub_reads or {}, today=today, keys=keys[rel]
-            )
-            fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
-            identity = card_identity(fm, rel).card_id
-            reason = None
-            if (
-                fm.get("trust") != "agent-unreviewed"
-                or str(fm.get("author_type", "")).lower() == "human"
-                or str(fm.get("author", "")).lower() == "human"
-            ):
-                reason = "human or unknown authorship"
-            elif (
-                fm.get("pinned")
-                or memory_archive.frontmatter_refusal(text)
-                or memory_cmd._is_read_only(config, rel)
-                or rel in config.index_paths
-            ):
-                reason = "pinned or protected"
-            elif any(
-                other in external_sources
-                or (
-                    today
-                    - _last_use(
-                        target,
-                        other,
-                        cards[other],
-                        ledger,
-                        signals,
-                        opens,
-                        hub_reads or {},
-                        today=today,
-                        keys=keys[other],
-                    )
-                ).days
-                < rules["stale_after_days"]
-                for other in referenced[rel]
-                if other not in archived_cards
-            ):
-                reason = "referenced"
-            if reason:
-                payload["skipped"].append({"path": rel, "reason": reason})
-                continue
-            days = [last_use]
-            age = (today - last_use).days
-            if not memory_card_reads.covered(
-                ledger,
-                today=today,
-                days=rules["archive_after_days"] if age >= rules["archive_after_days"] else rules["stale_after_days"],
-            ):
-                payload["skipped"].append({"path": rel, "reason": "local read coverage incomplete"})
-                continue
-            state_rel = f".brigade/memory/lifecycle/{hashlib.sha256(rel.encode()).hexdigest()}.json"
-            before = journal.current(target, state_rel)
-            try:
-                saved_state = json.loads(before) if before else {"state": "active"}
-                if (
-                    not isinstance(saved_state, dict)
-                    or not isinstance(saved_state.get("state"), str)
-                    or saved_state["state"] not in {"active", "stale", "archived"}
-                ):
-                    raise ValueError("invalid lifecycle state")
-            except ValueError:
-                payload["error"] = True
-                payload["skipped"].append({"path": rel, "reason": "invalid lifecycle state"})
-                continue
-            previous = saved_state["state"]
-            desired = (
-                "archived"
-                if age >= rules["archive_after_days"]
-                else "stale"
-                if age >= rules["stale_after_days"]
-                else "active"
-            )
-            # Record both lifecycle edges for a first run after the archive window.
-            states = ["stale", "archived"] if previous == "active" and desired == "archived" else [desired]
-            for state in states:
-                if state == previous or len(payload["transitions"]) >= rules["max_transitions_per_run"]:
+        try:
+            with _card_read_lock(target) as acquired:
+                if not acquired:
+                    payload["skipped"].append({"path": rel, "reason": "local read ledger busy"})
                     continue
-                if state == "archived" and (not AUTOMATIC_ARCHIVE_ENABLED or hub_reads is None):
-                    reason = (
-                        ARCHIVE_DISABLED_REASON if not AUTOMATIC_ARCHIVE_ENABLED else "hub read coverage unavailable"
-                    )
+                ledger = memory_card_reads.load(target)
+                if not memory_card_reads.covered(ledger, today=today, days=rules["stale_after_days"]):
+                    return {**payload, "blocked": "local read coverage incomplete"}
+                last_use = _last_use(
+                    target, rel, text, ledger, signals, opens, hub_reads or {}, today=today, keys=keys[rel]
+                )
+                fm, _ = memory_cmd._parse_frontmatter(text.lstrip("\ufeff").replace("\r\n", "\n"))
+                identity = card_identity(fm, rel).card_id
+                reason = None
+                if (
+                    fm.get("trust") != "agent-unreviewed"
+                    or str(fm.get("author_type", "")).lower() == "human"
+                    or str(fm.get("author", "")).lower() == "human"
+                ):
+                    reason = "human or unknown authorship"
+                elif (
+                    fm.get("pinned")
+                    or memory_archive.frontmatter_refusal(text)
+                    or memory_cmd._is_read_only(config, rel)
+                    or rel in config.index_paths
+                ):
+                    reason = "pinned or protected"
+                elif any(
+                    other in external_sources
+                    or (
+                        today
+                        - _last_use(
+                            target,
+                            other,
+                            cards[other],
+                            ledger,
+                            signals,
+                            opens,
+                            hub_reads or {},
+                            today=today,
+                            keys=keys[other],
+                        )
+                    ).days
+                    < rules["stale_after_days"]
+                    for other in referenced[rel]
+                    if other not in archived_cards
+                ):
+                    reason = "referenced"
+                if reason:
                     payload["skipped"].append({"path": rel, "reason": reason})
-                    break
-                # Failure markers can arrive without the lock and only veto.
-                # Successful readers hold this lock until their final content read.
+                    continue
+                days = [last_use]
+                age = (today - last_use).days
                 if not memory_card_reads.covered(
-                    memory_card_reads.load(target),
+                    ledger,
                     today=today,
-                    days=rules["archive_after_days"] if state == "archived" else rules["stale_after_days"],
+                    days=rules["archive_after_days"]
+                    if age >= rules["archive_after_days"]
+                    else rules["stale_after_days"],
                 ):
                     payload["skipped"].append({"path": rel, "reason": "local read coverage incomplete"})
-                    break
-                metadata = {
-                    "actor": "policy",
-                    "policy_digest": digest,
-                    "from_state": previous,
-                    "to_state": state,
-                    "last_use": max(days).isoformat(),
-                    "card_path": rel,
-                }
-                after = (json.dumps({"state": state, "path": rel}, sort_keys=True) + "\n").encode()
-                change = journal.Change(state_rel, before, after)
-                entry = {**metadata, "decision_id": None}
-                if not dry_run:
-                    try:
-                        if state == "archived":
-                            try:
-                                decision = memory_archive.archive_card(
-                                    target,
-                                    rel,
-                                    reason="unused-card",
-                                    config=config,
-                                    policy_metadata=metadata,
-                                    state_change=change,
-                                    expected_before=text.encode("utf-8"),
-                                )
-                            except memory_archive.ArchiveRecoveryUnverified as exc:
-                                payload["error"] = True
-                                payload.setdefault("recovery_unverified", []).append(exc.decision_id)
-                                payload["skipped"].append(
-                                    {"path": rel, "reason": str(exc), "decision_id": exc.decision_id}
-                                )
-                                break
-                            except memory_archive.ArchiveRefused as exc:
-                                # A refusal leaves the card and any existing archive in place.
-                                # Skip only this card so the rest of the pass still runs.
-                                payload["skipped"].append({"path": rel, "reason": str(exc)})
-                                break
-                        else:
-                            decision = journal.commit_phased(
-                                target,
-                                kind="lifecycle",
-                                reason="unused-card",
-                                card_id=identity,
-                                changes=[change],
-                                prepared_paths=[state_rel],
-                                hub={"status": "skipped"},
-                                metadata=metadata,
-                            )
-                    except journal.kernel.ProjectionError as exc:
-                        payload["skipped"].append({"path": rel, "reason": str(exc)})
+                    continue
+                state_rel = f".brigade/memory/lifecycle/{hashlib.sha256(rel.encode()).hexdigest()}.json"
+                before = journal.current(target, state_rel)
+                try:
+                    saved_state = json.loads(before) if before else {"state": "active"}
+                    if (
+                        not isinstance(saved_state, dict)
+                        or not isinstance(saved_state.get("state"), str)
+                        or saved_state["state"] not in {"active", "stale", "archived"}
+                    ):
+                        raise ValueError("invalid lifecycle state")
+                except ValueError:
+                    payload["error"] = True
+                    payload["skipped"].append({"path": rel, "reason": "invalid lifecycle state"})
+                    continue
+                previous = saved_state["state"]
+                desired = (
+                    "archived"
+                    if age >= rules["archive_after_days"]
+                    else "stale"
+                    if age >= rules["stale_after_days"]
+                    else "active"
+                )
+                # Record both lifecycle edges for a first run after the archive window.
+                states = ["stale", "archived"] if previous == "active" and desired == "archived" else [desired]
+                for state in states:
+                    if state == previous or len(payload["transitions"]) >= rules["max_transitions_per_run"]:
+                        continue
+                    if state == "archived" and (not AUTOMATIC_ARCHIVE_ENABLED or hub_reads is None):
+                        reason = (
+                            ARCHIVE_DISABLED_REASON
+                            if not AUTOMATIC_ARCHIVE_ENABLED
+                            else "hub read coverage unavailable"
+                        )
+                        payload["skipped"].append({"path": rel, "reason": reason})
                         break
-                    if state == "archived":
-                        archived_cards.add(rel)
-                    entry["decision_id"] = decision.decision_id
-                payload["transitions"].append(entry)
-                previous, before = state, after
+                    # Failure markers can arrive without the lock and only veto.
+                    # Successful readers hold this lock until their final content read.
+                    if not memory_card_reads.covered(
+                        memory_card_reads.load(target),
+                        today=today,
+                        days=rules["archive_after_days"] if state == "archived" else rules["stale_after_days"],
+                    ):
+                        payload["skipped"].append({"path": rel, "reason": "local read coverage incomplete"})
+                        break
+                    metadata = {
+                        "actor": "policy",
+                        "policy_digest": digest,
+                        "from_state": previous,
+                        "to_state": state,
+                        "last_use": max(days).isoformat(),
+                        "card_path": rel,
+                    }
+                    after = (json.dumps({"state": state, "path": rel}, sort_keys=True) + "\n").encode()
+                    change = journal.Change(state_rel, before, after)
+                    entry = {**metadata, "decision_id": None}
+                    if not dry_run:
+                        try:
+                            if state == "archived":
+                                try:
+                                    decision = memory_archive.archive_card(
+                                        target,
+                                        rel,
+                                        reason="unused-card",
+                                        config=config,
+                                        policy_metadata=metadata,
+                                        state_change=change,
+                                        expected_before=text.encode("utf-8"),
+                                    )
+                                except memory_archive.ArchiveRecoveryUnverified as exc:
+                                    payload["error"] = True
+                                    payload.setdefault("recovery_unverified", []).append(exc.decision_id)
+                                    payload["skipped"].append(
+                                        {"path": rel, "reason": str(exc), "decision_id": exc.decision_id}
+                                    )
+                                    break
+                                except memory_archive.ArchiveRefused as exc:
+                                    # A refusal leaves the card and any existing archive in place.
+                                    # Skip only this card so the rest of the pass still runs.
+                                    payload["skipped"].append({"path": rel, "reason": str(exc)})
+                                    break
+                            else:
+                                decision = journal.commit_phased(
+                                    target,
+                                    kind="lifecycle",
+                                    reason="unused-card",
+                                    card_id=identity,
+                                    changes=[change],
+                                    prepared_paths=[state_rel],
+                                    hub={"status": "skipped"},
+                                    metadata=metadata,
+                                )
+                        except journal.kernel.ProjectionError as exc:
+                            payload["skipped"].append({"path": rel, "reason": str(exc)})
+                            break
+                        if state == "archived":
+                            archived_cards.add(rel)
+                        entry["decision_id"] = decision.decision_id
+                    payload["transitions"].append(entry)
+                    previous, before = state, after
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError, journal.kernel.ProjectionError) as exc:
+            # One card that cannot be read or committed must not hide the
+            # transitions its siblings already committed in this pass.
+            payload["skipped"].append({"path": rel, "reason": f"card unreadable: {exc}"})
     return payload
