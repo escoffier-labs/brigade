@@ -1,0 +1,1 @@
+- Retry a scanner import read once when an identity check fails just after the scanner process group is reaped, so a late write to a completed scan no longer rejects the import; every validation runs again on the retry and a genuinely missing file is still reported immediately (#2286).

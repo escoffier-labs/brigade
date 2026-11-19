@@ -1875,10 +1875,10 @@ def _scanner_validate_import_output(
         return None, [], []
     if scanner.get("import_format", "jsonl") != "jsonl":
         return import_path, [], [f"{scanner.get('id')}: import_format must be jsonl"]
-    try:
-        records, errors = _scanner_read_import_jsonl(target, scanner)
-    except (OSError, UnicodeDecodeError) as exc:
-        return import_path, [], [scanner_errors.import_read_error(scanner.get("id"), import_path, exc)]
+    result, failure = scanner_errors.read_import_settled(_scanner_read_import_jsonl, target, scanner)
+    if failure is not None:
+        return import_path, [], [scanner_errors.import_read_error(scanner.get("id"), import_path, failure)]
+    records, errors = result
     return import_path, records, [f"{scanner.get('id')}: {error}" for error in errors]
 
 
@@ -1992,7 +1992,7 @@ def _scanner_read_import_jsonl(target: Path, scanner: dict[str, Any]) -> tuple[l
         _validate_scanner_import_leaf(parent, relative.parts[-1], descriptor)
         _validate_scanner_import_directories(anchor, directories)
         if _scanner_import_identity(before) != _scanner_import_identity(after):
-            raise OSError("scanner import file changed while reading")
+            raise scanner_errors.ImportChangedDuringRead()
         raw_joined = b"".join(raw_chunks)
         _bounded_jsonl_rows(raw_joined)
         return ledger_mod._parse_import_jsonl(raw_joined.decode())

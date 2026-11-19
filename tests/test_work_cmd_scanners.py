@@ -707,6 +707,93 @@ def test_scanner_import_output_reports_distinct_read_errors(tmp_path, monkeypatc
         assert "import file not found" not in errors[0]
 
 
+def test_scanner_import_output_retries_one_transient_read_failure(tmp_path, monkeypatch):
+    """A late write after the scanner group is reaped must not fail a settled import."""
+    from brigade.work_cmd import scanner_errors, scanners as scanners_mod
+
+    calls = []
+
+    def read_once_settled(_target, _scanner):
+        calls.append(1)
+        if len(calls) == 1:
+            raise scanner_errors.ImportChangedDuringRead()
+        return [{"text": "Settled scanner import"}], []
+
+    monkeypatch.setattr(scanners_mod, "_scanner_read_import_jsonl", read_once_settled)
+
+    path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert path == tmp_path / "imports/output.jsonl"
+    assert [record["text"] for record in records] == ["Settled scanner import"]
+    assert errors == []
+    assert len(calls) == 2
+
+
+def test_scanner_import_output_reports_persistent_read_failure_after_one_retry(tmp_path, monkeypatch):
+    """All validation still runs on the retry, so a real failure is still reported."""
+    from brigade.work_cmd import scanner_errors, scanners as scanners_mod
+
+    calls = []
+
+    def always_changed(_target, _scanner):
+        calls.append(1)
+        raise scanner_errors.ImportChangedDuringRead()
+
+    monkeypatch.setattr(scanners_mod, "_scanner_read_import_jsonl", always_changed)
+
+    path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert path == tmp_path / "imports/output.jsonl"
+    assert records == []
+    assert len(calls) == 2
+    assert len(errors) == 1
+    assert errors[0].startswith(f"output-import: cannot read import file: {path}: ")
+    assert "changed while reading" in errors[0]
+
+
+def test_scanner_import_output_does_not_retry_a_missing_file(tmp_path, monkeypatch):
+    """A genuinely missing import is reported immediately, without a second read."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    calls = []
+
+    def missing(_target, _scanner):
+        calls.append(1)
+        raise FileNotFoundError("missing output")
+
+    monkeypatch.setattr(scanners_mod, "_scanner_read_import_jsonl", missing)
+
+    path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert path == tmp_path / "imports/output.jsonl"
+    assert records == []
+    assert calls == [1]
+    assert len(errors) == 1
+    assert errors[0] == f"output-import: import file not found: {path}"
+
+
+def test_scanner_import_output_does_not_retry_a_validation_failure(tmp_path, monkeypatch):
+    """A refused path component or leaf is a real rejection, not a late write."""
+    from brigade.work_cmd import scanners as scanners_mod
+
+    calls = []
+
+    def refused(_target, _scanner):
+        calls.append(1)
+        raise OSError("scanner import file no longer matches its held descriptor")
+
+    monkeypatch.setattr(scanners_mod, "_scanner_read_import_jsonl", refused)
+
+    path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
+
+    assert path == tmp_path / "imports/output.jsonl"
+    assert records == []
+    assert calls == [1]
+    assert len(errors) == 1
+    assert errors[0].startswith(f"output-import: cannot read import file: {path}: ")
+    assert "no longer matches" in errors[0]
+
+
 def test_scanner_import_output_rejects_symlinked_leaf_outside_target(tmp_path):
     outside = tmp_path.parent / f"{tmp_path.name}-outside-import.jsonl"
     outside.write_text('{"text":"Outside scanner import"}\n')
