@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import sqlite3
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -91,6 +92,25 @@ def test_readonly_board_neither_queries_nor_discloses_agent_counts(hub, agent_in
     assert "agent:fixture" not in page
     assert 'aria-label="Agents"' not in page
     assert "unread message" not in page
+
+
+def test_agent_board_count_excludes_expired_without_writing(hub, agent_inbox):
+    """The agent count filters expired rows itself on a query-only connection."""
+    _base, _token_a, _token_b, db = hub
+    _principal, message_ids = agent_inbox
+    expired_at = (datetime.now(timezone.utc) - timedelta(days=fleet_hub_messages.RETENTION_DAYS + 1)).isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE fleet_messages SET created_at=? WHERE id=?", (expired_at, message_ids[1]))
+
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA query_only=ON")
+    try:
+        assert fleet_hub_messages.agent_unread_counts(conn) == ({"agent:fixture": 1}, False)
+    finally:
+        conn.close()
+
+    with sqlite3.connect(db) as verify:
+        assert verify.execute("SELECT COUNT(*) FROM fleet_messages WHERE id=?", (message_ids[1],)).fetchone()[0] == 1
 
 
 def test_agent_projection_uses_one_grouped_unacked_index_scan(hub, agent_inbox):
