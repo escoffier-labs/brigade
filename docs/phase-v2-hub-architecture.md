@@ -580,15 +580,16 @@ handler interrupts it and the request gets 503. A queue timeout answers
 The deadline that caps a handler or credential job counts from when the caller
 queued it, so a request never waits out a queue wait and then a run window no
 one reads. The handler pool keeps at least two readers even on a single-CPU
-machine. Credential reads run on their own two-worker pool, on the same file:
-admission's one lookup per request, and the token check every native route
-repeats before it reads, in `claims`, `heartbeat`, `messages`, `registration`
-and the memory route's `Store::authenticate`. A slow status or claims read
-cannot hold a request's 2 s credential deadline, and a slow credential lookup
-cannot hold a handler read. A route read that re-checks the credential inside
-its own snapshot, such as `heartbeat`'s `GET /status` or `claims`' `inspect`,
-stays on the handler pool: it is a data read, and the check belongs to that
-snapshot.
+machine. Credential reads run on their own pool, on the same file, sized like
+the handler pool: `hub_threads()` readers (2 to 8) and the same 1,024-job queue,
+because on main they shared that capacity. Admission's one lookup per request,
+and the token check every native route repeats before it reads, in `claims`,
+`heartbeat`, `messages`, `registration` and the memory route's
+`Store::authenticate`, run there. A slow status or claims read cannot hold a
+request's 2 s credential deadline, and a slow credential lookup cannot hold a
+handler read. A route read that re-checks the credential inside its own
+snapshot, such as `heartbeat`'s `GET /status` or `claims`' `inspect`, stays on
+the handler pool: it is a data read, and the check belongs to that snapshot.
 
 The memory pool keeps the deadline policy it had before the split: its run
 budget counts from when a reader starts the job, and the caller's final wait is
@@ -607,10 +608,12 @@ job before any reader saw it.
 
 The request log's `credential_kind` names a credential only when a lookup
 finished and matched one: `node`, `principal` or `admin`. `anonymous` means the
-request presented no bearer token at all. `unchecked` means a token was
-presented but no lookup named it, whether the request was refused before the
-lookup or the lookup timed out, and it stays the label for `/health`, which
-never waits on a reader for a label.
+request presented no bearer token, or its lookup finished without a live row:
+an unknown or revoked token reads as `anonymous`, as it did on main.
+`unchecked` means a token was presented but no lookup completed for it, whether
+the request was refused before the lookup or the lookup timed out, and it stays
+the label for the health family (`/health` and `/ready`), which never waits on
+a reader for a label.
 
 Python reads pick up enrollments and revocations by opening a new connection
 per request. The Rust readers see them because every request starts a new

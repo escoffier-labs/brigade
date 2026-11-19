@@ -92,14 +92,22 @@ the per-source cap even for loopback peers.
 
 Before reading a body, Rust validates bearer digests against active node and
 message-principal rows on a dedicated query-only credential pool, never on the
-handler pool. Every native route repeats that check on the same credential pool
-before it reads: `claims`, `heartbeat`, `messages`, `registration`, and the
-memory route's `Store::authenticate`. Admin digest comparison uses constant-time
-equality. Revocation takes effect on the next lookup. A credential read's two
-seconds count from when it was queued, as a handler read's do; a memory read
-counts its two seconds from when a reader starts, so a search that queued for
-most of its limit still gets a full run window. Lookup failure returns 503
-`credential-lookup` with `Retry-After: 1`.
+handler pool. The credential pool is sized like the handler pool, with
+`hub_threads()` readers (2 to 8) and the same 1,024-job queue, so a flood of
+bearer values meets the capacity main had when both shared one pool. Every
+native route repeats that check on the same credential pool before it reads:
+`claims`, `heartbeat`, `messages`, `registration`, and the memory route's
+`Store::authenticate`. Admin digest comparison uses constant-time equality.
+Revocation takes effect on the next lookup. A credential read's two seconds
+count from when it was queued, as a handler read's do; a memory read counts its
+two seconds from when a reader starts, so a search that queued for most of its
+limit still gets a full run window. Lookup failure returns 503
+`credential-lookup` with `Retry-After: 1`. The request log labels a credential
+`node`, `principal` or `admin` only when a lookup named it; `anonymous` when no
+token was presented or the lookup found no live row, so an unknown or revoked
+token reads as `anonymous`; and `unchecked` when a token was presented but no
+lookup completed, including `/health` and `/ready`, which never wait on a
+reader for a label.
 
 Requests have separate credential, browser and anonymous budgets. Validated
 credentials admit 64 requests each and hold at most four of the 16 credential
