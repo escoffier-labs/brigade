@@ -37,6 +37,9 @@ class FakeHub:
     def __init__(self, *, fail_on_call: int | None = None, reason: str = "hub rejected batch with HTTP 422"):
         self.calls: list[list[int]] = []
         self.stored: list[int] = []
+        # Counts every accepted POST per event, so a double delivery is visible
+        # even though stored deduplicates by sequence.
+        self.delivery_counts: dict[int, int] = {}
         self.fail_on_call = fail_on_call
         self.reason = reason
 
@@ -48,8 +51,10 @@ class FakeHub:
         if any(len(e["repo"]) > 1024 for e in batch):
             raise fleet_client._PoisonResponse(self.reason)
         for event in batch:
-            if event["sequence"] not in self.stored:
-                self.stored.append(event["sequence"])
+            sequence = event["sequence"]
+            self.delivery_counts[sequence] = self.delivery_counts.get(sequence, 0) + 1
+            if sequence not in self.stored:
+                self.stored.append(sequence)
 
 
 @pytest.fixture(autouse=True)
@@ -120,10 +125,38 @@ def test_all_rejected_batch_stays_queued_with_bounded_posts(monkeypatch):
     hub = FakeHub()
     # Unfixed code bisects 20 singles: one batch post plus 2 * 19 = 39 posts.
     assert _flush(hub, monkeypatch) == 0
-    assert len(hub.calls) <= 6
+    assert len(hub.calls) <= 1 + fleet_client_flush.WHOLE_BATCH_REJECT_BUDGET
     assert hub.stored == []
     assert _sequences(path) == list(range(1, 21))
     assert _dead_letters(path) == []
+
+
+@pytest.mark.parametrize("count", [20, 100])
+def test_single_poison_at_head_is_isolated_not_blocking(monkeypatch, count):
+    """A lone poison event at index 0 must not look like a hub rejecting everything (#1846)."""
+    events = [_event(seq, poison=seq == 1) for seq in range(1, count + 1)]
+    path = _spool(events)
+    hub = FakeHub()
+    assert _flush(hub, monkeypatch) == count - 1
+    # Probe deliveries land at probe time, so compare the set; each non-poison
+    # event is accepted exactly once and in its spool position thereafter.
+    assert sorted(hub.stored) == list(range(2, count + 1))
+    assert [r["sequence"] for r in _dead_letters(path)] == [1]
+    assert not path.exists()
+    assert hub.delivery_counts == {seq: 1 for seq in range(2, count + 1)}
+
+
+@pytest.mark.parametrize("count", [20, 100])
+def test_single_poison_at_tail_is_isolated_not_blocking(monkeypatch, count):
+    """A lone poison event at the last index must still be isolated (#1846)."""
+    events = [_event(seq, poison=seq == count) for seq in range(1, count + 1)]
+    path = _spool(events)
+    hub = FakeHub()
+    assert _flush(hub, monkeypatch) == count - 1
+    assert sorted(hub.stored) == list(range(1, count))
+    assert [r["sequence"] for r in _dead_letters(path)] == [count]
+    assert not path.exists()
+    assert hub.delivery_counts == {seq: 1 for seq in range(1, count)}
 
 
 def test_mixed_batch_still_isolates_individually(monkeypatch):
@@ -136,28 +169,31 @@ def test_mixed_batch_still_isolates_individually(monkeypatch):
     assert sorted(hub.stored) == [seq for seq in range(1, 21) if seq not in bad]
     assert sorted(r["sequence"] for r in _dead_letters(path)) == list(bad)
     assert not path.exists()
+    assert hub.delivery_counts == {seq: 1 for seq in range(1, 21) if seq not in bad}
 
 
 def test_transport_failure_during_bisection_keeps_unprocessed_events(monkeypatch):
-    # Call 1 rejects [1..6]; call 2 delivers [1, 2, 3]; call 3 (the [4, 5, 6]
-    # half) fails in transit, so 4, 5 and 6 stay queued, poison included.
+    # Call 1 rejects [1..6]; call 2 probes and accepts [1]; call 3 rejects the
+    # [2..6] tail; call 4 ([2, 3, 4]) fails in transit, so 2 through 6 stay
+    # queued, poison included.
     events = [_event(seq, poison=seq == 5) for seq in range(1, 7)]
     path = _spool(events)
-    hub = FakeHub(fail_on_call=3)
-    assert _flush(hub, monkeypatch) == 3
-    assert hub.stored == [1, 2, 3]
-    assert _sequences(path) == [4, 5, 6]
+    hub = FakeHub(fail_on_call=4)
+    assert _flush(hub, monkeypatch) == 1
+    assert hub.stored == [1]
+    assert _sequences(path) == [2, 3, 4, 5, 6]
     assert _dead_letters(path) == []
 
 
 def test_transport_failure_after_isolation_keeps_dead_letter_and_suffix(monkeypatch):
-    # [1..4] rejected, [1, 2] rejected, [1] rejected (isolated), [2] fails.
+    # [1..4] rejected, probe [1] rejected (isolated), probe [2] accepted,
+    # then the [3, 4] tail fails in transit, so 3 and 4 stay queued.
     events = [_event(seq, poison=seq == 1) for seq in range(1, 5)]
     path = _spool(events)
     hub = FakeHub(fail_on_call=4)
-    assert _flush(hub, monkeypatch) == 0
-    assert hub.stored == []
-    assert _sequences(path) == [2, 3, 4]
+    assert _flush(hub, monkeypatch) == 1
+    assert hub.stored == [2]
+    assert _sequences(path) == [3, 4]
     assert [r["sequence"] for r in _dead_letters(path)] == [1]
 
 

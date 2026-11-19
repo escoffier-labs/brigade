@@ -9,11 +9,13 @@ flush and keeps every unprocessed event queued.
 
 When the hub rejects every event, for example a wrong hub URL or an older
 hub refusing a field, bisection would isolate every single event: 199 POSTs
-per 100-event batch. If the first few split posts are all rejected and no
-event has been accepted, the batch is treated as a hub fault: isolation
-stops, nothing moves to the dead letter, and the events stay queued. Once
-any event is accepted the pattern is disproven and isolation continues as
-before, so individually rejected events in a mixed batch are still isolated.
+per 100-event batch. A rejected batch is first probed with a few single
+events at spread positions. If every probe is rejected, the batch is treated
+as a hub fault: isolation stops, nothing moves to the dead letter, and the
+events stay queued. One accepted probe proves a mixed batch, so the rest is
+resolved by normal bisection. Probing spread positions, not the left-first
+bisection path, keeps a single poison event at the head of a batch from
+looking like a hub that rejects everything.
 
 Processing is strictly in order, so handled events always form a prefix of
 the spool. The dead letter is written before the spool rewrite: a crash
@@ -39,9 +41,9 @@ DEAD_LETTER_MAX_RECORDS = 200
 # Events larger than this keep their identity fields but not their body.
 DEAD_LETTER_MAX_EVENT_BYTES = 16 * 1024
 REASON_MAX_CHARS = 200
-# Consecutive rejected split posts, with no accepted event, that identify a
-# hub rejecting everything. Bounds an all-reject batch to this many bisection
-# POSTs instead of isolating every single event.
+# Number of spread single-event probes used to decide whether the hub rejects
+# everything. Bounds an all-reject batch to one batch POST plus this many
+# probe POSTs instead of isolating every single event.
 WHOLE_BATCH_REJECT_BUDGET = 4
 _monotonic = time.monotonic
 _IDENTITY_FIELDS = ("node_id", "run_id", "sequence", "digest", "ts", "state")
@@ -63,8 +65,24 @@ class _Bisection:
     delivered: int = 0
     rejected: list[tuple[dict[str, Any], str]] = field(default_factory=list)
     stopped: bool = False
-    consecutive_rejects: int = 0
-    aborted: bool = False
+
+
+def _probe_indices(size: int, budget: int) -> list[int]:
+    """Distinct spread positions in a chunk: first, last, middle, then quarter.
+
+    Sorted ascending so probes, and therefore deliveries, keep event order.
+    Small chunks yield fewer positions, never more than the budget.
+    """
+    if size <= 0 or budget <= 0:
+        return []
+    candidates = (0, size - 1, size // 2, size // 4)
+    seen: set[int] = set()
+    for position in candidates:
+        if position not in seen:
+            seen.add(position)
+            if len(seen) == budget:
+                break
+    return sorted(seen)
 
 
 def _bisect(
@@ -74,14 +92,8 @@ def _bisect(
     poison: type[Exception],
     on_delivered: Callable[[list[dict[str, Any]]], None] | None,
     result: _Bisection,
-    whole_batch_budget: int = WHOLE_BATCH_REJECT_BUDGET,
 ) -> None:
-    """Resolve a rejected ``chunk`` in order; set ``stopped`` on transport failure.
-
-    An unbroken run of rejected split posts with no accepted event sets
-    ``aborted``: the hub appears to reject everything, so the chunk is left
-    queued instead of being bisected down to singles.
-    """
+    """Resolve a rejected ``chunk`` in order; set ``stopped`` on transport failure."""
     if len(chunk) == 1:
         result.rejected.append((chunk[0], _sanitize_reason(str(error))))
         result.handled += 1
@@ -94,14 +106,7 @@ def _bisect(
         try:
             post(half)
         except poison as exc:
-            # Only the opening run matters: one accepted event proves a
-            # mixed batch, after which isolation must continue as before.
-            if result.delivered == 0:
-                result.consecutive_rejects += 1
-                if result.consecutive_rejects >= whole_batch_budget:
-                    result.aborted = True
-                    return
-            _bisect(half, exc, post, poison, on_delivered, result, whole_batch_budget)
+            _bisect(half, exc, post, poison, on_delivered, result)
         except Exception:
             result.stopped = True
         else:
@@ -109,8 +114,32 @@ def _bisect(
             result.delivered += len(half)
             if on_delivered is not None:
                 on_delivered(half)
-        if result.stopped or result.aborted:
+        if result.stopped:
             return
+
+
+def _resolve_segment(
+    segment: list[dict[str, Any]],
+    error: Exception,
+    post: Callable[[list[dict[str, Any]]], None],
+    poison: type[Exception],
+    on_delivered: Callable[[list[dict[str, Any]]], None] | None,
+    result: _Bisection,
+) -> None:
+    """Deliver a contiguous run of unprobed events, or bisect it if rejected."""
+    if not segment:
+        return
+    try:
+        post(segment)
+    except poison as exc:
+        _bisect(segment, exc, post, poison, on_delivered, result)
+    except Exception:
+        result.stopped = True
+    else:
+        result.handled += len(segment)
+        result.delivered += len(segment)
+        if on_delivered is not None:
+            on_delivered(segment)
 
 
 def _fingerprint(client: Any, event: dict[str, Any]) -> str:
@@ -171,8 +200,8 @@ def flush_locked(
     Isolation that runs out of budget stops like a transport failure, so the
     unprocessed events stay queued for the next flush. ``None`` is unbounded.
 
-    ``whole_batch_budget`` caps the opening run of rejected split posts before
-    the hub is reported as rejecting everything and the batch is left queued.
+    ``whole_batch_budget`` caps the single-event probes used to decide whether
+    the hub rejects everything. When it does, the batch is left queued.
     """
     from . import fleet_client as client
 
@@ -216,16 +245,58 @@ def flush_locked(
             if bisect_budget is not None and deadline is None:
                 deadline = _monotonic() + bisect_budget
             outcome = _Bisection()
-            _bisect(batch, exc, bisect_post, client._PoisonResponse, on_delivered, outcome, whole_batch_budget)
-            if outcome.aborted:
+            # Probe spread singles, not the left-first bisection path: a
+            # single poison event at the head would otherwise reject the
+            # first halves at every depth and look like a hub fault (#1846).
+            positions = _probe_indices(len(batch), whole_batch_budget)
+            probed: list[tuple[int, bool, str]] = []
+            every_probe_rejected = bool(positions)
+            for position in positions:
+                try:
+                    bisect_post([batch[position]])
+                except client._PoisonResponse as probe_exc:
+                    probed.append((position, False, _sanitize_reason(str(probe_exc))))
+                except Exception:
+                    outcome.stopped = True
+                    break
+                else:
+                    probed.append((position, True, ""))
+                    every_probe_rejected = False
+                    # One accepted event proves a mixed batch; the rest of
+                    # the positions are handled by normal bisection below.
+                    break
+            if outcome.stopped:
+                break
+            # A lone event cannot establish a whole-batch pattern: it is
+            # isolated or delivered by the probe itself below.
+            if every_probe_rejected and len(positions) >= 2:
                 client._LOG.warning(
-                    "fleet spool %s: hub rejects every event (first %d split(s) all rejected); "
+                    "fleet spool %s: hub rejects every event (%d probe(s) all rejected); "
                     "keeping %d event(s) queued for the next flush",
                     path,
-                    outcome.consecutive_rejects,
+                    len(probed),
                     len(events) - index,
                 )
                 break
+            # Resolve probed events and the gaps between them in event order,
+            # so accepted events are delivered once and in their spool order.
+            previous = -1
+            for position, accepted, reason in probed:
+                if outcome.stopped:
+                    break
+                _resolve_segment(
+                    batch[previous + 1 : position], exc, bisect_post, client._PoisonResponse, on_delivered, outcome
+                )
+                outcome.handled += 1
+                if accepted:
+                    outcome.delivered += 1
+                    if on_delivered is not None:
+                        on_delivered([batch[position]])
+                else:
+                    outcome.rejected.append((batch[position], reason))
+                previous = position
+            if not outcome.stopped:
+                _resolve_segment(batch[previous + 1 :], exc, bisect_post, client._PoisonResponse, on_delivered, outcome)
             index += outcome.handled
             delivered += outcome.delivered
             rejected.extend(outcome.rejected)
