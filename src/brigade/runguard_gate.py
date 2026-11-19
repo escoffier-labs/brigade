@@ -20,7 +20,20 @@ if TYPE_CHECKING:
     from .runguard import RunLockError
 
 
+_LEASE_ROOT_NAME = ".run-locks"
+
+
 def _recovery_gate_path(path: Path) -> Path:
+    """Sibling file that holds the recovery gate for the lock at ``path``.
+
+    A reserved worktree keeps its lock at ``.run-locks/<checkout>/run.lock``, and
+    that directory has to be empty once the run ends so its owner can remove it.
+    Those locks keep their gate one level up in the lease root, where it is still
+    exactly one file per lock. Everywhere else the gate sits beside the lock.
+    """
+    parent = path.parent
+    if parent.parent.name == _LEASE_ROOT_NAME:
+        return parent.parent / f".{parent.name}.{path.name}.recovery-gate"
     return path.with_name(f".{path.name}.recovery-gate")
 
 

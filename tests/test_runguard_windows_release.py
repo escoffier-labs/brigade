@@ -5,8 +5,12 @@ even a handle opened with ``FILE_SHARE_DELETE``, and waiters poll ``pid`` and
 ``owner.json`` inside the lock directory. A contended release therefore removes
 those names with POSIX-semantics delete before the directory moves.
 
-These tests drive the Windows branch from any host through a fake kernel32. The
-last one needs a real NTFS volume and is skipped everywhere else.
+Most tests here drive the Windows branch from a fake kernel32. A fake handle is
+not a real Windows handle, so those tests run off Windows only (`requires_fake_kernel32`);
+on Windows the real kernel32 is never replaced. The tests without that marker
+use the production readers and run everywhere, and the last one needs a real
+NTFS volume and is skipped elsewhere. If a Windows run reports skips in this
+file, every `requires_fake_kernel32` test and the POSIX test will be among them.
 """
 
 from __future__ import annotations
@@ -21,13 +25,18 @@ from typing import Any
 
 import pytest
 
-from brigade import nt_process, runguard, runguard_release, run_lane_state
+from brigade import nt_process, runguard, runguard_gate, runguard_release, run_lane_state
 
 FILE_DISPOSITION_INFO_EX = 21
 ERROR_ACCESS_DENIED = 5
 ERROR_INVALID_PARAMETER = 87
 ERROR_SHARING_VIOLATION = 32
 _SHARE_DELETE = nt_process.FILE_SHARE_READ | nt_process.FILE_SHARE_WRITE | nt_process.FILE_SHARE_DELETE
+
+requires_fake_kernel32 = pytest.mark.skipif(
+    os.name == "nt",
+    reason="a fake kernel32 cannot hand real handles to a real Windows release",
+)
 
 
 class _Entry:
@@ -105,6 +114,12 @@ def _windows_release(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runguard_release, "_WINDOWS", True)
 
 
+def _fake_kernel32_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real Windows opens real handles; only another host needs the stand-in."""
+    if os.name != "nt":
+        _fake_kernel32(monkeypatch, FakeKernel32())
+
+
 class _NtOs:
     """``os`` stand-in that reports nt without switching pathlib to Windows paths."""
 
@@ -157,6 +172,7 @@ def _dead_owner_lock(lock_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     return ownership
 
 
+@requires_fake_kernel32
 def test_release_deletes_the_metadata_names_before_it_renames_the_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -189,6 +205,7 @@ def test_release_deletes_the_metadata_names_before_it_renames_the_directory(
     assert not lock_path.exists()
 
 
+@requires_fake_kernel32
 def test_release_leaves_a_lock_it_no_longer_owns_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     lock_path = tmp_path / "run.lock"
     runguard._publish_lock(lock_path, run_dir=None)
@@ -202,6 +219,7 @@ def test_release_leaves_a_lock_it_no_longer_owns_alone(tmp_path: Path, monkeypat
     assert sorted(entry.name for entry in lock_path.iterdir()) == ["owner.json", "pid"]
 
 
+@requires_fake_kernel32
 def test_release_falls_back_to_the_rename_when_posix_delete_is_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -222,6 +240,7 @@ def test_release_falls_back_to_the_rename_when_posix_delete_is_unsupported(
     assert not lock_path.exists()
 
 
+@requires_fake_kernel32
 def test_delete_closes_the_handle_and_reports_a_sharing_violation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -239,6 +258,7 @@ def test_delete_closes_the_handle_and_reports_a_sharing_violation(
     assert target.exists()
 
 
+@requires_fake_kernel32
 def test_release_restores_the_metadata_it_removed_when_it_gives_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -254,10 +274,12 @@ def test_release_restores_the_metadata_it_removed_when_it_gives_up(
     with pytest.raises(PermissionError):
         _release_with_fake_clock(monkeypatch, lock_path, ownership, clock)
 
+    assert len(clock.sleeps) > 1, "a persistent denial must be retried, then reported"
     assert {name: (lock_path / name).read_bytes() for name in ("pid", "owner.json")} == published
     assert clock.now <= 1.0, "the release budget must not grow when POSIX delete is available"
 
 
+@requires_fake_kernel32
 def test_release_backoff_starts_near_a_millisecond_and_grows_to_the_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -277,6 +299,128 @@ def test_release_backoff_starts_near_a_millisecond_and_grows_to_the_budget(
     assert clock.sleeps[:-1] == sorted(clock.sleeps[:-1]), "the backoff must grow"
     assert len(clock.sleeps) > 3
     assert clock.now <= 1.0
+
+
+@requires_fake_kernel32
+def test_release_leaves_a_successor_published_during_a_retry_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry must not touch a lock another owner published while the release slept."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    fake = FakeKernel32()
+    _fake_kernel32(monkeypatch, fake)
+    _windows_release(monkeypatch)
+    original_rename = Path.rename
+    servant: list[object] = []
+    attempts = 0
+
+    def deny_once(self: Path, target: Path) -> Path:
+        if self == lock_path and attempts == 0:
+            error = PermissionError(13, "sharing violation")
+            error.winerror = ERROR_SHARING_VIOLATION
+            raise error
+        return original_rename(self, target)
+
+    def publish_successor(seconds: float) -> None:
+        nonlocal attempts
+        attempts += 1
+        original_rename(lock_path, tmp_path / "old.lock")
+        servant.append(runguard._publish_lock(lock_path, run_dir=None))
+
+    clock = _FakeClock()
+    clock.sleep = publish_successor  # type: ignore[method-assign]
+    monkeypatch.setattr(Path, "rename", deny_once)
+
+    _release_with_fake_clock(monkeypatch, lock_path, ownership, clock)
+
+    assert attempts == 1
+    assert fake.disposition_calls, "the first attempt did withhold the metadata"
+    assert len(fake.disposition_calls) == 2, "the retry must not delete the successor's metadata"
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == servant[0].owner_token
+    assert sorted(entry.name for entry in lock_path.iterdir()) == ["owner.json", "pid"]
+
+
+@requires_fake_kernel32
+def test_release_does_not_retry_a_permission_error_the_platform_did_not_mark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a Windows sharing denial is worth retrying; anything else is reported at once."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    _fake_kernel32(monkeypatch, FakeKernel32())
+    _windows_release(monkeypatch)
+    published = {name: (lock_path / name).read_bytes() for name in ("pid", "owner.json")}
+    attempts = 0
+
+    def denied(self: Path, target: Path) -> Path:
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError(13, "Permission denied")
+
+    clock = _FakeClock()
+    monkeypatch.setattr(Path, "rename", denied)
+
+    with pytest.raises(PermissionError, match="Permission denied"):
+        _release_with_fake_clock(monkeypatch, lock_path, ownership, clock)
+
+    assert attempts == 1
+    assert clock.sleeps == []
+    assert {name: (lock_path / name).read_bytes() for name in ("pid", "owner.json")} == published
+
+
+@pytest.mark.parametrize("owner_bytes", [None, b"not json"], ids=["missing", "corrupt"])
+def test_release_removes_a_lock_whose_owner_metadata_is_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_bytes: bytes | None
+) -> None:
+    """A lost or corrupt owner.json leaves the published directory as the identity."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    if owner_bytes is None:
+        (lock_path / "owner.json").unlink()
+    else:
+        (lock_path / "owner.json").write_bytes(owner_bytes)
+    _fake_kernel32_off_windows(monkeypatch)
+    _windows_release(monkeypatch)
+
+    runguard._release_lock(lock_path, ownership)
+
+    assert not lock_path.exists()
+
+
+def test_release_leaves_a_reserved_worktree_lease_directory_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lease dir must be empty after a run so its owner can remove it."""
+    lease = tmp_path / ".run-locks" / "repo-run"
+    lease.mkdir(parents=True)
+    lock_path = lease / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    _fake_kernel32_off_windows(monkeypatch)
+    _windows_release(monkeypatch)
+
+    runguard._release_lock(lock_path, ownership)
+
+    assert not lock_path.exists()
+    assert sorted(entry.name for entry in lease.iterdir()) == []
+
+
+def test_a_reserved_worktree_lock_keeps_its_gate_out_of_the_lease_directory(tmp_path: Path) -> None:
+    gate = runguard_gate._recovery_gate_path(tmp_path / ".run-locks" / "repo-run" / "run.lock")
+    assert gate == tmp_path / ".run-locks" / ".repo-run.run.lock.recovery-gate"
+    assert runguard_gate._recovery_gate_path(tmp_path / "run.lock") == tmp_path / ".run.lock.recovery-gate"
+
+
+def test_the_lease_gate_still_excludes_a_second_recoverer(tmp_path: Path) -> None:
+    lock_path = tmp_path / ".run-locks" / "repo-run" / "run.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    with runguard._stale_recovery_gate(lock_path) as first:
+        assert first
+        with runguard._stale_recovery_gate(lock_path) as second:
+            assert second is False
+    with runguard._stale_recovery_gate(lock_path) as again:
+        assert again
 
 
 def test_claim_stale_lock_reads_the_owner_metadata_once_per_stale_check(
@@ -356,6 +500,7 @@ def test_owner_metadata_is_read_through_the_shared_open(tmp_path: Path, monkeypa
     assert reads == [lock_path / "owner.json"]
 
 
+@requires_fake_kernel32
 def test_release_reads_the_metadata_it_may_restore_through_the_shared_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -378,6 +523,7 @@ def test_release_reads_the_metadata_it_may_restore_through_the_shared_open(
     assert not lock_path.exists()
 
 
+@requires_fake_kernel32
 def test_a_stale_claimer_cannot_take_the_lock_the_release_is_emptying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -402,6 +548,7 @@ def test_a_stale_claimer_cannot_take_the_lock_the_release_is_emptying(
     assert not lock_path.exists()
 
 
+@requires_fake_kernel32
 def test_release_restores_its_metadata_before_a_waiter_can_judge_the_lock_dead(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -430,6 +577,7 @@ def test_release_restores_its_metadata_before_a_waiter_can_judge_the_lock_dead(
     assert {name: (lock_path / name).read_bytes() for name in ("pid", "owner.json")} == published
 
 
+@requires_fake_kernel32
 def test_release_stops_at_a_replacement_owner_that_reuses_the_inode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -450,6 +598,7 @@ def test_release_stops_at_a_replacement_owner_that_reuses_the_inode(
     assert runguard._read_lock_owner(lock_path)["owner_token"] == published.owner_token
 
 
+@requires_fake_kernel32
 def test_a_reader_retries_a_name_whose_delete_is_still_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """STATUS_DELETE_PENDING answers ERROR_ACCESS_DENIED for a moment, then the open works."""
     target = tmp_path / "owner.json"
@@ -465,6 +614,7 @@ def test_a_reader_retries_a_name_whose_delete_is_still_pending(tmp_path: Path, m
     assert fake.close_calls == [0x100], "only the handle that opened is closed"
 
 
+@requires_fake_kernel32
 def test_a_reader_reports_a_pending_delete_as_a_missing_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "owner.json"
     target.write_text("{}", encoding="utf-8")
@@ -480,6 +630,7 @@ def test_a_reader_reports_a_pending_delete_as_a_missing_name(tmp_path: Path, mon
     assert len(fake.create_calls) == nt_process.DELETE_PENDING_RETRY_ATTEMPTS
 
 
+@requires_fake_kernel32
 def test_lock_metadata_reads_do_not_fail_hard_while_a_release_deletes_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

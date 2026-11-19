@@ -135,10 +135,14 @@ def _release_posix_lock(path: Path, release_path: Path, ownership: _LockOwnershi
 
 
 def _still_our_lock(path: Path, ownership: _LockOwnership) -> bool:
-    """Whether ``path`` is still exactly the lock this lease published.
+    """Whether ``path`` is still the lock this lease published.
 
-    Device and inode alone are not enough: NTFS hands a released directory's
-    inode straight to the next lock directory, so the owner token is compared too.
+    The published directory's device and inode are the release identity, and
+    that identity alone releases a lock whose owner metadata is lost or
+    corrupt, a contract the release has always had. When the metadata is
+    readable, its owner token must also match: NTFS hands a released
+    directory's inode straight to the next lock, so the token is the only thing
+    that tells a replacement owner apart from ours.
     """
     try:
         visible = path.stat()
@@ -149,8 +153,11 @@ def _still_our_lock(path: Path, ownership: _LockOwnership) -> bool:
     try:
         payload = json.loads(nt_process.read_text_sharing_delete(path / "owner.json"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
-        return False
-    return isinstance(payload, dict) and payload.get("owner_token") == ownership.owner_token
+        return True
+    if not isinstance(payload, dict):
+        return True
+    token = payload.get("owner_token")
+    return not isinstance(token, str) or token == ownership.owner_token
 
 
 def _withhold_metadata(path: Path) -> _Metadata | None:
