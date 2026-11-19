@@ -67,9 +67,38 @@ transport passes both to the appserver runner, so a batch turn registers under
 `("task", task_id, attempt_id)`. `brigade runs interrupt --task-id` then reaches
 one of two same-seat tasks, and a worker-name request for that seat reports
 `ambiguous-target` with the task IDs. Direct CLI workers have no per-task
-control path yet: the process registry still cancels as a whole. Durable
-results, parent delivery, wait semantics, T3 children, and cancellation
-containment remain integration work under #2046/#2049.
+control path yet: the process registry still cancels as a whole. Parent
+delivery, T3 children, and cancellation containment remain integration work
+under #2046/#2049.
+
+
+## Reading task status and results
+
+`brigade runs tasks list <run> [--json]` prints one row per accepted task: task
+id, status, attempt id, whether the status is terminal, whether its result was
+acknowledged, containment, result id, and artifact classification and digest.
+`brigade runs tasks show <run> <task_id> [--json]` prints the same fields for
+one task and, when the batch result receipt exists, its run-relative path and
+SHA-256 digest. Neither command prints task text, prompt text, receipt bodies,
+or worker output. An unknown task exits 2 with code `unknown-task` and at most
+10 sorted known task ids. A missing task journal exits 2 with code
+`no-task-journal`.
+
+`brigade runs tasks wait <run> [<task_id>...] [--timeout SECONDS] [--json]`
+polls the journal at a bounded interval until every named task (default all) is
+terminal. It exits 0 when all are terminal and 3 on timeout with the
+non-terminal ids listed. `waiting-for-children`, `waiting-for-input` and
+`unknown` are not terminal. A timeout records nothing and never cancels or
+changes execution. JSON output uses `brigade.runs_tasks.v1`.
+
+The verbs append no journal facts and change no task state. Each read uses the
+same verified reader as the `brigade t3` verbs: it holds the journal lock for
+the length of one read and confirms the journal head is durable, so it never
+folds a half-written fact. A run directory on a read-only filesystem therefore
+cannot be read yet. `wait` with no `--timeout` reports `task-journal-unreadable`
+after 20 consecutive refused reads, and refuses with `no-tasks` when the run has
+no accepted tasks. The result receipt is hashed only when it is a regular file
+under 64 MiB, opened without following a symlink.
 
 
 ## Durable task control requests
