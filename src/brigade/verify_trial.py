@@ -13,7 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import agent_identity, generated_patch_quarantine, localio, outcome_attribution, verify_manifest
+from . import (
+    agent_identity,
+    generated_patch_quarantine,
+    git_status_snapshot,
+    localio,
+    outcome_attribution,
+    verify_manifest,
+)
 from .claude_hooks import producer_session as hook_producer
 
 VERIFY_INFRASTRUCTURE_FAILURE_CLASSES = frozenset(
@@ -249,56 +256,9 @@ def owned_delta_sha256(patch_bytes: bytes, subject_path: str) -> str | None:
     return hashlib.sha256(delta).hexdigest()
 
 
-def _normalize_repo_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
-
-
-def _status_paths(line: str) -> list[str]:
-    """Repo-relative paths one ``git status --short`` line names, unquoted. A rename names both ends."""
-    body = line[3:].strip()
-    if not body:
-        return []
-    parts = body.split(" -> ", 1) if " -> " in body else [body]
-    return [_normalize_repo_path(_unquote_patch_path(part.strip())) for part in parts]
-
-
-def subject_path_dirty_in_git_status(subject_path: str, dirty_files: object) -> bool:
-    """Whether a ``git status --short`` listing marks the subject dirty.
-
-    Quoted paths (spaces, non-ASCII) are unquoted first. A line for a directory, such as the
-    collapsed ``?? newdir/`` git prints for an untracked tree, marks every subject under it dirty.
-    """
-    if not isinstance(dirty_files, list):
-        return False
-    normalized = _normalize_repo_path(subject_path)
-    for line in dirty_files:
-        if not isinstance(line, str) or len(line) < 3:
-            continue
-        for candidate in _status_paths(line):
-            if not candidate:
-                continue
-            if candidate == normalized or candidate.endswith(f"/{normalized}"):
-                return True
-            directory = candidate.rstrip("/")
-            if (
-                candidate.endswith("/")
-                and directory
-                and (normalized.startswith(f"{directory}/") or f"/{directory}/" in f"/{normalized}")
-            ):
-                return True
-    return False
-
-
-def start_git_dirty_files_fingerprint(dirty_files: object) -> str | None:
-    if not isinstance(dirty_files, list):
-        return None
-    lines = sorted(str(line) for line in dirty_files)
-    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
-
-
-def load_work_session_payload(target: Path, session_id: str) -> dict[str, Any] | None:
+def load_work_session_payload(target: Path, session_id: str, start_id: str | None = None) -> dict[str, Any] | None:
     if hook_producer.fingerprint_from_producer_id(session_id) is not None:
-        return hook_producer.load_payload(target, session_id)
+        return hook_producer.load_payload(target, session_id, start_id)
     session_json = target / ".brigade" / "work" / session_id / "session.json"
     try:
         payload = json.loads(session_json.read_text())
@@ -319,14 +279,6 @@ def build_producer_binding(
         "work_session_id": session_id,
         "owned_delta_sha256": owned_delta,
     }
-    if session_id and hook_producer.fingerprint_from_producer_id(session_id) is not None:
-        # A hook session's start snapshot cannot say who wrote the subject, so record the verdict
-        # of the live ownership check for a projection that has no target to rerun it against.
-        binding["hook_ownership"] = (
-            (hook_producer.ownership_reason(target, session_id, subject_path) or hook_producer.OWNED)
-            if target is not None
-            else "producer_session_missing"
-        )
     if session_payload is None or not session_id:
         binding["subject_clean_at_start"] = False
         return binding
@@ -334,15 +286,25 @@ def build_producer_binding(
     if not isinstance(start, dict):
         binding["subject_clean_at_start"] = False
         return binding
+    if hook_producer.fingerprint_from_producer_id(session_id) is not None:
+        # A hook session's start snapshot cannot say who wrote the subject, so record the verdict
+        # of the live ownership check for a projection that has no target to rerun it against, and
+        # the start the receipt bound to so a later epoch's start cannot stand in for it.
+        start_id = start.get("id")
+        binding["hook_start_id"] = start_id
+        binding["hook_ownership"] = (
+            (hook_producer.ownership_reason(target, session_id, subject_path, start_id) or hook_producer.OWNED)
+            if target is not None and isinstance(start_id, str)
+            else "producer_session_missing"
+        )
     git = start.get("git")
     if not isinstance(git, dict):
         binding["subject_clean_at_start"] = False
         return binding
-    dirty_files = git.get("dirty_files")
-    fingerprint = start_git_dirty_files_fingerprint(dirty_files)
+    fingerprint = git_status_snapshot.fingerprint(git)
     if fingerprint is not None:
         binding["start_git"] = {"dirty_files_sha256": fingerprint}
-    binding["subject_clean_at_start"] = not subject_path_dirty_in_git_status(subject_path, dirty_files)
+    binding["subject_clean_at_start"] = not git_status_snapshot.subject_dirty(subject_path, git)
     return binding
 
 
@@ -384,7 +346,10 @@ def _validate_producer_binding(
             return "producer_session_missing"
         return None
 
-    session_payload = load_work_session_payload(target, session_id)
+    hook_start_id = producer.get("hook_start_id")
+    if hook_session and not isinstance(hook_start_id, str):
+        return "producer_session_missing"
+    session_payload = load_work_session_payload(target, session_id, hook_start_id if hook_session else None)
     if session_payload is None:
         return "producer_session_missing"
     if session_payload.get("id") != session_id:
@@ -397,14 +362,16 @@ def _validate_producer_binding(
     if not isinstance(git, dict):
         return "producer_session_missing"
 
-    dirty_files = git.get("dirty_files")
-    if subject_path_dirty_in_git_status(subject_path, dirty_files):
+    computed_fp = git_status_snapshot.fingerprint(git)
+    if computed_fp is None:
+        # A start snapshot in an older or unreadable format cannot show the subject clean.
+        return "producer_session_mismatch"
+    if git_status_snapshot.subject_dirty(subject_path, git):
         if producer.get("subject_clean_at_start") is True:
             return "concurrent_session_ownership"
         return "subject_pre_existing_dirty"
 
     start_git = producer.get("start_git")
-    computed_fp = start_git_dirty_files_fingerprint(dirty_files)
     if not isinstance(start_git, dict):
         return "producer_session_missing"
     stored_fp = start_git.get("dirty_files_sha256")
@@ -414,7 +381,7 @@ def _validate_producer_binding(
     if subject_clean_at_start is not True:
         return "producer_session_missing"
     if hook_session:
-        return hook_producer.ownership_reason(target, session_id, subject_path)
+        return hook_producer.ownership_reason(target, session_id, subject_path, hook_start_id)
     return None
 
 

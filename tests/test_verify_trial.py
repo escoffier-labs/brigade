@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import localio, verify_manifest, verify_trial, work_cmd
+from brigade import git_status_snapshot, localio, verify_manifest, verify_trial, work_cmd
 from brigade.verify_manifest import _WORKSPACE_MANIFESTS_REL
 from brigade.work_cmd import verification as verify_mod
 
@@ -382,19 +382,21 @@ def test_project_trial_unstaged_subject_as_first_dirty_line_is_pre_existing_dirt
 @pytest.mark.parametrize(
     ("status_line", "subject", "expected"),
     [
-        (' M "skills/my skill/SKILL.md"', "skills/my skill/SKILL.md", True),
-        ('?? "skills/caf\\303\\251/SKILL.md"', "skills/café/SKILL.md", True),
-        ('R  "old name.md" -> "skills/new name/SKILL.md"', "skills/new name/SKILL.md", True),
-        ("R  skills/old/SKILL.md -> skills/new/SKILL.md", "skills/old/SKILL.md", True),
+        (" M skills/my skill/SKILL.md", "skills/my skill/SKILL.md", True),
+        ("?? skills/café/SKILL.md", "skills/café/SKILL.md", True),
+        ("R  skills/new name/SKILL.md", "skills/new name/SKILL.md", True),
+        ("R  skills/old/SKILL.md", "skills/old/SKILL.md", True),
         ("?? skills/", "skills/brigade-work/SKILL.md", True),
         ("?? skills/brigade-work/", "skills/brigade-work/SKILL.md", True),
         ("?? skills/other/", "skills/brigade-work/SKILL.md", False),
         ("?? skills/brigade/", "skills/brigade-work/SKILL.md", False),
         (" M skills/brigade-work/OTHER.md", "skills/brigade-work/SKILL.md", False),
+        ("?? ./", "skills/brigade-work/SKILL.md", True),
     ],
 )
-def test_subject_path_dirty_reads_quoted_paths_and_collapsed_directories(status_line, subject, expected):
-    assert verify_trial.subject_path_dirty_in_git_status(subject, [status_line]) is expected
+def test_subject_dirty_reads_unquoted_paths_and_collapsed_directories(status_line, subject, expected):
+    git = {"dirty_files": [status_line], "status_format": "z1", "prefix": ""}
+    assert git_status_snapshot.subject_dirty(subject, git) is expected
 
 
 def test_project_trial_concurrent_session_ownership_is_ineligible(scoreable_target, monkeypatch):

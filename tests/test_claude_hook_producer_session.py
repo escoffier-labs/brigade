@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from brigade import localio, scorecard, verify_manifest, verify_trial, work_cmd
+from brigade import git_status_snapshot, localio, scorecard, verify_manifest, verify_trial, work_cmd
 from brigade.agent_identity import claude_session_fingerprint, stamp_verify_identity
 from brigade.claude_hooks import producer_session, runtime
 from brigade.install import install_selection
@@ -72,12 +73,16 @@ def hook_target(tmp_path: Path) -> Path:
 def _fake_git(monkeypatch, run) -> None:
     """Replace only this module's git call, so the hook's own git use is untouched."""
     monkeypatch.setattr(
-        producer_session, "subprocess", SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError)
+        git_status_snapshot,
+        "subprocess",
+        SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError, DEVNULL=subprocess.DEVNULL),
     )
 
 
-def _session_start(target: Path, session_id: str = SESSION_ID) -> dict:
+def _session_start(target: Path, session_id: str = SESSION_ID, source: str | None = None) -> dict:
     payload = {"session_id": session_id, "cwd": str(target), "hook_event_name": "SessionStart"}
+    if source is not None:
+        payload["source"] = source
     runtime.handle_payload("SessionStart", payload)
     state = runtime.read_session_state(target.resolve(), session_id)
     assert state is not None
@@ -110,7 +115,7 @@ def _verify(target: Path, monkeypatch) -> dict:
 def test_hook_records_start_dirty_files_in_work_session_shape(hook_target: Path) -> None:
     (hook_target / "scratch.txt").write_text("pending\n")
     state = _session_start(hook_target)
-    assert state["start"] == {"git": {"dirty_files": ["?? scratch.txt"]}}
+    assert state["start"]["git"] == {"dirty_files": ["?? scratch.txt"], "status_format": "z1", "prefix": ""}
 
 
 def test_start_snapshot_keeps_the_leading_status_column(hook_target: Path) -> None:
@@ -155,14 +160,14 @@ def test_git_failure_records_nothing(hook_target: Path, monkeypatch) -> None:
 
 
 def test_oversized_snapshot_is_dropped_not_truncated(monkeypatch, tmp_path: Path) -> None:
-    lines = "\n".join(f"?? f{index}" for index in range(producer_session.MAX_DIRTY_LINES + 1))
-    _fake_git(monkeypatch, lambda *_a, **_k: subprocess.CompletedProcess([], 0, stdout=lines, stderr=""))
-    assert producer_session.snapshot_dirty_files(tmp_path) is None
+    entries = b"".join(f"?? f{index}".encode() + b"\0" for index in range(producer_session.MAX_DIRTY_LINES + 1))
+    _fake_git(monkeypatch, lambda *_a, **_k: subprocess.CompletedProcess([], 0, stdout=entries, stderr=b""))
+    assert producer_session.snapshot_start(tmp_path) is None
 
 
 def test_nonzero_git_exit_records_nothing(monkeypatch, tmp_path: Path) -> None:
-    _fake_git(monkeypatch, lambda *_a, **_k: subprocess.CompletedProcess([], 128, stdout="", stderr="not a repo"))
-    assert producer_session.snapshot_dirty_files(tmp_path) is None
+    _fake_git(monkeypatch, lambda *_a, **_k: subprocess.CompletedProcess([], 128, stdout=b"", stderr=b"not a repo"))
+    assert producer_session.snapshot_start(tmp_path) is None
 
 
 def test_producer_id_cannot_collide_with_a_work_session_id() -> None:
@@ -189,10 +194,9 @@ def test_same_session_matches_the_bare_fingerprint_and_nothing_else() -> None:
 def test_load_payload_resolves_state_without_the_environment(hook_target: Path) -> None:
     _session_start(hook_target)
     payload = verify_trial.load_work_session_payload(hook_target, producer_session.producer_id(_fingerprint()))
-    assert payload == {
-        "id": f"claude-hook:{_fingerprint()}",
-        "start": {"git": {"dirty_files": []}},
-    }
+    state = runtime.read_session_state(hook_target.resolve(), SESSION_ID)
+    assert payload == {"id": f"claude-hook:{_fingerprint()}", "start": state["start"]}
+    assert payload["start"]["git"]["dirty_files"] == []
 
 
 def test_load_payload_needs_exactly_one_matching_state(hook_target: Path) -> None:
@@ -549,8 +553,349 @@ def test_unreadable_session_directory_fails_closed(hook_target: Path, monkeypatc
     def refuse(*_args, **_kwargs):
         raise producer_session.anchored_io.SessionIntegrityError("refused")
 
-    monkeypatch.setattr(producer_session.anchored_io, "iter_states", refuse)
+    monkeypatch.setattr(producer_session.anchored_io, "read_states_strict", refuse)
     reason = producer_session.ownership_reason(
         hook_target, producer_session.producer_id(_fingerprint()), "skills/brigade-work/SKILL.md"
     )
-    assert reason == "producer_session_missing"
+    assert reason == "concurrent_session_ownership"
+
+
+# --- second fix round (#2589): foreign writes, status parsing, /clear, strict state reads ---
+
+
+def _state_path(target: Path, session_id: str) -> Path:
+    sessions = runtime._sessions_root(target.resolve())
+    return next(
+        path for path in sessions.glob("*.json") if json.loads(path.read_text()).get("session_id") == session_id
+    )
+
+
+def _write_event(target: Path, session_id: str, path: Path) -> dict:
+    return {
+        "session_id": session_id,
+        "cwd": str(target),
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(path), "content": "x\n"},
+    }
+
+
+def _pre(event: dict) -> None:
+    runtime.handle_payload("PreToolUse", {**event, "hook_event_name": "PreToolUse"})
+
+
+def _post(event: dict) -> None:
+    runtime.handle_payload("PostToolUse", {**event, "hook_event_name": "PostToolUse"})
+
+
+def _foreign_file_write(target: Path, session_id: str, name: str = "notes.txt") -> None:
+    path = target / name
+    event = _write_event(target, session_id, path)
+    _pre(event)
+    path.write_text("x\n")
+    _post(event)
+
+
+def _as_session(target: Path, monkeypatch, session_id: str = SESSION_ID) -> str:
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+    return _project(target, _verify(target, monkeypatch)).reason
+
+
+def test_a_foreign_write_that_began_before_this_session_and_finished_after_is_concurrent(
+    hook_target: Path, monkeypatch
+) -> None:
+    """D1: the other session announced its subject write before B started and finished it after, then wrote elsewhere."""
+    subject = hook_target / "skills" / "brigade-work" / "SKILL.md"
+    _session_start(hook_target, OTHER_SESSION_ID)
+    straddling = _write_event(hook_target, OTHER_SESSION_ID, subject)
+    _pre(straddling)
+    _session_start(hook_target, SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    _post(straddling)
+    _foreign_file_write(hook_target, OTHER_SESSION_ID)
+    assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
+
+
+def test_a_foreign_file_write_elsewhere_plus_a_bash_write_is_concurrent(hook_target: Path, monkeypatch) -> None:
+    """D1: the other session's file-tool record for another file must not account for its Bash write."""
+    subject = hook_target / "skills" / "brigade-work" / "SKILL.md"
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _foreign_file_write(hook_target, OTHER_SESSION_ID)
+    bash = {
+        "session_id": OTHER_SESSION_ID,
+        "cwd": str(hook_target),
+        "tool_name": "Bash",
+        "tool_input": {"command": "printf 'by shell\\n' >> skills/brigade-work/SKILL.md"},
+    }
+    _pre(bash)
+    with subject.open("a") as handle:
+        handle.write("by shell\n")
+    _post(bash)
+    events = json.loads(_state_path(hook_target, OTHER_SESSION_ID).read_text())["write_events"]
+    assert [(event["tool"], event["path"]) for event in events] == [("Write", "notes.txt"), ("Bash", None)]
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
+
+
+def test_a_foreign_write_outside_the_target_does_not_veto(hook_target: Path, monkeypatch, tmp_path: Path) -> None:
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    outside = tmp_path / "elsewhere" / "plan.md"
+    outside.parent.mkdir()
+    event = _write_event(hook_target, OTHER_SESSION_ID, outside)
+    _pre(event)
+    outside.write_text("x\n")
+    _post(event)
+    events = json.loads(_state_path(hook_target, OTHER_SESSION_ID).read_text())["write_events"]
+    assert events[-1]["outside"] is True
+    _hook_write(hook_target, SESSION_ID)
+    assert _as_session(hook_target, monkeypatch) == "eligible"
+
+
+def test_write_events_are_bounded_and_eviction_is_recorded(hook_target: Path) -> None:
+    _session_start(hook_target, OTHER_SESSION_ID)
+    for index in range(producer_session.MAX_WRITE_EVENTS + 3):
+        _foreign_file_write(hook_target, OTHER_SESSION_ID, f"n{index}.txt")
+    state = json.loads(_state_path(hook_target, OTHER_SESSION_ID).read_text())
+    assert len(state["write_events"]) == producer_session.MAX_WRITE_EVENTS
+    assert state["write_events"][-1]["path"] == f"n{producer_session.MAX_WRITE_EVENTS + 2}.txt"
+    assert localio.parse_iso_datetime(state["write_events_evicted_at"]) is not None
+
+
+def test_a_foreign_event_list_that_lost_events_inside_the_window_fails_closed(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _foreign_file_write(hook_target, OTHER_SESSION_ID)
+    path = _state_path(hook_target, OTHER_SESSION_ID)
+    state = json.loads(path.read_text())
+    state["write_events_evicted_at"] = localio.utc_now_iso()
+    path.write_text(json.dumps(state))
+    _hook_write(hook_target, SESSION_ID)
+    assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
+
+
+def test_a_foreign_write_that_has_no_event_fails_closed(hook_target: Path, monkeypatch) -> None:
+    """A reported write whose event was lost reads as an unattributed write, not as an accounted one."""
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _foreign_file_write(hook_target, OTHER_SESSION_ID)
+    path = _state_path(hook_target, OTHER_SESSION_ID)
+    state = json.loads(path.read_text())
+    state["last_write_at"] = localio.utc_now_iso()
+    path.write_text(json.dumps(state))
+    _hook_write(hook_target, SESSION_ID)
+    assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
+
+
+def test_write_events_survive_a_task_epoch_reset(hook_target: Path) -> None:
+    _session_start(hook_target, SESSION_ID, source="startup")
+    _foreign_file_write(hook_target, SESSION_ID)
+    _session_start(hook_target, SESSION_ID, source="clear")
+    state = runtime.read_session_state(hook_target.resolve(), SESSION_ID)
+    assert [event["path"] for event in state["write_events"]] == ["notes.txt"]
+
+
+def _work_session_snapshot(target: Path) -> dict:
+    return {"id": "20261119-000000-work-test", "start": {"git": work_cmd._git_snapshot(target)}}
+
+
+def _clean_at_start(target: Path, subject_path: str) -> bool:
+    binding = verify_trial.build_producer_binding(
+        session_id="20261119-000000-work-test",
+        session_payload=_work_session_snapshot(target),
+        subject_path=subject_path,
+        owned_delta="0" * 64,
+    )
+    return binding["subject_clean_at_start"]
+
+
+def test_a_quoted_rename_whose_names_hold_an_arrow_reads_dirty(tmp_path: Path) -> None:
+    """D2: the rename split at the arrow inside the quotes and never named the subject."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_verify_git_repo(repo)
+    (repo / "old -> subject.txt").write_text("a\n")
+    _commit_all(repo, "add")
+    subprocess.run(["git", "mv", "old -> subject.txt", "new -> subject.txt"], cwd=repo, check=True)
+    assert _clean_at_start(repo, "new -> subject.txt") is False
+    assert _clean_at_start(repo, "old -> subject.txt") is False
+    assert _clean_at_start(repo, "other.txt") is True
+
+
+def test_a_wholly_untracked_target_under_a_repository_subdirectory_reads_dirty(tmp_path: Path) -> None:
+    """D2: ``git status --short`` printed ``?? ./`` for it, which normalized to nothing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_verify_git_repo(repo)
+    (repo / "tracked.txt").write_text("a\n")
+    _commit_all(repo, "add")
+    target = repo / "pkg"
+    (target / "skills").mkdir(parents=True)
+    (target / "skills" / "SKILL.md").write_text("new\n")
+    assert _clean_at_start(target, "skills/SKILL.md") is False
+    assert _clean_at_start(target, "skills/OTHER.md") is False
+
+
+def test_hook_snapshot_reads_a_renamed_subject_with_an_arrow_as_dirty(hook_target: Path) -> None:
+    (hook_target / "a -> b.txt").write_text("a\n")
+    _commit_all(hook_target, "add")
+    subprocess.run(["git", "mv", "a -> b.txt", "c -> d.txt"], cwd=hook_target, check=True)
+    start = _session_start(hook_target)["start"]
+    assert git_status_snapshot.subject_dirty("c -> d.txt", start["git"]) is True
+    assert git_status_snapshot.subject_dirty("a -> b.txt", start["git"]) is True
+
+
+def test_an_older_status_format_never_reads_clean() -> None:
+    legacy = {"dirty_files": [" M unrelated.txt"]}
+    assert git_status_snapshot.subject_dirty("skills/brigade-work/SKILL.md", legacy) is True
+    binding = verify_trial.build_producer_binding(
+        session_id="20261119-000000-work-test",
+        session_payload={"id": "20261119-000000-work-test", "start": {"git": legacy}},
+        subject_path="skills/brigade-work/SKILL.md",
+        owned_delta="0" * 64,
+    )
+    assert binding["subject_clean_at_start"] is False
+    assert "start_git" not in binding
+
+
+def test_work_session_receipt_against_an_older_session_payload_fails_closed(hook_target: Path, monkeypatch) -> None:
+    target = hook_target
+    assert work_cmd.start(target=target, title="legacy") == 0
+    _edit_subject(target)
+    receipt = _verify(target, monkeypatch)
+    producer = receipt["subject_binding"]["producer_binding"]
+    assert producer["subject_clean_at_start"] is True
+    assert _project(target, receipt).reason == "eligible"
+    session_json = next((target / ".brigade" / "work").glob("*/session.json"))
+    session = json.loads(session_json.read_text())
+    git = session["start"]["git"]
+    git.pop("status_format")
+    git.pop("prefix")
+    git["dirty_files"] = []
+    session_json.write_text(json.dumps(session))
+    assert _project(target, receipt).eligible is False
+
+
+def test_work_after_a_clear_produces_a_trial(hook_target: Path, monkeypatch) -> None:
+    """D3: a task-epoch reset left the state without a start, so the new task could never score."""
+    _session_start(hook_target, SESSION_ID, source="startup")
+    _session_start(hook_target, SESSION_ID, source="clear")
+    state = runtime.read_session_state(hook_target.resolve(), SESSION_ID)
+    assert state["start"]["id"] and len(state["start_history"]) == 1
+    _hook_write(hook_target)
+    assert _as_session(hook_target, monkeypatch) == "eligible"
+
+
+def test_an_eligible_receipt_stays_eligible_after_a_later_clear(hook_target: Path, monkeypatch) -> None:
+    """D3: the receipt is bound to the start it was made under, and that start outlives the reset."""
+    _session_start(hook_target, SESSION_ID, source="startup")
+    _hook_write(hook_target)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    receipt = _verify(hook_target, monkeypatch)
+    bound = receipt["subject_binding"]["producer_binding"]["hook_start_id"]
+    assert _project(hook_target, receipt).reason == "eligible"
+    _session_start(hook_target, SESSION_ID, source="clear")
+    state = runtime.read_session_state(hook_target.resolve(), SESSION_ID)
+    assert state["start"]["id"] != bound
+    assert _project(hook_target, receipt).reason == "eligible"
+
+
+def test_a_receipt_bound_to_a_start_that_aged_out_of_the_history_fails_closed(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, SESSION_ID, source="startup")
+    _hook_write(hook_target)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    receipt = _verify(hook_target, monkeypatch)
+    for _ in range(producer_session.MAX_START_HISTORY + 1):
+        _session_start(hook_target, SESSION_ID, source="clear")
+    state = runtime.read_session_state(hook_target.resolve(), SESSION_ID)
+    assert len(state["start_history"]) == producer_session.MAX_START_HISTORY
+    assert _project(hook_target, receipt).reason == "producer_session_missing"
+
+
+def test_a_receipt_without_a_recorded_start_id_fails_closed(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, SESSION_ID, source="startup")
+    _hook_write(hook_target)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    receipt = _verify(hook_target, monkeypatch)
+    del receipt["subject_binding"]["producer_binding"]["hook_start_id"]
+    assert _project(hook_target, receipt).eligible is False
+
+
+def _own_a_subject_with_a_foreign_state_file(hook_target: Path, monkeypatch, damage) -> str:
+    _session_start(hook_target, SESSION_ID)
+    _hook_write(hook_target)
+    sessions = runtime._sessions_root(hook_target.resolve())
+    damage(sessions)
+    return _as_session(hook_target, monkeypatch)
+
+
+def test_a_malformed_foreign_state_file_fails_closed(hook_target: Path, monkeypatch) -> None:
+    """D4: ``iter_states`` skipped it, so the ownership check never saw that session."""
+    reason = _own_a_subject_with_a_foreign_state_file(
+        hook_target, monkeypatch, lambda sessions: (sessions / "foreign.json").write_text("{not json")
+    )
+    assert reason == "concurrent_session_ownership"
+
+
+def test_a_non_object_foreign_state_file_fails_closed(hook_target: Path, monkeypatch) -> None:
+    reason = _own_a_subject_with_a_foreign_state_file(
+        hook_target, monkeypatch, lambda sessions: (sessions / "foreign.json").write_text("[]")
+    )
+    assert reason == "concurrent_session_ownership"
+
+
+def test_an_oversized_foreign_state_file_fails_closed(hook_target: Path, monkeypatch) -> None:
+    reason = _own_a_subject_with_a_foreign_state_file(
+        hook_target,
+        monkeypatch,
+        lambda sessions: (sessions / "foreign.json").write_text(
+            json.dumps({"pad": "x" * producer_session.outcome_attribution.MAX_STATE_BYTES})
+        ),
+    )
+    assert reason == "concurrent_session_ownership"
+
+
+def test_a_non_regular_foreign_state_entry_fails_closed(hook_target: Path, monkeypatch) -> None:
+    reason = _own_a_subject_with_a_foreign_state_file(
+        hook_target, monkeypatch, lambda sessions: (sessions / "foreign.json").mkdir()
+    )
+    assert reason == "concurrent_session_ownership"
+
+
+def test_an_unreadable_foreign_state_file_fails_closed(hook_target: Path, monkeypatch) -> None:
+    def damage(sessions: Path) -> None:
+        foreign = sessions / "foreign.json"
+        foreign.write_text(json.dumps({"session_id": "x"}))
+        foreign.chmod(0)
+
+    try:
+        reason = _own_a_subject_with_a_foreign_state_file(hook_target, monkeypatch, damage)
+    finally:
+        runtime._sessions_root(hook_target.resolve()).joinpath("foreign.json").chmod(0o600)
+    if os.access(runtime._sessions_root(hook_target.resolve()) / "foreign.json", os.R_OK) and os.geteuid() == 0:
+        pytest.skip("root reads a mode 0 file")
+    assert reason == "concurrent_session_ownership"
+
+
+def test_a_foreign_state_file_that_cannot_be_statted_fails_closed(hook_target: Path, monkeypatch) -> None:
+    real_stat = producer_session.anchored_io.dirfd.stat_child
+
+    def flaky(fd, name, **kwargs):
+        if name == "foreign.json":
+            raise PermissionError("stat refused")
+        return real_stat(fd, name, **kwargs)
+
+    monkeypatch.setattr(producer_session.anchored_io.dirfd, "stat_child", flaky)
+    reason = _own_a_subject_with_a_foreign_state_file(
+        hook_target, monkeypatch, lambda sessions: (sessions / "foreign.json").write_text(json.dumps({"a": 1}))
+    )
+    assert reason == "concurrent_session_ownership"
+
+
+def test_an_old_malformed_state_file_outside_the_window_does_not_veto(hook_target: Path, monkeypatch) -> None:
+    def damage(sessions: Path) -> None:
+        old = sessions / "foreign.json"
+        old.write_text("{not json")
+        os.utime(old, (1_000_000, 1_000_000))
+
+    assert _own_a_subject_with_a_foreign_state_file(hook_target, monkeypatch, damage) == "eligible"

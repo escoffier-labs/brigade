@@ -1973,6 +1973,7 @@ def _normalize_state(
     normalized = _new_state(target, session_id, recorded, task_epoch=task_epoch)
     if not isinstance(payload, dict):
         return normalized
+    producer_session.carry(normalized, payload, target, task_epoch)
     if task_epoch is not None and payload.get("task_epoch") != task_epoch:
         # State written by an earlier dispatched task under the same reused
         # session id. ``write_observed`` must be re-earned by this task's own
@@ -1983,7 +1984,6 @@ def _normalize_state(
         check_events.restore_identity(normalized, payload)
         return normalized
     check_events.restore_identity(normalized, payload)
-    producer_session.restore_start(normalized, payload)
     now = localio.utc_now()
     started = localio.parse_iso_datetime(payload.get("started_at"))
     if started is not None and started <= now:
@@ -2450,6 +2450,7 @@ def _handle_event(
         if wrote:
             state["write_observed"] = True
             written_at = localio.utc_now_iso()
+            producer_session.record_write(state, target, payload, written_at)
             state["last_write_at"] = written_at
             state["last_attributed_write_at"] = written_at
             handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (

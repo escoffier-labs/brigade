@@ -117,38 +117,59 @@ capture.
 ## Hook session as the producer of a manifest trial
 
 Ordinary Claude Code sessions never run `brigade work start`, so a manifest verify receipt had no
-producer session. When the hook creates a session's state for the first time it also records
-`start.git.dirty_files`, the output of one `git status --short --untracked-files=all` in the shape a
-work session records, with every untracked file on its own line. The call is bounded (2 second
-timeout, at most 512 lines of 1024 characters each) and fails open: on a git error, a timeout, or a
-larger list nothing is recorded, never a truncated list, and that session cannot produce trials. The
-snapshot is taken once, at creation. State normalization keeps it unchanged through later events, and
-a new task epoch under a reused session id drops it.
+producer session. When the hook creates a session's state for the first time, and again each time a
+task-epoch reset (`/clear`, a new dispatched task) starts a new task in it, it records a start
+snapshot: `start.git.dirty_files`, the output of one `git status --porcelain=v1 -z
+--untracked-files=all`, plus `start.git.status_format` (`z1`), `start.git.prefix` (the target's path
+inside the repository), an `id` and the time `at`. The `-z` form has no quoting, never joins a
+rename with ` -> `, and names both paths of a rename, so a filename holding an arrow or a space cannot
+be misread. Each path is one `XY path` line relative to the repository root, and a wholly untracked
+target appears as its directory (`?? pkg/`), which the check matches through `prefix`. The call is
+bounded (2 second timeout, at most 512 lines of 1024 characters each) and fails open: on a git error, a
+timeout, or a larger list nothing is recorded, never a truncated list, and that task cannot produce
+trials.
 
-`brigade work verify run --manifest` reads it back when no work session is active and the verify
-resolves exactly one Claude session (`BRIGADE_CLAUDE_SESSION`, else `CLAUDE_CODE_SESSION_ID`, with a
-disagreeing `BRIGADE_AGENT_SESSION` or a worker naming none). The producer id is
+A reset keeps the earlier starts in `start_history`, newest last, at most three. The receipt's
+producer binding records the `hook_start_id` it was made under, so a receipt finds that start after a
+later `/clear`. A receipt whose start has aged out of the history, or that records no start id,
+fails closed (`producer_session_missing`). A snapshot in any other format, such as an older
+`--short` list, reads as dirty for every subject, and a work session started before this format fails
+closed the same way.
+
+`brigade work verify run --manifest` reads the current start back when no work session is active and the
+verify resolves exactly one Claude session (`BRIGADE_CLAUDE_SESSION`, else `CLAUDE_CODE_SESSION_ID`, with
+a disagreeing `BRIGADE_AGENT_SESSION` or a worker naming none). The producer id is
 `claude-hook:<fingerprint>`, which a work session id (it starts with a timestamp) cannot equal.
 Exactly one state in this target must match the fingerprint and name this target, and it must carry
-a valid snapshot, otherwise there is no producer. The ownership checks in `verify_trial` then run
+a valid start, otherwise there is no producer. The ownership checks in `verify_trial` then run
 unchanged against that snapshot.
 
-The snapshot only shows the subject was clean when the session began, not who changed it later. So a
-hook session is a producer only for a subject it wrote itself. The same pre-write records the manifest
-Stop gate reads (`dependency_checks`, one per Edit, Write or NotebookEdit) must name the subject. Every
-other session state in the target is then scanned. A record naming the subject since this session
-started makes the trial ineligible (`concurrent_session_ownership`). So does a write another session
-observed with no record naming any path in that window, because that is a shell command and could have
-touched the subject. A record window that is full and starts after this session did is treated the same
-way, since the subject's record may have been dropped. A session with no record for the subject has no
-owned work (`no_owned_work`). The verdict is stored in the producer binding as `hook_ownership` and the
-live state is checked again when the receipt is projected, so a foreign write made after the receipt still
-counts.
+The snapshot only shows the subject was clean when the task began, not who changed it later. So a
+hook session is a producer only for a subject it wrote itself. Each session keeps a bounded list of
+write events, `write_events` (at most 64, kept across epochs). A completed Edit, Write or NotebookEdit
+adds an event with its completion time, its tool and its target-relative path (marked `outside` when
+the path is not in the target, so it cannot be the subject). A Bash command the hooks detected as a
+write adds an event with no path. The session needs a file-tool event for the subject since its start,
+or it has no owned work (`no_owned_work`). Every other session state in the target is then read. An
+event since this start that names the subject, or that names no path, makes the trial ineligible
+(`concurrent_session_ownership`). Completion time is what counts, so a write another session began
+before this one started and finished after it is inside the window. Three further cases fail closed
+as `concurrent_session_ownership`: the other session's list evicted events inside the window
+(`write_events_evicted_at`), it reports a write (`last_write_at`) that has no matching event, and a
+file-tool write it announced since this start is still in flight on the subject.
 
-Two limits fail closed. A subject changed only through Bash leaves no write record, so it never becomes
-a hook-session trial. A session that makes more than 32 Edit, Write or NotebookEdit calls after writing
-the subject can push that record out of the capped list. A foreign session that mixes file-tool writes to
-other files with a Bash write to the subject is not detected. See
+Every session state in the target must also be readable. The ownership check enumerates them
+strictly: a listing error, a stat failure, a `.json` entry that is not a regular file, a file over the
+state size cap, an unreadable file and a malformed one each give `concurrent_session_ownership`,
+instead of dropping out of the check as they do for other readers. A file last modified before this
+start is not read, because a session's write always refreshes its state file.
+
+The verdict is stored in the producer binding as `hook_ownership` and the live state is checked again
+when the receipt is projected, so a foreign write made after the receipt still counts.
+
+Two limits fail closed. A subject changed only through Bash has no file-tool event of the session's own, so it
+never becomes a hook-session trial. A Bash write that the hooks could not attribute to the session,
+because another session also wrote in the same window, leaves no event and is not detected. See
 [outcome scoring](outcome-scoring.md#producer-session-for-a-manifest-trial).
 
 ## Native Windows qualification

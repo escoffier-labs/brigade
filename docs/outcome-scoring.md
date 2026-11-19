@@ -162,11 +162,22 @@ another session owns, is rejected (`subject_pre_existing_dirty`, `concurrent_ses
    `CLAUDE_CODE_SESSION_ID`, or inside a `brigade run` worker.
 3. Otherwise `producer_session_missing`, so a plain shell or a Codex repo scores nothing.
 
-A hook session is a producer only for a subject it wrote. Its own Edit, Write or NotebookEdit record
-must name the subject (otherwise `no_owned_work`), and no other session's hook state in the target may
-record a write to the subject, or an unattributable write, since this session started
-(`concurrent_session_ownership`). A subject changed only through Bash has no write record, so it is
-never a hook-session trial. The check reruns against live hook state when the receipt is projected.
+A hook session is a producer only for a subject it wrote. Its own Edit, Write or NotebookEdit write
+events must name the subject since its start (otherwise `no_owned_work`). No other session in the target
+may have a write event since then that names the subject or names no path, a Bash write the hooks
+detected (`concurrent_session_ownership`). Events carry completion time, so a write that began before
+this session and finished after it counts. When another session's bounded event list lost events inside
+that window, when a state reports a write that has no event, or when any session state in the target
+cannot be listed, read or parsed, the result is also `concurrent_session_ownership`. A task-epoch reset
+(`/clear`) takes a fresh start, keeps up to three earlier starts, and a receipt records the
+`hook_start_id` it was made under, so it keeps resolving after a later reset. A subject changed only
+through Bash is never a hook-session trial. The check reruns against live hook state when the receipt is
+projected.
+
+Start snapshots, for hook sessions and for `brigade work start`, are NUL-separated porcelain status
+(`status_format` `z1`), so quoted names and renames whose names hold ` -> ` cannot hide a dirty subject,
+and a wholly untracked target reads as dirty. A snapshot in the older `--short` format reads as dirty for
+every subject, so a work session started before this format fails closed.
 
 The same resolver stamps the receipt's `harness_session` and the verifier id, so a verify typed in a
 session counts as that session's own receipt for the Stop gate. A `worktree` patch has no
