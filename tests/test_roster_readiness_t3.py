@@ -296,13 +296,25 @@ def test_required_features_block(workspace, tmp_path, field):
 
 @pytest.mark.parametrize(
     "offset,status,reason",
-    [(-120, "unverified", "t3-capabilities-stale"), (120, "unverified", "t3-capabilities-future")],
+    [
+        (-120, "unverified", "t3-capabilities-stale"),
+        (120, "unverified", "t3-capabilities-future"),
+        (5, "unverified", "t3-capabilities-future"),
+    ],
 )
 def test_reported_at_must_be_fresh(workspace, tmp_path, offset, status, reason):
     payload = _payload(reported_at=_iso(offset))
     report = _inspect(workspace, tmp_path, payload=payload)
     assert report["status"] == status
     assert _row(report, "route-support")["reason"] == reason
+
+
+def test_report_a_few_milliseconds_ahead_is_not_future(workspace, tmp_path):
+    """A coarse receive clock can trail a just-written report; that is not future-dated."""
+    payload = _payload(reported_at=_iso(0.2))
+    report = _inspect(workspace, tmp_path, payload=payload)
+    assert report["status"] == "ready"
+    assert _row(report, "route-support")["status"] == "passed"
 
 
 def test_shared_isolation_is_unsupported(workspace, tmp_path):

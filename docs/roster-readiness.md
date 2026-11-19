@@ -250,8 +250,9 @@ invalidates earlier evidence. Route support then requires all of these:
 - `features.appOwnedSubagents` and `features.cancellation` are true.
 
 `reported_at` is the parent's claim, recorded with the local `received_at`.
-It must be finite, not in the future and no more than the shared 30-second
-operation TTL old. File mtime never establishes freshness. Stale or future
+It must be finite, no more than one second ahead of the local clock (a coarse
+clock tick can trail a just-written report), and no more than the shared
+30-second operation TTL old. File mtime never establishes freshness. Stale or future
 reports are `unknown`.
 
 Isolation, admission and capacity come from Brigade governance, not the

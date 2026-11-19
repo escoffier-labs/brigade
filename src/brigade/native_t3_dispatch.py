@@ -35,6 +35,7 @@ from . import fleet_t3_transport, run_budget, run_events, run_journal, run_lifec
 from . import native_t3_admission as admission
 from . import native_t3_capacity as capacity
 from . import native_t3_observations as observations
+from . import native_t3_structural as structural
 from . import run_task_journal as journal
 from . import native_t3_enrollment as enrollment
 from .fleet_t3_transport import SourceRevisionError
@@ -1063,6 +1064,11 @@ def claim(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) -> 
                 if not decision.granted:
                     raise _refuse("capacity-denied", "no governed native capacity remains for this claim")
                 evidence = admission.evaluate(roster, seat, current.retained.target, hub=hub)
+                if evidence.reason in admission.STRUCTURAL_REASONS:
+                    # A target T3 structurally cannot run is decided by the
+                    # closed classifier, never by message text. Every policy,
+                    # capacity or authority refusal keeps its own code below.
+                    raise _refuse(structural.UNSUPPORTED, f"seat admission refused this claim ({evidence.reason})")
                 if evidence.code == admission.UNAVAILABLE:
                     raise _refuse(
                         "admission-unavailable", f"seat admission authority is unavailable ({evidence.reason})"

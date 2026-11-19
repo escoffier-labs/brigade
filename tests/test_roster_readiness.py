@@ -147,6 +147,15 @@ def test_missing_t3_contract_stays_unverified(declared, tmp_path):
     assert support["action"]
 
 
+def test_t3_fallback_points_structural_gaps_at_a_separate_batch_request(declared, tmp_path):
+    result = evaluate(declared, readiness.ReadinessRequest(("worker",), route="t3"), tmp_path)
+    fallback = result["fallback"]
+    assert fallback["automatic"] is False and fallback["admitted"] is False
+    assert "t3-unsupported" in fallback["action"] and "brigade run batch" in fallback["action"]
+    support = next(item for item in result["evidence"] if item["category"] == "route-support")
+    assert "t3-unsupported" in support["action"] and "brigade run batch" in support["action"]
+
+
 def test_observed_capacity_constrains_batch(declared, tmp_path):
     request = readiness.ReadinessRequest(("worker",), concurrency=2)
     evidence = observed(declared, request, tmp_path)

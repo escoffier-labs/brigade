@@ -48,7 +48,16 @@ def _git(repo: Path, *args: str):
     return result
 
 
-def _roster_text(*, targets: tuple[str, ...] = ("coder",), isolation: str = "worktree") -> str:
+def _roster_text(
+    *,
+    targets: tuple[str, ...] = ("coder",),
+    isolation: str = "worktree",
+    driver: str = "codex",
+    drivers: dict[str, str] | None = None,
+    target_environment: str = "env-target",
+    target_extra: tuple[str, ...] = (),
+) -> str:
+    overrides = drivers or {}
     lines = ['orchestrator = "coder"', ""]
     for agent, role in (("coder", "coder"), ("reviewer", "reviewer")):
         lines += [f"[agents.{agent}]", 'cli = "codex"', f'role = "{role}"', ""]
@@ -57,12 +66,13 @@ def _roster_text(*, targets: tuple[str, ...] = ("coder",), isolation: str = "wor
             f"[t3_targets.{name}]",
             'origin_environment = "env-target"',
             'origin_thread = "thread-parent"',
-            'target_environment = "env-target"',
+            f'target_environment = "{target_environment}"',
             'target_project = "project-test"',
             'provider_instance = "codex-test"',
-            'driver = "codex"',
+            f'driver = "{overrides.get(name, driver)}"',
             'model = "launch-model"',
             f'isolation = "{isolation}"',
+            *target_extra,
             "",
             f"[t3_targets.{name}.options]",
             'reasoningEffort = "high"',
@@ -71,7 +81,16 @@ def _roster_text(*, targets: tuple[str, ...] = ("coder",), isolation: str = "wor
     return "\n".join(lines)
 
 
-def _workspace(tmp_path: Path, *, targets: tuple[str, ...] = ("coder",), isolation: str = "worktree") -> Path:
+def _workspace(
+    tmp_path: Path,
+    *,
+    targets: tuple[str, ...] = ("coder",),
+    isolation: str = "worktree",
+    driver: str = "codex",
+    drivers: dict[str, str] | None = None,
+    target_environment: str = "env-target",
+    target_extra: tuple[str, ...] = (),
+) -> Path:
     repo = tmp_path / "workspace"
     repo.mkdir(parents=True)
     _git(repo, "init")
@@ -82,7 +101,17 @@ def _workspace(tmp_path: Path, *, targets: tuple[str, ...] = ("coder",), isolati
     _git(repo, "commit", "-m", "initial")
     brigade_dir = repo / ".brigade"
     brigade_dir.mkdir()
-    (brigade_dir / "roster.toml").write_text(_roster_text(targets=targets, isolation=isolation), encoding="utf-8")
+    (brigade_dir / "roster.toml").write_text(
+        _roster_text(
+            targets=targets,
+            isolation=isolation,
+            driver=driver,
+            drivers=drivers,
+            target_environment=target_environment,
+            target_extra=target_extra,
+        ),
+        encoding="utf-8",
+    )
     return repo
 
 
@@ -91,16 +120,19 @@ def _batch(
     *,
     request_id: str = "request-1",
     seat: str = "coder",
+    seats: tuple[str, ...] | None = None,
     ids: tuple[str, ...] = ("one", "two"),
     text: str = TASK_TEXT,
     isolation: str = "worktree",
     synthesis: dict | None = None,
 ) -> Path:
+    assigned = seats or (seat,) * len(ids)
     payload = {
         "schema": "brigade.run_batch.v1",
         "request_id": request_id,
         "tasks": [
-            {"task_id": task_id, "text": f"{text} {task_id}", "seat": seat, "isolation": isolation} for task_id in ids
+            {"task_id": task_id, "text": f"{text} {task_id}", "seat": task_seat, "isolation": isolation}
+            for task_id, task_seat in zip(ids, assigned, strict=False)
         ],
         "synthesis": synthesis,
     }
@@ -290,6 +322,74 @@ def test_batch_shape_refusals_write_nothing(tmp_path, capsys, batch_kwargs, code
     captured = capsys.readouterr()
     assert captured.out == "" and f"[{code}]" in captured.err
     assert not (workspace / ".brigade" / "runs").exists()
+
+
+@pytest.mark.parametrize("driver", ["opencode", "antigravity"])
+@POSIX_ONLY
+def test_open_refuses_drivers_t3_cannot_run(tmp_path, capsys, driver):
+    workspace = _workspace(tmp_path, driver=driver)
+    batch = _batch(tmp_path)
+    with pytest.raises(enrollment.UnsupportedTasksError) as refused:
+        enrollment.enroll(batch_path=batch, target=workspace)
+    assert refused.value.code == "t3-unsupported"
+    assert refused.value.entries == (("one", "driver-unsupported"), ("two", "driver-unsupported"))
+    capsys.readouterr()
+    assert _open(batch, workspace) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "error [t3-unsupported]: task one driver-unsupported",
+        "error [t3-unsupported]: task two driver-unsupported",
+    ]
+    assert TASK_TEXT not in captured.err
+    assert not (workspace / ".brigade" / "runs").exists()
+    assert not (workspace / ".brigade" / "run.lock").exists()
+
+
+@pytest.mark.parametrize(
+    ("workspace_kwargs", "token"),
+    [
+        ({"target_environment": "env-remote"}, "target-remote-unsupported"),
+        ({"target_extra": ('runtime_mode = "app-server"',)}, "target-mode-invalid"),
+        ({"target_extra": ('interaction_mode = "plan-fast"',)}, "target-mode-invalid"),
+    ],
+)
+@POSIX_ONLY
+def test_open_reports_structural_gaps_with_the_closed_token(tmp_path, capsys, workspace_kwargs, token):
+    workspace = _workspace(tmp_path, **workspace_kwargs)
+    batch = _batch(tmp_path)
+    assert _open(batch, workspace) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        f"error [t3-unsupported]: task one {token}",
+        f"error [t3-unsupported]: task two {token}",
+    ]
+    assert not (workspace / ".brigade" / "runs").exists()
+
+
+@POSIX_ONLY
+def test_open_names_only_unsupported_tasks_in_a_mixed_batch(tmp_path, capsys):
+    workspace = _workspace(tmp_path, targets=("coder", "reviewer"), drivers={"reviewer": "opencode"})
+    batch = _batch(tmp_path, ids=("one", "two", "three"), seats=("coder", "coder", "reviewer"))
+    assert _open(batch, workspace) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == ["error [t3-unsupported]: task three driver-unsupported"]
+    assert TASK_TEXT not in captured.err
+    assert not (workspace / ".brigade" / "runs").exists()
+
+
+@POSIX_ONLY
+def test_supported_batch_still_enrolls_every_task(tmp_path, capsys):
+    workspace = _workspace(tmp_path, targets=("coder", "reviewer"))
+    batch = _batch(tmp_path, ids=("one", "two"), seats=("coder", "reviewer"))
+    assert _open(batch, workspace) == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["run_id"].startswith("t3-")
+    assert [task["state"] for task in report["tasks"]] == [enrollment.ENROLLED_STATE] * 2
+    assert (workspace / ".brigade" / "runs" / report["run_id"]).is_dir()
 
 
 @POSIX_ONLY

@@ -401,23 +401,30 @@ def test_claim_arguments_are_a_subset_of_the_reviewed_delegate_schema(tmp_path, 
 
 
 @pytest.mark.parametrize(
-    ("target_environment", "target_extra", "code"),
+    ("target_environment", "target_extra", "token"),
     [
         ("env-target", ('runtime_mode = "app-server"',), "target-mode-invalid"),
         ("env-remote", (), "target-remote-unsupported"),
     ],
 )
 @POSIX_ONLY
-def test_open_refuses_modes_t3_rejects_and_remote_targets(tmp_path, capsys, target_environment, target_extra, code):
+def test_open_refuses_modes_t3_rejects_and_remote_targets(tmp_path, capsys, target_environment, target_extra, token):
     workspace = _workspace(tmp_path, target_environment=target_environment, target_extra=target_extra)
     batch = _batch(tmp_path)
-    with pytest.raises(enrollment.EnrollmentError) as refused:
+    with pytest.raises(enrollment.UnsupportedTasksError) as refused:
         enrollment.enroll(batch_path=batch, target=workspace)
-    assert refused.value.code == code
+    assert refused.value.code == "t3-unsupported"
+    assert refused.value.entries == (("one", token), ("two", token))
     capsys.readouterr()
     assert cli.main(["t3", "open", str(batch), "--target", str(workspace)]) == 2
     captured = capsys.readouterr()
-    assert captured.out == "" and f"[{code}]" in captured.err and TASK_TEXT not in captured.err
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        f"error [t3-unsupported]: task one {token}",
+        f"error [t3-unsupported]: task two {token}",
+    ]
+    assert TASK_TEXT not in captured.err
+    assert not (workspace / ".brigade" / "runs").exists()
 
 
 @POSIX_ONLY
@@ -441,13 +448,13 @@ def test_legacy_retained_app_server_is_refused_by_claim(tmp_path, capsys):
     run_id = _legacy_claim_run(workspace)
     with pytest.raises(dispatch.DispatchError) as refused:
         _claim(workspace, run_id)
-    assert refused.value.code == "admission-denied"
+    assert refused.value.code == "t3-unsupported"
     assert admission.TARGET_MODE_INVALID in str(refused.value)
     assert not [event for event in _events(workspace, run_id) if event.event_type == dispatch.CLAIM_EVENT]
     capsys.readouterr()
     assert cli.main(["t3", "claim", run_id, "one", "--parent-thread", THREAD, "--target", str(workspace)]) == 2
     captured = capsys.readouterr()
-    assert captured.out == "" and "[admission-denied]" in captured.err
+    assert captured.out == "" and "[t3-unsupported]" in captured.err
     assert admission.TARGET_MODE_INVALID in captured.err and TASK_TEXT not in captured.err
 
 
@@ -473,7 +480,7 @@ def test_legacy_retained_app_server_still_completes_existing_task_verbs(tmp_path
     assert abandoned["mode"] == dispatch.ABANDONED
     with pytest.raises(dispatch.DispatchError) as refused:
         _claim(workspace, run_id, "two")
-    assert refused.value.code == "admission-denied"
+    assert refused.value.code == "t3-unsupported"
     assert admission.TARGET_MODE_INVALID in str(refused.value)
 
 
@@ -487,12 +494,12 @@ def test_legacy_retained_remote_target_is_refused_by_claim(tmp_path, capsys):
     )
     with pytest.raises(dispatch.DispatchError) as refused:
         _claim(workspace, run_id)
-    assert refused.value.code == "admission-denied"
+    assert refused.value.code == "t3-unsupported"
     assert admission.TARGET_REMOTE_UNSUPPORTED in str(refused.value)
     capsys.readouterr()
     assert cli.main(["t3", "claim", run_id, "one", "--parent-thread", THREAD, "--target", str(workspace)]) == 2
     captured = capsys.readouterr()
-    assert captured.out == "" and "[admission-denied]" in captured.err
+    assert captured.out == "" and "[t3-unsupported]" in captured.err
     assert admission.TARGET_REMOTE_UNSUPPORTED in captured.err and TASK_TEXT not in captured.err
 
 

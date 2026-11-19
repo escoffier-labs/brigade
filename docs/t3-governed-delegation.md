@@ -58,16 +58,18 @@ The eight identity fields above are required. `runtime_mode` and
 `approval-required`, `auto-accept-edits`, `auto` and `full-access`, the literals
 the pinned T3 Code delegate schema accepts. `interaction_mode` also accepts only
 `default` and `plan`. A target that still declares `app-server`, or any other
-mode T3 does not accept, refuses at `t3 open` and at claim admission with
-`target-mode-invalid`. Set `inherit` and let the parent thread's mode apply. A
-retained target from an older release is still read back unchanged, so an
-attempt that was already claimed can finish its verbs. A new claim re-applies
-these rules and refuses with `admission-denied` and reason
-`target-mode-invalid`.
+well-formed mode name T3 does not accept, is a structural gap. `t3 open` refuses
+the whole batch with `t3-unsupported` and token `target-mode-invalid`, and a
+claim refuses the same way for a retained target. A malformed mode string, such
+as one containing a space, fails target validation first and refuses as
+`invalid-target`. Set `inherit` and let the parent thread's mode
+apply. A retained target from an older release is still read back unchanged, so
+an attempt that was already claimed can finish its verbs.
 
 `target_environment` must equal `origin_environment`, because a governed child
-must run locally. A different value refuses with `target-remote-unsupported` at
-`t3 open` and at claim admission. Cross-machine governed targets are
+must run locally. A different value is a structural gap: `t3 open` refuses with
+`t3-unsupported` and token `target-remote-unsupported`, and so does a claim on a
+retained remote target. Cross-machine governed targets are
 unsupported. Remote editing children belong to `t3_thread_launch` with a
 worktree `workspaceStrategy`, which needs its own design. `isolation` must be
 `worktree`, unknown fields refuse the whole batch, and a seat without a
@@ -75,7 +77,47 @@ declaration refuses the whole batch. `max_live` is optional and must be a
 positive integer. It caps how many governed native tasks that one seat may hold
 at once. Without it the seat has no per-seat cap and only the workspace-wide
 limit applies. The source revision is never taken from the roster. It is the
-clean workspace `HEAD` at `open` time, and a dirty workspace refuses.
+clean workspace `HEAD` at `open` time, and a dirty workspace refuses. A target
+`driver` outside the closed T3 driver table, today `codex` and `claudeAgent`, is
+a structural gap with token `driver-unsupported`.
+
+## Work T3 cannot run
+
+T3 Code cannot run some work at all. That is a structural property of the
+requested target, so `t3 open` decides it at submission and refuses the whole
+batch. There is no reroute verb inside a governed run, no fallback transfer and
+no budget transfer. The three tokens are closed.
+
+| Token | Meaning |
+| --- | --- |
+| `driver-unsupported` | The target driver is outside the closed T3 driver table. Today that table holds `codex` and `claudeAgent`, so `opencode` and `antigravity` land here. |
+| `target-remote-unsupported` | `target_environment` differs from `origin_environment`. |
+| `target-mode-invalid` | The runtime or interaction mode is not a literal T3 accepts. |
+
+`t3 open` refuses with code `t3-unsupported`, exits non-zero, prints nothing on
+stdout, and writes one fixed stderr line per affected task naming its
+caller-chosen task id and its token. No run directory, asset or journal fact is
+created. A supported task in the same batch is refused with the others, and a
+batch where every task is supported enrolls exactly as before.
+
+These three tokens are the only route to `brigade run batch`. The parent takes
+the refused tasks and submits them itself as a separate ordinary
+`brigade run batch` request. That request applies its own admission, budget and
+receipts, and its tasks carry their own identities. They are not linked into the
+governed T3 run, they consume no governed native capacity, and nothing about the
+governed run's budget or receipts applies to them.
+
+Every other refusal stays a refusal and is never reported as
+`t3-unsupported`. That covers a disallowed adapter, a retired model, an
+orchestrator seat, Hub policy denied or unavailable, a missing policy consumer,
+capacity, budget, a held task, a run barrier, an already claimed task, a missing
+target declaration, an invalid target declaration and parent-reported capability
+evidence. None of those is a structural gap, so none of them is an invitation to
+submit the work under another route.
+
+A claim re-applies the same classification. A retained target whose mode,
+locality or driver T3 cannot run, or a declaration edited after open into one,
+refuses with `t3-unsupported` and the token instead of `admission-denied`.
 
 ## What open writes
 
@@ -251,11 +293,13 @@ A claim is admitted only when all of these hold.
 - The seat exists in the current roster and is not the orchestrator.
 - The current `[t3_targets.<seat>]` declaration resolves and equals the
   retained target in every `NativeTarget` field, including canonical options.
-  A declaration edited after `t3 open` refuses the claim.
+  A declaration edited after `t3 open` refuses the claim, and a declaration
+  edited into a structural gap reports `t3-unsupported` with its token.
 - The seat adapter passes `limits.allow_models`, and neither the target launch
-  model nor the seat model is retired. The target driver is mapped through a
-  closed table onto the Brigade adapter whose allow patterns and
-  retired-model policy apply, and an unknown driver refuses.
+  model nor the seat model is retired. The target driver is mapped through the
+  closed table onto the Brigade adapter whose allow patterns and retired-model
+  policy apply, and a driver outside that table is the structural token
+  `driver-unsupported`.
 - When this node is enrolled with a Hub, `fleet_policy.admissible_seat` passes
   against the live Hub policy for the `brigade-run` consumer.
 
@@ -455,23 +499,33 @@ synthesis step.
 `t3 open` prints JSON with `schema`, `run_id` and one entry per task holding
 only `task_id`, `seat`, `state` and the target summary (`provider_instance`,
 `model`). Refusals print one bounded `error [<code>]: <diagnostic>` line to
-stderr and exit non-zero. Refusal codes include `source-dirty`,
+stderr and exit non-zero, except a structural-gap refusal, which prints one
+fixed line per affected task as described in [Work T3 cannot
+run](#work-t3-cannot-run). Open refusal codes include `source-dirty`,
 `roster-missing`, `unknown-seat`, `seat-unbound`, `invalid-target`,
-`target-mode-invalid`, `target-isolation`, `target-remote-unsupported`,
-`isolation-required`, `synthesis-unsupported`, `run-busy`, `request-conflict`,
-`asset-conflict`, `asset-custody`, `asset-digest`, `unsupported-platform` and
-`journal-refused`.
+`target-isolation`, `isolation-required`, `synthesis-unsupported`, `run-busy`,
+`request-conflict`, `asset-conflict`, `asset-custody`, `unsupported-platform`,
+`t3-unsupported` and `journal-refused`. `asset-digest` is not an open refusal.
+It is raised only when a retained asset is read back and fails digest
+verification.
 
-Claim and correlation refusals use the same one-line form. Codes include
-`run-missing`, `run-state`, `run-held`, `not-native-run`, `source-dirty`,
-`source-changed`, `target-changed`, `asset-custody`, `asset-digest`,
-`run-barrier`, `already-claimed`, `task-held`, `capacity-denied`,
-`budget-exhausted`, `no-claim`, `claim-incomplete`, `parent-mismatch`,
-`intent-mismatch`, `native-invalid`, `native-mismatch`,
-`provider-mismatch`, `model-mismatch`, `options-mismatch`,
-`accept-conflict`, `handle-mismatch`, `no-correlation`, `task-terminal`,
-`task-nonterminal`, `result-mismatch`, `ack-refused`, `finalize-held`,
-`finalize-abandoned` and `observation-conflict`.
+Claim refusals use the same one-line form. Codes include `run-missing`,
+`run-state`, `run-held`, `not-native-run`, `invalid-identity`, `invalid-run`,
+`source-dirty`, `source-unavailable`, `source-changed`, `target-changed`,
+`asset-custody`, `asset-digest`, `run-barrier`, `already-claimed`, `task-held`,
+`capacity-denied`, `capacity-unknown`, `capacity-lock`, `budget-exhausted`,
+`budget-refused`, `admission-denied`, `admission-unavailable`,
+`t3-unsupported`, `claim-refused`, `not-enrolled`, `intent-invalid`,
+`dispatch-binding`, `not-batch`, `roster-missing`, `roster-invalid`,
+`run-busy`, `run-lock` and `journal-refused`.
+
+Correlation, cancellation, acknowledgement and finalization refusals use the
+same form. Codes include `no-claim`, `claim-incomplete`, `parent-mismatch`,
+`intent-mismatch`, `native-invalid`, `native-mismatch`, `native-unreadable`,
+`native-too-large`, `provider-mismatch`, `model-mismatch`, `options-mismatch`,
+`accept-conflict`, `handle-mismatch`, `no-correlation`, `task-terminal`, `task-nonterminal`,
+`result-mismatch`, `ack-refused`, `finalize-held`, `finalize-abandoned` and
+`observation-conflict`.
 
 ## Limits
 
