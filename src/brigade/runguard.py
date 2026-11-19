@@ -23,7 +23,7 @@ from time import monotonic_ns as _monotonic_ns
 from time import sleep as _sleep
 from uuid import uuid4
 
-from . import dirfd, localio, nt_process, proc, receipt_schema, run_dirfd
+from . import dirfd, localio, nt_process, proc, receipt_schema, run_dirfd, runguard_release
 from .runguard_gate import _recovery_gate_busy_error, _RecoveryGate, _stale_recovery_gate
 
 # Re-exported for tests to call. Patch these on runguard_gate: the gate looks them up there.
@@ -74,8 +74,6 @@ STALE_LOCK_RECONCILE_MAX_AGE = timedelta(hours=24)
 # ground truth (issue #1165).
 _UNTRACKED_ENUM_BUDGET_BYTES = proc.MAX_DELIMITED_BYTES
 _UNTRACKED_ENUM_TIMEOUT_SECONDS = 120.0
-_WINDOWS_LOCK_RELEASE_RETRY_SECONDS = 1.0
-_WINDOWS_LOCK_RELEASE_RETRY_INTERVAL_SECONDS = 0.025
 _RECOVERY_GATE_BUSY_RETRY_SECONDS = 2.0
 _RECOVERY_GATE_BUSY_POLL_SECONDS = 0.02
 
@@ -266,11 +264,31 @@ def _pid_is_active(pid: int) -> bool:
     return True
 
 
-def _lock_is_stale(path: Path) -> bool:
-    _lock_path_is_directory(path)
+@dataclass(frozen=True)
+class _LockSnapshot:
+    """One read of a lock directory: its identity and whether its owner is dead."""
+
+    fingerprint: tuple[int, int, object]
+    stale: bool
+
+
+def _lock_snapshot(path: Path) -> _LockSnapshot | None:
+    """Read a lock once for both its identity and its liveness verdict (issue #2747).
+
+    ``None`` means no lock directory is at ``path``. Answering both questions from
+    one pass keeps a stale check from opening ``owner.json`` twice.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise RunLockError(f"malformed run lock is not a directory: {path}")
     recorded_pids: list[int] = []
     try:
-        recorded_pids.append(int((path / "pid").read_text().strip()))
+        recorded_pids.append(int(nt_process.read_text_sharing_delete(path / "pid").strip()))
     except (FileNotFoundError, NotADirectoryError, ValueError):
         pass
     except OSError as exc:
@@ -279,7 +297,16 @@ def _lock_is_stale(path: Path) -> bool:
     owner_pid = owner.get("pid") if owner is not None else None
     if isinstance(owner_pid, int):
         recorded_pids.append(owner_pid)
-    return not any(_pid_is_active(pid) for pid in set(recorded_pids))
+    owner_token = owner.get("owner_token") if owner is not None else None
+    return _LockSnapshot(
+        fingerprint=(info.st_dev, info.st_ino, owner_token),
+        stale=not any(_pid_is_active(pid) for pid in set(recorded_pids)),
+    )
+
+
+def _lock_is_stale(path: Path) -> bool:
+    snapshot = _lock_snapshot(path)
+    return True if snapshot is None else snapshot.stale
 
 
 def _lock_owner_payload(*, owner_token: str, run_dir: Path | None) -> dict[str, object]:
@@ -307,7 +334,7 @@ def read_lock_owner(path: Path | str | None) -> dict[str, object] | None:
 
 def _read_lock_owner(path: Path) -> dict[str, object] | None:
     try:
-        payload = json.loads((path / "owner.json").read_text())
+        payload = json.loads(nt_process.read_text_sharing_delete(path / "owner.json"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
@@ -360,22 +387,6 @@ def _owner_with_workspace(owner: dict[str, object] | None, path: Path) -> dict[s
     return enriched
 
 
-def _lock_fingerprint(path: Path) -> tuple[int, int, object] | None:
-    """Identity of the lock directory now at ``path``, or ``None`` when absent.
-
-    The owner token is part of it because a released lock's inode number is
-    usually handed straight to the next lock directory.
-    """
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
-    owner = _read_lock_owner(path)
-    return info.st_dev, info.st_ino, owner.get("owner_token") if owner is not None else None
-
-
 def _claim_stale_lock_patiently(path: Path) -> tuple[Path, dict[str, object] | None] | None:
     """``_claim_stale_lock``, waiting a bounded time while another recoverer holds the gate."""
     deadline: float | None = None  # read the clock only once the gate is busy
@@ -399,8 +410,8 @@ def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | Non
     # own lock, and C's rename then takes B's live lock out of sight (B crashes
     # on `stat`, or B's lock is stranded under C's claim name while another
     # acquirer publishes beside it). A busy gate returns BUSY, never None: the lock may still be dead.
-    judged = _lock_fingerprint(path)
-    if judged is None or not _lock_is_stale(path):
+    judged = _lock_snapshot(path)
+    if judged is None or not judged.stale:
         return None
     with _stale_recovery_gate(path) as gated:
         if not gated:
@@ -408,7 +419,7 @@ def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | Non
         # Re-judge under the gate: the same lock before and after the stale check means the verdict is
         # about that lock. Ungated renames into ``path`` (publish, restores, `_release_lock`'s put-back)
         # all need ``path`` empty, so none can displace a judged lock.
-        if _lock_fingerprint(path) != judged or not _lock_is_stale(path) or _lock_fingerprint(path) != judged:
+        if _lock_snapshot(path) != judged:
             return None
         claimed = _recovery_claim_path(path)
         try:
@@ -424,7 +435,7 @@ def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | Non
             raise
         # Defense in depth: a recycled owner pid can make the claimed lock look
         # live again. Put it back only if ``path`` is still free.
-        if _lock_fingerprint(claimed) != judged or not _lock_is_stale(claimed):
+        if _lock_snapshot(claimed) != judged:
             _restore_claimed_lock(path, claimed)
             return None
     return claimed, _owner_with_workspace(_read_lock_owner(claimed), path)
@@ -1456,36 +1467,9 @@ def _acquire_lock(
 
 
 def _release_lock(path: Path, ownership: _LockOwnership) -> None:
-    release_path = path.with_name(f".{path.name}.{ownership.owner_token}.release")
-    deadline = time.monotonic() + _WINDOWS_LOCK_RELEASE_RETRY_SECONDS
-    while True:
-        try:
-            visible = path.stat()
-        except OSError:
-            return
-        if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
-            return
-        try:
-            path.rename(release_path)
-            break
-        except FileNotFoundError:
-            return
-        except PermissionError as error:
-            if getattr(error, "winerror", None) not in {5, 32}:
-                raise
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise
-            time.sleep(min(_WINDOWS_LOCK_RELEASE_RETRY_INTERVAL_SECONDS, remaining))
-    try:
-        released = release_path.stat()
-    except OSError:
-        return
-    if released.st_dev == ownership.device and released.st_ino == ownership.inode:
-        shutil.rmtree(release_path, ignore_errors=True)
-        return
-    if not path.exists():
-        release_path.rename(path)
+    # Windows cannot rename a directory a waiter holds a file open in, so the
+    # release is a module of its own (issue #2747).
+    runguard_release.release_lock(path, ownership, clock=time)
 
 
 @contextlib.contextmanager

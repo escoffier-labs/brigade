@@ -303,7 +303,7 @@ def test_run_lock_retries_when_concurrent_stale_claim_removes_visible_lock(tmp_p
 
 
 def test_stale_verdict_never_takes_a_live_lock_published_during_the_check(tmp_path, monkeypatch):
-    """The holder releases and a new holder publishes while `_lock_is_stale` reads.
+    """The holder releases and a new holder publishes while `_lock_snapshot` reads.
 
     A lock with no readable owner counts as stale, so the verdict can describe a
     lock that is already gone. Renaming `path` then takes the live replacement
@@ -314,15 +314,15 @@ def test_stale_verdict_never_takes_a_live_lock_published_during_the_check(tmp_pa
     lock_path.mkdir()
     (lock_path / "pid").write_text("99999999\n")
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid == os.getpid())
-    original_is_stale = runguard._lock_is_stale
+    original_snapshot = runguard._lock_snapshot
     live = []
 
     def replaced_during_check(path):
-        verdict = original_is_stale(path)
+        snapshot = original_snapshot(path)
         if not live:
             shutil.rmtree(path)
             live.append(runguard._publish_lock(path, run_dir=None))
-        return verdict
+        return snapshot
 
     renamed = []
     original_rename = Path.rename
@@ -331,7 +331,7 @@ def test_stale_verdict_never_takes_a_live_lock_published_during_the_check(tmp_pa
         renamed.append(self)
         return original_rename(self, target)
 
-    monkeypatch.setattr(runguard, "_lock_is_stale", replaced_during_check)
+    monkeypatch.setattr(runguard, "_lock_snapshot", replaced_during_check)
     monkeypatch.setattr(Path, "rename", spy_rename)
 
     assert runguard._claim_stale_lock(lock_path) is None
@@ -484,7 +484,7 @@ def test_claim_mode_reaper_never_becomes_a_second_holder(tmp_path, monkeypatch):
             pass
 
     window = _run_between_stale_check_and_rename(monkeypatch, winner_recovers_and_publishes)
-    original_fingerprint = runguard._lock_fingerprint
+    original_snapshot = runguard._lock_snapshot
     reaped = []
 
     def reaper_publishes_after_the_late_rename(path):
@@ -494,9 +494,9 @@ def test_claim_mode_reaper_never_becomes_a_second_holder(tmp_path, monkeypatch):
                 holders.append(runguard._acquire_lock(lock_path, run_dir=run_dir, stale_action="claim"))
             except runguard.RunLockError:
                 pass
-        return original_fingerprint(path)
+        return original_snapshot(path)
 
-    monkeypatch.setattr(runguard, "_lock_fingerprint", reaper_publishes_after_the_late_rename)
+    monkeypatch.setattr(runguard, "_lock_snapshot", reaper_publishes_after_the_late_rename)
 
     runguard._claim_stale_lock(lock_path)
 
