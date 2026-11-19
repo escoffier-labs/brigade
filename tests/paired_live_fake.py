@@ -78,6 +78,10 @@ if steps:
     server = cfg["mcpServers"]["brigade-paired"]
     proc = subprocess.Popen([server["command"], *server["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             text=True, env={**os.environ, **server.get("env", {})})
+    # The server appends trace rows into the arm directory until it exits. Record
+    # its pid there so the test can wait for it before removing that directory.
+    with open(os.path.join(os.path.dirname(os.getcwd()), "server.pid"), "w") as handle:
+        handle.write(str(proc.pid))
     rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake", "version": "0"}})
     proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
     proc.stdin.flush()

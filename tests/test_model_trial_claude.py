@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, model_trial_claude, model_trials, proc
+from brigade import cli, model_trial_claude, model_trials, proc, runguard
 from brigade.memory_verify_seat import CLAUDE_SETTINGS
 from brigade.model_trial_claude import (
     ADAPTER_ID,
@@ -76,6 +76,21 @@ def clean_temp_root():
         pytest.skip("no temp directory without CLAUDE.md or AGENTS.md in its ancestors")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(tempfile, "tempdir", str(root))
+        original_remove = model_trial_claude.remove_work_dir
+
+        def remove_work_dir_after_server(path, *, windows=os.name == "nt"):
+            pid_file = path / "server.pid"
+            if pid_file.is_file():
+                try:
+                    pid = int(pid_file.read_text().strip())
+                except ValueError:
+                    pid = 0
+                deadline = time.monotonic() + 30
+                while runguard._pid_is_active(pid) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            return original_remove(path, windows=windows)
+
+        patch.setattr(model_trial_claude, "remove_work_dir", remove_work_dir_after_server)
         yield root
     shutil.rmtree(root, ignore_errors=True)
 
