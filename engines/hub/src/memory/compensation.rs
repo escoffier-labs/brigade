@@ -15,6 +15,10 @@ pub const CAPABILITY: &str = "automatic_compensation";
 const DEFAULT_WINDOW: i64 = 86_400;
 const METRIC_TOLERANCE: f64 = 0.01;
 
+/// Candidate verifier manifests, filtered exactly as the trip scan reads them.
+/// The scan and its cheap fingerprint both read this source so they cannot drift.
+const EVIDENCE_SOURCE: &str = " FROM memory_evidence e JOIN memory_evidence_bindings b USING(evidence_id) JOIN memory_verifier_credentials v ON v.credential=e.credential_id AND v.principal=e.principal AND v.verifier=1 JOIN memory_verifiers p ON p.principal=e.principal AND p.verifier=1 WHERE e.scope=?1 AND e.card_id=?2 AND b.base_revision>=?3 AND b.state='active' AND e.observed_ms>?4 AND e.observed_ms<=?5 AND e.created_ms>=e.observed_ms AND e.tombstoned=0 AND e.scan_state='clean' AND e.artifact_kind='memory-verify-manifest' ORDER BY e.evidence_id";
+
 /// Rebase only across a bounded, replayable sequence of evidence-only applies.
 /// Every revision is checked, so a human edit followed by a revert still fails.
 fn evidence_head<T: ReadTx + ?Sized>(tx: &T, card: &Json) -> rusqlite::Result<Option<Json>> {
@@ -382,7 +386,18 @@ fn trigger(
         .filter(|c| c["applied_revision"].is_i64())
     {
         let scope = string(card, "scope");
-        let rows = tx.query("SELECT e.evidence_id,e.artifact_bytes,e.artifact_sha256,e.principal,e.credential_id,e.observed_ms,e.credential_class,b.base_revision FROM memory_evidence e JOIN memory_evidence_bindings b USING(evidence_id) JOIN memory_verifier_credentials v ON v.credential=e.credential_id AND v.principal=e.principal AND v.verifier=1 JOIN memory_verifiers p ON p.principal=e.principal AND p.verifier=1 WHERE e.scope=?1 AND e.card_id=?2 AND b.base_revision>=?3 AND b.state='active' AND e.observed_ms>?4 AND e.observed_ms<=?5 AND e.created_ms>=e.observed_ms AND e.tombstoned=0 AND e.scan_state='clean' AND e.artifact_kind='memory-verify-manifest' ORDER BY e.evidence_id", &[t(scope),t(string(card,"card_id")),Value::Integer(card["applied_revision"].as_i64().unwrap_or(0)),Value::Integer(applied),Value::Integer(now)])?;
+        let rows = tx.query(
+            &format!(
+                "SELECT e.evidence_id,e.artifact_bytes,e.artifact_sha256,e.principal,e.credential_id,e.observed_ms,e.credential_class,b.base_revision{EVIDENCE_SOURCE}"
+            ),
+            &[
+                t(scope),
+                t(string(card, "card_id")),
+                Value::Integer(card["applied_revision"].as_i64().unwrap_or(0)),
+                Value::Integer(applied),
+                Value::Integer(now),
+            ],
+        )?;
         let mut principals = std::collections::BTreeSet::new();
         let mut evidence_ids = Vec::new();
         let mut kind = "contradicted";
@@ -503,6 +518,188 @@ fn trigger(
     Ok(review_trip)
 }
 
+fn save_journal(tx: &dyn WriteTx, key: &str, journal: &Json) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        &[t(key), t(&journal.to_string())],
+    )?;
+    Ok(())
+}
+
+fn row_key(row: &[Value]) -> Json {
+    Json::Array(
+        row.iter()
+            .map(|value| match value {
+                Value::Null => Json::Null,
+                Value::Integer(number) => json!(number),
+                Value::Real(number) => json!(number),
+                Value::Text(text) => json!(text),
+                Value::Blob(bytes) => json!(ids::sha256_hex(bytes)),
+            })
+            .collect(),
+    )
+}
+
+/// Fingerprint every input the trip scan reads, without hashing blobs or running
+/// the content scanner. A stale watch stores it so later polls can skip the
+/// retrieval and manifest scan until one of these inputs changes.
+///
+/// `None` means a bounded scan stopped with work still queued, so no verdict can
+/// be cached as if the whole input set had been consumed.
+fn watch_inputs<T: ReadTx + ?Sized>(
+    tx: &T,
+    body: &Json,
+    applied: i64,
+    now: i64,
+    request: &Json,
+    authority: &Authority,
+    scanner: &dyn Scanner,
+) -> rusqlite::Result<Option<String>> {
+    let (available, ruleset) = scanner.describe();
+    let mut inputs = vec![
+        json!({
+            "scope": string(request, "scope"),
+            "negative_outcomes": request["negative_outcomes"].clone(),
+        }),
+        json!({"authority": super::hardening::authority_digest(authority)}),
+        json!({"scanner": {"available": available, "ruleset": ruleset}}),
+    ];
+    for card in proposals::cards(body)
+        .iter()
+        .filter(|c| c["applied_revision"].is_i64())
+    {
+        let scope = string(card, "scope");
+        let card_id = string(card, "card_id");
+        let applied_revision = card["applied_revision"].as_i64().unwrap_or(0);
+        // Same filters as the scan, but no blob or manifest parsing.
+        let rows = tx.query(
+            &format!(
+                "SELECT e.evidence_id,e.artifact_sha256,e.principal,e.credential_id,e.observed_ms,e.credential_class,b.base_revision{EVIDENCE_SOURCE}"
+            ),
+            &[
+                t(scope),
+                t(card_id),
+                Value::Integer(applied_revision),
+                Value::Integer(applied),
+                Value::Integer(now),
+            ],
+        )?;
+        // A grant that arrives later makes an already copied evidence row
+        // eligible, so the row alone is not the whole input.
+        let mut principals = std::collections::BTreeSet::new();
+        for row in &rows {
+            if let Value::Text(principal) = &row[2] {
+                principals.insert(principal.clone());
+            }
+        }
+        let mut grants = Vec::new();
+        for principal in principals {
+            for row in tx.query(
+                "SELECT scope,rights FROM memory_grants WHERE principal=?1 ORDER BY scope,rights",
+                &[t(&principal)],
+            )? {
+                grants.push(json!({"principal": principal, "grant": row_key(&row)}));
+            }
+        }
+        inputs.push(json!({
+            "card": [scope, card_id, applied_revision],
+            "evidence": rows.iter().map(|row| row_key(row)).collect::<Vec<_>>(),
+            "grants": grants,
+        }));
+    }
+    let mut consumed = true;
+    let retrieval = match body["preflight"]["retrieval_eval_record"]["record_seq"].as_i64() {
+        Some(seq) => {
+            let baseline = tx.query(
+                "SELECT report_json,mode FROM memory_retrieval_evals WHERE record_seq=?1",
+                &[Value::Integer(seq)],
+            )?;
+            let cursor_key = format!("compensation_retrieval:{}", string(body, "proposal_id"));
+            let cursor = tx
+                .query(
+                    "SELECT value FROM memory_meta WHERE key=?1",
+                    &[t(&cursor_key)],
+                )?
+                .first()
+                .and_then(|row| s(&row[0]).parse::<i64>().ok())
+                .unwrap_or(seq);
+            let candidates = match baseline.first() {
+                Some(row) => tx.query(
+                    "SELECT count(*),MAX(record_seq) FROM memory_retrieval_evals WHERE mode=?1 AND record_seq>?2 AND evaluated_ms>?3 AND evaluated_ms<=?4",
+                    &[
+                        row[1].clone(),
+                        Value::Integer(cursor),
+                        Value::Integer(applied),
+                        Value::Integer(now),
+                    ],
+                )?,
+                None => Vec::new(),
+            };
+            // The scan reads at most 128 rows. A queued row past the cursor
+            // means the verdict is partial and must not be cached.
+            consumed = match candidates.first() {
+                Some(row) => match &row[1] {
+                    Value::Integer(max) => *max <= cursor,
+                    _ => true,
+                },
+                None => true,
+            };
+            json!({
+                "record_seq": seq,
+                "mode": baseline.first().map(|row| s(&row[1])),
+                "cursor": cursor,
+                "candidates": candidates.iter().map(|row| row_key(row)).collect::<Vec<_>>(),
+            })
+        }
+        None => Json::Null,
+    };
+    inputs.push(json!({"retrieval": retrieval}));
+    if !consumed {
+        return Ok(None);
+    }
+    Ok(Some(ids::sha256_hex(
+        ids::canonical(&Json::Array(inputs)).as_bytes(),
+    )))
+}
+
+fn set_stale_inputs(journal: &mut Json, inputs: Option<String>) {
+    if let Some(object) = journal.as_object_mut() {
+        object.remove("stale_inputs");
+    }
+    if let Some(inputs) = inputs {
+        journal["stale_inputs"] = json!(inputs);
+    }
+}
+
+/// Persist the inputs behind the current stale verdict. Only a stale result
+/// carries a fingerprint, since every other outcome is retried from scratch.
+fn remember_stale_inputs(
+    tx: &dyn WriteTx,
+    key: &str,
+    journal: &mut Json,
+    inputs: Option<String>,
+) -> rusqlite::Result<()> {
+    if journal["result"] != "stale" {
+        return Ok(());
+    }
+    set_stale_inputs(journal, inputs);
+    save_journal(tx, key, journal)
+}
+
+/// A suppressed outcome is not a completed stale verdict. Forget the cached
+/// fingerprint so the next poll re-runs the scan and can report the trip once
+/// the blocking referral is decided.
+fn clear_stale_inputs(tx: &dyn WriteTx, key: &str, journal: &mut Json) -> rusqlite::Result<()> {
+    let removed = journal
+        .as_object_mut()
+        .and_then(|object| object.remove("stale_inputs"))
+        .is_some();
+    if removed {
+        save_journal(tx, key, journal)?;
+    }
+    Ok(())
+}
+
 pub fn watch(
     tx: &dyn WriteTx,
     p: &Prepared,
@@ -599,9 +796,6 @@ pub fn watch(
             "SELECT value FROM memory_meta WHERE key=?1",
             &[t(&cursor_key)],
         )?;
-        let Some(trip) = trigger(tx, &body, applied, p.now_ms, request, a, scanner)? else {
-            continue;
-        };
         let journal_key = format!("compensation_watch:{id}");
         let previous = tx.query(
             "SELECT value FROM memory_meta WHERE key=?1",
@@ -612,6 +806,24 @@ pub fn watch(
             .and_then(|r| serde_json::from_str::<Json>(&s(&r[0])).ok())
             .filter(Json::is_object)
             .unwrap_or_else(|| json!({}));
+        // A permanently stale watch still owes a later distinct trip, but the
+        // scan it would repeat is the expensive part. Skip it while every input
+        // it reads is identical to the last stale evaluation.
+        if journal["result"] == "stale" {
+            if let Some(saved) = journal["stale_inputs"].as_str() {
+                let inputs = watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?;
+                if inputs.as_deref() == Some(saved) {
+                    continue;
+                }
+            }
+        }
+        let Some(trip) = trigger(tx, &body, applied, p.now_ms, request, a, scanner)? else {
+            if journal["result"] == "stale" {
+                let inputs = watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?;
+                remember_stale_inputs(tx, &journal_key, &mut journal, inputs)?;
+            }
+            continue;
+        };
         let fingerprint = ids::sha256_hex(ids::canonical(&trip).as_bytes());
         // Retain round-4 journals and every completed fingerprint. A permanent
         // refusal ends retries of that trip, not watches for the original.
@@ -619,6 +831,10 @@ pub fn watch(
             && matches!(string(&journal, "result"), "review_required" | "stale"))
             || journal["completed_trips"].get(&fingerprint).is_some()
         {
+            if journal["result"] == "stale" {
+                let inputs = watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?;
+                remember_stale_inputs(tx, &journal_key, &mut journal, inputs)?;
+            }
             continue;
         }
         // A changed signal must not multiply referrals awaiting human review.
@@ -627,6 +843,7 @@ pub fn watch(
             "SELECT proposal_id FROM memory_proposals WHERE state='pending' AND json_extract(body,'$.rollback_of')=?1 LIMIT 1",
             &[t(&id)],
         )?.is_empty() {
+            clear_stale_inputs(tx, &journal_key, &mut journal)?;
             continue;
         }
         body["watch_trip"] = trip.clone();
@@ -663,7 +880,13 @@ pub fn watch(
             journal["trip"] = trip.clone();
             journal["result"] = json!(journal_result);
             journal["completed_trips"][fingerprint] = json!(journal_result);
-            tx.execute("INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &[t(&journal_key),t(&journal.to_string())])?;
+            let inputs = if journal_result == "stale" {
+                watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?
+            } else {
+                None
+            };
+            set_stale_inputs(&mut journal, inputs);
+            save_journal(tx, &journal_key, &journal)?;
         } else {
             // A refusal must leave both verifier and retrieval signals retryable.
             tx.execute("DELETE FROM memory_meta WHERE key=?1", &[t(&cursor_key)])?;
