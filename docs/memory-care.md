@@ -864,7 +864,10 @@ recorded cause. Clearing first starts a fresh coverage window at the clear day,
 under the ledger lock. If that window cannot be written, the sentinel stays, so
 the outage days can never count as covered. The recorded clear is also a floor
 for later reads: a restored older ledger cannot claim coverage across a cleared
-outage. Recording resumes on the next successful read; until then the lifecycle
+outage. A record that is present but torn, unreadable or not a regular file also
+blocks coverage until it can be read again. Deleting the record together with
+restoring an older ledger is an owner action that can restore old coverage;
+Brigade cannot detect that combination. Recording resumes on the next successful read; until then the lifecycle
 stays blocked. A TTY also prompts `y/N`; without `--confirm` the command
 refuses.
 Reference scans prune vendor, environment, cache and build directories and do

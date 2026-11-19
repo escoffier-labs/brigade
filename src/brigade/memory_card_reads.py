@@ -127,8 +127,19 @@ def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
 
-def _failures(target: Path) -> dict[str, tuple[int, int, int, int]]:
-    """Failure markers keyed by path, each with the identity seen at read time."""
+def _marker_count(bound, name: str) -> int:
+    """Parsed coalesced count, or zero when the marker cannot be read."""
+    try:
+        raw = bound.read_bytes(*Path(FAILURES_REL).parts, name, max_bytes=4096)
+        payload = json.loads(raw) if raw is not None else None
+    except (OSError, ValueError, TypeError):
+        return 0
+    count = payload.get("count") if isinstance(payload, dict) else None
+    return count if type(count) is int and count > 0 else 0
+
+
+def _failures(target: Path) -> dict[str, tuple[int, int, int, int, int]]:
+    """Failure markers keyed by path, with the identity and count seen at read time."""
     with bound_run_dir(target) as bound:
         try:
             parent = bound.dir_fd(*Path(FAILURES_REL).parts)
@@ -140,13 +151,14 @@ def _failures(target: Path) -> dict[str, tuple[int, int, int, int]]:
         markers = {}
         for name in names:
             try:
-                markers[f"{FAILURES_REL}/{name}"] = _fingerprint(dirfd.stat_child(parent, name))
+                info = dirfd.stat_child(parent, name)
             except FileNotFoundError:
                 continue
+            markers[f"{FAILURES_REL}/{name}"] = (*_fingerprint(info), _marker_count(bound, name))
         return markers
 
 
-def _unlink_if_unchanged(target: Path, rel: str, expected: tuple[int, int, int, int]) -> None:
+def _unlink_if_unchanged(target: Path, rel: str, expected: tuple[int, int, int, int, int]) -> None:
     """Consume a marker only while it is still the file that was read.
 
     A failing process writes markers without the ledger lock, so it can replace
@@ -157,15 +169,15 @@ def _unlink_if_unchanged(target: Path, rel: str, expected: tuple[int, int, int, 
     with bound_run_dir(target) as bound:
         try:
             parent = bound.dir_fd(*parts[:-1])
+            info = dirfd.stat_child(parent, parts[-1])
         except FileNotFoundError:
+            return
+        if (*_fingerprint(info), _marker_count(bound, parts[-1])) != expected:
             return
         try:
-            current = _fingerprint(dirfd.stat_child(parent, parts[-1]))
+            dirfd.unlink_child(parent, parts[-1])
         except FileNotFoundError:
             return
-        if current != expected:
-            return
-        dirfd.unlink_child(parent, parts[-1])
         dirfd.fsync_directory(parent)
 
 
@@ -177,17 +189,6 @@ def _disabled(target: Path) -> bool:
         except FileNotFoundError:
             return False
         return True
-
-
-def _failure_count(bound, name: str) -> int:
-    """Prior count of one bounded failure marker, or zero when unreadable."""
-    try:
-        raw = bound.read_bytes(*Path(FAILURES_REL).parts, name, max_bytes=4096)
-        payload = json.loads(raw) if raw is not None else None
-    except (OSError, ValueError, TypeError):
-        return 0
-    count = payload.get("count") if isinstance(payload, dict) else None
-    return count if type(count) is int and count > 0 else 0
 
 
 def _record_failure(target: Path, *, today: date | None = None) -> None:
@@ -202,7 +203,9 @@ def _record_failure(target: Path, *, today: date | None = None) -> None:
     name = f"{today.isoformat()}.json"
     try:
         with bound_run_dir(target) as bound:
-            count = _failure_count(bound, name) + 1
+            # Counting is best effort: concurrent writers can lose one increment,
+            # and any count of 1 or more keeps the interval unhealthy.
+            count = _marker_count(bound, name) + 1
             bound.write_text_atomic(
                 tuple(Path(FAILURES_REL).parts),
                 name,
@@ -237,7 +240,9 @@ def _read_descriptor(descriptor: int) -> bytes:
 
 
 def _open_sentinel(bound) -> int:
-    return bound.open_file((), DISABLED_REL, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    # O_BINARY keeps a Windows handle from translating the recorded cause bytes.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    return bound.open_file((), DISABLED_REL, flags)
 
 
 def _sentinel_problem(info: os.stat_result) -> str | None:
@@ -300,19 +305,32 @@ def _stored_since(target: Path) -> date | None:
         return None
 
 
-def _cleared_day(target: Path) -> date | None:
-    """Day of the last recorded sentinel clear, or ``None`` when absent or untrusted."""
+@dataclass(frozen=True)
+class ClearedRecord:
+    day: date | None  # the recorded clear, when the record can be trusted
+    trusted: bool  # absent records are trusted; present but unreadable ones are not
+
+
+def _cleared_record(target: Path) -> ClearedRecord:
+    """The last recorded sentinel clear.
+
+    Absent means no clear ever happened. A record that is present but torn,
+    unreadable, oversized or not a regular file cannot be trusted to bound an
+    outage, so the caller must fail closed instead of trusting the ledger.
+    """
     try:
         payload = _read_json(target, CLEARED_REL)
     except (OSError, ValueError):
-        return None
+        return ClearedRecord(None, False)
+    if payload is None:
+        return ClearedRecord(None, True)
     if not isinstance(payload, dict):
-        return None
+        return ClearedRecord(None, False)
     try:
         day = date.fromisoformat(payload["day"])
     except (KeyError, TypeError, ValueError):
-        return None
-    return day if day <= _day() else None
+        return ClearedRecord(None, False)
+    return ClearedRecord(day, True) if day <= _day() else ClearedRecord(None, False)
 
 
 def _reset_coverage(target: Path, *, today: date) -> bool:
@@ -422,10 +440,13 @@ def load(target: Path) -> ReadLedger:
         ):
             raise ValueError("incomplete read coverage history")
         # A recorded clear is a floor: coverage before it was never observed,
-        # even when a restored ledger still claims an earlier window.
-        cleared = _cleared_day(target)
-        if cleared is not None and cleared > since:
-            since = cleared
+        # even when a restored ledger still claims an earlier window. A record
+        # that cannot be read is never treated as absent.
+        cleared = _cleared_record(target)
+        if not cleared.trusted:
+            return ReadLedger(_day(), {}, recorder_error=True)
+        if cleared.day is not None and cleared.day > since:
+            since = cleared.day
         return ReadLedger(
             date.fromisoformat(p["tracking_since"]),
             {k: date.fromisoformat(v) for k, v in p["last_read"].items()},
@@ -488,9 +509,9 @@ def _record_locked(target: Path, keys: Iterable[str], *, today: date | None = No
             return False
         _write_json(target, intent, {"state": "pending", "day": today.isoformat()})
         ledger = load(target)
-        cleared = _cleared_day(target)
+        cleared = _cleared_record(target)
         stored = _stored_since(target)
-        clamped = cleared is not None and (stored is None or stored < cleared)
+        clamped = not cleared.trusted or (cleared.day is not None and (stored is None or stored < cleared.day))
         limits = _coverage_policy(target)
         failures = _failures(target)
         errors = []
