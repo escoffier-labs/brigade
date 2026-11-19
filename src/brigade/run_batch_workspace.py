@@ -392,7 +392,8 @@ def validate(binding: Binding, repo_root: Path, *, pristine: bool = True) -> Non
             raise WorkspaceError(WORKSPACE_INVALID, "status-unreadable") from None
         if status:
             raise WorkspaceError(WORKSPACE_INVALID, "dirty")
-    # The directory must still be the reserved one after every Git probe.
+    # Identity is checked before and again after the Git probes. A swap that is
+    # restored between the two checks is outside the cooperative-worker model.
     _check_identity(binding)
 
 
