@@ -314,7 +314,8 @@ def _append(
     """Record an event for ``subject`` (the routing key) on behalf of ``producer`` (the authenticated cause).
 
     The hourly bound counts per producer: keyed by subject, anyone allowed to message a principal could use up
-    that principal's allowance and silence its legitimate events for an hour.
+    that principal's allowance and silence its legitimate events for an hour. ``created_at`` is insertion time,
+    which keeps the rate bound, retention and envelope timestamp truthful even when the fact happened earlier.
     """
     now = time.time()
     recent = conn.execute(
@@ -326,7 +327,14 @@ def _append(
         return
     conn.execute(
         "INSERT OR IGNORE INTO fleet_events(event_id,name,subject,producer,data,created_at) VALUES(?,?,?,?,?,?)",
-        (event_id or "evt_" + uuid4().hex, name, subject, producer, json.dumps(data, separators=(",", ":")), now),
+        (
+            event_id or "evt_" + uuid4().hex,
+            name,
+            subject,
+            producer,
+            json.dumps(data, separators=(",", ":")),
+            now,
+        ),
     )
 
 

@@ -18,6 +18,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,32 @@ def sweep_expired_claims(conn: sqlite3.Connection, now: float, after: Watermark 
     return (rows[-1][3], rows[-1][0]) if rows else floor
 
 
+def _predates_subscription(name: str, data: str, subscribed_at: float) -> bool:
+    """True when a claim.expired fact happened before the subscription was created.
+
+    The expiry time is carried in the event data, not in ``created_at`` (which is insertion time): a lazily
+    recorded expiry is inserted long after the lease actually ended. A missing or unparsable value is not a
+    reason to drop the event, so it is delivered as before.
+    """
+    if name != events.CLAIM_EXPIRED:
+        return False
+    try:
+        expired_at = json.loads(data).get("expired_at")
+    except (ValueError, AttributeError):
+        return False
+    if not isinstance(expired_at, str):
+        return False
+    try:
+        moment = datetime.fromisoformat(expired_at)
+    except ValueError:
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    # Compare datetimes, not a float: iso() stamps to microseconds, so an expiry at the same instant as the
+    # subscription must not look earlier because the float carried more precision.
+    return moment < datetime.fromtimestamp(subscribed_at, timezone.utc)
+
+
 def _round_robin(subscriptions: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
     """Interleave subscriptions across principals (principal id is the last column), keeping each one's order."""
     queues: dict[str, deque[tuple[Any, ...]]] = {}
@@ -91,8 +118,9 @@ def _round_robin(subscriptions: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
 def _materialize(conn: sqlite3.Connection, now: float) -> None:
     """Create delivery rows for new events, a bounded window per subscription and a bounded pending total.
 
-    A subscription's cursor moves only past events it was given a delivery row for (or past the end of the
-    outbox when nothing more matches), so whatever does not fit this tick waits for the next one. Capacity is
+    A subscription's cursor moves only past events it was given a delivery row for, ``claim.expired`` events it
+    skips because the lease lapsed before it subscribed, or the end of the outbox when nothing more matches, so
+    whatever does not fit this tick waits for the next one. Capacity is
     shared by principal, not by subscription: subscriptions are served round-robin across principals, each
     principal is capped, and each keeps a small reserve, so one subscriber's failing callbacks cannot fill the
     outbox and hold other principals' events back.
@@ -107,11 +135,11 @@ def _materialize(conn: sqlite3.Connection, now: float) -> None:
     shared = MAX_PENDING_DELIVERIES - sum(pending.values())
     newest = conn.execute("SELECT COALESCE(MAX(seq),0) FROM fleet_events").fetchone()[0]
     subscriptions = conn.execute(
-        "SELECT id, name, filter_value, cursor_seq, principal_id FROM fleet_event_subscriptions WHERE cursor_seq<? "
-        "ORDER BY cursor_seq, id",
+        "SELECT id, name, filter_value, cursor_seq, created_at, principal_id FROM fleet_event_subscriptions "
+        "WHERE cursor_seq<? ORDER BY cursor_seq, id",
         (newest,),
     ).fetchall()
-    for sid, name, filter_value, cursor, principal in _round_robin(subscriptions):
+    for sid, name, filter_value, cursor, subscribed_at, principal in _round_robin(subscriptions):
         held = pending.get(principal, 0)
         room = max(
             RESERVED_PENDING_PER_PRINCIPAL - held,
@@ -120,14 +148,25 @@ def _materialize(conn: sqlite3.Connection, now: float) -> None:
         limit = min(FAN_OUT_PER_SUBSCRIPTION, room)
         if limit <= 0:
             continue
-        seqs = [
-            row[0]
-            for row in conn.execute(
-                "SELECT seq FROM fleet_events WHERE name=? AND seq>? AND created_at>=? "
+        # Retention is keyed on insertion time, so a lazily recorded expiry is still eligible even when the
+        # lease ended long ago. Only claim.expired gets the occurrence check, against the expiry in its data.
+        floor = now - EVENT_RETENTION_SECONDS
+        seqs: list[int] = []
+        last_seen = cursor
+        while len(seqs) < limit:
+            batch = conn.execute(
+                "SELECT seq, data FROM fleet_events WHERE name=? AND seq>? AND created_at>=? "
                 "AND (? IS NULL OR subject=?) ORDER BY seq LIMIT ?",
-                (name, cursor, now - EVENT_RETENTION_SECONDS, filter_value, filter_value, limit),
-            )
-        ]
+                (name, last_seen, floor, filter_value, filter_value, limit - len(seqs)),
+            ).fetchall()
+            if not batch:
+                last_seen = newest
+                break
+            for seq, data in batch:
+                last_seen = seq
+                if _predates_subscription(name, data, subscribed_at):
+                    continue
+                seqs.append(seq)
         conn.executemany(
             "INSERT OR IGNORE INTO fleet_event_deliveries(seq,subscription_id,state,next_attempt) "
             "VALUES(?,?,'pending',0)",
@@ -135,11 +174,9 @@ def _materialize(conn: sqlite3.Connection, now: float) -> None:
         )
         pending[principal] = held + len(seqs)
         shared -= len(seqs)
-        # A full window may have more behind it; a short one has reached the end of the outbox.
-        conn.execute(
-            "UPDATE fleet_event_subscriptions SET cursor_seq=? WHERE id=?",
-            (seqs[-1] if len(seqs) == limit else newest, sid),
-        )
+        # The cursor advances past every row examined, including skipped ones, so a stale fact cannot starve
+        # the matching events behind it. An empty batch means the subscription has reached the end of the outbox.
+        conn.execute("UPDATE fleet_event_subscriptions SET cursor_seq=? WHERE id=?", (last_seen, sid))
 
 
 def _prune_subscriptions(conn: sqlite3.Connection, now: float) -> None:

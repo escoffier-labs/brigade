@@ -1,0 +1,1 @@
+- A `claim.expired` event no longer reaches a Fleet Hub subscription created after the lease expired, even when the expiry is recorded later by a prune, release, or sweep. The check uses the expiry carried in the event data, while insertion time still governs rate limits, retention, and the delivery envelope (#1967).
