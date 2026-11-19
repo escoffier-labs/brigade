@@ -110,6 +110,14 @@ pub(super) const PRINCIPAL_USAGE: &str = "SELECT COALESCE(SUM(state IN ('pending
 pub(super) const SCOPE_USAGE: &str = "SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0),COALESCE(SUM(p.proposal_id=?2 AND p.state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN p.proposal_id=?3 THEN p.retained_bytes ELSE 0 END),0) FROM memory_proposals p INDEXED BY memory_proposals_scope_quota JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1";
 /// The strict principal total in `settle`.
 pub(super) const SETTLE_PRINCIPAL_USAGE: &str = "SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0) FROM memory_proposals INDEXED BY memory_proposals_principal_quota WHERE principal=?1";
+/// Pending proposal slots automatic anchoring leaves free for repair
+/// proposals. Admission enforces the reservation in the same transaction that
+/// reads the principal's pending anchor-only proposals, so two reflectors
+/// cannot both spend the reserve after reading one `status` count.
+pub const ANCHOR_RESERVE_SLOTS: i64 = 4;
+/// The principal's pending proposals whose ops are all `anchor_blocks`. The
+/// `instr` guard keeps the JSON walk to bodies that can qualify.
+pub(super) const PRINCIPAL_ANCHORS: &str = "SELECT COALESCE(SUM(json_array_length(json_extract(memory_proposals.body,'$.ops'))>0 AND NOT EXISTS (SELECT 1 FROM json_each(json_extract(memory_proposals.body,'$.ops')) WHERE json_extract(value,'$.type')<>'anchor_blocks')),0) FROM memory_proposals INDEXED BY memory_proposals_principal_quota WHERE principal=?1 AND state IN ('pending','held') AND instr(body,'anchor_blocks')>0";
 /// The strict scope total in `settle`.
 pub(super) const SETTLE_SCOPE_USAGE: &str = "SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0) FROM memory_proposals p INDEXED BY memory_proposals_scope_quota JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1";
 
@@ -190,7 +198,43 @@ pub(super) fn admit_excluding(
         reply.body["tier"] = json!(number(&row[1]));
         return Ok(Some(reply));
     }
-    quota_excluding(tx, body, limits, referral.unwrap_or(""), "")
+    if let Some(r) = quota_excluding(tx, body, limits, referral.unwrap_or(""), "")? {
+        return Ok(Some(r));
+    }
+    anchor_reserve(tx, body, limits)
+}
+/// Anchoring repairs need pending slots, so an all-anchor proposal is refused
+/// once the principal's pending anchor-only proposals reach the reserve
+/// boundary. Any proposal with another op kind is admitted under the normal
+/// limits. The count and the insert share one writer transaction.
+fn anchor_reserve(
+    tx: &dyn WriteTx,
+    body: &Json,
+    limits: &Limits,
+) -> rusqlite::Result<Option<Reply>> {
+    let anchor_only = body["ops"]
+        .as_array()
+        .is_some_and(|ops| !ops.is_empty() && ops.iter().all(|op| op["type"] == "anchor_blocks"));
+    if !anchor_only {
+        return Ok(None);
+    }
+    let rows = tx.query(
+        PRINCIPAL_ANCHORS,
+        &[ops::t(proposals::string(body, "proposer"))],
+    )?;
+    let pending = number(&rows[0][0]);
+    if pending
+        >= limits
+            .pending_per_principal
+            .saturating_sub(ANCHOR_RESERVE_SLOTS)
+    {
+        return Ok(Some(ops::error(
+            429,
+            "memory_anchor_quota_reserve",
+            "the anchoring repair reserve is full",
+        )));
+    }
+    Ok(None)
 }
 /// A dimension passes when its usage stays within the limit or does not grow.
 /// Admission always grows pending count and bytes, so it stays strict, while a

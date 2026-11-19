@@ -418,3 +418,53 @@ async fn reflector_withdraws_only_own_anchors_and_releases_quota() {
         .await;
     assert_eq!(denied.status, 403, "{denied:?}");
 }
+
+/// Issue #2638: the four pending slots kept free for anchoring repairs are
+/// enforced inside admission, so two reflectors on one principal cannot each
+/// read the same `status` count and then spend the reserve.
+#[tokio::test]
+async fn admission_reserves_four_pending_slots_for_anchor_repairs() {
+    let mut h = Hub::with(clean(), None);
+    h.store
+        .as_mut()
+        .unwrap()
+        .configure_retrieval(&json!({"proposal_limits": {"pending_per_principal": 8}}))
+        .unwrap();
+    let anchor = |card: &str, revision: i64| json!({"type":"anchor_blocks","scope":"fleet","card_id":card,"base_revision":revision});
+    // Four pending anchors fill every slot above the reserve of 8 - 4.
+    for i in 0..4 {
+        let card = format!("anchor-{i}");
+        let put = h.put(ADMIN_TOKEN, "fleet", &card, None, "Claim.\n").await;
+        let opened = submit(&h, ADMIN_TOKEN, vec![anchor(&card, rev(&put))]).await;
+        assert_eq!(opened.status, 201, "{opened:?}");
+    }
+    let over = h
+        .put(ADMIN_TOKEN, "fleet", "anchor-4", None, "Claim.\n")
+        .await;
+    let refused = submit(&h, ADMIN_TOKEN, vec![anchor("anchor-4", rev(&over))]).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_anchor_quota_reserve")
+    );
+    // A repair proposal with another op kind is still admitted under the normal limit.
+    let repair = h.put(ADMIN_TOKEN, "fleet", "repair", None, OLD).await;
+    let repaired = submit(&h, ADMIN_TOKEN, vec![op("fleet", "repair", rev(&repair))]).await;
+    assert_eq!(repaired.status, 201, "{repaired:?}");
+    // A proposal that mixes an anchor with another op kind is not anchor-only.
+    let mixed = h
+        .put(ADMIN_TOKEN, "fleet", "anchor-5", None, "Claim.\n")
+        .await;
+    let other = h.put(ADMIN_TOKEN, "fleet", "repair-2", None, OLD).await;
+    let admitted = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![
+            anchor("anchor-5", rev(&mixed)),
+            op("fleet", "repair-2", rev(&other)),
+        ],
+    )
+    .await;
+    assert_eq!(admitted.status, 201, "{admitted:?}");
+    let status = h.call(ADMIN_TOKEN, json!({"action": "status"})).await;
+    assert_eq!(status.body["proposal_quota"]["pending"], 6);
+}

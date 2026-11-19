@@ -91,6 +91,10 @@ READ_SCOPES_MAX = 64
 _UNAVAILABLE_STATUSES = {408, 429}
 # Coded proposal quota answers are hub decisions, so callers can stop proposing.
 QUOTA_REFUSALS = {"memory_proposal_principal_quota", "memory_proposal_scope_quota"}
+# The hub refuses an all-anchor proposal once the principal's pending anchors
+# would spend the slots kept free for anchoring repairs. Back pressure, but it
+# skips that one op instead of stopping the run like a full proposal quota.
+ANCHOR_RESERVE_REFUSALS = {"memory_anchor_quota_reserve"}
 # Lifetime and retained-storage budgets for verifier manifests (phase-memory-verify D5). Back pressure, like the proposal quotas.
 EVIDENCE_QUOTA_REFUSALS = {
     "memory_evidence_retained_principal_quota",
@@ -672,7 +676,7 @@ class MemoryHubClient:
                 raise HubRefusal(status, {"code": "memory_rescan_status", "error": "rescan requires HTTP 200"})
             return payload
         code = payload.get("code")
-        coded = QUOTA_REFUSALS | EVIDENCE_QUOTA_REFUSALS | {READ_STATS_RATE_LIMITED}
+        coded = QUOTA_REFUSALS | EVIDENCE_QUOTA_REFUSALS | ANCHOR_RESERVE_REFUSALS | {READ_STATS_RATE_LIMITED}
         if action == "auto_apply":
             coded = coded | {"memory_auto_apply_rate_limited"}
         if status == 429 and isinstance(code, str) and code in coded:
