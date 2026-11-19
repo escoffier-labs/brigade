@@ -163,36 +163,61 @@ pub fn listed(policy_document: &Json, principal: &str) -> bool {
         .is_some_and(|items| items.iter().any(|v| v.as_str() == Some(principal)))
 }
 
+/// The principals that count as holders when a status reply works out
+/// reserved scopes: those the policy lists whose hub credential is live
+/// (`ops::live_credentials`, the rule `proposer_credential` is checked
+/// against), plus the caller when it is listed, because an authenticated
+/// caller's credential is live. A listed principal with no live credential
+/// cannot authenticate or satisfy `proposer_credential`, so it must not
+/// reserve a scope. Reads only the listed principals' credential rows.
+pub fn live_listed<T: ReadTx + ?Sized>(
+    hub: &T,
+    policy_document: &Json,
+    caller: &str,
+    admin: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut others: Vec<String> = policy_document["memory"]["reflect_principals"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Json::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    others.sort();
+    others.dedup();
+    let caller_listed = others.iter().any(|name| name == caller);
+    others.retain(|name| name != caller && name != super::ADMIN);
+    let mut live: Vec<String> = super::ops::live_credentials(hub, admin, Some(&others))?
+        .into_iter()
+        .map(|(_, principal, _)| principal)
+        .collect();
+    if caller_listed {
+        live.push(caller.to_string());
+    }
+    live.sort();
+    live.dedup();
+    Ok(live)
+}
+
 /// The caller-safe policy summary on the `status` reply: whether automatic
 /// apply is on, which op classes are reserved to listed principals, and the
-/// scopes where the caller holds `reflect` and a listed principal does too,
-/// so that principal's job can apply a reserved class there. `holders` maps
-/// each of the caller's reflect scopes to the principals holding `reflect`
-/// on it. A reflect client reads the summary to leave a reserved class to a
-/// principal that can apply it. The caller gates it on the `reflect` right.
-/// It carries no principal name and changes no authority or gate.
-pub fn policy_summary(policy_document: &Json, holders: &Json) -> Json {
+/// scopes where the caller holds `reflect` and a listed principal with a live
+/// credential does too, so that principal's job can apply a reserved class
+/// there. `reserved` is that scope set, from `auth::reserved_reflect_scopes`.
+/// A reflect client reads the summary to leave a reserved class to a principal
+/// that can apply it. The caller gates it on the `reflect` right. It carries
+/// no principal name and changes no authority or gate.
+pub fn policy_summary(
+    policy_document: &Json,
+    reserved: &std::collections::BTreeSet<String>,
+) -> Json {
     let memory = &policy_document["memory"];
     let classes: Vec<&str> = memory["tier0_op_classes"]
         .as_array()
         .map(|items| items.iter().filter_map(Json::as_str).collect())
-        .unwrap_or_default();
-    let reserved: Vec<&str> = holders
-        .as_object()
-        .map(|scopes| {
-            scopes
-                .iter()
-                .filter(|(_, names)| {
-                    names.as_array().is_some_and(|names| {
-                        names
-                            .iter()
-                            .filter_map(Json::as_str)
-                            .any(|n| listed(policy_document, n))
-                    })
-                })
-                .map(|(scope, _)| scope.as_str())
-                .collect()
-        })
         .unwrap_or_default();
     json!({
         "auto_apply": memory["auto_apply"] == true,

@@ -160,3 +160,125 @@ async fn an_empty_principal_list_reserves_nothing() {
                "reserved_scopes": []})
     );
 }
+
+fn revoke_node(h: &Hub, id: &str) {
+    let changed = Connection::open(&h.hub)
+        .unwrap()
+        .execute(
+            "UPDATE nodes SET revoked_at='2026-02-01' WHERE node_id=?1",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+#[tokio::test]
+async fn a_live_listed_holder_reserves_the_scope() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "node-1", A, &["read", "reflect"]).await;
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    set_policy(&h, reserved());
+    let r = status(&h, AGENT_TOKEN).await;
+    assert_eq!(
+        r.body["memory_policy"]["reserved_scopes"],
+        json!([A]),
+        "{r:?}"
+    );
+}
+
+#[tokio::test]
+async fn revoking_the_only_listed_holder_unreserves_the_scope() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "node-1", A, &["read", "reflect"]).await;
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    set_policy(&h, reserved());
+    let before = status(&h, AGENT_TOKEN).await;
+    assert_eq!(before.body["memory_policy"]["reserved_scopes"], json!([A]));
+    // The retained reflect grant no longer reserves the scope: the listed
+    // principal cannot authenticate or satisfy `proposer_credential`.
+    revoke_node(&h, "node-1");
+    let after = status(&h, AGENT_TOKEN).await;
+    assert_eq!(after.status, 200, "{after:?}");
+    assert_eq!(
+        after.body["memory_policy"]["reserved_scopes"],
+        json!([]),
+        "{after:?}"
+    );
+    assert_no_leak(&after);
+}
+
+#[tokio::test]
+async fn a_listed_principal_with_a_grant_but_no_credential_never_reserves() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "agent:ghost", A, &["read", "reflect"]).await;
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    set_policy(
+        &h,
+        json!({"memory": {"auto_apply": true,
+               "tier0_op_classes": ["merge_exact_duplicates"],
+               "reflect_principals": ["agent:ghost"]}}),
+    );
+    let r = status(&h, AGENT_TOKEN).await;
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(
+        r.body["memory_policy"]["reserved_scopes"],
+        json!([]),
+        "{r:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_listed_caller_reserves_its_own_scopes() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    set_policy(
+        &h,
+        json!({"memory": {"auto_apply": true,
+               "tier0_op_classes": ["merge_exact_duplicates"],
+               "reflect_principals": ["agent:dot"]}}),
+    );
+    let r = status(&h, AGENT_TOKEN).await;
+    assert_eq!(
+        r.body["memory_policy"]["reserved_scopes"],
+        json!([A]),
+        "{r:?}"
+    );
+}
+
+/// Counts the statements the reserved-scope read issues.
+struct Counting<'a>(&'a Connection, std::cell::Cell<usize>);
+impl ReadTx for Counting<'_> {
+    fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
+        self.1.set(self.1.get() + 1);
+        worker::Tx(self.0).query(sql, params)
+    }
+}
+
+#[tokio::test]
+async fn unlisted_grant_principals_are_not_queried_one_by_one() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    let counted = |h: &Hub| {
+        let memory = Connection::open(h.memory()).unwrap();
+        let tx = Counting(&memory, std::cell::Cell::new(0));
+        let credential = Credential::Principal {
+            id: "agent:dot".into(),
+            digest: String::new(),
+        };
+        let reserved =
+            auth::reserved_reflect_scopes(&tx, &credential, &["node-1".to_string()]).unwrap();
+        (reserved, tx.1.get())
+    };
+    let (_, few) = counted(&h);
+    for n in 0..40 {
+        grant_to(&h, &format!("agent:other-{n}"), A, &["read", "reflect"]).await;
+    }
+    grant_to(&h, "node-1", A, &["read", "reflect"]).await;
+    let (reserved, many) = counted(&h);
+    assert_eq!(reserved, Some([A.to_string()].into()));
+    assert_eq!(
+        many, few,
+        "the number of statements must not grow with grants"
+    );
+    assert!(many <= 4, "{many} statements");
+}

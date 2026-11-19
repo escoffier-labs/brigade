@@ -1999,9 +1999,13 @@ granted per scope, so the reservation is too. `reserved_scopes` lists the
 scopes where the caller holds `reflect` and at least one principal listed in
 `memory.reflect_principals` holds it as well, using the same grant rules as the
 hub's own checks (an exact grant, `repo:*` for repository scopes, `*` for
-repository scopes and `fleet`). A scope where only unlisted principals reflect
-is not in the list, so a proposal-only job there is the only proposer and still
-opens its merges for review. This status field carries no principal names and
+repository scopes and `fleet`). A listed principal counts only while it has at
+least one live, unrevoked hub credential, the same test the hub applies when it
+checks `proposer_credential` at apply. A revoked or credential-less listed
+principal does not reserve a scope, even if its `reflect` grant remains. A scope
+where only unlisted principals reflect, or where no listed principal can
+authenticate, is not in the list, so a proposal-only job there is the only
+proposer and still opens its merges for review. This status field carries no principal names and
 no credential data, and it changes no authority, gate or decision. Review
 holders can still read the full `policy_limits` through preflight.
 
