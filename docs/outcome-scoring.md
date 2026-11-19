@@ -11,18 +11,21 @@ supersedes, broken-link repairs and anchors. Stale-newer-evidence and
 opposite-polarity candidates are local only, and a contradicted card is a verify
 verdict.
 
-One reflection class applies with no person on real memory. An exact-duplicate
-merge applies when both cards and the applying credential share one writer, the
-hub policy lists that credential in `reflect_principals` and enables
+Scheduled reflect applies one class with no person on real memory. An
+exact-duplicate merge applies when both cards share one writer with the
+principal that proposes and applies it, the hub policy lists that principal in
+`reflect_principals` and enables
 `merge_exact_duplicates`, the workspace has opted in, and every preflight gate
 passes. Each automatic apply can be rolled back by exact compensation. A merge
-of cards written by different credentials holds with
-`retrieval_eval_merge_cross_writer` and waits for a reviewer. Near-duplicate
+of cards written by different principals holds with
+`retrieval_eval_merge_cross_writer` (`retrieval_eval_writer_changed` when the
+cards are `agent-unreviewed`) and waits for a reviewer. Near-duplicate
 supersedes and broken-link repairs are Tier 2 and wait for a reviewer. The fleet
 policy writer rejects `anchor_blocks`, so no anchor applies automatically.
-Scheduled reflect opens no evidence-append proposals. A scope over 2,000 live
-cards or 16 MiB holds every automatic apply, because the retrieval-history
-check cannot run on it. Local repository candidates stay proposal-only. The
+Scheduled reflect opens no evidence-append proposals, though the hub can apply
+an attested evidence append when the policy enables it. A scope over 2,000 live
+cards, 16 MiB or 500 judged retrieval uses holds every automatic reflection
+apply, because the retrieval-history check cannot run on it. Local repository candidates stay proposal-only. The
 `[reflect] scopes` setting limits where the job proposes, applies and watches.
 Unlisted read scopes are still read, never changed. See
 [memory operations](memory-operations.md) for the gates and limits.

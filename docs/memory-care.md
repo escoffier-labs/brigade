@@ -725,7 +725,9 @@ withdrawn in the same run with a recorded reason. A withdrawn anchor waits seven
 days before reflection proposes it again.
 
 Anchoring uses the existing Tier 0 proposal, policy, journal and rollback path.
-The hub policy must list `anchor_blocks` in `tier0_op_classes`. Existing local
+An automatic anchor needs `anchor_blocks` in the hub policy's
+`tier0_op_classes`, and the fleet policy writer does not accept that class
+today, so the hub never applies an anchor automatically. Existing local
 policies must also list it to permit automatic attempts. Local policy can only
 veto application. Hub authority and evidence checks still apply.
 `memory reflect status` reports `anchoring.anchored_cards` over

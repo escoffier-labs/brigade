@@ -147,27 +147,33 @@ proposal-only because their authority contracts are unbound.
 These cases still wait for a person or hold, with the code named where one
 exists:
 
-- Cross-writer exact merges (`retrieval_eval_merge_cross_writer`).
+- Cross-writer exact merges (`retrieval_eval_merge_cross_writer`, or
+  `retrieval_eval_writer_changed` when the cards are `agent-unreviewed`).
 - Near-duplicate supersedes and link repairs, which are Tier 2.
 - Model-backed corrections, which need an admin `go` record.
 - Anchoring. The reflect job proposes anchors, but the fleet policy writer
   rejects `anchor_blocks`, so none applies automatically.
-- A scope over 2,000 live cards or 16 MiB, or with more than 500 judged
-  retrieval uses in the history window. The retrieval-history check cannot run
-  there, and it holds the apply with `retrieval_eval_history_unavailable`. A
+- A reflection apply on a scope over 2,000 live cards or 16 MiB, or with more
+  than 500 judged retrieval uses in the history window. The retrieval-history
+  check cannot run there, and it holds the apply with
+  `retrieval_eval_history_unavailable`. Verifier applies and compensations do
+  not take this check. A
   scope with no judged history skips the replay but not the size bound.
 - A local repository with no hub, which stays proposal-only.
 
 Two operating limits show up in the output. The hub budgets diagnostics and
-the writer lock at 1000 ms each by default (`diagnostic_ms`, `lock_ms`). A
-principal whose automatic command is refused with
-`memory_auto_apply_budget_exceeded` then waits out a 60 s cooldown
-(`auto_proposal_ms`), and its next commands of those kinds get 429
-`memory_auto_apply_cooldown` until it ends. Operators can change both under
-`memory.proposal_limits`. A reflect job whose principal is not in
+the writer lock at 1000 ms each by default (`diagnostic_ms`, `lock_ms`). Five
+proposal commands are budgeted: `auto_apply`, `verify_auto_apply`, `propose`,
+`compensation_watch` and `rollback`. When any of them from a principal is
+refused with `memory_auto_apply_budget_exceeded`, that principal waits out a
+60 s cooldown (`auto_proposal_ms`), and its budgeted commands get 429
+`memory_auto_apply_cooldown` until it ends. Operators can change all three
+values under `memory.proposal_limits`. A reflect job whose principal is not in
 `reflect_principals` skips a merge it would otherwise open on a scope where a
 listed principal also reflects, and reports it as `reserved_automatic`. The
-listed principal's job proposes and applies that merge. `status` carries the
+listed principal's job proposes the merge, and applies it automatically only
+when that principal wrote both cards and every gate passes. Otherwise it waits
+for a reviewer. `status` carries the
 `memory_policy.reserved_scopes` list the job reads for this.
 
 `memory reflect auto-apply off --target .` sets the workspace policy to false.
