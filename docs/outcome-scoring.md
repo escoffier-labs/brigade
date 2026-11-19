@@ -44,21 +44,20 @@ for the `auto_apply` policy field, the switch and rollback.
 
 ## The default loop
 
-This is the setup the rest of this page assumes. Three one-time operator commands turn it on. After that, scoring keeps running without anyone remembering to capture, rank or reconcile.
+This is the setup the rest of this page assumes. `brigade init` with the Claude harness (the default) already writes the project-scope Claude Code work-loop hooks to `.claude/settings.json`, so verify routing and the Stop gate work from the first session. Two one-time commands add the schedule. After that, scoring keeps running without anyone remembering to capture, rank or reconcile.
 
 ```bash
-brigade work hooks install --scope user   # Claude Code work-loop hooks
 brigade extras on                         # once per machine, runbook steps are extras-gated
 brigade care install --target .           # schedules the care entries, including the weekly ratchet
 ```
 
-`brigade init` does none of these. It writes no hook and no timer, so a newly initialized workspace has no automated loop until the commands above run. To schedule only the ratchet, use `brigade care install --target . --entry weekly-outcome-ratchet`. See [scheduled care](scheduled-care.md#weekly-outcome-ratchet) for what install writes and how to confirm it ran.
+`brigade init` writes no timer and does not enable extras, so a newly initialized workspace routes verifies but runs no weekly ratchet until the commands above run. `brigade work hooks install --scope user` is optional: it adds the same hooks at user scope so every repository on the machine gets them. To schedule only the ratchet, use `brigade care install --target . --entry weekly-outcome-ratchet`. See [scheduled care](scheduled-care.md#weekly-outcome-ratchet) for what install writes and how to confirm it ran.
 
 With the hooks and the schedule on, this happens with no operator command:
 
 1. **Verify is routed with automatic attribution.** In a hook-enabled Claude Code session, the hook denies a raw test command and supplies the Brigade replacement: `brigade work verify run --target . --command "<check>" --capture auto`. The receipt records the real exit code. `auto` writes one `session_observed` row for each skill the session read or invoked. When nothing resolves, it writes one `caller_typed` `brigade-work` row instead. If the session state already holds an artifact id from an earlier typed capture, the replacement uses that id. Neither kind of row can promote a skill. See [Attribution sources](#attribution-sources).
 2. **A manifest subject change gets the manifest verify.** When the working tree changes the exact `subject_path` of a tracked manifest, the same deny adds `brigade work verify run --manifest <manifest> --capture auto` beside the agent's own check. A match on `scope_globs` alone does not count. The Stop gate then holds closeout until a completed receipt from that manifest postdates the write. If the hook session wrote the subject itself and no other session did, that receipt can be a scoreable trial. See [Producer session for a manifest trial](#producer-session-for-a-manifest-trial).
-3. **The weekly ratchet runs.** The `weekly-outcome-ratchet` care entry fires Monday at 07:00 local time and runs two steps from its shipped runbook: `brigade outcome rank --target .`, then `brigade outcome reconcile --target . --report --proposals`. Both are dry runs. Reconcile evaluates every ranked artifact, flags a verified regression as a `regression_hold` decision and a bounded session-observed one as `observed_regression_hold`, writes the [ratchet report](#weekly-ratchet-report), and files one skills inbox proposal for each verified regression on a Brigade-bundled skill (see [Regression proposals](#regression-proposals)).
+3. **The weekly ratchet runs.** The `weekly-outcome-ratchet` care entry fires Monday at 07:00 local time and runs two steps from its shipped runbook: `brigade outcome rank --target .`, then `brigade outcome reconcile --target . --report --proposals`. Both are dry runs. Reconcile evaluates every scored artifact (it reloads records, scorecards and status itself and reads nothing `rank` writes). A verified regression produces `regression_hold` on a candidate or `regression_rollback` on a promoted artifact, and bounded session-observed hurt vetoes an install or bump as `observed_regression_hold`. Reconcile writes the [ratchet report](#weekly-ratchet-report) and files a skills inbox proposal for a verified regression on a Brigade-bundled skill, at most one per skill text, so a later regression on unchanged text reports `existing` (see [Regression proposals](#regression-proposals)).
 4. **The report is shown.** `brigade work brief` prints an `outcome_ratchet:` line, the Center dashboard outcomes view shows a ratchet panel, and `brigade outcome ratchet --target .` prints the report. A report older than seven days is labeled stale on the dashboard.
 
 To check that the loop ran, run `brigade care status --target .` and look for a completed receipt on `weekly-outcome-ratchet`, then run `brigade outcome ratchet --target .` and read its `generated_at`.
@@ -86,7 +85,7 @@ The reason is the trust model. A receipt from ordinary work carries attribution 
 
 ## Workflow
 
-The commands below are what the default loop runs for you. Run them by hand to score outside a hook-enabled session or to inspect a result.
+The default loop runs only the hook-routed verify commands, `outcome rank` and `outcome reconcile --report --proposals`. The other commands below are manual. Run them to score outside a hook-enabled session, to inspect a result, or to apply a decision.
 
 ```bash
 # scoreable evidence: a git-tracked manifest under verify/manifests/ authors subject_binding
@@ -132,7 +131,7 @@ Why: every local input to a physical change is writable by the agent being gated
 
 The commands you run by hand keep their own guards (see `docs/skill-registry.md`): `install --force` and `rollback` refuse an installed copy with local edits unless `--discard-local-edits` is passed, in which case the edit is snapshotted first, and both re-verify the copy's bytes immediately before they remove it.
 
-Prefer `--capture auto`, so Brigade names the skills the session actually read and nobody types an id. If you type an id, use one that guided the work, because an invented skill name pollutes the ranking. Capture failures too: a `-1` is how a regression gets held and reported, and the rollback that follows is an operator command. Ledger files live under `memory/outcome/` as plain JSON and markdown.
+Prefer `--capture auto`, so Brigade names the skills the session actually read and nobody types an id. If you type an id, use one that guided the work, because an invented skill name pollutes the ranking. Capture failures too, because a `-1` row counts against the artifact in ranking and, for a card, in its reconcile cohort. A skill is held or rolled back only by the scorecard of a tracked-manifest receipt, and `--capture` cannot make a receipt scoreable. Ledger files live under `memory/outcome/` as plain JSON and markdown.
 
 ## Attribution sources
 

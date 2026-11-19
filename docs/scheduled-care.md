@@ -477,7 +477,7 @@ brigade outcome rank --target .
 brigade outcome reconcile --target . --report --proposals
 ```
 
-Both steps are dry runs. `reconcile` is dry-run by default and the runbook never passes `--apply`, so a scheduled run changes no skill status, no route policy and no skill file. It evaluates every ranked artifact, writes the advisory report, and `--proposals` files one skills inbox review request per verified regression on a Brigade-bundled skill (see [Outcome scoring](outcome-scoring.md#regression-proposals)). A proposal is a review request only.
+Both steps are dry runs. `reconcile` is dry-run by default and the runbook never passes `--apply`, so a scheduled run changes no skill status, no route policy and no skill file. It evaluates every scored artifact (it does not read `rank` output), writes the advisory report, and `--proposals` files a skills inbox review request for a verified regression on a Brigade-bundled skill, at most one per skill text (see [Outcome scoring](outcome-scoring.md#regression-proposals)). A proposal is a review request only.
 
 `--apply` is routing only and stays a deliberate operator choice. It records promotion and demotion status and route policy. It never installs or rolls back a skill file, and it lists the `brigade skills install` or `brigade skills rollback` commands an operator would run (also counted as `pending_physical_actions` in the ratchet report and the session brief):
 
