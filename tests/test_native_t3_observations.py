@@ -76,6 +76,19 @@ def test_task_identity_cannot_be_replaced_by_child_identity(reference, snapshot,
     assert result.reference == reference
 
 
+def test_a_real_t3_task_node_is_a_valid_accepted_handle(snapshot):
+    request_key = "brigade-t3:" + "0378" + "9f" * 30
+    node_id = (
+        "node:delegated-task:command%3Amcp%3A3f1c2b44-7a1e-4b8c-9f2d-0a1b2c3d4e5f"
+        "%3Adelegate-task%3Abrigade-t3%253A0378" + "9f" * 30
+    )
+    reference = NativeTaskReference("example-origin", request_key, node_id)
+    snapshot["taskId"] = node_id
+    result = classify(reference, snapshot)
+    assert observation_diagnostic(result) == {"family": "terminal-candidate", "reason": "terminal-evidence-complete"}
+    assert result.reference.task_id == node_id
+
+
 @pytest.mark.parametrize(
     "remote", [None, {"environmentId": "example-remote", "threadId": "example-thread", "label": "Example"}]
 )

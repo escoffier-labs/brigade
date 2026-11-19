@@ -1,0 +1,3 @@
+- Fix `brigade t3 accepted` and `brigade t3 observe` refusing every real T3 reply by correlating on the T3 `delegate_task` task node id built from the claim's `clientRequestId` instead of Brigade's batch task id.
+- Store T3's task node id as the correlation provider handle while keeping digest-only legacy journals readable.
+- Pin the reviewed T3 Code task node encoding in code and document that a future format change refuses and holds the task.

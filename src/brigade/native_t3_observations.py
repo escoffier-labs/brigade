@@ -139,7 +139,9 @@ def classify_native_snapshot(
     """Retain uncertainty unless all required terminal evidence is supplied.
 
     A missing accepted task handle never adopts identity from a status snapshot.
-    Child thread/run identities cannot stand in for task/terminal identities.
+    The accepted handle is T3's task node identity for the retained client
+    request, not Brigade's batch task id. Child thread and run identities cannot
+    stand in for the task handle, and the snapshot task id must equal it exactly.
     """
     if type(expected) is not NativeTaskReference:
         raise ValueError("invalid native task reference")
