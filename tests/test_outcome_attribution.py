@@ -161,6 +161,17 @@ def test_resolver_refuses_oversized_state(tmp_path):
     assert outcome_attribution.resolve_observed_skill_ids(tmp_path, _env(), {"alpha"}) == []
 
 
+def test_resolver_skips_a_state_nested_past_the_parser_limit(tmp_path):
+    """Nesting past Python's recursion limit raises RecursionError, which must read as malformed."""
+    valid = _write_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
+    deep = _write_state(tmp_path, [], name="s-0-deep.json")
+    deep.write_text("[" * 200_000)
+    # States are read newest first, so the deep file must be newer to be parsed at all.
+    older = valid.stat().st_mtime - 60
+    os.utime(valid, (older, older))
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, _env(), {"alpha"}) == ["alpha"]
+
+
 def test_resolver_agent_session_env_also_matches(tmp_path):
     _write_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
     env = {"BRIGADE_AGENT_SESSION": FINGERPRINT}

@@ -1,0 +1,1 @@
+- `--capture auto` no longer crashes when a hook session state file is nested deeper than the JSON parser's recursion limit. That file is now skipped as malformed, like any other unreadable state (#2589).

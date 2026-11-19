@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from .. import work_cmd
 from ..selection import WRITER_INBOXES
+from ..shell_quote import quote_argument
 from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
 from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
@@ -318,7 +319,10 @@ def _write_suppression_health_cache_from_report(
 
 
 def _suppression_full_scan_next_command(target: Path) -> str:
-    return f"brigade security scan --target {target} --output-dir {default_artifacts_dir(target)}"
+    return (
+        f"brigade security scan --target {quote_argument(str(target))} "
+        f"--output-dir {quote_argument(str(default_artifacts_dir(target)))}"
+    )
 
 
 def suppression_health_cache(target: Path) -> dict[str, Any]:
@@ -338,7 +342,7 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "missing",
             "health": None,
-            "detail": f"cache missing; run `{next_command}`",
+            "detail": "cache missing; run the suppression scan command below",
             "next_command": next_command,
         }
     try:
@@ -347,14 +351,14 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "invalid",
             "health": None,
-            "detail": f"cache invalid: {exc}; run `{next_command}`",
+            "detail": f"cache invalid: {exc}; run the suppression scan command below",
             "next_command": next_command,
         }
     if not isinstance(payload, dict):
         return {
             "status": "invalid",
             "health": None,
-            "detail": f"cache invalid: expected object; run `{next_command}`",
+            "detail": "cache invalid: expected object; run the suppression scan command below",
             "next_command": next_command,
         }
     cache_key = payload.get("key")
@@ -362,7 +366,7 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "invalid",
             "health": None,
-            "detail": f"cache invalid: missing key; run `{next_command}`",
+            "detail": "cache invalid: missing key; run the suppression scan command below",
             "next_command": next_command,
         }
     health = payload.get("health")
@@ -370,7 +374,7 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "invalid",
             "health": None,
-            "detail": f"cache invalid: missing health; run `{next_command}`",
+            "detail": "cache invalid: missing health; run the suppression scan command below",
             "next_command": next_command,
         }
     expected_key = _suppression_cache_key(target, effective, config)
@@ -378,7 +382,7 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "stale",
             "health": None,
-            "detail": f"cache stale; run `{next_command}`",
+            "detail": "cache stale; run the suppression scan command below",
             "next_command": next_command,
         }
     return {"status": "ok", "health": health, "detail": "cache fresh", "next_command": None}
