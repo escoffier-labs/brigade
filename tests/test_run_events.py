@@ -66,6 +66,8 @@ def test_schema_constants_are_registered_in_receipt_schema():
     assert RUN_EVENT_SCHEMA_VERSION == 2
     assert run_events.SCHEMA == RUN_EVENT_SCHEMA
     assert run_events.SCHEMA_VERSION == RUN_EVENT_SCHEMA_VERSION
+    assert run_events.WORKSPACE_SCHEMA_VERSION == 3
+    assert run_events.SUPPORTED_SCHEMA_VERSIONS == {1, 2, 3}
 
 
 @pytest.mark.parametrize(
@@ -593,6 +595,107 @@ def test_launch_claim_closed_payload_rejects_invalid_values(change):
                 event_type="task.launch-claimed",
                 payload={k: v for k, v in payload.items() if k != missing},
                 idempotency_key="claim",
+                recorded_at=RECORDED_AT,
+                previous_digest=None,
+            )
+
+
+_WORKSPACE_BINDING = {
+    "task_id": "one",
+    "base_sha": "a" * 40,
+    "branch_digest": "b" * 64,
+    "path_digest": "c" * 64,
+    "dev_ino_digest": "d" * 64,
+}
+
+
+def _workspace_event() -> dict:
+    return run_events.build_event(
+        run_id=RUN_ID,
+        sequence=1,
+        event_type="task.workspace-bound",
+        payload=_WORKSPACE_BINDING,
+        idempotency_key="workspace:one",
+        recorded_at=RECORDED_AT,
+        previous_digest=None,
+    )
+
+
+def _rehashed(envelope: dict) -> dict:
+    """Recompute the content digests after editing a stored envelope."""
+    envelope["event_digest"] = run_events.compute_event_digest(envelope)
+    envelope["event_id"] = run_events.make_event_id(
+        run_id=envelope["run_id"], sequence=envelope["sequence"], event_digest=envelope["event_digest"]
+    )
+    return envelope
+
+
+def test_workspace_bound_event_builds_the_only_schema_version_three_envelope():
+    event = _workspace_event()
+    assert event["schema_version"] == 3 == run_events.WORKSPACE_SCHEMA_VERSION
+    assert run_events.validate_event(event) == []
+    # Every other event keeps the version 2 envelope older binaries already read.
+    assert (
+        run_events.build_event(
+            run_id=RUN_ID,
+            sequence=1,
+            event_type="run.created",
+            payload={"status": "started"},
+            idempotency_key=IDEMPOTENCY_KEY,
+            recorded_at=RECORDED_AT,
+            previous_digest=None,
+        )["schema_version"]
+        == RUN_EVENT_SCHEMA_VERSION
+    )
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_workspace_bound_event_is_refused_under_an_older_envelope(schema_version):
+    """A v3-only fact cannot be replayed as if an older writer produced it."""
+    downgraded = _rehashed({**_workspace_event(), "schema_version": schema_version})
+    assert run_events.validate_event(downgraded) == ["unknown event_type 'task.workspace-bound'"]
+
+
+def test_version_three_envelope_rejects_every_other_event_type():
+    envelope = _rehashed({**_sample_envelope(), "schema_version": 3})
+    assert run_events.validate_event(envelope) == ["unknown event_type 'run.created'"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"base_sha": "A" * 40},
+        {"base_sha": "a" * 39},
+        {"base_sha": None},
+        {"branch_digest": "z" * 64},
+        {"path_digest": "c" * 63},
+        {"task_id": "../x"},
+        {"task_id": None},
+        {"extra": "nope"},
+    ],
+)
+def test_workspace_bound_payload_is_closed(change):
+    with pytest.raises(run_events.CanonicalizationError):
+        run_events.build_event(
+            run_id=RUN_ID,
+            sequence=1,
+            event_type="task.workspace-bound",
+            payload={**_WORKSPACE_BINDING, **change},
+            idempotency_key="workspace:one",
+            recorded_at=RECORDED_AT,
+            previous_digest=None,
+        )
+
+
+def test_workspace_bound_payload_requires_every_key():
+    for missing in _WORKSPACE_BINDING:
+        with pytest.raises(run_events.CanonicalizationError):
+            run_events.build_event(
+                run_id=RUN_ID,
+                sequence=1,
+                event_type="task.workspace-bound",
+                payload={k: v for k, v in _WORKSPACE_BINDING.items() if k != missing},
+                idempotency_key="workspace:one",
                 recorded_at=RECORDED_AT,
                 previous_digest=None,
             )

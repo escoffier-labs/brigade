@@ -121,6 +121,38 @@ and each task's isolation, then is refused before any launch with
 `isolation-worktree-not-implemented`. Creating the worktrees is a following
 slice.
 
+## Per-task worktrees
+
+`brigade.run_batch_workspace` (not wired into execution yet) reserves, creates
+and validates one checkout per isolated task:
+
+- The path is always recomputed from the caller repository, run ID and task ID
+  as `<worktree-cache>/<repo-slug>-batch-<task-slug>-<digest12>`, where the
+  cache is `~/.cache/brigade/worktrees`. A path read from JSON is never
+  trusted. Slugged task IDs stay ordinary path components, so a hostile ID
+  cannot climb out of the cache.
+- A task path must be a direct child of that cache and disjoint from the
+  caller checkout, every Git-registered worktree, and every other task's path.
+  Overlap refuses with `workspace-overlap`.
+- A reservation is exclusive: a pre-existing directory or lease refuses with
+  `workspace-exists` and nothing is deleted, adopted, or repaired.
+- A created worktree is validated against the reservation: a real directory
+  (never a symlink), the same device/inode, the same recomputed path, its own
+  Git toplevel, the caller repository's common directory, the bound
+  `brigade/batch/...` branch, `HEAD` at the pinned base, and a pristine status
+  including ignored files. Any mismatch refuses with `workspace-invalid`.
+- A validated binding is recorded in the run journal as digest-only
+  `task.workspace-bound` facts (path, branch and device/inode appear only as
+  SHA-256 digests). The fact proves custody of a checkout, never launch
+  permission: the task stays queued and never attempted.
+
+Isolation separates cooperative workers. It is not a security boundary: a
+worker with full filesystem access can still reach the caller checkout by
+absolute path, and every worktree shares the repository's Git common
+directory. Uncommitted parent edits are never copied either — the worktree
+starts at the pinned base revision, so a dirty checkout is refused before a
+worker starts.
+
 | Code | Refusal |
 | --- | --- |
 | `invalid-payload` | Wrong object shape, unknown fields, or invalid text Unicode |

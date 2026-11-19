@@ -78,6 +78,17 @@ the stripping guard. Archive builds refuse cassette bodies.
    per line).
 5. **Readers** must accept records **without** `schema_version` (pre-#506 storage).
 
+## `brigade.run_event.v1`: `schema_version: 3`
+
+Schema version 3 carries one event type, `task.workspace-bound`, the
+digest-only record of one per-task batch worktree. Only journals from a batch
+that isolated a task with `isolation: "worktree"` reach version 3; every other
+event is still written with the version 2 envelope above, so an older binary
+refuses those journals and keeps reading all others. The payload is
+`{task_id, base_sha, branch_digest, path_digest, dev_ino_digest}`: the pinned
+40-hex base plus SHA-256 digests. No checkout path, branch name, or
+device/inode value is stored as text.
+
 ## `brigade.run_event.v1`: `schema_version: 2`
 
 Lifecycle journals that contain `approval`, `run.ship`, or `run.merge` events

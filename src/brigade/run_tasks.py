@@ -108,6 +108,26 @@ class TaskEnrollment:
 
 
 @dataclass(frozen=True)
+class TaskWorkspaceBinding:
+    """One validated per-task worktree, retained as digests only.
+
+    The checkout path, branch and device/inode never enter the journal, so this
+    record cannot be used to reconstruct or label another workspace.
+    """
+
+    base_sha: str
+    branch_digest: str
+    path_digest: str
+    dev_ino_digest: str
+
+    def __post_init__(self) -> None:
+        if not journal.base_sha(self.base_sha):
+            raise TaskJournalError("invalid task workspace base revision")
+        if not all(journal.digest(value) for value in (self.branch_digest, self.path_digest, self.dev_ino_digest)):
+            raise TaskJournalError("invalid task workspace binding digest")
+
+
+@dataclass(frozen=True)
 class TaskResult:
     handle: TaskHandle
     status: str
@@ -122,11 +142,17 @@ class TaskResult:
     version: str | None = None
     launch_claim: TaskLaunchBinding | None = None
     enrollment: TaskEnrollment | None = None
+    workspace: TaskWorkspaceBinding | None = None
 
     @property
     def native_enrolled(self) -> bool:
         """True when the fold saw a ``task.native-enrolled`` fact for this task."""
         return self.enrollment is not None
+
+    @property
+    def attempted(self) -> bool:
+        """True once an attempt exists. A workspace binding is never an attempt."""
+        return self.handle.attempt_id is not None
 
 
 @dataclass(frozen=True)
@@ -355,6 +381,22 @@ def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHisto
                     p["descriptor_version"], p["asset_path"], p["asset_digest"], p["template_digest"]
                 ),
             )
+        elif event.event_type == "task.workspace-bound":
+            # A binding never grants launch authority: the task stays queued,
+            # attempt-free, and cannot be bound twice or re-bound differently.
+            if (
+                current.workspace is not None
+                or current.status != "queued"
+                or current.handle.attempt_id is not None
+                or current.launch_claim is not None
+            ):
+                raise TaskJournalError("workspace binding requires pristine queued task history")
+            results[task_id] = replace(
+                current,
+                workspace=TaskWorkspaceBinding(
+                    p["base_sha"], p["branch_digest"], p["path_digest"], p["dev_ino_digest"]
+                ),
+            )
         prior_types[task_id] = event.event_type
         results[task_id] = replace(results[task_id], version=event.event_digest)
     return _TaskHistory(results, batches)
@@ -526,6 +568,39 @@ def record_native_enrollment(
             payload={"task_id": task_id, **asdict(enrollment)},
         )
         return replace(current, enrollment=enrollment, version=event.event_digest)
+
+
+def record_workspace_binding(
+    run_dir: Path,
+    *,
+    workspace: Path,
+    task_id: str,
+    binding: TaskWorkspaceBinding,
+) -> TaskResult:
+    """Bind one per-task worktree before any attempt exists.
+
+    Requires a queued, attempt-free task. Replaying the identical binding is a
+    no-op that writes nothing; a different binding for the same task refuses.
+    A binding is custody of a checkout, never launch permission, so the task
+    stays queued and the relaunch fence still treats it as never attempted.
+    """
+    if type(binding) is not TaskWorkspaceBinding:
+        raise TaskJournalError("invalid task workspace binding")
+    with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
+        current = _find(_fold(run_dir.name, events), task_id)
+        if current.workspace is not None:
+            if current.workspace == binding:
+                return current
+            raise TaskJournalError("task workspace binding conflict")
+        if current.status != "queued" or current.handle.attempt_id is not None or current.launch_claim is not None:
+            raise TaskJournalError("workspace binding requires pristine queued task history")
+        event = journal.append(
+            run_dir,
+            workspace=workspace,
+            event_type="task.workspace-bound",
+            payload={"task_id": task_id, **asdict(binding)},
+        )
+        return replace(current, workspace=binding, version=event.event_digest)
 
 
 def claim_task_launch(
