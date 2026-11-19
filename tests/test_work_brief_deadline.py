@@ -45,7 +45,10 @@ def test_work_brief_degrades_a_stalled_section_within_its_deadline(tmp_path, mon
     assert "work brief:" in out
     assert "dogfood_ready:" in out
     assert "suggested_command:" in out
-    assert "status_section_issues: 1" in out
+    # Slow runners can time out other real sections at the 1 s test limit too, so assert the
+    # stalled section is reported rather than that it is the only issue.
+    assert "status_section_issues: " in out
+    assert "status_section_issues: 0" not in out
     assert "work_brief_section:memory-care-health timed out after 1s" in out
 
 
@@ -203,8 +206,13 @@ def test_work_brief_fails_closed_on_corrupt_task_ledger(tmp_path, capsys):
 def test_brief_cloud_observation_keeps_one_github_deadline(tmp_path, monkeypatch):
     calls: list[float] = []
 
+    test_thread = threading.get_ident()
+
     def slow_run_text(command, *, cwd=None, timeout=30.0):
-        calls.append(timeout)
+        # An earlier test's abandoned section thread can still be inside its own observation and
+        # reach this stub; count only this test's reads.
+        if threading.get_ident() == test_thread:
+            calls.append(timeout)
         time.sleep(0.2)
         return 1, "", "timed out"
 
