@@ -128,6 +128,17 @@ def _dirfd_replace(parent: int, source: str, destination: str) -> None:
     raise _dirfd_unavailable("import inbox operations")
 
 
+def _dirfd_replace_new(parent: int, source: str, destination: str) -> None:
+    """Publish a file under a new name, refusing to replace an existing one."""
+    if _posix_dirfd_available():
+        dirfd._posix_replace_children(parent, source, destination, replace=False)
+        return
+    if _nt_dirfd_available():
+        dirfd._nt_replace_children(parent, source, destination, replace=False)
+        return
+    raise _dirfd_unavailable("import inbox operations")
+
+
 def _dirfd_unlink(parent: int, name: str) -> None:
     if _posix_dirfd_available():
         dirfd._posix_unlink_child(parent, name)

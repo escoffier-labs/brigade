@@ -352,6 +352,7 @@ def import_ingest(
                         "skipped": 0,
                         "dismissed": 0,
                         "invalid": len(errors),
+                        "retried": 0,
                     },
                     indent=2,
                     sort_keys=True,
@@ -368,6 +369,7 @@ def import_ingest(
         ledger_mod._sanitize_untrusted_import_record(record, importer_source=importer_source) for record in records
     ]
 
+    retried: list[dict[str, Any]] = []
     imported, skipped, skipped_dismissed, rejected = ledger_mod._append_import_records(
         target,
         imported_records,
@@ -375,6 +377,7 @@ def import_ingest(
         provenance_source=importer_source,
         contain_provenance_errors=True,
         migrate_untrusted_identities=True,
+        retried_out=retried,
     )
     rejection_reasons = {"provenance_stamp_failed": len(rejected)} if rejected else {}
     payload = {
@@ -388,6 +391,7 @@ def import_ingest(
         "dismissed": len(skipped_dismissed),
         "skipped_dismissed": len(skipped_dismissed),
         "rejected": len(rejected),
+        "retried": len(retried),
         "rejection_reasons": rejection_reasons,
         "invalid": 0,
         "imports": imported,
@@ -400,6 +404,7 @@ def import_ingest(
     print(f"dry_run: {dry_run}")
     print(f"imported: {len(imported)}")
     print(f"skipped_duplicates: {len(skipped)}")
+    print(f"retried: {len(retried)}")
     print(f"rejected: {len(rejected)}")
     if rejection_reasons:
         print("rejection_reasons: " + ", ".join(f"{reason}={count}" for reason, count in rejection_reasons.items()))
@@ -408,6 +413,11 @@ def import_ingest(
     for item in imported:
         print(
             f"- {item.get('id')} [{item.get('kind')}] {item.get('source')}: {helpers._short(str(item.get('text', '')))}"
+        )
+    for item in retried:
+        print(
+            f"- {item.get('id')} [retried] [{item.get('kind')}] {item.get('source')}: "
+            f"{helpers._short(str(item.get('text', '')))}"
         )
     return 0
 

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -1100,6 +1102,427 @@ def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return _parse_import_jsonl(text)
 
 
+# Only the ingest-owned fields change when a failed field redaction is retried.
+# The binding itself is compared through the digest above, not as metadata.
+_IMPORT_REDACTION_RETRY_IGNORED_METADATA_KEYS: frozenset[str] = frozenset(
+    {"provenance", "field_redaction", "field_redaction_binding", "field_redaction_retry"}
+)
+# Caller metadata may not occupy the ingest-owned verdict, binding, or retry keys.
+_IMPORT_REDACTION_RESERVED_METADATA_KEYS: frozenset[str] = frozenset(
+    {"field_redaction", "field_redaction_binding", "field_redaction_retry"}
+)
+_IMPORT_REDACTION_BINDING_KEY = "field_redaction_binding"
+_IMPORT_REDACTION_BINDING_SCHEMA = "work-import-redaction-binding.v2"
+_IMPORT_REDACTION_RETRY_KEY = "field_redaction_retry"
+_IMPORT_REDACTION_RETRY_SCHEMA = "work-import-redaction-retry.v1"
+_IMPORT_REDACTION_SALT_NAME = "redaction-retry.salt"
+_IMPORT_REDACTION_SALT_BYTES = 32
+
+
+def _prepare_import_metadata(metadata: object) -> tuple[dict[str, Any], object]:
+    """Split inbound producer metadata into the scannable body and its envelope claim."""
+    stamped = dict(metadata) if isinstance(metadata, dict) else {}
+    inbound_provenance = stamped.pop("provenance", None)
+    return _sanitize_import_identity_metadata(stamped), inbound_provenance
+
+
+def _import_redaction_binding_payload(
+    *,
+    text: str,
+    kind: str,
+    task_type: object,
+    priority: object,
+    template: object,
+    acceptance: object,
+    metadata: object,
+) -> dict[str, Any]:
+    """Return the full canonical content the retry must reproduce, not a truncated fingerprint."""
+    prepared_metadata, _inbound = _prepare_import_metadata(metadata)
+    return {
+        "text": text,
+        "kind": kind,
+        "type": import_model._normalize_task_type(task_type)
+        if isinstance(task_type, str) and task_type.strip()
+        else None,
+        "priority": import_model._normalize_task_priority(priority)
+        if isinstance(priority, str) and priority.strip()
+        else None,
+        "template": template.strip() if isinstance(template, str) and template.strip() else None,
+        "acceptance": import_model._normalize_acceptance(acceptance),
+        "metadata": prepared_metadata,
+    }
+
+
+def _import_redaction_binding(payload: Mapping[str, Any], *, salt: bytes) -> dict[str, str] | None:
+    """Return a keyed digest of the pre-redaction metadata, never the values."""
+    try:
+        rendered = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return {
+        "schema": _IMPORT_REDACTION_BINDING_SCHEMA,
+        "digest": hmac.new(salt, rendered, hashlib.sha256).hexdigest(),
+    }
+
+
+def _read_import_redaction_salt_at(parent: int) -> bytes | None:
+    try:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            _IMPORT_REDACTION_SALT_NAME,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError("redaction retry salt is not a single-link regular file")
+        if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise OSError("redaction retry salt must not be group or world readable")
+        if metadata.st_size != _IMPORT_REDACTION_SALT_BYTES * 2:
+            raise OSError("redaction retry salt is corrupt")
+        raw = os.read(descriptor, _IMPORT_REDACTION_SALT_BYTES * 2)
+    finally:
+        os.close(descriptor)
+    try:
+        text = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        raise OSError("redaction retry salt is corrupt") from None
+    if len(text) != _IMPORT_REDACTION_SALT_BYTES * 2:
+        raise OSError("redaction retry salt is corrupt")
+    try:
+        return bytes.fromhex(text)
+    except ValueError:
+        raise OSError("redaction retry salt is corrupt") from None
+
+
+def _inbox_has_redaction_binding_at(parent: int, name: str) -> bool:
+    """Return whether any stored row depends on the retry salt."""
+    try:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 64 * 1024):
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    return _IMPORT_REDACTION_BINDING_KEY.encode("utf-8") in b"".join(chunks)
+
+
+def _publish_import_redaction_salt_at(parent: int, salt: bytes) -> None:
+    """Write the salt through a temporary file and publish it without replacing one."""
+    temporary = f".{_IMPORT_REDACTION_SALT_NAME}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    try:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            with os.fdopen(os.dup(descriptor), "w", encoding="ascii") as handle:
+                handle.write(salt.hex())
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)
+        try:
+            authority_store._dirfd_replace_new(parent, temporary, _IMPORT_REDACTION_SALT_NAME)
+        except FileExistsError:
+            pass
+        authority_store._dirfd_fsync(parent)
+    finally:
+        try:
+            authority_store._dirfd_unlink(parent, temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _import_redaction_salt(target: Path, *, create: bool) -> bytes | None:
+    """Return the per-target retry salt, optionally creating it through the inbox parent."""
+    try:
+        parent, name = _open_import_inbox_parent(target, create=create)
+    except OSError:
+        return None
+    try:
+        try:
+            existing = _read_import_redaction_salt_at(parent)
+        except OSError:
+            if not create:
+                return None
+            if _inbox_has_redaction_binding_at(parent, name):
+                raise OSError(
+                    "redaction retry salt is corrupt and stored bindings depend on it; "
+                    "restore the salt file or dismiss the affected quarantined imports"
+                ) from None
+            try:
+                authority_store._dirfd_unlink(parent, _IMPORT_REDACTION_SALT_NAME)
+            except FileNotFoundError:
+                pass
+            existing = None
+        if existing is not None or not create:
+            return existing
+        salt = secrets.token_bytes(_IMPORT_REDACTION_SALT_BYTES)
+        _publish_import_redaction_salt_at(parent, salt)
+        try:
+            published = _read_import_redaction_salt_at(parent)
+        except OSError:
+            published = None
+        if published is None:
+            raise OSError("redaction retry salt could not be published")
+        return published
+    finally:
+        os.close(parent)
+
+
+def _require_import_redaction_salt(target: Path) -> bytes:
+    salt = _import_redaction_salt(target, create=True)
+    if salt is None:
+        raise OSError("redaction retry salt is unavailable")
+    return salt
+
+
+def _stored_redaction_binding(item: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    binding = _metadata(item).get(_IMPORT_REDACTION_BINDING_KEY)
+    if not isinstance(binding, Mapping) or binding.get("schema") != _IMPORT_REDACTION_BINDING_SCHEMA:
+        return None
+    digest = binding.get("digest")
+    if not isinstance(digest, str) or len(digest) != 64:
+        return None
+    return binding
+
+
+def _redaction_value_equal(stored: object, recovered: object) -> bool:
+    """Compare two JSON values without letting a bool pass for an int."""
+    if type(stored) is not type(recovered):
+        return False
+    if isinstance(stored, dict) and isinstance(recovered, dict):
+        return set(stored) == set(recovered) and all(
+            _redaction_value_equal(value, recovered[key]) for key, value in stored.items()
+        )
+    if isinstance(stored, list) and isinstance(recovered, list):
+        if len(stored) != len(recovered):
+            return False
+        return all(_redaction_value_equal(left, right) for left, right in zip(stored, recovered, strict=True))
+    return stored == recovered
+
+
+def _redaction_recovery_matches(stored: object, recovered: object) -> bool:
+    """Compare stored and retried values, allowing only failed-scan placeholders to differ."""
+    if isinstance(stored, str) and stored == evidence_redaction.FAILED_PLACEHOLDER:
+        return True
+    if type(stored) is not type(recovered):
+        return False
+    if isinstance(stored, dict) and isinstance(recovered, dict):
+        return set(stored) == set(recovered) and all(
+            _redaction_recovery_matches(value, recovered[key]) for key, value in stored.items()
+        )
+    if isinstance(stored, list) and isinstance(recovered, list):
+        if len(stored) != len(recovered):
+            return False
+        return all(_redaction_recovery_matches(left, right) for left, right in zip(stored, recovered, strict=True))
+    return stored == recovered
+
+
+_IMPORT_PROVENANCE_RETRY_EXACT_KEYS: tuple[str, ...] = (
+    "schema",
+    "schema_version",
+    "source",
+    "origin",
+    "repository",
+    "session",
+    "collection_id",
+    "item_id",
+    "locator",
+    "attribution",
+    "modality",
+)
+_IMPORT_PROVENANCE_RETRY_HASH_KEYS: tuple[str, ...] = (
+    "content_algorithm",
+    "content_scope",
+    "raw_algorithm",
+    "raw_scope",
+    "raw",
+)
+
+
+def _redaction_retry_provenance_matches(stored: object, recovered: object) -> bool:
+    """Require every record-derived envelope field to survive the retry unchanged."""
+    if not isinstance(stored, Mapping) or not isinstance(recovered, Mapping):
+        return False
+    for key in _IMPORT_PROVENANCE_RETRY_EXACT_KEYS:
+        if not _redaction_value_equal(stored.get(key), recovered.get(key)):
+            return False
+    stored_hashes = stored.get("hashes")
+    recovered_hashes = recovered.get("hashes")
+    if not isinstance(stored_hashes, Mapping) or not isinstance(recovered_hashes, Mapping):
+        return False
+    for key in _IMPORT_PROVENANCE_RETRY_HASH_KEYS:
+        if not _redaction_value_equal(stored_hashes.get(key), recovered_hashes.get(key)):
+            return False
+    # Without a producer-supplied captured_at the writer stamps the ingest time.
+    if not _redaction_value_equal(stored.get("captured_at"), recovered.get("captured_at")):
+        if not (
+            _redaction_value_equal(stored.get("captured_at"), stored.get("ingested_at"))
+            and _redaction_value_equal(recovered.get("captured_at"), recovered.get("ingested_at"))
+        ):
+            return False
+    stored_trust = stored.get("trust")
+    recovered_trust = recovered.get("trust")
+    if not isinstance(stored_trust, Mapping) or not isinstance(recovered_trust, Mapping):
+        return False
+    if not _redaction_value_equal(stored_trust.get("assigned_by"), recovered_trust.get("assigned_by")):
+        return False
+    if not _redaction_value_equal(stored_trust.get("trust_policy"), recovered_trust.get("trust_policy")):
+        return False
+    stored_injection = stored_trust.get("injection")
+    recovered_injection = recovered_trust.get("injection")
+    if not isinstance(stored_injection, Mapping) or not isinstance(recovered_injection, Mapping):
+        return False
+    for key in ("status", "count", "rules"):
+        if not _redaction_value_equal(stored_injection.get(key), recovered_injection.get(key)):
+            return False
+    # The label may only rise from quarantined to the writer's scanned-clean label.
+    return stored_trust.get("label") == "quarantined" and recovered_trust.get("label") == "untrusted"
+
+
+def _redaction_retry_preserves_content(
+    existing_item: dict[str, Any],
+    recovered_item: dict[str, Any],
+) -> bool:
+    """Return whether a retried row body differs from the stored one only where bypassed."""
+    for key in ("kind", "type", "priority", "template"):
+        if existing_item.get(key) != recovered_item.get(key):
+            return False
+    if not _redaction_recovery_matches(existing_item.get("source"), recovered_item.get("source")):
+        return False
+    for key in ("text", "acceptance"):
+        if not _redaction_recovery_matches(existing_item.get(key), recovered_item.get(key)):
+            return False
+    stored_metadata = {
+        key: value
+        for key, value in _metadata(existing_item).items()
+        if key not in _IMPORT_REDACTION_RETRY_IGNORED_METADATA_KEYS
+    }
+    recovered_metadata = {
+        key: value
+        for key, value in _metadata(recovered_item).items()
+        if key not in _IMPORT_REDACTION_RETRY_IGNORED_METADATA_KEYS
+    }
+    if not _redaction_recovery_matches(stored_metadata, recovered_metadata):
+        return False
+    return _redaction_retry_provenance_matches(
+        _metadata(existing_item).get("provenance"),
+        _metadata(recovered_item).get("provenance"),
+    )
+
+
+def _retry_quarantined_field_redaction(
+    existing_item: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    target: Path,
+    provenance_source: str | None,
+    trusted_existing_row: bool,
+) -> dict[str, Any] | None:
+    """Rebuild one quarantined row when an identical re-ingest scans cleanly (#1886).
+
+    The retry only re-runs the scan for rows the ingest writer itself stored
+    with a field-redaction error verdict, whose persisted proof still binds the
+    current bytes, whose stored injection verdict is an explicit clean scan, and
+    whose incoming metadata digest matches the binding recorded at quarantine
+    time. Any still-failing scan, unresolved injection, missing or different
+    digest, or content difference returns None so the caller keeps the original
+    quarantined row untouched.
+    """
+    if not trusted_existing_row or existing_item.get("status") != "pending":
+        return None
+    stored_field = _metadata(existing_item).get("field_redaction")
+    if not isinstance(stored_field, Mapping) or stored_field.get("status") != "error":
+        return None
+    stored_env = _metadata(existing_item).get("provenance")
+    stored_trust = stored_env.get("trust") if isinstance(stored_env, Mapping) else None
+    stored_injection = stored_trust.get("injection") if isinstance(stored_trust, Mapping) else None
+    if not isinstance(stored_injection, Mapping) or stored_injection.get("status") != "clean":
+        return None
+    stored_binding = _stored_redaction_binding(existing_item)
+    salt = _import_redaction_salt(target, create=False)
+    if stored_binding is None or salt is None:
+        return None
+    binding_payload = _import_redaction_binding_payload(
+        text=str(record["text"]),
+        kind=str(record["kind"]),
+        task_type=record.get("type") if isinstance(record.get("type"), str) else None,
+        priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
+        template=record.get("template") if isinstance(record.get("template"), str) else None,
+        acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
+        metadata=record.get("metadata"),
+    )
+    incoming_binding = _import_redaction_binding(binding_payload, salt=salt)
+    if incoming_binding is None or not hmac.compare_digest(
+        incoming_binding["digest"], str(stored_binding.get("digest"))
+    ):
+        return None
+    source = _resolve_import_provenance_source(record, provenance_source)
+    origin, _modality = _import_origin_modality(source, kind=str(record["kind"]))
+    if tasks_plans._import_field_redaction(source, origin) is None:
+        return None
+    try:
+        recovered = tasks_plans._make_import(
+            str(record["text"]),
+            kind=str(record["kind"]),
+            source=str(record["source"]),
+            metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+            task_type=record.get("type") if isinstance(record.get("type"), str) else None,
+            priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
+            acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
+            template=record.get("template") if isinstance(record.get("template"), str) else None,
+            provenance_source=source,
+            redaction_salt_source=lambda: salt,
+            item_id=str(existing_item["id"]) if isinstance(existing_item.get("id"), str) else None,
+        )
+    except _ImportProvenanceError:
+        return None
+    recovered_field = _metadata(recovered).get("field_redaction")
+    if not isinstance(recovered_field, Mapping) or recovered_field.get("status") == "error":
+        return None
+    if trust_gate.trust_label_of(recovered) == "quarantined":
+        return None
+    if not _redaction_retry_preserves_content(existing_item, recovered):
+        return None
+    recovered_metadata = _metadata(recovered)
+    recovered_metadata[_IMPORT_REDACTION_RETRY_KEY] = {
+        "schema": _IMPORT_REDACTION_RETRY_SCHEMA,
+        "retried_at": str(recovered.get("updated_at") or recovered.get("created_at") or ""),
+    }
+    return recovered
+
+
+def _apply_redaction_retry(existing_item: dict[str, Any], recovered_item: dict[str, Any]) -> None:
+    """Swap a quarantined row body for its recovered retry, keeping its identity."""
+    preserved: dict[str, Any] = {
+        key: existing_item[key] for key in ("id", "status", "created_at") if key in existing_item
+    }
+    existing_item.clear()
+    existing_item.update(recovered_item)
+    existing_item.update(preserved)
+
+
 def _append_import_records(
     target: Path,
     records: list[dict[str, Any]],
@@ -1111,6 +1534,7 @@ def _append_import_records(
     preserve_existing_raw: Callable[[bytes], None] | None = None,
     restore_existing_raw: Callable[[bytes, bool], None] | None = None,
     existing_imports: list[dict[str, Any]] | None = None,
+    retried_out: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Append records as one locked inbox read-modify-write transaction.
 
@@ -1130,6 +1554,7 @@ def _append_import_records(
             preserve_existing_raw=preserve_existing_raw,
             restore_existing_raw=restore_existing_raw,
             existing_imports=existing_imports,
+            retried_out=retried_out,
         )
 
 
@@ -1144,6 +1569,7 @@ def _append_import_records_locked(
     preserve_existing_raw: Callable[[bytes], None] | None = None,
     restore_existing_raw: Callable[[bytes, bool], None] | None = None,
     existing_imports: list[dict[str, Any]] | None = None,
+    retried_out: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = existing_imports if existing_imports is not None else import_model._read_imports(target)
     # One authenticated view of authority state for the whole append: the
@@ -1185,6 +1611,7 @@ def _append_import_records_locked(
     skipped: list[dict[str, Any]] = []
     skipped_dismissed: list[dict[str, Any]] = []
     rejected: list[str] = []
+    retried_rows: list[dict[str, Any]] = []
     for record in records:
         key = import_model._import_record_key(record)
         identity = _import_source_identity(record)
@@ -1263,7 +1690,33 @@ def _append_import_records_locked(
                     skipped_dismissed.append(record)
                     continue
             elif _import_fingerprint(existing_item) == _import_fingerprint(record):
-                skipped.append(record)
+                recovered_item = None
+                if preserve_existing_raw is None and id(existing_item) not in batch_item_ids:
+                    recovered_item = _retry_quarantined_field_redaction(
+                        existing_item,
+                        record,
+                        target=target,
+                        provenance_source=provenance_source,
+                        trusted_existing_row=trusted_existing_row,
+                    )
+                if recovered_item is None:
+                    skipped.append(record)
+                    continue
+                if dry_run:
+                    # Report what a live run would refresh without touching the row.
+                    reported = dict(recovered_item)
+                    reported.update(
+                        {key: existing_item[key] for key in ("id", "status", "created_at") if key in existing_item}
+                    )
+                    retried_rows.append(reported)
+                    continue
+                # The row keeps its id, status, and creation time; only the
+                # previously bypassed field values and verdict change.
+                _apply_redaction_retry(existing_item, recovered_item)
+                retried_rows.append(existing_item)
+                # This transaction republishes the row's proof, so later
+                # records in the same batch may dedupe against it again.
+                batch_item_ids.add(id(existing_item))
                 continue
         elif (
             key[2]
@@ -1295,6 +1748,7 @@ def _append_import_records_locked(
                 acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
                 template=record.get("template") if isinstance(record.get("template"), str) else None,
                 provenance_source=_resolve_import_provenance_source(record, provenance_source),
+                redaction_salt_source=None if dry_run else (lambda: _require_import_redaction_salt(target)),
             )
         except _ImportProvenanceError:
             if not contain_provenance_errors:
@@ -1306,9 +1760,11 @@ def _append_import_records_locked(
         existing.add(key)
         if identity is not None:
             existing_by_source[identity] = item
-    if imported and not dry_run:
+    if (imported or retried_rows) and not dry_run:
         verify_canonical_write_locks(target)
         inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
+        proof_scopes = descriptor_anchors._persisted_import_proof_scopes(imported)
+        before_files = descriptor_anchors._snapshot_external_file_authorities(target)
         published = False
         try:
             if preserve_existing_raw:
@@ -1329,7 +1785,12 @@ def _append_import_records_locked(
                     _restore_import_inbox_snapshot(inbox_parent, inbox_name, previous_raw, previous_exists)
                     raise
             try:
-                descriptor_anchors._write_persisted_import_proofs(target, imported, operation_id=uuid4().hex)
+                if imported:
+                    descriptor_anchors._write_persisted_import_proofs(target, imported, operation_id=uuid4().hex)
+                if retried_rows:
+                    # The refreshed rows keep their ids, so their proofs are
+                    # replaced in place rather than created.
+                    descriptor_anchors._rewrite_persisted_import_proofs(target, retried_rows, operation_id=uuid4().hex)
             except BaseException:
                 try:
                     if published:
@@ -1342,8 +1803,19 @@ def _append_import_records_locked(
                         descriptor_anchors._remove_persisted_import_proofs(target, imported)
                     except BaseException:
                         pass
+                    if proof_scopes:
+                        try:
+                            # Unlinked new proofs must not leave authority keys
+                            # pointing at a file the rollback removed.
+                            descriptor_anchors._restore_external_file_authorities(
+                                target, before_files, owned=proof_scopes
+                            )
+                        except OSError as exc:
+                            raise OSError("import proof rollback could not restore its retained bindings") from exc
                 raise
         finally:
             if inbox_parent != -1:
                 os.close(inbox_parent)
+    if retried_out is not None:
+        retried_out.extend(retried_rows)
     return imported, skipped, skipped_dismissed, rejected
