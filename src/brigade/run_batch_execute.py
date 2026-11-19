@@ -435,13 +435,30 @@ class BatchExecution:
         return orchestrator.OrchestratorHealthRoutingDecision(roster=roster)
 
     def finish(self, results: list[WorkerResult]) -> agents.AgentResult:
+        failures: list[str] = []
+        lines = []
         for result in results:
-            self.observe(result)
+            try:
+                self.observe(result)
+            except Exception as exc:
+                # Dispatch guards on_result failures, so finish is the last
+                # chance to record that a result file or journal observation
+                # could not be written. Keep it inside the batch summary path
+                # instead of escaping as an unexpected run failure.
+                failures.append(f"task {result.task_id} observation failed: {exc}")
+            lines.append(f"{result.task_id}: {'completed' if result.ok else result.status or 'failed'}")
         # Use the planned-run finish path with no synthesis invocation. It
         # records incomplete workers and retains every result and artifact.
+        ok = all(r.ok for r in results) and not failures
+        detail = "; ".join(failures)
+        if detail:
+            lines.append(detail)
         return agents.AgentResult(
-            text="\n".join(f"{r.task_id}: {'completed' if r.ok else r.status or 'failed'}" for r in results),
-            ok=all(r.ok for r in results),
+            text="\n".join(lines),
+            ok=ok,
+            detail=detail,
+            failure_phase="result-processing" if failures else None,
+            failure_kind="observation-write-failed" if failures else None,
         )
 
 
@@ -486,6 +503,11 @@ def stored_result(
 
 def retryable_before_launch(run_dir: Path) -> bool:
     """Fail closed on damaged journals or any evidence of a possible launch."""
+    # A result file is written only after a worker returns, so its presence is
+    # evidence of a possible launch even when the lifecycle journal is gone.
+    # A preflight refusal writes none, so its retry stays allowed.
+    if any(run_dir.glob("batch-result-*.json")):
+        return False
     if not run_lifecycle._journal_path(run_dir).exists():
         return True
     try:

@@ -604,3 +604,91 @@ def test_launch_point_refuses_unknown_task_if_fence_regresses(setup, capsys, mon
     assert len(setup[1]) == 1
     assert rc != 0
     assert result["tasks"]["a"]["status"] == "unknown"
+
+
+def test_result_file_evidence_blocks_retry_without_journal(setup):
+    from brigade import run_batch_execute, run_lifecycle
+
+    root, _ = setup
+    run_dir = root / ".brigade" / "runs" / "batch-lost-journal-result"
+    run_dir.mkdir(parents=True)
+    # A result file is written only after a worker returns, so its presence is
+    # evidence of a possible launch even when the lifecycle journal is gone.
+    (run_dir / f"batch-result-{'a' * 64}.json").write_text("{}")
+    assert not run_lifecycle._journal_path(run_dir).exists()
+    assert run_batch_execute.retryable_before_launch(run_dir) is False
+
+
+def test_missing_journal_without_result_keeps_preflight_retry(setup):
+    from brigade import run_batch_execute, run_lifecycle
+
+    root, _ = setup
+    run_dir = root / ".brigade" / "runs" / "batch-fresh-preflight"
+    run_dir.mkdir(parents=True)
+    assert not run_lifecycle._journal_path(run_dir).exists()
+    assert not any(run_dir.glob("batch-result-*.json"))
+    # A preflight refusal writes no result file, so its retry stays allowed.
+    assert run_batch_execute.retryable_before_launch(run_dir) is True
+
+
+def test_launch_journal_read_error_writes_a_receipt(setup, capsys, monkeypatch):
+    from brigade.run_batch_execute import BatchExecution
+    from brigade.run_task_journal import TaskJournalError
+
+    original = BatchExecution.current
+    calls = []
+
+    def current(self, task_id):
+        calls.append(task_id)
+        if len(calls) == 1:
+            raise TaskJournalError("journal unreadable at launch")
+        return original(self, task_id)
+
+    monkeypatch.setattr(BatchExecution, "current", current)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc != 0, err
+    assert len(setup[1]) == 0
+    assert result["tasks"]["a"]["status"] == "queued"
+    run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
+    assert (run_dir / "run.json").is_file()
+
+
+def test_missing_task_raises_batch_error_naming_task_id(setup, monkeypatch):
+    from brigade import run_tasks
+    from brigade.run_batch import BatchError
+    from brigade.run_batch_execute import BatchExecution
+
+    root, _ = setup
+    run_dir = root / ".brigade" / "runs" / "batch-missing-task"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setattr(run_tasks, "read_tasks", lambda run_dir: ())
+    plan = {"request_id": "req", "tasks": [], "layers": []}
+    execution = BatchExecution(plan, run_dir, root)
+    with pytest.raises(BatchError) as refused:
+        execution.current("missing-task")
+    assert "missing-task" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("result file unavailable"), OSError("journal observation unavailable")],
+    ids=["result-file", "journal-observation"],
+)
+def test_summary_ok_reflects_observation_write_failure(setup, capsys, monkeypatch, failure):
+    from brigade.run_batch_execute import BatchExecution
+
+    def observe(self, result):
+        raise failure
+
+    monkeypatch.setattr(BatchExecution, "observe", observe)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 2, err
+    run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
+    # A failed observation must finish through the batch summary path, not
+    # escape as an unexpected run failure outside finish().
+    summary = json.loads((run_dir / "synthesis.json").read_text())["result"]
+    assert summary["ok"] is False
+    assert "unavailable" in summary["text"]
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt["status"] == "failed"
+    assert "unavailable" in receipt["error"]
