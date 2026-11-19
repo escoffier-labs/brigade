@@ -860,6 +860,65 @@ def test_a_receiver_that_keeps_failing_is_dropped(stations, receiver, hub, monke
     assert rows(db, "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(0,)]
 
 
+def test_refresh_does_not_reset_a_receiver_failure_streak(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_FAILED_STREAK", 3)
+    subscribe(stations[1], receiver.url)
+    receiver.status = 400
+    for index in range(3):
+        send(stations[0], NODE_B)
+        tick(db)
+        if index < 2:
+            assert "result" in subscribe(stations[1], receiver.url)
+            assert len(receiver.challenges) == 1, "a same-secret refresh is not verified again"
+            assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(index + 1,)]
+    assert rows(db, "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(0,)]
+
+
+def test_successful_delivery_resets_a_receiver_failure_streak(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_FAILED_STREAK", 3)
+    subscribe(stations[1], receiver.url)
+    receiver.status = 400
+    for _ in range(2):
+        send(stations[0], NODE_B)
+        tick(db)
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(2,)]
+    receiver.status = 200
+    send(stations[0], NODE_B)
+    assert tick(db) == 1
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(0,)]
+    receiver.status = 400
+    for index in range(2):
+        send(stations[0], NODE_B)
+        tick(db)
+        if index == 0:
+            assert "result" in subscribe(stations[1], receiver.url)
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(2,)]
+
+
+def test_verified_secret_rotation_resets_a_nonzero_failure_streak(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_FAILED_STREAK", 3)
+    subscribe(stations[1], receiver.url)
+    receiver.status = 400
+    for _ in range(2):
+        send(stations[0], NODE_B)
+        tick(db)
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(2,)]
+    receiver.secrets = [OTHER_SECRET]
+    subscribe(stations[1], receiver.url, secret=OTHER_SECRET)
+    assert len(receiver.challenges) == 2, "a new secret is verified again"
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(0,)]
+    for index in range(2):
+        send(stations[0], NODE_B)
+        tick(db)
+        if index == 0:
+            assert "result" in subscribe(stations[1], receiver.url, secret=OTHER_SECRET)
+    assert len(receiver.challenges) == 2, "a same-secret refresh inside the rotation window is not verified again"
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(2,)]
+
+
 def test_connection_time_policy_rejection_is_permanent(stations, receiver, hub) -> None:
     _base, _ta, _tb, db = hub
     subscribe(stations[1], receiver.url)

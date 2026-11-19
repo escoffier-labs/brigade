@@ -537,7 +537,7 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
         moment = time.time()
         expires = moment + ttl
         old = conn.execute(
-            "SELECT secret, previous_secret, rotate_until, created_at, cursor_seq, expires_at, generation "
+            "SELECT secret, previous_secret, rotate_until, created_at, cursor_seq, expires_at, generation, failures "
             "FROM fleet_event_subscriptions WHERE id=?",
             (sid,),
         ).fetchone()
@@ -565,7 +565,7 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
         conn.execute(
             "INSERT OR REPLACE INTO fleet_event_subscriptions(id,principal_id,name,arguments,filter_value,url,secret,"
             "previous_secret,rotate_until,created_at,expires_at,cursor_seq,failures,generation) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sid,
                 caller,
@@ -579,6 +579,10 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
                 old[3] if old is not None else moment,
                 expires,
                 cursor_seq,
+                # A same-secret refresh of an active subscription keeps its failure streak, judged on the row read
+                # inside this transaction like the generation below. A successful delivery clears it in the
+                # dispatcher; a creation, a lapsed row or a rotated secret starts a new streak.
+                old[7] if old is not None and old[0] == delivery["secret"] else 0,
                 # A refresh keeps its generation. A creation, including one after an unsubscribe, and a secret
                 # rotation get a new one, so outcomes of requests signed before the change are ignored.
                 old[6] if old is not None and old[0] == delivery["secret"] else secrets.token_hex(8),
