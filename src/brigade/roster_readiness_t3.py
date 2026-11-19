@@ -587,10 +587,16 @@ def _target_projection(target: NativeTarget) -> dict[str, Any]:
     }
 
 
+# Wall clocks read through different APIs (or a coarse Windows time.time tick)
+# can put a just-written report a few milliseconds after Brigade's receipt time.
+# Allow that much, and no more, before calling a report future-dated.
+CLOCK_SKEW_SECONDS = 1.0
+
+
 def _freshness(report: T3Capabilities, now: float) -> str | None:
-    if report.reported_at > report.received_at or now < report.reported_at:
+    if report.reported_at > report.received_at + CLOCK_SKEW_SECONDS or report.reported_at > now + CLOCK_SKEW_SECONDS:
         return CAPABILITIES_FUTURE
-    age = now - report.reported_at
+    age = max(0.0, now - report.reported_at)
     if not math.isfinite(age) or age > OPERATION_TTL_SECONDS:
         return CAPABILITIES_STALE
     return None

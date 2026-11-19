@@ -521,7 +521,7 @@ Correlation, cancellation, acknowledgement and finalization refusals use the
 same form. Codes include `no-claim`, `claim-incomplete`, `parent-mismatch`,
 `intent-mismatch`, `native-invalid`, `native-mismatch`, `native-unreadable`,
 `native-too-large`, `provider-mismatch`, `model-mismatch`, `options-mismatch`,
-`accept-conflict`, `no-correlation`, `task-terminal`, `task-nonterminal`,
+`accept-conflict`, `handle-mismatch`, `no-correlation`, `task-terminal`, `task-nonterminal`,
 `result-mismatch`, `ack-refused`, `finalize-held`, `finalize-abandoned` and
 `observation-conflict`.
 
