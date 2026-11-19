@@ -732,8 +732,26 @@ max_transitions_per_run = 20
 ```
 
 The policy floors are 30 days before stale and 90 days before archive. Values
-below these floors are raised to the floors in code. Larger values delay the
-transitions. Changing these values cannot enable automatic archiving.
+below these floors are raised to the floors in code, and the stage reports each
+raised value as `policy_adjusted` (`configured` and `applied`), which
+`memory care status` prints as `lifecycle_policy_adjusted`. Larger values delay
+the transitions. Changing these values cannot enable automatic archiving.
+
+The lifecycle stage keeps two stop conditions apart. `blocked` means the stage
+stopped, for example when installed care schedules or local read coverage
+cannot be read. It normally stops before any card. If local read coverage
+fails partway through a pass, transitions already committed stay listed.
+`archive_blocked` means only archiving stopped, such as when no
+hub reports read coverage, while stale transitions still commit. Per-card
+failures do not stop the pass: the unreadable card is listed in `skipped` with
+a `card unreadable` reason, and transitions committed before and after it keep
+their decision ids. The stage still sets `error`, so `tend` counts it in
+`failed_stages` and exits nonzero. A card file that cannot be decoded is
+reported the same way instead of being dropped. A symlinked lifecycle state
+directory or a read-only protection conflict belongs to the workspace, so it
+fails the stage instead of skipping one card. `memory care status` prints the
+last pass as `lifecycle_stage:`, so a stage that did nothing and a stage that
+only stopped archiving stay distinguishable.
 
 Set `enabled = false` to disable this pass. `[tend] enabled = false` disables
 all tending. Preview with `memory care tend --stage lifecycle --dry-run --json`.
@@ -786,12 +804,13 @@ supported. Provision the workspace key through `brigade receipts keygen` before
 starting the observation window, with the receipt-key override unset.
 The signing process and key are trusted. This prevents direct JSON forgery,
 but does not isolate the key from a process with the same user's shell access.
-A missing or unavailable hub blocks automatic archiving. Stale marking can
-continue using local coverage. Hub statistics that expose only combined search
-and read dates also block automatic archiving because those totals cannot prove
-explicit opens. A compatible hub must supply `last_card_read_day` separately.
-Malformed evidence logs stop the pass before transitions. Uninstrumented
-external reads remain outside this observation model.
+A missing or unavailable hub blocks automatic archiving and reports
+`archive_blocked`. Stale marking can continue using local coverage. Hub
+statistics that expose only combined search and read dates also block automatic
+archiving because those totals cannot prove explicit opens. A compatible hub
+must supply `last_card_read_day` separately. Malformed evidence logs stop the
+pass before transitions and report `blocked`. Uninstrumented external reads
+remain outside this observation model.
 
 Default search excludes archives. Use `brigade memory search TERMS
 --include-archived` for a local search that includes them. This flag uses the

@@ -159,7 +159,9 @@ def test_stale_reactivated_by_use(tmp_path):
 def test_unavailable_hub_protects(tmp_path, monkeypatch):
     path = card(tmp_path)
     monkeypatch.setattr(reads, "hub_last_reads", lambda *a, **k: None)
-    assert observed_run(tmp_path, today=TODAY)["blocked"]
+    payload = observed_run(tmp_path, today=TODAY)
+    assert payload["archive_blocked"] == "hub read coverage unavailable"
+    assert [row["to_state"] for row in payload["transitions"]] == ["stale"]
     assert path.exists()
 
 
