@@ -218,4 +218,7 @@ def test_brief_cloud_observation_keeps_one_github_deadline(tmp_path, monkeypatch
     assert result["prs"] == []
     assert calls, "observe_github should still attempt the first GitHub read"
     assert max(calls) <= 0.3 + 1e-6
-    assert elapsed < 1.0
+    # Each read sleeps at least 0.2 s, so a shared 0.3 s budget allows at most two reads; an unbudgeted
+    # observation would make every read. The wall-clock bound is loose for slow and coarse-clock runners.
+    assert len(calls) <= 2
+    assert elapsed < 5.0
