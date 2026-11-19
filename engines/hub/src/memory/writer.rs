@@ -532,7 +532,7 @@ fn apply_one(
     let deadline = super::hardening::deadline(authority.proposal_limits.lock_ms);
     // Review and ordinary writes retain their existing admission contracts.
     // The resource guard covers reflect-controlled automatic work and admission.
-    if matches!(&p.action,ops::Action::Proposal(c) if matches!(c.name(),"auto_apply"|"verify_auto_apply"|"propose"|"compensation_watch"|"rollback"))
+    if super::hardening::budgeted(&p.action)
         && db
             .progress_handler(1000, Some(move || Instant::now() >= deadline))
             .is_err()
@@ -742,6 +742,7 @@ pub(crate) fn run(
     let mut dense_rebuilt: Vec<Box<super::dense::Rebuilt>> = Vec::new();
     let mut directory_synced = false;
     let mut auto_rate = super::hardening::Rate::default();
+    let mut cooldown = super::hardening::Cooldown::default();
     let mut flush_requested = false;
     let mut read_cursor = super::read_counts::SweepCursor::default();
     // Index publication runs on this thread after step 5, never under a lock.
@@ -876,6 +877,27 @@ pub(crate) fn run(
         if batch.is_empty() {
             continue;
         }
+        // A principal whose budgeted command just exhausted its budget is
+        // refused here, before diagnostics and before any writer is taken.
+        {
+            let limits = config.proposal_limits.read().unwrap().clone();
+            let now = config.clock.now_ms();
+            batch = batch
+                .into_iter()
+                .filter_map(|pending| {
+                    if super::hardening::budgeted(&pending.command.action)
+                        && cooldown.active(pending.command.credential.principal(), now, &limits)
+                    {
+                        answer(pending, Ok(super::hardening::cooldown_refusal()));
+                        return None;
+                    }
+                    Some(pending)
+                })
+                .collect();
+        }
+        if batch.is_empty() {
+            continue;
+        }
         // Corpus diagnostics run in a separate read snapshot before either writer lock.
         for pending in &mut batch {
             if let ops::Action::Proposal(cmd) = &mut pending.command.action {
@@ -905,6 +927,12 @@ pub(crate) fn run(
                     if matches!(cmd.name(), "auto_apply" | "verify_auto_apply") {
                         if let Err(refusal) = &cmd.draft {
                             let reply = refusal.clone();
+                            if super::hardening::exhausted(&reply) {
+                                cooldown.start(
+                                    pending.command.credential.principal(),
+                                    config.clock.now_ms(),
+                                );
+                            }
                             answer(pending, Ok(reply));
                             return None;
                         }
@@ -982,6 +1010,20 @@ pub(crate) fn run(
             if Instant::now() >= p.deadline {
                 results.push((p, Err(storage("writer-timeout"))));
             } else {
+                // A command ahead of this one in the batch can exhaust the
+                // principal's budget, so check again before spending it.
+                let principal = p.command.credential.principal().to_owned();
+                let budgeted = super::hardening::budgeted(&p.command.action);
+                if budgeted
+                    && cooldown.active(
+                        &principal,
+                        config.clock.now_ms(),
+                        &config.proposal_limits.read().unwrap(),
+                    )
+                {
+                    results.push((p, Ok(super::hardening::cooldown_refusal())));
+                    continue;
+                }
                 let result = match hub.reread(
                     &p.command.credential,
                     &config.admin_digest,
@@ -1033,6 +1075,9 @@ pub(crate) fn run(
                     }
                     Err(refusal) => refusal,
                 };
+                if budgeted && matches!(&result, Ok(r) if super::hardening::exhausted(r)) {
+                    cooldown.start(&principal, config.clock.now_ms());
+                }
                 results.push((p, result));
                 if db.is_autocommit() {
                     broken = true;

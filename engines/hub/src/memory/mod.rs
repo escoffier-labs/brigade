@@ -72,6 +72,8 @@ mod collection_tests;
 #[cfg(test)]
 mod compensation_tests;
 #[cfg(test)]
+mod cooldown_tests;
+#[cfg(test)]
 mod embedder_tests;
 #[cfg(test)]
 mod hardening_tests;

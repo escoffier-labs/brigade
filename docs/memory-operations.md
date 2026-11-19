@@ -2030,7 +2030,7 @@ The hub configuration accepts `memory.proposal_limits`:
 | `diagnostic_ms` | 1000 | Read snapshot execution deadline in milliseconds |
 | `lock_ms` | 1000 | SQLite execution deadline for proposal admission and automatic apply |
 | `auto_principal_ms` | 1000 | Minimum interval between attempts by one principal |
-| `auto_proposal_ms` | 60000 | Minimum interval between attempts on one proposal |
+| `auto_proposal_ms` | 60000 | Minimum interval between attempts on one proposal, and the cooldown after a command exhausts its budget |
 
 The two deadlines are sized from a scope of 1,500 cards, where one automatic
 exact-duplicate merge spends about 150 ms in diagnostics and about 170 ms under
@@ -2092,6 +2092,22 @@ even outside the target scope. SQLite progress handlers bound remaining scans.
 `memory_auto_apply_rate_limited` refuses attempts inside either interval. The
 bounded rate cache is in memory and resets on hub restart. Committed retries
 retain their existing idempotency behavior.
+
+The rate gate covers only `auto_apply` and `verify_auto_apply`, but the writer
+deadline bounds five reflect-controlled commands: those two, `propose`,
+`compensation_watch` and `rollback`. When any of them is refused with
+`memory_auto_apply_budget_exceeded`, from either the writer deadline or the
+diagnostics deadline, the sending principal enters a cooldown of
+`auto_proposal_ms`. During it the hub answers that principal's commands of those
+five kinds with 429 `memory_auto_apply_cooldown` before diagnostics and before
+taking either writer. The refusal writes nothing and spends no rate slot.
+Other principals, reviewed decisions and ordinary writes are unaffected, and
+work that finishes inside its budget never starts a cooldown. This stops a
+principal from holding both writers for a full `lock_ms` on every request. The
+cooldown is a bounded in-memory map of 4096 principals that resets on hub
+restart. A full map refuses principals it does not hold, as the rate cache does,
+until entries expire. A client should treat the code like a 429 and retry
+after the interval.
 
 Hybrid records retain the active embedder id, vector log sequence, coverage
 count and a digest of scoped live content hashes and exact vector identities.

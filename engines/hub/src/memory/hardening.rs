@@ -361,6 +361,45 @@ impl Rate {
         true
     }
 }
+/// The reflect-controlled commands the writer deadline and the diagnostics
+/// deadline bound. Reviewed decisions and ordinary writes are outside it.
+pub fn budgeted(action: &ops::Action) -> bool {
+    matches!(action, ops::Action::Proposal(c) if matches!(c.name(), "auto_apply" | "verify_auto_apply" | "propose" | "compensation_watch" | "rollback"))
+}
+/// Principals whose budgeted command ran out of budget. The rate gate only
+/// covers automatic apply, so without this a principal could repeat work that
+/// runs to the full deadline under both writers. A principal stays here for
+/// `auto_proposal_ms` after its last exhausted command and has its budgeted
+/// commands refused before the writer is taken. Work that finishes inside its
+/// budget never enters the map.
+#[derive(Default)]
+pub struct Cooldown {
+    principals: BTreeMap<String, i64>,
+}
+impl Cooldown {
+    /// Fails closed like `Rate::admit`: a full map refuses every principal it
+    /// does not hold, because one it cannot record could not be cooled down.
+    pub fn active(&mut self, principal: &str, now: i64, limits: &Limits) -> bool {
+        self.principals
+            .retain(|_, at| now.saturating_sub(*at) < limits.auto_proposal_ms);
+        self.principals.contains_key(principal) || self.principals.len() >= 4096
+    }
+    /// A batch already past the check can add a few entries beyond the cap. The
+    /// cap then refuses new principals until entries expire.
+    pub fn start(&mut self, principal: &str, now: i64) {
+        self.principals.insert(principal.into(), now);
+    }
+}
+pub fn exhausted(reply: &Reply) -> bool {
+    reply.body["code"] == "memory_auto_apply_budget_exceeded"
+}
+pub fn cooldown_refusal() -> Reply {
+    ops::error(
+        429,
+        "memory_auto_apply_cooldown",
+        "a recent command from this principal exhausted its work budget",
+    )
+}
 pub fn deadline(ms: u64) -> Instant {
     Instant::now() + Duration::from_millis(ms)
 }

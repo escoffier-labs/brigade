@@ -1235,8 +1235,11 @@ pub(super) fn compensate(
             ))
         }
         Err(e) => {
-            tx.execute("ROLLBACK TO compensation", &[])?;
-            tx.execute("RELEASE compensation", &[])?;
+            // An interrupt from the writer deadline can end the whole
+            // transaction, leaving no savepoint to unwind. Keep the original
+            // error so the writer still reports the exhausted budget.
+            let _ = tx.execute("ROLLBACK TO compensation", &[]);
+            let _ = tx.execute("RELEASE compensation", &[]);
             Err(e)
         }
     }
