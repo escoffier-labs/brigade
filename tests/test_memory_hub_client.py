@@ -787,6 +787,39 @@ def test_search_cli_labels_a_degraded_answer(hub, tmp_path, capsys):
     assert "[local]" in out
 
 
+def test_one_unreadable_read_scope_does_not_disable_hub_search(hub, tmp_path, capsys):
+    # The hub refuses the whole search when any requested scope has no grant (#2302).
+    target = workspace(tmp_path, mode="read", scope="repo:test/app", read_scopes=("repo:test/app", "principal:alice"))
+    _put(hub, "repo:test/app", "searchable", "the searchable words")
+    code, out, err = run(["memory", "search", "--target", str(target), "--json", "searchable"], capsys)
+    assert code == 0 and err == ""
+    payload = json.loads(out)
+    assert payload["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    assert [(m["card_id"], m["scope"], m["source"]) for m in payload["matches"]] == [
+        ("searchable", "repo:test/app", "hub")
+    ]
+    assert "principal:alice" in payload["warning"]
+    searches = [call for call in hub.calls if call["action"] == "search"]
+    assert searches[0]["scopes"] == ["repo:test/app", "principal:alice"]
+    assert [call["scopes"] for call in searches[1:]] == [["repo:test/app"], ["principal:alice"]]
+
+
+def test_a_refusal_that_leaves_no_readable_scope_still_answers_locally(hub, tmp_path, capsys):
+    target = workspace(
+        tmp_path,
+        mode="read",
+        scope="repo:test/app",
+        read_scopes=("principal:alice", "principal:bob"),
+        mine="# Mine\nsearchable\n",
+    )
+    code, out, err = run(["memory", "search", "--target", str(target), "--json", "searchable"], capsys)
+    assert code == 0 and err == ""
+    payload = json.loads(out)
+    assert payload["retrieval"]["hub"] == "refused" and payload["retrieval"]["degraded"] is True
+    assert "skipped_scopes" not in payload["retrieval"]
+    assert [match["source"] for match in payload["matches"]] == ["local"]
+
+
 @pytest.mark.parametrize(
     ("lineage", "source_demoted", "ranks"),
     [([{"scope": "fleet", "card_id": "ancestor", "revision": 1}], True, {"lexical": 2, "dense": 1}), ([], False, {})],
@@ -1502,6 +1535,45 @@ def test_a_long_pull_never_blocks_a_push_and_a_busy_lock_says_so(hub, tmp_path, 
     with store.locked(target):
         code, out, err = run(["memory", "hub", "push", "--target", str(target)], capsys)
         assert code == 75 and "another memory hub push or pull is running" in err and "unusable" not in err
+
+
+def test_a_pull_save_waits_out_a_push_that_holds_the_state_lock(hub, tmp_path, monkeypatch):
+    # A push holds the state lock for its whole run (#2302). The pull's save waits
+    # instead of failing the pull after the ordinary deadline.
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    monkeypatch.setattr(store, "LOCK_DEADLINE_SECONDS", 0.05)
+    holding = threading.Event()
+    release = threading.Event()
+    released = threading.Event()
+    pauses: list[float] = []
+
+    def hold_like_a_push() -> None:
+        with store.locked(target, deadline_seconds=10):
+            holding.set()
+            release.wait(10)
+        released.set()
+
+    original = hub.do_log
+
+    def log_while_a_push_holds_the_lock(body):
+        thread = threading.Thread(target=hold_like_a_push, daemon=True)
+        thread.start()
+        assert holding.wait(5)
+        return original(body)
+
+    hub.do_log = log_while_a_push_holds_the_lock
+
+    def wait_for_the_push(seconds: float) -> None:
+        pauses.append(seconds)
+        release.set()
+        assert released.wait(5)
+
+    monkeypatch.setattr(sync, "_state_lock_pause", wait_for_the_push)
+    report = sync.pull(target, client(hub), settings(target))
+    assert pauses, "the save should have waited for the push"
+    assert report["cards"] == 1
+    assert _card_ids(store.replica(target)) == {"theirs"}
 
 
 def test_keep_hub_rewrites_the_card_and_keeps_the_local_text(hub, tmp_path, capsys):

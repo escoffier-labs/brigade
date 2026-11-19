@@ -11,19 +11,27 @@ refuses an admin credential (`memory_hub_client.refuse_admin`).
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
+from .inbox_lock import InboxLockTimeout
 
 SPOOL_MAX_AGE_MS = 28 * 24 * 3600 * 1000
 CLOCK_SKEW_WARN_SECONDS = 60
 LOG_PAGE = 500
 SAVE_EVERY_PAGES = 50
+# A push holds the state lock for its whole run, one `put` after another (each
+# up to 10s), so a pull's state writes wait it out instead of failing the pull
+# after the ordinary deadline. The lock's own deadline bounds each attempt; the
+# pull tries this many times and reports the busy lock when they are spent.
+PULL_STATE_LOCK_ATTEMPTS = 5
+PULL_STATE_LOCK_PAUSE_SECONDS = 0.5
 # Refusals that mean "this exact write can never apply": review it as a proposal.
 CONFLICT_CODES = {
     "memory_base_mismatch",
@@ -57,6 +65,32 @@ class _ScopeRefused(Exception):
     def __init__(self, scope: str) -> None:
         super().__init__(scope)
         self.scope = scope
+
+
+def _state_lock_pause(seconds: float) -> None:
+    """Wait between state-lock attempts. Separate so a test can release the holder."""
+    time.sleep(seconds)
+
+
+@contextlib.contextmanager
+def _state_lock(target: Path) -> Iterator[None]:
+    """`store.locked` for a pull's state writes, waiting out a concurrent push.
+
+    Each attempt keeps the lock's own deadline, so a busy lock is still
+    reported as `InboxLockTimeout` once the attempts are spent, and the pull
+    can simply be run again. The retry only covers acquiring the lock; an
+    error inside the protected write is never retried.
+    """
+    with contextlib.ExitStack() as stack:
+        for attempt in range(1, PULL_STATE_LOCK_ATTEMPTS + 1):
+            try:
+                stack.enter_context(store.locked(target))
+                break
+            except InboxLockTimeout:
+                if attempt == PULL_STATE_LOCK_ATTEMPTS:
+                    raise
+                _state_lock_pause(PULL_STATE_LOCK_PAUSE_SECONDS)
+        yield
 
 
 def read_status(client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
@@ -161,7 +195,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         "applied": 0,
         "warnings": [],
     }
-    with store.locked(target):
+    with _state_lock(target):
         swap, replica = _prepare(target, hub, epoch, principal, readable, report)
 
     def save_held() -> None:
@@ -174,7 +208,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         replica.save()
 
     def save() -> None:
-        with store.locked(target):
+        with _state_lock(target):
             save_held()
 
     try:
@@ -182,13 +216,13 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         if str(client.call("status").get("log_epoch") or "") != epoch:
             raise _EpochMoved
         replica.meta["read_scopes"] = sorted(readable)
-        with store.locked(target):
+        with _state_lock(target):
             save_held()
             if swap:
                 replica = store.finish_building(target)
     except _EpochMoved:
         # Heads pulled so far belong to the old epoch: never serve them.
-        with store.locked(target):
+        with _state_lock(target):
             store.discard_replica(target)
             store.discard_building(target)
         report["warnings"].append("the hub's log_epoch changed during the pull; run pull again to rebuild")
@@ -285,7 +319,7 @@ def _drop_revoked_scope(target: Path, hub: str, principal: object, epoch: str, s
     Only when the replica is still this hub, principal and log_epoch. A refusal
     that is not about a grant never reaches here, so an ordinary outage keeps the replica.
     """
-    with store.locked(target):
+    with _state_lock(target):
         live = store.replica(target)
         if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
             return

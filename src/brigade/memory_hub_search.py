@@ -8,9 +8,12 @@ hub entry with its bytes. When the hub is unreachable, times out, or answers
 3xx, 404, 408, 429 or 503, the answer comes from local cards and the replica
 and says it degraded. A refusal (401, 403 or any other coded answer) never
 falls back to the replica: the hub has just said no, so the answer is local
-cards only and the warning says why. While a replica rebuild is in progress
-there is no replica, so the fallback is local cards only. `off` mode never
-reaches this module.
+cards only and the warning says why. One exception is a missing grant on one
+of several configured read scopes: the hub refuses the whole search and names
+no scope, so the client searches each scope once, keeps the readable ones and
+reports the refused scopes; it never asks for a scope it was refused. While a
+replica rebuild is in progress there is no replica, so the fallback is local
+cards only. `off` mode never reaches this module.
 
 The query goes to the hub over the authenticated transport and nowhere else:
 nothing here writes it to disk. The caller's search log keeps the #2196 rules.
@@ -187,6 +190,96 @@ def fuse(lists: dict[str, list[dict[str, Any]]], limit: int, *, home_scope: str 
     return out
 
 
+def _hub_search(
+    client: hubc.MemoryHubClient,
+    *,
+    query: str,
+    limit: int,
+    query_source: str,
+    scopes: tuple[str, ...],
+) -> dict[str, Any]:
+    from .memory_retrieval_eval.live import interactive_session
+
+    return client.call(
+        "search",
+        timeout=hubc.SEARCH_BUDGET_SECONDS,
+        query=query,
+        limit=limit,
+        query_source=query_source,
+        scopes=list(scopes),
+        **interactive_session(),
+    )
+
+
+def _missing_grant(exc: hubc.HubRefusal) -> bool:
+    return exc.status == 403 and exc.code == "memory_grant_missing"
+
+
+def _match_order(match: dict[str, Any]) -> tuple[float, str, str]:
+    score = match.get("score")
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        score = 0.0
+    return (-float(score), str(match.get("scope") or ""), str(match.get("card_id") or ""))
+
+
+def _merge_scope_replies(replies: list[dict[str, Any]]) -> dict[str, Any]:
+    """One search reply built from per-scope replies: every match, in the hub's own score order."""
+    matches = [match for reply in replies for match in (reply.get("matches") or []) if isinstance(match, dict)]
+    matches.sort(key=_match_order)
+    merged: dict[str, Any] = {"matches": matches}
+    counts = [reply.get("match_count") for reply in replies]
+    if all(isinstance(count, int) and not isinstance(count, bool) for count in counts):
+        merged["match_count"] = sum(counts)
+    mode = None
+    stale = False
+    for reply in replies:
+        retrieval = reply.get("retrieval")
+        if not isinstance(retrieval, dict):
+            continue
+        if mode is None and isinstance(retrieval.get("mode"), str):
+            mode = retrieval["mode"]
+        stale = stale or retrieval.get("stale") is True
+    merged["retrieval"] = {"mode": mode, "stale": stale}
+    return merged
+
+
+def _search_readable_scopes(
+    client: hubc.MemoryHubClient,
+    *,
+    query: str,
+    limit: int,
+    query_source: str,
+    scopes: tuple[str, ...],
+) -> tuple[dict[str, Any], list[str]]:
+    """The hub's search reply, and the scopes it refused for a missing grant.
+
+    The hub answers 403 `memory_grant_missing` to the whole search when any
+    requested scope is unreadable, and the error names no scope. Search each
+    configured scope once instead (at most one search per configured scope,
+    bounded by the config's read-scope ceiling), keep what the readable ones
+    answered and report the refused ones. Nothing here widens a grant: a scope
+    that answers the refusal is dropped, never retried with another scope.
+    """
+    try:
+        return _hub_search(client, query=query, limit=limit, query_source=query_source, scopes=scopes), []
+    except hubc.HubRefusal as exc:
+        if len(scopes) < 2 or not _missing_grant(exc):
+            raise
+        whole_search_refusal = exc
+    replies: list[dict[str, Any]] = []
+    refused: list[str] = []
+    for scope in scopes:
+        try:
+            replies.append(_hub_search(client, query=query, limit=limit, query_source=query_source, scopes=(scope,)))
+        except hubc.HubRefusal as exc:
+            if not _missing_grant(exc):
+                raise
+            refused.append(scope)
+    if not replies:
+        raise whole_search_refusal
+    return _merge_scope_replies(replies), refused
+
+
 def search_payload(
     target: Path,
     query: str,
@@ -208,17 +301,15 @@ def search_payload(
     try:
         client = hubc.client_for(settings, transport=transport)
         hub = client.identity
-        from .memory_retrieval_eval.live import interactive_session
-
-        body = client.call(
-            "search",
-            timeout=hubc.SEARCH_BUDGET_SECONDS,
+        body, skipped_scopes = _search_readable_scopes(
+            client,
             query=query,
             limit=hub_limit,
             query_source=query_source,
-            scopes=list(settings.read_scopes),
-            **interactive_session(),
+            scopes=tuple(settings.read_scopes),
         )
+        if skipped_scopes:
+            retrieval["skipped_scopes"] = skipped_scopes
         lists["hub"] = [
             {**m, "path": m.get("path") or f"cards/{m.get('card_id')}.md"}
             for m in body.get("matches") or []
@@ -274,6 +365,12 @@ def search_payload(
         if retrieval.get("replica_incomplete"):
             warning += "; the replica is incomplete (it reached its size cap)"
         notes.insert(0, warning)
+    if retrieval.get("skipped_scopes"):
+        notes.append(
+            "the hub refused a read grant on "
+            + ", ".join(retrieval["skipped_scopes"])
+            + "; searched the readable scopes"
+        )
     if notes:
         payload["warning"] = "; ".join(notes)
     return payload

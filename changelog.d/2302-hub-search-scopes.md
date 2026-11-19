@@ -1,0 +1,2 @@
+- `memory search` keeps searching the readable hub scopes when one configured read scope has no grant, and names the skipped scopes instead of answering from local cards only.
+- A pull's replica saves wait out a push that holds the state lock, so a long push no longer fails a concurrent pull with a busy-lock error.
