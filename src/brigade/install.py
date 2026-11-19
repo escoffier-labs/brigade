@@ -575,7 +575,7 @@ def install_selection(
                 '  2. `brigade work verify run --target . --command "<test>" --capture auto`  (verify THROUGH brigade, not raw)'
             )
             print(
-                "  3. `--capture auto` records the result. A typed `brigade outcome capture <id>` is caller_typed (veto only)"
+                "  3. `--capture auto` records the result. A typed id still works after the fact with `brigade outcome capture`"
             )
             print(
                 "  4. write a Memory Handoff only if the session learned something durable, else end with `Nothing durable: <reason>`."

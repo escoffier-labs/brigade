@@ -1,1 +1,1 @@
-- The work-loop guidance in the shipped templates, the `brigade-work` skill, install next-steps and doctor hints now shows `brigade work verify run ... --capture auto` as the default. A typed `--capture <id>` is still accepted but is recorded as `caller_typed` and can only veto, so for a skill it can hold or roll back but never promote (#2589).
+- The work-loop guidance in the shipped templates, the `brigade-work` skill, install next-steps and doctor hints now shows `brigade work verify run ... --capture auto` as the default. A typed id never moves a skill (#2589).

@@ -15,7 +15,7 @@ Write a handoff only when the session produced knowledge a later session cannot 
 
 ## Brigade work loop (Mandatory)
 
-This workspace is Brigade-wired. Route real work through Brigade so its outcome ledger fills. Invoke the `brigade-work` skill: `brigade work brief` at the start; run verifications via `brigade work verify run --target . --command "<test>" --capture auto` (not raw) when the result should count; a typed `brigade outcome capture <skill-or-card-id> --run-id latest` after the fact is recorded as `caller_typed` and can only veto; handoff only if durable (see above). If `brigade outcome rank` says "ranking: none", work is not flowing through Brigade. Full contract in `AGENTS.md`.
+This workspace is Brigade-wired. Route real work through Brigade so its outcome ledger fills. Invoke the `brigade-work` skill: `brigade work brief` at the start; run verifications via `brigade work verify run --target . --command "<test>" --capture auto` (not raw) when the result should count; a typed id still works after the fact with `brigade outcome capture`; handoff only if durable (see above). If `brigade outcome rank` says "ranking: none", work is not flowing through Brigade. Full contract in `AGENTS.md`.
 
 For large scoping work, invoke `ultra-work-scout` first. It is installed with the built-in Brigade skills and keeps Scout delegation tied to verified Brigade work.
 

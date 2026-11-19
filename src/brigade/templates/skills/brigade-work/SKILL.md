@@ -35,7 +35,7 @@ brigade work verify run --target . --command "<test command>" --capture auto
 ```
 `auto` rows are marked `session_observed`. That attribution is caller-side and forgeable, so it can only lower a rank or hold a promotion, never raise or promote. If no skill was read (a Codex repo, a plain shell) it records against `brigade-work` as `caller_typed` and prints one note, so the loop never records nothing.
 
-A typed id (`--capture <skill-id>`) is still accepted but is recorded as `caller_typed` and can only veto. For a skill it can hold or roll back a promotion but never promote one, because promotion needs a scoreable manifest trial.
+A typed id (`--capture <skill-id>`) is still accepted and is recorded as `caller_typed`. For a skill it never promotes, holds or rolls it back, because only a scoreable manifest trial moves a skill through the scorecard. Card scores still count typed captures.
 
 For scoreable evidence, use an existing registered verifier manifest tracked under `verify/manifests/`:
 ```bash

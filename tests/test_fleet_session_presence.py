@@ -420,3 +420,8 @@ def test_heartbeat_cadence_keeps_a_long_session_listed_past_the_ttl(hub_conn, mo
     assert rows[0]["expires_at"] == HUB_T0 + 2 * ttl + ttl
     # A refreshed session keeps its original start; heartbeats are not restarts.
     assert rows[0]["started_at"] == fleet_hub._epoch_to_iso(HUB_T0)
+
+
+def test_cursor_work_loop_context_uses_capture_auto() -> None:
+    assert "--capture auto" in presence.CURSOR_WORK_LOOP_CONTEXT
+    assert "--capture brigade-work" not in presence.CURSOR_WORK_LOOP_CONTEXT

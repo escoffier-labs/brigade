@@ -252,7 +252,7 @@ case "$event" in
         allow
       fi
       if [[ "$work_mode" == "strict" ]] && ! is_direct_brigade_verification && is_raw_verification; then
-        deny "This repository is Brigade-wired. Run the check through: brigade work verify run --target . --command \"<test command>\" --capture brigade-work"
+        deny "This repository is Brigade-wired. Run the check through: brigade work verify run --target . --command \"<test command>\" --capture auto"
       fi
     fi
     # Do not deny edits while a background brief is running (#536).
