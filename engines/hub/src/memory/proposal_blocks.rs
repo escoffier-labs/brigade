@@ -161,10 +161,32 @@ pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> 
 /// `claim_anchor_ids` list. Every other claim byte and metadata line stays
 /// before's. Fail closed on any ambiguity.
 pub fn proven_delta(before: &str, after: &str) -> bool {
-    let (Ok(before_reserved), Ok(after_reserved)) = (
-        super::proposal_metadata::list(before, "claim_anchor_ids"),
-        super::proposal_metadata::list(after, "claim_anchor_ids"),
+    // One line ending across each front matter, fences included. A card that
+    // mixes them, or holds a lone carriage return, would have that byte
+    // rewritten, so it stays for review.
+    let (Ok(before_front), Ok(after_front)) = (
+        super::proposal_metadata::front_bytes(before),
+        super::proposal_metadata::front_bytes(after),
     ) else {
+        return false;
+    };
+    for (header, _) in [before_front, after_front].into_iter().flatten() {
+        if !super::proposal_metadata::uniform_front_endings(header) {
+            return false;
+        }
+    }
+    let (Ok(before_line), Ok(after_line)) = (
+        super::proposal_metadata::anchor_reservation_line(before),
+        super::proposal_metadata::anchor_reservation_line(after),
+    ) else {
+        return false;
+    };
+    let reserved = |line: &Option<String>| match line.as_deref() {
+        Some(line) => super::proposal_metadata::reservation_ids(line),
+        None => Ok(BTreeSet::new()),
+    };
+    let (Ok(before_reserved), Ok(after_reserved)) = (reserved(&before_line), reserved(&after_line))
+    else {
         return false;
     };
     let (before_counts, after_counts) = (id_counts(before), id_counts(after));
@@ -197,12 +219,6 @@ pub fn proven_delta(before: &str, after: &str) -> bool {
     // the new line must be that form for the existing ids plus the added ones.
     // An automatic apply therefore never sorts, re-spaces or dedupes a value
     // someone wrote by hand; that card stays for review.
-    let (Ok(before_line), Ok(after_line)) = (
-        super::proposal_metadata::anchor_reservation_line(before),
-        super::proposal_metadata::anchor_reservation_line(after),
-    ) else {
-        return false;
-    };
     if let Some(line) = before_line.as_deref() {
         let canonical = super::proposal_metadata::canonical_anchor_reservation(&before_reserved);
         if line != canonical.as_str() {
@@ -217,20 +233,41 @@ pub fn proven_delta(before: &str, after: &str) -> bool {
     if after_line.as_deref() != Some(canonical.as_str()) {
         return false;
     }
-    // No other metadata line and no other claim byte changes.
-    matches!(
-        (
-            super::proposal_metadata::other_lines(before, "claim_anchor_ids"),
-            super::proposal_metadata::other_lines(after, "claim_anchor_ids"),
+    // Every front-matter byte outside the reservation line is before's, fences
+    // included. A card that gains its first front matter must gain exactly the
+    // empty block the writer emits.
+    let (Ok((before_kept, before_present)), Ok((after_kept, after_present))) = (
+        super::proposal_metadata::header_without_reservation(
+            before_front.map_or("", |(header, _)| header),
         ),
-        (Ok(kept), Ok(written)) if kept == written
-    ) && matches!(
-        (
-            super::proposal_metadata::claims(before),
-            super::proposal_metadata::claims(after),
+        super::proposal_metadata::header_without_reservation(
+            after_front.map_or("", |(header, _)| header),
         ),
-        (Ok(kept), Ok(written)) if kept == written
-    )
+    ) else {
+        return false;
+    };
+    if before_present != before_line.is_some()
+        || after_present != after_line.is_some()
+        || !after_present
+    {
+        return false;
+    }
+    let same_front = match before_front {
+        Some(_) => before_kept == after_kept,
+        None => after_kept == "---\n---\n",
+    };
+    if !same_front {
+        return false;
+    }
+    // No claim byte outside the added suffixes changes.
+    let body = |text: &str| -> Result<String, &'static str> {
+        let body = match super::proposal_metadata::front_bytes(text)? {
+            Some((_, body)) => body,
+            None => text,
+        };
+        Ok(strip_anchors(body))
+    };
+    matches!((body(before), body(after)), (Ok(kept), Ok(written)) if kept == written)
 }
 
 pub fn pin(text: &str, id: &str, hash: &str) -> Result<Json, &'static str> {
@@ -406,6 +443,23 @@ mod tests {
             after.contains("claim_anchor_ids: [\"c-111111\", \"c-222222\", \"c-"),
             "{after}"
         );
+    }
+    #[test]
+    fn a_mixed_line_ending_front_matter_is_never_normalized_by_the_proof() {
+        // `lines()` hides the CR before `title`, so the transform would rewrite
+        // that ending as LF and the old proof still matched.
+        let mixed = "---\nclaim_anchor_ids: [\"c-111111\"]\r\ntitle: T\n---\nClaim.\n";
+        let after = anchor_blocks(mixed, "a").unwrap();
+        assert_ne!(after, mixed);
+        assert!(!proven_delta(mixed, &after), "{after}");
+        // One ending across the front matter, fences included, still anchors.
+        let crlf = "---\r\ntitle: T\r\n---\r\nClaim.\r\n";
+        let after = anchor_blocks(crlf, "a").unwrap();
+        assert!(after.contains("claim_anchor_ids: [\"c-"));
+        assert!(!after.replace("\r\n", "").contains('\n'), "{after}");
+        assert!(proven_delta(crlf, &after), "{after}");
+        let lf = "---\ntitle: T\n---\nClaim.\n";
+        assert!(proven_delta(lf, &anchor_blocks(lf, "a").unwrap()));
     }
     #[test]
     fn an_indented_reservation_line_is_refused_rather_than_rewritten() {

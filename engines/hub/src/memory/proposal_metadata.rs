@@ -250,41 +250,121 @@ pub fn reserve_anchors(text: &str, ids: &BTreeSet<String>) -> Result<String, &'s
     };
     Ok(updated.replace('\n', ending) + &text[offset..])
 }
-/// The exact `claim_anchor_ids` line, or `None` when the field is absent. A
-/// line whose stripped key names the field but whose exact key does not, or
-/// more than one such line, is refused: the writer would replace a line the
-/// exact-key reader never sees.
+/// The raw front matter, fences included, and the body. `None` when the card
+/// has no front matter. A card that opens a fence without closing it reads as
+/// an error, so a proof refuses it.
+pub fn front_bytes(text: &str) -> Result<Option<(&str, &str)>, &'static str> {
+    if let Some(offset) = body_offset(text) {
+        return Ok(Some((&text[..offset], &text[offset..])));
+    }
+    let first = text.split_inclusive('\n').next().unwrap_or("");
+    if first.ends_with('\n') && fence(first) {
+        return Err("unsupported card front matter");
+    }
+    Ok(None)
+}
+/// One raw front-matter line as its content and its terminator. A carriage
+/// return is only a terminator when a line feed follows it.
+fn front_line(line: &str) -> (&str, &str) {
+    let content = line
+        .strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(line);
+    (content, &line[content.len()..])
+}
+/// Whether every line in this front matter ends the same way, all LF or all
+/// CRLF, fences included, with no lone carriage return.
+pub fn uniform_front_endings(header: &str) -> bool {
+    let bytes = header.as_bytes();
+    let mut crlf = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                if bytes.get(index + 1) != Some(&b'\n') || crlf == Some(false) {
+                    return false;
+                }
+                crlf = Some(true);
+                index += 2;
+            }
+            b'\n' => {
+                if crlf == Some(true) {
+                    return false;
+                }
+                crlf = Some(false);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    true
+}
+/// The exact `claim_anchor_ids` line content, without its terminator, or
+/// `None` when the field is absent. A line whose stripped key names the field
+/// but whose exact key does not, or more than one such line, is refused: the
+/// writer would replace a line the exact-key reader never sees. The bytes are
+/// read raw so a CRLF card names the same field as an LF one.
 pub fn anchor_reservation_line(text: &str) -> Result<Option<String>, &'static str> {
-    let (meta, _) = front(text)?;
+    let Some((header, _)) = front_bytes(text)? else {
+        return Ok(None);
+    };
     let mut found = Vec::new();
-    for line in meta {
-        let Some((key, _)) = line.split_once(':') else {
+    for line in header.split_inclusive('\n') {
+        let (content, _) = front_line(line);
+        let Some((key, _)) = content.split_once(':') else {
             continue;
         };
         if key.trim() == "claim_anchor_ids" {
-            found.push((key, line));
+            found.push((key, content));
         }
     }
     match found.as_slice() {
         [] => Ok(None),
-        [(key, line)] if *key == "claim_anchor_ids" => Ok(Some((*line).to_string())),
+        [(key, content)] if *key == "claim_anchor_ids" => Ok(Some((*content).to_string())),
         _ => Err("ambiguous claim anchor reservations"),
     }
+}
+/// The ids on an exact `claim_anchor_ids` line, checked against the writer's
+/// format and reservation limit.
+pub fn reservation_ids(line: &str) -> Result<BTreeSet<String>, &'static str> {
+    let value = line
+        .strip_prefix("claim_anchor_ids: ")
+        .ok_or("invalid claim anchor reservation")?;
+    let ids: Vec<String> =
+        serde_json::from_str(value).map_err(|_| "invalid claim anchor reservation")?;
+    if ids.len() > MAX_ANCHORS || ids.iter().any(|id| !proposal_blocks::anchor(id)) {
+        return Err("invalid claim anchor reservation");
+    }
+    Ok(ids.into_iter().collect())
 }
 /// The exact `claim_anchor_ids` line [`reserve_anchors`] writes for `ids`.
 pub fn canonical_anchor_reservation(ids: &BTreeSet<String>) -> String {
     format!("claim_anchor_ids: {}", anchor_list(ids))
 }
-/// Every front-matter line the writer would not treat as `key`, blank lines
-/// included, so a structural proof can bind the metadata bytes it did not write.
-pub fn other_lines(text: &str, key: &str) -> Result<Vec<String>, &'static str> {
-    let (meta, _) = front(text)?;
-    Ok(meta
-        .into_iter()
-        .filter(|line| !is_key(line, key))
-        .map(str::to_string)
-        .collect())
+/// The raw front matter with its `claim_anchor_ids` line and terminator
+/// removed, plus whether it had one. An indented or duplicated field is
+/// refused. Every other byte, line endings included, is retained.
+pub fn header_without_reservation(header: &str) -> Result<(String, bool), &'static str> {
+    let mut kept = String::new();
+    let mut found = 0;
+    for line in header.split_inclusive('\n') {
+        let (content, _) = front_line(line);
+        let key = content.split_once(':').map(|(key, _)| key);
+        if key == Some("claim_anchor_ids") {
+            found += 1;
+            continue;
+        }
+        if key.is_some_and(|key| key.trim() == "claim_anchor_ids") {
+            return Err("ambiguous claim anchor reservations");
+        }
+        kept.push_str(line);
+    }
+    if found > 1 {
+        return Err("ambiguous claim anchor reservations");
+    }
+    Ok((kept, found == 1))
 }
+
 pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str> {
     let (meta, body) = front(text)?;
     for (key, _) in updates {
