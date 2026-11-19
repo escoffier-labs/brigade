@@ -520,3 +520,214 @@ async fn draining_pending_backlog_cannot_push_bytes_past_a_limit_they_were_withi
         drain(&h, &db, &mut ids, 1).await;
     }
 }
+
+/// A realistic scope: card count and size spread follow a measured workspace
+/// (median about 1.4 KB, p90 about 3.8 KB, a thin tail past 10 KB), with
+/// generated words, a few anchored blocks and some wiki links per card. No
+/// text here comes from any real card.
+mod scale {
+    use super::super::{
+        merge_drift_tests::{GONE, KEEP, merge_op},
+        ranking_gate_tests::Real,
+    };
+    use super::*;
+    use std::time::Instant;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+    const SYLLABLES: [&str; 24] = [
+        "ka", "lo", "mi", "ren", "tu", "vash", "ode", "pri", "sul", "ban", "cre", "dov", "elm",
+        "fia", "gor", "hel", "ith", "jun", "kep", "lur", "mox", "nel", "ora", "pek",
+    ];
+    fn word(rng: &mut Lcg) -> String {
+        (0..1 + rng.below(3))
+            .map(|_| SYLLABLES[rng.below(24) as usize])
+            .collect()
+    }
+    /// Target byte size drawn from the measured quantiles.
+    fn target(rng: &mut Lcg) -> usize {
+        match rng.below(100) {
+            0..=9 => 400 + rng.below(260) as usize,
+            10..=49 => 660 + rng.below(710) as usize,
+            50..=89 => 1370 + rng.below(2450) as usize,
+            90..=98 => 3820 + rng.below(6800) as usize,
+            _ => 10_650 + rng.below(6500) as usize,
+        }
+    }
+    fn card_text(i: usize, count: usize, rng: &mut Lcg) -> String {
+        let title: Vec<_> = (0..4).map(|_| word(rng)).collect();
+        let mut text = format!(
+            "---\ntitle: {} #{i}\ntags: [{}, {}, {}]\ncreated: 2026-08-14\n---\n\n",
+            title.join(" "),
+            word(rng),
+            word(rng),
+            word(rng)
+        );
+        let goal = target(rng);
+        while text.len() < goal {
+            let sentence: Vec<_> = (0..8 + rng.below(14)).map(|_| word(rng)).collect();
+            text.push_str(&sentence.join(" "));
+            text.push('.');
+            match rng.below(9) {
+                0 => text.push_str(&format!(" ^c-{:06x}\n\n", rng.below(0xff_ffff))),
+                1 => text.push_str(&format!(" [[card-{:04}]]\n\n", rng.below(count as u64))),
+                2 => text.push_str("\n\n"),
+                _ => text.push(' '),
+            }
+        }
+        text.push('\n');
+        text
+    }
+    /// A pair of exact duplicate claim bodies of ordinary card size.
+    fn pair_text(anchor: &str) -> String {
+        let mut rng = Lcg(7);
+        let body: Vec<_> = (0..180).map(|_| word(&mut rng)).collect();
+        format!("{}. ^c-{anchor}\n", body.join(" "))
+    }
+    /// `count` other cards beside one exact-duplicate pair, all agent-unreviewed
+    /// and written by the admin, on the real scope `fleet`.
+    pub(super) async fn scope(count: usize) -> Real {
+        let mut rng = Lcg(42);
+        let (keeper, retired) = (pair_text("aaaaaa"), pair_text("bbbbbb"));
+        let texts: Vec<_> = (0..count).map(|i| card_text(i, count, &mut rng)).collect();
+        let mut cards: Vec<(String, &str)> = vec![(KEEP.into(), &keeper), (GONE.into(), &retired)];
+        cards.extend(
+            texts
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (format!("card-{i:04}"), t.as_str())),
+        );
+        let refs: Vec<_> = cards.iter().map(|(id, t)| (id.as_str(), *t)).collect();
+        Real::untrusted(&refs).await
+    }
+    pub(super) async fn open(r: &Real) -> Reply {
+        let opened = submit(&r.h, ADMIN_TOKEN, vec![merge_op(r, KEEP, GONE).await]).await;
+        assert_eq!(
+            (opened.status, &opened.body["tier"]),
+            (201, &json!(0)),
+            "{opened:?}"
+        );
+        opened
+    }
+    /// `queries` judged use rows: each a recorded search and the card the agent used.
+    pub(super) fn seed_history(r: &Real, queries: usize) {
+        let epoch = super::super::ops::epoch(&crate::writer::worker::Tx(&r.db)).unwrap();
+        let now = r.h.now();
+        for i in 0..queries {
+            let id = format!("card-{:04}", i * 7);
+            let (hash, revision): (String, i64) = r.db
+                .query_row("SELECT content_hash,revision FROM memory_cards WHERE scope='fleet' AND card_id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            let search = json!({"session_id":format!("s{i}"),"session_kind":"interactive","query":format!("{} {}", SYLLABLES[i % 24], SYLLABLES[(i * 5 + 3) % 24]),"results":[{"scope":"fleet","card_id":id,"content_hash":hash,"revision":revision}],"epoch":epoch});
+            r.db.execute("INSERT INTO memory_retrieval_history(principal,credential,session,kind,created_ms,payload) VALUES('p','c',?1,'search',?2,?3)", rusqlite::params![format!("s{i}"), now - 5000, search.to_string()]).unwrap();
+            let seq = r.db.last_insert_rowid();
+            let used = json!({"search_seq":seq,"match":{"scope":"fleet","card_id":id,"content_hash":hash,"revision":revision}});
+            r.db.execute("INSERT INTO memory_retrieval_history(principal,credential,session,kind,created_ms,payload) VALUES('p','c',?1,'use',?2,?3)", rusqlite::params![format!("s{i}"), now - 4000, used.to_string()]).unwrap();
+        }
+    }
+    fn ms(since: Instant) -> f64 {
+        since.elapsed().as_secs_f64() * 1000.0
+    }
+    fn best(mut run: impl FnMut()) -> f64 {
+        (0..5)
+            .map(|_| {
+                let start = Instant::now();
+                run();
+                ms(start)
+            })
+            .fold(f64::MAX, f64::min)
+    }
+    /// The automatic exact-duplicate merge on a real-size scope, under the limits
+    /// an operator gets without configuring any. On a 1,500-card scope the
+    /// earlier defaults (100 ms diagnostics, 50 ms writer) refused it with
+    /// `memory_auto_apply_budget_exceeded`. No timing is asserted here: the
+    /// merge either finishes inside the defaults or the hub refuses it.
+    #[tokio::test]
+    async fn exact_merge_applies_on_a_realistic_scope_with_default_limits() {
+        let r = scope(1500).await;
+        let opened = open(&r).await;
+        let applied = super::super::merge_drift_tests::auto(&r, &opened).await;
+        assert_eq!(applied.body["state"], "applied", "{applied:?}");
+        assert_eq!(card(&r.h, "fleet", GONE).await["state"], "retired");
+        assert_eq!(card(&r.h, "fleet", KEEP).await["state"], "live");
+    }
+    /// A veto with no judged history never builds the scope's indexes, yet a
+    /// recorded history still vetoes a merge that moves a judged card.
+    #[tokio::test]
+    async fn history_veto_still_replays_when_history_exists() {
+        let r = scope(300).await;
+        let opened = open(&r).await;
+        let body = r.body(&opened);
+        assert_eq!(r.hold(&body, "admin", None), None);
+        seed_history(&r, 20);
+        assert_eq!(
+            r.hold(&body, "admin", None),
+            Some("retrieval_eval_query_veto")
+        );
+    }
+    #[tokio::test]
+    #[ignore = "host-dependent timing measurement"]
+    async fn measure_exact_merge_at_scope() {
+        let count: usize = std::env::var("SCOPE_CARDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1500);
+        let started = Instant::now();
+        let mut r = scope(count).await;
+        let history: usize = std::env::var("HISTORY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        seed_history(&r, history);
+        eprintln!("seeded {} cards in {:.0} ms", count + 2, ms(started));
+        r.h.store
+            .as_mut()
+            .unwrap()
+            .configure_retrieval(
+                &json!({"proposal_limits":{"diagnostic_ms":60_000,"lock_ms":60_000}}),
+            )
+            .unwrap();
+        let start = Instant::now();
+        let opened = open(&r).await;
+        eprintln!("propose: {:.1} ms", ms(start));
+        let body = r.body(&opened);
+        eprintln!(
+            "diagnostics core (preflight::evaluate, no budget): {:.1} ms",
+            best(|| {
+                let report = r.evaluate_as(&body, "admin", ADMIN);
+                assert_eq!(report["structural_merge_proof"], true);
+            })
+        );
+        eprintln!(
+            "  retrieval_eval::hold: {:.1} ms",
+            best(|| {
+                let held = r.hold(&body, "admin", None);
+                if history == 0 {
+                    assert_eq!(held, None);
+                }
+            })
+        );
+        if history > 0 {
+            return;
+        }
+        r.h.set_clock(r.h.now() + 1);
+        let start = Instant::now();
+        let applied = super::super::merge_drift_tests::auto(&r, &opened).await;
+        eprintln!(
+            "auto-apply request total: {:.1} ms state={}",
+            ms(start),
+            applied.body["state"]
+        );
+    }
+}

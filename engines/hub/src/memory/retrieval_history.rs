@@ -200,6 +200,13 @@ pub fn derive<T: ReadTx + ?Sized>(
     {
         return Ok(Err(budget()));
     }
+    // With no judged use there is nothing for the retired set to filter, so the
+    // result is the empty query set whatever the corpus holds. The size bound
+    // above still refuses an oversized scope. Parsing every card's relation
+    // metadata is the cost this skips.
+    if rows.is_empty() {
+        return Ok(Ok(judged_queries(&BTreeMap::new(), high)));
+    }
     let corpus=tx.query("SELECT c.card_id,c.trust,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' LIMIT 2001", &[ops::t(scope)])?;
     if corpus.len() > 2000 {
         return Ok(Err(budget()));
@@ -257,11 +264,12 @@ pub fn derive<T: ReadTx + ?Sized>(
         }
         grouped.entry(query).or_default().insert(card.into());
     }
+    Ok(Ok(judged_queries(&grouped, high)))
+}
+fn judged_queries(grouped: &BTreeMap<String, BTreeSet<String>>, high: i64) -> Json {
     let pairs: Vec<_> = grouped.iter().map(|(q, g)| json!([q, g])).collect();
     let digest = ids::sha256_hex(ids::canonical(&json!(pairs)).as_bytes());
-    Ok(Ok(
-        json!({"queries":pairs,"query_set_digest":digest,"history_seq":high,"query_count":grouped.len()}),
-    ))
+    json!({"queries":pairs,"query_set_digest":digest,"history_seq":high,"query_count":grouped.len()})
 }
 /// Bounded rotation only discards history too old for a still-live report or join.
 pub fn rotate(tx: &dyn WriteTx, p: &Prepared, limit: usize) -> rusqlite::Result<Reply> {
@@ -330,6 +338,12 @@ pub fn veto<T: ReadTx + ?Sized>(
         Ok(j) => j,
         Err(_) => return Ok(Some("retrieval_eval_history_unavailable")),
     };
+    // Each judged query replays against a before and an after index of the whole
+    // scope. Building those two is the cost of this veto, so a scope with no
+    // judged query, which cannot be vetoed, never builds them.
+    if judged["queries"].as_array().is_none_or(Vec::is_empty) {
+        return Ok(None);
+    }
     let rows=tx.query(&format!("SELECT c.card_id,c.revision,c.content_hash,c.trust,b.bytes,{} FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.scope=?1 AND c.state='live' ORDER BY c.card_id",super::index::AUTOMATED_SQL), &[ops::t(scope)])?;
     let before: Vec<_> = rows
         .iter()

@@ -1,0 +1,2 @@
+- Stop the hub from building two full-scope search indexes for the retrieval-history veto when a scope has no judged search history, which cut an automatic exact-duplicate merge on a 1,500-card scope from about 510 ms of diagnostics and 540 ms of apply to about 140 ms and 170 ms on a release build (#2591).
+- Raise the memory `proposal_limits` defaults `diagnostic_ms` and `lock_ms` from 100 and 50 to 1000 each, so that merge applies with default limits instead of failing with `memory_auto_apply_budget_exceeded` (#2591).

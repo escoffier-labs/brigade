@@ -35,8 +35,12 @@ impl Default for Limits {
             bytes_per_scope: 256 * 1024 * 1024,
             retention_days: 7,
             diagnostic_rows: 100_000,
-            diagnostic_ms: 100,
-            lock_ms: 50,
+            // Sized from a 1,500-card scope, where one automatic exact-duplicate
+            // merge reads for about 150 ms and applies in about 170 ms on a
+            // release build, and for a debug build on a slower runner. See
+            // docs/memory-operations.md.
+            diagnostic_ms: 1_000,
+            lock_ms: 1_000,
             auto_principal_ms: 1_000,
             auto_proposal_ms: 60_000,
         }

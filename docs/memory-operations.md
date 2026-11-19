@@ -2027,10 +2027,20 @@ The hub configuration accepts `memory.proposal_limits`:
 | `bytes_per_scope` | 268435456 | Retained body bytes charged in full to every target scope |
 | `retention_days` | 7 | Days after a terminal decision before body compaction |
 | `diagnostic_rows` | 100000 | Total rows returned by automatic diagnostics |
-| `diagnostic_ms` | 100 | Read snapshot execution deadline in milliseconds |
-| `lock_ms` | 50 | SQLite execution deadline for proposal admission and automatic apply |
+| `diagnostic_ms` | 1000 | Read snapshot execution deadline in milliseconds |
+| `lock_ms` | 1000 | SQLite execution deadline for proposal admission and automatic apply |
 | `auto_principal_ms` | 1000 | Minimum interval between attempts by one principal |
 | `auto_proposal_ms` | 60000 | Minimum interval between attempts on one proposal |
+
+The two deadlines are sized from a scope of 1,500 cards, where one automatic
+exact-duplicate merge spends about 150 ms in diagnostics and about 170 ms under
+the writer on a release build. They are cancellation bounds, not expected
+durations. They leave room for a debug build on a slower host and for a scope
+growing to the 2,000-card judged-history bound. Earlier defaults of 100 ms and
+50 ms refused that merge with `memory_auto_apply_budget_exceeded` on a real
+scope. Raise them only when a larger scope measures slower, and keep `lock_ms`
+as low as that measurement allows, because the writer is held for as long as
+it runs.
 
 Limits must be positive integers. Unknown keys fail configuration. Retention
 is capped at 365 days. The pending defaults allow a review batch of 32 proposals
