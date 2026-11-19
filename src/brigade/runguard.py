@@ -23,7 +23,7 @@ from time import monotonic_ns as _monotonic_ns
 from time import sleep as _sleep
 from uuid import uuid4
 
-from . import dirfd, localio, proc, receipt_schema, run_dirfd
+from . import dirfd, localio, nt_process, proc, receipt_schema, run_dirfd
 from .runguard_gate import _recovery_gate_busy_error, _RecoveryGate, _stale_recovery_gate
 
 # Re-exported for tests to call. Patch these on runguard_gate: the gate looks them up there.
@@ -250,6 +250,9 @@ def resolve_run_lock_workspace(
 
 
 def _pid_is_active(pid: int) -> bool:
+    if os.name == "nt":
+        # os.kill(pid, 0) is CTRL_C_EVENT on Windows, not a liveness probe (#2287).
+        return nt_process.pid_is_active(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

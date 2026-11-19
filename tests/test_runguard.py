@@ -150,6 +150,7 @@ def test_acquire_lock_retries_when_release_removes_lock_during_type_probe(tmp_pa
     assert not lock_path.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="covers the POSIX os.kill error mapping; Windows probes handles")
 def test_run_lock_handles_windows_missing_process_error_as_stale(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)
@@ -800,7 +801,9 @@ print(json.dumps(report))
 """
 
 
-@pytest.mark.skipif(os.name == "nt", reason="pid probing with os.kill(pid, 0) terminates processes on Windows")
+@pytest.mark.skipif(
+    os.name == "nt", reason="multi-process race harness is POSIX-only; Windows liveness has its own test"
+)
 def test_genuinely_dead_holder_is_recovered_by_one_of_several_racing_processes(tmp_path):
     """A SIGKILLed holder leaves its lock; separate recoverer processes race to take it."""
     import subprocess
