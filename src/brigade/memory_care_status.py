@@ -134,6 +134,13 @@ def status(*, target: Path, json_output: bool = False) -> int:
     )
     for candidate in archive.get("candidates", []):
         print(f"  archive_candidate: {candidate.get('file')} signal={candidate.get('signal')}")
+    blocked_value = archive.get("projection_blocked")
+    blocked = blocked_value if isinstance(blocked_value, list) else []
+    if blocked:
+        print(f"archive_projection_blocked: count={len(blocked)}")
+        for row in blocked:
+            if isinstance(row, dict):
+                print(f"  archive_blocked: {row.get('path')}")
     recall_value = payload.get("search_recall")
     recall = recall_value if isinstance(recall_value, dict) else {}
     print(

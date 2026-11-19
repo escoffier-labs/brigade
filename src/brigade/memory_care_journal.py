@@ -482,8 +482,37 @@ def commit_phased(
                 os.fsync(handle.fileno())
     store.fsync_dir(directory / "before")
     preparation.extend(c for c in changes if c.path in prepared_paths)
-    _execute_phase(target, decision_id, "prepare", preparation)
+    try:
+        _execute_phase(target, decision_id, "prepare", preparation)
+    except kernel.OverlapBlockedError:
+        # The kernel refuses an overlap before it creates its operation directory
+        # or writes a destination, so this decision published no record. Its
+        # before-images belong to this refused attempt alone, and leaving them
+        # adds one orphan directory to every pass that retries the same card.
+        _discard_refused_prepare(target, decision_id)
+        raise
     return finish_prepared(target, decision_id)
+
+
+def _discard_refused_prepare(target: Path, decision_id: str) -> None:
+    """Remove the journal directory of a prepare the kernel refused.
+
+    Only this attempt's own artifacts may go: the directory must hold no
+    decision record and nothing but the before-image tree. A record, a hold
+    marker, a quarantined record or any other state keeps the directory, so
+    one decision never discards another's evidence. Cleanup failures are
+    ignored, because the refusal that called this must reach its caller.
+    """
+    try:
+        directory = _directory(target, decision_id)
+        if not directory.is_dir() or safe_path(target, f"{JOURNAL_REL}/{decision_id}/decision.json").exists():
+            return
+        if any(entry.name != "before" for entry in directory.iterdir()):
+            return
+        shutil.rmtree(directory)
+        store.fsync_dir(directory.parent)
+    except (JournalConflict, store.StoreError, OSError):
+        return
 
 
 def index_paths(payload: dict[str, Any]) -> set[str]:
@@ -937,9 +966,48 @@ def _committed_destinations(target: Path, operation_id: str) -> list[str]:
         return []
 
 
+def _recover_named_commit(target: Path, decision_id: str) -> dict[str, Any] | None:
+    """Recover a commit() operation that named itself after its decision.
+
+    commit() plans under the decision id without the care- prefix, so an
+    interrupted undo holds its operation under an id that ordinary care
+    recovery cannot address: the unfinished operation blocks later care work
+    while the printed recovery command only reaches care-<id>-* phases. Named
+    recovery accepts that id here. Automatic recovery never calls this, so a
+    held decision still fails closed. Kernel recovery restores the operation's
+    own before-images and writes nothing else, and a decision that did not
+    apply is recorded as abandoned rather than left pending.
+    """
+    if not any(operation.operation_id == decision_id for operation in kernel.unfinished_operations(target)):
+        return None
+    reason = "interrupted operation recovered; decision not applied"
+    try:
+        receipt = kernel.recover(decision_id, target=target)
+        if receipt.terminal_state != "restored":
+            raise JournalConflict(f"kernel {receipt.terminal_state}")
+    except (JournalConflict, kernel.ProjectionError) as exc:
+        # Recovery that cannot restore safely stays outstanding for the operator.
+        return {
+            "decision_id": decision_id,
+            "phase": "operator_required",
+            "reason": f"interrupted operation retained: {exc}",
+        }
+    try:
+        if _payload(target, decision_id).get("status") == "pending":
+            annotate(target, decision_id, phase="abandoned", status="abandoned", abandoned_reason=reason)
+    except (JournalConflict, store.StoreError, OSError):
+        # The operation is recovered either way; only its record annotation failed.
+        pass
+    return {"decision_id": decision_id, "phase": "abandoned", "reason": reason}
+
+
 def _resolve_prepared_locked(target: Path, *, selected: str | None = None) -> list[dict[str, Any]]:
     """Recover our interrupted kernel plans before interpreting decision phases."""
     resolved: list[dict[str, Any]] = []
+    if selected is not None:
+        interrupted = _recover_named_commit(target, selected)
+        if interrupted is not None:
+            return [interrupted]
     for operation in kernel.unfinished_operations(target):
         match = re.fullmatch(rf"care-({DECISION_ID})-(prepare|finish|repair)", operation.operation_id)
         if not match:
