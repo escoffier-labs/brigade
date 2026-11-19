@@ -1825,6 +1825,7 @@ def search_card_fields(
                 for p in sorted(root.rglob("*.md"))
                 if not p.is_symlink()
                 and (keep is None or keep(p))
+                and original_paths(p)
                 and (
                     not config.include_paths
                     or any(_path_matches(rel, config.include_paths) for rel in original_paths(p))
