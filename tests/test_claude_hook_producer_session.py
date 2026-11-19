@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -723,30 +725,67 @@ def test_a_foreign_bash_still_running_vetoes_before_its_post_tool_use(hook_targe
     assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
 
 
+def _own_reason(target: Path) -> str | None:
+    return producer_session.ownership_reason(
+        target, producer_session.producer_id(_fingerprint()), "skills/brigade-work/SKILL.md"
+    )
+
+
+def _age_marker(path: Path, seconds: float) -> None:
+    """Move a session's Bash marker and its state file's mtime ``seconds`` into the past."""
+    state = json.loads(path.read_text())
+    started = localio.utc_now() - timedelta(seconds=seconds)
+    state["pending_bash_started_at"] = started.isoformat()
+    path.write_text(json.dumps(state))
+    old = time.time() - seconds
+    os.utime(path, (old, old))
+
+
 def test_a_foreign_bash_that_started_before_the_scan_window_still_vetoes(hook_target: Path, monkeypatch) -> None:
-    """A long command leaves its state file untouched, so an old mtime must not hide the marker."""
+    """A long command leaves its state file untouched, so an mtime older than the start must not hide the marker."""
     _session_start(hook_target, SESSION_ID)
     _session_start(hook_target, OTHER_SESSION_ID)
     _hook_write(hook_target, SESSION_ID, "this session's own edit")
     _pre(_bash_event(OTHER_SESSION_ID, hook_target, "sleep 600"))
-    other_path = _state_path(hook_target, OTHER_SESSION_ID)
-    old = other_path.stat().st_mtime - 3600
-    os.utime(other_path, (old, old))
+    _age_marker(_state_path(hook_target, OTHER_SESSION_ID), 1800)
     assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
 
 
-def test_a_stale_foreign_state_without_a_pending_bash_stays_unread(hook_target: Path, monkeypatch) -> None:
-    """Age still excludes a state that has nothing in flight, so a corrupt old one does not veto."""
+def test_an_abandoned_foreign_bash_marker_expires(hook_target: Path, monkeypatch) -> None:
+    """A command that failed or was killed never reaches PostToolUse, so its marker must not veto forever."""
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    _pre(_bash_event(OTHER_SESSION_ID, hook_target, "false"))
+    other_path = _state_path(hook_target, OTHER_SESSION_ID)
+    lifetime = producer_session.BASH_MARKER_LIFETIME.total_seconds()
+    _age_marker(other_path, lifetime + 600)
+    assert _own_reason(hook_target) is None
+    # A fresh state file does not revive an expired marker either.
+    os.utime(other_path, None)
+    assert _own_reason(hook_target) is None
+
+
+def test_an_unreadable_foreign_state_inside_the_marker_lifetime_fails_closed(hook_target: Path, monkeypatch) -> None:
+    """It could hold a running Bash marker, so it cannot be skipped as old."""
     _session_start(hook_target, SESSION_ID)
     _hook_write(hook_target, SESSION_ID, "this session's own edit")
     junk = runtime._sessions_root(hook_target.resolve()) / "stale-junk.json"
     junk.write_text("{not json")
-    old = junk.stat().st_mtime - 3600
+    old = time.time() - 1800
     os.utime(junk, (old, old))
-    reason = producer_session.ownership_reason(
-        hook_target, producer_session.producer_id(_fingerprint()), "skills/brigade-work/SKILL.md"
-    )
-    assert reason is None
+    assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
+
+
+def test_a_corrupt_foreign_state_older_than_the_marker_lifetime_stays_unread(hook_target: Path, monkeypatch) -> None:
+    """Nothing in it could still be running, so one old junk file does not veto every trial."""
+    _session_start(hook_target, SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's own edit")
+    junk = runtime._sessions_root(hook_target.resolve()) / "stale-junk.json"
+    junk.write_text("{not json")
+    old = time.time() - producer_session.BASH_MARKER_LIFETIME.total_seconds() - 600
+    os.utime(junk, (old, old))
+    assert _own_reason(hook_target) is None
 
 
 def test_this_sessions_own_pending_bash_does_not_veto_it(hook_target: Path, monkeypatch) -> None:

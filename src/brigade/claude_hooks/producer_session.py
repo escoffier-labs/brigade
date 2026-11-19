@@ -68,6 +68,9 @@ _FILE_WRITE_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
 OWNED = "owned"
 # Slack for the state-file mtime prefilter only. The write timestamps themselves compare exactly.
 _MTIME_SLACK = timedelta(seconds=2)
+# How long an unclosed Bash marker keeps vetoing. It is longer than any foreground Bash command a
+# Claude Code session can run, and it lets a marker left by a failed or killed command expire.
+BASH_MARKER_LIFETIME = timedelta(hours=1)
 _FINGERPRINT = re.compile(r"[0-9a-f]{16}")
 
 
@@ -329,17 +332,22 @@ def _maybe_same_file(recorded: object, subject_path: str) -> bool:
     return left == right or left.endswith(f"/{right}") or right.endswith(f"/{left}")
 
 
-def _bash_in_flight(state: Mapping[str, Any]) -> bool:
+def _bash_in_flight(state: Mapping[str, Any], now: datetime) -> bool:
     """Whether the session announced a Bash command at PreToolUse that no PostToolUse has closed.
 
     A Bash write is recorded as a pathless event only when the command completes, so until then the
-    marker is the one sign the command may be changing the subject. It counts however long ago the
-    command started: a long build still running is exactly the case.
+    marker is the one sign the command may be changing the subject. It counts for
+    ``BASH_MARKER_LIFETIME`` from its start, so a long build still vetoes, while a marker left by a
+    command that failed, was denied or was killed stops vetoing once no command could still be running.
+    A marker without a readable start time counts, since its state file is recent enough to be read.
     """
-    return state.get("pending_bash_started_at") is not None or state.get("pending_bash_fingerprint") is not None
+    if state.get("pending_bash_started_at") is None and state.get("pending_bash_fingerprint") is None:
+        return False
+    started = localio.parse_iso_datetime(state.get("pending_bash_started_at"))
+    return started is None or now - started <= BASH_MARKER_LIFETIME
 
 
-def _foreign_wrote(state: Mapping[str, Any], subject_path: str, since: datetime) -> bool:
+def _foreign_wrote(state: Mapping[str, Any], subject_path: str, since: datetime, now: datetime) -> bool:
     """Whether another session may have written the subject, or could have, at or after ``since``.
 
     True when its event list names the subject or names no path in the window, when the list
@@ -349,7 +357,7 @@ def _foreign_wrote(state: Mapping[str, Any], subject_path: str, since: datetime)
     """
     from . import dependencies
 
-    if _bash_in_flight(state):
+    if _bash_in_flight(state, now):
         return True
     events = _valid_events(state.get(EVENTS_KEY))
     evicted = localio.parse_iso_datetime(state.get(EVICTED_KEY))
@@ -384,7 +392,7 @@ def ownership_reason(target: Path, session_id: str, subject_path: str, start_id:
 
     ``concurrent_session_ownership`` when another session in the target has a write event, since
     the bound start, that names the subject or names no path, when its events cannot cover that
-    window, when it has a Bash command still running (whenever it started), or when any session
+    window, when it has a Bash command that may still be running (see ``BASH_MARKER_LIFETIME``), or when any session
     state in the target cannot be read. ``no_owned_work`` when this
     session has no Edit, Write or NotebookEdit event on the subject itself. A change made only
     through Bash has none, so it fails closed. The events come from live hook state, so the check
@@ -397,19 +405,23 @@ def ownership_reason(target: Path, session_id: str, subject_path: str, start_id:
     if state is None or fingerprint is None or start is None or started is None:
         return "producer_session_missing"
     resolved = target.expanduser().resolve()
+    now = localio.utc_now()
+    # A running Bash command leaves its state untouched, so the window also reaches back over the
+    # marker lifetime. Every state in it is read strictly, so an unreadable one still fails closed.
+    since = min(started - _MTIME_SLACK, now - BASH_MARKER_LIFETIME)
     try:
         others = anchored_io.read_states_strict(
             resolved,
-            modified_since=started - _MTIME_SLACK,
+            modified_since=since,
             max_bytes=outcome_attribution.MAX_STATE_BYTES,
-            # A long Bash command leaves its state untouched while it runs, so age cannot clear it.
-            keep_stale=_bash_in_flight,
         )
     except (OSError, ValueError):
         # Another session's state cannot be listed, read or parsed, so its writes cannot be ruled out.
         return "concurrent_session_ownership"
     for other in others:
-        if not outcome_attribution._state_matches(other, fingerprint) and _foreign_wrote(other, subject_path, started):
+        if not outcome_attribution._state_matches(other, fingerprint) and _foreign_wrote(
+            other, subject_path, started, now
+        ):
             return "concurrent_session_ownership"
     if not _owns_subject(state, start, subject_path):
         return "no_owned_work"
