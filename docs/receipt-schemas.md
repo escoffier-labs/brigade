@@ -97,6 +97,46 @@ use schema version 2. Readers older than version 2 refuse these events with
 
 ---
 
+## `brigade.batch_task_artifact.v1`
+
+**Path:** `.brigade/runs/batch-<sha256 of request id>/batch-artifact-<sha256 of task id>.json`
+
+The sanitized record of one per-task batch worktree's delivery (#2050).
+Execution and delivery are separate facts: `execution` says whether the worker
+reported success, and `delivery` says whether what it left in its checkout could
+be collected. The file is written for every terminal worktree result, failed
+ones included.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | Always `brigade.batch_task_artifact.v1` |
+| `task_id` | string | The batch task identity, verbatim |
+| `attempt_id` | string \| null | The task attempt this result belongs to |
+| `execution` | string | `completed` or `failed`, from the worker result |
+| `delivery` | string | `retained`, `no-changes`, `base-diverged`, or `collection-failed` |
+| `reason` | string \| null | A closed reason token; `patch-oversize` or `patch-timeout` marks a retained commit whose patch was not written, and `artifact-conflict` marks a refusal to replace an existing artifact |
+| `base_sha` | string | The pinned 40-hex base revision the checkout was created at |
+| `branch` | string | The bound `brigade/batch/...` branch |
+| `candidate_commit` | string \| null | The 40-hex candidate commit; null when there is no candidate |
+| `patch_ref` | string \| null | The patch file name only, relative to the same run directory |
+| `patch_sha256` | string \| null | SHA-256 of the patch file |
+| `patch_bytes` | integer \| null | Patch size in bytes |
+| `changed_paths` | integer | Paths changed between the base and the candidate |
+| `ignored_left` | integer | Ignored entries left in the checkout; never committed or patched |
+
+Delivery states: `retained` keeps a candidate commit on the task branch (with a
+patch unless it was oversize), `no-changes` means `HEAD` is the pinned base with
+nothing left over, `base-diverged` records a candidate that does not descend
+from the base and writes no patch, and `collection-failed` records a closed
+reason and changes nothing.
+
+No absolute path, file content, or diff text appears in this file. The patch it
+names is local-only and never exported: it can carry the contents of untracked
+files a worker created. Collection is described in
+[explicit task batches](run-batch.md#task-artifacts).
+
+---
+
 ## `brigade.work_verify_receipt`: `schema_version: 2`
 
 **Path:** `.brigade/work/verify-runs/<run-id>/receipt.json`
