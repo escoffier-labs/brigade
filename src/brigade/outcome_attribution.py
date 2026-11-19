@@ -154,7 +154,8 @@ def _iter_states(target: Path) -> Iterator[dict[str, Any]]:
                     continue
                 try:
                     value = json.loads(raw)
-                except (UnicodeError, ValueError):
+                except (UnicodeError, ValueError, RecursionError):
+                    # A file nested deeper than the parser's recursion limit is malformed too.
                     continue
                 if isinstance(value, dict):
                     yield value
