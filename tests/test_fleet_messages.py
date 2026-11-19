@@ -476,7 +476,7 @@ def test_client_enqueue_time_cannot_bypass_sender_daily_quota(message_hub, monke
     assert "sender" in rejected[1]["error"]
 
 
-def test_expired_messages_are_pruned_before_read_ack_reply_and_unread_count(message_hub):
+def test_expired_messages_are_pruned_on_writes_not_on_unread_count(message_hub):
     base, token_a, token_b, db = message_hub
     sent = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "Soon old", "body": "Expire me"})
     message_id = sent[1]["message"]["id"]
@@ -508,8 +508,31 @@ def test_expired_messages_are_pruned_before_read_ack_reply_and_unread_count(mess
     assert fleet_hub_messages.unread_counts(conn) == {}
     conn.close()
     conn = sqlite3.connect(db)
-    assert conn.execute("SELECT COUNT(*) FROM fleet_messages WHERE id=?", (unread_id,)).fetchone()[0] == 0
+    # The board count filters expired rows in SQL; it does not prune them.
+    assert conn.execute("SELECT COUNT(*) FROM fleet_messages WHERE id=?", (unread_id,)).fetchone()[0] == 1
     conn.close()
+
+
+def test_board_counts_are_query_only_and_exclude_expired(message_hub):
+    """Both board count helpers filter expired rows in SQL and never write."""
+    base, token_a, _token_b, db = message_hub
+    active = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "Active", "body": "Keep"})[1]
+    expired = _request(base, token_a, {"action": "send", "to": NODE_B, "subject": "Old", "body": "Exclude"})[1]
+    expired_at = (datetime.now(timezone.utc) - timedelta(days=fleet_hub_messages.RETENTION_DAYS + 1)).isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE fleet_messages SET created_at=? WHERE id=?", (expired_at, expired["message"]["id"]))
+
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA query_only=ON")
+    try:
+        assert fleet_hub_messages.unread_counts(conn) == {NODE_B: 1}
+        assert fleet_hub_messages.agent_unread_counts(conn) == ({}, False)
+    finally:
+        conn.close()
+
+    with sqlite3.connect(db) as verify:
+        for message_id in (active["message"]["id"], expired["message"]["id"]):
+            assert verify.execute("SELECT COUNT(*) FROM fleet_messages WHERE id=?", (message_id,)).fetchone()[0] == 1
 
 
 def test_revoked_node_unread_messages_are_excluded_from_board_counts(message_hub):

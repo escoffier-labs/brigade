@@ -346,8 +346,11 @@ def unread_count(
 
 
 def unread_counts(conn: sqlite3.Connection, *, storage_policy: StoragePolicy | None = None) -> dict[str, int]:
-    """Unread message totals keyed by enrolled machine identity for the fleet board."""
-    _prune_expired(conn, storage_policy=storage_policy)
+    """Unread message totals keyed by enrolled machine identity for the fleet board.
+
+    Query only: expired messages are excluded by the predicate, not pruned here.
+    Retention cleanup stays on the authorized mutation paths.
+    """
     counts = {
         str(recipient): int(count)
         for recipient, count in conn.execute(
@@ -357,7 +360,6 @@ def unread_counts(conn: sqlite3.Connection, *, storage_policy: StoragePolicy | N
             (_expiry_cutoff(storage_policy),),
         )
     }
-    conn.commit()
     return counts
 
 
@@ -367,8 +369,8 @@ def agent_unread_counts(
     """Unread totals for at most ``limit`` active agent principals, in principal order.
 
     Grouped over the unacked index. The flag is true when more principals have
-    unread messages than were returned. The board calls ``unread_counts`` first
-    to prune expired messages.
+    unread messages than were returned. Query only: expired messages are excluded
+    by the predicate, not pruned here.
     """
     rows = conn.execute(
         "SELECT message.recipient,COUNT(*) FROM fleet_messages AS message "
