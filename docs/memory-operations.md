@@ -2040,7 +2040,11 @@ growing to the 2,000-card judged-history bound. Earlier defaults of 100 ms and
 50 ms refused that merge with `memory_auto_apply_budget_exceeded` on a real
 scope. Raise them only when a larger scope measures slower, and keep `lock_ms`
 as low as that measurement allows, because the writer is held for as long as
-it runs.
+it runs. A command that runs to the full `lock_ms` holds the memory and hub
+writers for that long, and the writer arbiter then delays the next memory write
+by about three times the hold, so concurrent memory writes can see
+`authority-lock-timeout`. Index publication after the command is outside the
+deadline.
 
 Limits must be positive integers. Unknown keys fail configuration. Retention
 is capped at 365 days. The pending defaults allow a review batch of 32 proposals

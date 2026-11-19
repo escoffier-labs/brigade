@@ -651,19 +651,32 @@ mod scale {
     /// The automatic exact-duplicate merge on a real-size scope, under the limits
     /// an operator gets without configuring any. On a 1,500-card scope the
     /// earlier defaults (100 ms diagnostics, 50 ms writer) refused it with
-    /// `memory_auto_apply_budget_exceeded`. No timing is asserted here: the
-    /// merge either finishes inside the defaults or the hub refuses it.
+    /// `memory_auto_apply_budget_exceeded`. The deadlines are wall clock, so a
+    /// debug build gets three times the defaults: the old veto spent about
+    /// 3.9 s per phase there and still fails, while this code spends about
+    /// 0.3 s. A release build runs on the defaults themselves.
     #[tokio::test]
     async fn exact_merge_applies_on_a_realistic_scope_with_default_limits() {
-        let r = scope(1500).await;
+        let defaults = super::super::hardening::Limits::default();
+        assert_eq!((defaults.diagnostic_ms, defaults.lock_ms), (1_000, 1_000));
+        let mut r = scope(1500).await;
+        if cfg!(debug_assertions) {
+            let (d, l) = (defaults.diagnostic_ms * 3, defaults.lock_ms * 3);
+            r.h.store
+                .as_mut()
+                .unwrap()
+                .configure_retrieval(&json!({"proposal_limits":{"diagnostic_ms":d,"lock_ms":l}}))
+                .unwrap();
+        }
         let opened = open(&r).await;
         let applied = super::super::merge_drift_tests::auto(&r, &opened).await;
         assert_eq!(applied.body["state"], "applied", "{applied:?}");
         assert_eq!(card(&r.h, "fleet", GONE).await["state"], "retired");
         assert_eq!(card(&r.h, "fleet", KEEP).await["state"], "live");
     }
-    /// A veto with no judged history never builds the scope's indexes, yet a
-    /// recorded history still vetoes a merge that moves a judged card.
+    /// With no judged history the veto has nothing to replay and holds nothing.
+    /// Once history exists it still replays, and the merge's corpus change
+    /// moves a judged query's ranking, so the veto holds it.
     #[tokio::test]
     async fn history_veto_still_replays_when_history_exists() {
         let r = scope(300).await;
@@ -688,7 +701,8 @@ mod scale {
         let history: usize = std::env::var("HISTORY")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(count.div_ceil(7));
         seed_history(&r, history);
         eprintln!("seeded {} cards in {:.0} ms", count + 2, ms(started));
         r.h.store
