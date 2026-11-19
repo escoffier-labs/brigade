@@ -328,8 +328,12 @@ def test_suggested_command_quotes_an_apostrophe_safely(tmp_path, capsys):
     out = _brief(tmp_path, capsys)
 
     assert "next: it's ok" in out
-    quoted = shell_quote.quote_argument("it's ok")
-    assert f"suggested_command: brigade work run {quoted}" in out
+    if shell_quote.is_safe_argument("it's ok"):
+        quoted = shell_quote.quote_argument("it's ok")
+        assert f"suggested_command: brigade work run {quoted}" in out
+    else:
+        # Windows has no quoting that is safe in both cmd.exe and PowerShell.
+        assert f"suggested_command: {brief_values.WITHHELD}" in out
 
 
 def test_suggested_command_stays_runnable_for_a_plain_task_text(tmp_path, capsys):
@@ -1060,3 +1064,15 @@ def test_every_printed_command_withholds_on_windows(tmp_path, capsys, monkeypatc
     assert len(lines) >= 10
     for line in lines:
         assert "&whoami" not in line, line
+
+
+def test_suggested_command_with_an_apostrophe_is_withheld_on_windows(tmp_path, capsys, monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    _dogfood_next(tmp_path, "it's ok")
+
+    out = _brief(tmp_path, capsys)
+
+    assert "next: it's ok" in out
+    assert f"suggested_command: {brief_values.WITHHELD}" in out
