@@ -605,3 +605,51 @@ def test_http_requires_jsonrpc_2_0(memory_station: _Station) -> None:
             "id": message["id"],
             "error": {"code": -32600, "message": "invalid request"},
         }
+
+
+# --- cancellation over HTTP -------------------------------------------------------
+
+
+def test_http_cancellation_reaches_a_running_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+
+    def call_tool(name: str, arguments: dict[str, Any]) -> tuple[object, bool]:
+        started.set()
+        token = mcp_server.current_cancellation()
+        assert token is not None
+        token.wait(20)
+        return {"done": True}, False
+
+    def run() -> int:
+        return mcp_server.serve_http(
+            server_name="t",
+            host="127.0.0.1",
+            port=0,
+            token=TOKEN,
+            list_resources=lambda: [],
+            read_resource=lambda uri: (None, None),
+            list_tools=lambda: [{"name": "block"}],
+            call_tool=call_tool,
+        )
+
+    results: list[tuple[int, dict[str, str], bytes]] = []
+    request = {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "block", "arguments": {}}}
+
+    def call_block(station: _Station) -> None:
+        results.append(station.rpc(request))
+
+    for station in _start(monkeypatch, run):
+        worker = threading.Thread(target=call_block, args=(station,), daemon=True)
+        worker.start()
+        assert started.wait(20)
+        status, _, body = station.rpc(
+            {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 9}}
+        )
+        assert status == 202 and body == b""
+        worker.join(20)
+        assert not worker.is_alive()
+        assert _json(results[0][2])["error"]["code"] == -32800
+        # The session survives the cancellation and still serves requests.
+        status, _, body = station.rpc({"jsonrpc": "2.0", "id": 10, "method": "tools/list"})
+        assert status == 200
+        assert _json(body)["result"]["tools"] == [{"name": "block"}]

@@ -213,18 +213,18 @@ the requested wait deadline. An initial failed read returns a sanitized error.
 A later poll failure can return the last good page, so an empty page is not
 evidence of current connectivity. Directory reads and ack require the hub.
 
-Cancellation has a known limit: the shared stateless station ignores MCP
-cancellation notifications and does not propagate an HTTP disconnect to
-`poll_inbox`. The loop can open successive hub waits of up to 20 seconds until
-the full `wait_secs` deadline, up to 120 seconds, even after the caller abandons
-it. Ending one chunk does not end the abandoned call. Two such calls can keep
-the per-principal cap of 2 hub waiters occupied for their full waits unless mail
-arrives or a hub failure ends polling. The app's 10-second policy bounds this
-recipe's waits, but direct station callers can still request 120 seconds.
-There is no cancellation rollback for an accepted send or ack. End-to-end
-cancellation and immediate capacity release are deferred to
-[#2012](https://github.com/escoffier-labs/brigade/issues/2012). Check capacity
-release before treating the cancellation acceptance item as complete.
+Cancellation: the station honours MCP `notifications/cancelled` for a running
+tool call over both the stdio and loopback HTTP transports. A cancelled
+`fleet_inbox` call stops opening new hub waits, so its hub waiter slot is free
+within one wait chunk (at most 20 seconds) and the next wait from the same
+principal is admitted instead of failing with `message_wait_capped`. The
+cancelled request is answered with error `-32800` (request cancelled) and the
+session keeps serving. Release is bounded rather than immediate: the wait that
+is already open when the notification arrives still runs to the end of its
+chunk, because the client cannot abort that hub socket from another thread. An
+HTTP disconnect is still not treated as a cancellation, so a caller that closes
+the connection without sending the notification leaves the wait running to its
+own deadline. There is no cancellation rollback for an accepted send or ack.
 
 Generate a fresh `client_id` for each intended send or reply, persist it before
 calling, and reuse it with identical arguments after a timeout or reconnect.
@@ -295,11 +295,13 @@ mode. Record no credentials. All checks in this section are currently unverified
    and ack changes only the intended principal's messages. Check partial ack
    failures individually.
 6. Time an empty 10-second inbox wait, then cancel another wait and observe the
-   hub's waiter count return to baseline. Record the delay. The current station
-   cannot promise immediate cancellation propagation. Test Executor/client
-   deadlines and server restart recovery without replaying a whole program.
-   Confirm the app denies `wait_secs: 11` and `wait_secs: 120` before the station
-   is called, while omitted, zero and 10-second waits remain allowed.
+   hub's waiter count return to baseline. Record the delay. The station stops
+   opening new waits on cancellation, but the chunk already in flight still
+   runs, so expect release within one wait chunk rather than instantly. Test
+   Executor/client deadlines and server restart recovery without replaying a
+   whole program. Confirm the app denies `wait_secs: 11` and `wait_secs: 120`
+   before the station is called, while omitted, zero and 10-second waits remain
+   allowed.
 7. Compare direct HTTP MCP and Executor on the same presence, send, receive,
    reply, receive, ack and sent-status workflow, using separate fresh message
    keys and equivalent approvals. Record correctness, outer MCP calls, upstream
@@ -308,5 +310,5 @@ mode. Record no credentials. All checks in this section are currently unverified
    token savings from payload size. Keep direct MCP whichever route wins.
 
 No benchmark numbers or Executor end-to-end success are claimed. Event push,
-desktop panels, browser approval and immediate cancellation release need their
-own evidence before recommending a broader deployment.
+desktop panels, browser approval and cancellation release through a real client
+need their own evidence before recommending a broader deployment.

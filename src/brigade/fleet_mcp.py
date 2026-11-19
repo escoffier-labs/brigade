@@ -259,6 +259,18 @@ def _frame_directory(value: Any, key: str | None = None) -> Any:
     return value
 
 
+def _pause(seconds: float, cancel: mcp_server.RequestCancellation | None) -> bool:
+    """Wait out a backoff, ending early on cancellation; True means cancelled."""
+    if cancel is None:
+        sleep(seconds)
+        return False
+    return cancel.wait(seconds)
+
+
+def _cancelled(cancel: mcp_server.RequestCancellation | None) -> bool:
+    return cancel is not None and cancel.cancelled
+
+
 def poll_inbox(
     *,
     wait_secs: int,
@@ -266,8 +278,14 @@ def poll_inbox(
     authority: messages.MessageAuthority,
     after: int = 0,
     limit: int | None = None,
+    cancel: mcp_server.RequestCancellation | None = None,
 ) -> dict[str, Any]:
-    """Long-poll until the deadline, with bounded backoff for old or unavailable hubs."""
+    """Long-poll until the deadline, with bounded backoff for old or unavailable hubs.
+
+    ``cancel`` stops the loop between hub waits, so a caller that abandoned the
+    call releases its hub waiter slot within one wait bound instead of holding it
+    for the whole ``wait_secs``.
+    """
     deadline = monotonic() + wait_secs
 
     def read(unacked: bool, *, wait_ms: int = 0) -> dict[str, Any]:
@@ -296,6 +314,8 @@ def poll_inbox(
             return history
     last_good = history
     while (remaining := deadline - monotonic()) > 0:
+        if _cancelled(cancel):
+            return last_good
         chunk = int(min(remaining, MAX_WAIT_MS / 1000) * 1000)
         if chunk == 0:
             break
@@ -314,7 +334,8 @@ def poll_inbox(
 
     delay = 1.0
     while (remaining := deadline - monotonic()) > 0:
-        sleep(min(delay, remaining))
+        if _pause(min(delay, remaining), cancel):
+            return last_good
         if monotonic() >= deadline:
             break
         try:
@@ -405,7 +426,7 @@ class FleetMcp:
             reply_to = _message_id(arguments["reply_to"]) if "reply_to" in arguments else None
             if "after" in arguments:
                 _message_id(arguments["after"], allow_zero=True)
-            payload = self._call(name, arguments, ids, message_id, reply_to)
+            payload = self._call(name, arguments, ids, message_id, reply_to, mcp_server.current_cancellation())
             return _frame(payload), False
         except (_InvalidArguments, MessageError) as exc:
             return {"error": str(exc)}, True
@@ -418,7 +439,13 @@ class FleetMcp:
         return messages._authority(None, self.token_file, None)
 
     def _call(
-        self, name: str, args: dict[str, Any], ids: list[int], message_id: int | None, reply_to: int | None
+        self,
+        name: str,
+        args: dict[str, Any],
+        ids: list[int],
+        message_id: int | None,
+        reply_to: int | None,
+        cancel: mcp_server.RequestCancellation | None = None,
     ) -> dict[str, Any]:
         # One captured credential for the whole tool call, as the message layer requires.
         authority = self._authority()
@@ -484,6 +511,7 @@ class FleetMcp:
                     authority=authority,
                     after=int(args.get("after", "0")),
                     limit=args.get("limit", 100),
+                    cancel=cancel,
                 ),
                 args.get("limit", 100),
             )

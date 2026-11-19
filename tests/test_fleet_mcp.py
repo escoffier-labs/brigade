@@ -11,7 +11,7 @@ import time
 import pytest
 
 from brigade import cli, fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages, mcp_server
-from tests.test_fleet_messages import NODE_A, NODE_B, _wait_for_active_waiters
+from tests.test_fleet_messages import NODE_A, NODE_B, _request, _wait_for_active_waiters
 from tests.test_mcp_http import _start
 
 pytest_plugins = ["tests._fleet_message_fixtures"]
@@ -337,6 +337,84 @@ def test_inbox_network_read_has_minimum_timeout(stations, monkeypatch):
     _payload, error = b.call("fleet_inbox", {"wait_secs": 1})
     assert error and 2 <= timeouts[0] <= fleet_client.FLUSH_TIMEOUT_SECONDS
     assert time.monotonic() - start < 1
+
+
+def _wait_for_no_hub_waiters(recipient: str, *, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with fleet_hub_messages._WAKE_LOCK:
+            if not fleet_hub_messages._ACTIVE_WAITERS.get(recipient):
+                return
+        time.sleep(0.01)
+    with fleet_hub_messages._WAKE_LOCK:
+        actual = fleet_hub_messages._ACTIVE_WAITERS.get(recipient)
+    raise AssertionError(f"hub waiter(s) still held for {recipient}: {actual}")
+
+
+def _wait_for_rpc(replies, request_id, *, timeout: float = 20.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if request_id in replies:
+            return replies[request_id]
+        time.sleep(0.01)
+    raise AssertionError(f"no MCP reply for request {request_id}")
+
+
+def test_cancelled_inbox_releases_its_hub_wait_slot(stations, hub, monkeypatch):
+    """A cancelled fleet_inbox stops opening hub waits, so the slot frees within one wait bound."""
+    from brigade import fleet_mcp
+    from brigade.fleet_mcp import serve_mcp
+
+    _a, b = stations
+    base, _token_a, token_b, _db = hub
+    # One injected hub wait bound: after a cancellation the loop must not open
+    # another wait, so the slot frees in one chunk instead of the full 120 s.
+    monkeypatch.setattr(fleet_mcp, "MAX_WAIT_MS", 300)
+    replies: dict[int, tuple[int, dict[str, str], bytes]] = {}
+
+    def inbox(station, request_id):
+        replies[request_id] = station.rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": "fleet_inbox", "arguments": {"wait_secs": 120}},
+            }
+        )
+
+    def hub_wait():
+        return _request(base, token_b, {"action": "list", "after": 0, "unacked": True, "wait_ms": 50})
+
+    for station in _start(monkeypatch, lambda: serve_mcp(http=True, port=0, token_file=b.token_file)):
+        workers = [threading.Thread(target=inbox, args=(station, request_id), daemon=True) for request_id in (1, 2)]
+        for worker in workers:
+            worker.start()
+        _wait_for_active_waiters(NODE_B, 2, timeout=30)
+        # The per-caller cap of 2 is real: a third wait is refused.
+        assert hub_wait()[0] == 429
+
+        for request_id in (1, 2):
+            status, _headers, _body = station.rpc(
+                {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request_id}}
+            )
+            assert status == 202
+        for request_id in (1, 2):
+            reply = json.loads(_wait_for_rpc(replies, request_id)[2])
+            assert reply["error"]["code"] == -32800
+
+        # Both waits were released, so the same principal is admitted again.
+        _wait_for_no_hub_waiters(NODE_B)
+        status, payload = hub_wait()
+        assert status == 200 and payload["messages"] == []
+
+        third = threading.Thread(target=inbox, args=(station, 3), daemon=True)
+        third.start()
+        _wait_for_active_waiters(NODE_B, 1, timeout=30)
+        station.rpc({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 3}})
+        assert json.loads(_wait_for_rpc(replies, 3)[2])["error"]["code"] == -32800
+        for worker in [*workers, third]:
+            worker.join(30)
+            assert not worker.is_alive()
 
 
 def test_http_station_uses_shared_security_guards(stations, monkeypatch):

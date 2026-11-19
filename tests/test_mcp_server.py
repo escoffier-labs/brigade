@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import queue
+import threading
+import time
 
 from brigade import mcp_server
 
@@ -171,3 +174,125 @@ def test_stdio_stateless_initialize_applies_to_later_requests_without_meta(monke
     assert "resultType" not in by_id[1]["result"]
     assert by_id[2]["result"]["resultType"] == "complete"
     assert by_id[3]["result"]["resultType"] == "complete"
+
+
+# --- cancellation (notifications/cancelled) ---------------------------------------
+
+REQUEST_CANCELLED = -32800
+
+
+class _StdioFeed:
+    """A stdin replacement a test can append to while serve_stdio is running."""
+
+    def __init__(self) -> None:
+        self._lines: queue.Queue[str | None] = queue.Queue()
+
+    def send(self, message: object) -> None:
+        self._lines.put(json.dumps(message) + "\n")
+
+    def close(self) -> None:
+        self._lines.put(None)
+
+    def __iter__(self) -> _StdioFeed:
+        return self
+
+    def __next__(self) -> str:
+        line = self._lines.get()
+        if line is None:
+            raise StopIteration
+        return line
+
+
+def _callbacks(call_tool):
+    return {
+        "server_name": "t",
+        "list_resources": list,
+        "read_resource": lambda uri: (None, None),
+        "list_tools": lambda: [{"name": "block"}],
+        "call_tool": call_tool,
+    }
+
+
+def _cancelled(request_id: object) -> dict[str, object]:
+    return {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request_id}}
+
+
+def _wait_for(predicate, *, timeout: float = 20.0, what: str = "condition"):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def test_cancelled_request_is_answered_with_request_cancelled():
+    registry = mcp_server.CancellationRegistry()
+    started = threading.Event()
+    seen: list[object] = []
+
+    def call_tool(name, arguments):
+        seen.append(mcp_server.current_cancellation())
+        started.set()
+        mcp_server.current_cancellation().wait(20)
+        return {"done": True}, False
+
+    replies: list[object] = []
+    request = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "block", "arguments": {}}}
+    worker = threading.Thread(
+        target=lambda: replies.append(mcp_server.handle_message(request, **_callbacks(call_tool), registry=registry)),
+        daemon=True,
+    )
+    worker.start()
+    assert started.wait(20)
+    assert mcp_server.handle_message(_cancelled(7), **_callbacks(call_tool), registry=registry) is None
+    worker.join(20)
+    assert not worker.is_alive()
+    assert seen and seen[0] is not None
+    assert replies[0]["error"]["code"] == REQUEST_CANCELLED
+
+
+def test_cancellation_for_unknown_or_finished_ids_is_ignored():
+    registry = mcp_server.CancellationRegistry()
+    callbacks = _callbacks(lambda name, arguments: ("done", False))
+    # Unknown id: no reply, no crash, and no request is left behind.
+    assert mcp_server.handle_message(_cancelled("missing"), **callbacks, registry=registry) is None
+    finished = mcp_server.handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call"}, **callbacks, registry=registry
+    )
+    assert finished["result"]["isError"] is False
+    assert mcp_server.handle_message(_cancelled(1), **callbacks, registry=registry) is None
+    later = mcp_server.handle_message(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call"}, **callbacks, registry=registry
+    )
+    assert "error" not in later
+
+
+def test_stdio_cancellation_reaches_a_running_tool_call(monkeypatch):
+    replies: dict[object, dict] = {}
+    monkeypatch.setattr(mcp_server, "_emit", lambda payload: replies.__setitem__(payload.get("id"), payload))
+    feed = _StdioFeed()
+    monkeypatch.setattr("sys.stdin", feed)
+    started = threading.Event()
+
+    def call_tool(name, arguments):
+        started.set()
+        mcp_server.current_cancellation().wait(20)
+        return {"done": True}, False
+
+    result: list[int] = []
+    server = threading.Thread(
+        target=lambda: result.append(mcp_server.serve_stdio(**_callbacks(call_tool))), daemon=True
+    )
+    server.start()
+    try:
+        feed.send({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "block", "arguments": {}}})
+        assert started.wait(20)
+        feed.send(_cancelled(1))
+        _wait_for(lambda: 1 in replies or not server.is_alive(), what="the cancelled call's reply")
+        assert replies[1]["error"]["code"] == REQUEST_CANCELLED
+    finally:
+        feed.close()
+        server.join(20)
+    assert not server.is_alive()
+    assert result == [0]
