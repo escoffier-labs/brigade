@@ -149,7 +149,12 @@ def _is_t3_task_node(value: object, request_key: str) -> bool:
     namespace, and requires the decoded request key to equal ours exactly with
     nothing trailing. Any other shape refuses so the caller can fail closed.
     """
-    if type(value) is not str or not value.startswith(_T3_NODE_PREFIX) or not request_key:
+    if (
+        type(value) is not str
+        or len(value) > run_events.MAX_PAYLOAD_STR_LEN
+        or not value.startswith(_T3_NODE_PREFIX)
+        or not request_key
+    ):
         return False
     command = _decode_t3_component(value[len(_T3_NODE_PREFIX) :])
     if command is None or not command.startswith(_T3_COMMAND_PREFIX):

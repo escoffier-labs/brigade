@@ -198,6 +198,59 @@ def test_terminal_evidence_changes_the_result_identity():
 
 
 @POSIX_ONLY
+def test_legacy_correlation_without_provider_task_id_stays_usable(tmp_path, monkeypatch):
+    """A journal written before provider_task_id existed still reads, observes and cancels."""
+    workspace, run_id = _enroll(tmp_path, ("one", "two"))
+    _claim(workspace, run_id, "one")
+    sibling = _claim(workspace, run_id, "two")
+    real_append = dispatch._append
+
+    def legacy_append(workspace_arg, run_dir, event_type, payload, *, key):
+        if event_type == dispatch.CORRELATION_EVENT:
+            payload = {name: value for name, value in payload.items() if name != "provider_task_id"}
+        return real_append(workspace_arg, run_dir, event_type, payload, key=key)
+
+    monkeypatch.setattr(dispatch, "_append", legacy_append)
+    _accepted(workspace, run_id)
+    monkeypatch.setattr(dispatch, "_append", real_append)
+    correlated = [event for event in _events(workspace, run_id) if event.event_type == dispatch.CORRELATION_EVENT]
+    assert correlated and "provider_task_id" not in correlated[0].payload
+
+    status = lifecycle.status(workspace=workspace, run_id=run_id)
+    assert [task["correlated"] for task in status["tasks"] if task["task_id"] == "one"] == [True]
+    cancel = lifecycle.cancel(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD)
+    assert cancel["task_cancel"]["taskId"] == "one"
+
+    before = _journal(workspace, run_id).read_bytes()
+    with pytest.raises(dispatch.DispatchError) as refused:
+        lifecycle.observe(
+            workspace=workspace,
+            run_id=run_id,
+            task_id="one",
+            parent_thread=THREAD,
+            payload=_native(request_key=sibling["clientRequestId"]),
+        )
+    assert refused.value.code == "native-mismatch"
+    assert _journal(workspace, run_id).read_bytes() == before
+    assert _observe(workspace, run_id)["result_id"] is not None
+
+
+def test_overlong_task_node_refuses_before_decoding():
+    """A well-formed node id longer than the journal's string bound refuses."""
+    from urllib.parse import quote
+
+    safe = "-_.!~*'()"
+    key = "brigade-t3:" + "a" * 64
+    namespace = "a" + ":" * 200
+    command = "command:mcp:" + quote(namespace, safe=safe) + ":delegate-task:" + quote(key, safe=safe)
+    node = "node:delegated-task:" + quote(command, safe=safe)
+    short = "node:delegated-task:" + quote("command:mcp:a:delegate-task:" + quote(key, safe=safe), safe=safe)
+    assert len(node) > run_events.MAX_PAYLOAD_STR_LEN
+    assert dispatch._is_t3_task_node(short, key) is True
+    assert dispatch._is_t3_task_node(node, key) is False
+
+
+@POSIX_ONLY
 def test_cancel_replays_identically_and_refuses_once_terminal(tmp_path, capsys):
     workspace, run_id = _enroll(tmp_path, ("one",))
     _claim(workspace, run_id, "one")
