@@ -26,6 +26,15 @@ from tests.test_verify_trial import (
 SESSION_ID = "11111111-2222-3333-4444-555555555555"
 OTHER_SESSION_ID = "99999999-8888-7777-6666-555555555555"
 MANIFEST_ID = "test-skill-patch"
+
+
+# A manifest trial on Windows fails ``verifier_manifest_mismatch`` the same way the allowlisted
+# tests/test_verify_trial.py does (#1482 baseline), so the trial-scoring cases here run on POSIX only.
+posix_manifest_digest = pytest.mark.skipif(
+    os.name == "nt", reason="manifest trial digest mismatches on Windows (same as test_verify_trial.py)"
+)
+windows_invalid_filename = pytest.mark.skipif(os.name == "nt", reason="Windows filenames cannot contain '>'")
+posix_permissions = pytest.mark.skipif(os.name == "nt", reason="needs POSIX file permissions")
 _SESSION_ENV = (
     "BRIGADE_CLAUDE_SESSION",
     "BRIGADE_AGENT_SESSION",
@@ -227,6 +236,7 @@ def test_load_payload_rejects_a_state_copied_from_another_target(hook_target: Pa
     assert producer_session.load_payload(hook_target, producer_session.producer_id(_fingerprint())) is None
 
 
+@posix_manifest_digest
 def test_hook_session_trial_is_eligible_and_scores(hook_target: Path, monkeypatch) -> None:
     """The headline case: no work session, a hook session that edits the subject and verifies it."""
     _session_start(hook_target)
@@ -244,6 +254,7 @@ def test_hook_session_trial_is_eligible_and_scores(hook_target: Path, monkeypatc
     assert [audit.eligible for audit in scorecard.audit_all_verify_receipts(hook_target)] == [True]
 
 
+@posix_manifest_digest
 def test_hook_printed_session_value_also_resolves_the_producer(hook_target: Path, monkeypatch) -> None:
     _session_start(hook_target)
     _hook_write(hook_target)
@@ -309,6 +320,7 @@ def test_session_that_never_ran_a_hook_here_picks_no_session(hook_target: Path, 
     assert verify_trial.project_trial(receipt, target=hook_target).reason == "producer_session_missing"
 
 
+@posix_manifest_digest
 def test_active_work_session_wins_over_the_hook_session(hook_target: Path, monkeypatch) -> None:
     _session_start(hook_target)
     assert work_cmd.start(target=hook_target, title="explicit") == 0
@@ -432,6 +444,7 @@ def test_a_session_that_never_wrote_the_subject_has_no_owned_work(hook_target: P
     assert projection.reason == "no_owned_work"
 
 
+@posix_manifest_digest
 def test_a_foreign_write_before_this_session_started_does_not_veto(hook_target: Path, monkeypatch) -> None:
     _session_start(hook_target, OTHER_SESSION_ID)
     _hook_write(hook_target, OTHER_SESSION_ID, "landed earlier")
@@ -443,6 +456,7 @@ def test_a_foreign_write_before_this_session_started_does_not_veto(hook_target: 
     assert projection.reason == "eligible"
 
 
+@posix_manifest_digest
 def test_a_foreign_write_to_another_file_does_not_veto(hook_target: Path, monkeypatch) -> None:
     _session_start(hook_target, SESSION_ID)
     _session_start(hook_target, OTHER_SESSION_ID)
@@ -478,6 +492,7 @@ def test_a_foreign_write_with_no_recorded_path_is_treated_as_concurrent(hook_tar
     assert projection.reason == "concurrent_session_ownership"
 
 
+@posix_manifest_digest
 def test_a_foreign_write_after_the_receipt_is_caught_at_projection_time(hook_target: Path, monkeypatch) -> None:
     _session_start(hook_target, SESSION_ID)
     _session_start(hook_target, OTHER_SESSION_ID)
@@ -637,6 +652,7 @@ def test_a_foreign_file_write_elsewhere_plus_a_bash_write_is_concurrent(hook_tar
     assert _as_session(hook_target, monkeypatch) == "concurrent_session_ownership"
 
 
+@posix_manifest_digest
 def test_a_foreign_write_outside_the_target_does_not_veto(hook_target: Path, monkeypatch, tmp_path: Path) -> None:
     _session_start(hook_target, SESSION_ID)
     _session_start(hook_target, OTHER_SESSION_ID)
@@ -709,6 +725,7 @@ def _clean_at_start(target: Path, subject_path: str) -> bool:
     return binding["subject_clean_at_start"]
 
 
+@windows_invalid_filename
 def test_a_quoted_rename_whose_names_hold_an_arrow_reads_dirty(tmp_path: Path) -> None:
     """D2: the rename split at the arrow inside the quotes and never named the subject."""
     repo = tmp_path / "repo"
@@ -736,6 +753,7 @@ def test_a_wholly_untracked_target_under_a_repository_subdirectory_reads_dirty(t
     assert _clean_at_start(target, "skills/OTHER.md") is False
 
 
+@windows_invalid_filename
 def test_hook_snapshot_reads_a_renamed_subject_with_an_arrow_as_dirty(hook_target: Path) -> None:
     (hook_target / "a -> b.txt").write_text("a\n")
     _commit_all(hook_target, "add")
@@ -758,6 +776,7 @@ def test_an_older_status_format_never_reads_clean() -> None:
     assert "start_git" not in binding
 
 
+@posix_manifest_digest
 def test_work_session_receipt_against_an_older_session_payload_fails_closed(hook_target: Path, monkeypatch) -> None:
     target = hook_target
     assert work_cmd.start(target=target, title="legacy") == 0
@@ -776,6 +795,7 @@ def test_work_session_receipt_against_an_older_session_payload_fails_closed(hook
     assert _project(target, receipt).eligible is False
 
 
+@posix_manifest_digest
 def test_work_after_a_clear_produces_a_trial(hook_target: Path, monkeypatch) -> None:
     """D3: a task-epoch reset left the state without a start, so the new task could never score."""
     _session_start(hook_target, SESSION_ID, source="startup")
@@ -786,6 +806,7 @@ def test_work_after_a_clear_produces_a_trial(hook_target: Path, monkeypatch) -> 
     assert _as_session(hook_target, monkeypatch) == "eligible"
 
 
+@posix_manifest_digest
 def test_an_eligible_receipt_stays_eligible_after_a_later_clear(hook_target: Path, monkeypatch) -> None:
     """D3: the receipt is bound to the start it was made under, and that start outlives the reset."""
     _session_start(hook_target, SESSION_ID, source="startup")
@@ -862,6 +883,7 @@ def test_a_non_regular_foreign_state_entry_fails_closed(hook_target: Path, monke
     assert reason == "concurrent_session_ownership"
 
 
+@posix_permissions
 def test_an_unreadable_foreign_state_file_fails_closed(hook_target: Path, monkeypatch) -> None:
     def damage(sessions: Path) -> None:
         foreign = sessions / "foreign.json"
@@ -892,6 +914,7 @@ def test_a_foreign_state_file_that_cannot_be_statted_fails_closed(hook_target: P
     assert reason == "concurrent_session_ownership"
 
 
+@posix_manifest_digest
 def test_an_old_malformed_state_file_outside_the_window_does_not_veto(hook_target: Path, monkeypatch) -> None:
     def damage(sessions: Path) -> None:
         old = sessions / "foreign.json"
