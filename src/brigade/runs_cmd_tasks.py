@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
+import stat
 import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -21,8 +24,11 @@ from . import run_tasks as tasks
 
 RUN_TASKS_SCHEMA = "brigade.runs_tasks.v1"
 POLL_INTERVAL_SECONDS = 0.5
+# A refusal that persists this many polls is reported instead of waited out.
+MAX_CONSECUTIVE_READ_ERRORS = 20
 MAX_KNOWN_TASK_IDS = 10
 _SIDECAR_CHUNK_BYTES = 1024 * 1024
+_SIDECAR_MAX_BYTES = 64 * 1024 * 1024
 
 _COLUMNS = (
     ("task", "task_id", 24),
@@ -114,7 +120,7 @@ def _resolve(run: str | Path, *, cwd: Path, runs_dir: Path | None) -> Path | Non
 
 def _read(run_dir: Path) -> tuple[tasks.TaskResult, ...] | None:
     if not _journal_present(run_dir):
-        _fail("no-task-journal", f"no task journal in {run_dir}")
+        _fail("no-task-journal", f"no task journal in run {run_dir.name}")
         return None
     try:
         return tasks.read_tasks(run_dir)
@@ -135,15 +141,26 @@ def _result_sidecar(run_dir: Path, task_id: str) -> tuple[str | None, str | None
     """The batch result receipt reference and digest, when that file exists."""
     name = f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
     path = run_dir / name
-    if not run_journal.bound_is_file(path):
-        return None, None
     digest = hashlib.sha256()
     try:
-        with path.open("rb") as handle:
+        # Never follow a symlink out of the run directory, and only hash a
+        # regular file of bounded size.
+        fd = run_journal._open_nofollow(path, os.O_RDONLY)
+    except (OSError, run_journal.RunJournalError):
+        return None, None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _SIDECAR_MAX_BYTES:
+            return None, None
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
             for chunk in iter(lambda: handle.read(_SIDECAR_CHUNK_BYTES), b""):
                 digest.update(chunk)
     except OSError:
         return None, None
+    finally:
+        if fd >= 0:
+            os.close(fd)
     return name, digest.hexdigest()
 
 
@@ -273,20 +290,21 @@ def wait_tasks(
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """Wait for named tasks (default all) to be terminal. Never mutates anything."""
-    if interval <= 0:
+    if not math.isfinite(interval) or interval <= 0:
         return _fail("invalid-interval", "poll interval must be greater than zero")
-    if timeout is not None and timeout < 0:
+    if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
         return _fail("invalid-timeout", "timeout must not be negative")
     run_dir = _resolve(run, cwd=cwd, runs_dir=runs_dir)
     if run_dir is None:
         return 2
     if not _journal_present(run_dir):
-        return _fail("no-task-journal", f"no task journal in {run_dir}")
+        return _fail("no-task-journal", f"no task journal in run {run_dir.name}")
 
     selected = list(dict.fromkeys(task_ids))
     deadline = None if timeout is None else monotonic() + timeout
     latest: list[TaskRow] | None = None
     last_error: tasks.TaskJournalError | None = None
+    consecutive_errors = 0
     while True:
         try:
             results = tasks.read_tasks(run_dir)
@@ -295,12 +313,19 @@ def wait_tasks(
             # checkpoint and its fact. Keep waiting; a persistent refusal is
             # reported instead of being mistaken for a timeout.
             last_error = exc
+            consecutive_errors += 1
             if not _journal_present(run_dir):
-                return _fail("no-task-journal", f"no task journal in {run_dir}")
+                return _fail("no-task-journal", f"no task journal in run {run_dir.name}")
+            if consecutive_errors >= MAX_CONSECUTIVE_READ_ERRORS:
+                return _fail("task-journal-unreadable", str(exc))
         else:
             last_error = None
+            consecutive_errors = 0
             by_id = {result.handle.spec.task_id: result for result in results}
             watched = selected or list(by_id)
+            if not watched:
+                # Nothing accepted yet is not "all terminal".
+                return _fail("no-tasks", "the run has no accepted tasks to wait for")
             unknown = [task_id for task_id in watched if task_id not in by_id]
             if unknown:
                 return _unknown(unknown[0], by_id)

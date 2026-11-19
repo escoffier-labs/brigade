@@ -91,8 +91,14 @@ non-terminal ids listed. `waiting-for-children`, `waiting-for-input` and
 `unknown` are not terminal. A timeout records nothing and never cancels or
 changes execution. JSON output uses `brigade.runs_tasks.v1`.
 
-Task status is read-only: the verbs append no journal facts and take no write
-lock.
+The verbs append no journal facts and change no task state. Each read uses the
+same verified reader as the `brigade t3` verbs: it holds the journal lock for
+the length of one read and confirms the journal head is durable, so it never
+folds a half-written fact. A run directory on a read-only filesystem therefore
+cannot be read yet. `wait` with no `--timeout` reports `task-journal-unreadable`
+after 20 consecutive refused reads, and refuses with `no-tasks` when the run has
+no accepted tasks. The result receipt is hashed only when it is a regular file
+under 64 MiB, opened without following a symlink.
 
 
 ## Durable task control requests

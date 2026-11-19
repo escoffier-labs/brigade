@@ -295,3 +295,56 @@ def test_terminal_states_come_from_the_shared_journal_definition():
     assert task_journal.TERMINAL == frozenset({"completed", "failed", "interrupted", "cancelled"})
     for status in ("waiting-for-children", "unknown", "waiting-for-input", "queued", "running"):
         assert status not in task_journal.TERMINAL
+
+
+def test_show_refuses_a_symlinked_result_sidecar(populated, tmp_path, capsys):
+    run_dir, _workspace = populated
+    sidecar = run_dir / f"batch-result-{hashlib.sha256(b'done').hexdigest()}.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"secret": true}')
+    sidecar.unlink()
+    sidecar.symlink_to(outside)
+
+    assert cli.main(["runs", "tasks", "show", str(run_dir), "done", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task"]["result_ref"] is None
+    assert payload["task"]["result_sha256"] is None
+
+
+def test_wait_with_no_accepted_tasks_refuses_instead_of_succeeding(task_run, monkeypatch, capsys):
+    run_dir, workspace = task_run
+    _accept(run_dir, workspace, "only")
+    monkeypatch.setattr(tasks, "read_tasks", lambda _run_dir: ())
+    assert cli.main(["runs", "tasks", "wait", str(run_dir), "--timeout", "0"]) == 2
+    assert "no-tasks" in _output(capsys.readouterr())
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-1"])
+def test_wait_rejects_a_non_finite_or_negative_timeout(populated, value, capsys):
+    run_dir, _workspace = populated
+    assert cli.main(["runs", "tasks", "wait", str(run_dir), "queued", "--timeout", value]) == 2
+    assert "invalid-timeout" in _output(capsys.readouterr())
+
+
+def test_wait_without_timeout_reports_a_persistent_journal_refusal(populated, monkeypatch, capsys):
+    run_dir, _workspace = populated
+    calls = []
+
+    def refuse(_run_dir):
+        calls.append(1)
+        raise tasks.TaskJournalError("task journal has no recovery checkpoint")
+
+    monkeypatch.setattr(tasks, "read_tasks", refuse)
+    code = runs_cmd_tasks.wait_tasks(str(run_dir), ["queued"], cwd=run_dir, sleep=lambda _s: None)
+    assert code == 2
+    assert len(calls) == runs_cmd_tasks.MAX_CONSECUTIVE_READ_ERRORS
+    assert "task-journal-unreadable" in _output(capsys.readouterr())
+
+
+def test_missing_journal_message_names_the_run_not_its_path(populated, capsys):
+    run_dir, _workspace = populated
+    (run_dir / "events" / "lifecycle.jsonl").unlink()
+    assert cli.main(["runs", "tasks", "list", str(run_dir)]) == 2
+    output = _output(capsys.readouterr())
+    assert run_dir.name in output
+    assert str(run_dir.parent) not in output
