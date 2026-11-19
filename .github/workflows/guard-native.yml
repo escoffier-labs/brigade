@@ -63,7 +63,17 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Rust checks and release build
         run: TMPDIR=$(mktemp -d -p /tmp) brigade work verify run --target . --argv-json '["./scripts/verify-rust-guard"]' --capture brigade-work
+      - name: Fetch release tags
+        # verify-guard-native runs the shipped-file history check, which is strict in GitHub
+        # Actions and verifies digests against the tags that shipped them. The checkout is shallow
+        # and carries no tags.
+        run: git fetch --force --depth=1 origin 'refs/tags/v*:refs/tags/v*'
+      - name: Fetch shipped file history base
+        # The same check compares the manifest with the base branch, so fetch that ref here.
+        run: git fetch --no-tags --depth=1 origin '+refs/heads/${{ github.base_ref || 'main' }}:refs/remotes/origin/${{ github.base_ref || 'main' }}'
       - name: Python parity both ways and all guard tests with native enabled
+        env:
+          BRIGADE_SHIPPED_HISTORY_BASE_REF: origin/${{ github.base_ref || 'main' }}
         run: TMPDIR=$(mktemp -d -p /tmp) brigade work verify run --target . --argv-json '["./scripts/verify-guard-native"]' --timeout 1800 --capture brigade-work
       # Smoke only: proves the benchmark builds and runs on tiny inputs and
       # that the three backends agree. The cap catches a hang. No timing
