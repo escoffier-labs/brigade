@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._home import set_home
+
 from brigade import run_batch_execute, run_batch_workspace as workspace, runguard
 from brigade import run_tasks as tasks
 from tests import test_run_tasks as journal_support
@@ -75,7 +77,7 @@ class Sandbox:
 def sandbox(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     repo = tmp_path / "repo"
     base_sha = _init_repo(repo)
     assert workspace.cache_root() == (home / ".cache" / "brigade" / "worktrees").resolve()
@@ -98,7 +100,7 @@ def test_hostile_task_ids_stay_direct_children_of_the_cache_root(sandbox, task_i
 def test_overlap_refuses_a_repo_root_above_the_cache_root(sandbox, monkeypatch):
     inside = sandbox.repo / "home"
     inside.mkdir()
-    monkeypatch.setenv("HOME", str(inside))
+    set_home(monkeypatch, inside)
     path = workspace.expected_path(sandbox.repo, "run-one", "one")
     assert path.parent != sandbox.cache_root
     with pytest.raises(workspace.WorkspaceError) as refused:
@@ -161,6 +163,7 @@ def test_reserve_refuses_an_existing_reservation_without_touching_it(sandbox):
     assert not path.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink and shell semantics required")
 def test_validate_refuses_a_symlink_at_the_expected_path(sandbox):
     path = sandbox.path_for("one")
     elsewhere = path.parent / "elsewhere"
@@ -353,6 +356,7 @@ def test_equal_repo_names_in_different_places_get_different_paths(sandbox, tmp_p
     assert workspace.expected_path(other, "run-one", "one") != sandbox.path_for("one")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink and shell semantics required")
 def test_reserve_refuses_a_dangling_symlink_without_following_it(sandbox, tmp_path):
     path = sandbox.path_for("one")
     outside = tmp_path / "outside"
@@ -390,6 +394,7 @@ def test_validate_refuses_when_git_status_fails(sandbox, monkeypatch):
     assert (refused.value.code, refused.value.reason) == (workspace.WORKSPACE_INVALID, "status-unreadable")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink and shell semantics required")
 def test_validate_does_not_run_a_worktree_fsmonitor_or_inherit_git_dir(sandbox, tmp_path, monkeypatch):
     binding = sandbox.bind("one")
     marker = tmp_path / "fsmonitor-ran"
