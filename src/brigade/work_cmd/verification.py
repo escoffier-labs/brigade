@@ -30,6 +30,7 @@ from .. import (
 )
 from .. import verification_contract, verify_manifest, verify_trial
 from ..agent_identity import stamp_verify_identity as _stamp_harness_session
+from ..claude_hooks import producer_session as hook_producer
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -407,6 +408,7 @@ def _build_subject_binding(
         session_id = str(session_payload["id"])
     else:
         session_id = _active_work_session_id(target)
+    session_id, session_payload = hook_producer.resolve_session(target, session_id, session_payload)
     binding["producer_binding"] = verify_trial.build_producer_binding(
         session_id=session_id,
         session_payload=session_payload,

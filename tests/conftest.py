@@ -169,6 +169,16 @@ def _isolate_orchestrator_run_id(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_native_claude_session(monkeypatch):
+    """A suite run from inside Claude Code must not read that session's own id.
+
+    Receipt identity and the manifest producer resolve a session from it (#2589).
+    Tests that need one set ``CLAUDE_CODE_SESSION_ID`` explicitly.
+    """
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_fleet_hub(monkeypatch):
     """Never let an operator's exported fleet hub leak into the suite.
 

@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import generated_patch_quarantine, localio, verify_manifest
+from . import agent_identity, generated_patch_quarantine, localio, outcome_attribution, verify_manifest
+from .claude_hooks import producer_session as hook_producer
 
 VERIFY_INFRASTRUCTURE_FAILURE_CLASSES = frozenset(
     {
@@ -276,6 +277,8 @@ def start_git_dirty_files_fingerprint(dirty_files: object) -> str | None:
 
 
 def load_work_session_payload(target: Path, session_id: str) -> dict[str, Any] | None:
+    if hook_producer.fingerprint_from_producer_id(session_id) is not None:
+        return hook_producer.load_payload(target, session_id)
     session_json = target / ".brigade" / "work" / session_id / "session.json"
     try:
         payload = json.loads(session_json.read_text())
@@ -433,11 +436,19 @@ def subject_hash_for_path(target: Path, subject_path: str) -> str | None:
 
 
 def verifier_session_id() -> str | None:
-    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
-    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
-        return claude_session
+    """The verifying session: the hook-printed Claude session, else an explicit override, else the ambient one.
+
+    One resolver names the Claude session for the verifier id and for the receipt's
+    ``harness_session`` stamp (``agent_identity.claude_session_fingerprint``), so a
+    typed verify that found its session through ``CLAUDE_CODE_SESSION_ID`` is the
+    same session in both places and is never counted as an independent verifier of
+    its own edit.
+    """
+    explicit = os.environ.get(outcome_attribution.CLAUDE_SESSION_ENV, "")
+    if explicit and re.fullmatch(r"[0-9a-f]{16}", explicit):
+        return explicit
     override = os.environ.get("BRIGADE_VERIFY_SESSION_ID", "").strip()
-    return override or None
+    return override or agent_identity.claude_session_fingerprint()
 
 
 def _verifier_session_id() -> str | None:
@@ -765,7 +776,7 @@ def project_trial(
                 or not verifier_session
                 or not isinstance(producer_session, str)
                 or not producer_session
-                or verifier_session == producer_session
+                or hook_producer.same_session(producer_session, verifier_session)
             ):
                 return TrialProjection(eligible=False, reason="verifier_not_independent", attributed=True)
             quarantine_reason = generated_patch_quarantine.generated_patch_eligibility_reason(binding, receipt)

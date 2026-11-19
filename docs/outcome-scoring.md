@@ -145,6 +145,29 @@ so it is forgeable. It may only veto, never promote:
   `subject_binding`. They never read `session_observed` rows, and promotion
   stays verifier-only (see [skill scorecards](proposals/skill-scorecards.md)).
 
+## Producer session for a manifest trial
+
+A patch-backed manifest receipt scores only when it names the session that produced the edit
+and that session's start-of-session dirty files, so a subject that was already dirty, or that
+another session owns, is rejected (`subject_pre_existing_dirty`, `concurrent_session_ownership`).
+`brigade work verify run --manifest ...` resolves that producer in this order:
+
+1. The active `brigade work start` session, as before. It always wins.
+2. Otherwise the single hook-enabled Claude session the verify runs in, named
+   `claude-hook:<fingerprint>`. The hook records the target's dirty files in that session's state
+   when it first creates it (`start.git.dirty_files`, see
+   [session state](claude-hook-session-state.md#hook-session-as-the-producer-of-a-manifest-trial)).
+   The session comes from `BRIGADE_CLAUDE_SESSION` or from Claude Code's own `CLAUDE_CODE_SESSION_ID`.
+   It is never named from a bare `BRIGADE_AGENT_SESSION`, when that value disagrees with
+   `CLAUDE_CODE_SESSION_ID`, or inside a `brigade run` worker.
+3. Otherwise `producer_session_missing`, so a plain shell or a Codex repo scores nothing.
+
+The same resolver stamps the receipt's `harness_session` and the verifier id, so a verify typed in a
+session counts as that session's own receipt for the Stop gate. A `worktree` patch has no
+independent-verifier rule, so a session may verify its own edit and score it. Only a `generated`
+patch must be verified by a different session, and a session never counts as independent of its own
+`claude-hook:<fingerprint>` producer id.
+
 ## Weekly ratchet report
 
 `outcome reconcile` prints its decisions and then forgets them. The weekly memory-care ratchet runs it as a dry run, so a skill held for "withheld: verified regression present" left no structured trace. `--report` writes one small file per run:

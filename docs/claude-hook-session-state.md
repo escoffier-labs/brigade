@@ -114,6 +114,23 @@ same file-only rules). The attribution is forgeable and veto-only; see
 resolved, `--capture auto` falls back to `brigade-work` as a caller-typed
 capture.
 
+## Hook session as the producer of a manifest trial
+
+Ordinary Claude Code sessions never run `brigade work start`, so a manifest verify receipt had no
+producer session. When the hook creates a session's state for the first time it also records
+`start.git.dirty_files`, the output of one `git status --short` lines in the shape a work session
+records. The call is bounded (2 second timeout, at most 512 lines of 1024 characters each) and fails
+open: on a git error, a timeout, or a larger list nothing is recorded, never a truncated list, and that
+session cannot produce trials. The snapshot is taken once, at creation. State normalization keeps it
+unchanged through later events, and a new task epoch under a reused session id drops it.
+
+`brigade work verify run --manifest` reads it back when no work session is active and the verify
+resolves exactly one Claude session (`BRIGADE_CLAUDE_SESSION`, else `CLAUDE_CODE_SESSION_ID`, with a disagreeing `BRIGADE_AGENT_SESSION` or a worker naming none). The producer
+id is `claude-hook:<fingerprint>`, which a work session id (it starts with a timestamp) cannot equal.
+Exactly one state in this target must match the fingerprint and name this target, and it must carry
+a valid snapshot, otherwise there is no producer. The ownership checks in `verify_trial` then run
+unchanged against that snapshot. See [outcome scoring](outcome-scoring.md#producer-session-for-a-manifest-trial).
+
 ## Native Windows qualification
 
 `tests/test_claude_hooks_state_containment.py` uses directory junctions on

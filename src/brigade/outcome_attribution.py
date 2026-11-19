@@ -127,7 +127,12 @@ def skill_ids_from_read_files(read_files: object) -> list[str]:
 
 
 def _iter_states(target: Path) -> Iterator[dict[str, Any]]:
-    """Session state files, newest first, one parse at a time. Regular files only, size capped, never followed."""
+    """Session state files, newest first, one parse at a time.
+
+    Regular files only, never followed. A file over ``MAX_STATE_BYTES`` is skipped, and only the
+    ``MAX_STATES_SCANNED`` most recently modified files are read, so an older session's state
+    can fall out of view in a target with many sessions.
+    """
     try:
         with anchored_io.session_directory(target) as anchor:
             names = [name for name in dirfd.child_names(anchor.fd, sys.maxsize) if name.endswith(".json")]
@@ -165,7 +170,12 @@ def target_known_skill_ids(target: Path) -> set[str]:
 
 
 def _state_matches(state: Mapping[str, Any], fingerprint: str) -> bool:
-    """Match the fingerprint and, when the state names its session id, that id's hash too."""
+    """Match the fingerprint and, when the state names its session id, that id's hash too.
+
+    A ``session_id`` that is not the string the fingerprint was hashed from (a number, or an empty
+    string) never matches. Only a state whose ``session_id`` is absent or null is matched on the
+    fingerprint alone.
+    """
     if state.get("session_fingerprint") != fingerprint:
         return False
     session_id = state.get("session_id")

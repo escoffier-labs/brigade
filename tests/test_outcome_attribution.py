@@ -985,3 +985,14 @@ def test_route_and_capability_breakdowns_exclude_observed_helped():
     [capability] = outcome_cmd._capability_breakdown(rows) or []
     for group in (routed, capability):
         assert (group["helped"], group["hurt"]) == (1, 1)
+
+
+def test_state_match_needs_the_session_id_the_fingerprint_was_hashed_from() -> None:
+    fingerprint = _native_fingerprint()
+    base = {"session_fingerprint": fingerprint}
+    assert outcome_attribution._state_matches({**base, "session_id": NATIVE_ID}, fingerprint)
+    assert outcome_attribution._state_matches(base, fingerprint)
+    assert outcome_attribution._state_matches({**base, "session_id": None}, fingerprint)
+    assert not outcome_attribution._state_matches({**base, "session_id": ""}, fingerprint)
+    assert not outcome_attribution._state_matches({**base, "session_id": 123}, fingerprint)
+    assert not outcome_attribution._state_matches({**base, "session_id": "another-session"}, fingerprint)

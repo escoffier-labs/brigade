@@ -113,11 +113,34 @@ def for_verify_run(target: Path, environ: Mapping[str, str] | None = None) -> Ag
     return AgentIdentity(**map_identity(harness, model, UNKNOWN), harness_source=harness_source, model_source=source)
 
 
+def claude_session_fingerprint(environ: Mapping[str, str] | None = None) -> str | None:
+    """The one Claude session this process may claim, or ``None``.
+
+    The hook-printed ``BRIGADE_CLAUDE_SESSION`` wins alone. Otherwise Claude Code's own
+    ``CLAUDE_CODE_SESSION_ID`` names it, outside a ``brigade run`` worker, and a
+    ``BRIGADE_AGENT_SESSION`` that disagrees with it names nothing (#2589). A bare ambient
+    ``BRIGADE_AGENT_SESSION`` proves no Claude session, so it names nothing either.
+
+    The receipt's ``harness_session`` stamp, the verifier id in ``verify_trial`` and the
+    manifest producer in ``claude_hooks.producer_session`` all read this, so a verify typed
+    in a session counts as that session's own receipt and as that session's own verifier.
+    """
+    from . import outcome_attribution
+
+    environ = os.environ if environ is None else environ
+    fingerprint = outcome_attribution.session_fingerprint_from_env(environ)
+    if fingerprint is None:
+        return None
+    if environ.get(outcome_attribution.CLAUDE_SESSION_ENV) or environ.get(outcome_attribution.NATIVE_SESSION_ENV):
+        return fingerprint
+    return None
+
+
 def stamp_verify_identity(receipt: dict[str, Any], target: Path) -> None:
     """Stamp identity before signing; preserve strict harness-session matching."""
     receipt["agent_identity"] = for_verify_run(target).as_dict()
-    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
-    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
+    claude_session = claude_session_fingerprint()
+    if claude_session:
         receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
 
 

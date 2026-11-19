@@ -33,6 +33,7 @@ from . import (
     hub_recall,
     manifest_loop,
     presence,
+    producer_session,
     skill_invocations,
     verification_mode,
     write_attribution,
@@ -1982,6 +1983,7 @@ def _normalize_state(
         check_events.restore_identity(normalized, payload)
         return normalized
     check_events.restore_identity(normalized, payload)
+    producer_session.restore_start(normalized, payload)
     now = localio.utc_now()
     started = localio.parse_iso_datetime(payload.get("started_at"))
     if started is not None and started <= now:
@@ -2275,6 +2277,8 @@ def _handle_event(
     # No tool runs inside one hook event, so its fingerprints are reused within it.
     event_fingerprint = functools.cache(repo_worktree_fingerprint)
     state = _normalize_state(target, session_id, persisted_state, task_epoch=task_epoch, fingerprint=event_fingerprint)
+    if persisted_state is None:
+        producer_session.stamp_start(state, target)
     if persisted_state != state:
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
     if event not in {"Stop", "SessionEnd"}:
