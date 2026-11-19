@@ -447,17 +447,19 @@ _HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain
 _JS_RECEIVER = r"(?:(?:args|argv|options|opts|params|props|this|globalThis)|process\.env)"
 
 
-def _whole_fstring_field(before: str, after: str) -> bool:
-    """Whether a match is the entire expression of one f-string field."""
-    opener = before.rstrip()
-    braces = len(opener) - len(opener.rstrip("{"))
-    # '{{' is a literal brace, so only an odd run opens a replacement field.
-    if braces % 2 == 0:
-        return False
-    stem = opener[:-braces]
+def _brace_run_before(text: str, index: int) -> int:
+    """Number of consecutive '{' immediately before `index`."""
+    prefix = text[:index]
+    return len(prefix) - len(prefix.rstrip("{"))
+
+
+def _fstring_literal_still_open(stem: str, index: int) -> bool:
+    """Whether text before `index` sits in an open f-string literal in code position.
+
+    Shared by the whole-field and sub-expression paths: an opener in prose,
+    another string, a line-start comment or a block comment keeps detection.
+    """
     match = _FSTRING_OPEN.search(stem) or _FSTRING_QUOTED_FIELD_OPEN.search(stem)
-    # The prefix must start a literal in an expression position, not in prose,
-    # another string, or a comment, and the literal must still be open at the brace.
     if match is None or not _FSTRING_POSITION.search(stem[: match.start()]):
         return False
     # `_quote_at` stops at '#' and '//' comments but not at a trailing '/*'.
@@ -465,7 +467,18 @@ def _whole_fstring_field(before: str, after: str) -> bool:
         return False
     if stem.lstrip().startswith(_LINE_START_COMMENT_PREFIXES) or _quote_at(stem, match.start(), None) is not None:
         return False
-    return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
+    return _quote_at(stem, index, None) is not None
+
+
+def _whole_fstring_field(before: str, after: str) -> bool:
+    """Whether a match is the entire expression of one f-string field."""
+    opener = before.rstrip()
+    braces = _brace_run_before(opener, len(opener))
+    # '{{' is a literal brace, so only an odd run opens a replacement field.
+    if braces % 2 == 0:
+        return False
+    stem = opener[:-braces]
+    return _fstring_literal_still_open(stem, len(stem)) and bool(_FIELD_CLOSE.match(after))
 
 
 # The last single '{' whose text to the end has no brace: an open field. A
@@ -475,41 +488,62 @@ _FSTRING_OPEN_FIELD = re.compile(r"\{(?!\{)[^{}]*$")
 _FSTRING_NESTED_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*\{$""")
 
 
+def _format_spec_started(code: str) -> bool:
+    """Whether a top-level ':' or '!' starts a format spec or conversion."""
+    depth = 0
+    quote: str | None = None
+    escape = False
+    for char in code:
+        if quote is not None:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "'\"":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(depth - 1, 0)
+        elif depth == 0 and char in ":!":
+            return True
+    return False
+
+
 def _fstring_expression_host(before: str) -> bool:
     """Whether a host begins a bare sub-expression inside an f-string field.
 
     Call arguments, subscripts, boolean operands and nested f-string fields put
-    the host in code. A quote opened inside the field, a closed field, a format
-    spec, URL text or a prose position keeps the existing hostname detection.
+    the host in code. An escaped brace, a quote opened in the field, a format
+    spec, a comment or URL text keeps the existing hostname detection.
     """
     stem = before.rstrip()
     nested = _FSTRING_NESTED_OPEN.search(stem)
     if nested is not None:
-        outer = stem[: nested.start()]
-        braces = len(outer) - len(outer.rstrip("{"))
+        braces = _brace_run_before(stem, len(stem))
         if braces % 2 == 0:
             return False
-        outer = outer[:-1]
-        opener = _FSTRING_OPEN.search(outer) or _FSTRING_QUOTED_FIELD_OPEN.search(outer)
-        if opener is None or not _FSTRING_POSITION.search(outer[: opener.start()]):
+        outer = stem[: nested.start()]
+        outer_braces = _brace_run_before(outer, len(outer))
+        if outer_braces % 2 == 0:
             return False
-        if _quote_at(outer, opener.start(), None) is not None:
-            return False
-        return _quote_at(outer, len(outer), None) is not None
+        outer_stem = outer[:-outer_braces]
+        return _fstring_literal_still_open(outer_stem, len(outer_stem))
     match = _FSTRING_OPEN_FIELD.search(stem)
     if match is None:
         return False
+    # The matched brace must be the odd one in its run, not the second of '{{'.
+    if _brace_run_before(stem, match.start()) % 2 != 0:
+        return False
     code = stem[match.start() + 1 :]
-    # A format spec or a URL in the field text is not an expression operand.
-    if not code or "://" in code or code.rstrip().endswith(":") or _quote_at(code, len(code), None) is not None:
+    # A URL or a format spec in the field text is not an expression operand.
+    if not code or "://" in code or _format_spec_started(code) or _quote_at(code, len(code), None) is not None:
         return False
     prefix = stem[: match.start()]
-    opener = _FSTRING_OPEN.search(prefix) or _FSTRING_QUOTED_FIELD_OPEN.search(prefix)
-    if opener is None or not _FSTRING_POSITION.search(prefix[: opener.start()]):
-        return False
-    if _quote_at(prefix, opener.start(), None) is not None:
-        return False
-    return _quote_at(prefix, len(prefix), None) is not None
+    return _fstring_literal_still_open(prefix, len(prefix))
 
 
 _JS_WORD = re.compile(r"[A-Za-z_$][\w$]*")
