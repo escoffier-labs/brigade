@@ -1,0 +1,4 @@
+- Keep the real conflict or projection reason when the automatic recovery hold marker cannot be written, and report `automatic hold not recorded` with the write error instead of a generic unreadable-operations message (#2637).
+- Record the blocking operation id and status in the `automatic-hold` marker, and echo them in the held reason on later runs (#2637).
+- Treat a symlink at the hold marker path as held, so a dangling link cannot look like a cleared hold (#2637).
+- Clear the hold marker only when named recovery commits or abandons the decision, and report holds made by `plan-fixes --apply` in its result and summary line (#2637).

@@ -253,8 +253,17 @@ def apply_fixes(
     result: dict[str, Any] = dict(applied=0, skipped=0, decision_ids=[], reasons={})
     if not load_config(target).enabled:
         return result
+    recovery: list[dict[str, Any]] = []
     if not dry_run:
-        journal.resolve_prepared(target, automatic=True)
+        recovery = journal.resolve_prepared(target, automatic=True)
+        # A hold made here used to wait for the next tend before anyone saw it.
+        if recovery:
+            result["recovery"] = recovery
+            result["operator_recovery"] = [
+                f"brigade memory care recover {item['decision_id']} --target ."
+                for item in recovery
+                if item["phase"] == "operator_required"
+            ]
     if plan is None:
         try:
             plan = plan_payload(target, config, care._scan_payload(target, config))
@@ -319,4 +328,6 @@ def apply_fixes(
 
 def summary(payload: dict[str, Any]) -> str:
     reasons = ",".join(f"{key}={value}" for key, value in sorted(payload["reasons"].items())) or "none"
-    return f"memory care fixes: applied={payload['applied']} skipped={payload['skipped']} reasons={reasons}"
+    line = f"memory care fixes: applied={payload['applied']} skipped={payload['skipped']} reasons={reasons}"
+    held = len(payload.get("operator_recovery", []))
+    return f"{line} operator_required={held}" if held else line
