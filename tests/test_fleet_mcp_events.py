@@ -919,6 +919,110 @@ def test_verified_secret_rotation_resets_a_nonzero_failure_streak(stations, rece
     assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(2,)]
 
 
+def interleave_before_store(monkeypatch, action: Any) -> list[bool]:
+    """Run ``action`` once, after the refresh's read-only lookup and before its write transaction.
+
+    A refresh that skipped callback verification decides on the row it read during the lookup. To reproduce
+    #2000 the action changes the stored row in that gap, by a real dispatcher tick or a concurrent write.
+    """
+    real = fleet_hub_messages._as_active_principal
+    fired: list[bool] = []
+
+    def wrapper(conn, principal, operation, *, read_only=False, connection_state=None):
+        if not read_only and not fired:
+            fired.append(True)
+            action()
+        return real(conn, principal, operation, read_only=read_only, connection_state=connection_state)
+
+    monkeypatch.setattr(fleet_hub_messages, "_as_active_principal", wrapper)
+    return fired
+
+
+def test_a_refresh_cannot_recreate_a_subscription_the_dispatcher_dropped(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    subscribe(stations[1], receiver.url)
+    receiver.status = 400
+    for _ in range(9):
+        send(stations[0], NODE_B)
+        tick(db)
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(9,)]
+    send(stations[0], NODE_B)
+    before = rows(db, "SELECT generation FROM fleet_event_subscriptions")[0][0]
+    fired = interleave_before_store(monkeypatch, lambda: tick(db))
+    assert "result" in subscribe(stations[1], receiver.url), "a re-registration after a fresh challenge succeeds"
+    assert fired
+    assert rows(db, "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(1,)], "the tenth failure dropped the row"
+    assert len(receiver.challenges) == 2, "the replacement subscription cannot reuse the refresh's skipped check"
+    stored = rows(db, "SELECT secret, failures, generation FROM fleet_event_subscriptions")
+    assert stored == [(SECRET, 0, stored[0][2])]
+    assert stored[0][2] != before, "the replacement is a new subscription, not the dropped one"
+
+
+def test_a_refresh_cannot_recreate_a_dropped_subscription_when_verification_fails(
+    stations, receiver, hub, monkeypatch
+) -> None:
+    _base, _ta, _tb, db = hub
+    subscribe(stations[1], receiver.url)
+    receiver.status = 400
+    for _ in range(9):
+        send(stations[0], NODE_B)
+        tick(db)
+    send(stations[0], NODE_B)
+    receiver.challenge_mode = "wrong"
+    fired = interleave_before_store(monkeypatch, lambda: tick(db))
+    reply = subscribe(stations[1], receiver.url)
+    assert fired
+    assert reply["error"]["data"]["reason"] == "challenge_mismatch"
+    assert len(receiver.challenges) == 2, "the refresh had to ask for a new challenge"
+    assert rows(db, "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(0,)], "no unverified row is recreated"
+
+
+def test_a_refresh_racing_a_rotation_cannot_rekey_without_a_challenge(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    subscribe(stations[1], receiver.url)
+    state = {"busy": False, "rotated": False}
+
+    def rotate() -> None:
+        if state["busy"] or state["rotated"]:
+            return
+        state["busy"] = True
+        try:
+            assert "result" in subscribe(stations[1], receiver.url, secret=OTHER_SECRET)
+        finally:
+            state["busy"] = False
+        state["rotated"] = True
+
+    fired = interleave_before_store(monkeypatch, rotate)
+    assert "result" in subscribe(stations[1], receiver.url), "the refresh re-keys only after a fresh challenge"
+    assert fired
+    assert len(receiver.challenges) == 3, "creation, rotation, and the refreshed old secret are each verified"
+    stored = rows(db, "SELECT secret, previous_secret, failures FROM fleet_event_subscriptions")
+    assert stored == [(SECRET, OTHER_SECRET, 0)], "the racing refresh kept a verified rotation window"
+
+
+def test_a_refresh_racing_expiry_cannot_recreate_without_a_challenge(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    first = subscribe(stations[1], receiver.url)["result"]["id"]
+    before = rows(db, "SELECT generation FROM fleet_event_subscriptions")[0][0]
+
+    def lapse() -> None:
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("UPDATE fleet_event_subscriptions SET expires_at=? WHERE id=?", (time.time() - 1, first))
+            conn.commit()
+        finally:
+            conn.close()
+
+    fired = interleave_before_store(monkeypatch, lapse)
+    reply = subscribe(stations[1], receiver.url)
+    assert fired
+    assert "result" in reply and reply["result"]["id"] == first
+    assert len(receiver.challenges) == 2, "a lapsed row is a new subscription and needs its own challenge"
+    stored = rows(db, "SELECT failures, generation FROM fleet_event_subscriptions")
+    assert stored[0][0] == 0
+    assert stored[0][1] != before, "the lapsed row is replaced by a new generation"
+
+
 def test_connection_time_policy_rejection_is_permanent(stations, receiver, hub) -> None:
     _base, _ta, _tb, db = hub
     subscribe(stations[1], receiver.url)
