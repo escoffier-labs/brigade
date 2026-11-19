@@ -178,6 +178,8 @@ A check record shows what ran. It does not show that the tests are good. A hando
 
 Questions and ideas: [Discussions](https://github.com/escoffier-labs/brigade/discussions).
 
+BrigadeStack is built by [Escoffier Labs](https://escoffierlabs.dev). Principal engineer: [Solomon Neas](https://solomonneas.dev).
+
 The Python CLI may send a passive version request. [Telemetry](https://github.com/escoffier-labs/brigade/blob/main/docs/telemetry.md) lists its fields and opt-outs.
 
 <details>

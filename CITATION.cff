@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you cite BrigadeStack, please use this metadata."
+title: "BrigadeStack"
+abstract: "A coordination layer for AI coding agents: shared memory, MCP servers and skills across agent tools, with verification receipts."
+type: software
+authors:
+  - family-names: Neas
+    given-names: Solomon
+    website: "https://solomonneas.dev"
+    affiliation: "Escoffier Labs"
+repository-code: "https://github.com/escoffier-labs/brigade"
+url: "https://brigadestack.com"
+license: MIT
+keywords:
+  - ai-agents
+  - coding-agents
+  - mcp
+  - agent-memory
