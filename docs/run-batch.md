@@ -8,6 +8,9 @@ Without `--dry-run`, the command executes through the existing run orchestrator.
 Use `--cwd WORKSPACE` and optionally `--roster ROSTER.toml`. Execution makes no
 planner or synthesis call. Remove `synthesis` from this example to execute it.
 Validation errors exit 2, with a stable code in text or `error.code` in JSON.
+Tasks that `brigade t3 open` refuses as `t3-unsupported` belong here, submitted
+as a separate request with its own admission, budget and receipts. See
+[work T3 cannot run](t3-governed-delegation.md#work-t3-cannot-run).
 
 ```json
 {

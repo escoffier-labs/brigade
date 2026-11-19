@@ -32,13 +32,8 @@ from typing import Any, Iterator, Mapping
 from . import dirfd, localio, roster as roster_mod, run_batch, run_dirfd, run_journal, run_lifecycle, runguard
 from . import run_task_journal as journal
 from . import run_tasks
-from .native_t3_contract import (
-    INHERIT_MODE,
-    INTERACTION_MODES,
-    RUNTIME_MODES,
-    NativeIntentTemplate,
-    NativeTarget,
-)
+from .native_t3_contract import INHERIT_MODE, NativeIntentTemplate, NativeTarget
+from .native_t3_structural import TARGET_MODE_INVALID, TARGET_REMOTE_UNSUPPORTED, UNSUPPORTED, structural_gap
 
 SCHEMA = "brigade.t3_enrollment.v1"
 INPUT_SCHEMA = "brigade.t3_delegation_input.v1"
@@ -68,6 +63,20 @@ class EnrollmentError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
+
+
+class UnsupportedTasksError(EnrollmentError):
+    """A batch holding tasks T3 structurally cannot run.
+
+    Every entry names one affected task id and its closed structural token,
+    never task text. The whole batch is refused, so nothing is enrolled for the
+    tasks that would otherwise have been fine.
+    """
+
+    def __init__(self, entries: tuple[tuple[str, str], ...]) -> None:
+        self.entries = tuple(entries)
+        named = ", ".join(f"{task_id} {token}" for task_id, token in self.entries)
+        super().__init__(UNSUPPORTED, f"tasks T3 cannot run: {named}")
 
 
 def _bound(message: str) -> str:
@@ -137,8 +146,14 @@ def _target_string(binding: Mapping[str, object], key: str, *, default: str | No
     return value
 
 
-def target_for_seat(loaded: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
-    """Map one roster seat to its declared native target; declarations grant nothing."""
+def _declared_target(loaded: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
+    """Resolve one declaration without applying the structural-gap classifier.
+
+    Field, option, model and isolation validity stay declaration refusals. The
+    mode, locality and driver rules are structural, and the caller applies them
+    through ``native_t3_structural.structural_gap`` so one closed decision
+    covers submission and claim.
+    """
     binding = loaded.t3_targets.get(seat)
     if binding is None:
         raise EnrollmentError("seat-unbound", f"seat {seat!r} has no declared T3 target")
@@ -159,16 +174,6 @@ def target_for_seat(loaded: roster_mod.Roster, seat: str, *, source_revision: st
         raise EnrollmentError("invalid-target", f"seat {seat!r} T3 target model must be non-empty text")
     runtime_mode = _target_string(binding, "runtime_mode", default=INHERIT_MODE)
     interaction_mode = _target_string(binding, "interaction_mode", default=INHERIT_MODE)
-    if runtime_mode not in RUNTIME_MODES | {INHERIT_MODE}:
-        raise EnrollmentError(
-            "target-mode-invalid",
-            f"seat {seat!r} T3 target runtime_mode must be a T3 runtime literal or inherit",
-        )
-    if interaction_mode not in INTERACTION_MODES | {INHERIT_MODE}:
-        raise EnrollmentError(
-            "target-mode-invalid",
-            f"seat {seat!r} T3 target interaction_mode must be a T3 interaction literal or inherit",
-        )
     try:
         target = NativeTarget(
             **{key: _target_string(binding, key) for key in _TARGET_STRING_FIELDS},
@@ -183,9 +188,23 @@ def target_for_seat(loaded: roster_mod.Roster, seat: str, *, source_revision: st
         raise EnrollmentError("invalid-target", f"seat {seat!r} T3 target binding is invalid") from None
     if target.isolation != "worktree":
         raise EnrollmentError("target-isolation", f"seat {seat!r} T3 target must use worktree isolation")
-    if target.target_environment != target.origin_environment:
+    return target
+
+
+def target_for_seat(loaded: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
+    """Map one roster seat to its declared native target; declarations grant nothing.
+
+    A mode or locality gap raises under its own token, which is also the
+    structural token the caller reports. A driver gap stays resolvable here so
+    admission, rather than declaration parsing, decides it.
+    """
+    target = _declared_target(loaded, seat, source_revision=source_revision)
+    gap = structural_gap(target)
+    if gap == TARGET_MODE_INVALID:
+        raise EnrollmentError(gap, f"seat {seat!r} T3 target modes must be T3 literals or inherit")
+    if gap == TARGET_REMOTE_UNSUPPORTED:
         raise EnrollmentError(
-            "target-remote-unsupported",
+            gap,
             f"seat {seat!r} T3 target must be local because cross-machine governed targets are unsupported",
         )
     return target
@@ -246,12 +265,25 @@ def plan_enrollment(*, workspace: Path, batch_path: Path, roster_path: Path | No
     plan = run_batch.plan_batch(payload, base_sha=source_revision)
     loaded = _load_roster(workspace, roster_path)
     targets: dict[str, NativeTarget] = {}
+    gaps: dict[str, str] = {}
     for task in canonical["tasks"]:
         seat = task["seat"]
         if seat not in loaded.agents:
             raise EnrollmentError("unknown-seat", f"seat {seat!r} is not in the roster")
-        if seat not in targets:
-            targets[seat] = target_for_seat(loaded, seat, source_revision=source_revision)
+        if seat in targets or seat in gaps:
+            continue
+        target = _declared_target(loaded, seat, source_revision=source_revision)
+        gap = structural_gap(target)
+        if gap is None:
+            targets[seat] = target
+        else:
+            gaps[seat] = gap
+    if gaps:
+        # Classify the whole batch before writing anything, and name only the
+        # affected caller-chosen task ids with their structural tokens.
+        raise UnsupportedTasksError(
+            tuple((task["task_id"], gaps[task["seat"]]) for task in canonical["tasks"] if task["seat"] in gaps)
+        )
     run_id = "t3-" + hashlib.sha256(canonical["request_id"].encode("utf-8")).hexdigest()
     run_dir = runguard.lock_path(workspace).parent / "runs" / run_id
     entries = []
@@ -738,8 +770,8 @@ def read_delegation_input(run_dir: Path, *, task_id: str) -> DelegationInput:
     if type(seat) is not str or type(text) is not str or not isinstance(raw_target, dict):
         raise EnrollmentError("asset-invalid", "retained delegation input is incomplete")
     # A retained target is read back exactly as enrolled, including a legacy
-    # `app-server` mode. New declarations are checked in target_for_seat and a
-    # claim re-applies the mode rules in admission.evaluate.
+    # `app-server` mode. New declarations are classified at open and a claim
+    # re-applies the same closed structural decision in admission.evaluate.
     try:
         target = NativeTarget(
             **{key: raw_target[key] for key in (*_TARGET_STRING_FIELDS, "runtime_mode", "interaction_mode")},
@@ -759,6 +791,12 @@ def open_cli(args: Any) -> int:
         result = enroll(batch_path=args.batch_file, target=args.target, roster_path=args.roster)
     except run_batch.BatchError as exc:
         print(f"error [{exc.code}]: {_bound(str(exc))}", file=sys.stderr)
+        return 2
+    except UnsupportedTasksError as exc:
+        # One fixed line per affected task, naming only its caller-chosen id
+        # and the closed structural token. Task text never enters a refusal.
+        for task_id, token in exc.entries:
+            print(f"error [{exc.code}]: task {task_id} {token}", file=sys.stderr)
         return 2
     except EnrollmentError as exc:
         print(f"error [{exc.code}]: {_bound(str(exc))}", file=sys.stderr)

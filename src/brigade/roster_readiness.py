@@ -421,8 +421,10 @@ def evaluate_readiness(
             else:
                 reason = "t3-caller-context-unavailable" if category == "route-support" else "observation-missing"
                 action = (
-                    "The parent session must report its own orchestrator capabilities; Brigade has no caller context. "
-                    "Brigade fallback requires separate admission and an explicit route request."
+                    "The parent session must report its own orchestrator capabilities, because Brigade has no caller "
+                    "context. Brigade fallback requires separate admission and an explicit route request. A task that "
+                    "`brigade t3 open` refuses as t3-unsupported goes to a separate `brigade run batch` request with "
+                    "its own admission."
                     if reason == "t3-caller-context-unavailable"
                     else f"Obtain fresh operation-scoped {category} evidence from the execution route."
                 )
@@ -541,7 +543,9 @@ def evaluate_readiness(
         "fallback": {
             "automatic": False,
             "admitted": False,
-            "action": "Request route brigade explicitly and obtain its own admission evidence."
+            "action": "Request route brigade explicitly and obtain its own admission evidence. "
+            "A task that `brigade t3 open` refuses as t3-unsupported goes to a separate "
+            "`brigade run batch` request with its own admission."
             if request.route == "t3"
             else None,
         },

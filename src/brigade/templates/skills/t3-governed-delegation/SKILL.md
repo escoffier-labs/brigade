@@ -13,7 +13,7 @@ Placeholders: `<run>` (run id from `t3 open`), `<task>` (task id), `<parent-thre
 
 ## Call order
 
-1. `brigade t3 open batch.json --target .` enrolls the batch and prints `run_id`. It launches nothing.
+1. `brigade t3 open batch.json --target .` enrolls the batch and prints `run_id`. It launches nothing. If it refuses with `t3-unsupported`, the named tasks have a structural gap and nothing was enrolled. See [Work T3 cannot run](#work-t3-cannot-run).
 2. Before the first claim, call your own `orchestrator_capabilities` tool. Write its unmodified result into a `brigade.t3_capabilities_report.v1` envelope, then run
    `brigade roster ready --route t3 --isolation worktree --worker <seat> --t3-capabilities <file|->`.
    A ready result is parent-reported and non-reserving. Without the envelope, route support stays unknown.
@@ -28,6 +28,16 @@ Placeholders: `<run>` (run id from `t3 open`), `<task>` (task id), `<parent-thre
 7. Run `brigade t3 finalize <run>`. It is never automatic.
 
 Inspect progress with `brigade t3 status <run> --json`. It prints fixed tokens only: state, held reason, correlated, terminal, acked, cancel-requested, attempt and a seat digest.
+
+## Work T3 cannot run
+
+A structural gap is decided at submission from the target declaration alone. The closed tokens are `driver-unsupported` (the driver is outside the closed T3 table of `codex` and `claudeAgent`), `target-remote-unsupported` (`target_environment` differs from `origin_environment`) and `target-mode-invalid` (the runtime or interaction mode is not a T3 literal).
+
+`t3 open` refuses the whole batch with code `t3-unsupported`, empty stdout and one fixed stderr line per affected task. No run directory, asset or journal fact is created. Submit those tasks yourself as a separate ordinary `brigade run batch` request. That request applies its own admission, budget and receipts, and its task identities are its own. They are not linked into the governed run and no budget moves between the two.
+
+Each of the three tokens is the only route to `brigade run batch`. Every other refusal stays a refusal: a disallowed adapter, a retired model, an orchestrator seat, Hub policy denied or unavailable, a missing policy consumer, capacity, budget, a held task, a run barrier, an already claimed task, a missing or invalid target declaration and parent-reported capability evidence. None of those is structural, so never resubmit the work under another route after one of them.
+
+A claim re-applies the same classification. A retained target or an edited declaration with a structural gap refuses with `t3-unsupported` and the token, not `admission-denied`.
 
 ## Readiness is parent-reported
 
@@ -47,9 +57,9 @@ Resolve it with `brigade t3 hold-resolve <run> <task> --abandon` when the attemp
 
 ## Native target modes and locality
 
-`runtime_mode` and `interaction_mode` default to `inherit`, which omits both from the printed `delegate_task` arguments. T3 accepts `approval-required`, `auto-accept-edits`, `auto` and `full-access` for runtime mode, and `default` or `plan` for interaction mode. A target that still declares `app-server`, or any other mode T3 does not accept, refuses at `t3 open` and at claim with `target-mode-invalid`. Set `inherit`.
+`runtime_mode` and `interaction_mode` default to `inherit`, which omits both from the printed `delegate_task` arguments. T3 accepts `approval-required`, `auto-accept-edits`, `auto` and `full-access` for runtime mode, and `default` or `plan` for interaction mode. A target that still declares `app-server`, or any other mode T3 does not accept, refuses at `t3 open` and at claim with `t3-unsupported` and token `target-mode-invalid`. Set `inherit`.
 
-A target must run locally: `target_environment` must equal `origin_environment`. A different value refuses with `target-remote-unsupported` at `t3 open` and at claim. Cross-machine governed children are unsupported. Remote editing children belong to `t3_thread_launch` with a worktree workspace strategy, which needs its own design.
+A target must run locally: `target_environment` must equal `origin_environment`. A different value refuses with `t3-unsupported` and token `target-remote-unsupported` at `t3 open` and at claim. Cross-machine governed children are unsupported. Remote editing children belong to `t3_thread_launch` with a worktree workspace strategy, which needs its own design.
 
 `target_project` must equal the T3 project of the parent thread that calls `delegate_task`. T3's local path refuses a different `projectId` with `invalid_request` after the claim already consumed the launch. That is a held lost launch: resolve it with `hold-resolve`, never resubmit. The hold keeps its capacity slot until a reviewed release operation exists.
 

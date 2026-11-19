@@ -526,6 +526,7 @@ def test_skill_template_names_every_verb_and_the_ack_boundary():
     assert "acknowledges T3 delivery" in text and "Brigade `ack` is separate" in text
     assert "do not resubmit `delegate_task`" in text.lower() or "do not resubmit `delegate_task`" in text
     assert "hold-resolve" in text and "delegate_task" in text
+    assert "t3-unsupported" in text and "brigade run batch" in text
 
 
 @POSIX_ONLY

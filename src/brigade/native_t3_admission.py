@@ -23,7 +23,8 @@ from typing import Any, Mapping
 from . import agents as agents_mod
 from . import fleet_model_roster, roster as roster_mod
 from . import native_t3_enrollment as enrollment
-from .native_t3_contract import INHERIT_MODE, INTERACTION_MODES, RUNTIME_MODES, NativeTarget
+from . import native_t3_structural as structural
+from .native_t3_contract import NativeTarget
 
 ADMITTED = "admitted"
 DENIED = "admission-denied"
@@ -34,10 +35,13 @@ SEAT_ORCHESTRATOR = "seat-orchestrator"
 TARGET_MISSING = "target-missing"
 TARGET_INVALID = "target-invalid"
 TARGET_CHANGED = "target-changed"
-TARGET_MODE_INVALID = "target-mode-invalid"
-TARGET_REMOTE_UNSUPPORTED = "target-remote-unsupported"
+# The three structural tokens are shared with the closed classifier, so a
+# claim can report exactly what `t3 open` refuses.
+TARGET_MODE_INVALID = structural.TARGET_MODE_INVALID
+TARGET_REMOTE_UNSUPPORTED = structural.TARGET_REMOTE_UNSUPPORTED
+DRIVER_UNSUPPORTED = structural.DRIVER_UNSUPPORTED
+STRUCTURAL_REASONS = structural.STRUCTURAL_GAPS
 ADAPTER_NOT_ALLOWED = "adapter-not-allowed"
-DRIVER_UNKNOWN = "driver-unknown"
 DRIVER_MISMATCH = "driver-mismatch"
 MODEL_RETIRED = "model-retired"
 POLICY_UNAVAILABLE = "policy-unavailable"
@@ -45,10 +49,6 @@ POLICY_CONSUMER_MISSING = "policy-consumer-missing"
 POLICY_DENIED = "policy-denied"
 
 _ROSTER_DOMAIN = "brigade.native-t3.roster-digest.v1"
-# The launch uses the T3 target driver, not the seat's Brigade adapter. Map the
-# closed set of T3 driver literals onto the Brigade adapter whose provider and
-# model policy apply, and refuse anything outside it.
-_TARGET_DRIVER_ADAPTERS = {"codex": "codex", "claudeAgent": "claude"}
 
 
 @dataclass(frozen=True)
@@ -108,16 +108,17 @@ def _verdict(code: str, reason: str, roster: roster_mod.Roster, hub: HubAuthorit
 
 
 def _target_refusal(roster: roster_mod.Roster, seat: str, retained: NativeTarget) -> tuple[str, str] | None:
-    """Resolve the current declaration and require it to equal the retained target."""
+    """Resolve the current declaration, classify it, then require it to equal the retained target."""
     try:
-        declared = enrollment.target_for_seat(roster, seat, source_revision=retained.source_revision)
+        declared = enrollment._declared_target(roster, seat, source_revision=retained.source_revision)
     except enrollment.EnrollmentError as exc:
-        reason = {
-            "seat-unbound": TARGET_MISSING,
-            "target-mode-invalid": TARGET_MODE_INVALID,
-            "target-remote-unsupported": TARGET_REMOTE_UNSUPPORTED,
-        }.get(exc.code, TARGET_INVALID)
+        reason = TARGET_MISSING if exc.code == "seat-unbound" else TARGET_INVALID
         return DENIED, reason
+    gap = structural.structural_gap(declared)
+    if gap is not None:
+        # A declaration edited after open into a target T3 cannot run is a
+        # structural gap, not a plain target change.
+        return DENIED, gap
     if declared != retained:
         # NativeTarget equality covers every field, including canonical options.
         return DENIED, TARGET_CHANGED
@@ -126,9 +127,9 @@ def _target_refusal(roster: roster_mod.Roster, seat: str, retained: NativeTarget
 
 def _model_refusal(roster: roster_mod.Roster, seat: str, retained: NativeTarget) -> str | None:
     agent = roster.agents[seat]
-    adapter = _TARGET_DRIVER_ADAPTERS.get(retained.driver)
+    adapter = structural.DRIVER_ADAPTERS.get(retained.driver)
     if adapter is None:
-        return DRIVER_UNKNOWN
+        return DRIVER_UNSUPPORTED
     if (
         agent.cli is None
         or not roster_mod.is_cli_allowed(agent.cli, roster)
@@ -163,14 +164,12 @@ def evaluate(
         return _verdict(DENIED, SEAT_UNKNOWN, roster, hub)
     if seat == roster.orchestrator:
         return _verdict(DENIED, SEAT_ORCHESTRATOR, roster, hub)
-    if retained.runtime_mode not in RUNTIME_MODES | {
-        INHERIT_MODE
-    } or retained.interaction_mode not in INTERACTION_MODES | {INHERIT_MODE}:
-        # A retained target from before the native mode contract is never
-        # rewritten. It refuses until the operator re-enrolls with inherit.
-        return _verdict(DENIED, TARGET_MODE_INVALID, roster, hub)
-    if retained.target_environment != retained.origin_environment:
-        return _verdict(DENIED, TARGET_REMOTE_UNSUPPORTED, roster, hub)
+    retained_gap = structural.structural_gap(retained)
+    if retained_gap is not None:
+        # A retained target from before the native mode contract, or one whose
+        # driver or locality T3 cannot run, is never rewritten. It refuses
+        # until the operator re-enrolls, and the reason is the structural token.
+        return _verdict(DENIED, retained_gap, roster, hub)
     refusal = _target_refusal(roster, seat, retained)
     if refusal is not None:
         return _verdict(*refusal, roster, hub)

@@ -23,6 +23,7 @@ from brigade import (
     native_t3_dispatch as dispatch,
     native_t3_enrollment as enrollment,
     native_t3_lifecycle as lifecycle,
+    native_t3_structural as structural,
     proc,
     roster as roster_mod,
     run_dirfd,
@@ -224,12 +225,15 @@ def test_target_driver_must_match_the_seat_provider(tmp_path):
 
 
 @POSIX_ONLY
-def test_unknown_target_driver_refuses_a_claim(tmp_path):
-    workspace, run_id = _enroll(tmp_path, driver="cursor")
+def test_target_driver_changed_after_open_refuses_as_structural(tmp_path):
+    workspace, run_id = _enroll(tmp_path)
+    roster = workspace / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text(encoding="utf-8").replace('driver = "codex"', 'driver = "opencode"'))
     with pytest.raises(dispatch.DispatchError) as refused:
         _claim(workspace, run_id, "one")
-    assert refused.value.code == "admission-denied"
-    assert "driver-unknown" in str(refused.value)
+    assert refused.value.code == "t3-unsupported"
+    assert "driver-unsupported" in str(refused.value)
+    assert not [event for event in _events(workspace, run_id) if event.event_type == dispatch.CLAIM_EVENT]
 
 
 def test_last_known_good_authority_refuses_in_the_pure_predicate():
@@ -250,6 +254,24 @@ def test_disallowed_adapter_refuses_in_the_pure_predicate():
     verdict = admission.evaluate(allowed, "coder", target, hub=admission.HubAuthority(state="unenrolled"))
     assert verdict.admitted and verdict.reason == "local-roster"
     assert verdict.roster_digest.startswith("sha256:") and verdict.policy_digest is None
+
+
+def test_structural_gap_is_closed_over_driver_locality_and_modes():
+    text = _roster_text()
+    roster = roster_mod.load_roster(Path("/nonexistent/roster.toml"), text=text)
+    target = enrollment.target_for_seat(roster, "coder", source_revision="a" * 40)
+    assert structural.structural_gap(target) is None
+    assert structural.structural_gap(replace(target, driver="opencode")) == "driver-unsupported"
+    assert structural.structural_gap(replace(target, driver="antigravity")) == "driver-unsupported"
+    assert structural.structural_gap(replace(target, driver="claudeAgent")) is None
+    assert structural.structural_gap(replace(target, target_environment="env-remote")) == "target-remote-unsupported"
+    assert structural.structural_gap(replace(target, runtime_mode="app-server")) == "target-mode-invalid"
+    assert structural.structural_gap(replace(target, interaction_mode="plan-fast")) == "target-mode-invalid"
+    assert structural.STRUCTURAL_GAPS == {
+        "driver-unsupported",
+        "target-remote-unsupported",
+        "target-mode-invalid",
+    }
 
 
 @POSIX_ONLY
