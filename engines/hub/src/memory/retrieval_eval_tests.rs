@@ -1880,13 +1880,18 @@ fn retrieval_history_migration_13_and_legacy_14_to_15() {
     for (version, legacy) in [(13, false), (14, false), (14, true)] {
         let db = Connection::open_in_memory().unwrap();
         schema::migrate(&db, 1_800_000_000_000).unwrap();
-        if !legacy {
-            db.execute_batch("DROP TABLE memory_retrieval_history")
-                .unwrap();
-        } else {
+        // Put the file back in the shape a real `version` file had: a later
+        // migration's tables are absent, not merely stamped over.
+        if version < 14 {
             db.execute_batch("DROP TABLE memory_verify_evals").unwrap();
+        }
+        if legacy {
+            // A pre-v15 trigger refused every delete; v15 makes rotation possible.
             db.execute_batch("DROP TRIGGER memory_retrieval_history_no_delete; CREATE TRIGGER memory_retrieval_history_no_delete BEFORE DELETE ON memory_retrieval_history BEGIN SELECT RAISE(ABORT,'retrieval history is append-only'); END;").unwrap();
             db.execute("INSERT INTO memory_retrieval_history(principal,credential,session,kind,created_ms,payload) VALUES('one','one','s','search',0,'{}')",[]).unwrap();
+        } else {
+            db.execute_batch("DROP TABLE memory_retrieval_history")
+                .unwrap();
         }
         db.pragma_update(None, "user_version", version).unwrap();
         let epoch = schema::log_epoch(&db).unwrap();
@@ -1905,11 +1910,40 @@ fn retrieval_history_migration_13_and_legacy_14_to_15() {
             )
             .unwrap();
         assert!(trigger.contains("retrieval_history_rotation"));
+        // A row makes the BEFORE DELETE trigger run in every case. The legacy
+        // row also proves the migration kept the history it found.
+        if !legacy {
+            db.execute("INSERT INTO memory_retrieval_history(principal,credential,session,kind,created_ms,payload) VALUES('one','one','s','search',0,'{}')",[]).unwrap();
+        }
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM memory_retrieval_history", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            1
+        );
+        // Append-only still refuses a delete without the rotation marker.
+        assert!(
+            db.execute("DELETE FROM memory_retrieval_history", [])
+                .is_err()
+        );
+        // With the marker, rotation succeeds. The legacy trigger refused it
+        // even then, so this proves v15 replaced that trigger.
+        db.execute(
+            "INSERT INTO memory_meta(key,value) VALUES('retrieval_history_rotation','admin')",
+            [],
+        )
+        .unwrap();
         assert!(
             db.execute("DELETE FROM memory_retrieval_history", [])
                 .is_ok()
-                != legacy
         );
+        db.execute(
+            "DELETE FROM memory_meta WHERE key='retrieval_history_rotation'",
+            [],
+        )
+        .unwrap();
         schema::migrate(&db, 1_800_000_000_000).unwrap();
     }
 }

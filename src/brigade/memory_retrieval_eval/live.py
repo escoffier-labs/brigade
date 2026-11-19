@@ -58,6 +58,22 @@ def interactive_session(payload: dict[str, Any] | None = None) -> dict[str, str]
     return {"session_id": sid, "session_kind": "interactive"}
 
 
+def same_hub_target(first: Path, second: Path) -> bool:
+    """Whether two targets record use against the same hub URL and credential.
+
+    A hub only joins a use to a search from the same credential and session, so
+    a second call that resolves to the same hub and token repeats the first.
+    """
+    from brigade.memory_hub_client import HubConfigError, load_settings
+
+    try:
+        left = load_settings(first)
+        right = load_settings(second)
+    except (OSError, ValueError, HubConfigError):
+        return False
+    return left.hub_url == right.hub_url and left.token == right.token
+
+
 def record_use(target: Path, card_id: str, text: str, *, payload: dict[str, Any] | None = None) -> None:
     """Best effort. The hub joins only its own search in this credential/session."""
     context = interactive_session(payload)

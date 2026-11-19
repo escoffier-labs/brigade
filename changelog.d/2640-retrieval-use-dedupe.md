@@ -1,0 +1,1 @@
+- Record a single hub use row per Read when the wired target and the memory root resolve to the same hub URL and credential, instead of calling `retrieval_use` twice with a 0.8 second timeout each time (#2640).
