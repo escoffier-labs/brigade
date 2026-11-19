@@ -840,17 +840,33 @@ def _record_automatic_hold(
     return reason
 
 
+_HOLD_MARKER_MAX_BYTES = 4096
+_HOLD_FIELD_MAX_CHARS = 200
+
+
+def _hold_field(value: str) -> str:
+    """One marker field as a single printable line of bounded length, since the marker is untrusted input."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())[:_HOLD_FIELD_MAX_CHARS]
+
+
 def _automatic_hold_reason(target: Path, decision_id: str) -> str:
-    """Read the recorded blocker so a later run still names it."""
+    """Read the recorded blocker so a later run still names it.
+
+    The marker is read like other private journal files: no symlinks, regular files only, a size
+    cap, and a non-blocking open so a FIFO cannot stall the run. Any failure only drops the detail;
+    the decision is already held by the time this runs.
+    """
     try:
-        body = _automatic_hold(target, decision_id).read_text(encoding="utf-8")
+        body = store.read_private(_automatic_hold(target, decision_id), max_bytes=_HOLD_MARKER_MAX_BYTES)
     except (JournalConflict, store.StoreError, OSError, ValueError):
+        return ""
+    if body is None:
         return ""
     fields: dict[str, str] = {}
     for line in body.splitlines():
         key, separator, value = line.partition(": ")
         if separator:
-            fields[key] = value.strip()
+            fields[key] = _hold_field(value)
     parts = [fields["reason"]] if fields.get("reason") else []
     if fields.get("blocking_operation"):
         parts.append(f"blocked by {fields['blocking_operation']} ({fields.get('blocking_status') or 'unknown'})")
@@ -867,6 +883,8 @@ def _blocking_projection(diagnostic: str, operations: Sequence[kernel.OperationS
 
 def _release_automatic_holds(target: Path, resolved: Sequence[dict[str, Any]]) -> None:
     """Clear a hold only after named recovery committed or abandoned the decision.
+
+    An undo decision commits with phase ``undone``, so that counts as committed here.
 
     Automatic resolution never reaches this function, so a run that fails closed
     cannot release its own hold. A decision that is still prepared, quarantined,

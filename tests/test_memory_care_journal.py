@@ -424,13 +424,48 @@ def test_automatic_hold_marker_names_the_blocking_projection_and_echoes_it(tmp_p
     assert "blocking_status: committing" in marker
     assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
     assert (tmp_path / "a.md").read_bytes() == b"old a"
-    # A later run echoes the recorded blocker instead of a constant reason.
+    # A later run echoes the recorded blocker instead of a constant reason, even once the blocker clears.
+    monkeypatch.undo()
     again = journal.resolve_prepared(tmp_path, automatic=True)
     assert again[0]["phase"] == "operator_required"
     assert "projection-blocker-0001" in again[0]["reason"]
     assert "committing" in again[0]["reason"]
     assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
     assert (tmp_path / "a.md").read_bytes() == b"old a"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"operator recovery required\nreason: ok\x1b[31mFAKE\x1b[0m\x08\x07\nblocking_operation: op\x1b]8;;x\x07\n",
+        b"operator recovery required\nreason: " + b"A" * 10_000 + b"\n",
+        b"\xff\xfe not utf-8 at all",
+        b"",
+    ],
+    ids=["control-characters", "oversized", "undecodable", "empty"],
+)
+def test_untrusted_hold_marker_body_stays_held_and_echoes_only_bounded_text(tmp_path, monkeypatch, body):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    decision_id = _leave_prepared(tmp_path, monkeypatch, [journal.Change("a.md", b"old a", b"new a")])
+    (journal._directory(tmp_path, decision_id) / "automatic-hold").write_bytes(body)
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    reason = result[0]["reason"]
+    assert result[0]["phase"] == "operator_required"
+    assert reason.startswith("an earlier automatic run held this decision")
+    assert all(ch.isprintable() for ch in reason)
+    assert len(reason) < 600
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"old a"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs")
+def test_fifo_at_the_hold_marker_stays_held_without_blocking(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    decision_id = _leave_prepared(tmp_path, monkeypatch, [journal.Change("a.md", b"old a", b"new a")])
+    os.mkfifo(journal._directory(tmp_path, decision_id) / "automatic-hold")
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    assert result[0]["phase"] == "operator_required"
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
 
 
 def test_dangling_symlink_at_the_hold_marker_counts_as_held(tmp_path, monkeypatch):
