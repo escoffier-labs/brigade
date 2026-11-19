@@ -886,6 +886,193 @@ async fn compensation_stale_watch_skips_the_manifest_rescan_until_a_distinct_tri
 }
 
 #[tokio::test]
+async fn compensation_stale_watch_rescans_after_a_late_reflect_grant() {
+    let (h, id, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "contradiction-a", "active", false, "").await;
+    verifier_signal(&h, NODE_TOKEN, "contradiction-n", "active", false, "").await;
+    let negative = verifier_signal(&h, AGENT_TOKEN, "negative-x", "active", true, "").await;
+    let c = card(&h, FIXTURE_SCOPE, "a").await;
+    h.put(
+        ADMIN_TOKEN,
+        FIXTURE_SCOPE,
+        "a",
+        c["revision"].as_i64(),
+        "Human correction. ^c-abcdef",
+    )
+    .await;
+    let first = watch_negative(&h, vec![negative.clone()]).await;
+    assert_eq!(first.body["results"][0]["result"], "failed", "{first:?}");
+    // The node signal stops counting, and the remaining verifier loses reflect.
+    let r = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"verifier","principal":"node-1","verifier":false,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{r:?}");
+    let r = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"grant","principal":"agent:dot","scope":FIXTURE_SCOPE,"rights":["read"],"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(
+        watch_negative(&h, vec![negative.clone()]).await.body["results"],
+        json!([])
+    );
+    let r = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"grant","principal":"agent:dot","scope":FIXTURE_SCOPE,"rights":["read","reflect"],"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{r:?}");
+    let later = watch_negative(&h, vec![negative]).await;
+    assert_eq!(later.body["results"][0]["rollback_of"], id, "{later:?}");
+}
+
+#[tokio::test]
+async fn compensation_stale_watch_resumes_past_a_retrieval_scan_limit() {
+    let (h, id, _) = applied().await;
+    let _contradiction =
+        verifier_signal(&h, AGENT_TOKEN, "contradiction-a", "active", false, "").await;
+    let referred = watch(&h).await;
+    assert_eq!(
+        referred.body["results"][0]["result"], "review_required",
+        "{referred:?}"
+    );
+    let pending = referred.body["results"][0]["proposal_id"].clone();
+    verifier_signal(&h, NODE_TOKEN, "contradiction-n", "active", false, "").await;
+    let c = card(&h, FIXTURE_SCOPE, "a").await;
+    h.put(
+        ADMIN_TOKEN,
+        FIXTURE_SCOPE,
+        "a",
+        c["revision"].as_i64(),
+        "Human correction. ^c-abcdef",
+    )
+    .await;
+    let stale = watch(&h).await;
+    assert_eq!(stale.body["results"][0]["result"], "failed", "{stale:?}");
+    // The agent-only trip is already completed, so later polls stay quiet
+    // until the retrieval backlog reaches its regression.
+    let r = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"verifier","principal":"node-1","verifier":false,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{r:?}");
+    let r = h.call(
+        ADMIN_TOKEN,
+        json!({"action":"decide","proposal_id":pending,"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()}),
+    ).await;
+    assert_eq!(r.body["state"], "rejected", "{r:?}");
+    let now = h.now();
+    {
+        let db = rusqlite::Connection::open(h.memory()).unwrap();
+        let (base, mode, sha, report, principal, credential): (
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = db
+            .query_row(
+                "SELECT record_seq,mode,report_sha256,report_json,principal,credential_id FROM memory_retrieval_evals ORDER BY record_seq DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        for step in 1..=128 {
+            db.execute(
+                "INSERT INTO memory_retrieval_evals(record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms,evaluated_ms,corpus_members) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,NULL)",
+                rusqlite::params![base + step, &mode, &sha, &report, &principal, &credential, now],
+            )
+            .unwrap();
+        }
+        let mut regressed: Json = serde_json::from_str(&report).unwrap();
+        regressed["adapters"]["hub-lexical"]["overall"]["mrr"] = json!(0.25);
+        let regressed = ids::canonical(&regressed);
+        db.execute(
+            "INSERT INTO memory_retrieval_evals(record_seq,mode,report_sha256,report_json,principal,credential_id,created_ms,evaluated_ms,corpus_members) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,NULL)",
+            rusqlite::params![
+                base + 129,
+                &mode,
+                ids::sha256_hex(regressed.as_bytes()),
+                &regressed,
+                &principal,
+                &credential,
+                now
+            ],
+        )
+        .unwrap();
+    }
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    let later = watch(&h).await;
+    assert_eq!(later.body["results"][0]["rollback_of"], id, "{later:?}");
+    assert_eq!(
+        later.body["results"][0]["trigger"], "retrieval-regression",
+        "{later:?}"
+    );
+}
+
+#[tokio::test]
+async fn compensation_rejected_pending_rollback_releases_a_suppressed_trip() {
+    let (h, id, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "contradiction-a", "active", false, "").await;
+    let referred = watch(&h).await;
+    assert_eq!(
+        referred.body["results"][0]["result"], "review_required",
+        "{referred:?}"
+    );
+    let pending = referred.body["results"][0]["proposal_id"].clone();
+    verifier_signal(&h, NODE_TOKEN, "contradiction-n", "active", false, "").await;
+    let c = card(&h, FIXTURE_SCOPE, "a").await;
+    h.put(
+        ADMIN_TOKEN,
+        FIXTURE_SCOPE,
+        "a",
+        c["revision"].as_i64(),
+        "Human correction. ^c-abcdef",
+    )
+    .await;
+    let stale = watch(&h).await;
+    assert_eq!(stale.body["results"][0]["result"], "failed", "{stale:?}");
+    let negative = verifier_signal(&h, AGENT_TOKEN, "negative-x", "active", true, "").await;
+    let r = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"verifier","principal":"node-1","verifier":false,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{r:?}");
+    // The pending referral suppresses the distinct review trip.
+    assert_eq!(
+        watch_negative(&h, vec![negative.clone()]).await.body["results"],
+        json!([])
+    );
+    let r = h.call(
+        ADMIN_TOKEN,
+        json!({"action":"decide","proposal_id":pending,"decision":"reject","base_epoch":h.epoch().await,"client_event_id":h.id()}),
+    ).await;
+    assert_eq!(r.body["state"], "rejected", "{r:?}");
+    let later = watch_negative(&h, vec![negative]).await;
+    assert_eq!(later.body["results"][0]["rollback_of"], id, "{later:?}");
+}
+
+#[tokio::test]
 async fn compensation_watch_scan_refusal_retries_after_scanner_recovers() {
     let (mut h, id, before) = applied().await;
     verifier_signal(&h, AGENT_TOKEN, "one", "active", true, "").await;

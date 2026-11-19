@@ -543,15 +543,18 @@ fn row_key(row: &[Value]) -> Json {
 /// Fingerprint every input the trip scan reads, without hashing blobs or running
 /// the content scanner. A stale watch stores it so later polls can skip the
 /// retrieval and manifest scan until one of these inputs changes.
-fn watch_inputs(
-    tx: &dyn ReadTx,
+///
+/// `None` means a bounded scan stopped with work still queued, so no verdict can
+/// be cached as if the whole input set had been consumed.
+fn watch_inputs<T: ReadTx + ?Sized>(
+    tx: &T,
     body: &Json,
     applied: i64,
     now: i64,
     request: &Json,
     authority: &Authority,
     scanner: &dyn Scanner,
-) -> rusqlite::Result<String> {
+) -> rusqlite::Result<Option<String>> {
     let (available, ruleset) = scanner.describe();
     let mut inputs = vec![
         json!({
@@ -581,11 +584,30 @@ fn watch_inputs(
                 Value::Integer(now),
             ],
         )?;
+        // A grant that arrives later makes an already copied evidence row
+        // eligible, so the row alone is not the whole input.
+        let mut principals = std::collections::BTreeSet::new();
+        for row in &rows {
+            if let Value::Text(principal) = &row[2] {
+                principals.insert(principal.clone());
+            }
+        }
+        let mut grants = Vec::new();
+        for principal in principals {
+            for row in tx.query(
+                "SELECT scope,rights FROM memory_grants WHERE principal=?1 ORDER BY scope,rights",
+                &[t(&principal)],
+            )? {
+                grants.push(json!({"principal": principal, "grant": row_key(&row)}));
+            }
+        }
         inputs.push(json!({
             "card": [scope, card_id, applied_revision],
             "evidence": rows.iter().map(|row| row_key(row)).collect::<Vec<_>>(),
+            "grants": grants,
         }));
     }
+    let mut consumed = true;
     let retrieval = match body["preflight"]["retrieval_eval_record"]["record_seq"].as_i64() {
         Some(seq) => {
             let baseline = tx.query(
@@ -613,6 +635,15 @@ fn watch_inputs(
                 )?,
                 None => Vec::new(),
             };
+            // The scan reads at most 128 rows. A queued row past the cursor
+            // means the verdict is partial and must not be cached.
+            consumed = match candidates.first() {
+                Some(row) => match &row[1] {
+                    Value::Integer(max) => *max <= cursor,
+                    _ => true,
+                },
+                None => true,
+            };
             json!({
                 "record_seq": seq,
                 "mode": baseline.first().map(|row| s(&row[1])),
@@ -623,9 +654,21 @@ fn watch_inputs(
         None => Json::Null,
     };
     inputs.push(json!({"retrieval": retrieval}));
-    Ok(ids::sha256_hex(
+    if !consumed {
+        return Ok(None);
+    }
+    Ok(Some(ids::sha256_hex(
         ids::canonical(&Json::Array(inputs)).as_bytes(),
-    ))
+    )))
+}
+
+fn set_stale_inputs(journal: &mut Json, inputs: Option<String>) {
+    if let Some(object) = journal.as_object_mut() {
+        object.remove("stale_inputs");
+    }
+    if let Some(inputs) = inputs {
+        journal["stale_inputs"] = json!(inputs);
+    }
 }
 
 /// Persist the inputs behind the current stale verdict. Only a stale result
@@ -634,13 +677,27 @@ fn remember_stale_inputs(
     tx: &dyn WriteTx,
     key: &str,
     journal: &mut Json,
-    inputs: String,
+    inputs: Option<String>,
 ) -> rusqlite::Result<()> {
     if journal["result"] != "stale" {
         return Ok(());
     }
-    journal["stale_inputs"] = json!(inputs);
+    set_stale_inputs(journal, inputs);
     save_journal(tx, key, journal)
+}
+
+/// A suppressed outcome is not a completed stale verdict. Forget the cached
+/// fingerprint so the next poll re-runs the scan and can report the trip once
+/// the blocking referral is decided.
+fn clear_stale_inputs(tx: &dyn WriteTx, key: &str, journal: &mut Json) -> rusqlite::Result<()> {
+    let removed = journal
+        .as_object_mut()
+        .and_then(|object| object.remove("stale_inputs"))
+        .is_some();
+    if removed {
+        save_journal(tx, key, journal)?;
+    }
+    Ok(())
 }
 
 pub fn watch(
@@ -754,7 +811,8 @@ pub fn watch(
         // it reads is identical to the last stale evaluation.
         if journal["result"] == "stale" {
             if let Some(saved) = journal["stale_inputs"].as_str() {
-                if saved == watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)? {
+                let inputs = watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?;
+                if inputs.as_deref() == Some(saved) {
                     continue;
                 }
             }
@@ -785,10 +843,7 @@ pub fn watch(
             "SELECT proposal_id FROM memory_proposals WHERE state='pending' AND json_extract(body,'$.rollback_of')=?1 LIMIT 1",
             &[t(&id)],
         )?.is_empty() {
-            if journal["result"] == "stale" {
-                let inputs = watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?;
-                remember_stale_inputs(tx, &journal_key, &mut journal, inputs)?;
-            }
+            clear_stale_inputs(tx, &journal_key, &mut journal)?;
             continue;
         }
         body["watch_trip"] = trip.clone();
@@ -825,13 +880,12 @@ pub fn watch(
             journal["trip"] = trip.clone();
             journal["result"] = json!(journal_result);
             journal["completed_trips"][fingerprint] = json!(journal_result);
-            if journal_result == "stale" {
-                journal["stale_inputs"] = json!(watch_inputs(
-                    tx, &body, applied, p.now_ms, request, a, scanner
-                )?);
-            } else if let Some(object) = journal.as_object_mut() {
-                object.remove("stale_inputs");
-            }
+            let inputs = if journal_result == "stale" {
+                watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?
+            } else {
+                None
+            };
+            set_stale_inputs(&mut journal, inputs);
             save_journal(tx, &journal_key, &journal)?;
         } else {
             // A refusal must leave both verifier and retrieval signals retryable.

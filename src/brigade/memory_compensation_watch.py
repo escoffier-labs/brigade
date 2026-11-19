@@ -29,6 +29,7 @@ def run(
         fields: dict[str, Any] = {"scope": scope, "base_epoch": epoch}
         seen = set()
         for _ in range(32):
+            sent = fields.get("after")
             response = client.call("compensation_watch", client_event_id=hubc.event_id(), **fields)
             results.extend(response["results"])
             after = response.get("next_after")
@@ -36,11 +37,15 @@ def run(
                 break
             if not isinstance(after, str) or hubc.event_id_ms(after) is None:
                 raise ValueError("invalid compensation watch cursor")
-            # A cursor this poll already used means the hub did not advance the
-            # page. That is a quiet scope, not a failure: the hub owns progress,
-            # so the next scheduled run resumes from its committed continuation.
-            if after in seen:
+            # The page did not advance on the cursor it was given. That is a
+            # quiet scope, not a failure: the hub owns progress, so the next
+            # scheduled run resumes from its committed continuation.
+            if after == sent:
                 break
+            # A cursor that swings back to an earlier page would drop the pages
+            # in between, so it is still a malformed reply.
+            if after in seen:
+                raise ValueError("invalid compensation watch cursor")
             seen.add(after)
             fields["after"] = after
         # Exhausting the budget is a successful poll. The hub commits each

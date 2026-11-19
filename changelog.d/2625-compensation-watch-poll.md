@@ -1,2 +1,2 @@
-- Treat a compensation watch page that repeats a cursor the poll already used as the end of that poll, so a quiet scope finishes without a client error.
-- Skip the retrieval and manifest scan for a permanently stale compensation watch while every input the scan reads is unchanged, and still report a later distinct trip.
+- Treat a compensation watch page that repeats the cursor it was given as the end of that poll, while a cursor that jumps back to an earlier page still fails, so a quiet scope finishes without a client error.
+- Skip the retrieval and manifest scan for a permanently stale compensation watch only while every input the scan reads is unchanged, including grants and the scanner ruleset, and only when every bounded scan finished, so a later distinct trip is still reported.

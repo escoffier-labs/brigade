@@ -95,6 +95,21 @@ def test_watch_treats_a_repeated_cursor_as_the_end_of_the_poll():
     assert [call.get("after") for call in calls] == [None, cursor]
 
 
+def test_watch_rejects_a_cursor_that_returns_to_an_earlier_page():
+    first = "01MCER5BZ8B2Y78ED29HAFZZ10"
+    second = "01MCER5BZ8B2Y78ED29HAFZZ11"
+    following = {None: first, first: second, second: first}
+
+    class Client:
+        def call(self, action, **fields):
+            if action == "status":
+                return {"capabilities": [watch.CAPABILITY]}
+            return {"results": [], "next_after": following[fields.get("after")]}
+
+    with pytest.raises(ValueError, match="invalid compensation watch cursor"):
+        watch.run(Client(), ("repo",), "epoch")
+
+
 def test_watch_budget_is_success_and_next_run_continues():
     from brigade import memory_hub_client as hubc
 
