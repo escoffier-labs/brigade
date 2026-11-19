@@ -58,9 +58,11 @@ The eight identity fields above are required. `runtime_mode` and
 `approval-required`, `auto-accept-edits`, `auto` and `full-access`, the literals
 the pinned T3 Code delegate schema accepts. `interaction_mode` also accepts only
 `default` and `plan`. A target that still declares `app-server`, or any other
-mode T3 does not accept, is a structural gap. `t3 open` refuses the whole batch
-with `t3-unsupported` and token `target-mode-invalid`, and a claim refuses the
-same way for a retained target. Set `inherit` and let the parent thread's mode
+well-formed mode name T3 does not accept, is a structural gap. `t3 open` refuses
+the whole batch with `t3-unsupported` and token `target-mode-invalid`, and a
+claim refuses the same way for a retained target. A malformed mode string, such
+as one containing a space, fails target validation first and refuses as
+`invalid-target`. Set `inherit` and let the parent thread's mode
 apply. A retained target from an older release is still read back unchanged, so
 an attempt that was already claimed can finish its verbs.
 
