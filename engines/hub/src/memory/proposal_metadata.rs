@@ -115,6 +115,102 @@ pub fn lines_without_key<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
         .filter(|l| !l.trim().is_empty() && !is_key(l, key))
         .collect()
 }
+/// One front-matter fence line: three dashes, then only spaces or tabs.
+fn fence(line: &str) -> bool {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line.strip_prefix("---")
+        .is_some_and(|rest| rest.chars().all(|c| c == ' ' || c == '\t'))
+}
+/// Python `memory_proposals._body_offset`: the byte extent of the leading front
+/// matter, fence included, or `None` when the card has no front matter. A card
+/// that opens a fence without closing it is left to the caller to refuse.
+fn body_offset(text: &str) -> Option<usize> {
+    let first = text.split_inclusive('\n').next()?;
+    if !first.ends_with('\n') || !fence(first) {
+        return None;
+    }
+    let mut offset = first.len();
+    for line in text[offset..].split_inclusive('\n') {
+        offset += line.len();
+        if fence(line) {
+            return Some(offset);
+        }
+    }
+    None
+}
+/// The local proposal path's reservation list rendering, exactly
+/// `json.dumps(sorted(ids))`: quoted ids with a comma and a space between them.
+fn anchor_list(ids: &BTreeSet<String>) -> String {
+    let quoted: Vec<String> = ids.iter().map(|id| format!("\"{id}\"")).collect();
+    format!("[{}]", quoted.join(", "))
+}
+/// Record claim anchor ids exactly as the local proposal path writes them. The
+/// field keeps its place when present and is inserted before the closing fence
+/// otherwise; a card without front matter gains one. Every other byte stays.
+pub fn reserve_anchors(text: &str, ids: &BTreeSet<String>) -> Result<String, &'static str> {
+    if ids.iter().any(|id| !proposal_blocks::anchor(id)) {
+        return Err("invalid claim anchor reservation");
+    }
+    let found = body_offset(text);
+    if found.is_none() && text.starts_with("---") {
+        return Err("unsupported card front matter");
+    }
+    let offset = found.unwrap_or(0);
+    let header = if offset == 0 {
+        "---\n---\n".to_string()
+    } else {
+        text[..offset].replace("\r\n", "\n")
+    };
+    let mut lines: Vec<String> = header.split('\n').map(str::to_string).collect();
+    let closing = (1..lines.len())
+        .find(|index| lines[*index].trim() == "---")
+        .ok_or("unsupported card front matter")?;
+    let field = format!("claim_anchor_ids: {}", anchor_list(ids));
+    let mut replaced = 0;
+    for line in &mut lines[1..closing] {
+        if line
+            .split_once(':')
+            .is_some_and(|(key, _)| key.trim() == "claim_anchor_ids")
+        {
+            *line = field.clone();
+            replaced += 1;
+        }
+    }
+    if replaced > 1 {
+        return Err("ambiguous claim anchor reservations");
+    }
+    if replaced == 0 {
+        // Append after the last field, never after a trailing blank line. A
+        // blank left before the fence is part of the fence separator, so
+        // keeping it there keeps the searched text identical to before.
+        let insert = (1..closing)
+            .rev()
+            .find(|index| !lines[*index].trim().is_empty())
+            .map_or(1, |index| index + 1);
+        lines.insert(insert, field);
+    }
+    let mut updated = lines.join("\n");
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    let ending = if text.starts_with("---\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    Ok(updated.replace('\n', ending) + &text[offset..])
+}
+/// Every front-matter line the writer would not treat as `key`, blank lines
+/// included, so a structural proof can bind the metadata bytes it did not write.
+pub fn other_lines(text: &str, key: &str) -> Result<Vec<String>, &'static str> {
+    let (meta, _) = front(text)?;
+    Ok(meta
+        .into_iter()
+        .filter(|line| !is_key(line, key))
+        .map(str::to_string)
+        .collect())
+}
 pub fn set(text: &str, updates: &[(&str, Json)]) -> Result<String, &'static str> {
     let (meta, body) = front(text)?;
     for (key, _) in updates {

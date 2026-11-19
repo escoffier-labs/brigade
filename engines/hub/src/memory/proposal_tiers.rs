@@ -158,7 +158,10 @@ pub(super) fn anchor_proof<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite:
         let Ok(after) = super::proposal_blocks::anchor_blocks(before, id) else {
             return Ok(false);
         };
-        if after == before || after != string(card, "after_text") {
+        if after == before
+            || after != string(card, "after_text")
+            || !super::proposal_blocks::proven_delta(before, &after)
+        {
             return Ok(false);
         }
     }
@@ -328,6 +331,12 @@ pub fn classify<T: ReadTx + ?Sized>(
                 }
                 "merge_exact_duplicates" => {
                     excluded.extend(["aliases", "evidence"]);
+                }
+                // The structural proof below binds the exact reservation list
+                // to the suffixes this transform adds, so only that field is
+                // excluded here and every other metadata line must still match.
+                "anchor_blocks" => {
+                    excluded.insert("claim_anchor_ids");
                 }
                 _ => (),
             }

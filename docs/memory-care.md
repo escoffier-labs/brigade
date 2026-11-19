@@ -716,8 +716,10 @@ provide the card-write atomicity coverage.
 Hub reflection proposes `anchor_blocks` only for clean live cards whose current
 head came from a gated automatic hub apply and has unanchored claim blocks.
 Cards written by put, import or human-reviewed applies are not proposed.
-Anchoring adds deterministic `^c-xxxxxx` suffixes and preserves all other bytes,
-including existing anchors. Unsupported Markdown stays opaque.
+Anchoring adds deterministic `^c-xxxxxx` suffixes and records their ids in
+`claim_anchor_ids`, as local proposals do, so a removed anchor stays reserved.
+All other bytes, including existing anchors, are preserved. Unsupported Markdown
+stays opaque.
 Each run handles at most 25 anchoring proposals, including retries. The normal
 run limit and hub quotas can reduce that number. Anchoring stops with four
 pending slots reserved for repair proposals. Unapplied anchoring proposals are

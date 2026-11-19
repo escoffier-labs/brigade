@@ -1484,6 +1484,10 @@ mod projection_tests {
         for (what, text) in [
             ("anchor suffix", "needle ^c-abcdef\n"),
             ("evidence line", "---\nevidence: [\"a/b/c\"]\n---\nneedle\n"),
+            (
+                "anchor reservations",
+                "---\nclaim_anchor_ids: [\"c-abcdef\"]\n---\nneedle\n",
+            ),
         ] {
             let mut same = before.clone();
             same.text = text.into();

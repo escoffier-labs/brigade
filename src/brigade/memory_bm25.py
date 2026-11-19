@@ -5,8 +5,9 @@ and no persistent index: a full build over about 1,900 cards takes a fraction
 of a second, which is cheaper than keeping a derived file in sync.
 
 Each card is one field: title, tags, summary, and the card text, joined. The
-card text leaves out the ``evidence`` front-matter line and anchor suffixes,
-which are stored and shown but never searched (``ranking_text``).
+card text leaves out the ``evidence`` and ``claim_anchor_ids`` front-matter
+lines and anchor suffixes, which are stored and shown but never searched
+(``ranking_text``).
 Query terms are deduplicated. Scores are rounded to ``SCORE_DIGITS`` decimals
 so near-identical cards still tie and callers can break ties by path.
 """
@@ -54,8 +55,8 @@ def _front_matter_body(text: str) -> str | None:
     return None
 
 
-def _without_evidence(text: str) -> str:
-    """Drop the front-matter lines the hub writer treats as the ``evidence`` field.
+def _without_keys(text: str, keys: Collection[str]) -> str:
+    """Drop the front-matter lines the hub writer treats as one of ``keys``.
 
     The lines come from the writer's own parse, so a blank line or a final newline in
     the metadata reads the same before and after the writer rewrites it. Nothing is
@@ -67,20 +68,22 @@ def _without_evidence(text: str) -> str:
     if not sep:
         return text
     lines = _writer_lines(meta)
-    kept = [line for line in lines if not (":" in line and line.partition(":")[0] == "evidence")]
+    kept = [line for line in lines if not (":" in line and line.partition(":")[0] in keys)]
     if len(kept) == len(lines) or _front_matter_body(text) != body:
         return text
-    # A front matter left with no lines goes too, so a card that gains its first evidence field reads the same.
+    # A front matter left with no lines goes too, so a card that gains its first reserved field reads the same.
     return "---\n" + "\n".join(kept) + "\n---\n" + body if kept else body
 
 
 def ranking_text(text: str) -> str:
     """The card as search sees it, the mirror of the hub's ``text::ranking_text``.
 
-    The evidence line goes first, because a reference holding ``<`` would
-    otherwise make the whole card opaque to the anchor span parser.
+    Evidence citations and claim-anchor reservations are stored and shown but
+    never searched, so anchoring a card cannot move any ranking. The evidence
+    line goes first, because a reference holding ``<`` would otherwise make the
+    whole card opaque to the anchor span parser.
     """
-    text = _without_evidence(text)
+    text = _without_keys(text, ("evidence", "claim_anchor_ids"))
     data = text.encode("utf-8")
     for start, end in sorted(hub_spans(text), reverse=True):
         block = data[start:end].decode("utf-8")

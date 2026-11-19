@@ -136,6 +136,9 @@ RANKING = [
     # The search parser closes the front matter at a fence with trailing whitespace.
     ("fence-trailing-space", '---\nevidence: ["a/b/c"]\n---  \nClaim. ^c-abcdef\n'),
     ("fence-earlier-than-writers", '---\ntitle: T\n---  \nevidence: ["a/b/c"]\n---\nClaim.\n'),
+    # Claim-anchor reservations are stored and shown but never searched.
+    ("claim-anchor-ids", '---\ntitle: T\nclaim_anchor_ids: ["c-abcdef"]\n---\nClaim. ^c-abcdef\n'),
+    ("only-claim-anchor-ids", '---\nclaim_anchor_ids: ["c-abcdef"]\n---\nClaim.\n'),
 ]
 
 ROUND = [0.03125, 0.00015, 1.23455, 2.5, 0.000049999, 12.34565, 1e-05, 3.14159265, 0.99995, 7.00005]

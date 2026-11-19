@@ -95,7 +95,18 @@ fn suffix(block: &str) -> Option<(usize, usize, &str)> {
     anchor(id).then_some((prefix.len(), trimmed.len(), id))
 }
 
-/// Add only suffix bytes. Reserve every anchor spelling, even in opaque text.
+fn id_counts(text: &str) -> std::collections::BTreeMap<String, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for (i, _) in text.match_indices('^') {
+        if let Some(id) = text.get(i + 1..i + 9).filter(|id| anchor(id)) {
+            *counts.entry(id.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Add only suffix bytes and the reservations for the ids this transform
+/// mints. Every anchor spelling stays reserved, even in opaque text.
 pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> {
     let mut used = BTreeSet::new();
     for (i, _) in text.match_indices('^') {
@@ -104,12 +115,11 @@ pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> 
         }
     }
     // Retired anchors in metadata remain reserved too.
-    for id in super::proposal_metadata::list(text, "claim_anchor_ids")? {
-        if !anchor(&id) {
-            return Err("invalid claim anchor reservation");
-        }
-        used.insert(id);
+    let mut reserved = super::proposal_metadata::list(text, "claim_anchor_ids")?;
+    if reserved.iter().any(|id| !anchor(id)) {
+        return Err("invalid claim anchor reservation");
     }
+    used.extend(reserved.iter().cloned());
     let mut result = text.to_string();
     let mut edits = Vec::new();
     let mut seen = BTreeSet::new();
@@ -134,12 +144,69 @@ pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> 
         if used.len() > 4096 {
             return Err("claim anchor reservation limit exceeded");
         }
+        reserved.insert(id.clone());
         edits.push((start + block.trim_end_matches([' ', '\t']).len(), id));
+    }
+    if edits.is_empty() {
+        return Ok(text.to_string());
     }
     for (end, id) in edits.into_iter().rev() {
         result.insert_str(end, &format!(" ^{id}"));
     }
-    Ok(result)
+    super::proposal_metadata::reserve_anchors(&result, &reserved)
+}
+
+/// The only diff an anchor transform may make: an added ` ^<id>` suffix on a
+/// block that carried none, and exactly those ids added to the card's
+/// `claim_anchor_ids` list. Every other claim byte and metadata line stays
+/// before's. Fail closed on any ambiguity.
+pub fn proven_delta(before: &str, after: &str) -> bool {
+    let (Ok(before_reserved), Ok(after_reserved)) = (
+        super::proposal_metadata::list(before, "claim_anchor_ids"),
+        super::proposal_metadata::list(after, "claim_anchor_ids"),
+    ) else {
+        return false;
+    };
+    let (before_counts, after_counts) = (id_counts(before), id_counts(after));
+    // No prior spelling loses an occurrence.
+    if before_counts
+        .iter()
+        .any(|(id, count)| after_counts.get(id) != Some(count))
+    {
+        return false;
+    }
+    let added: BTreeSet<String> = after_counts
+        .keys()
+        .filter(|id| !before_counts.contains_key(*id))
+        .cloned()
+        .collect();
+    if added.is_empty() || added.iter().any(|id| after_counts.get(id) != Some(&1)) {
+        return false;
+    }
+    // The reservation list gains exactly the ids the transform added.
+    if !before_reserved.is_subset(&after_reserved)
+        || after_reserved
+            .difference(&before_reserved)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != added
+    {
+        return false;
+    }
+    // No other metadata line and no other claim byte changes.
+    matches!(
+        (
+            super::proposal_metadata::other_lines(before, "claim_anchor_ids"),
+            super::proposal_metadata::other_lines(after, "claim_anchor_ids"),
+        ),
+        (Ok(kept), Ok(written)) if kept == written
+    ) && matches!(
+        (
+            super::proposal_metadata::claims(before),
+            super::proposal_metadata::claims(after),
+        ),
+        (Ok(kept), Ok(written)) if kept == written
+    )
 }
 
 pub fn pin(text: &str, id: &str, hash: &str) -> Result<Json, &'static str> {
@@ -273,6 +340,31 @@ pub(super) fn span_texts(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn anchor_proof_admits_only_added_suffixes_and_their_reservations() {
+        let before = "---\ntitle: Notes\nevidence: []\n---\nFirst claim.\n\n- Second. ^c-abcdef\n";
+        let after = anchor_blocks(before, "a").unwrap();
+        assert!(proven_delta(before, &after), "{after}");
+        assert_eq!(anchor_blocks(&after, "a").unwrap(), after);
+        // Another metadata field may not move.
+        assert!(!proven_delta(
+            before,
+            &after.replace("title: Notes", "title: Other")
+        ));
+        assert!(!proven_delta(
+            before,
+            &after.replace("evidence: []", "evidence: [\"ns/a/b\"]")
+        ));
+        // A reserved id that no suffix added is refused.
+        let extra = after.replacen("]\n---\n", ", \"c-000000\"]\n---\n", 1);
+        assert_ne!(extra, after);
+        assert!(!proven_delta(before, &extra));
+        // Dropping a claim anchor while keeping its reservation is refused.
+        assert!(!proven_delta(
+            before,
+            &after.replace("- Second. ^c-abcdef", "- Second.")
+        ));
+    }
     #[test]
     fn opaque_markdown_and_duplicate_ids_never_resolve_by_position() {
         for body in [

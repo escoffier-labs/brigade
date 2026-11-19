@@ -62,11 +62,11 @@ leaves out revision, head sequence, content hash and raw text. Changed document
 membership always holds. Hybrid scopes hold.
 
 Search indexes `ranking_text`, not the stored card. It drops the single-line
-`evidence:` front-matter line, by the same key rule the proposal writer uses, and
-the ` ^c-xxxxxx` anchor suffixes. Both are still stored and shown, and neither
-is searchable. So only an op list made entirely of `append_evidence` and
-`anchor_blocks` is admitted, and each must leave `ranking_text` and every other
-ranking input equal. An apply rewrites the card's writer class to the applier's,
+`evidence:` and `claim_anchor_ids:` front-matter lines, by the same key rule the
+proposal writer uses, and the ` ^c-xxxxxx` anchor suffixes. All are still stored
+and shown, and none is searchable. So only an op list made entirely of
+`append_evidence` and `anchor_blocks` is admitted, and each must leave
+`ranking_text` and every other ranking input equal. An apply rewrites the card's writer class to the applier's,
 so a target whose `automated` value would flip holds. A mixed op list, a stale
 base revision hold. Removing a document changes BM25 document counts and
 average length, so a duplicate merge is admitted under a bounded drift instead

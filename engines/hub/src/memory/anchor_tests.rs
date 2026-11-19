@@ -2,22 +2,37 @@
 use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{proposal_blocks::anchor_blocks, proposal_tests::*, tests::*, *};
 
+/// The body a card's front matter ends before, or the text when it has none.
+fn body(text: &str) -> &str {
+    let first = text.split_inclusive('\n').next().unwrap_or("");
+    if first != "---\n" && first != "---\r\n" {
+        return text;
+    }
+    let mut offset = first.len();
+    for line in text[offset..].split_inclusive('\n') {
+        offset += line.len();
+        if line.trim_end_matches(['\n', '\r']) == "---" {
+            return &text[offset..];
+        }
+    }
+    text
+}
+
 #[test]
 fn deterministic_suffixes_preserve_bytes_and_reserve_existing_ids() {
     let original = "---\nevidence: []\n---\nFirst claim.\n\n- Second claim. ^c-abcdef\n";
     let anchored = anchor_blocks(original, "a").unwrap();
     let digest = ids::sha256_hex(b"a\x000\x00First claim.\x000");
-    let expected = original.replacen(
-        "First claim.",
-        &format!("First claim. ^c-{}", &digest[..6]),
-        1,
+    let minted = format!("c-{}", &digest[..6]);
+    let expected = format!(
+        "---\nevidence: []\nclaim_anchor_ids: [\"{minted}\"]\n---\nFirst claim. ^{minted}\n\n- Second claim. ^c-abcdef\n"
     );
     assert_eq!(anchored, expected);
     assert_eq!(anchor_blocks(original, "a").unwrap(), anchored);
     assert_eq!(anchor_blocks(&anchored, "a").unwrap(), anchored);
     assert_eq!(
-        super::proposal_blocks::strip_anchors(&anchored),
-        original.replace(" ^c-abcdef", "")
+        super::proposal_blocks::strip_anchors(body(&anchored)),
+        super::proposal_blocks::strip_anchors(body(original))
     );
     assert!(anchored.ends_with("- Second claim. ^c-abcdef\n"));
     let first = super::proposal_blocks::pins(&anchored)[0]["block_id"]
@@ -32,6 +47,95 @@ fn deterministic_suffixes_preserve_bytes_and_reserve_existing_ids() {
     let result = anchor_blocks(&reserved, "a").unwrap();
     assert!(!result.contains(&format!(" ^{first}")));
     assert!(anchor_blocks("A. ^c-abcdef\n\nB. ^c-abcdef\n", "a").is_err());
+}
+
+#[tokio::test]
+async fn removed_hub_anchor_stays_reserved_for_the_card() {
+    let h = Hub::with(clean(), None);
+    let put = h
+        .put(ADMIN_TOKEN, "fleet", "a", None, "Keep the cache warm.\n")
+        .await;
+    let opened = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![
+            json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)}),
+        ],
+    )
+    .await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    let applied = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let anchored = card(&h, "fleet", "a").await;
+    let pinned = super::proposal_blocks::pins(anchored["text"].as_str().unwrap());
+    let pin = &pinned[0];
+    let id = pin["block_id"].as_str().unwrap().to_string();
+    // The anchoring transform records its own ids, like the local path does.
+    assert_eq!(
+        super::proposal_metadata::list(anchored["text"].as_str().unwrap(), "claim_anchor_ids")
+            .unwrap(),
+        std::collections::BTreeSet::from([id.clone()])
+    );
+    let removal = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![json!({
+            "type":"remove_block",
+            "scope":"fleet",
+            "card_id":"a",
+            "base_revision":anchored["revision"],
+            "block_id":id,
+            "expected_block_hash":pin["hash"]
+        })],
+    )
+    .await;
+    assert_eq!(removal.status, 201, "{removal:?}");
+    let removed = decide(&h, ADMIN_TOKEN, &removal.body["proposal_id"]).await;
+    assert_eq!(removed.body["state"], "applied", "{removed:?}");
+    let current = card(&h, "fleet", "a").await;
+    let text = current["text"].as_str().unwrap();
+    assert!(!text.contains(&format!(" ^{id}")), "{text:?}");
+    assert!(text.contains(&format!("\"{id}\"")), "{text:?}");
+    // The same claim at the same block position derives the same candidate id,
+    // so only the retained reservation can keep it from being minted again.
+    let restored = format!("{text}\nKeep the cache warm.\n");
+    let put = h
+        .put(
+            ADMIN_TOKEN,
+            "fleet",
+            "a",
+            current["revision"].as_i64(),
+            &restored,
+        )
+        .await;
+    assert_eq!(put.status, 201, "{put:?}");
+    let again = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![
+            json!({"type":"anchor_blocks","scope":"fleet","card_id":"a","base_revision":rev(&put)}),
+        ],
+    )
+    .await;
+    assert_eq!(again.status, 201, "{again:?}");
+    let applied = decide(&h, ADMIN_TOKEN, &again.body["proposal_id"]).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let final_text = card(&h, "fleet", "a").await["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let minted = super::proposal_blocks::pins(&final_text);
+    let claim = minted
+        .iter()
+        .find(|pin| {
+            pin["bytes"]
+                .as_str()
+                .is_some_and(|bytes| bytes.starts_with("Keep the cache warm."))
+        })
+        .unwrap();
+    assert_ne!(claim["block_id"], json!(id), "{final_text:?}");
+    assert!(!final_text.contains(&format!(" ^{id}")), "{final_text:?}");
+    assert!(final_text.contains(&format!("\"{id}\"")), "{final_text:?}");
 }
 
 #[tokio::test]
@@ -85,8 +189,8 @@ fn shared_span_table_and_whitespace_suffixes() {
         let anchored = anchor_blocks(text, "a").unwrap();
         assert_eq!(anchor_blocks(&anchored, "a").unwrap(), anchored);
         assert_eq!(
-            proposal_blocks::strip_anchors(&anchored),
-            proposal_blocks::strip_anchors(text)
+            proposal_blocks::strip_anchors(body(&anchored)),
+            proposal_blocks::strip_anchors(body(text))
         );
     }
     for text in ["Claim. ^c-abcdef   \n", "Café. ^c-abcdef\t\r\n"] {
@@ -102,7 +206,7 @@ fn shared_span_table_and_whitespace_suffixes() {
     for (before, ending) in [("Claim.  \n", "  \n"), ("Café.\t\r\n", "\t\r\n")] {
         let after = anchor_blocks(before, "a").unwrap();
         assert!(after.ends_with(ending), "{after:?}");
-        assert_eq!(proposal_blocks::strip_anchors(&after), before);
+        assert_eq!(proposal_blocks::strip_anchors(body(&after)), before);
     }
 }
 
@@ -289,6 +393,50 @@ async fn anchor_proof_refuses_non_suffix_changes_and_client_fields() {
         let refused = submit(&h, ADMIN_TOKEN, vec![operation]).await;
         assert_eq!(refused.status, 422, "{refused:?}");
     }
+}
+
+#[tokio::test]
+async fn anchor_proof_refuses_reservations_the_transform_did_not_add() {
+    let (h, id) = anchor_ready(AGENT_TOKEN).await;
+    let report = attestation_tests::report(&h, &id).await;
+    assert_eq!(
+        report.body["structural_anchor_proof"],
+        json!(true),
+        "{report:?}"
+    );
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let raw: String = db
+        .query_row(
+            "SELECT body FROM memory_proposals WHERE proposal_id=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut body: Json = serde_json::from_str(&raw).unwrap();
+    let after = body["cards"][0]["after_text"].as_str().unwrap();
+    // A reservation id that no added suffix minted must not ride along.
+    let tampered = after.replacen("]\n---\n", ", \"c-000000\"]\n---\n", 1);
+    assert_ne!(tampered, after);
+    body["cards"][0]["after_text"] = json!(tampered);
+    db.execute(
+        "UPDATE memory_proposals SET body=?1 WHERE proposal_id=?2",
+        [body.to_string(), id.as_str().unwrap().to_string()],
+    )
+    .unwrap();
+    let report = attestation_tests::report(&h, &id).await;
+    assert_eq!(
+        report.body["structural_anchor_proof"],
+        json!(false),
+        "{report:?}"
+    );
+    assert!(
+        report.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "tier_requires_review"),
+        "{report:?}"
+    );
 }
 
 async fn forged_origin_stays_review_only(token: &str, origin: Option<&str>, action: &str) {
