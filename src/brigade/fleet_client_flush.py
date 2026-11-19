@@ -7,6 +7,14 @@ and each isolated event moves to a bounded dead-letter file beside the
 spool (``<node>.rejected.jsonl``). A transport failure at any point stops the
 flush and keeps every unprocessed event queued.
 
+When the hub rejects every event, for example a wrong hub URL or an older
+hub refusing a field, bisection would isolate every single event: 199 POSTs
+per 100-event batch. If the first few split posts are all rejected and no
+event has been accepted, the batch is treated as a hub fault: isolation
+stops, nothing moves to the dead letter, and the events stay queued. Once
+any event is accepted the pattern is disproven and isolation continues as
+before, so individually rejected events in a mixed batch are still isolated.
+
 Processing is strictly in order, so handled events always form a prefix of
 the spool. The dead letter is written before the spool rewrite: a crash
 between the two replays the prefix, which the hub dedupes by digest and the
@@ -31,6 +39,10 @@ DEAD_LETTER_MAX_RECORDS = 200
 # Events larger than this keep their identity fields but not their body.
 DEAD_LETTER_MAX_EVENT_BYTES = 16 * 1024
 REASON_MAX_CHARS = 200
+# Consecutive rejected split posts, with no accepted event, that identify a
+# hub rejecting everything. Bounds an all-reject batch to this many bisection
+# POSTs instead of isolating every single event.
+WHOLE_BATCH_REJECT_BUDGET = 4
 _monotonic = time.monotonic
 _IDENTITY_FIELDS = ("node_id", "run_id", "sequence", "digest", "ts", "state")
 
@@ -51,6 +63,8 @@ class _Bisection:
     delivered: int = 0
     rejected: list[tuple[dict[str, Any], str]] = field(default_factory=list)
     stopped: bool = False
+    consecutive_rejects: int = 0
+    aborted: bool = False
 
 
 def _bisect(
@@ -60,8 +74,14 @@ def _bisect(
     poison: type[Exception],
     on_delivered: Callable[[list[dict[str, Any]]], None] | None,
     result: _Bisection,
+    whole_batch_budget: int = WHOLE_BATCH_REJECT_BUDGET,
 ) -> None:
-    """Resolve a rejected ``chunk`` in order; set ``stopped`` on transport failure."""
+    """Resolve a rejected ``chunk`` in order; set ``stopped`` on transport failure.
+
+    An unbroken run of rejected split posts with no accepted event sets
+    ``aborted``: the hub appears to reject everything, so the chunk is left
+    queued instead of being bisected down to singles.
+    """
     if len(chunk) == 1:
         result.rejected.append((chunk[0], _sanitize_reason(str(error))))
         result.handled += 1
@@ -74,7 +94,14 @@ def _bisect(
         try:
             post(half)
         except poison as exc:
-            _bisect(half, exc, post, poison, on_delivered, result)
+            # Only the opening run matters: one accepted event proves a
+            # mixed batch, after which isolation must continue as before.
+            if result.delivered == 0:
+                result.consecutive_rejects += 1
+                if result.consecutive_rejects >= whole_batch_budget:
+                    result.aborted = True
+                    return
+            _bisect(half, exc, post, poison, on_delivered, result, whole_batch_budget)
         except Exception:
             result.stopped = True
         else:
@@ -82,7 +109,7 @@ def _bisect(
             result.delivered += len(half)
             if on_delivered is not None:
                 on_delivered(half)
-        if result.stopped:
+        if result.stopped or result.aborted:
             return
 
 
@@ -135,6 +162,7 @@ def flush_locked(
     preserve_poison: bool = False,
     on_delivered: Callable[[list[dict[str, Any]]], None] | None = None,
     bisect_budget: float | None = None,
+    whole_batch_budget: int = WHOLE_BATCH_REJECT_BUDGET,
 ) -> int:
     """Flush a locked spool in order; return the number of delivered events.
 
@@ -142,6 +170,9 @@ def flush_locked(
     flush may share, for callers with a latency contract (``report_event``).
     Isolation that runs out of budget stops like a transport failure, so the
     unprocessed events stay queued for the next flush. ``None`` is unbounded.
+
+    ``whole_batch_budget`` caps the opening run of rejected split posts before
+    the hub is reported as rejecting everything and the batch is left queued.
     """
     from . import fleet_client as client
 
@@ -185,7 +216,16 @@ def flush_locked(
             if bisect_budget is not None and deadline is None:
                 deadline = _monotonic() + bisect_budget
             outcome = _Bisection()
-            _bisect(batch, exc, bisect_post, client._PoisonResponse, on_delivered, outcome)
+            _bisect(batch, exc, bisect_post, client._PoisonResponse, on_delivered, outcome, whole_batch_budget)
+            if outcome.aborted:
+                client._LOG.warning(
+                    "fleet spool %s: hub rejects every event (first %d split(s) all rejected); "
+                    "keeping %d event(s) queued for the next flush",
+                    path,
+                    outcome.consecutive_rejects,
+                    len(events) - index,
+                )
+                break
             index += outcome.handled
             delivered += outcome.delivered
             rejected.extend(outcome.rejected)

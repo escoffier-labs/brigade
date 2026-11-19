@@ -1,0 +1,1 @@
+- Bound spool poison isolation when the hub rejects every event: after a few rejected splits with no accepted event, the flush stops, leaves the events queued, and reports the hub as rejecting everything instead of POSTing every event as a single. Mixed batches still isolate only the rejected events (#1846).

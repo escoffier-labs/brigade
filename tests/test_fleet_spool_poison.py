@@ -113,6 +113,31 @@ def test_multiple_poisoned_events_keep_valid_order(monkeypatch):
     assert not path.exists()
 
 
+def test_all_rejected_batch_stays_queued_with_bounded_posts(monkeypatch):
+    """A hub that rejects every event is treated as a fault, not bisected to singles (#1846)."""
+    events = [_event(seq, poison=True) for seq in range(1, 21)]
+    path = _spool(events)
+    hub = FakeHub()
+    # Unfixed code bisects 20 singles: one batch post plus 2 * 19 = 39 posts.
+    assert _flush(hub, monkeypatch) == 0
+    assert len(hub.calls) <= 6
+    assert hub.stored == []
+    assert _sequences(path) == list(range(1, 21))
+    assert _dead_letters(path) == []
+
+
+def test_mixed_batch_still_isolates_individually(monkeypatch):
+    """A mixed batch is not mistaken for a hub that rejects everything (#1846)."""
+    bad = (5, 16)
+    events = [_event(seq, poison=seq in bad) for seq in range(1, 21)]
+    path = _spool(events)
+    hub = FakeHub()
+    assert _flush(hub, monkeypatch) == 18
+    assert sorted(hub.stored) == [seq for seq in range(1, 21) if seq not in bad]
+    assert sorted(r["sequence"] for r in _dead_letters(path)) == list(bad)
+    assert not path.exists()
+
+
 def test_transport_failure_during_bisection_keeps_unprocessed_events(monkeypatch):
     # Call 1 rejects [1..6]; call 2 delivers [1, 2, 3]; call 3 (the [4, 5, 6]
     # half) fails in transit, so 4, 5 and 6 stay queued, poison included.
@@ -202,13 +227,15 @@ def test_append_during_flush_is_preserved(monkeypatch):
 
 
 def test_dead_letter_is_bounded_and_deduplicated(monkeypatch):
+    # A mixed batch keeps isolation active; an all-rejected batch stays queued (#1846).
     monkeypatch.setattr(fleet_client_flush, "DEAD_LETTER_MAX_RECORDS", 3)
-    path = _spool([_event(seq, poison=True) for seq in range(1, 6)])
+    bad = (6, 7, 8, 9, 10)
+    path = _spool([_event(seq, poison=seq in bad) for seq in range(1, 13)])
+    assert _flush(FakeHub(), monkeypatch) == 7
+    assert [r["sequence"] for r in _dead_letters(path)] == [8, 9, 10]
+    _spool([_event(8, poison=True)])
     assert _flush(FakeHub(), monkeypatch) == 0
-    assert [r["sequence"] for r in _dead_letters(path)] == [3, 4, 5]
-    _spool([_event(5, poison=True)])
-    assert _flush(FakeHub(), monkeypatch) == 0
-    assert [r["sequence"] for r in _dead_letters(path)] == [3, 4, 5]
+    assert [r["sequence"] for r in _dead_letters(path)] == [8, 9, 10]
 
 
 def test_oversized_dead_letter_keeps_identity_without_body(monkeypatch):
