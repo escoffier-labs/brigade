@@ -37,6 +37,9 @@ class FakeHub:
     def __init__(self, *, fail_on_call: int | None = None, reason: str = "hub rejected batch with HTTP 422"):
         self.calls: list[list[int]] = []
         self.stored: list[int] = []
+        # Counts every accepted POST per event, so a double delivery is visible
+        # even though stored deduplicates by sequence.
+        self.delivery_counts: dict[int, int] = {}
         self.fail_on_call = fail_on_call
         self.reason = reason
 
@@ -48,8 +51,10 @@ class FakeHub:
         if any(len(e["repo"]) > 1024 for e in batch):
             raise fleet_client._PoisonResponse(self.reason)
         for event in batch:
-            if event["sequence"] not in self.stored:
-                self.stored.append(event["sequence"])
+            sequence = event["sequence"]
+            self.delivery_counts[sequence] = self.delivery_counts.get(sequence, 0) + 1
+            if sequence not in self.stored:
+                self.stored.append(sequence)
 
 
 @pytest.fixture(autouse=True)
@@ -113,12 +118,104 @@ def test_multiple_poisoned_events_keep_valid_order(monkeypatch):
     assert not path.exists()
 
 
+def test_all_rejected_batch_stays_queued_with_bounded_posts(monkeypatch):
+    """A hub that rejects every event is treated as a fault, not bisected to singles (#1846)."""
+    events = [_event(seq, poison=True) for seq in range(1, 21)]
+    path = _spool(events)
+    hub = FakeHub()
+    # One batch POST plus nine split/single POSTs before the fourth single.
+    assert _flush(hub, monkeypatch) == 0
+    assert len(hub.calls) == 10
+    assert hub.stored == []
+    assert _sequences(path) == list(range(1, 21))
+    assert _dead_letters(path) == []
+
+
+@pytest.mark.parametrize("count", [20, 100])
+def test_single_poison_at_head_is_isolated_not_blocking(monkeypatch, count):
+    """A lone poison event at index 0 must not look like a hub rejecting everything (#1846)."""
+    events = [_event(seq, poison=seq == 1) for seq in range(1, count + 1)]
+    path = _spool(events)
+    hub = FakeHub()
+    assert _flush(hub, monkeypatch) == count - 1
+    assert hub.stored == list(range(2, count + 1))
+    assert [r["sequence"] for r in _dead_letters(path)] == [1]
+    assert not path.exists()
+    assert hub.delivery_counts == {seq: 1 for seq in range(2, count + 1)}
+
+
+@pytest.mark.parametrize("count", [20, 100])
+def test_single_poison_at_tail_is_isolated_not_blocking(monkeypatch, count):
+    """A lone poison event at the last index must still be isolated (#1846)."""
+    events = [_event(seq, poison=seq == count) for seq in range(1, count + 1)]
+    path = _spool(events)
+    hub = FakeHub()
+    assert _flush(hub, monkeypatch) == count - 1
+    assert hub.stored == list(range(1, count))
+    assert [r["sequence"] for r in _dead_letters(path)] == [count]
+    assert not path.exists()
+    assert hub.delivery_counts == {seq: 1 for seq in range(1, count)}
+
+
+def test_mixed_batch_still_isolates_individually(monkeypatch):
+    """A mixed batch is not mistaken for a hub that rejects everything (#1846)."""
+    bad = (5, 16)
+    events = [_event(seq, poison=seq in bad) for seq in range(1, 21)]
+    path = _spool(events)
+    hub = FakeHub()
+    assert _flush(hub, monkeypatch) == 18
+    assert hub.stored == [seq for seq in range(1, 21) if seq not in bad]
+    assert [r["sequence"] for r in _dead_letters(path)] == list(bad)
+    assert not path.exists()
+    assert hub.delivery_counts == {seq: 1 for seq in range(1, 21) if seq not in bad}
+
+
+def test_four_poison_at_head_stays_queued(monkeypatch):
+    """Documented residual: four head poison events with no delivery look like a hub fault (#1846)."""
+    events = [_event(seq, poison=seq <= 4) for seq in range(1, 9)]
+    path = _spool(events)
+    hub = FakeHub()
+    assert _flush(hub, monkeypatch) == 0
+    assert hub.stored == []
+    assert _sequences(path) == list(range(1, 9))
+    assert _dead_letters(path) == []
+
+
+def test_transport_failure_after_pending_rejection_keeps_events_queued(monkeypatch):
+    """A pending rejection is not dead-lettered when a later post fails (#1846)."""
+    events = [_event(seq, poison=seq == 1) for seq in range(1, 7)]
+    path = _spool(events)
+    hub = FakeHub(fail_on_call=4)
+    assert _flush(hub, monkeypatch) == 0
+    assert hub.stored == []
+    assert _sequences(path) == list(range(1, 7))
+    assert _dead_letters(path) == []
+    assert hub.delivery_counts == {}
+
+
+def test_transport_failure_after_delivery_resumes_at_first_undelivered(monkeypatch):
+    """Two flushes deliver each event at most once and resume at the first gap (#1846)."""
+    events = [_event(seq, poison=seq == 3) for seq in range(1, 9)]
+    path = _spool(events)
+    hub = FakeHub(fail_on_call=6)
+    assert _flush(hub, monkeypatch) == 2
+    assert hub.stored == [1, 2]
+    assert _sequences(path) == [4, 5, 6, 7, 8]
+    assert [r["sequence"] for r in _dead_letters(path)] == [3]
+    hub.fail_on_call = None
+    assert _flush(hub, monkeypatch) == 5
+    assert not path.exists()
+    assert hub.stored == [1, 2, 4, 5, 6, 7, 8]
+    assert hub.delivery_counts == {seq: 1 for seq in range(1, 9) if seq != 3}
+    assert [r["sequence"] for r in _dead_letters(path)] == [3]
+
+
 def test_transport_failure_during_bisection_keeps_unprocessed_events(monkeypatch):
-    # Call 1 rejects [1..6]; call 2 delivers [1, 2, 3]; call 3 (the [4, 5, 6]
-    # half) fails in transit, so 4, 5 and 6 stay queued, poison included.
+    # Call 1 rejects [1..6]; call 2 delivers [1, 2, 3]; call 3 rejects
+    # [4, 5, 6]; call 4 ([4]) fails in transit, so 4 through 6 stay queued.
     events = [_event(seq, poison=seq == 5) for seq in range(1, 7)]
     path = _spool(events)
-    hub = FakeHub(fail_on_call=3)
+    hub = FakeHub(fail_on_call=4)
     assert _flush(hub, monkeypatch) == 3
     assert hub.stored == [1, 2, 3]
     assert _sequences(path) == [4, 5, 6]
@@ -126,14 +223,15 @@ def test_transport_failure_during_bisection_keeps_unprocessed_events(monkeypatch
 
 
 def test_transport_failure_after_isolation_keeps_dead_letter_and_suffix(monkeypatch):
-    # [1..4] rejected, [1, 2] rejected, [1] rejected (isolated), [2] fails.
+    # [1..4] rejected, [1, 2] rejected, [1] rejected (pending), then [2] fails
+    # before any delivery, so all four events stay queued and none are dropped.
     events = [_event(seq, poison=seq == 1) for seq in range(1, 5)]
     path = _spool(events)
     hub = FakeHub(fail_on_call=4)
     assert _flush(hub, monkeypatch) == 0
     assert hub.stored == []
-    assert _sequences(path) == [2, 3, 4]
-    assert [r["sequence"] for r in _dead_letters(path)] == [1]
+    assert _sequences(path) == [1, 2, 3, 4]
+    assert _dead_letters(path) == []
 
 
 def test_interrupted_cleanup_replays_idempotently(monkeypatch):
@@ -202,13 +300,15 @@ def test_append_during_flush_is_preserved(monkeypatch):
 
 
 def test_dead_letter_is_bounded_and_deduplicated(monkeypatch):
+    # A mixed batch keeps isolation active; an all-rejected batch stays queued (#1846).
     monkeypatch.setattr(fleet_client_flush, "DEAD_LETTER_MAX_RECORDS", 3)
-    path = _spool([_event(seq, poison=True) for seq in range(1, 6)])
+    bad = (6, 7, 8, 9, 10)
+    path = _spool([_event(seq, poison=seq in bad) for seq in range(1, 13)])
+    assert _flush(FakeHub(), monkeypatch) == 7
+    assert [r["sequence"] for r in _dead_letters(path)] == [8, 9, 10]
+    _spool([_event(8, poison=True)])
     assert _flush(FakeHub(), monkeypatch) == 0
-    assert [r["sequence"] for r in _dead_letters(path)] == [3, 4, 5]
-    _spool([_event(5, poison=True)])
-    assert _flush(FakeHub(), monkeypatch) == 0
-    assert [r["sequence"] for r in _dead_letters(path)] == [3, 4, 5]
+    assert [r["sequence"] for r in _dead_letters(path)] == [8, 9, 10]
 
 
 def test_oversized_dead_letter_keeps_identity_without_body(monkeypatch):
@@ -279,3 +379,25 @@ def test_explicit_flush_bisects_without_a_budget(monkeypatch):
     monkeypatch.setattr(hub, "post", slow_post)
     assert _flush(hub, monkeypatch) == 7
     assert [r["sequence"] for r in _dead_letters(path)] == [4]
+
+
+def test_whole_batch_transport_failure_keeps_unproven_rejections_queued(monkeypatch):
+    """A failed batch POST must not dead-letter rejections no delivery proved (#1846)."""
+    monkeypatch.setattr(fleet_client, "FLUSH_BATCH_SIZE", 3)
+    events = [_event(seq, poison=seq <= 3) for seq in range(1, 7)]
+    path = _spool(events)
+    # Batch [1,2,3] is rejected and bisected into held rejections (calls 1-5).
+    # The next whole-batch POST for [4,5,6] fails in transit (call 6).
+    hub = FakeHub(fail_on_call=6)
+    assert _flush(hub, monkeypatch) == 0
+    assert hub.stored == []
+    assert _sequences(path) == list(range(1, 7))
+    assert _dead_letters(path) == []
+
+
+def test_whole_batch_budget_must_allow_a_mixed_run(monkeypatch):
+    """A budget below two would treat the first rejected event as a hub fault (#1846)."""
+    path = _spool([_event(1, poison=True), _event(2)])
+    with pytest.raises(ValueError):
+        _flush(FakeHub(), monkeypatch, whole_batch_budget=1)
+    assert _sequences(path) == [1, 2]

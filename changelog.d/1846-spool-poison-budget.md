@@ -1,0 +1,1 @@
+- Bound spool poison isolation when the hub rejects every event: single rejections are held until an accepted event proves the hub works, and four consecutive rejections with no acceptance leave the batch queued and report a hub fault. A single poison event at the head or tail of a batch is still isolated, and a transport failure never drops an undelivered event (#1846).
