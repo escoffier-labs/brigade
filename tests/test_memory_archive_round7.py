@@ -122,6 +122,27 @@ def test_custom_root_archive_search_filters(tmp_path, excluded):
     assert bool(matches) is not excluded
 
 
+@pytest.mark.parametrize(
+    "original_rel,expected",
+    [("memory/cards/old.md", False), ("notes/cards/old.md", True)],
+)
+def test_archived_search_requires_card_root_with_empty_filters(tmp_path, original_rel, expected):
+    from brigade import memory_archive
+
+    path = card(tmp_path)
+    if original_rel != "memory/cards/old.md":
+        dest = tmp_path / original_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        path.rename(dest)
+    archive_config = memory_cmd.MemoryCareConfig(card_roots=("memory/cards", "notes/cards"))
+    memory_archive.archive_card(tmp_path, original_rel, reason="test", config=archive_config)
+    scoped = memory_cmd.MemoryCareConfig(card_roots=("notes/cards",), include_paths=(), exclude_paths=())
+    matches = memory_cmd.search_cards_payload(tmp_path, "retrievalwidget", config=scoped, include_archived=True)[
+        "matches"
+    ]
+    assert bool(matches) is expected
+
+
 def test_scan_failure_keeps_later_tend_stages_running(tmp_path, monkeypatch):
     from brigade import memory_care_retire, memory_inbox_drain
 
