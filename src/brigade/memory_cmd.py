@@ -1141,6 +1141,11 @@ def health(target: Path) -> dict[str, Any]:
                 "detail": "workspace key unavailable, lifecycle and expiry disabled",
             }
         )
+    from . import memory_card_reads
+
+    recorder = memory_card_reads.disabled_message(target)
+    if recorder is not None:
+        checks.append({"status": "warn", "name": "memory_read_recorder", "detail": recorder})
     issues = [check for check in checks if check["status"] != "ok"]
     metadata = (
         scan_payload.get("metadata")

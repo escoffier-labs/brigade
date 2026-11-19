@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from .budgets import (
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
-from . import config, engine_paths, localio
+from . import config, engine_paths, localio, memory_read_recorder_doctor
 from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
@@ -860,7 +860,7 @@ def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_handoff_sources(ctx.target))
     checks.extend(_check_memory_cards(ctx.target))
     checks.extend(_check_memory_index(ctx.target))
-    checks.extend(_check_memory_care(ctx.target))
+    checks.extend([*_check_memory_care(ctx.target), *memory_read_recorder_doctor.checks(ctx.target)])
     checks.extend(_check_care_schedule_health(ctx.target))
     checks.extend(_check_memory_care_producer_collision(ctx.target))
     return checks
