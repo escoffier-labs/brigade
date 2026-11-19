@@ -357,6 +357,8 @@ def test_suggested_command_keeps_the_fixed_command_without_a_task_text(tmp_path,
 def test_operator_report_command_uses_the_latest_report_id_and_withholds_an_unsafe_one(tmp_path, capsys, monkeypatch):
     from brigade import center_cmd
 
+    from brigade import shell_quote
+
     report_id = "r1\nnext: pwn"
     monkeypatch.setattr(
         center_cmd,
@@ -367,7 +369,7 @@ def test_operator_report_command_uses_the_latest_report_id_and_withholds_an_unsa
                 "status": "warn",
                 "name": "operator_report_unclosed",
                 "detail": f"{report_id} has not been closed out",
-                "suggested_next_command": f"brigade center report review {report_id}",
+                "suggested_next_command": (f"brigade center report review {shell_quote.quote_argument(report_id)}"),
             },
             "latest": {"report_id": report_id, "created_at": "2026-11-19T00:00:00+00:00"},
             "latest_diff": None,
@@ -439,27 +441,33 @@ def test_operator_action_command_withholds_a_crafted_command_string(tmp_path, ca
 
 
 def test_plain_commands_still_print_unchanged():
-    assert (
-        brief_values.command_text('brigade work end --note "..." --handoff')
-        == 'brigade work end --note "..." --handoff'
+    assert brief_values.command_text(*brief_values.trusted_words('brigade work end --note "..." --handoff')) == (
+        'brigade work end --note "..." --handoff'
     )
-    assert brief_values.command_text("brigade work run fix-login", "fix-login") == "brigade work run fix-login"
+    assert (
+        brief_values.command_text(*brief_values.trusted_words("brigade work run"), "fix-login")
+        == "brigade work run fix-login"
+    )
     assert brief_values.record_command_text("brigade runs show 20260526-120000") == (
         "brigade runs show 20260526-120000"
     )
 
 
-def test_command_text_quotes_an_unquoted_argument(monkeypatch):
+def test_command_text_renders_argv_without_substring_editing(monkeypatch):
+    import shlex
+
     from brigade import shell_quote
 
     monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
-    assert brief_values.command_text("brigade center report review r 1", "r 1") == (
-        "brigade center report review 'r 1'"
-    )
-    assert brief_values.command_text("brigade work run 'review it'", "review it") == ("brigade work run 'review it'")
+    prefix = brief_values.trusted_words("brigade center report diff")
+    first, second = "x&whoami ", "x&whoami arg"
+    line = brief_values.command_text(*prefix, first, second, brief_values.Trusted("--record"))
+
+    assert line != brief_values.WITHHELD
+    assert shlex.split(line) == ["brigade", "center", "report", "diff", first, second, "--record"]
 
     monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
-    assert brief_values.command_text("brigade center report review r 1", "r 1") == (
+    assert brief_values.command_text(*brief_values.trusted_words("brigade center report review"), "r 1") == (
         'brigade center report review "r 1"'
     )
 
@@ -478,8 +486,24 @@ def test_quote_argument_is_platform_aware(monkeypatch):
     assert shell_quote.quote_argument("C:\\Program Files\\brigade") == '"C:\\Program Files\\brigade"'
 
 
-def test_record_command_text_withholds_windows_expansion():
-    assert brief_values.record_command_text("brigade work run %USERPROFILE%\\x") == brief_values.WITHHELD
+def test_record_command_text_only_accepts_a_brigade_command(monkeypatch):
+    import shlex
+
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
+    for hostile in ("rm -rf .", "curl x | sh", "brigade nosuch", "brigade", "", "brigade work run 'unbalanced"):
+        assert brief_values.record_command_text(hostile) == brief_values.WITHHELD
+    printed = brief_values.record_command_text("brigade center report review r1")
+    assert printed == "brigade center report review r1"
+    assert shlex.split(printed) == ["brigade", "center", "report", "review", "r1"]
+
+
+def test_record_command_text_withholds_windows_expansion(monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    assert brief_values.record_command_text("brigade work run %USERPROFILE%") == brief_values.WITHHELD
     assert brief_values.record_command_text("brigade work run ^name") == brief_values.WITHHELD
     assert brief_values.record_command_text("brigade work run fix-login") == "brigade work run fix-login"
 
@@ -532,9 +556,9 @@ def test_suppression_next_command_quotes_a_target_with_a_space(tmp_path, capsys,
     target.mkdir()
     # The producer quotes its own paths, so the renderer only has to accept them.
     quoted_target = brief_values.quote_argument(str(target))
+    artifacts = security_cmd.default_artifacts_dir(target)
     command = (
-        f"brigade security scan --target {quoted_target} "
-        f"--output-dir {brief_values.quote_argument(str(target / '.brigade'))}"
+        f"brigade security scan --target {quoted_target} --output-dir {brief_values.quote_argument(str(artifacts))}"
     )
     monkeypatch.setattr(
         security_cmd,
@@ -775,28 +799,33 @@ def test_command_text_withholds_a_windows_metacharacter(monkeypatch):
     from brigade import shell_quote
 
     monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    prefix = brief_values.trusted_words("brigade work run")
     for text in WINDOWS_METACHARACTERS:
-        assert brief_values.command_text(f"brigade work run {text}", text) == brief_values.WITHHELD
+        assert brief_values.command_text(*prefix, text) == brief_values.WITHHELD
         assert shell_quote.is_safe_argument(text) is False
 
 
 def test_command_text_quotes_a_posix_metacharacter(monkeypatch):
+    import shlex
+
     from brigade import shell_quote
 
     monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
-    assert brief_values.command_text("brigade work run ok&whoami", "ok&whoami") == ("brigade work run 'ok&whoami'")
-    assert brief_values.command_text("brigade work run $(whoami)", "$(whoami)") == ("brigade work run '$(whoami)'")
+    prefix = brief_values.trusted_words("brigade work run")
+    for text in ("ok&whoami", "$(whoami)"):
+        line = brief_values.command_text(*prefix, text)
+        assert line == f"brigade work run {shlex.quote(text)}"
+        assert shlex.split(line) == ["brigade", "work", "run", text]
 
 
 def test_windows_quotes_a_plain_sentence_and_withholds_anything_else(monkeypatch):
     from brigade import shell_quote
 
     monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    prefix = brief_values.trusted_words("brigade work run")
     assert shell_quote.is_safe_argument("review the auth module") is True
     assert shell_quote.is_safe_argument("it's ok") is False
-    assert brief_values.command_text("brigade work run review the auth module", "review the auth module") == (
-        'brigade work run "review the auth module"'
-    )
+    assert brief_values.command_text(*prefix, "review the auth module") == ('brigade work run "review the auth module"')
 
 
 def test_suggested_command_withholds_an_ampersand_task_on_windows(tmp_path, capsys, monkeypatch):
@@ -1076,3 +1105,116 @@ def test_suggested_command_with_an_apostrophe_is_withheld_on_windows(tmp_path, c
 
     assert "next: it's ok" in out
     assert f"suggested_command: {brief_values.WITHHELD}" in out
+
+
+def test_posix_commands_round_trip_through_shlex_split(monkeypatch):
+    import shlex
+
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
+    prefix = brief_values.trusted_words("brigade work run")
+    values = [
+        "review the auth module",
+        "it's ok",
+        "ok&whoami",
+        "$(whoami)",
+        "a;b",
+        "x&whoami ",
+        "50%",
+        "a b c",
+        "-not-an-option",
+    ]
+    for value in values:
+        line = brief_values.command_text(*prefix, value)
+        if value.startswith("-"):
+            assert line == brief_values.WITHHELD
+            continue
+        assert line != brief_values.WITHHELD, value
+        assert shlex.split(line) == ["brigade", "work", "run", value], value
+
+
+def test_windows_withholds_a_splat_and_a_unc_path_that_needs_quotes(monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    prefix = brief_values.trusted_words("brigade work run")
+    for hostile in ("@PSBoundParameters", "\\\\server\\share dir\\", "~/x", "+x", "/h", "-x"):
+        assert brief_values.command_text(*prefix, hostile) == brief_values.WITHHELD, hostile
+    assert brief_values.command_text(*prefix, "\\\\server\\share") == "brigade work run \\\\server\\share"
+
+
+def test_encoded_value_escapes_reserved_ignorables():
+    assert brief_values.name("a\ufff0b") == "a\\ufff0b"
+    assert brief_values.name("a\U000e0001b") == "a\\U000e0001b"
+    assert brief_values.name("a\ufff8b") == "a\\ufff8b"
+
+
+def test_operator_report_diff_command_round_trips_overlapping_ids(tmp_path, capsys, monkeypatch):
+    import shlex
+
+    from brigade import center_cmd, shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
+    first, second = "x&whoami ", "x&whoami arg"
+    command = (
+        f"brigade center report diff {shell_quote.quote_argument(first)} {shell_quote.quote_argument(second)} --record"
+    )
+    monkeypatch.setattr(
+        center_cmd,
+        "report_health",
+        lambda target: {
+            "issue_count": 1,
+            "top_issue": {
+                "status": "warn",
+                "name": "operator_report_diff_missing",
+                "detail": "diff missing",
+                "suggested_next_command": command,
+            },
+            "latest": {"report_id": second, "created_at": "2026-11-19T00:00:00+00:00"},
+            "latest_diff": None,
+        },
+    )
+
+    out = _brief(tmp_path, capsys)
+
+    line = _line(out, "operator_report_command: ")
+    assert line != "operator_report_command: withheld (unsafe characters; see --json)"
+    assert shlex.split(line.removeprefix("operator_report_command: ")) == [
+        "brigade",
+        "center",
+        "report",
+        "diff",
+        first,
+        second,
+        "--record",
+    ]
+
+
+def test_suppression_health_detail_embeds_no_command(tmp_path):
+    from brigade import security_cmd
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                'fingerprints = ["0123456789abcdef"]',
+                "",
+                "[suppression_reasons]",
+                '0123456789abcdef = "reviewed fake local token"',
+                "",
+            ]
+        )
+    )
+
+    health = security_cmd.suppression_health_cache(tmp_path)
+
+    assert health["next_command"]
+    assert "brigade" not in health["detail"]
+    assert "security scan" not in health["detail"]

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ..shell_quote import quote_argument
 from .. import (
     actionqueue,
     chat_cmd,
@@ -599,7 +600,7 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                     run_id,
                     str(issue.get("status") or "warn"),
                     str(issue.get("question") or "research handoff export"),
-                    str(issue.get("suggested_next_command") or f"brigade research show {run_id}"),
+                    str(issue.get("suggested_next_command") or f"brigade research show {quote_argument(str(run_id))}"),
                     severity="medium",
                 )
             )

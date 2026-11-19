@@ -342,7 +342,7 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "missing",
             "health": None,
-            "detail": f"cache missing; run `{next_command}`",
+            "detail": "cache missing; run the suppression scan command below",
             "next_command": next_command,
         }
     try:
@@ -351,14 +351,14 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "invalid",
             "health": None,
-            "detail": f"cache invalid: {exc}; run `{next_command}`",
+            "detail": f"cache invalid: {exc}; run the suppression scan command below",
             "next_command": next_command,
         }
     if not isinstance(payload, dict):
         return {
             "status": "invalid",
             "health": None,
-            "detail": f"cache invalid: expected object; run `{next_command}`",
+            "detail": "cache invalid: expected object; run the suppression scan command below",
             "next_command": next_command,
         }
     cache_key = payload.get("key")
@@ -366,7 +366,7 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "invalid",
             "health": None,
-            "detail": f"cache invalid: missing key; run `{next_command}`",
+            "detail": "cache invalid: missing key; run the suppression scan command below",
             "next_command": next_command,
         }
     health = payload.get("health")
@@ -374,7 +374,7 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "invalid",
             "health": None,
-            "detail": f"cache invalid: missing health; run `{next_command}`",
+            "detail": "cache invalid: missing health; run the suppression scan command below",
             "next_command": next_command,
         }
     expected_key = _suppression_cache_key(target, effective, config)
@@ -382,7 +382,7 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
         return {
             "status": "stale",
             "health": None,
-            "detail": f"cache stale; run `{next_command}`",
+            "detail": "cache stale; run the suppression scan command below",
             "next_command": next_command,
         }
     return {"status": "ok", "health": health, "detail": "cache fresh", "next_command": None}

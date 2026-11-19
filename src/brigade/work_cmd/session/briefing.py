@@ -180,29 +180,21 @@ def _next_payload(target: Path) -> dict[str, Any]:
     }
 
 
-def _suggested_command_parts(
-    active: dict[str, Any] | None, next_text: object, source: object
-) -> tuple[str, str | None]:
-    """The suggested command and the untrusted text it embeds, if it embeds one.
-
-    The text is returned beside the command because `shlex.quote` rewrites a quote,
-    so the quoted argument is not a substring of the raw text. The renderer needs
-    the raw value to decide whether the command may be printed at all.
-    """
+def _suggested_command_argv(active: dict[str, Any] | None, next_text: object, source: object) -> list[object]:
+    """The suggested command as argv: Brigade's words, then the task text as a value."""
     if active is not None:
-        return 'brigade work end --note "..." --handoff', None
+        return list(brief_values.trusted_words('brigade work end --note "..." --handoff'))
     if source == "task_ledger":
-        return "brigade work run", None
+        return list(brief_values.trusted_words("brigade work run"))
     if source == "task_ledger_blocked":
-        return "brigade work ready --explain --json", None
+        return list(brief_values.trusted_words("brigade work ready --explain --json"))
     if isinstance(next_text, str) and next_text.strip() and source != "default_review":
-        text = next_text.strip()
-        return f"brigade work run {brief_values.quote_argument(text)}", text
-    return "brigade work run", None
+        return [*brief_values.trusted_words("brigade work run"), next_text.strip()]
+    return list(brief_values.trusted_words("brigade work run"))
 
 
 def _suggested_command(active: dict[str, Any] | None, next_text: object, source: object) -> str:
-    return _suggested_command_parts(active, next_text, source)[0]
+    return brief_values.render_argv(_suggested_command_argv(active, next_text, source))
 
 
 def _pick_fields(payload: object, fields: list[str]) -> dict[str, Any] | None:
@@ -967,6 +959,10 @@ def _next_line(payload: dict[str, Any]) -> str:
     return f"next: {shown}"
 
 
+# A scheduled-care fix command is Brigade's own, but it drives the platform scheduler.
+_CARE_FIX_EXECUTABLES = frozenset({"systemctl", "launchctl"})
+
+
 def _pin_error_line(raw: object) -> str:
     """The pin failure: Brigade's fixed prefix readable, the exception text encoded."""
     from ... import work_mode
@@ -999,10 +995,8 @@ def _suggested_command_line(payload: dict[str, Any]) -> str:
     task text that is not plain enough to survive quoting untouched withholds the
     command instead. The JSON payload keeps the real command.
     """
-    command, untrusted = _suggested_command_parts(
-        payload.get("active_session"), payload.get("next"), payload.get("next_source")
-    )
-    return f"suggested_command: {brief_values.command_text(command, untrusted)}"
+    argv = _suggested_command_argv(payload.get("active_session"), payload.get("next"), payload.get("next_source"))
+    return f"suggested_command: {brief_values.command_text(*argv)}"
 
 
 def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
@@ -1254,7 +1248,9 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
             )
             command = row.get("suggested_command")
             if isinstance(command, str) and command.strip():
-                print(f"  {brief_values.command_text(command, row.get('run_id'))}")
+                print(
+                    f"  {brief_values.command_text(*brief_values.trusted_words('brigade runs show'), row.get('run_id'))}"
+                )
         print("orphaned_trap: recorded dirty count only; inspect before assuming the tree is clean")
 
     pending = payload.get("pending_tasks")
@@ -1326,7 +1322,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
             )
             print(
                 "scanner_next_command: "
-                f"{brief_values.command_text('brigade work import plan ' + str(scanner_candidate.get('id')), scanner_candidate.get('id'))}"
+                f"{brief_values.command_text(*brief_values.trusted_words('brigade work import plan'), scanner_candidate.get('id'))}"
             )
     handoff_candidate = payload.get("handoff_candidate")
     pending_tasks = payload.get("pending_tasks") if isinstance(payload.get("pending_tasks"), list) else []
@@ -1337,7 +1333,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
         print(f"handoff_next_target: {brief_values.name(handoff_candidate.get('target_document'))}")
         print(
             "handoff_next_command: "
-            f"{brief_values.command_text('brigade work import plan-handoff ' + str(handoff_candidate.get('id')), handoff_candidate.get('id'))}"
+            f"{brief_values.command_text(*brief_values.trusted_words('brigade work import plan-handoff'), handoff_candidate.get('id'))}"
         )
 
     inbox_hygiene = payload.get("inbox_hygiene") if isinstance(payload.get("inbox_hygiene"), dict) else {}
@@ -1404,7 +1400,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
             )
             print(
                 "scanner_sweep_review: "
-                f"{brief_values.command_text('brigade work sweep-review ' + str(latest_sweep.get('sweep_id')), latest_sweep.get('sweep_id'))}"
+                f"{brief_values.command_text(*brief_values.trusted_words('brigade work sweep-review'), latest_sweep.get('sweep_id'))}"
             )
 
     raw_chat_surfaces = payload.get("chat_surfaces")
@@ -1460,7 +1456,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
         print(
             f"care_schedule_warning: {brief_values.name(warning.get('entry'))} "
             f"{warning.get('code')} "
-            f"fix={brief_values.command_text(warning.get('fix_command'), warning.get('entry'))}"
+            f"fix={brief_values.record_command_text(warning.get('fix_command'), executables=_CARE_FIX_EXECUTABLES)}"
         )
 
     raw_instruction_budget = payload.get("instruction_budget")
@@ -1487,7 +1483,15 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
                 f"{suppression_cache.get('status')} {brief_values.text(suppression_cache.get('detail'))}"
             )
             if suppression_cache.get("next_command"):
-                command = brief_values.command_text(suppression_cache.get("next_command"), target)
+                from ... import security_cmd as security_mod
+
+                command = brief_values.command_text(
+                    *brief_values.trusted_words("brigade security scan"),
+                    brief_values.Trusted("--target"),
+                    target,
+                    brief_values.Trusted("--output-dir"),
+                    security_mod.default_artifacts_dir(target),
+                )
                 print(f"security_suppressions_next_command: {command}")
         top_security = (
             security_health.get("top_finding") if isinstance(security_health.get("top_finding"), dict) else None
@@ -1707,21 +1711,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
         if top_report:
             print(_top_issue_line("operator_report_top_issue", top_report))
             if top_report.get("suggested_next_command"):
-                raw_latest = operator_report.get("latest")
-                latest: dict[str, Any] = raw_latest if isinstance(raw_latest, dict) else {}
-                raw_diff = operator_report.get("latest_diff")
-                diff: dict[str, Any] = raw_diff if isinstance(raw_diff, dict) else {}
-                declared = top_report.get("command_args")
-                report_args = [
-                    latest.get("report_id"),
-                    diff.get("diff_id"),
-                    diff.get("base_report_id"),
-                    diff.get("compare_report_id"),
-                    top_report.get("report_id"),
-                ]
-                if isinstance(declared, list):
-                    report_args.extend(declared)
-                command = brief_values.command_text(top_report.get("suggested_next_command"), *report_args)
+                command = brief_values.record_command_text(top_report.get("suggested_next_command"))
                 print(f"operator_report_command: {command}")
 
     operator_actions = payload.get("operator_actions") if isinstance(payload.get("operator_actions"), dict) else {}
@@ -1777,7 +1767,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
             )
             print(
                 "review_top_command: "
-                f"{brief_values.command_text('brigade work review finding-show ' + str(finding_id), finding_id)}"
+                f"{brief_values.command_text(*brief_values.trusted_words('brigade work review finding-show'), finding_id)}"
             )
 
     handoff_issues = payload.get("handoff_issues")
@@ -1820,7 +1810,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
                 )
                 print(
                     "handoff_draft_next_command: "
-                    f"{brief_values.command_text('brigade handoff show ' + str(first.get('id')), first.get('id'))}"
+                    f"{brief_values.command_text(*brief_values.trusted_words('brigade handoff show'), first.get('id'))}"
                 )
 
     recent = payload.get("recent_sessions")

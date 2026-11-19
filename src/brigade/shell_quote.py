@@ -18,8 +18,9 @@ import sys
 __all__ = ["is_safe_argument", "is_windows", "quote_argument"]
 
 # A character that needs no quoting in cmd.exe or PowerShell: the letters, the digits
-# and the path characters, a drive colon and a Windows separator included.
-_PLAIN = frozenset(string.ascii_letters + string.digits + "_./\\:-~+=@")
+# and the path characters, a drive colon and a Windows separator included. `@` is not
+# here: PowerShell reads it as a splat.
+_PLAIN = frozenset(string.ascii_letters + string.digits + "_./\\:-~+=")
 
 
 def is_windows() -> bool:
@@ -37,7 +38,11 @@ def is_safe_argument(value: str) -> bool:
     """
     if not is_windows():
         return True
-    return all(char in _PLAIN or char == " " for char in value)
+    if any(char not in _PLAIN and char != " " for char in value):
+        return False
+    # A path that needs double quotes and ends with a separator would swallow the
+    # closing quote: `"\\server\share dir\"`.
+    return not (" " in value and value.endswith("\\"))
 
 
 def quote_argument(value: str) -> str:

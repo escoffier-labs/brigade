@@ -28,19 +28,24 @@ expansion or a control character.
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 import unicodedata
+from collections.abc import Sequence
+from functools import lru_cache
 from typing import Any
 
-from ..memory_care_instructions import TRUNCATED, VALUE_MAX, _SAFE_CHARS, _escape as _escape_char
+from ..memory_care_instructions import TRUNCATED, VALUE_MAX, _escape as _escape_char
 from ..memory_care_instructions import code  # noqa: F401
-from ..shell_quote import is_safe_argument, quote_argument
+from .. import shell_quote
 
 __all__ = [
     "TRUNCATED",
     "VALUE_MAX",
     "WITHHELD",
     "BriefOutput",
+    "Trusted",
+    "brigade_commands",
     "code",
     "command_text",
     "is_plain",
@@ -48,8 +53,10 @@ __all__ = [
     "name",
     "quote_argument",
     "record_command_text",
+    "render_argv",
     "status_entry",
     "text",
+    "trusted_words",
 ]
 
 # Printed in place of a command that cannot be vouched for. The JSON payload still
@@ -80,13 +87,13 @@ _IGNORABLE_RANGES = (
     (0xFE00, 0xFE0F),
     (0xFFA0, 0xFFA0),
     (0x1D173, 0x1D17A),
-    (0xE0100, 0xE01EF),
+    (0xFFF0, 0xFFF8),
+    (0xE0000, 0xE0FFF),
 )
 
-# A record-supplied command string may hold these: plain characters, spaces and the
-# quoting Brigade's own templates use. Anything else withholds it, including a shell
-# metacharacter, a Windows expansion (`%`, `^`), a backslash and a control character.
-_RECORD_COMMAND_CHARS = _SAFE_CHARS | frozenset(" ,=+:@'\"")
+# A switch a record command may carry: Brigade's own flags. Anything else that starts
+# with `-` is treated as a value and withholds the command.
+_RECORD_FLAG = re.compile(r"-{1,2}[A-Za-z0-9][A-Za-z0-9-]*")
 
 
 def _dangerous(char: str) -> bool:
@@ -184,32 +191,98 @@ def _has_dangerous(raw: object) -> bool:
     return any(_dangerous(char) for char in str(raw if raw is not None else ""))
 
 
-def record_command_text(command: object) -> str:
-    """A command string read from a record, or `WITHHELD` when it holds a metacharacter."""
-    rendered = "" if command is None else str(command)
-    if all(char in _RECORD_COMMAND_CHARS for char in rendered):
-        return rendered
-    return WITHHELD
+class Trusted(str):
+    """One argv word Brigade wrote itself. It is printed exactly as it is."""
 
 
-def command_text(command: object, *untrusted: object) -> str:
-    """A command Brigade composed, with each untrusted argument shell quoted.
+def trusted_words(text: str) -> tuple[Trusted, ...]:
+    """A Brigade literal as argv words: `trusted_words("brigade work run")`."""
+    return tuple(Trusted(word) for word in text.split())
 
-    The command is withheld when an argument holds a character that can break a line
-    or hide text, when this platform cannot quote the argument safely (a cmd or
-    PowerShell metacharacter on Windows), or when the argument starts with `-` and
-    would be read as an option. Otherwise the argument is quoted for this platform's
-    shell, where a space, a quote or a shell metacharacter is inert. An argument the
-    producer already quoted is left as it is.
+
+def _option_like(token: str) -> bool:
+    """True when a shell would read the argument as a switch, a splat or an expansion."""
+    if token.startswith("-"):
+        return True
+    if shell_quote.is_windows():
+        if token.startswith(("@", "~", "+")):
+            return True
+        # A cmd switch is one segment (`/h`, `/help`); a path holds more separators.
+        if len(token) > 1 and token[0] == "/" and token[1].isalpha() and "/" not in token[1:]:
+            return True
+    return False
+
+
+def quote_argument(value: str) -> str:
+    """`shell_quote.quote_argument`, re-exported for the brief's callers."""
+    return shell_quote.quote_argument(value)
+
+
+def render_argv(items: Sequence[object]) -> str:
+    """Join argv items, quoting each untrusted one for this shell."""
+    return " ".join(str(item) if isinstance(item, Trusted) else shell_quote.quote_argument(str(item)) for item in items)
+
+
+def command_text(*items: object) -> str:
+    """A command Brigade composed, as argv: `Trusted` words print as they are.
+
+    Each untrusted item is quoted for this platform's shell, where a space, a quote
+    or a shell metacharacter is inert. The whole command is withheld when an item
+    holds a character that can break a line or hide text, when this platform cannot
+    quote it safely (a cmd or PowerShell metacharacter on Windows), or when a shell
+    would read it as a switch, a splat or an expansion.
+    """
+    for item in items:
+        if isinstance(item, Trusted):
+            continue
+        token = "" if item is None else str(item)
+        if not token or _has_dangerous(token) or not shell_quote.is_safe_argument(token) or _option_like(token):
+            return WITHHELD
+    return render_argv(items)
+
+
+@lru_cache(maxsize=1)
+def brigade_commands() -> frozenset[str]:
+    """The top-level command names Brigade registers, with their aliases."""
+    from ..cli._index import COMMANDS
+
+    names: set[str] = set()
+    for entry in COMMANDS:
+        names.add(entry.name)
+        names.update(entry.aliases)
+    return frozenset(names)
+
+
+def record_command_text(command: object, *, executables: frozenset[str] = frozenset({"brigade"})) -> str:
+    """A command string read from a record, rendered as argv when it is Brigade's own.
+
+    The string is split into argv, and the command is withheld unless it runs an
+    allowed executable and, for `brigade`, a top-level command Brigade registers.
+    Every remaining item is an untrusted argument, except a switch Brigade's own
+    flags match. A Windows string with a quote is withheld: POSIX splitting would
+    mangle a quoted Windows path.
     """
     rendered = "" if command is None else str(command)
-    tokens = [str(raw if raw is not None else "") for raw in untrusted]
-    tokens = [token for token in tokens if token]
-    for token in sorted(tokens, key=len, reverse=True):
-        if _has_dangerous(token) or not is_safe_argument(token) or token.startswith("-"):
+    if shell_quote.is_windows() and '"' in rendered:
+        return WITHHELD
+    try:
+        argv = shlex.split(rendered)
+    except ValueError:
+        return WITHHELD
+    if not argv or argv[0] not in executables:
+        return WITHHELD
+    items: list[object] = [Trusted(argv[0])]
+    rest = argv[1:]
+    if argv[0] == "brigade":
+        if not rest or rest[0] not in brigade_commands():
             return WITHHELD
-        quoted = quote_argument(token)
-        if quoted == token or quoted in rendered:
+        items.append(Trusted(rest[0]))
+        rest = rest[1:]
+    for token in rest:
+        if _RECORD_FLAG.fullmatch(token):
+            items.append(Trusted(token))
             continue
-        rendered = rendered.replace(token, quoted)
-    return rendered
+        if not token or _has_dangerous(token) or not shell_quote.is_safe_argument(token) or _option_like(token):
+            return WITHHELD
+        items.append(token)
+    return render_argv(items)
