@@ -533,73 +533,106 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
             "SELECT secret, expires_at FROM fleet_event_subscriptions WHERE id=? AND principal_id=?", (sid, caller)
         ).fetchone()
 
-    existing = messages._as_active_principal(conn, caller, known, read_only=True)
-    now = time.time()
-    # A refresh with the same identity and secret was verified when it was created.
-    if not (existing and existing[0] == delivery["secret"] and (existing[1] is None or existing[1] > now)):
-        # Capacity and the verification budget are settled, and the attempt is on the ledger, before any egress.
-        messages._as_active_principal(conn, caller, lambda: _reserve_verification(conn, caller, existing is None))
-        _verify_callback(delivery["url"], delivery["secret"], sid)
-
-    def store() -> float:
-        moment = time.time()
-        expires = moment + ttl
-        old = conn.execute(
-            "SELECT secret, previous_secret, rotate_until, created_at, cursor_seq, expires_at, generation, failures "
-            "FROM fleet_event_subscriptions WHERE id=?",
-            (sid,),
-        ).fetchone()
-        if old is None:
-            if (
-                conn.execute(
-                    "SELECT COUNT(*) FROM fleet_event_subscriptions WHERE principal_id=?", (caller,)
-                ).fetchone()[0]
-                >= MAX_SUBSCRIPTIONS_PER_PRINCIPAL
-                or conn.execute("SELECT COUNT(*) FROM fleet_event_subscriptions").fetchone()[0] >= MAX_SUBSCRIPTIONS
-            ):
-                raise EventsError(429, "events_subscription_limit", "subscription_limit")
-        # A row that lapsed but was not yet swept is a new subscription: no replay of the lapse.
-        if old is not None and old[5] is not None and old[5] <= moment:
-            conn.execute("DELETE FROM fleet_event_deliveries WHERE subscription_id=?", (sid,))
-            old = None
-        previous, rotate_until = None, None
-        if old is not None and old[0] != delivery["secret"]:
-            previous, rotate_until = old[0], moment + ROTATION_WINDOW_SECONDS
-        elif old is not None and old[2] and old[2] > moment:
-            previous, rotate_until = old[1], old[2]
-        cursor_seq = (
-            old[4] if old is not None else conn.execute("SELECT COALESCE(MAX(seq),0) FROM fleet_events").fetchone()[0]
+    # A refresh with the same identity and secret was verified when it was created, but only while the row it
+    # read is still active. The row can be dropped by the dispatcher, rotated, or lapsed before the write
+    # transaction opens; trusting the earlier lookup then would create or re-key a subscription with no fresh
+    # challenge. So the write decides again, and a stale refresh is retried through the verified path once.
+    must_verify = False
+    while True:
+        existing = messages._as_active_principal(conn, caller, known, read_only=True)
+        now = time.time()
+        trusted = bool(
+            not must_verify
+            and existing
+            and existing[0] == delivery["secret"]
+            and (existing[1] is None or existing[1] > now)
         )
-        conn.execute(
-            "INSERT OR REPLACE INTO fleet_event_subscriptions(id,principal_id,name,arguments,filter_value,url,secret,"
-            "previous_secret,rotate_until,created_at,expires_at,cursor_seq,failures,generation) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                sid,
-                caller,
-                name,
-                canonical,
-                filter_value,
-                delivery["url"],
-                delivery["secret"],
-                previous,
-                rotate_until,
-                old[3] if old is not None else moment,
-                expires,
-                cursor_seq,
-                # A same-secret refresh of an active subscription keeps its failure streak, judged on the row read
-                # inside this transaction like the generation below. A successful delivery clears it in the
-                # dispatcher; a creation, a lapsed row or a rotated secret starts a new streak.
-                old[7] if old is not None and old[0] == delivery["secret"] else 0,
-                # A refresh keeps its generation. A creation, including one after an unsubscribe, and a secret
-                # rotation get a new one, so outcomes of requests signed before the change are ignored.
-                old[6] if old is not None and old[0] == delivery["secret"] else secrets.token_hex(8),
-            ),
-        )
-        return expires
+        if not trusted:
+            # Capacity and the verification budget are settled, and the attempt is on the ledger, before any egress.
+            adds_row = existing is None
+            messages._as_active_principal(
+                conn, caller, lambda adds_row=adds_row: _reserve_verification(conn, caller, adds_row)
+            )
+            _verify_callback(delivery["url"], delivery["secret"], sid)
 
-    expires = messages._as_active_principal(conn, caller, store)
-    return {"id": sid, "refreshBefore": iso(expires), "cursor": None, "truncated": False}
+        def store(trusted: bool = trusted) -> float | None:
+            return _store_subscription(conn, caller, sid, name, canonical, filter_value, delivery, ttl, trusted)
+
+        expires = messages._as_active_principal(conn, caller, store)
+        if expires is not None:
+            return {"id": sid, "refreshBefore": iso(expires), "cursor": None, "truncated": False}
+        # The row changed under the refresh. The retry runs the verified path, whose store always writes.
+        must_verify = True
+
+
+def _store_subscription(
+    conn: sqlite3.Connection,
+    caller: str,
+    sid: str,
+    name: str,
+    canonical: str,
+    filter_value: str | None,
+    delivery: dict[str, Any],
+    ttl: float,
+    trusted: bool,
+) -> float | None:
+    """Write the subscription, or return ``None`` when a refresh may no longer rely on its earlier lookup."""
+    moment = time.time()
+    expires = moment + ttl
+    old = conn.execute(
+        "SELECT secret, previous_secret, rotate_until, created_at, cursor_seq, expires_at, generation, failures "
+        "FROM fleet_event_subscriptions WHERE id=?",
+        (sid,),
+    ).fetchone()
+    if trusted and (old is None or old[0] != delivery["secret"] or (old[5] is not None and old[5] <= moment)):
+        # Missing, re-keyed, or lapsed since the lookup: never recreate or re-key without a fresh challenge.
+        return None
+    if old is None:
+        if (
+            conn.execute("SELECT COUNT(*) FROM fleet_event_subscriptions WHERE principal_id=?", (caller,)).fetchone()[0]
+            >= MAX_SUBSCRIPTIONS_PER_PRINCIPAL
+            or conn.execute("SELECT COUNT(*) FROM fleet_event_subscriptions").fetchone()[0] >= MAX_SUBSCRIPTIONS
+        ):
+            raise EventsError(429, "events_subscription_limit", "subscription_limit")
+    # A row that lapsed but was not yet swept is a new subscription: no replay of the lapse.
+    if old is not None and old[5] is not None and old[5] <= moment:
+        conn.execute("DELETE FROM fleet_event_deliveries WHERE subscription_id=?", (sid,))
+        old = None
+    previous, rotate_until = None, None
+    if old is not None and old[0] != delivery["secret"]:
+        previous, rotate_until = old[0], moment + ROTATION_WINDOW_SECONDS
+    elif old is not None and old[2] and old[2] > moment:
+        previous, rotate_until = old[1], old[2]
+    cursor_seq = (
+        old[4] if old is not None else conn.execute("SELECT COALESCE(MAX(seq),0) FROM fleet_events").fetchone()[0]
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO fleet_event_subscriptions(id,principal_id,name,arguments,filter_value,url,secret,"
+        "previous_secret,rotate_until,created_at,expires_at,cursor_seq,failures,generation) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            sid,
+            caller,
+            name,
+            canonical,
+            filter_value,
+            delivery["url"],
+            delivery["secret"],
+            previous,
+            rotate_until,
+            old[3] if old is not None else moment,
+            expires,
+            cursor_seq,
+            # A same-secret refresh of an active subscription keeps its failure streak, judged on the row read
+            # inside this transaction like the generation below. A successful delivery clears it in the
+            # dispatcher; a creation, a lapsed row or a rotated secret starts a new streak.
+            old[7] if old is not None and old[0] == delivery["secret"] else 0,
+            # A refresh keeps its generation. A creation, including one after an unsubscribe, and a secret
+            # rotation get a new one, so outcomes of requests signed before the change are ignored.
+            old[6] if old is not None and old[0] == delivery["secret"] else secrets.token_hex(8),
+        ),
+    )
+    return expires
 
 
 def _unsubscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) -> dict[str, Any]:
