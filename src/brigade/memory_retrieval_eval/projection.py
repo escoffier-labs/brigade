@@ -11,6 +11,7 @@ import hashlib
 import json
 import shutil
 import statistics
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -572,20 +573,16 @@ def load_projection_fixture_cards(projection_root: Path | None = None) -> list[C
     cards_dir = root / "cards"
     if not cards_dir.is_dir():
         return []
-    temp_root = root / ".eval-projection-cards"
-    target_cards = temp_root / "memory" / "cards"
-    if temp_root.exists():
-        shutil.rmtree(temp_root)
-    target_cards.mkdir(parents=True)
-    for path in sorted(cards_dir.glob("*.md")):
-        shutil.copy2(path, target_cards / path.name)
-    try:
-        from .corpus import load_cards
+    from .corpus import load_cards
 
+    # A private temp dir per call: a fixed in-repo directory raced under concurrent loaders.
+    with tempfile.TemporaryDirectory(prefix="eval-projection-cards-") as temp_dir:
+        temp_root = Path(temp_dir)
+        target_cards = temp_root / "memory" / "cards"
+        target_cards.mkdir(parents=True)
+        for path in sorted(cards_dir.glob("*.md")):
+            shutil.copy2(path, target_cards / path.name)
         return load_cards(temp_root)
-    finally:
-        if temp_root.exists():
-            shutil.rmtree(temp_root)
 
 
 def projection_fixture_card_ids(projection_root: Path | None = None) -> list[str]:

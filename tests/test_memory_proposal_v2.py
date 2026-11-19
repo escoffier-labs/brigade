@@ -288,6 +288,70 @@ def test_reflect_propose_retains_run_candidate_and_uses_existing_decisions(tmp_p
     assert memory_reflect.run_payload(target=tmp_path)["candidates"] == []
 
 
+@pytest.mark.parametrize(
+    "owner,harnesses,inbox",
+    [
+        # An owner outside the writer set routes the notice to the alphabetically first writer's inbox.
+        ("openclaw", ["openclaw", "codex"], ".codex/memory-handoffs"),
+        # An owner that is itself a writer keeps the notice, even when another writer sorts first.
+        ("codex", ["claude", "codex"], ".codex/memory-handoffs"),
+    ],
+    ids=["non-writer-owner-routes-to-writer-inbox", "writer-owner-uses-own-inbox"],
+)
+def test_reflect_propose_routes_handoff_notice_by_owner_and_leaves_cards_untouched(
+    tmp_path, capsys, owner, harnesses, inbox
+):
+    """Which inbox gets the proposal's handoff notice, and that proposing never edits a card.
+
+    This is local routing only: a non-writer owner sends the notice to the alphabetically first
+    writer harness's inbox, and a writer-owned host keeps it in its own. The owner is not what stops an apply here.
+    #1856 item 8 (an external or handoff-only owner never applies) is covered in the hub by
+    `attestation_tests.rs` (each_auto_apply_gate_independently_holds_without_card_or_vector_changes,
+    the "owner" and "handoff" cases, around lines 301-329), `verify_eval_tests.rs`
+    (owner_kill_policy_class_and_snapshot_rechecked_at_apply, "external" and "handoff-only", around
+    lines 476-503) and the `owner_not_hub` hold in `preflight.rs`.
+    """
+    from brigade import config
+    from brigade.selection import Selection
+    from tests.test_memory_reflect import snapshot
+
+    path = setup(tmp_path)
+    config.write_config(
+        tmp_path,
+        config.Config(version=1, selection=Selection(depth="repo", owner=owner, harnesses=harnesses, includes=[])),
+    )
+    log(tmp_path, path, (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"))
+    assert cli.main(["memory", "reflect", "run", "--target", str(tmp_path), "--json"]) == 0
+    candidate = json.loads(capsys.readouterr().out)["candidates"][0]
+    before = snapshot(tmp_path)
+    assert before
+    code = cli.main(
+        [
+            "memory",
+            "reflect",
+            "propose",
+            candidate["candidate_id"],
+            "--reason",
+            "Inspect new support.",
+            "--target",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+    proposal = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert proposal["handoff_path"] == f"{inbox}/{proposal['id']}.md"
+    handoff = tmp_path / proposal["handoff_path"]
+    text = handoff.read_text(encoding="utf-8")
+    assert "## Memory proposal notification" in text
+    assert proposal["proposal_path"] in text
+    assert proposal["digest"] in text
+    assert (tmp_path / proposal["proposal_path"]).is_file()
+    # Emitting the proposal and its handoff leaves every card untouched until a reviewed apply.
+    assert snapshot(tmp_path) == before
+    assert "last_consolidated" not in path.read_text()
+
+
 def test_consolidation_preview_does_not_use_a_later_machine_reinforcement(tmp_path):
     from brigade.memory_proposal_v2_reflect import propose_payload
 
