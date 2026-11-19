@@ -31,6 +31,7 @@ from . import (
     fleet_inbox,
     heartbeat,
     hub_recall,
+    manifest_loop,
     presence,
     skill_invocations,
     verification_mode,
@@ -1905,13 +1906,19 @@ def _verify_replacement(
         or exercised_artifact_for_fingerprint(target, session_fingerprint)
         or outcome_attribution.AUTO_CAPTURE
     )
-    # The session state lives where the hook fired; point a verifier in another checkout at it.
-    state_at = f"{outcome_attribution.SESSION_TARGET_ENV}={shlex.quote(str(hook_target))} " if hook_target else ""
     return (
-        f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} {state_at}"
+        f"{_verify_env_prefix(session_fingerprint, hook_target)}"
         f"brigade work verify run --target {shlex.quote(str(target))} "
         f"--command {shlex.quote(command)} --capture {shlex.quote(artifact_id)}"
     )
+
+
+def _verify_env_prefix(session_fingerprint: str, hook_target: Path | None) -> str:
+    from .. import outcome_attribution
+
+    # The session state lives where the hook fired; point a verifier in another checkout at it.
+    state_at = f"{outcome_attribution.SESSION_TARGET_ENV}={shlex.quote(str(hook_target))} " if hook_target else ""
+    return f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} {state_at}"
 
 
 def _new_state(target: Path, session_id: str, repo_fp: str | None, *, task_epoch: str | None = None) -> dict[str, Any]:
@@ -2359,6 +2366,9 @@ def _handle_event(
         capture_artifact_id = state.get("exercised_artifact_id")
         if not isinstance(capture_artifact_id, str):
             capture_artifact_id = None
+        # The replacement runs the verifier with cwd=target, so it names the
+        # verifier's checkout, not a worktree a later segment writes to.
+        verify_target = effective_hook_target(payload, pin=pin, attribute_writes=False) or target
         if _has_unsupported_verifier_structure(str(command)):
             from .. import outcome_attribution
 
@@ -2369,9 +2379,6 @@ def _handle_event(
                 f"from the verifier, then run that verifier with `brigade work verify run --capture {capture_id}`."
             )
         else:
-            # The replacement runs the verifier with cwd=target, so it names the
-            # verifier's checkout, not a worktree a later segment writes to.
-            verify_target = effective_hook_target(payload, pin=pin, attribute_writes=False) or target
             replacement = _verify_replacement(
                 verify_target,
                 _first_verifier_command(str(command)),
@@ -2383,6 +2390,9 @@ def _handle_event(
                 "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
                 f"Use: {replacement}"
             )
+        hook_at = target if verify_target != target else None
+        prefix = _verify_env_prefix(str(state["session_fingerprint"]), hook_at)
+        reason += manifest_loop.deny_hint(verify_target, prefix)
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -2467,6 +2477,7 @@ def _handle_event(
         if payload.get("stop_hook_active") is True:
             return None
         blocking_failures: list[str] = []
+        manifest_failures: list[str] = []
         shared_tree_notes: list[str] = []
         handoff_target: Path | None = None
         unverified_handoff: Path | None = None
@@ -2516,14 +2527,14 @@ def _handle_event(
                 blocking_failures.append(f"{stop_target}: run `{replacement}`")
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
                 handoff_target = stop_target
-        if blocking_failures:
-            return {
-                "decision": "block",
-                "reason": (
-                    "Recent write work in Brigade-wired repos has no verification receipt for this session.\n- "
-                    + "\n- ".join(blocking_failures)
-                ),
-            }
+            manifest_failures += manifest_loop.stop_failures(
+                stop_target,
+                stop_state,
+                _verify_env_prefix(fingerprint, None),
+                is_foreign=functools.partial(_shared_tree_block_is_foreign, stop_target, session_id, stop_state),
+            )
+        if blocking_failures or manifest_failures:
+            return {"decision": "block", "reason": manifest_loop.block_reason(blocking_failures, manifest_failures)}
         if closed_without_handoff:
             handoff_target = None
         if shared_tree_notes:

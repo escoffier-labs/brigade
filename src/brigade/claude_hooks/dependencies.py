@@ -41,6 +41,11 @@ def _check_key(check: dict[str, Any]) -> str:
     return str(check.get("check_id") or json.dumps(check, sort_keys=True))
 
 
+def write_checks(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pre-write checks in ``state``: the file each Edit, Write or NotebookEdit targeted."""
+    return [check for check in _checks(state) if check.get("phase") == "pre_write"]
+
+
 def restore(state: dict[str, Any], persisted: dict[str, Any]) -> None:
     """Keep validated observations within the task epoch selected by the runtime."""
     for key in _STATE_KEYS:

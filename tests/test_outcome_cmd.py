@@ -812,7 +812,7 @@ def test_rank_and_reconcile_count_verify_and_run_receipt_graph_deltas_identicall
     assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
     expected = (
         f"outcome rank: {tmp_path.resolve()}\n"
-        f"- skill-x score={outcome.wilson_lower_bound(2, 2):.3f} helped=2 hurt=0 "
+        f"- skill-x score={outcome.wilson_lower_bound(2, 2):.3f} helped=2 hurt=0 trials=2 "
         "graph: 1 changing / 1 no-op\n"
     )
     assert capsys.readouterr().out == expected
@@ -2916,3 +2916,23 @@ def test_append_records_fails_closed_when_lock_is_held(tmp_path, monkeypatch):
         release_path.touch()
         holder.join(timeout=10)
         assert holder.exitcode == 0
+
+
+def test_rank_text_shows_scoreable_trial_count(tmp_path, capsys, monkeypatch):
+    from types import SimpleNamespace
+
+    from brigade import scorecard as scorecard_mod
+
+    _seed(tmp_path, _helped("skill-x", 2))
+    card = SimpleNamespace(
+        subject=SimpleNamespace(artifact_id="skill-x", content_fingerprint=None),
+        dimensions={"effectiveness": {"trials": 4, "helped": 2, "hurt": 0, "wilson": 0.34}},
+        utility_guardrails={},
+        ineligible_summary=None,
+    )
+    monkeypatch.setattr(scorecard_mod, "build_scorecards", lambda _target: [card])
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+
+    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
+    assert " helped=2 hurt=0 trials=4" in line

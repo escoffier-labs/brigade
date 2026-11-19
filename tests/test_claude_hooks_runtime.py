@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -3319,3 +3320,399 @@ def test_stop_ignores_nothing_durable_outside_final_assistant_line(tmp_path: Pat
         assert runtime.handle_payload("Stop", stop) is None
         return
     assert "Memory Handoff" in _stop_text(runtime.handle_payload("Stop", stop))
+
+
+# --- Manifest verify in the loop (#2589) ---------------------------------------------------------
+
+_MANIFEST_SUBJECT = "src/subject.py"
+_MANIFEST_SOURCE = "verify/manifests/subject-manifest.json"
+
+
+def _manifest_repo(tmp_path: Path) -> Path:
+    """A git repo with one tracked manifest bound to ``src/subject.py``, committed clean."""
+    target = _git_wired_claude(tmp_path)
+    (target / "src").mkdir()
+    (target / _MANIFEST_SUBJECT).write_text("value = 1\n")
+    manifests = target / "verify" / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "subject-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.verify_manifest.v1",
+                "schema_version": 1,
+                "manifest_id": "subject-manifest",
+                "binding_mode": "patch_backed",
+                "verifier_id": "brigade.verify.pytest",
+                "patch_source": "worktree",
+                "subject": {
+                    "artifact_kind": "skill",
+                    "artifact_id": "brigade-work",
+                    "subject_path": _MANIFEST_SUBJECT,
+                },
+                "scope_globs": [_MANIFEST_SUBJECT],
+                "checks": [
+                    {
+                        "check_id": "pytest.subject",
+                        "check_role": "effectiveness",
+                        "command": "python -m pytest -q tests/test_subject.py",
+                    }
+                ],
+            }
+        )
+        + "\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=target, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=target, check=True, capture_output=True, text=True)
+    return target
+
+
+def _deny_reason(target: Path) -> str:
+    result = runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
+    )
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_deny_without_manifest_match_keeps_todays_message(tmp_path: Path):
+    target = _manifest_repo(tmp_path)
+    (target / "src" / "other.py").write_text("other = 1\n")  # not a manifest subject
+
+    reason = _deny_reason(target)
+
+    assert "--command" in reason and "--capture auto" in reason
+    assert "--manifest" not in reason
+    assert "tracked verify manifest" not in reason
+
+
+def test_deny_with_manifest_subject_change_adds_manifest_command_and_keeps_own(tmp_path: Path):
+    target = _manifest_repo(tmp_path)
+    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
+
+    reason = _deny_reason(target)
+
+    own = f"--command {shlex.quote('python -m pytest -q')} --capture auto"
+    assert own in reason  # the agent's own check is kept
+    assert (
+        f"--target {shlex.quote(str(target.resolve()))} --manifest verify/manifests/subject-manifest.json --capture auto"
+        in reason
+    )
+    assert _MANIFEST_SUBJECT in reason
+
+
+def test_deny_ignores_a_scope_glob_only_change(tmp_path: Path):
+    target = _manifest_repo(tmp_path)
+    manifest_path = target / "verify" / "manifests" / "subject-manifest.json"
+    payload = json.loads(manifest_path.read_text())
+    payload["scope_globs"] = [_MANIFEST_SUBJECT, "src/extra/**"]
+    manifest_path.write_text(json.dumps(payload) + "\n")
+    subprocess.run(["git", "commit", "-am", "scope"], cwd=target, check=True, capture_output=True, text=True)
+    (target / "src" / "extra").mkdir()
+    (target / "src" / "extra" / "x.py").write_text("x = 1\n")  # in scope_globs, not the subject
+
+    assert "--manifest" not in _deny_reason(target)
+
+
+def test_deny_fails_open_when_git_errors(tmp_path: Path, monkeypatch):
+    from brigade.claude_hooks import manifest_loop
+
+    target = _manifest_repo(tmp_path)
+    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
+
+    def broken_git(*_args, **_kwargs):
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(manifest_loop.subprocess, "run", broken_git)
+
+    reason = _deny_reason(target)
+
+    assert "--command" in reason
+    assert "--manifest" not in reason
+
+
+def _session_writes(target: Path, session_id: str, path: Path) -> None:
+    """One Write tool call as the hooks see it: PreToolUse records the path, PostToolUse the write."""
+    event_payload = {"tool_name": "Write", "tool_input": {"file_path": str(path), "content": path.read_text()}}
+    for event in ("PreToolUse", "PostToolUse"):
+        runtime.handle_payload(event, _payload(target, event, session_id=session_id, **event_payload))
+
+
+def _stop_after_subject_write(target: Path, monkeypatch, session_id: str = "manifest-stop") -> tuple[dict, float]:
+    """Run SessionStart, write the manifest subject, satisfy the generic gate, and pin the subject mtime."""
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    subject = target / _MANIFEST_SUBJECT
+    subject.write_text("value = 2\n")
+    _session_writes(target, session_id, subject)
+    state = runtime.read_session_state(target, session_id)
+    written = localio.parse_iso_datetime(state["started_at"]).timestamp() + 5
+    os.utime(subject, (written, written))
+    _write_session_receipt(target, session_id, tree_fingerprint=localio.tree_fingerprint(target))
+    return _payload(target, "Stop", session_id=session_id, stop_hook_active=False), written
+
+
+def _write_manifest_receipt(target: Path, *, started_at: float, status: str = "completed") -> None:
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "manifest-run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.fromtimestamp(started_at, tz=localio.utc_now().tzinfo).isoformat()
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "manifest-run",
+                "status": status,
+                "started_at": stamp,
+                "completed_at": stamp,
+                "target": str(target.resolve()),
+                "verify_manifest_id": "subject-manifest",
+            }
+        )
+        + "\n"
+    )
+
+
+def test_stop_without_covered_manifest_change_is_unchanged(tmp_path: Path, monkeypatch):
+    target = _manifest_repo(tmp_path)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "brief")
+    session_id = "no-match"
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    other = target / "src" / "other.py"
+    other.write_text("other = 2\n")
+    _session_writes(target, session_id, other)
+    _write_session_receipt(target, session_id, tree_fingerprint=localio.tree_fingerprint(target))
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+
+    assert result is None or result.get("decision") != "block"
+
+
+def test_stop_blocks_when_manifest_subject_changed_and_no_manifest_receipt(tmp_path: Path, monkeypatch):
+    target = _manifest_repo(tmp_path)
+    stop, _written = _stop_after_subject_write(target, monkeypatch)
+
+    result = runtime.handle_payload("Stop", stop)
+
+    assert result["decision"] == "block"
+    assert (
+        f"--target {shlex.quote(str(target.resolve()))} --manifest verify/manifests/subject-manifest.json --capture auto"
+        in result["reason"]
+    )
+    assert "no verification receipt" not in result["reason"]  # the generic gate was satisfied
+
+
+def test_stop_blocks_when_manifest_receipt_predates_the_write(tmp_path: Path, monkeypatch):
+    target = _manifest_repo(tmp_path)
+    stop, written = _stop_after_subject_write(target, monkeypatch)
+    _write_manifest_receipt(target, started_at=written - 60)
+
+    result = runtime.handle_payload("Stop", stop)
+
+    assert result["decision"] == "block"
+    assert "--manifest verify/manifests/subject-manifest.json" in result["reason"]
+
+
+def test_stop_allows_when_a_newer_manifest_receipt_exists(tmp_path: Path, monkeypatch):
+    target = _manifest_repo(tmp_path)
+    stop, written = _stop_after_subject_write(target, monkeypatch)
+    _write_manifest_receipt(target, started_at=written + 60)
+
+    result = runtime.handle_payload("Stop", stop)
+
+    assert result is None or result.get("decision") != "block"
+
+
+def test_stop_does_not_count_a_failed_manifest_receipt(tmp_path: Path, monkeypatch):
+    target = _manifest_repo(tmp_path)
+    stop, written = _stop_after_subject_write(target, monkeypatch)
+    _write_manifest_receipt(target, started_at=written + 60, status="failed")
+
+    result = runtime.handle_payload("Stop", stop)
+
+    assert result["decision"] == "block"
+
+
+def test_stop_fails_open_when_git_errors_in_the_manifest_probe(tmp_path: Path, monkeypatch):
+    from brigade.claude_hooks import manifest_loop
+
+    target = _manifest_repo(tmp_path)
+    stop, _written = _stop_after_subject_write(target, monkeypatch)
+
+    def broken_git(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    monkeypatch.setattr(manifest_loop.subprocess, "run", broken_git)
+
+    result = runtime.handle_payload("Stop", stop)
+
+    assert result is None or result.get("decision") != "block"
+
+
+def test_manifest_changed_paths_are_repo_relative_posix(tmp_path: Path):
+    from brigade.claude_hooks import manifest_loop
+
+    target = _manifest_repo(tmp_path)
+    (target / "src" / "nested").mkdir()
+    (target / "src" / "nested" / "new.py").write_text("n = 1\n")
+    (target / _MANIFEST_SUBJECT).write_text("value = 3\n")
+
+    paths = manifest_loop.changed_paths(target)
+
+    assert paths is not None
+    assert "src/nested/new.py" in paths and _MANIFEST_SUBJECT in paths
+    assert all("\\" not in path and not path.startswith("/") for path in paths)
+
+
+def _manifest_stop(target: Path, session_id: str) -> dict | None:
+    return runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+
+
+def test_stop_ignores_a_subject_that_was_dirty_before_the_session(tmp_path: Path, monkeypatch):
+    """A formatter, checkout or stash pop bumps the mtime of a subject this session never wrote."""
+    target = _manifest_repo(tmp_path)
+    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")  # dirty before the session starts
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "brief")
+    session_id = "dirty-before"
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    other = target / "src" / "other.py"
+    other.write_text("other = 2\n")
+    _session_writes(target, session_id, other)
+    started = localio.parse_iso_datetime(runtime.read_session_state(target, session_id)["started_at"]).timestamp()
+    os.utime(target / _MANIFEST_SUBJECT, (started + 5, started + 5))  # mtime bumped after session start
+    _write_session_receipt(target, session_id, tree_fingerprint=localio.tree_fingerprint(target))
+
+    result = _manifest_stop(target, session_id)
+
+    assert result is None or result.get("decision") != "block"
+
+
+def test_stop_ignores_a_subject_another_session_wrote(tmp_path: Path, monkeypatch):
+    target = _manifest_repo(tmp_path)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "brief")
+    reader, writer = "reader-session", "writer-session"
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader))
+    other = target / "src" / "other.py"
+    other.write_text("other = 2\n")
+    _session_writes(target, reader, other)
+    _write_session_receipt(target, reader, tree_fingerprint=localio.tree_fingerprint(target))
+    subject = target / _MANIFEST_SUBJECT
+    subject.write_text("value = 9\n")
+    _session_writes(target, writer, subject)  # a concurrent session in the same worktree
+
+    result = _manifest_stop(target, reader)
+
+    assert result is None or result.get("decision") != "block"
+
+
+def test_stop_skips_the_manifest_gate_when_the_generic_gate_sees_a_foreign_tree(tmp_path: Path, monkeypatch):
+    """#959: the generic gate forgives a tree a concurrent writer drifted after this session's capture."""
+    target = _manifest_repo(tmp_path)
+    reader, writer = "owner-session", "drift-session"
+    stop, _written = _stop_after_subject_write(target, monkeypatch, session_id=reader)
+    foreign = target / "src" / "foreign.py"
+    foreign.write_text("foreign = 1\n")
+    _session_writes(target, writer, foreign)
+
+    result = runtime.handle_payload("Stop", stop)
+
+    assert result is None or result.get("decision") != "block"
+
+
+def test_stop_ignores_a_deleted_subject_and_the_deny_does_not_name_it(tmp_path: Path, monkeypatch):
+    target = _manifest_repo(tmp_path)
+    stop, _written = _stop_after_subject_write(target, monkeypatch)
+    (target / _MANIFEST_SUBJECT).unlink()
+    # Re-capture so the generic gate matches the tree without the subject.
+    _write_session_receipt(target, "manifest-stop", tree_fingerprint=localio.tree_fingerprint(target))
+
+    assert "--manifest" not in _deny_reason(target)
+    result = runtime.handle_payload("Stop", stop)
+    assert result is None or result.get("decision") != "block"
+
+
+def test_deny_names_the_manifest_for_unsupported_verifier_structure(tmp_path: Path):
+    target = _manifest_repo(tmp_path)
+    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
+
+    result = runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "cd src && pytest -q"}),
+    )
+
+    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "Split shell grouping" in reason
+    assert f"--target {shlex.quote(str(target.resolve()))} --manifest {_MANIFEST_SOURCE} --capture auto" in reason
+
+
+def test_manifest_command_uses_a_path_that_resolves_when_the_id_is_ambiguous(tmp_path: Path):
+    from brigade import verify_manifest
+    from brigade.claude_hooks import manifest_loop
+
+    target = _manifest_repo(tmp_path)
+    manifests = target / "verify" / "manifests"
+    (manifests / "duplicate.json").write_text((manifests / "subject-manifest.json").read_text())
+    subprocess.run(["git", "add", "."], cwd=target, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "dup"], cwd=target, check=True, capture_output=True, text=True)
+    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
+
+    assert verify_manifest.resolve_manifest(target, "subject-manifest")[0] is None  # the id is ambiguous
+    covered = manifest_loop.covered_manifests(target)
+
+    assert len(covered) == 1
+    assert verify_manifest.resolve_manifest(target, covered[0].source)[0] is not None
+
+
+def _nested_manifest_repo(tmp_path: Path) -> Path:
+    """The manifest workspace is ``pkg/`` inside a larger repo."""
+    root = tmp_path / "mono"
+    nested = root / "pkg"
+    shutil.copytree(_manifest_repo(tmp_path), nested, ignore=shutil.ignore_patterns(".git"))
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    for key, value in (("user.email", "test@example.com"), ("user.name", "Test User")):
+        subprocess.run(["git", "config", key, value], cwd=root, check=True, capture_output=True, text=True)
+    (root / "outside.py").write_text("outside = 1\n")
+    subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=root, check=True, capture_output=True, text=True)
+    return nested
+
+
+def test_changed_paths_are_relative_to_a_target_nested_in_a_larger_repo(tmp_path: Path):
+    from brigade.claude_hooks import manifest_loop
+
+    nested = _nested_manifest_repo(tmp_path)
+    (nested / _MANIFEST_SUBJECT).write_text("value = 2\n")
+    (nested.parent / "outside.py").write_text("outside = 2\n")  # in the repo, not under the target
+
+    assert manifest_loop.changed_paths(nested) == [_MANIFEST_SUBJECT]
+    covered = manifest_loop.covered_manifests(nested)
+    assert [(item.manifest_id, item.subject_path) for item in covered] == [("subject-manifest", _MANIFEST_SUBJECT)]
+
+
+def test_changed_paths_keep_non_ascii_filenames(tmp_path: Path):
+    from brigade.claude_hooks import manifest_loop
+
+    target = _manifest_repo(tmp_path)
+    (target / "src" / "caf\u00e9.py").write_text("n = 1\n")
+    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
+
+    paths = manifest_loop.changed_paths(target)
+
+    assert paths is not None and "src/caf\u00e9.py" in paths and _MANIFEST_SUBJECT in paths
+
+
+def test_manifest_probe_git_calls_stay_inside_the_hook_budget(tmp_path: Path, monkeypatch):
+    from brigade.claude_hooks import manifest_loop
+
+    target = _manifest_repo(tmp_path)
+    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
+    real_run = subprocess.run
+    timeouts: list[float] = []
+
+    def recording_run(*args, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(manifest_loop.subprocess, "run", recording_run)
+
+    assert manifest_loop.changed_paths(target) == [_MANIFEST_SUBJECT]
+    assert timeouts and max(timeouts) <= 2.0  # one shared deadline, not 2 s per call
+    assert manifest_loop._GIT_TIMEOUT_SECONDS <= 2.0
