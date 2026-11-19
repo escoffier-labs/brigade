@@ -37,8 +37,9 @@ brigade work verify run --target . --command "<test command>" --capture auto
 
 For scoreable evidence, use an existing registered verifier manifest tracked under `verify/manifests/`:
 ```bash
-brigade work verify run --target . --manifest <registered-manifest-id> --capture <id>
+brigade work verify run --target . --manifest <registered-manifest-id> --capture auto
 ```
+When the hook names a manifest verify, run it: that is the only scoreable kind.
 Inspect the reported eligibility and reason. Do not create or alter a manifest merely to make a result count.
 
 ### 3. Capture the outcome against what did the work
