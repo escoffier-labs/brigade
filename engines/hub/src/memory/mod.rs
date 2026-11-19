@@ -82,6 +82,8 @@ mod lexical_tests;
 #[cfg(test)]
 mod manifest_binding_tests;
 #[cfg(test)]
+mod policy_summary_tests;
+#[cfg(test)]
 mod powercut;
 #[cfg(test)]
 mod preflight_tests;
@@ -1900,6 +1902,30 @@ impl Store {
             action == "card" && map.get("offset").is_none_or(|o| o.is_null() || o == 0);
         let proposal_cursors = self.proposal_cursors.clone();
         let pending_limit = self.proposal_limits.read().unwrap().pending_per_principal;
+        // The policy lives in the hub file and the grants in this one. A
+        // status call reads the policy and the live listed principals first,
+        // so the grant read below touches only those principals.
+        let policy = if is_status {
+            let who = credential.principal().to_string();
+            let admin = self.admin.clone();
+            match self
+                .hub
+                .submit(move |db| {
+                    let tx = Conn(db);
+                    let document = ops::Authority::read(&tx)?.policy_document;
+                    let live = verifier::live_listed(&tx, &document, &who, &admin)?;
+                    Ok((document, live))
+                })
+                .await
+            {
+                Ok(read) => Some(read),
+                Err(_) => {
+                    return error(503, "memory_action_unavailable", "policy read unavailable");
+                }
+            }
+        } else {
+            None
+        };
         match self
             .readers
             .submit(move |c| {
@@ -1948,6 +1974,14 @@ impl Store {
                 if action == "status" && reply.status == 200 {
                     let rows = Conn(c).query("SELECT count(*) FROM memory_proposals WHERE principal=?1 AND state IN ('pending','held')", &[Value::Text(credential.principal().into())])?;
                     reply.body["proposal_quota"] = json!({"pending": num(&rows[0][0]).unwrap_or(0), "pending_per_principal": pending_limit});
+                    if let Some((document, live)) = &policy {
+                        if let Some(reserved) =
+                            auth::reserved_reflect_scopes(&Conn(c), &credential, live)?
+                        {
+                            reply.body["memory_policy"] =
+                                verifier::policy_summary(document, &reserved);
+                        }
+                    }
                 }
                 Ok(reply)
             })

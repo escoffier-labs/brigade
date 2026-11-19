@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import memory_claim_blocks as claim_blocks
 from . import memory_fairness as fairness
@@ -472,6 +472,46 @@ def _check_replica_files(target: Path, *, scope: str | None, dry_run: bool) -> N
                 )
 
 
+class _Reserved(NamedTuple):
+    """What the hub reserves for automatic apply by a principal this run is not."""
+
+    classes: frozenset[str] = frozenset()
+    scopes: frozenset[str] = frozenset()
+
+    def holds(self, ops: list[dict[str, Any]]) -> bool:
+        """Whether a listed principal's job can apply every op, so this run should not propose it."""
+        return bool(self.classes and self.scopes) and all(
+            op["type"] in self.classes and op.get("scope") in self.scopes for op in ops
+        )
+
+
+def _reserved_classes(client: hubc.MemoryHubClient) -> _Reserved:
+    """Op classes and scopes the hub reserves for automatic apply by a principal this run is not.
+
+    The status reply carries `memory_policy` only for a caller with the reflect right. `reserved_scopes`
+    names the scopes where this caller reflects and a listed principal does too. Anything short of a
+    clear signal returns nothing, so an older hub, a policy with automatic apply off, a scope no listed
+    principal reflects on or a listed caller all keep today's behaviour.
+    """
+    try:
+        body = client.call("status")
+    except (hubc.HubUnavailable, hubc.HubRefusal):
+        return _Reserved()
+    policy = body.get("memory_policy")
+    if (
+        not isinstance(policy, dict)
+        or policy.get("auto_apply") is not True
+        or body.get("reflect_principal") is not False
+    ):
+        return _Reserved()
+    classes, scopes = policy.get("tier0_op_classes"), policy.get("reserved_scopes")
+    if not isinstance(classes, list) or not isinstance(scopes, list):
+        return _Reserved()
+    return _Reserved(
+        frozenset(c for c in classes if isinstance(c, str)), frozenset(x for x in scopes if isinstance(x, str))
+    )
+
+
 def _reflect(
     target: Path,
     settings: hubc.HubSettings,
@@ -579,6 +619,8 @@ def _reflect(
     budget = near.Budget()
     link_stats = {"links": 0, "broken": 0, "repairs": 0}
     link_index = links.Index(heads)
+    reserved = _reserved_classes(client)
+
     for name in reflected:
         scoped = [head for head in heads if head["scope"] == name]
         scope_ops, scope_skips = _ops(scoped)
@@ -639,6 +681,11 @@ def _reflect(
                 skipped["already_proposed"] = skipped.get("already_proposed", 0) + 1
             elif remembered.get("refused"):
                 skipped["refused"] = skipped.get("refused", 0) + 1
+            elif reserved.holds(ops):
+                # Only a submission with no history is left to the listed principal. A remembered
+                # one above keeps its retry and withdrawal path, so an open proposal is not orphaned.
+                # The hub holds a proposal automatic unless every op is reserved, so a mixed one stays.
+                skipped["reserved_automatic"] = skipped.get("reserved_automatic", 0) + len(ops)
             else:
                 fresh.append((digest, ops))
         return fresh

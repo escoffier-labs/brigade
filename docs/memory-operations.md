@@ -1980,6 +1980,54 @@ manager and enable the timer using the commands printed by install. For a
 manual dry run, set the same environment pair in the invoking shell. A successful
 manual non-dry run resumes a paused job.
 
+A proposal-only reflect job (a principal that is not in `memory.reflect_principals`)
+can share a scope with the principal that applies automatically. The hub binds
+an automatic apply to the proposer and dedupes proposals by digest, so a
+proposal the hub job opens first for a reserved class (for example
+`merge_exact_duplicates`) could never apply and would sit pending. To avoid
+that, `status` carries a `memory_policy` summary:
+
+```json
+{"memory_policy": {"auto_apply": true,
+                   "tier0_op_classes": ["merge_exact_duplicates"],
+                   "reserved_scopes": ["repo:acme/api"]}}
+```
+
+The hub adds it only for a caller that holds the `reflect` right on at least
+one scope. Other callers get no `memory_policy` key. The `reflect` right is
+granted per scope, so the reservation is too. `reserved_scopes` lists the
+scopes where the caller holds `reflect` and at least one principal listed in
+`memory.reflect_principals` holds it as well, using the same grant rules as the
+hub's own checks (an exact grant, `repo:*` for repository scopes, `*` for
+repository scopes and `fleet`). A listed principal counts only while it has at
+least one live, unrevoked hub credential, the same test the hub applies when it
+checks `proposer_credential` at apply. A revoked or credential-less listed
+principal does not reserve a scope, even if its `reflect` grant remains. A
+listed `hub:admin` counts for every caller, because the apply gate always
+accepts the admin credential. The computation reads a bounded number of grant
+and card-scope rows, and an over-cap computation reserves nothing, so the list
+comes back empty. A scope
+where only unlisted principals reflect, or where no listed principal can
+authenticate, is not in the list, so a proposal-only job there is the only
+proposer and still opens its merges for review. This status field carries no principal names and
+no credential data, and it changes no authority, gate or decision. Review
+holders can still read the full `policy_limits` through preflight.
+
+When `auto_apply` is true, `reflect_principal` is false for the run, every op in
+a submission is in `tier0_op_classes` and every op's scope is in
+`reserved_scopes`, `memory reflect run` skips a submission that has no history
+and reports it as `skipped_reasons: {"reserved_automatic": N}` (N counts ops).
+A submission with any other op, a listed caller, automatic apply off, a scope
+outside `reserved_scopes` or a hub that sends no summary behaves as before. A
+submission the run already opened or recorded keeps its retry and withdrawal
+path, so an open proposal from before an upgrade or a policy change is not
+orphaned.
+
+The summary reflects the fleet policy only. It does not read the persistent
+auto-apply switch or any per-proposal hold, and that is deliberate. A skipped
+job leaves the merge to the listed principal's job, which still proposes it for
+review while the switch is off, so nothing is lost by skipping.
+
 The installed timer sets only `PATH`. Configure `[memory_hub]` in the user's
 `fleet.toml` for scheduled jobs unless you import the environment pair into the
 user service manager. A custom `BRIGADE_HOME` must also be available there if
@@ -2402,6 +2450,8 @@ The hub enforces three rules for a flagged principal:
 3. `status` reports the caller's own `verifier` flag and its
    `reflect_principal` membership as booleans, and `capabilities` lists
    `verifier_floor`.
+   A caller with the `reflect` right on some scope also gets `memory_policy`
+   (see the [dedicated reflect folder](#dedicated-reflect-folder)).
 
 Python never opens the memory file. Inside each flag change's transaction,
 while it holds the hub lock and before it commits, the memory writer replaces

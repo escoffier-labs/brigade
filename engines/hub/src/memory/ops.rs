@@ -219,49 +219,13 @@ impl Authority {
         authority
             .valid_credentials
             .insert(authority.admin_credential.clone());
-        for (table, id_column, column, class) in [
-            ("nodes", "node_id", "token_sha256", "node"),
-            (
-                "fleet_message_principals",
-                "principal_id",
-                "token_hash",
-                "principal",
-            ),
-        ] {
-            for row in tx.query(
-                &format!("SELECT {id_column},{column} FROM {table} WHERE revoked_at IS NULL"),
-                &[],
-            )? {
-                let id = s(&row[0]);
-                let digest = s(&row[1]);
-                let credential = if class == "node" {
-                    Credential::Node {
-                        id,
-                        digest: digest.clone(),
-                    }
-                } else {
-                    Credential::Principal {
-                        id,
-                        digest: digest.clone(),
-                    }
-                };
-                // Authentication precedence, including shadowed or admin hashes,
-                // is defined in auth rather than duplicated in a validity query.
-                if auth::still_valid(tx, &credential, admin)?.is_ok() {
-                    authority.live.push((
-                        class.to_string(),
-                        credential.principal().to_string(),
-                        digest.clone(),
-                    ));
-                    authority
-                        .valid_credentials
-                        .insert(super::attestation::credential_id(
-                            class,
-                            credential.principal(),
-                            &digest,
-                        ));
-                }
-            }
+        for (class, principal, digest) in live_credentials(tx, admin, None)? {
+            authority
+                .valid_credentials
+                .insert(super::attestation::credential_id(
+                    &class, &principal, &digest,
+                ));
+            authority.live.push((class, principal, digest));
         }
         Ok(authority)
     }
@@ -286,6 +250,66 @@ impl Authority {
             _ => Err(rusqlite::Error::InvalidQuery),
         }
     }
+}
+
+/// Live hub credentials as (class, principal, token digest): unrevoked rows
+/// that still authenticate under `auth::still_valid`. This is the one liveness
+/// rule. `Authority::with_credentials` builds `valid_credentials` from it for
+/// the `proposer_credential` check, and the status reply's reserved scopes use
+/// it for listed principals (`only`). `Some(names)` reads just those
+/// principals' rows in one query per table.
+pub fn live_credentials<T: ReadTx + ?Sized>(
+    tx: &T,
+    admin: &str,
+    only: Option<&[String]>,
+) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let mut live = Vec::new();
+    for (table, id_column, column, class) in [
+        ("nodes", "node_id", "token_sha256", "node"),
+        (
+            "fleet_message_principals",
+            "principal_id",
+            "token_hash",
+            "principal",
+        ),
+    ] {
+        let (filter, params): (String, Vec<Value>) = match only {
+            None => (String::new(), Vec::new()),
+            Some([]) => continue,
+            Some(names) => (
+                format!(" AND {id_column} IN ({})", vec!["?"; names.len()].join(",")),
+                names.iter().map(|n| Value::Text(n.clone())).collect(),
+            ),
+        };
+        for row in tx.query(
+            &format!("SELECT {id_column},{column} FROM {table} WHERE revoked_at IS NULL{filter}"),
+            &params,
+        )? {
+            let id = s(&row[0]);
+            let digest = s(&row[1]);
+            let credential = if class == "node" {
+                Credential::Node {
+                    id,
+                    digest: digest.clone(),
+                }
+            } else {
+                Credential::Principal {
+                    id,
+                    digest: digest.clone(),
+                }
+            };
+            // Authentication precedence, including shadowed or admin hashes,
+            // is defined in auth rather than duplicated in a validity query.
+            if auth::still_valid(tx, &credential, admin)?.is_ok() {
+                live.push((
+                    class.to_string(),
+                    credential.principal().to_string(),
+                    digest,
+                ));
+            }
+        }
+    }
+    Ok(live)
 }
 
 pub fn error(status: u16, code: &str, message: &str) -> Reply {
