@@ -1112,7 +1112,7 @@ _IMPORT_REDACTION_RESERVED_METADATA_KEYS: frozenset[str] = frozenset(
     {"field_redaction", "field_redaction_binding", "field_redaction_retry"}
 )
 _IMPORT_REDACTION_BINDING_KEY = "field_redaction_binding"
-_IMPORT_REDACTION_BINDING_SCHEMA = "work-import-redaction-binding.v1"
+_IMPORT_REDACTION_BINDING_SCHEMA = "work-import-redaction-binding.v2"
 _IMPORT_REDACTION_RETRY_KEY = "field_redaction_retry"
 _IMPORT_REDACTION_RETRY_SCHEMA = "work-import-redaction-retry.v1"
 _IMPORT_REDACTION_SALT_NAME = "redaction-retry.salt"
@@ -1124,6 +1124,33 @@ def _prepare_import_metadata(metadata: object) -> tuple[dict[str, Any], object]:
     stamped = dict(metadata) if isinstance(metadata, dict) else {}
     inbound_provenance = stamped.pop("provenance", None)
     return _sanitize_import_identity_metadata(stamped), inbound_provenance
+
+
+def _import_redaction_binding_payload(
+    *,
+    text: str,
+    kind: str,
+    task_type: object,
+    priority: object,
+    template: object,
+    acceptance: object,
+    metadata: object,
+) -> dict[str, Any]:
+    """Return the full canonical content the retry must reproduce, not a truncated fingerprint."""
+    prepared_metadata, _inbound = _prepare_import_metadata(metadata)
+    return {
+        "text": text,
+        "kind": kind,
+        "type": import_model._normalize_task_type(task_type)
+        if isinstance(task_type, str) and task_type.strip()
+        else None,
+        "priority": import_model._normalize_task_priority(priority)
+        if isinstance(priority, str) and priority.strip()
+        else None,
+        "template": template.strip() if isinstance(template, str) and template.strip() else None,
+        "acceptance": import_model._normalize_acceptance(acceptance),
+        "metadata": prepared_metadata,
+    }
 
 
 def _import_redaction_binding(payload: Mapping[str, Any], *, salt: bytes) -> dict[str, str] | None:
@@ -1437,7 +1464,15 @@ def _retry_quarantined_field_redaction(
     salt = _import_redaction_salt(target, create=False)
     if stored_binding is None or salt is None:
         return None
-    binding_payload, _inbound = _prepare_import_metadata(record.get("metadata"))
+    binding_payload = _import_redaction_binding_payload(
+        text=str(record["text"]),
+        kind=str(record["kind"]),
+        task_type=record.get("type") if isinstance(record.get("type"), str) else None,
+        priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
+        template=record.get("template") if isinstance(record.get("template"), str) else None,
+        acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
+        metadata=record.get("metadata"),
+    )
     incoming_binding = _import_redaction_binding(binding_payload, salt=salt)
     if incoming_binding is None or not hmac.compare_digest(
         incoming_binding["digest"], str(stored_binding.get("digest"))

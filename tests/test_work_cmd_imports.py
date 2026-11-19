@@ -1085,6 +1085,64 @@ def test_work_import_ingest_redaction_retry_promote_requires_matching_proof(tmp_
     assert not (tmp_path / ".brigade" / "work" / "tasks.json").exists()
 
 
+def test_work_import_ingest_redaction_retry_refuses_colliding_truncated_fingerprint(tmp_path, capsys, monkeypatch):
+    """#1886 Daybreak: a 64-bit fingerprint collision cannot swap row content."""
+    from brigade import evidence_redaction
+    from brigade.work_cmd.ledger import import_model
+
+    real_apply = evidence_redaction.apply_and_record
+    failing = {"active": True}
+
+    def flaky_apply(text, *, origin, scanner=None):
+        if failing["active"] and "force-scan-failure" in text:
+            return evidence_redaction.FAILED_PLACEHOLDER, evidence_redaction._error_verdict(origin).record(), True
+        return real_apply(text, origin=origin, scanner=scanner)
+
+    monkeypatch.setattr(evidence_redaction, "apply_and_record", flaky_apply)
+    monkeypatch.setattr(import_model.helpers, "_stable_hash", lambda _value: "0123456789abcdef")
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "force-scan-failure alpha rollout",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure entry"},
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    quarantined = json.loads(capsys.readouterr().out)["imports"][0]
+    assert quarantined["text"] == evidence_redaction.FAILED_PLACEHOLDER
+    assert quarantined["metadata"]["owner"] == evidence_redaction.FAILED_PLACEHOLDER
+    assert quarantined["metadata"]["field_redaction"]["status"] == "error"
+
+    failing["active"] = False
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "beta rollout",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure entry"},
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["retried"] == 0
+    assert repeated["skipped"] == 1
+    stored = work_cmd.ledger._read_imports(tmp_path)
+    assert len(stored) == 1
+    assert stored[0]["id"] == quarantined["id"]
+    assert stored[0]["text"] == evidence_redaction.FAILED_PLACEHOLDER
+    assert stored[0]["metadata"]["owner"] == evidence_redaction.FAILED_PLACEHOLDER
+    assert stored[0]["metadata"]["field_redaction"]["status"] == "error"
+    assert stored[0]["metadata"]["provenance"]["trust"]["label"] == "quarantined"
+    assert work_cmd.import_promote(target=tmp_path, import_id=quarantined["id"]) == 2
+
+
 def test_work_import_add_learning_loop_promotes_without_proof(tmp_path, capsys):
     """#1886 round 3: an added learning-loop row still promotes exactly as on main."""
     _init_git_repo(tmp_path)

@@ -211,9 +211,22 @@ def _make_import(
     # validated inbound envelope may reuse safe identity fields; trust/digest
     # are always recomputed. Inbound provenance is never authority.
     stamped_metadata, inbound_provenance = inbox_provenance._prepare_import_metadata(metadata)
-    # The digest covers exactly the pre-redaction metadata the field scan sees,
-    # so a later retry can prove it is rebuilding from the same bytes.
-    binding_payload = dict(stamped_metadata) if field_redaction is not None else None
+    # The digest covers the full pre-redaction content and metadata, never the
+    # truncated source fingerprint, so a later retry can prove it is rebuilding
+    # from the same bytes even when two rows share a fingerprint.
+    binding_payload = (
+        inbox_provenance._import_redaction_binding_payload(
+            text=text,
+            kind=kind,
+            task_type=task_type,
+            priority=priority,
+            template=template,
+            acceptance=acceptance,
+            metadata=metadata,
+        )
+        if field_redaction is not None
+        else None
+    )
     if field_redaction is not None:
         stamped_metadata = field_redaction.redact_mapping(
             stamped_metadata,
