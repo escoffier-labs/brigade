@@ -495,18 +495,35 @@ def _status_section_timeout_seconds() -> int:
     return DEFAULT_STATUS_SECTION_TIMEOUT_SECONDS
 
 
-def _status_section_check(label: str, status: str, detail: str, elapsed_ms: int) -> dict[str, Any]:
+def _status_section_check(
+    label: str,
+    status: str,
+    detail: str,
+    elapsed_ms: int,
+    *,
+    prefix: str = "daily_status_section",
+) -> dict[str, Any]:
     return {
         "status": status,
-        "name": f"daily_status_section:{label}",
+        "name": f"{prefix}:{label}",
         "detail": detail,
         "elapsed_ms": elapsed_ms,
     }
 
 
 def _bounded_status_call(
-    label: str, func, fallback: Any, *, timeout_seconds: int | None = None
+    label: str,
+    func,
+    fallback: Any,
+    *,
+    timeout_seconds: float | None = None,
+    check_prefix: str = "daily_status_section",
 ) -> tuple[Any, dict[str, Any]]:
+    """Run one status section under a deadline and report a warn check on expiry.
+
+    ``check_prefix`` names the owning surface so ``work brief`` can reuse this
+    bound without claiming daily-status section names.
+    """
     timeout = timeout_seconds or _status_section_timeout_seconds()
     start = time.monotonic()
     use_alarm = threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM")
@@ -514,7 +531,9 @@ def _bounded_status_call(
         # Platforms without SIGALRM (notably Windows) bound the call with a
         # worker thread so a slow section still reports warn instead of
         # stalling the whole status run.
-        return _thread_bounded_status_call(label, func, fallback, timeout=timeout, start=start)
+        return _thread_bounded_status_call(
+            label, func, fallback, timeout=timeout, start=start, check_prefix=check_prefix
+        )
     previous_handler = None
     previous_timer = None
     previous_handler = signal.getsignal(signal.SIGALRM)
@@ -528,14 +547,16 @@ def _bounded_status_call(
     try:
         result = func()
         elapsed = int((time.monotonic() - start) * 1000)
-        return result, _status_section_check(label, "ok", "completed", elapsed)
+        return result, _status_section_check(label, "ok", "completed", elapsed, prefix=check_prefix)
     except _DailyStatusSectionTimeout:
         elapsed = int((time.monotonic() - start) * 1000)
-        return fallback, _status_section_check(label, "warn", f"timed out after {timeout}s", elapsed)
+        return fallback, _status_section_check(
+            label, "warn", f"timed out after {timeout}s", elapsed, prefix=check_prefix
+        )
     except Exception as exc:
         elapsed = int((time.monotonic() - start) * 1000)
         return fallback, _status_section_check(
-            label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed
+            label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed, prefix=check_prefix
         )
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -546,7 +567,7 @@ def _bounded_status_call(
 
 
 def _thread_bounded_status_call(
-    label: str, func, fallback: Any, *, timeout: int, start: float
+    label: str, func, fallback: Any, *, timeout: float, start: float, check_prefix: str = "daily_status_section"
 ) -> tuple[Any, dict[str, Any]]:
     """Run ``func`` in a worker thread and bound it with ``join(timeout)``."""
     outcomes: list[Any] = []
@@ -558,21 +579,25 @@ def _thread_bounded_status_call(
         except BaseException as exc:  # noqa: BLE001 - re-reported below with its type name
             errors.append(exc)
 
-    worker = threading.Thread(target=_run, name=f"brigade-daily-status-{label}", daemon=True)
+    worker = threading.Thread(target=_run, name=f"brigade-bounded-section-{label}", daemon=True)
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
         elapsed = int((time.monotonic() - start) * 1000)
-        return fallback, _status_section_check(label, "warn", f"timed out after {timeout}s", elapsed)
+        return fallback, _status_section_check(
+            label, "warn", f"timed out after {timeout}s", elapsed, prefix=check_prefix
+        )
     if errors:
         exc = errors[0]
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise exc
         elapsed = int((time.monotonic() - start) * 1000)
         if isinstance(exc, _DailyStatusSectionTimeout):
-            return fallback, _status_section_check(label, "warn", f"timed out after {timeout}s", elapsed)
+            return fallback, _status_section_check(
+                label, "warn", f"timed out after {timeout}s", elapsed, prefix=check_prefix
+            )
         return fallback, _status_section_check(
-            label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed
+            label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed, prefix=check_prefix
         )
     elapsed = int((time.monotonic() - start) * 1000)
-    return outcomes[0], _status_section_check(label, "ok", "completed", elapsed)
+    return outcomes[0], _status_section_check(label, "ok", "completed", elapsed, prefix=check_prefix)
