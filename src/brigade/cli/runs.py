@@ -550,6 +550,40 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
     p_tasks_wait.add_argument("--json", action="store_true", help="Emit the brigade.runs_tasks.v1 JSON contract.")
+    p_tasks_integrate = tasks_sub.add_parser(
+        "integrate",
+        help=(
+            "Integrate selected terminal task candidates into a new local branch. "
+            "Never merges into another branch, pushes or publishes."
+        ),
+    )
+    p_tasks_integrate.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_integrate.add_argument(
+        "task_ids",
+        nargs="+",
+        metavar="task_id",
+        help="Task ids to integrate, in merge and recording order.",
+    )
+    p_tasks_integrate.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate the selection and the quarantined merges, writing no ref, record or journal fact.",
+    )
+    p_tasks_integrate.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_tasks_integrate.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_tasks_integrate.add_argument(
+        "--json", action="store_true", help="Emit the brigade.runs_tasks_integrate.v1 JSON contract."
+    )
     p_runs.set_defaults(func=dispatch)
 
 

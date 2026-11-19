@@ -32,10 +32,10 @@ from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION, R
 SCHEMA = RUN_EVENT_SCHEMA
 SCHEMA_VERSION = RUN_EVENT_SCHEMA_VERSION
 LEGACY_SCHEMA_VERSION = 1
-# Schema version 3 introduces ``task.workspace-bound`` and nothing else. It is
-# reserved for journals that record per-task batch worktrees, so an older
-# binary refuses only those journals instead of every journal written after
-# this change.
+# Schema version 3 introduces ``task.workspace-bound`` and ``task.integrated``
+# and nothing else. It is reserved for journals that record per-task batch
+# worktrees and explicit integrations, so an older binary refuses only those
+# journals instead of every journal written after this change.
 WORKSPACE_SCHEMA_VERSION = RUN_EVENT_WORKSPACE_SCHEMA_VERSION
 SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION})
 
@@ -201,8 +201,9 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     ),
 }
 # Durable assignment facts use closed reference-only shapes, without changing
-# existing envelope bounds. ``task.workspace-bound`` is the one fact that is
-# written under the version 3 envelope; the rest stay readable at version 2.
+# existing envelope bounds. ``task.workspace-bound`` and ``task.integrated`` are
+# the facts written under the version 3 envelope; the rest stay readable at
+# version 2.
 _TASK_EVENT_TYPES = frozenset(
     {
         "task.accepted",
@@ -213,6 +214,7 @@ _TASK_EVENT_TYPES = frozenset(
         "task.acknowledged",
         "task.native-enrolled",
         "task.workspace-bound",
+        "task.integrated",
     }
 )
 EVENT_TYPES.update(
@@ -268,6 +270,9 @@ EVENT_TYPES.update(
         # One per-task worktree binding. Only digests and the pinned base
         # revision enter the journal: never the checkout path or branch text.
         "task.workspace-bound": frozenset({"task_id", "base_sha", "branch_digest", "path_digest", "dev_ino_digest"}),
+        # One explicit integration of a selected task result. Only the closed
+        # integration identity and the two commit revisions enter the journal.
+        "task.integrated": frozenset({"task_id", "integration_id", "candidate_commit", "integration_commit"}),
         "task.launch-claimed": frozenset({"task_id", "attempt_id", "seat", "dispatch_attempt"}),
         "task.observed": frozenset(
             {
@@ -302,9 +307,9 @@ _NATIVE_T3_EVENT_TYPES = frozenset(
         "task.native-hold-resolved",
     }
 )
-# The only event type written under schema version 3. A v3 envelope must carry
+# The only event types written under schema version 3. A v3 envelope must carry
 # one of these, and every other event type keeps the v2 envelope.
-_SCHEMA_V3_EVENT_TYPES = frozenset({"task.workspace-bound"})
+_SCHEMA_V3_EVENT_TYPES = frozenset({"task.workspace-bound", "task.integrated"})
 _SCHEMA_V2_EVENT_TYPES = (
     frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
 ) - _SCHEMA_V3_EVENT_TYPES
@@ -487,9 +492,9 @@ def make_event_id(*, run_id: str, sequence: int, event_digest: str) -> str:
 def schema_version_for_event(event_type: str) -> int:
     """The envelope version that introduced ``event_type``.
 
-    Only ``task.workspace-bound`` advances a journal to version 3; every other
-    event type keeps the version 2 envelope so older binaries still read runs
-    that never isolated a task.
+    Only ``task.workspace-bound`` and ``task.integrated`` advance a journal to
+    version 3; every other event type keeps the version 2 envelope so older
+    binaries still read runs that never isolated or integrated a task.
     """
     return WORKSPACE_SCHEMA_VERSION if event_type in _SCHEMA_V3_EVENT_TYPES else SCHEMA_VERSION
 

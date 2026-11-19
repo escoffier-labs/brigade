@@ -191,6 +191,8 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "task.native-enrolled",
         # A workspace binding records custody of a checkout, never state.
         "task.workspace-bound",
+        # An integration records a selected result's new commit, never state.
+        "task.integrated",
         # Governed native T3 claim, correlation and hold facts change task
         # custody, not the aggregate run status.
         "task.native-claimed",

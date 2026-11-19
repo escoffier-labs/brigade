@@ -42,6 +42,9 @@ _PROVIDER_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:%~+/@=-]*", re.ASCII)
 # workspace binding carries.
 _BASE_SHA = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _WORKSPACE_DIGEST_FIELDS = ("branch_digest", "path_digest", "dev_ino_digest")
+# An integration identity is the first 16 hex digits of a SHA-256 over the
+# ordered selection, so it is a bounded, already-public string.
+_INTEGRATION_ID = re.compile(r"[0-9a-f]{16}", re.ASCII)
 # Run-local delegation input assets are flat names derived from the task ID.
 # The name is reloadable and never carries task text.
 _NATIVE_ASSET_PATH = re.compile(r"native-input-[0-9a-f]{64}\.json", re.ASCII)
@@ -75,6 +78,10 @@ def digest(value: object) -> bool:
 
 def base_sha(value: object) -> bool:
     return isinstance(value, str) and bool(_BASE_SHA.fullmatch(value))
+
+
+def integration_id(value: object) -> bool:
+    return isinstance(value, str) and bool(_INTEGRATION_ID.fullmatch(value))
 
 
 def native_asset_path(value: object) -> bool:
@@ -159,6 +166,16 @@ def _validate_workspace_binding_payload(payload: Mapping[str, Any]) -> None:
         raise run_events.CanonicalizationError("invalid task workspace binding digest")
 
 
+def _validate_integration_payload(payload: Mapping[str, Any]) -> None:
+    """Closed integration shape: one identity and the two commit revisions."""
+    if not task_id(payload["task_id"]):
+        raise run_events.CanonicalizationError("invalid task integration identity")
+    if not integration_id(payload["integration_id"]):
+        raise run_events.CanonicalizationError("invalid task integration reference")
+    if not base_sha(payload["candidate_commit"]) or not base_sha(payload["integration_commit"]):
+        raise run_events.CanonicalizationError("invalid task integration revision")
+
+
 def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
     """Validate exact closed task shapes, also used by envelope readers."""
     fields = TASK_FIELDS[event_type]
@@ -172,6 +189,9 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
         return
     if event_type == "task.workspace-bound":
         _validate_workspace_binding_payload(payload)
+        return
+    if event_type == "task.integrated":
+        _validate_integration_payload(payload)
         return
     optional = (
         {"provider_task_id", "original_run_id", "provider_result_id", "result_id", "artifact_kind", "artifact_digest"}

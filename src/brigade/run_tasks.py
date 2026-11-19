@@ -128,6 +128,25 @@ class TaskWorkspaceBinding:
 
 
 @dataclass(frozen=True)
+class TaskIntegration:
+    """One recorded integration of this task's candidate commit.
+
+    The integration identity covers the run, the pinned base and the ordered
+    selection, so the same fact cannot be replayed under a different result.
+    """
+
+    integration_id: str
+    candidate_commit: str
+    integration_commit: str
+
+    def __post_init__(self) -> None:
+        if not journal.integration_id(self.integration_id):
+            raise TaskJournalError("invalid task integration identity")
+        if not journal.base_sha(self.candidate_commit) or not journal.base_sha(self.integration_commit):
+            raise TaskJournalError("invalid task integration revision")
+
+
+@dataclass(frozen=True)
 class TaskResult:
     handle: TaskHandle
     status: str
@@ -143,6 +162,7 @@ class TaskResult:
     launch_claim: TaskLaunchBinding | None = None
     enrollment: TaskEnrollment | None = None
     workspace: TaskWorkspaceBinding | None = None
+    integrations: tuple[TaskIntegration, ...] = ()
 
     @property
     def native_enrolled(self) -> bool:
@@ -394,6 +414,15 @@ def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHisto
             ):
                 raise TaskJournalError("workspace binding requires pristine queued task history")
             results[task_id] = replace(current, workspace=bound)
+        elif event.event_type == "task.integrated":
+            # Integration consumes a terminal result, never grants or changes
+            # execution state. One task may be part of several explicit
+            # integrations; an identical fact is a no-op on replay.
+            integrated = TaskIntegration(p["integration_id"], p["candidate_commit"], p["integration_commit"])
+            if current.status not in journal.TERMINAL or current.result_id is None or current.handle.attempt_id is None:
+                raise TaskJournalError("task integration requires a terminal task result")
+            if integrated not in current.integrations:
+                results[task_id] = replace(current, integrations=(*current.integrations, integrated))
         prior_types[task_id] = event.event_type
         results[task_id] = replace(results[task_id], version=event.event_digest)
     return _TaskHistory(results, batches)
