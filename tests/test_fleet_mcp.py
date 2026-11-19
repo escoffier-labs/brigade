@@ -13,6 +13,7 @@ import pytest
 from brigade import cli, fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages, mcp_server
 from tests.test_fleet_messages import NODE_A, NODE_B, _request, _wait_for_active_waiters
 from tests.test_mcp_http import _start
+from tests.test_mcp_server import _StdioFeed
 
 pytest_plugins = ["tests._fleet_message_fixtures"]
 
@@ -358,6 +359,90 @@ def _wait_for_rpc(replies, request_id, *, timeout: float = 20.0):
             return replies[request_id]
         time.sleep(0.01)
     raise AssertionError(f"no MCP reply for request {request_id}")
+
+
+def _wait_for_state(predicate, *, timeout: float = 10.0, what: str = "state"):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def test_pipelined_inbox_cancel_is_honoured(stations, monkeypatch):
+    """A cancel for a queued call is kept: it answers -32800 and opens no hub wait."""
+    from brigade import fleet_mcp
+
+    _a, b = stations
+    monkeypatch.setattr(fleet_mcp, "MAX_WAIT_MS", 300)
+    callbacks = b.callbacks()
+    original_call = callbacks["call_tool"]
+    release = threading.Event()
+    holding = threading.Event()
+
+    def call_tool(name, arguments):
+        if name == "fleet_who":
+            # Hold the loop thread so the next request is only queued, not started.
+            holding.set()
+            release.wait(20)
+        return original_call(name, arguments)
+
+    callbacks["call_tool"] = call_tool
+
+    waits: list[int] = []
+    hub_handle = fleet_hub_messages.handle
+
+    def handle(conn, raw, **kwargs):
+        if raw.get("wait_ms"):
+            waits.append(raw["wait_ms"])
+        return hub_handle(conn, raw, **kwargs)
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", handle)
+
+    tokens: dict[object, mcp_server.RequestCancellation] = {}
+    original_registry = mcp_server.CancellationRegistry
+
+    class Recording(original_registry):
+        def begin(self, request_id, *args, **kwargs):
+            token = super().begin(request_id, *args, **kwargs)
+            if token is not None:
+                tokens[request_id] = token
+            return token
+
+    monkeypatch.setattr(mcp_server, "CancellationRegistry", Recording)
+
+    replies: dict[object, dict] = {}
+    monkeypatch.setattr(mcp_server, "_emit", lambda payload: replies.__setitem__(payload.get("id"), payload))
+    feed = _StdioFeed()
+    monkeypatch.setattr("sys.stdin", feed)
+    result: list[int] = []
+    server = threading.Thread(target=lambda: result.append(mcp_server.serve_stdio(**callbacks)), daemon=True)
+    server.start()
+    try:
+        feed.send({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "fleet_who", "arguments": {}}})
+        assert holding.wait(20)
+        feed.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "fleet_inbox", "arguments": {"wait_secs": 120}},
+            }
+        )
+        _wait_for_state(lambda: 2 in tokens, what="request 2 to be queued")
+        feed.send({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}})
+        _wait_for_state(lambda: tokens[2].cancelled, what="the queued cancellation to be applied")
+        release.set()
+        assert _wait_for_rpc(replies, 2)["error"]["code"] == -32800
+        assert waits == []
+        _wait_for_rpc(replies, 1)
+    finally:
+        release.set()
+        feed.close()
+        server.join(20)
+    assert not server.is_alive()
+    assert result == [0]
 
 
 def test_cancelled_inbox_releases_its_hub_wait_slot(stations, hub, monkeypatch):

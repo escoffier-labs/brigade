@@ -653,3 +653,89 @@ def test_http_cancellation_reaches_a_running_tool_call(monkeypatch: pytest.Monke
         status, _, body = station.rpc({"jsonrpc": "2.0", "id": 10, "method": "tools/list"})
         assert status == 200
         assert _json(body)["result"]["tools"] == [{"name": "block"}]
+
+
+def test_http_id_less_tool_call_never_executes(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def call_tool(name: str, arguments: dict[str, Any]) -> tuple[object, bool]:
+        calls.append(name)
+        return {"done": True}, False
+
+    def run() -> int:
+        return mcp_server.serve_http(
+            server_name="t",
+            host="127.0.0.1",
+            port=0,
+            token=TOKEN,
+            list_resources=lambda: [],
+            read_resource=lambda uri: (None, None),
+            list_tools=lambda: [{"name": "block"}],
+            call_tool=call_tool,
+        )
+
+    for station in _start(monkeypatch, run):
+        # Both protocol versions, with and without the routing headers, exactly
+        # as a client could send them. No id means no caller can read the result.
+        for version in (None, "2026-07-28"):
+            for routing in ({}, {"Mcp-Method": "tools/call", "Mcp-Name": "block"}):
+                headers = {**routing, **({} if version is None else {"MCP-Protocol-Version": version})}
+                status, _, body = station.rpc(
+                    {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "block", "arguments": {}}},
+                    headers=headers,
+                )
+                assert (status, body) == (202, b""), (version, routing)
+        assert calls == []
+        # A request with an id still runs the tool.
+        status, _, body = station.rpc(
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "block", "arguments": {}}}
+        )
+        assert status == 200 and _json(body)["result"]["isError"] is False
+        assert calls == ["block"]
+
+
+def test_http_cancellation_with_an_id_is_a_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+
+    def call_tool(name: str, arguments: dict[str, Any]) -> tuple[object, bool]:
+        started.set()
+        mcp_server.current_cancellation().wait(20)
+        return {"done": True}, False
+
+    def run() -> int:
+        return mcp_server.serve_http(
+            server_name="t",
+            host="127.0.0.1",
+            port=0,
+            token=TOKEN,
+            list_resources=lambda: [],
+            read_resource=lambda uri: (None, None),
+            list_tools=lambda: [{"name": "block"}],
+            call_tool=call_tool,
+        )
+
+    results: list[tuple[int, dict[str, str], bytes]] = []
+    request = {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "block", "arguments": {}}}
+
+    def call_block(station: _Station) -> None:
+        results.append(station.rpc(request))
+
+    for station in _start(monkeypatch, run):
+        worker = threading.Thread(target=call_block, args=(station,), daemon=True)
+        worker.start()
+        assert started.wait(20)
+        # An id makes this a request: it cancels nothing and gets the normal
+        # method-not-found error for its own id.
+        status, _, body = station.rpc(
+            {"jsonrpc": "2.0", "id": 5, "method": "notifications/cancelled", "params": {"requestId": 9}}
+        )
+        assert status == 200
+        assert _json(body)["id"] == 5 and _json(body)["error"]["code"] == -32601
+        assert worker.is_alive()
+        status, _, body = station.rpc(
+            {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 9}}
+        )
+        assert status == 202
+        worker.join(20)
+        assert not worker.is_alive()
+        assert _json(results[0][2])["error"]["code"] == -32800

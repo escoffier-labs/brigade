@@ -214,7 +214,9 @@ A later poll failure can return the last good page, so an empty page is not
 evidence of current connectivity. Directory reads and ack require the hub.
 
 Cancellation: the station honours MCP `notifications/cancelled` for a running
-tool call over both the stdio and loopback HTTP transports. A cancelled
+tool call over both the stdio and loopback HTTP transports. Over stdio a
+cancellation is also kept for a request that is still queued behind another
+call, so it is honoured when that request starts. A cancelled
 `fleet_inbox` call stops opening new hub waits, so its hub waiter slot is free
 within one wait chunk (at most 20 seconds) and the next wait from the same
 principal is admitted instead of failing with `message_wait_capped`. The

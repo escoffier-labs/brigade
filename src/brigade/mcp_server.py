@@ -56,6 +56,8 @@ HEADER_MISMATCH_CODE = -32020
 # MCP cancellation: a cancelled request may be answered with this error instead of a result.
 CANCELLED_ERROR_CODE = -32800
 CANCELLED_ERROR_MESSAGE = "request cancelled"
+# The one notification the transports deliver on its own; everything else id-less is dropped.
+CANCELLED_NOTIFICATION = "notifications/cancelled"
 # Stateless requests carry their protocol version per request in params._meta.
 PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 RESULT_TYPE_COMPLETE = "complete"
@@ -145,25 +147,29 @@ class RequestCancellation:
 
 
 class CancellationRegistry:
-    """Track in-flight request ids so ``notifications/cancelled`` can reach them.
+    """Track request ids so ``notifications/cancelled`` can reach them.
 
-    Ids are only held while their request runs, so a cancellation for an unknown
-    or already-finished request is ignored instead of reaching a later request
-    that reuses the id.
+    An id is held from the moment its request is accepted until the response is
+    produced, so a cancellation for an unknown or already-finished request is
+    ignored instead of reaching a later request that reuses the id. A transport
+    that queues requests registers the token when it queues the message, so a
+    cancellation that arrives while the request waits behind another call is
+    kept rather than dropped.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._inflight: dict[tuple[str, object], RequestCancellation] = {}
 
-    def begin(self, request_id: object) -> RequestCancellation | None:
+    def begin(self, request_id: object, token: RequestCancellation | None = None) -> RequestCancellation | None:
+        """Register a request id and return its token, reusing ``token`` when given."""
         key = _request_key(request_id)
         if key is None:
             return None
-        token = RequestCancellation()
+        cancellation = token if token is not None else RequestCancellation()
         with self._lock:
-            self._inflight[key] = token
-        return token
+            self._inflight[key] = cancellation
+        return cancellation
 
     def finish(self, request_id: object, token: RequestCancellation | None) -> None:
         key = _request_key(request_id)
@@ -247,6 +253,7 @@ def handle_message(
     extension: McpExtension | None = None,
     protocol_version: str | None = None,
     registry: CancellationRegistry | None = None,
+    cancellation: RequestCancellation | None = None,
 ) -> dict[str, Any] | None:
     """Handle one decoded JSON-RPC message and return its response.
 
@@ -258,17 +265,18 @@ def handle_message(
     successful result of a 2026-07-28 request gets ``resultType: "complete"``
     unless the method already set one (for example ``input_required``).
 
-    ``registry`` tracks in-flight request ids so a ``notifications/cancelled``
-    notification can reach the call that is still running. A cancelled request
+    ``registry`` tracks request ids so an id-less ``notifications/cancelled``
+    notification can reach the call it targets. A transport that queues a
+    request may pass the ``cancellation`` token it already registered, so a
+    cancellation received while the request waited is kept. A cancelled request
     is answered with error ``-32800`` (request cancelled) instead of its result;
     a cancellation for an unknown or finished id is ignored.
     """
-    cancellation: RequestCancellation | None = None
     if registry is not None and isinstance(message, dict):
-        if message.get("method") == "notifications/cancelled":
+        if "id" not in message and message.get("method") == CANCELLED_NOTIFICATION:
             registry.cancel(_cancelled_request_id(message.get("params")))
             return None
-        cancellation = registry.begin(message.get("id"))
+        cancellation = registry.begin(message.get("id"), cancellation)
     try:
         reply = _dispatch_message(
             message,
@@ -317,8 +325,18 @@ def _dispatch_message(
     request_id = message.get("id")
     method = str(message.get("method") or "")
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
-    if request_id is None and method.startswith("notifications/"):
+    if request_id is None:
+        # Only a notification is valid without an id. Any other id-less message is
+        # never executed: nobody can receive its result, so an id-less tools/call
+        # or extension method must not run on any transport.
+        if method.startswith("notifications/"):
+            return None
+        if not isinstance(message.get("method"), str):
+            return response(request_id, error={"code": -32600, "message": "invalid request"})
         return None
+    if cancellation is not None and cancellation.cancelled:
+        # Cancelled before it started: run nothing and answer cancelled.
+        return response(request_id, error={"code": CANCELLED_ERROR_CODE, "message": CANCELLED_ERROR_MESSAGE})
     if not isinstance(message.get("method"), str):
         return response(request_id, error={"code": -32600, "message": "invalid request"})
     capabilities: dict[str, Any] = {"resources": {}, "tools": {}, **(extension.capabilities if extension else {})}
@@ -383,13 +401,25 @@ _STDIO_PARSE_ERROR = "parse_error"
 _STDIO_EOF = "eof"
 
 
-def _read_stdio(stream: Any, pending: queue.Queue[tuple[str, object]], registry: CancellationRegistry) -> None:
+@dataclass(frozen=True)
+class _StdioItem:
+    """One queued stdin line, with the cancellation token registered when it was queued."""
+
+    kind: str
+    message: object = None
+    cancellation: RequestCancellation | None = None
+
+
+def _read_stdio(stream: Any, pending: queue.Queue[_StdioItem], registry: CancellationRegistry) -> None:
     """Read stdin for ``serve_stdio``, signalling cancellations as they arrive.
 
     The loop thread cannot read stdin while it runs a tool call, so this thread
-    reads ahead and hands messages over. Only ``notifications/cancelled`` is
-    handled here, because it has to reach the call that is still running; every
-    other message keeps its place in the queue and stays strictly sequential.
+    reads ahead and hands messages over. Only an id-less
+    ``notifications/cancelled`` is handled here, because it has to reach a call
+    that is running or queued. Every other message keeps its place in the queue
+    and stays strictly sequential. A request's token is registered here, at the
+    moment it is queued, so a cancellation for a request still waiting behind
+    another call is kept instead of dropped.
     """
     try:
         for line in stream:
@@ -398,14 +428,15 @@ def _read_stdio(stream: Any, pending: queue.Queue[tuple[str, object]], registry:
             try:
                 request = json.loads(line)
             except json.JSONDecodeError:
-                pending.put((_STDIO_PARSE_ERROR, None))
+                pending.put(_StdioItem(_STDIO_PARSE_ERROR))
                 continue
-            if isinstance(request, dict) and request.get("method") == "notifications/cancelled":
+            if isinstance(request, dict) and "id" not in request and request.get("method") == CANCELLED_NOTIFICATION:
                 registry.cancel(_cancelled_request_id(request.get("params")))
                 continue
-            pending.put((_STDIO_MESSAGE, request))
+            token = registry.begin(request.get("id")) if isinstance(request, dict) else None
+            pending.put(_StdioItem(_STDIO_MESSAGE, request, token))
     finally:
-        pending.put((_STDIO_EOF, None))
+        pending.put(_StdioItem(_STDIO_EOF))
 
 
 def serve_stdio(
@@ -424,7 +455,7 @@ def serve_stdio(
     Requests themselves stay sequential, in the order the client sent them.
     """
     registry = CancellationRegistry()
-    pending: queue.Queue[tuple[str, object]] = queue.Queue()
+    pending: queue.Queue[_StdioItem] = queue.Queue()
     threading.Thread(
         target=_read_stdio,
         args=(sys.stdin, pending, registry),
@@ -433,12 +464,13 @@ def serve_stdio(
     ).start()
     negotiated: str | None = None
     while True:
-        kind, request = pending.get()
-        if kind == _STDIO_EOF:
+        item = pending.get()
+        if item.kind == _STDIO_EOF:
             break
-        if kind == _STDIO_PARSE_ERROR:
+        if item.kind == _STDIO_PARSE_ERROR:
             _emit(response(None, error={"code": -32700, "message": "parse error"}))
             continue
+        request = item.message
         reply = handle_message(
             request,
             server_name=server_name,
@@ -449,6 +481,7 @@ def serve_stdio(
             extension=extension,
             protocol_version=negotiated,
             registry=registry,
+            cancellation=item.cancellation,
         )
         if isinstance(request, dict) and request.get("method") == "initialize" and reply is not None:
             version = (reply.get("result") or {}).get("protocolVersion")
@@ -716,11 +749,12 @@ def _make_handler(
                 return
             replies: list[dict[str, Any]] = []
             for message in messages:
-                # Client responses never get a reply. Notifications get no reply
-                # either, but they are still dispatched so notifications/cancelled
-                # reaches the call it targets on another handler thread. A
-                # methodless object with an id that is not a response falls
-                # through to an invalid-request error.
+                # Client responses never get a reply. An id-less message is only
+                # dispatched when it is a cancellation, which has to reach the call
+                # it targets on another handler thread; every other id-less message
+                # is dropped before dispatch, so it cannot run a tool for a caller
+                # that would never see the result. A methodless object with an id
+                # that is not a response falls through to an invalid-request error.
                 if isinstance(message, dict) and message.get("jsonrpc") != "2.0":
                     # Enforced over HTTP only; stdio keeps accepting legacy clients
                     # that omit the version field.
@@ -732,7 +766,8 @@ def _make_handler(
                     if is_response:
                         continue
                     if is_notification:
-                        self._dispatch_one(message, protocol_version)
+                        if message.get("method") == CANCELLED_NOTIFICATION:
+                            self._dispatch_one(message, protocol_version)
                         continue
                 reply = self._dispatch_one(message, protocol_version)
                 if reply is not None:

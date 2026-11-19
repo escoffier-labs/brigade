@@ -296,3 +296,65 @@ def test_stdio_cancellation_reaches_a_running_tool_call(monkeypatch):
         server.join(20)
     assert not server.is_alive()
     assert result == [0]
+
+
+def test_id_less_requests_are_never_executed():
+    calls: list[str] = []
+    extension = mcp_server.McpExtension(
+        methods={"events/subscribe": lambda params: calls.append("subscribe") or {"ok": True}}
+    )
+    callbacks = {**_callbacks(lambda name, arguments: (calls.append(name), ("ok", False))[1]), "extension": extension}
+    for registry in (None, mcp_server.CancellationRegistry()):
+        for message in (
+            {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "block", "arguments": {}}},
+            {"jsonrpc": "2.0", "method": "events/subscribe", "params": {}},
+            {"jsonrpc": "2.0", "method": "initialize", "params": {}},
+        ):
+            assert mcp_server.handle_message(message, **callbacks, registry=registry) is None, message
+    assert calls == []
+
+
+def test_cancellation_notification_with_an_id_is_a_request():
+    registry = mcp_server.CancellationRegistry()
+    running = registry.begin(1)
+    callbacks = _callbacks(lambda name, arguments: ("ok", False))
+    assert running is not None
+    # An id makes this a request, not a notification: it cancels nothing and gets
+    # the normal method-not-found error for its own id.
+    reply = mcp_server.handle_message(
+        {"jsonrpc": "2.0", "id": 2, "method": "notifications/cancelled", "params": {"requestId": 1}},
+        **callbacks,
+        registry=registry,
+    )
+    assert reply is not None and reply["id"] == 2 and reply["error"]["code"] == -32601
+    assert not running.cancelled
+    # The same message without an id is a notification and still cancels.
+    assert (
+        mcp_server.handle_message(
+            {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1}},
+            **callbacks,
+            registry=registry,
+        )
+        is None
+    )
+    assert running.cancelled
+
+
+def test_stdio_cancellation_with_an_id_gets_method_not_found(monkeypatch):
+    replies: dict[object, dict] = {}
+    monkeypatch.setattr(mcp_server, "_emit", lambda payload: replies.__setitem__(payload.get("id"), payload))
+    feed = _StdioFeed()
+    monkeypatch.setattr("sys.stdin", feed)
+    result: list[int] = []
+    callbacks = _callbacks(lambda name, arguments: ("ok", False))
+    server = threading.Thread(target=lambda: result.append(mcp_server.serve_stdio(**callbacks)), daemon=True)
+    server.start()
+    try:
+        feed.send({"jsonrpc": "2.0", "id": 2, "method": "notifications/cancelled", "params": {"requestId": 99}})
+        _wait_for(lambda: 2 in replies or not server.is_alive(), what="the rejected cancellation's reply")
+        assert replies[2]["error"]["code"] == -32601
+    finally:
+        feed.close()
+        server.join(20)
+    assert not server.is_alive()
+    assert result == [0]
