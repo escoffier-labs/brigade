@@ -10,6 +10,7 @@ from brigade.claude_hooks import runtime
 from brigade.config import Config, write_config
 from brigade.selection import Selection
 from brigade.isolated_exec import module_argv, trusted_cwd
+from brigade.work_cmd import brief_values
 from tests._home import set_home
 
 
@@ -52,8 +53,8 @@ def test_session_start_keeps_workspace_code_out_of_children(tmp_path, monkeypatc
     finally:
         assert not sentinel.exists(), "SessionStart child executed workspace Brigade code"
     context = result["hookSpecificOutput"]["additionalContext"]
-    assert "work brief:" in context
-    assert str(target) in context
+    # The brief prints the target encoded: a backslash is doubled and a long path is capped, as on Windows.
+    assert f"work brief: {brief_values.name(target)}" in context
 
 
 def test_subprocess_worker_preserves_tilde_target_pin(tmp_path, monkeypatch):
