@@ -134,9 +134,11 @@ def _decode_t3_component(value: str) -> str | None:
     """Decode one T3 component, refusing anything that is not its canonical encoding."""
     try:
         decoded = unquote(value, encoding="utf-8", errors="strict")
-    except UnicodeDecodeError:
+        # A lone surrogate survives unquote and then fails to re-encode.
+        canonical = _encode_t3_component(decoded)
+    except UnicodeError:
         return None
-    if not decoded or _encode_t3_component(decoded) != value:
+    if not decoded or canonical != value:
         return None
     return decoded
 

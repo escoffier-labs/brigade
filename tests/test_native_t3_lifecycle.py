@@ -235,6 +235,11 @@ def test_legacy_correlation_without_provider_task_id_stays_usable(tmp_path, monk
     assert _observe(workspace, run_id)["result_id"] is not None
 
 
+@pytest.mark.parametrize("node", ["node:delegated-task:\ud800", "node:delegated-task:command%3Amcp%3A\udfff"])
+def test_lone_surrogate_task_node_refuses_without_raising(node):
+    assert dispatch._is_t3_task_node(node, "brigade-t3:" + "a" * 64) is False
+
+
 def test_overlong_task_node_refuses_before_decoding():
     """A well-formed node id longer than the journal's string bound refuses."""
     from urllib.parse import quote
