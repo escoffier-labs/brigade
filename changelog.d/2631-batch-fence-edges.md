@@ -1,0 +1,2 @@
+- Harden the explicit batch preflight retry fence: an existing `batch-result-*.json` now counts as evidence of a possible launch, so a deleted lifecycle journal can no longer re-enroll tasks that may already have run. A preflight refusal writes no result file and keeps its retry.
+- Make the batch finish summary reflect observation write failures: a result file or journal observation that cannot be written now returns `ok=false` with the failure named in the receipt, instead of escaping as an unexpected run failure outside the batch summary path.
