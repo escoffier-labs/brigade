@@ -149,7 +149,7 @@ def test_center_activity_marks_merged_grokbot_draft_pr_succeeded(tmp_path, monke
     )
     monkeypatch.setattr(
         "brigade.cloud_tracker.observe_github",
-        lambda _: {
+        lambda _target, **_kwargs: {
             "branches": [],
             "prs": [
                 {

@@ -28,6 +28,7 @@ def test_render_shows_summary_strip_and_plain_word_tiles():
             "ineligible_receipt_count": 1,
         },
         "pending_tasks": [{"id": "task-a"}, {"id": "task-b"}],
+        "scheduled_care": {"threshold": 2, "count": 0, "entries": []},
         "inbox_hygiene": {"issue_count": 1},
     }
 
@@ -75,6 +76,25 @@ def test_render_missing_sections_show_missing_tiles():
     assert "not available" in fragment or "unavailable" in fragment
     assert 'class="sg-chip-icon sg-chip-serious"' in fragment
     assert "style=" not in fragment.split("<style", 1)[-1].split("</style>", 1)[-1]
+
+
+def test_render_timed_out_section_is_not_reported_ok():
+    payload = {
+        "handoff_issues": {"count": 0},
+        "status_section_checks": [
+            {
+                "name": "work_brief_section:scheduled-care",
+                "status": "warn",
+                "detail": "timed out after 1s",
+                "elapsed_ms": 1000,
+            }
+        ],
+    }
+    fragment = status_grid.render(payload, "unused")
+    tile = fragment.split('data-sg-tile="scheduled_care"', 1)[1].split("</article>", 1)[0]
+    assert "TIMED OUT" in tile
+    assert "OK" not in tile
+    assert "No care entries are failing repeatedly" not in fragment
 
 
 def test_render_surfaces_repeated_scheduled_care_failures():

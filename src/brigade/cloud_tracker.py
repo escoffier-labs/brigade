@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,9 @@ PRESERVED_RETENTION_REASONS = ("active", "ambiguous", "orphaned", "needs-investi
 
 DEFAULT_STALE_READY_HOURS = 6
 CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/", "claude/")
+# The work brief's GitHub observation shares this budget across its reads and
+# fits inside the brief's own section deadline.
+BRIEF_GITHUB_BUDGET_SECONDS = 4.0
 TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud"})
 
 READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
@@ -1207,7 +1211,11 @@ def stale_entries_for_brief(target: Path, *, now: datetime | None = None) -> dic
     from . import codex_cloud
 
     try:
-        provider_tasks, github, cursor_wired = observe_providers(target, codex_max_items=codex_cloud.MAX_LIST_LIMIT)
+        provider_tasks, github, cursor_wired = observe_providers(
+            target,
+            codex_max_items=codex_cloud.MAX_LIST_LIMIT,
+            github_budget_seconds=BRIEF_GITHUB_BUDGET_SECONDS,
+        )
         payload = status_payload(
             target,
             now=now,
@@ -1522,10 +1530,23 @@ def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
     return _codex_cloud_observation(target).tasks
 
 
-def observe_github(target: Path) -> dict[str, Any]:
-    """Ground truth for cloud-shaped branches and PRs via gh."""
+def observe_github(target: Path, *, budget_seconds: float | None = None) -> dict[str, Any]:
+    """Ground truth for cloud-shaped branches and PRs via gh.
+
+    ``budget_seconds`` bounds the whole observation rather than each read.
+    Three sequential GitHub reads at the 30 s per-call timeout could otherwise
+    hold a work brief for 90 s before it printed anything.
+    """
+    deadline = None if budget_seconds is None else time.monotonic() + max(0.0, budget_seconds)
+
+    def read(command: list[str]) -> tuple[int, str, str]:
+        remaining = 30.0 if deadline is None else min(30.0, deadline - time.monotonic())
+        if remaining <= 0:
+            return 1, "", "github observation budget exhausted"
+        return _run_text(command, cwd=target, timeout=remaining)
+
     repo = None
-    code, stdout, _ = _run_text(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=target)
+    code, stdout, _ = read(["gh", "repo", "view", "--json", "nameWithOwner"])
     if code == 0:
         try:
             candidate = json.loads(stdout)
@@ -1542,10 +1563,7 @@ def observe_github(target: Path) -> dict[str, Any]:
     explicit_prs = {entry.get("pr_url") for entry in explicit if isinstance(entry.get("pr_url"), str)}
     branches: list[dict[str, str]] = []
     branches_complete = False
-    code, stdout, _ = _run_text(
-        ["gh", "api", "repos/{owner}/{repo}/branches?per_page=100"],
-        cwd=target,
-    )
+    code, stdout, _ = read(["gh", "api", "repos/{owner}/{repo}/branches?per_page=100"])
     if code == 0 and stdout.strip():
         try:
             data = json.loads(stdout)
@@ -1563,7 +1581,7 @@ def observe_github(target: Path) -> dict[str, Any]:
     # Preserve legacy offline discovery without treating local refs as current
     # remote existence evidence for explicitly repository-bound sessions.
     if not branches and not branches_complete:
-        code, stdout, _ = _run_text(["git", "branch", "-a", "--format=%(refname:short)"], cwd=target)
+        code, stdout, _ = read(["git", "branch", "-a", "--format=%(refname:short)"])
         if code == 0:
             for line in stdout.splitlines():
                 name = line.strip().removeprefix("origin/")
@@ -1571,7 +1589,7 @@ def observe_github(target: Path) -> dict[str, Any]:
                     branches.append({"name": name})
 
     prs: list[dict[str, Any]] = []
-    code, stdout, _ = _run_text(
+    code, stdout, _ = read(
         [
             "gh",
             "pr",
@@ -1582,8 +1600,7 @@ def observe_github(target: Path) -> dict[str, Any]:
             "number,state,headRefName,url,isDraft,headRefOid",
             "--limit",
             "100",
-        ],
-        cwd=target,
+        ]
     )
     if code == 0 and stdout.strip():
         try:
@@ -1728,7 +1745,11 @@ def observe_provider(provider: str, target: Path, *, codex_max_items: int | None
 
 
 def observe_provider_details(
-    target: Path, *, codex_max_items: int | None = None, **_kwargs: Any
+    target: Path,
+    *,
+    codex_max_items: int | None = None,
+    github_budget_seconds: float | None = None,
+    **_kwargs: Any,
 ) -> tuple[dict[str, ProviderObservation], dict[str, Any]]:
     """Return per-provider health so failed empty inventories stay visible."""
     observations: dict[str, ProviderObservation] = {}
@@ -1740,7 +1761,7 @@ def observe_provider_details(
                 observations[provider] = observe_provider(provider, target)
         except Exception:  # noqa: BLE001 - observation must stay bounded
             observations[provider] = ProviderObservation(True, False, "transport-failure", {})
-    github = observe_github(target)
+    github = observe_github(target, budget_seconds=github_budget_seconds)
     return observations, github
 
 
@@ -1752,13 +1773,16 @@ def _legacy_provider_tasks(observations: dict[str, ProviderObservation]) -> dict
 
 
 def observe_providers(
-    target: Path, *, codex_max_items: int | None = None, **_kwargs: Any
+    target: Path,
+    *,
+    codex_max_items: int | None = None,
+    github_budget_seconds: float | None = None,
+    **_kwargs: Any,
 ) -> tuple[dict[str, Any], dict[str, Any], bool]:
     """Compatibility wrapper for callers that only accept a flattened inventory."""
-    if codex_max_items is None:
-        observations, github = observe_provider_details(target)
-    else:
-        observations, github = observe_provider_details(target, codex_max_items=codex_max_items)
+    observations, github = observe_provider_details(
+        target, codex_max_items=codex_max_items, github_budget_seconds=github_budget_seconds
+    )
     return _legacy_provider_tasks(observations), github, observations["cursor-cloud"].configured
 
 

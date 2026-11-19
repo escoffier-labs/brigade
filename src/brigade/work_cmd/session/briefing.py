@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,96 @@ from .. import constants, helpers, ledger as ledger_mod, config as config_mod, s
 from .. import scanners as scanners_mod, reviews as reviews_mod
 
 from .lifecycle import _resolve_next_task
+
+# A section deadline keeps one unreachable provider from holding the whole
+# brief. The total budget bounds the sum: once it is spent the remaining
+# sections report a skip instead of calling their provider. Both are
+# env-overridable so tests and hooks can tighten them.
+DEFAULT_BRIEF_SECTION_TIMEOUT_SECONDS = 5.0
+DEFAULT_BRIEF_BUDGET_SECONDS = 20.0
+BRIEF_SECTION_TIMEOUT_ENV = "BRIGADE_WORK_BRIEF_SECTION_TIMEOUT"
+BRIEF_BUDGET_ENV = "BRIGADE_WORK_BRIEF_BUDGET"
+
+
+class _UnavailableSection(dict):
+    """Render-safe placeholder for a section that did not finish in time.
+
+    The brief packs section fields straight into its payload, so a timed-out
+    dict section still has to answer lookups. Missing keys read as ``None``, and
+    the owning payload entry is dropped before it is returned.
+    """
+
+    def __missing__(self, key: str) -> None:
+        return None
+
+
+def _brief_seconds_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return default
+
+
+class _BriefSections:
+    """Bound each work-brief provider with a per-section deadline and a budget."""
+
+    def __init__(self, *, section_timeout: float | None = None, budget: float | None = None) -> None:
+        self.section_timeout = (
+            section_timeout
+            if section_timeout is not None
+            else _brief_seconds_env(BRIEF_SECTION_TIMEOUT_ENV, DEFAULT_BRIEF_SECTION_TIMEOUT_SECONDS)
+        )
+        self.budget = (
+            budget if budget is not None else _brief_seconds_env(BRIEF_BUDGET_ENV, DEFAULT_BRIEF_BUDGET_SECONDS)
+        )
+        self.deadline = time.monotonic() + self.budget
+        self.checks: list[dict[str, Any]] = []
+        self.unavailable_keys: set[str] = set()
+
+    def call(self, label: str, func, fallback: Any, *, key: str | None = None) -> Any:
+        """Return the section value, its fallback, or a skip once the budget is spent."""
+        from ...daily_cmd.config import _bounded_status_call
+
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            value: Any = fallback
+            check = {
+                "status": "warn",
+                "name": f"work_brief_section:{label}",
+                "detail": f"skipped after the {self.budget:g}s brief budget",
+                "elapsed_ms": 0,
+            }
+        else:
+            value, check = _bounded_status_call(
+                label,
+                func,
+                fallback,
+                timeout_seconds=min(self.section_timeout, remaining),
+                check_prefix="work_brief_section",
+                # A corrupt or unsupported ledger must keep failing closed with
+                # exit 2 for the session-start hooks, not degrade to a warning.
+                raise_types=(ledger_mod.TaskLedgerError,),
+            )
+        self.checks.append(check)
+        if check.get("status") != "ok" and key:
+            self.unavailable_keys.add(key)
+        return value
+
+    @property
+    def issue_count(self) -> int:
+        return sum(1 for check in self.checks if check.get("status") != "ok")
+
+    @property
+    def top_issue(self) -> dict[str, Any] | None:
+        # The session facade copies sibling command names into this module, so
+        # avoid the ``next`` builtin here.
+        for check in self.checks:
+            if check.get("status") != "ok":
+                return check
+        return None
 
 
 def _security_health_for_brief(security_cmd: Any, target: Path) -> dict[str, Any]:
@@ -282,62 +373,152 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     )
 
     target = target.expanduser().resolve()
-    active = helpers._active_session_info(target)
-    sessions, skipped = helpers._collect_sessions(helpers._work_root(target))
+    sections = _BriefSections()
+    active = sections.call("active-session", lambda: helpers._active_session_info(target), None, key="active_session")
+    session_rows = sections.call(
+        "sessions",
+        lambda: helpers._collect_sessions(helpers._work_root(target)),
+        ([], 0),
+        key="recent_sessions",
+    )
+    sessions, skipped = session_rows
     latest_session = helpers._session_info(sessions[0][0], sessions[0][1]) if sessions else None
     recent_sessions = [helpers._session_info(path, payload) for path, payload in sessions[:limit]]
-    resolved = _resolve_next_task(target)
+    resolved = sections.call(
+        "next-task",
+        lambda: _resolve_next_task(target),
+        {"task": "", "source": "default_review", "dogfood": {}, "ledger_task": None},
+    )
     task_text = str(resolved.get("task") or "").strip()
     code_graph = (
-        aboyeur.code_graph_brief(target, task_text)
+        sections.call("code-graph", lambda: aboyeur.code_graph_brief(target, task_text), None)
         if include_code_graph and task_text and resolved.get("source") != "default_review"
         else None
     )
     ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
-    git = helpers._git_snapshot(target)
+    git = sections.call("git", lambda: helpers._git_snapshot(target), {}, key="git")
     from ... import run_reap, runs_patrol
 
-    orphaned_runs = run_reap.list_orphaned_runs(target)
+    orphaned_runs = sections.call("orphaned-runs", lambda: run_reap.list_orphaned_runs(target), [], key="orphaned_runs")
+    patrol = sections.call("patrol", lambda: runs_patrol.brief_summary(target), {}, key="patrol")
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
-    pending = ledger_mod._pending_tasks(target)
-    ready_tasks = ledger_mod._ready_tasks(target)
-    readiness = ledger_mod._readiness_payload(target, explain=False)
-    pending_imports = ledger_mod._pending_imports(target)
-    pending_import_counts = ledger_mod._import_counts(pending_imports)
-    scanner_candidate = ledger_mod._scanner_candidate(pending_imports)
-    handoff_candidate = ledger_mod._handoff_candidate(pending_imports)
-    inbox_hygiene = services_mod._inbox_hygiene_payload(target)
-    scanner_health = scanners_mod._scanner_health(target)
-    sweep_health = scanners_mod._scanner_sweep_health(target)
-    review_health = reviews_mod._review_health(target)
-    chat_health = chat_cmd.health(target)
-    memory_health = memory_cmd.health(target)
-    security_health = _security_health_for_brief(security_cmd, target)
-    backup_health = config_mod._backup_health(target)
-    tool_health = tools_cmd.health(target)
-    roadmap_health = roadmap_cmd.health(target)
-    repo_health = repos_cmd.health(target)
+    pending = sections.call("pending-tasks", lambda: ledger_mod._pending_tasks(target), [], key="pending_tasks")
+    ready_tasks = sections.call("ready-tasks", lambda: ledger_mod._ready_tasks(target), [], key="ready_tasks")
+    readiness = sections.call(
+        "readiness",
+        lambda: ledger_mod._readiness_payload(target, explain=False),
+        _UnavailableSection(),
+        key="ready",
+    )
+    pending_imports = sections.call(
+        "pending-imports", lambda: ledger_mod._pending_imports(target), [], key="pending_imports"
+    )
+    if "pending_imports" in sections.unavailable_keys:
+        # Counting a fallback empty inbox would report zero pending imports
+        # when the inbox was never read; the pending-imports check carries it.
+        pending_import_counts = _UnavailableSection()
+        sections.unavailable_keys.add("pending_import_counts")
+    else:
+        pending_import_counts = sections.call(
+            "pending-import-counts",
+            lambda: ledger_mod._import_counts(pending_imports),
+            _UnavailableSection(),
+            key="pending_import_counts",
+        )
+    scanner_candidate = sections.call("scanner-candidate", lambda: ledger_mod._scanner_candidate(pending_imports), None)
+    handoff_candidate = sections.call("handoff-candidate", lambda: ledger_mod._handoff_candidate(pending_imports), None)
+    inbox_hygiene = sections.call(
+        "inbox-hygiene", lambda: services_mod._inbox_hygiene_payload(target), _UnavailableSection(), key="inbox_hygiene"
+    )
+    scanner_health = sections.call(
+        "scanner-health", lambda: scanners_mod._scanner_health(target), _UnavailableSection(), key="scanner_health"
+    )
+    sweep_health = sections.call(
+        "scanner-sweeps",
+        lambda: scanners_mod._scanner_sweep_health(target),
+        _UnavailableSection(),
+        key="scanner_sweeps",
+    )
+    review_health = sections.call(
+        "code-review-health", lambda: reviews_mod._review_health(target), _UnavailableSection(), key="code_review"
+    )
+    chat_health = sections.call(
+        "chat-surfaces", lambda: chat_cmd.health(target), _UnavailableSection(), key="chat_surfaces"
+    )
+    memory_health = sections.call(
+        "memory-care-health", lambda: memory_cmd.health(target), _UnavailableSection(), key="memory_care"
+    )
+    security_health = sections.call(
+        "security-health",
+        lambda: _security_health_for_brief(security_cmd, target),
+        _UnavailableSection(),
+        key="security_health",
+    )
+    backup_health = sections.call(
+        "backup-health", lambda: config_mod._backup_health(target), _UnavailableSection(), key="backup_health"
+    )
+    tool_health = sections.call(
+        "tool-catalog", lambda: tools_cmd.health(target), _UnavailableSection(), key="tool_catalog"
+    )
+    roadmap_health = sections.call(
+        "roadmap-completion", lambda: roadmap_cmd.health(target), _UnavailableSection(), key="roadmap_completion"
+    )
     # Reduce immediately: the raw fleet health embeds per-repo scan state that
     # scales with repo count; holding it (plus every other section payload)
     # until the return literal was the unbounded working set.
-    repo_fleet_section = _compact_repo_fleet_health(repo_health)
-    del repo_health
-    pantry_health = pantry_cmd.status_payload(target)
-    notification_health = notifications_cmd.health(target)
-    context_health = context_cmd.health(target)
-    projects_health = projects_cmd.health(target)
-    learning_health = learn_cmd.health(target)
-    research_health = research_cmd.health(target)
-    center_report_health = center_cmd.report_health(target)
-    center_actions_health = center_cmd.actions_health(target)
-    daily_health = daily_cmd.health(target)
-    phase_health = phases_cmd.health(target)
-    outcome_health = outcome_cmd.health(target)
-    outcome_ratchet = outcome_ratchet_report.brief_payload(outcome_ratchet_report.load_report(target))
-    handoff_issues = handoff_cmd.collect_issues(target)
-    known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
+    repo_fleet_section = sections.call(
+        "repo-fleet",
+        lambda: _compact_repo_fleet_health(repos_cmd.health(target)),
+        _UnavailableSection(),
+        key="repo_fleet",
+    )
+    pantry_health = sections.call(
+        "pantry", lambda: pantry_cmd.status_payload(target), _UnavailableSection(), key="pantry"
+    )
+    notification_health = sections.call(
+        "notifications", lambda: notifications_cmd.health(target), _UnavailableSection(), key="notifications"
+    )
+    context_health = sections.call(
+        "context-packs", lambda: context_cmd.health(target), _UnavailableSection(), key="context_packs"
+    )
+    projects_health = sections.call(
+        "project-consolidation", lambda: projects_cmd.health(target), _UnavailableSection(), key="project_consolidation"
+    )
+    learning_health = sections.call("learning", lambda: learn_cmd.health(target), _UnavailableSection(), key="learning")
+    research_health = sections.call(
+        "research-handoffs", lambda: research_cmd.health(target), _UnavailableSection(), key="research_handoffs"
+    )
+    center_report_health = sections.call(
+        "operator-report", lambda: center_cmd.report_health(target), _UnavailableSection(), key="operator_report"
+    )
+    center_actions_health = sections.call(
+        "operator-actions", lambda: center_cmd.actions_health(target), _UnavailableSection(), key="operator_actions"
+    )
+    daily_health = sections.call(
+        "daily-driver", lambda: daily_cmd.health(target), _UnavailableSection(), key="daily_driver"
+    )
+    phase_health = sections.call(
+        "phase-ledger", lambda: phases_cmd.health(target), _UnavailableSection(), key="phase_ledger"
+    )
+    outcome_health = sections.call(
+        "outcome-loop", lambda: outcome_cmd.health(target), _UnavailableSection(), key="outcome_loop"
+    )
+    outcome_ratchet = sections.call(
+        "outcome-ratchet",
+        lambda: outcome_ratchet_report.brief_payload(outcome_ratchet_report.load_report(target)),
+        _UnavailableSection(),
+        key="outcome_ratchet",
+    )
+    handoff_issues = sections.call(
+        "handoff-issues", lambda: handoff_cmd.collect_issues(target), [], key="handoff_issues"
+    )
+    known_handoff_issue_ids = sections.call(
+        "handoff-known-issues", lambda: handoff_cmd._known_local_issue_ids(target), set()
+    )
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
-    handoff_drafts_full = handoff_cmd.draft_queue_payload(target)
+    handoff_drafts_full = sections.call(
+        "handoff-drafts", lambda: handoff_cmd.draft_queue_payload(target), _UnavailableSection(), key="handoff_drafts"
+    )
     handoff_drafts = {
         "counts": handoff_drafts_full.get("counts"),
         "issue_count": handoff_drafts_full.get("issue_count"),
@@ -349,11 +530,40 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     from ... import brief_sections, work_mode
 
     pin_errors: list[str] = []
-    work_mode.pin_explicit_mode(target, errors=pin_errors)
-    work = work_mode.summary(target)
+    sections.call("work-mode-pin", lambda: work_mode.pin_explicit_mode(target, errors=pin_errors), None)
+    work = sections.call("work-mode", lambda: work_mode.summary(target), {"mode": "unknown", "rails": "unknown"})
     if pin_errors:
         work["pin_error"] = pin_errors[0]
-    return {
+    plan_coverage = sections.call(
+        "plan-coverage", lambda: ledger_mod._plan_coverage_payload(target), _UnavailableSection(), key="plan_coverage"
+    )
+    scheduled_care = sections.call(
+        "scheduled-care", lambda: care_cmd.repeated_failure_summary(target), _UnavailableSection(), key="scheduled_care"
+    )
+    care_schedule_health = sections.call(
+        "care-schedule-health",
+        lambda: care_receipts.schedule_health(target),
+        _UnavailableSection(),
+        key="care_schedule_health",
+    )
+    instruction_budget = sections.call(
+        "instruction-budget",
+        lambda: memory_care_instructions.brief_payload(target),
+        _UnavailableSection(),
+        key="instruction_budget",
+    )
+    cloud_tracker = sections.call(
+        "cloud-tracker", lambda: _cloud_tracker_for_brief(target), _UnavailableSection(), key="cloud_tracker"
+    )
+    fleet_routing = sections.call("fleet-routing", lambda: _fleet_routing_for_brief(), None, key="fleet_routing")
+    interactive_presence = sections.call(
+        "interactive-presence",
+        lambda: _interactive_presence_for_brief(target),
+        _UnavailableSection(),
+        key="interactive_sessions",
+    )
+    update = sections.call("update", lambda: update_notify.available_update(), None)
+    payload: dict[str, Any] = {
         "target": str(target),
         "session_close": {
             "items": list(brief_sections.session_close_items(mode=work["mode"])),
@@ -368,7 +578,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "pending_tasks": pending,
         "ready_tasks": ready_tasks,
         "ready": readiness,
-        "plan_coverage": ledger_mod._plan_coverage_payload(target),
+        "plan_coverage": plan_coverage,
         "imports_path": str(helpers._imports_path(target)),
         "pending_imports": pending_imports,
         "pending_import_counts": pending_import_counts,
@@ -419,9 +629,9 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "top_issue": memory_health["top_issue"],
             "autofix_plan": memory_health.get("autofix_plan"),
         },
-        "scheduled_care": care_cmd.repeated_failure_summary(target),
-        "care_schedule_health": care_receipts.schedule_health(target),
-        "instruction_budget": memory_care_instructions.brief_payload(target),
+        "scheduled_care": scheduled_care,
+        "care_schedule_health": care_schedule_health,
+        "instruction_budget": instruction_budget,
         "security_health": {
             "config_path": security_health["config_path"],
             "valid": security_health["valid"],
@@ -576,12 +786,21 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "next": str(resolved["task"]),
         "suggested_command": suggested,
         "orphaned_runs": orphaned_runs,
-        "patrol": runs_patrol.brief_summary(target),
-        "update": update_notify.available_update(),
-        "cloud_tracker": _cloud_tracker_for_brief(target),
-        "fleet_routing": _fleet_routing_for_brief(),
-        **_interactive_presence_for_brief(target),
+        "patrol": patrol,
+        "update": update,
+        "cloud_tracker": cloud_tracker,
+        "fleet_routing": fleet_routing,
+        **interactive_presence,
+        "status_section_checks": sections.checks,
+        "status_section_issue_count": sections.issue_count,
+        "top_status_section_issue": sections.top_issue,
     }
+    # A section that timed out is named in ``status_section_checks`` instead of
+    # pretending its packed fields are real. The text renderer skips absent
+    # sections, so only the sections that completed are printed.
+    for key in sections.unavailable_keys:
+        payload.pop(key, None)
+    return payload
 
 
 def _interactive_presence_for_brief(target: Path) -> dict[str, Any]:
@@ -691,6 +910,17 @@ def _outcome_ratchet_line(ratchet: object) -> str:
     )
 
 
+def _brief_section_failed(payload: dict[str, Any], label: str) -> bool:
+    """True when the brief recorded a non-ok check for ``label``."""
+    checks = payload.get("status_section_checks")
+    if not isinstance(checks, list):
+        return False
+    name = f"work_brief_section:{label}"
+    return any(
+        isinstance(check, dict) and check.get("name") == name and check.get("status") != "ok" for check in checks
+    )
+
+
 def _outcome_proposals_line(ratchet: object) -> str:
     """Return the one-line brief summary of inbox proposals filed by the last ratchet run."""
     report = ratchet if isinstance(ratchet, dict) else {}
@@ -713,24 +943,36 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
 
+    if not json_output:
+        # Print the header before collecting, so an outer timeout still leaves
+        # a non-empty brief instead of a silent hang.
+        print(f"work brief: {target}", flush=True)
     payload = _brief_payload(target, limit=limit, include_code_graph=json_output)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
 
-    print(f"work brief: {target}")
     from ... import brief_sections
 
-    for line in brief_sections.render_brief_session_close_lines(mode=payload["work_mode"]["mode"]):
+    work_mode_payload = payload.get("work_mode")
+    if not isinstance(work_mode_payload, dict):
+        work_mode_payload = {"mode": "unknown", "rails": "unknown"}
+    for line in brief_sections.render_brief_session_close_lines(mode=str(work_mode_payload.get("mode") or "unknown")):
         print(line)
-    if "pin_error" in payload["work_mode"]:
-        print(f"work_mode_pin: {payload['work_mode']['pin_error']}")
-    if payload["work_mode"]["rails"] == "off":
+    if "pin_error" in work_mode_payload:
+        print(f"work_mode_pin: {work_mode_payload['pin_error']}")
+    if work_mode_payload.get("rails") == "off":
         print("safety_rails: off (pre-push content guard and secret scanning are skipped)")
+    section_issues = payload.get("status_section_issue_count")
+    if section_issues:
+        print(f"status_section_issues: {section_issues}")
+        top_section_issue = payload.get("top_status_section_issue")
+        if isinstance(top_section_issue, dict):
+            print(f"top_status_section_issue: {top_section_issue.get('name')} {top_section_issue.get('detail')}")
     update = payload.get("update")
     if isinstance(update, dict):
         print(f'update_available: {update.get("latest")} (installed {update.get("installed")}); run "brigade update"')
-    git = payload["git"]
+    git = payload.get("git")
     if isinstance(git, dict) and git.get("available"):
         print(f"branch: {git.get('branch')}")
         raw_dirty = git.get("dirty_files")
@@ -756,7 +998,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"{warning.get('session_id')} {' '.join(shown)}"
             )
 
-    active = payload["active_session"]
+    active = payload.get("active_session")
     if isinstance(active, dict):
         if active.get("valid"):
             print(f"active_session: {active.get('path')}")
@@ -764,10 +1006,12 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 print(f"active_session_title: {helpers._short(str(active['title']))}")
         else:
             print(f"active_session: invalid ({active.get('path')})")
+    elif _brief_section_failed(payload, "active-session"):
+        print("active_session: unavailable (section timed out or failed)")
     else:
         print("active_session: none")
 
-    latest_session = payload["latest_session"]
+    latest_session = payload.get("latest_session")
     if isinstance(latest_session, dict):
         print(f"latest_session: {latest_session.get('path')}")
         if latest_session.get("title"):
@@ -776,10 +1020,14 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"latest_session_note: {helpers._short(str(latest_session['note']))}")
         if latest_session.get("handoff"):
             print(f"latest_session_handoff: {latest_session['handoff']}")
+    elif _brief_section_failed(payload, "sessions"):
+        print("latest_session: unavailable (section timed out or failed)")
     else:
         print(f"latest_session: none ({helpers._work_root(target)})")
 
-    dogfood = payload["dogfood"]
+    dogfood = payload.get("dogfood")
+    if not isinstance(dogfood, dict):
+        dogfood = {}
     print(f"dogfood_ready: {dogfood.get('ready')}")
     if dogfood.get("error"):
         print(f"dogfood_error: {dogfood['error']}")
@@ -829,8 +1077,12 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
         if top_outcome:
             print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")
-    print(_outcome_ratchet_line(payload.get("outcome_ratchet")))
-    print(_outcome_proposals_line(payload.get("outcome_ratchet")))
+    ratchet = payload.get("outcome_ratchet")
+    if isinstance(ratchet, dict):
+        print(_outcome_ratchet_line(ratchet))
+        print(_outcome_proposals_line(ratchet))
+    elif _brief_section_failed(payload, "outcome-ratchet"):
+        print("outcome_ratchet: unavailable (section timed out or failed)")
 
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:
@@ -861,7 +1113,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"branch={row.get('branch') or ((row.get('artifact_refs') or {}).get('branch') if isinstance(row.get('artifact_refs'), dict) else None)}"
             )
 
-    print(f"next_source: {payload['next_source']}")
+    print(f"next_source: {payload.get('next_source')}")
     if payload.get("task_id"):
         print(f"task_id: {payload['task_id']}")
     next_task = payload.get("next_task") if isinstance(payload.get("next_task"), dict) else None
@@ -882,8 +1134,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         labels = next_issue.get("labels")
         if isinstance(labels, list) and labels:
             print(f"issue_labels: {', '.join(str(label) for label in labels)}")
-    print(f"next: {helpers._short(str(payload['next']))}")
-    print(f"suggested_command: {payload['suggested_command']}")
+    print(f"next: {helpers._short(str(payload.get('next') or ''))}")
+    print(f"suggested_command: {payload.get('suggested_command')}")
 
     patrol = payload.get("patrol")
     if isinstance(patrol, dict):
@@ -905,7 +1157,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 print(f"  {command}")
         print("orphaned_trap: recorded dirty count only; inspect before assuming the tree is clean")
 
-    pending = payload["pending_tasks"]
+    pending = payload.get("pending_tasks")
     if isinstance(pending, list) and pending:
         print("pending_tasks:")
         for task in pending[:5]:
@@ -931,7 +1183,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         else:
             print("plans: significant pending tasks have plan artifacts")
 
-    pending_imports = payload["pending_imports"]
+    pending_imports = payload.get("pending_imports")
     if isinstance(pending_imports, list) and pending_imports:
         counts = payload.get("pending_import_counts")
         if isinstance(counts, dict):
@@ -1396,7 +1648,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 print(f"handoff_draft_next: {first.get('id')} {first.get('status')} {first.get('path')}")
                 print(f"handoff_draft_next_command: brigade handoff show {first.get('id')}")
 
-    recent = payload["recent_sessions"]
+    recent = payload.get("recent_sessions")
     if isinstance(recent, list) and recent:
         print("recent_sessions:")
         for item in recent:

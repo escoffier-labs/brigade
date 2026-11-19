@@ -16,7 +16,7 @@ def isolated_providers(monkeypatch):
     empty = cloud_tracker.ProviderObservation(False, False, "unconfigured", {})
     monkeypatch.setattr(cloud_tracker, "_cursor_cloud_observation", lambda target: empty)
     monkeypatch.setattr(cloud_tracker, "_grokbot_cloud_observation", lambda: empty)
-    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target, **_kwargs: {"branches": [], "prs": []})
 
 
 def _register(target: Path, task_id: str, *, provider: str = "codex-cloud", hours_ago: float = 12) -> None:
