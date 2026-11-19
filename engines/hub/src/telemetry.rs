@@ -19,8 +19,8 @@ pub fn queue_probe<T: Send + 'static>(sender: &mpsc::Sender<T>) -> QueueProbe {
             .map_or(0, |s| s.max_capacity() - s.capacity())
     })
 }
-/// One reader pool's counters. `Telemetry::attach_reader_stats` sums them, the
-/// way the queue probes are summed.
+/// One reader pool's counters. `Telemetry::attach_reader_stats` keeps them per
+/// pool, so every series carries the pool it came from.
 #[derive(Default)]
 pub struct ReaderStats {
     jobs: AtomicU64,
@@ -29,6 +29,24 @@ pub struct ReaderStats {
     aged: AtomicU64,
     expired: AtomicU64,
     abandoned: AtomicU64,
+    full: AtomicU64,
+}
+/// The reader pools a hub process can run, as the `pool` label spells them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Pool {
+    Handler,
+    Lookup,
+    Memory,
+}
+impl Pool {
+    pub const ALL: [Self; 3] = [Self::Handler, Self::Lookup, Self::Memory];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Handler => "handler",
+            Self::Lookup => "lookup",
+            Self::Memory => "memory",
+        }
+    }
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReaderSnapshot {
@@ -38,6 +56,7 @@ pub struct ReaderSnapshot {
     pub aged: u64,
     pub expired: u64,
     pub abandoned: u64,
+    pub full: u64,
 }
 fn micros(span: std::time::Duration) -> u64 {
     u64::try_from(span.as_micros()).unwrap_or(u64::MAX)
@@ -64,6 +83,10 @@ impl ReaderStats {
     pub fn abandoned(&self) {
         self.abandoned.fetch_add(1, Ordering::Relaxed);
     }
+    /// A full queue refused the job before any reader could pick it up.
+    pub fn full(&self) {
+        self.full.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn snapshot(&self) -> ReaderSnapshot {
         ReaderSnapshot {
             jobs: self.jobs.load(Ordering::Relaxed),
@@ -72,6 +95,7 @@ impl ReaderStats {
             aged: self.aged.load(Ordering::Relaxed),
             expired: self.expired.load(Ordering::Relaxed),
             abandoned: self.abandoned.load(Ordering::Relaxed),
+            full: self.full.load(Ordering::Relaxed),
         }
     }
 }
@@ -88,7 +112,7 @@ pub struct Telemetry {
     shadow: Mutex<BTreeMap<&'static str, u64>>,
     writer: Mutex<Option<Arc<WriterStats>>>,
     readers: Mutex<Vec<QueueProbe>>,
-    reader_stats: Mutex<Vec<Arc<ReaderStats>>>,
+    reader_stats: Mutex<BTreeMap<Pool, Arc<ReaderStats>>>,
     cpu: Mutex<Vec<QueueProbe>>,
 }
 impl Telemetry {
@@ -103,14 +127,17 @@ impl Telemetry {
     pub fn attach_writer(&self, stats: Arc<WriterStats>) {
         *self.writer.lock().unwrap() = Some(stats);
     }
-    /// One probe per reader pool. `reader_queue_depth` is their sum.
+    /// One probe per reader pool. `reader_queue_depth` is their sum, as it was
+    /// before the pools split: the handler and memory pools. The lookup pool is
+    /// counted per pool by `attach_reader_stats` instead, so this gauge keeps
+    /// reporting what it reported on main.
     pub fn attach_readers(&self, probe: QueueProbe) {
         self.readers.lock().unwrap().push(probe);
     }
-    /// One per reader pool, with `attach_readers`. The `reader_*` counters are
-    /// their sum.
-    pub fn attach_reader_stats(&self, stats: Arc<ReaderStats>) {
-        self.reader_stats.lock().unwrap().push(stats);
+    /// One call per reader pool, with `attach_readers`, which names the pool
+    /// every counter carries.
+    pub fn attach_reader_stats(&self, pool: Pool, stats: Arc<ReaderStats>) {
+        self.reader_stats.lock().unwrap().insert(pool, stats);
     }
     pub fn attach_cpu(&self, probe: QueueProbe) {
         self.cpu.lock().unwrap().push(probe);
@@ -236,55 +263,69 @@ impl Telemetry {
                 format!("# HELP brigade_hub_{name} {help}\nbrigade_hub_{name} {depth}\n")
             };
         }
-        let snapshots: Vec<ReaderSnapshot> = self
-            .reader_stats
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|stats| stats.snapshot())
-            .collect();
-        let sum =
-            |field: fn(&ReaderSnapshot) -> u64| snapshots.iter().map(field).sum::<u64>() as f64;
+        let snapshots = self.reader_stats.lock().unwrap().clone();
         let missing = "No reader pool attached to this process.";
-        for (name, help, value) in [
+        for (name, help, field, time) in [
             (
                 "reader_jobs_total",
-                "Jobs a reader ran a query for, all reader pools (counter).",
-                sum(|s| s.jobs),
+                "Jobs a reader ran a query for, by pool (counter).",
+                (|s: &ReaderSnapshot| s.jobs) as fn(&ReaderSnapshot) -> u64,
+                false,
             ),
             (
                 "reader_queue_wait_seconds_total",
-                "Time jobs waited for a reader, all reader pools (counter).",
-                sum(|s| s.queue_micros) / 1e6,
+                "Time jobs waited for a reader, by pool (counter).",
+                |s: &ReaderSnapshot| s.queue_micros,
+                true,
             ),
             (
                 "reader_run_seconds_total",
-                "Time readers spent running jobs, all reader pools (counter).",
-                sum(|s| s.run_micros) / 1e6,
+                "Time readers spent running jobs, by pool (counter).",
+                |s: &ReaderSnapshot| s.run_micros,
+                true,
             ),
         ] {
             text += &if snapshots.is_empty() {
-                format!("# HELP brigade_hub_{name} {missing}\nbrigade_hub_{name} NaN\n")
+                format!("# HELP brigade_hub_{name} {missing}\n")
             } else {
-                format!("# HELP brigade_hub_{name} {help}\nbrigade_hub_{name} {value}\n")
+                format!("# HELP brigade_hub_{name} {help}\n")
             };
+            for pool in Pool::ALL {
+                let value = match snapshots.get(&pool) {
+                    Some(stats) => {
+                        let raw = field(&stats.snapshot());
+                        if time { raw as f64 / 1e6 } else { raw as f64 }
+                    }
+                    None => f64::NAN,
+                };
+                text += &format!("brigade_hub_{name}{{pool=\"{}\"}} {value}\n", pool.label());
+            }
         }
-        let help = if snapshots.is_empty() {
-            missing
+        text += &if snapshots.is_empty() {
+            format!("# HELP brigade_hub_reader_timeouts_total {missing}\n")
         } else {
-            "Read jobs that hit a deadline, by cause, all reader pools (counter)."
+            "# HELP brigade_hub_reader_timeouts_total Read jobs that hit a deadline, by cause and pool (counter).\n".into()
         };
-        text += &format!("# HELP brigade_hub_reader_timeouts_total {help}\n");
-        for (reason, count) in [
-            ("aged-in-queue", sum(|s| s.aged)),
-            ("run-deadline", sum(|s| s.expired)),
-            ("caller-gone", sum(|s| s.abandoned)),
+        for (reason, field) in [
+            (
+                "aged-in-queue",
+                (|s: &ReaderSnapshot| s.aged) as fn(&ReaderSnapshot) -> u64,
+            ),
+            ("run-deadline", |s: &ReaderSnapshot| s.expired),
+            ("caller-gone", |s: &ReaderSnapshot| s.abandoned),
+            // A full queue refused the job before any reader saw it.
+            ("queue-full", |s: &ReaderSnapshot| s.full),
         ] {
-            text += &if snapshots.is_empty() {
-                format!("brigade_hub_reader_timeouts_total{{reason=\"{reason}\"}} NaN\n")
-            } else {
-                format!("brigade_hub_reader_timeouts_total{{reason=\"{reason}\"}} {count}\n")
-            };
+            for pool in Pool::ALL {
+                let value = match snapshots.get(&pool) {
+                    Some(stats) => field(&stats.snapshot()) as f64,
+                    None => f64::NAN,
+                };
+                text += &format!(
+                    "brigade_hub_reader_timeouts_total{{pool=\"{}\",reason=\"{reason}\"}} {value}\n",
+                    pool.label()
+                );
+            }
         }
         text
     }
@@ -299,14 +340,23 @@ pub struct RequestLog {
     pub response_bytes: u64,
     pub start: Instant,
 }
+impl RequestLog {
+    /// The one request line this log writes, before it is emitted.
+    pub fn line(&self) -> serde_json::Value {
+        serde_json::json!({"event":"request","request_id":self.id,"family":self.family,"status":self.status,"latency_seconds":self.start.elapsed().as_secs_f64(),"credential_kind":self.credential_kind,"request_bytes":self.request_bytes.load(Ordering::Relaxed),"response_bytes":self.response_bytes})
+    }
+}
 impl Drop for RequestLog {
     fn drop(&mut self) {
-        let seconds = self.start.elapsed().as_secs_f64();
-        self.telemetry.request(self.family, self.status, seconds);
-        eprintln!(
-            "{}",
-            serde_json::json!({"event":"request","request_id":self.id,"family":self.family,"status":self.status,"latency_seconds":seconds,"credential_kind":self.credential_kind,"request_bytes":self.request_bytes.load(Ordering::Relaxed),"response_bytes":self.response_bytes})
+        let line = self.line();
+        // The histogram reads the same latency the line carries, so the metric
+        // and the log never disagree.
+        self.telemetry.request(
+            self.family,
+            self.status,
+            line["latency_seconds"].as_f64().unwrap_or_default(),
         );
+        eprintln!("{line}");
     }
 }
 
@@ -331,6 +381,15 @@ mod tests {
         }
     }
 
+    /// One labelled series, e.g. `reader_jobs_total{pool="handler"}`.
+    fn series(text: &str, name: &str, labels: &str) -> String {
+        let prefix = format!("brigade_hub_{name}{{{labels}}} ");
+        text.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("{name}{{{labels}}} missing"))
+            .to_owned()
+    }
+
     #[test]
     fn unattached_pools_render_nan_with_the_reason() {
         let text = Telemetry::default().render();
@@ -343,16 +402,33 @@ mod tests {
             "writer_aborted_batches_total",
             "reader_queue_depth",
             "cpu_queue_depth",
+        ] {
+            assert_eq!(value(&text, name), "NaN", "{name}");
+        }
+        for name in [
             "reader_jobs_total",
             "reader_queue_wait_seconds_total",
             "reader_run_seconds_total",
         ] {
-            assert_eq!(value(&text, name), "NaN", "{name}");
+            for pool in Pool::ALL {
+                assert_eq!(
+                    series(&text, name, &format!("pool=\"{}\"", pool.label())),
+                    "NaN",
+                    "{name} {}",
+                    pool.label()
+                );
+            }
+        }
+        for reason in ["aged-in-queue", "run-deadline", "caller-gone", "queue-full"] {
+            assert!(text.contains(&format!(
+                "brigade_hub_reader_timeouts_total{{pool=\"handler\",reason=\"{reason}\"}} NaN"
+            )));
         }
         assert!(!text.contains("Not yet wired"));
         assert!(text.contains("# HELP brigade_hub_writer_queue_depth No writer in this process"));
         assert!(text.contains("# HELP brigade_hub_reader_queue_depth No reader pool attached"));
         assert!(text.contains("# HELP brigade_hub_cpu_queue_depth No CPU pool attached"));
+        assert!(text.contains("# HELP brigade_hub_reader_jobs_total No reader pool attached"));
     }
 
     #[test]
@@ -367,31 +443,50 @@ mod tests {
     }
 
     #[test]
-    fn reader_stats_sum_across_pools_and_split_timeouts_by_cause() {
+    fn reader_stats_keep_each_pool_apart_and_split_timeouts_by_cause() {
         let telemetry = Telemetry::default();
-        // An unattached process reads unavailable, never idle.
+        let handlers = Arc::new(ReaderStats::default());
+        let lookups = Arc::new(ReaderStats::default());
+        telemetry.attach_reader_stats(Pool::Handler, handlers.clone());
+        telemetry.attach_reader_stats(Pool::Lookup, lookups.clone());
+        handlers.ran(Duration::from_millis(20));
+        handlers.finished(Duration::from_millis(30));
+        handlers.aged();
+        handlers.expired();
+        handlers.full();
+        lookups.ran(Duration::from_millis(0));
+        lookups.abandoned();
         let text = telemetry.render();
-        assert_eq!(value(&text, "reader_jobs_total"), "NaN");
-        assert_eq!(value(&text, "reader_queue_wait_seconds_total"), "NaN");
-        assert_eq!(value(&text, "reader_run_seconds_total"), "NaN");
-        assert!(text.contains("brigade_hub_reader_timeouts_total{reason=\"aged-in-queue\"} NaN"));
-        let first = Arc::new(ReaderStats::default());
-        let second = Arc::new(ReaderStats::default());
-        telemetry.attach_reader_stats(first.clone());
-        telemetry.attach_reader_stats(second.clone());
-        first.ran(Duration::from_millis(20));
-        first.finished(Duration::from_millis(30));
-        first.aged();
-        first.expired();
-        second.ran(Duration::from_millis(0));
-        second.abandoned();
-        let text = telemetry.render();
-        assert_eq!(value(&text, "reader_jobs_total"), "2");
-        assert_eq!(value(&text, "reader_queue_wait_seconds_total"), "0.02");
-        assert_eq!(value(&text, "reader_run_seconds_total"), "0.03");
-        assert!(text.contains("brigade_hub_reader_timeouts_total{reason=\"aged-in-queue\"} 1"));
-        assert!(text.contains("brigade_hub_reader_timeouts_total{reason=\"run-deadline\"} 1"));
-        assert!(text.contains("brigade_hub_reader_timeouts_total{reason=\"caller-gone\"} 1"));
+        assert_eq!(series(&text, "reader_jobs_total", "pool=\"handler\""), "1");
+        assert_eq!(series(&text, "reader_jobs_total", "pool=\"lookup\""), "1");
+        // An unattached pool is unavailable, never idle.
+        assert_eq!(series(&text, "reader_jobs_total", "pool=\"memory\""), "NaN");
+        assert_eq!(
+            series(&text, "reader_queue_wait_seconds_total", "pool=\"handler\""),
+            "0.02"
+        );
+        assert_eq!(
+            series(&text, "reader_run_seconds_total", "pool=\"handler\""),
+            "0.03"
+        );
+        assert!(text.contains(
+            "brigade_hub_reader_timeouts_total{pool=\"handler\",reason=\"aged-in-queue\"} 1"
+        ));
+        assert!(text.contains(
+            "brigade_hub_reader_timeouts_total{pool=\"handler\",reason=\"run-deadline\"} 1"
+        ));
+        assert!(text.contains(
+            "brigade_hub_reader_timeouts_total{pool=\"handler\",reason=\"queue-full\"} 1"
+        ));
+        assert!(text.contains(
+            "brigade_hub_reader_timeouts_total{pool=\"lookup\",reason=\"caller-gone\"} 1"
+        ));
+        assert!(text.contains(
+            "brigade_hub_reader_timeouts_total{pool=\"lookup\",reason=\"queue-full\"} 0"
+        ));
+        assert!(text.contains(
+            "brigade_hub_reader_timeouts_total{pool=\"memory\",reason=\"queue-full\"} NaN"
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -401,8 +496,11 @@ mod tests {
             .unwrap()
             .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x);")
             .unwrap();
+        // A pool limit far past any slow-runner delay: the held and queued jobs
+        // here must never age out of the queue, which would turn the queue
+        // depth this test reads into a refusal.
         let readers =
-            Arc::new(ReaderPool::open_unchecked(&path, 1, 8, Duration::from_secs(5)).unwrap());
+            Arc::new(ReaderPool::open_unchecked(&path, 1, 8, Duration::from_secs(120)).unwrap());
         let cpu = Arc::new(CpuPool::new(1, 8));
         let telemetry = Telemetry::default();
         telemetry.attach_readers(readers.queue_probe());

@@ -108,6 +108,8 @@ fn bearer(parts: &Parts) -> Option<String> {
 #[derive(Clone)]
 pub struct Heartbeat {
     pub readers: Arc<ReaderPool>,
+    /// Credential reads only: the auth check before any handler read.
+    pub lookups: Arc<ReaderPool>,
     pub writer: writer::Writer,
     pub admin: String,
     pub clock: Option<String>,
@@ -165,6 +167,8 @@ impl Heartbeat {
             ("POST", "/events" | "/sessions") | ("GET", "/status")
         )
     }
+    /// The token check before any handler read. It runs on the lookup pool, so
+    /// a slow status read cannot turn a write into `credential-lookup`.
     pub async fn auth(&self, parts: &Parts) -> Option<Response<Body>> {
         let Some(key) = bearer(parts) else {
             return Some(Reply::error(401, "unauthorized").response());
@@ -175,7 +179,7 @@ impl Heartbeat {
             parts.method == "POST",
         );
         match self
-            .readers
+            .lookups
             .submit(move |c| claims::caller(&claims::ReadConnection(c), &key, &admin, write, allow))
             .await
         {
@@ -322,6 +326,7 @@ mod review_tests {
         let writer = Writer::start(Config::new(path.clone()), arbiter).unwrap();
         let route = Heartbeat {
             readers: Arc::new(ReaderPool::open(&path, 1, 8).unwrap()),
+            lookups: Arc::new(ReaderPool::open(&path, 1, 8).unwrap()),
             writer: writer.clone(),
             admin: digest("fake-admin"),
             clock: None,

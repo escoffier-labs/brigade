@@ -40,6 +40,7 @@ fn fixture() -> Fixture {
     let hub = hub_db(&dir);
     let arbiter = Arc::new(brigade_hub::writer::Arbiter::default());
     let readers = Arc::new(brigade_hub::read::ReaderPool::open(&hub, 1, 64).unwrap());
+    let lookups = Arc::new(brigade_hub::read::ReaderPool::open(&hub, 1, 64).unwrap());
     let store = Arc::new(
         Store::open(
             Options {
@@ -52,6 +53,7 @@ fn fixture() -> Fixture {
                 hook: None,
             },
             readers.clone(),
+            lookups.clone(),
         )
         .unwrap(),
     );
@@ -63,6 +65,7 @@ fn fixture() -> Fixture {
     ));
     let registration = registration::Registration {
         readers,
+        lookups,
         writer,
         admin: registration::digest(ADMIN),
         clock: None,
@@ -303,6 +306,7 @@ async fn a_failed_startup_republish_blocks_policy_writes() {
     std::fs::create_dir(&temp).unwrap();
     std::fs::write(temp.join("blocker"), b"x").unwrap();
     let readers = Arc::new(brigade_hub::read::ReaderPool::open(&f.hub, 1, 64).unwrap());
+    let lookups = Arc::new(brigade_hub::read::ReaderPool::open(&f.hub, 1, 64).unwrap());
     let restarted = Store::open(
         Options {
             memory: memory.clone(),
@@ -314,6 +318,7 @@ async fn a_failed_startup_republish_blocks_policy_writes() {
             hook: None,
         },
         readers,
+        lookups,
     );
     assert!(restarted.is_err());
     // Every policy that lists a reflect principal is held, flagged or not.

@@ -14,6 +14,19 @@ use tokio::sync::{mpsc, oneshot};
 
 type Job = Box<dyn FnOnce(&mut Connection, &mut Option<(i64, i64)>) + Send>;
 pub const READ_LIMIT: Duration = Duration::from_secs(2);
+/// When a read job's budget starts counting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Deadline {
+    /// From when the caller queued the job: a caller that waits at most
+    /// `limit` is never followed by up to `limit` more seconds of work no one
+    /// will read. Handler and lookup pools use this.
+    Queued,
+    /// From when a reader starts the job, and the caller's final wait is not
+    /// cut short. The memory pool keeps this: a search that queued for most of
+    /// its limit still gets a full run window, as it had before the hub split
+    /// its pools.
+    Started,
+}
 pub fn hub_threads() -> usize {
     hub_threads_for(
         std::thread::available_parallelism()
@@ -61,27 +74,41 @@ pub struct ReaderPool {
     sender: Option<mpsc::Sender<Job>>,
     workers: Vec<JoinHandle<()>>,
     limit: Duration,
+    deadline: Deadline,
     checked: bool,
     stats: Arc<ReaderStats>,
 }
 impl ReaderPool {
     pub fn open(path: &Path, threads: usize, capacity: usize) -> Result<Self, String> {
-        Self::build(path, threads, capacity, READ_LIMIT, true)
+        Self::build(path, threads, capacity, READ_LIMIT, Deadline::Queued, true)
     }
-    /// For files with their own schema owner, such as the future memory file.
+    /// For files with their own schema owner, such as the memory file.
     pub fn open_unchecked(
         path: &Path,
         threads: usize,
         capacity: usize,
         limit: Duration,
     ) -> Result<Self, String> {
-        Self::build(path, threads, capacity, limit, false)
+        Self::open_unchecked_deadline(path, threads, capacity, limit, Deadline::Queued)
+    }
+    /// `open_unchecked` with an explicit deadline policy. The memory pool asks
+    /// for `Deadline::Started`, so a job's run budget does not shrink by its
+    /// queue wait.
+    pub fn open_unchecked_deadline(
+        path: &Path,
+        threads: usize,
+        capacity: usize,
+        limit: Duration,
+        deadline: Deadline,
+    ) -> Result<Self, String> {
+        Self::build(path, threads, capacity, limit, deadline, false)
     }
     fn build(
         path: &Path,
         threads: usize,
         capacity: usize,
         limit: Duration,
+        deadline: Deadline,
         checked: bool,
     ) -> Result<Self, String> {
         if threads == 0 || capacity == 0 || limit.is_zero() {
@@ -126,6 +153,7 @@ impl ReaderPool {
             sender: Some(sender),
             workers,
             limit,
+            deadline,
             checked,
             stats: Arc::default(),
         })
@@ -148,22 +176,28 @@ impl ReaderPool {
         let (reply, receive) = oneshot::channel();
         let (started, starting) = oneshot::channel();
         let limit = self.limit;
+        let deadline = self.deadline;
         let queued = Instant::now();
         let checked = self.checked;
         let stats = self.stats.clone();
+        let counted = stats.clone();
         let job = Box::new(move |c: &mut Connection, cookie: &mut Option<(i64, i64)>| {
-            // The deadline counts from when the caller queued the job, not from
-            // when a reader picked it up: a caller that waits at most `limit`
-            // is never followed by up to `limit` more seconds of work no one
-            // will read.
-            let deadline = queued + limit;
-            if Instant::now() >= deadline {
-                // The caller has already given up on this job. Report the queue
-                // as the refusal it is and leave the reader for the next job.
+            // The caller waits at most `limit` for a reader, so a job that
+            // starts after that has nobody left to answer.
+            if queued.elapsed() >= limit {
                 stats.aged();
                 let _ = reply.send(Err("reader-queue-full".into()));
                 return;
             }
+            // A queue-relative deadline counts from when the caller queued the
+            // job, so a caller that waits at most `limit` is never followed by
+            // up to `limit` more seconds of work no one will read. A
+            // start-relative one leaves the full run budget however long the
+            // queue wait was.
+            let deadline = match deadline {
+                Deadline::Queued => queued + limit,
+                Deadline::Started => Instant::now() + limit,
+            };
             if reply.is_closed() || started.send(()).is_err() {
                 // The caller stopped waiting: its deadline fired or the
                 // connection ended. Skip the query instead of delaying the
@@ -218,21 +252,31 @@ impl ReaderPool {
         });
         tokio::time::timeout(limit, self.sender.as_ref().unwrap().send(job))
             .await
-            .map_err(|_| "reader-queue-full")?
+            .map_err(|_| {
+                // A full queue turned the job away before any reader saw it.
+                counted.full();
+                "reader-queue-full"
+            })?
             .map_err(|_| "reader-stopped")?;
         let remaining = limit.saturating_sub(queued.elapsed());
         tokio::time::timeout(remaining, starting)
             .await
             .map_err(|_| "reader-queue-full")?
             .map_err(|_| "reader-stopped")?;
-        // A job that started just before the deadline still owes an answer by
-        // then. The runner refuses at the same instant, so either side reports
-        // the same reason.
-        let remaining = limit.saturating_sub(queued.elapsed());
-        tokio::time::timeout(remaining, receive)
-            .await
-            .map_err(|_| "reader-timeout")?
-            .map_err(|_| "reader-stopped")?
+        let answer = match deadline {
+            // A job that started just before the deadline still owes an answer
+            // by then. The runner refuses at the same instant, so either side
+            // reports the same reason.
+            Deadline::Queued => {
+                let remaining = limit.saturating_sub(queued.elapsed());
+                tokio::time::timeout(remaining, receive)
+                    .await
+                    .map_err(|_| "reader-timeout")?
+            }
+            // The run budget counts from the start, so the caller waits it out.
+            Deadline::Started => receive.await,
+        };
+        answer.map_err(|_| "reader-stopped")?
     }
 }
 impl Drop for ReaderPool {
@@ -318,13 +362,12 @@ mod tests {
         for (_, _, entered) in &held {
             entered.recv_timeout(Duration::from_secs(5)).unwrap();
         }
-        let started = Instant::now();
-        lookups.submit(|_| Ok(())).await.unwrap();
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "a held handler pool must not delay a credential lookup: {:?}",
-            started.elapsed()
-        );
+        // A shared pool would answer `reader-queue-full` when the caller's
+        // budget runs out. The lookup either runs now or not at all.
+        lookups
+            .submit(|_| Ok(()))
+            .await
+            .expect("a held handler pool must not delay a credential lookup");
         for (hold, gate, _) in held {
             gate.send(()).unwrap();
             hold.await.unwrap();
@@ -338,9 +381,10 @@ mod tests {
     async fn a_job_queued_past_its_deadline_never_runs() {
         let path = temp_db("aged");
         let pool =
-            Arc::new(ReaderPool::open_unchecked(&path, 1, 8, Duration::from_millis(100)).unwrap());
+            Arc::new(ReaderPool::open_unchecked(&path, 1, 8, Duration::from_millis(600)).unwrap());
+        let probe = pool.queue_probe();
         let (hold, gate, entered) = hold_reader(&pool);
-        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
         let ran = Arc::new(AtomicUsize::new(0));
         let marker = ran.clone();
         let pool_copy = pool.clone();
@@ -352,8 +396,11 @@ mod tests {
                 })
                 .await
         });
-        // Longer than the caller's 100ms budget, shorter than the old 2s one.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // The job must be in the queue before the clock starts, or a fast
+        // reader could pick it up inside its deadline.
+        wait_for("the late job is queued", || probe() == 1);
+        // Longer than the caller's 600 ms budget, shorter than the old 2 s one.
+        tokio::time::sleep(Duration::from_millis(800)).await;
         gate.send(()).unwrap();
         hold.await.unwrap();
         assert_eq!(
@@ -407,30 +454,98 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_run_deadline_counts_from_the_queue_not_the_start() {
         let path = temp_db("deadline");
-        let pool =
-            Arc::new(ReaderPool::open_unchecked(&path, 1, 8, Duration::from_millis(400)).unwrap());
+        let limit = Duration::from_secs(2);
+        let pool = Arc::new(ReaderPool::open_unchecked(&path, 1, 8, limit).unwrap());
+        let probe = pool.queue_probe();
         let (hold, gate, entered) = hold_reader(&pool);
-        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
         let pool_copy = pool.clone();
         let slow = tokio::spawn(async move {
             pool_copy
                 .submit(|_| {
-                    // A start-relative 400ms deadline would still allow this.
-                    std::thread::sleep(Duration::from_millis(250));
+                    // A start-relative 2 s deadline would still allow this; the
+                    // queue-relative one leaves only 1 s of the budget.
+                    std::thread::sleep(Duration::from_millis(1500));
                     Ok(())
                 })
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        wait_for("the slow job is queued", || probe() == 1);
+        // Half the budget passes in the queue before a reader is free.
+        tokio::time::sleep(Duration::from_secs(1)).await;
         gate.send(()).unwrap();
         hold.await.unwrap();
-        let started = Instant::now();
         assert_eq!(
             slow.await.unwrap().err().as_deref(),
             Some("reader-timeout"),
             "work past the queued deadline must not answer the caller"
         );
-        assert!(started.elapsed() < Duration::from_millis(250));
+        drop(pool);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_memory_job_that_queued_still_gets_its_full_run_budget() {
+        let path = temp_db("memory-budget");
+        // The memory pool's own constructor and limit, as `memory::Store::open`
+        // opens it: the run budget counts from when a reader starts the job.
+        let limit = Duration::from_secs(4);
+        let pool = Arc::new(
+            ReaderPool::open_unchecked_deadline(&path, 1, 8, limit, Deadline::Started).unwrap(),
+        );
+        let probe = pool.queue_probe();
+        let (hold, gate, entered) = hold_reader(&pool);
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        let finished = Arc::new(AtomicUsize::new(0));
+        let marker = finished.clone();
+        let pool_copy = pool.clone();
+        let queued = tokio::spawn(async move {
+            pool_copy
+                .submit(move |_| {
+                    // Longer than the 1.5 s a queue-relative deadline would
+                    // leave, shorter than the full 4 s run budget.
+                    std::thread::sleep(Duration::from_secs(2));
+                    marker.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .await
+        });
+        // Most of the limit passes in the queue before a reader is free.
+        wait_for("the memory job is queued", || probe() == 1);
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        gate.send(()).unwrap();
+        hold.await.unwrap();
+        assert_eq!(
+            queued.await.unwrap(),
+            Ok(()),
+            "a memory read that queued for most of its limit still owes a full run budget"
+        );
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+        drop(pool);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_queue_refusal_is_counted() {
+        let path = temp_db("full");
+        let limit = Duration::from_millis(300);
+        let pool = Arc::new(ReaderPool::open_unchecked(&path, 1, 1, limit).unwrap());
+        let probe = pool.queue_probe();
+        let (hold, gate, entered) = hold_reader(&pool);
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        // One job fills the queue of one while the only reader is held.
+        let pool_copy = pool.clone();
+        let queued = tokio::spawn(async move { pool_copy.submit(|_| Ok(())).await });
+        wait_for("the queue is full", || probe() == 1);
+        // The next job cannot even enter the queue, so no reader ever sees it.
+        assert_eq!(
+            pool.submit(|_| Ok(())).await.err().as_deref(),
+            Some("reader-queue-full")
+        );
+        assert_eq!(pool.stats().snapshot().full, 1);
+        gate.send(()).unwrap();
+        let _ = hold.await;
+        let _ = queued.await;
         drop(pool);
         let _ = std::fs::remove_file(&path);
     }
@@ -439,10 +554,20 @@ mod tests {
     async fn reader_stats_count_jobs_and_their_time() {
         let path = temp_db("stats");
         let pool = ReaderPool::open_unchecked(&path, 1, 8, READ_LIMIT).unwrap();
-        pool.submit(|_| Ok(7)).await.unwrap();
+        pool.submit(|_| {
+            // A job that returns instantly can round its run time down to 0.
+            std::thread::sleep(Duration::from_millis(2));
+            Ok(7)
+        })
+        .await
+        .unwrap();
         let snapshot = pool.stats().snapshot();
         assert_eq!(snapshot.jobs, 1);
-        assert!(snapshot.run_micros > 0, "a job records its run time");
+        assert!(
+            snapshot.run_micros >= 1_000,
+            "a job records its run time: {}",
+            snapshot.run_micros
+        );
         assert_eq!(snapshot.aged, 0);
         assert_eq!(snapshot.expired, 0);
         assert_eq!(snapshot.abandoned, 0);

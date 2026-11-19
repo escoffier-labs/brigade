@@ -107,7 +107,7 @@ use push_scopes::push_scopes;
 mod tests;
 
 use crate::{
-    read::{MEMORY_QUEUE, MEMORY_THREADS, READ_LIMIT, ReaderPool},
+    read::{Deadline, MEMORY_QUEUE, MEMORY_THREADS, READ_LIMIT, ReaderPool},
     writer::{Arbiter, ReadTx, worker},
 };
 pub use auth::Credential;
@@ -175,7 +175,10 @@ pub struct Store {
     writer: writer::Writer,
     arbiter: Arc<Arbiter>,
     readers: ReaderPool,
+    /// Hub-file reads the handler needs, such as the authority row.
     hub: Arc<ReaderPool>,
+    /// Hub-file credential reads only, shared with admission.
+    lookups: Arc<ReaderPool>,
     admin: String,
     proposal_cursors: Arc<proposal_cursor::Cursors>,
     read_stats_cursors: Arc<proposal_cursor::Cursors>,
@@ -252,7 +255,11 @@ pub fn pressure_refusal(
 
 impl Store {
     /// Creates the memory file when it is absent, then migrates and checks it.
-    pub fn open(options: Options, hub: Arc<ReaderPool>) -> Result<Self, String> {
+    pub fn open(
+        options: Options,
+        hub: Arc<ReaderPool>,
+        lookups: Arc<ReaderPool>,
+    ) -> Result<Self, String> {
         let created = !options.memory.exists();
         let db = worker::open_file(&options.memory, true).map_err(|e| e.to_string())?;
         schema::migrate(&db, options.clock.now_ms())?;
@@ -268,8 +275,16 @@ impl Store {
             // A new file's directory entry must be durable before any write is acknowledged.
             worker::sync_directory(&db).map_err(|e| e.to_string())?;
         }
-        let readers =
-            ReaderPool::open_unchecked(&options.memory, MEMORY_THREADS, MEMORY_QUEUE, READ_LIMIT)?;
+        // The memory pool's run budget counts from when a reader starts the
+        // job, as it always has: a search that queued for most of its limit
+        // still gets a full run window.
+        let readers = ReaderPool::open_unchecked_deadline(
+            &options.memory,
+            MEMORY_THREADS,
+            MEMORY_QUEUE,
+            READ_LIMIT,
+            Deadline::Started,
+        )?;
         let dense = Arc::new(dense::Index::default());
         let mut config = writer::Config::new(
             options.memory.clone(),
@@ -293,6 +308,7 @@ impl Store {
             arbiter: options.arbiter,
             readers,
             hub,
+            lookups,
             admin: options.admin_digest,
             proposal_cursors,
             read_stats_cursors,
@@ -962,12 +978,14 @@ impl Store {
         self.arbiter.balance()
     }
     /// Admission: the bearer token's digest against the admin token and the
-    /// hub's credential rows. The token itself is hashed here and dropped.
+    /// hub's credential rows. The token itself is hashed here and dropped. A
+    /// pure token read, so it runs on the lookup pool: a slow hub handler read
+    /// cannot turn a memory request into `credential-lookup`.
     pub async fn authenticate(&self, token: &str) -> Result<Credential, Reply> {
         let digest = ids::sha256_hex(token.as_bytes());
         let admin = self.admin.clone();
         match self
-            .hub
+            .lookups
             .submit(move |c| auth::resolve(&Conn(c), &digest, &admin))
             .await
         {
