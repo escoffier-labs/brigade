@@ -310,16 +310,12 @@ def _append(
     data: dict[str, Any],
     *,
     event_id: str | None = None,
-    created_at: float | None = None,
 ) -> None:
     """Record an event for ``subject`` (the routing key) on behalf of ``producer`` (the authenticated cause).
 
     The hourly bound counts per producer: keyed by subject, anyone allowed to message a principal could use up
-    that principal's allowance and silence its legitimate events for an hour.
-
-    ``created_at`` is the time the fact happened. It defaults to insertion time, but a lazily recorded event
-    passes the earlier time it actually occurred: the dispatcher uses it to keep an event from reaching a
-    subscription created after that time.
+    that principal's allowance and silence its legitimate events for an hour. ``created_at`` is insertion time,
+    which keeps the rate bound, retention and envelope timestamp truthful even when the fact happened earlier.
     """
     now = time.time()
     recent = conn.execute(
@@ -337,7 +333,7 @@ def _append(
             subject,
             producer,
             json.dumps(data, separators=(",", ":")),
-            now if created_at is None else created_at,
+            now,
         ),
     )
 
@@ -389,7 +385,6 @@ def record_claim_expired(
         owner_node,
         data,
         event_id=claim_expired_event_id(target, holder_token, expires_at),
-        created_at=expires_at,
     )
 
 
