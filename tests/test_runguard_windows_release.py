@@ -14,6 +14,8 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ import pytest
 from brigade import nt_process, runguard, runguard_release, run_lane_state
 
 FILE_DISPOSITION_INFO_EX = 21
+ERROR_ACCESS_DENIED = 5
 ERROR_INVALID_PARAMETER = 87
 ERROR_SHARING_VIOLATION = 32
 _SHARE_DELETE = nt_process.FILE_SHARE_READ | nt_process.FILE_SHARE_WRITE | nt_process.FILE_SHARE_DELETE
@@ -42,8 +45,11 @@ class _Entry:
 class FakeKernel32:
     """Kernel32 stand-in that unlinks the name it is asked to dispose of."""
 
-    def __init__(self, *, posix_delete: bool = True) -> None:
+    def __init__(self, *, posix_delete: bool = True, deny_opens: int = 0) -> None:
         self.posix_delete = posix_delete
+        # Calls to CreateFileW that answer ERROR_ACCESS_DENIED before it works, the
+        # way a name whose delete is pending behaves.
+        self.deny_opens = deny_opens
         self.next_handle = 0x100
         self.paths: dict[int, Path] = {}
         self.create_calls: list[tuple[Any, ...]] = []
@@ -55,6 +61,9 @@ class FakeKernel32:
 
     def _create_file(self, name: str, access: int, share: int, *rest: Any) -> int:
         self.create_calls.append((name, access, share, *rest))
+        if self.deny_opens > 0:
+            self.deny_opens -= 1
+            return 0
         handle = self.next_handle
         self.next_handle += 1
         self.paths[handle] = Path(name[len("\\\\?\\") :] if name.startswith("\\\\?\\") else name)
@@ -291,10 +300,9 @@ def test_claim_stale_lock_reads_the_owner_metadata_once_per_stale_check(
     assert len(reads) == 4, "one owner.json read per snapshot, plus one for the claimed lock's owner"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX release path; the Windows release is covered above")
 def test_posix_release_never_deletes_metadata_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """POSIX renames a directory with readers inside it, so its release must not change."""
-    if os.name == "nt":
-        pytest.skip("POSIX release path")
     lock_path = tmp_path / "run.lock"
     ownership = runguard._publish_lock(lock_path, run_dir=None)
     monkeypatch.setattr(
@@ -331,21 +339,201 @@ def test_run_lane_state_reads_run_lock_owner_through_the_shared_open(
     assert opened == [target], "a plain os.open here would block the holder's release on Windows"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="needs NTFS POSIX-semantics delete and a real share-delete reader")
-def test_release_succeeds_while_a_waiter_holds_the_metadata_open(tmp_path: Path) -> None:
-    """The Windows failure from issue #2747, reproduced without a second process."""
+def test_owner_metadata_is_read_through_the_shared_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain read of owner.json refuses the holder's POSIX-semantics delete."""
     lock_path = tmp_path / "run.lock"
     ownership = runguard._publish_lock(lock_path, run_dir=None)
-    readers = [nt_process.open_shared_delete(lock_path / name) for name in ("pid", "owner.json")]
+    reads: list[Path] = []
+    original = nt_process.read_text_sharing_delete
+
+    def spy(path: Path | str) -> str:
+        reads.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(nt_process, "read_text_sharing_delete", spy)
+
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == ownership.owner_token
+    assert reads == [lock_path / "owner.json"]
+
+
+def test_release_reads_the_metadata_it_may_restore_through_the_shared_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    _fake_kernel32(monkeypatch, FakeKernel32())
+    _windows_release(monkeypatch)
+    reads: list[Path] = []
+    original = nt_process.read_bytes_sharing_delete
+
+    def spy(path: Path | str) -> bytes:
+        reads.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(nt_process, "read_bytes_sharing_delete", spy)
+
+    runguard._release_lock(lock_path, ownership)
+
+    assert reads == [lock_path / "pid", lock_path / "owner.json"]
+    assert not lock_path.exists()
+
+
+def test_a_stale_claimer_cannot_take_the_lock_the_release_is_emptying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between the unlinks and the rename the lock directory is empty and reads stale."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    _fake_kernel32(monkeypatch, FakeKernel32())
+    _windows_release(monkeypatch)
+    original_rename = Path.rename
+    verdicts: list[object] = []
+
+    def claim_between_withhold_and_rename(self: Path, target: Path) -> Path:
+        if self == lock_path and not verdicts:
+            verdicts.append(runguard._claim_stale_lock(lock_path))
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", claim_between_withhold_and_rename)
+
+    runguard._release_lock(lock_path, ownership)
+
+    assert verdicts == [runguard._RecoveryGate.BUSY], "the recovery gate must cover the empty directory"
+    assert not lock_path.exists()
+
+
+def test_release_restores_its_metadata_before_a_waiter_can_judge_the_lock_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry releases the gate, so the metadata must be back before the next waiter looks."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    published = {name: (lock_path / name).read_bytes() for name in ("pid", "owner.json")}
+    _fake_kernel32(monkeypatch, FakeKernel32())
+    _windows_release(monkeypatch)
+    _deny_rename(monkeypatch)
+    clock = _FakeClock()
+    verdicts: list[object] = []
+    sleeping = clock.sleep
+
+    def claim_while_the_release_sleeps(seconds: float) -> None:
+        verdicts.append(runguard._claim_stale_lock(lock_path))
+        sleeping(seconds)
+
+    clock.sleep = claim_while_the_release_sleeps  # type: ignore[method-assign]
+
+    with pytest.raises(PermissionError):
+        _release_with_fake_clock(monkeypatch, lock_path, ownership, clock)
+
+    assert verdicts, "the release must have retried"
+    assert verdicts == [None] * len(verdicts), "a waiter must find the restored live owner, not a dead lock"
+    assert {name: (lock_path / name).read_bytes() for name in ("pid", "owner.json")} == published
+
+
+def test_release_stops_at_a_replacement_owner_that_reuses_the_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NTFS hands a released directory's inode straight on, so the token is the identity."""
+    lock_path = tmp_path / "run.lock"
+    published = runguard._publish_lock(lock_path, run_dir=None)
+    info = lock_path.stat()
+    stale_lease = runguard._LockOwnership("stale-lease", info.st_dev, info.st_ino)
+    fake = FakeKernel32()
+    _fake_kernel32(monkeypatch, fake)
+    _windows_release(monkeypatch)
+
+    runguard._release_lock(lock_path, stale_lease)
+
+    assert fake.create_calls == [], "the release must not delete another owner's metadata"
+    assert fake.disposition_calls == []
+    assert sorted(entry.name for entry in lock_path.iterdir()) == ["owner.json", "pid"]
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == published.owner_token
+
+
+def test_a_reader_retries_a_name_whose_delete_is_still_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """STATUS_DELETE_PENDING answers ERROR_ACCESS_DENIED for a moment, then the open works."""
+    target = tmp_path / "owner.json"
+    target.write_text('{"pid": 1}', encoding="utf-8")
+    fake = FakeKernel32(deny_opens=2)
+    _fake_kernel32(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
+
+    assert nt_process.read_text_sharing_delete(target) == '{"pid": 1}'
+    assert len(fake.create_calls) == 3
+    assert fake.close_calls == [0x100], "only the handle that opened is closed"
+
+
+def test_a_reader_reports_a_pending_delete_as_a_missing_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "owner.json"
+    target.write_text("{}", encoding="utf-8")
+    fake = FakeKernel32(deny_opens=99)
+    _fake_kernel32(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
+
+    with pytest.raises(FileNotFoundError):
+        nt_process.read_text_sharing_delete(target)
+
+    assert len(fake.create_calls) == nt_process.DELETE_PENDING_RETRY_ATTEMPTS
+
+
+def test_lock_metadata_reads_do_not_fail_hard_while_a_release_deletes_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Callers like reconcile_run_lock must see a lock going away, not a refusal."""
+    lock_path = tmp_path / "run.lock"
+    runguard._publish_lock(lock_path, run_dir=None)
+    fake = FakeKernel32(deny_opens=999)
+    _fake_kernel32(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
+
+    assert runguard._read_lock_owner(lock_path) is None
+    assert runguard._lock_snapshot(lock_path) is not None
+    assert runguard._lock_is_stale(lock_path) is True
+
+
+# This is the acceptance test for issue #2747 on Windows. It must run there: if a
+# Windows affected-tests run reports a skip in this file, it is the POSIX test above.
+@pytest.mark.skipif(os.name != "nt", reason="needs NTFS POSIX-semantics delete and real share-delete readers")
+def test_release_succeeds_while_waiters_poll_the_lock(tmp_path: Path) -> None:
+    """The Windows failure from issue #2747, with the release running under live readers."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    failures: list[BaseException] = []
+    stop = threading.Event()
+
+    def waiter() -> None:
+        # The reader path every waiter runs: _lock_snapshot and read_lock_owner,
+        # both of which open pid and owner.json through the share-delete open.
+        while not stop.is_set():
+            try:
+                runguard._lock_snapshot(lock_path)
+                runguard.read_lock_owner(lock_path)
+            except BaseException as exc:  # noqa: BLE001 - any failure is the finding
+                failures.append(exc)
+                return
+
+    held = [nt_process.open_shared_delete(lock_path / name) for name in ("pid", "owner.json")]
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
     try:
-        assert [len(os.read(reader, 1)) for reader in readers] == [1, 1]
+        assert [len(os.read(reader, 1)) for reader in held] == [1, 1]
         runguard._release_lock(lock_path, ownership)
     finally:
-        for reader in readers:
+        stop.set()
+        thread.join(timeout=10)
+        for reader in held:
             os.close(reader)
 
-    assert not lock_path.exists(), "a release under an open reader must not strand the lock"
-    held = runguard._acquire_lock(lock_path)
+    assert failures == []
+    assert not thread.is_alive()
+    assert not lock_path.exists(), "a release under readers must not strand the lock"
+    held_lock = runguard._acquire_lock(lock_path)
     assert lock_path.is_dir()
-    runguard._release_lock(lock_path, held)
+    runguard._release_lock(lock_path, held_lock)
     assert not lock_path.exists()

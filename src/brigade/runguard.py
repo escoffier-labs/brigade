@@ -334,7 +334,7 @@ def read_lock_owner(path: Path | str | None) -> dict[str, object] | None:
 
 def _read_lock_owner(path: Path) -> dict[str, object] | None:
     try:
-        payload = json.loads((path / "owner.json").read_text())
+        payload = json.loads(nt_process.read_text_sharing_delete(path / "owner.json"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None

@@ -26,6 +26,7 @@ import errno
 import locale
 import os
 import sys
+import time
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,12 @@ ERROR_SHARING_VIOLATION = 32
 ERROR_INVALID_FUNCTION = 1
 ERROR_NOT_SUPPORTED = 50
 ERROR_CALL_NOT_IMPLEMENTED = 120
+
+# A name another handle is deleting answers ERROR_ACCESS_DENIED (5,
+# STATUS_DELETE_PENDING) until that delete completes, which is microseconds away.
+# A reader retries that briefly and then reports the name as gone.
+DELETE_PENDING_RETRY_ATTEMPTS = 5
+DELETE_PENDING_RETRY_SECONDS = 0.001
 
 # SetFileInformationByHandle answers one of these when FileDispositionInfoEx
 # cannot apply: ERROR_INVALID_PARAMETER before Windows 10 1709, and the others on
@@ -158,11 +165,33 @@ def open_shared_delete(path: Path | str) -> int:
     if sys.platform != "win32":
         return os.open(target, os.O_RDONLY | _BINARY)
     try:
-        return _shared_descriptor(target)
+        return _open_shared_while_delete_pends(target)
     except OSError:
         raise
     except Exception:  # noqa: BLE001 - the plain open is the pre-existing behavior
         return os.open(target, os.O_RDONLY | _BINARY)
+
+
+def _open_shared_while_delete_pends(path: Path) -> int:
+    """Read a name that a concurrent release may be unlinking (issue #2747 review).
+
+    While a POSIX-semantics delete is pending, opening the name answers
+    ``ERROR_ACCESS_DENIED``. That is a name going away rather than a failure, and
+    readers run in paths that turn a hard error into a refused operation, so the
+    open is retried briefly and then reported as missing. A reader can only see
+    this for a lock whose own holder is releasing it.
+    """
+    attempts = DELETE_PENDING_RETRY_ATTEMPTS
+    while True:
+        try:
+            return _shared_descriptor(path)
+        except PermissionError as error:
+            if getattr(error, "winerror", None) != ERROR_ACCESS_DENIED:
+                raise
+            attempts -= 1
+            if attempts <= 0:
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path)) from error
+            time.sleep(DELETE_PENDING_RETRY_SECONDS)
 
 
 def read_text_sharing_delete(path: Path | str) -> str:
@@ -170,6 +199,18 @@ def read_text_sharing_delete(path: Path | str) -> str:
     descriptor = open_shared_delete(path)
     try:
         stream = os.fdopen(descriptor, "r", encoding=locale.getencoding())
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with stream:
+        return stream.read()
+
+
+def read_bytes_sharing_delete(path: Path | str) -> bytes:
+    """Read ``path`` as bytes through :func:`open_shared_delete`."""
+    descriptor = open_shared_delete(path)
+    try:
+        stream = os.fdopen(descriptor, "rb")
     except BaseException:
         os.close(descriptor)
         raise

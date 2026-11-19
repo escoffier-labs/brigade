@@ -16,11 +16,19 @@ retries, the behaviour every platform had before. A release that gives up puts
 back the metadata it removed, so a lock that is still published still describes
 its live owner.
 
+Removing the names empties the directory for the instant before the rename, and
+an empty lock directory reads as stale to every waiter. So the whole Windows
+attempt runs under the stale-recovery gate (``runguard_gate``): no recoverer can
+rename that empty directory away or publish a new lock at ``path`` while the
+release holds the gate, which is what makes removing and restoring the metadata
+safe. The gate is released before the release sleeps and retries.
+
 Split out of ``runguard`` to keep that module under the size ceiling.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from collections.abc import Iterable
@@ -29,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from . import nt_process
+from .runguard_gate import _recovery_gate_busy_error, _stale_recovery_gate
 
 if TYPE_CHECKING:
     from .runguard import _LockOwnership
@@ -51,6 +60,10 @@ class _Clock(Protocol):
     def sleep(self, seconds: float) -> None: ...
 
 
+class _GateBusy(Exception):
+    """Another process holds the stale-recovery gate, so this attempt did nothing."""
+
+
 @dataclass(frozen=True)
 class _Metadata:
     """Metadata bytes a Windows release removed, to put back if the release gives up."""
@@ -61,7 +74,7 @@ class _Metadata:
 def release_lock(path: Path, ownership: _LockOwnership, *, clock: _Clock) -> None:
     """Remove the lock at ``path`` while it is still ``ownership``'s.
 
-    Retries a sharing denial with a short backoff inside
+    Retries a sharing denial and a busy recovery gate with a short backoff inside
     ``LOCK_RELEASE_RETRY_SECONDS``. A denial that outlasts the budget raises
     ``PermissionError`` with the lock left as it was found.
     """
@@ -69,30 +82,75 @@ def release_lock(path: Path, ownership: _LockOwnership, *, clock: _Clock) -> Non
     deadline = clock.monotonic() + LOCK_RELEASE_RETRY_SECONDS
     backoff = LOCK_RELEASE_BACKOFF_SECONDS
     while True:
+        denial: PermissionError | None = None
         try:
-            visible = path.stat()
-        except OSError:
-            return
-        if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
-            return
-        withheld: _Metadata | None = None
-        try:
-            if _WINDOWS:
-                withheld = _withhold_metadata(path)
-            path.rename(release_path)
-            break
-        except FileNotFoundError:
+            _release_once(path, release_path, ownership)
             return
         except PermissionError as error:
             if getattr(error, "winerror", None) not in _SHARING_DENIED:
                 raise
-            _restore_metadata(path, ownership, withheld)
-            remaining = deadline - clock.monotonic()
-            if remaining <= 0:
-                raise
-            clock.sleep(min(backoff, remaining))
-            backoff = min(backoff * 2, LOCK_RELEASE_BACKOFF_CAP_SECONDS)
-    _remove_released(path, release_path, ownership)
+            denial = error
+        except _GateBusy:
+            pass
+        remaining = deadline - clock.monotonic()
+        if remaining <= 0:
+            if denial is not None:
+                raise denial
+            raise _recovery_gate_busy_error(path)
+        clock.sleep(min(backoff, remaining))
+        backoff = min(backoff * 2, LOCK_RELEASE_BACKOFF_CAP_SECONDS)
+
+
+def _release_once(path: Path, release_path: Path, ownership: _LockOwnership) -> None:
+    """One release attempt, under the stale-recovery gate on Windows."""
+    if not _WINDOWS:
+        _release_posix_lock(path, release_path, ownership)
+        return
+    try:
+        path.stat()
+    except OSError:
+        # The lock or its workspace is gone; do not make the gate file for it.
+        return
+    with _stale_recovery_gate(path) as gated:
+        if not gated:
+            raise _GateBusy
+        # Judge the lock again inside the gate, on the identity and the owner
+        # token: a holder that lost `path` must not unlink the metadata of the
+        # lock that replaced it, and a released inode is reused at once.
+        if not _still_our_lock(path, ownership):
+            return
+        withheld = _withhold_metadata(path)
+        _rename_and_remove(path, release_path, ownership, withheld=withheld)
+
+
+def _release_posix_lock(path: Path, release_path: Path, ownership: _LockOwnership) -> None:
+    """The release every platform used before issue #2747, byte for byte."""
+    try:
+        visible = path.stat()
+    except OSError:
+        return
+    if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
+        return
+    _rename_and_remove(path, release_path, ownership, withheld=None)
+
+
+def _still_our_lock(path: Path, ownership: _LockOwnership) -> bool:
+    """Whether ``path`` is still exactly the lock this lease published.
+
+    Device and inode alone are not enough: NTFS hands a released directory's
+    inode straight to the next lock directory, so the owner token is compared too.
+    """
+    try:
+        visible = path.stat()
+    except OSError:
+        return False
+    if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
+        return False
+    try:
+        payload = json.loads(nt_process.read_text_sharing_delete(path / "owner.json"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        return False
+    return isinstance(payload, dict) and payload.get("owner_token") == ownership.owner_token
 
 
 def _withhold_metadata(path: Path) -> _Metadata | None:
@@ -119,19 +177,34 @@ def _withhold_metadata(path: Path) -> _Metadata | None:
 def _metadata_bytes(path: Path) -> list[tuple[Path, bytes]]:
     """The lock metadata as it is published, or nothing when any of it is unreadable.
 
-    A name that is already gone is skipped; one that cannot be read could not be
+    The read shares delete access for the same reason every other reader does: a
+    plain open would refuse the unlink this release is about to attempt. A name
+    that is already gone is skipped; one that cannot be read could not be
     restored, so nothing may be removed.
     """
     captured: list[tuple[Path, bytes]] = []
     for name in _LOCK_METADATA_NAMES:
         target = path / name
         try:
-            captured.append((target, target.read_bytes()))
+            captured.append((target, nt_process.read_bytes_sharing_delete(target)))
         except FileNotFoundError:
             continue
         except OSError:
             return []
     return captured
+
+
+def _rename_and_remove(
+    path: Path, release_path: Path, ownership: _LockOwnership, *, withheld: _Metadata | None
+) -> None:
+    try:
+        path.rename(release_path)
+    except FileNotFoundError:
+        return
+    except BaseException:
+        _restore_metadata(path, ownership, withheld)
+        raise
+    _remove_released(path, release_path, ownership)
 
 
 def _put_back(files: Iterable[tuple[Path, bytes]]) -> None:
@@ -144,7 +217,7 @@ def _put_back(files: Iterable[tuple[Path, bytes]]) -> None:
 
 
 def _restore_metadata(path: Path, ownership: _LockOwnership, withheld: _Metadata | None) -> None:
-    """Put withheld metadata back before a retry, if ``path`` is still this lease's lock."""
+    """Put withheld metadata back, if ``path`` still holds this lease's directory."""
     if withheld is None or not withheld.files:
         return
     try:
