@@ -573,8 +573,9 @@ def _rebaseline(search, before):
 def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
     """#845 / #1856 lifecycle coverage through real proposal and search code.
 
-    Drives `memory_proposals` create, review, reject and apply plus `current_adapter` search for the
-    accepted, rejected, stale, contradictory and cross-scope states. Rolled-back has no local path
+    Drives `memory_proposals` create, review, reject and apply plus `current_adapter` search. Accepted,
+    rejected and stale run the full review and apply path. Contradictory and cross-scope are refused
+    at create with their specific errors, and the corpus is unchanged. Rolled-back has no local path
     (rollback lives in the hub), so its search proof is the hub test
     `search_follows_apply_then_rollback_and_never_returns_reverted_text` in
     engines/hub/src/memory/proposal_tests.rs.
@@ -598,7 +599,8 @@ def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
         # refused workflow is measured against the deliberately edited corpus.
         before = _rebaseline(search, before)
     if workflow in ("cross-scope", "contradictory"):
-        with pytest.raises(api.ProposalError):
+        refusal = "source scope" if workflow == "cross-scope" else "opposite polarity requires explicit supersede"
+        with pytest.raises(api.ProposalError, match=refusal):
             api.create_payload(
                 target=tmp_path,
                 issue_id=issue,
@@ -615,19 +617,21 @@ def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
             reason="Keep current cache assertion.",
         )
         if workflow == "rejected":
-            api.reject_payload(
+            decided = api.reject_payload(
                 target=tmp_path,
                 proposal_id=proposal["id"],
                 digest=proposal["digest"],
                 reason="Reject the proposed replacement.",
             )
+            assert decided["status"] == "rejected"
         else:
-            api.review_payload(
+            decided = api.review_payload(
                 target=tmp_path,
                 proposal_id=proposal["id"],
                 digest=proposal["digest"],
                 reason="Accept exact replacement.",
             )
+            assert decided["status"] == "accepted"
         if workflow == "stale":
             path = tmp_path / SURVIVOR
             path.write_bytes(raw_before[SURVIVOR] + b"\nMetadata-free later source edit.\n")
@@ -649,7 +653,7 @@ def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
             assert all(index.resolve(key) == SURVIVOR for key in (OLD_ID, LOSER, "previous"))
             assert (tmp_path / "MEMORY.md").read_text() == f"[Previous]({SURVIVOR}#details)\n"
             return
-        with pytest.raises(api.ProposalError):
+        with pytest.raises(api.ProposalError, match="was rejected" if workflow == "rejected" else "drift"):
             api.apply_payload(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])
     assert search("juniper maple cedar", 10) == before
     assert {p: (tmp_path / p).read_bytes() for p in raw_before} == raw_before
