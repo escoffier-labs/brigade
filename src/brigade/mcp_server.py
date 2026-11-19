@@ -325,10 +325,11 @@ def _dispatch_message(
     request_id = message.get("id")
     method = str(message.get("method") or "")
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
-    if request_id is None:
+    if "id" not in message:
         # Only a notification is valid without an id. Any other id-less message is
         # never executed: nobody can receive its result, so an id-less tools/call
-        # or extension method must not run on any transport.
+        # or extension method must not run on any transport. An explicit
+        # ``"id": null`` is present, so it is answered as on earlier releases.
         if method.startswith("notifications/"):
             return None
         if not isinstance(message.get("method"), str):
@@ -427,13 +428,25 @@ def _read_stdio(stream: Any, pending: queue.Queue[_StdioItem], registry: Cancell
                 continue
             try:
                 request = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                # Deeply nested JSON raises RecursionError, not JSONDecodeError;
+                # either way answer a parse error instead of ending the session.
                 pending.put(_StdioItem(_STDIO_PARSE_ERROR))
                 continue
             if isinstance(request, dict) and "id" not in request and request.get("method") == CANCELLED_NOTIFICATION:
                 registry.cancel(_cancelled_request_id(request.get("params")))
                 continue
-            token = registry.begin(request.get("id")) if isinstance(request, dict) else None
+            # Only a message that will run as a request gets a cancellation token.
+            # Client responses and an id-bearing cancellation (answered -32601)
+            # must not take a running request's place in the registry.
+            token = (
+                registry.begin(request.get("id"))
+                if isinstance(request, dict)
+                and "id" in request
+                and isinstance(request.get("method"), str)
+                and request.get("method") != CANCELLED_NOTIFICATION
+                else None
+            )
             pending.put(_StdioItem(_STDIO_MESSAGE, request, token))
     finally:
         pending.put(_StdioItem(_STDIO_EOF))

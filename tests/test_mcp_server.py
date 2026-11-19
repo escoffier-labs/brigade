@@ -314,6 +314,61 @@ def test_id_less_requests_are_never_executed():
     assert calls == []
 
 
+def test_null_id_requests_are_answered_as_before():
+    calls: list[str] = []
+    callbacks = _callbacks(lambda name, arguments: (calls.append(name), ("ok", False))[1])
+    for registry in (None, mcp_server.CancellationRegistry()):
+        reply = mcp_server.handle_message(
+            {"jsonrpc": "2.0", "id": None, "method": "tools/call", "params": {"name": "block", "arguments": {}}},
+            **callbacks,
+            registry=registry,
+        )
+        assert reply is not None and reply["id"] is None and reply["result"]["isError"] is False
+        reply = mcp_server.handle_message(
+            {"jsonrpc": "2.0", "id": None, "method": "notifications/cancelled", "params": {"requestId": 1}},
+            **callbacks,
+            registry=registry,
+        )
+        assert reply is not None and reply["error"]["code"] == -32601
+    assert calls == ["block", "block"]
+
+
+def test_stdio_deeply_nested_json_is_a_parse_error_and_the_session_continues(monkeypatch):
+    replies: list[dict] = []
+    monkeypatch.setattr(mcp_server, "_emit", replies.append)
+    feed = _StdioFeed()
+    monkeypatch.setattr("sys.stdin", feed)
+    result: list[int] = []
+    callbacks = _callbacks(lambda name, arguments: ("ok", False))
+    server = threading.Thread(target=lambda: result.append(mcp_server.serve_stdio(**callbacks)), daemon=True)
+    server.start()
+    try:
+        feed._lines.put("[" * 100_000 + "]" * 100_000 + "\n")
+        feed.send({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
+        _wait_for(lambda: any(r.get("id") == 7 for r in replies) or not server.is_alive(), what="the reply after it")
+        assert replies[0]["error"]["code"] == -32700
+        assert any(r.get("id") == 7 and "result" in r for r in replies)
+    finally:
+        feed.close()
+        server.join(20)
+    assert result == [0]
+
+
+def test_stdio_cancel_with_an_id_does_not_take_a_running_requests_token(monkeypatch):
+    registry = mcp_server.CancellationRegistry()
+    running = registry.begin(1)
+    assert running is not None
+    queued: "queue.Queue[object]" = queue.Queue()
+    lines = [
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "notifications/cancelled", "params": {"requestId": 1}}) + "\n",
+        json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}) + "\n",
+        json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1}}) + "\n",
+    ]
+    mcp_server._read_stdio(iter(lines), queued, registry)
+    # The id-less cancellation still reaches the running request.
+    assert running.cancelled
+
+
 def test_cancellation_notification_with_an_id_is_a_request():
     registry = mcp_server.CancellationRegistry()
     running = registry.begin(1)

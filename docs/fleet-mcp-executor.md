@@ -227,6 +227,9 @@ chunk, because the client cannot abort that hub socket from another thread. An
 HTTP disconnect is still not treated as a cancellation, so a caller that closes
 the connection without sending the notification leaves the wait running to its
 own deadline. There is no cancellation rollback for an accepted send or ack.
+Over HTTP, request ids are tracked per server, not per connection, so two
+clients that share the server's bearer token and reuse the same request id can
+cancel each other's call. Use distinct request ids per client.
 
 Generate a fresh `client_id` for each intended send or reply, persist it before
 calling, and reuse it with identical arguments after a timeout or reconnect.
