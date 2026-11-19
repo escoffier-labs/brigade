@@ -18,6 +18,7 @@ from typing import Callable, Iterable
 
 from . import memory_hub_client as hubc
 from . import dirfd, receipt_signing
+from .bounded_read import read_regular_file
 from .run_dirfd import bound_run_dir, MAX_READ_BYTES
 
 READS_REL = ".brigade/memory/card-reads.json"
@@ -35,8 +36,17 @@ class ReadLedger:
 COVERAGE_REL = ".brigade/memory/read-coverage"
 FAILURES_REL = ".brigade/read-recorder-failures"
 DISABLED_REL = ".brigade-read-recorder-disabled"
+CLEARED_REL = ".brigade/memory/read-recorder-cleared.json"
+# Enough for a recorded cause, never the whole file.
+DISABLED_CAUSE_BYTES = 256
 # Last resort when storage cannot accept a marker or invalidate the ledger.
 _FAILED_ROOTS: set[Path] = set()
+
+
+@dataclass(frozen=True)
+class DisabledSentinel:
+    present: bool
+    cause: str | None
 
 
 def _coverage_policy(target: Path) -> dict:
@@ -136,12 +146,35 @@ def _disabled(target: Path) -> bool:
         return True
 
 
-def _record_failure(target: Path) -> None:
-    """Use storage independent of both the ledger and its intent writer."""
+def _failure_count(bound, name: str) -> int:
+    """Prior count of one bounded failure marker, or zero when unreadable."""
+    try:
+        raw = bound.read_bytes(*Path(FAILURES_REL).parts, name, max_bytes=4096)
+        payload = json.loads(raw) if raw is not None else None
+    except (OSError, ValueError, TypeError):
+        return 0
+    count = payload.get("count") if isinstance(payload, dict) else None
+    return count if type(count) is int and count > 0 else 0
+
+
+def _record_failure(target: Path, *, today: date | None = None) -> None:
+    """Use storage independent of both the ledger and its intent writer.
+
+    Repeated failures inside one day share that day's marker and only raise its
+    count, so a persistent failure cannot fill the bounded marker scan. The day
+    is the same interval the lifecycle uses for heartbeats and pending intents.
+    """
     _FAILED_ROOTS.add(target.resolve())
+    today = today or _day()
+    name = f"{today.isoformat()}.json"
     try:
         with bound_run_dir(target) as bound:
-            bound.write_text_atomic(tuple(Path(FAILURES_REL).parts), secrets.token_hex(16), "recorder-error\n")
+            count = _failure_count(bound, name) + 1
+            bound.write_text_atomic(
+                tuple(Path(FAILURES_REL).parts),
+                name,
+                json.dumps({"day": today.isoformat(), "count": count}, sort_keys=True) + "\n",
+            )
         return
     except (OSError, ValueError):
         pass
@@ -158,6 +191,123 @@ def _record_failure(target: Path) -> None:
         _unlink(target, READS_REL)
     except (OSError, ValueError):
         pass
+
+
+def _sentinel_path(target: Path) -> Path:
+    return target / DISABLED_REL
+
+
+def _sentinel_stat(target: Path) -> os.stat_result:
+    """The sentinel entry itself, never a link target."""
+    if dirfd.available():
+        try:
+            with bound_run_dir(target) as bound:
+                return bound.stat((), DISABLED_REL)
+        except FileNotFoundError:
+            raise
+        except OSError:
+            pass
+    return _sentinel_path(target).lstat()
+
+
+def _read_bound_sentinel(bound) -> bytes:
+    descriptor = bound.open_file((), DISABLED_REL, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        data = bytearray()
+        while len(data) <= DISABLED_CAUSE_BYTES:
+            chunk = os.read(descriptor, DISABLED_CAUSE_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
+    finally:
+        os.close(descriptor)
+    return bytes(data[:DISABLED_CAUSE_BYTES])
+
+
+def _sentinel_read(target: Path) -> bytes | None:
+    """Bounded cause bytes, or ``None`` when the file cannot be read as one regular file."""
+    if dirfd.available():
+        try:
+            with bound_run_dir(target) as bound:
+                return _read_bound_sentinel(bound)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            pass
+    read = read_regular_file(_sentinel_path(target), max_bytes=DISABLED_CAUSE_BYTES)
+    return read.data
+
+
+def disabled_sentinel(target: Path) -> DisabledSentinel:
+    """The root sentinel and its recorded cause, read without following a link."""
+    try:
+        info = _sentinel_stat(target)
+    except FileNotFoundError:
+        return DisabledSentinel(False, None)
+    except OSError:
+        # An unverifiable sentinel is still a stop signal.
+        return DisabledSentinel(True, "unreadable")
+    if not stat.S_ISREG(info.st_mode):
+        return DisabledSentinel(True, "not a regular file")
+    if info.st_nlink != 1:
+        return DisabledSentinel(True, "multiple hard links")
+    data = _sentinel_read(target)
+    if data is None:
+        return DisabledSentinel(True, "unreadable")
+    cause = data.decode("utf-8", "replace").strip()
+    return DisabledSentinel(True, cause or "empty")
+
+
+def disabled_message(target: Path) -> str | None:
+    """Operator line for the sentinel, encoded for a terminal. ``None`` when absent."""
+    from .memory_care_instructions import field
+
+    state = disabled_sentinel(target)
+    if not state.present:
+        return None
+    cause = state.cause if state.cause is not None else "unreadable"
+    return (
+        f"stopped={DISABLED_REL} {field('cause', cause)} "
+        f'clear="brigade memory care clear-read-recorder --confirm --target {target.expanduser().resolve()}"'
+    )
+
+
+def clear_disabled(target: Path, *, today: date | None = None) -> dict[str, object]:
+    """Remove a plain root sentinel and record the clear. Never follows a link."""
+    target = target.expanduser().resolve()
+    try:
+        info = _sentinel_stat(target)
+    except FileNotFoundError:
+        return {"cleared": False, "reason": "missing"}
+    except OSError:
+        return {"cleared": False, "reason": "unreadable"}
+    if not stat.S_ISREG(info.st_mode):
+        return {"cleared": False, "reason": "not a regular file"}
+    if info.st_nlink != 1:
+        return {"cleared": False, "reason": "multiple hard links"}
+    read = _sentinel_read(target)
+    if read is None:
+        return {"cleared": False, "reason": "unreadable"}
+    try:
+        os.unlink(_sentinel_path(target))
+    except FileNotFoundError:
+        return {"cleared": False, "reason": "missing"}
+    except OSError:
+        return {"cleared": False, "reason": "unreadable"}
+    recorded = True
+    try:
+        _write_json(
+            target,
+            CLEARED_REL,
+            {
+                "sentinel": DISABLED_REL,
+                "day": (today or _day()).isoformat(),
+                "cause_sha256": hashlib.sha256(read).hexdigest(),
+            },
+        )
+    except (OSError, ValueError):
+        recorded = False
+    return {"cleared": True, "recorded": recorded}
 
 
 def load(target: Path) -> ReadLedger:
@@ -211,7 +361,7 @@ def record(target: Path, keys: Iterable[str], *, today: date | None = None) -> b
         with held_file_lock(safe_path(target, READS_REL).with_suffix(".lock"), deadline_seconds=5):
             return _record_locked(target, keys, today=today)
     except (OSError, ValueError):
-        _record_failure(target)
+        _record_failure(target, today=today)
         return False
 
 
@@ -235,7 +385,7 @@ def _record_locked(target: Path, keys: Iterable[str], *, today: date | None = No
                     bound.stat((".brigade",), receipt_signing.KEY_NAME)
                 except FileNotFoundError:
                     return False
-            _record_failure(target)
+            _record_failure(target, today=today)
             return False
         if _disabled(target):
             return False
@@ -306,7 +456,7 @@ def _record_locked(target: Path, keys: Iterable[str], *, today: date | None = No
         return True
     except (OSError, ValueError, TypeError, AttributeError):
         # This is independent of the ledger lock and remains visible to lifecycle.
-        _record_failure(target)
+        _record_failure(target, today=today)
         try:
             _write_json(target, intent, {"state": "error", "day": today.isoformat()})
         except (OSError, ValueError):

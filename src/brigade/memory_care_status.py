@@ -76,6 +76,8 @@ def status(*, target: Path, json_output: bool = False) -> int:
     for check in payload.get("checks", []):
         if check["name"] == "memory_lifecycle_authority":
             print(f"lifecycle: {check['detail']}")
+        elif check["name"] == "memory_read_recorder":
+            print(f"read_recorder: {check['detail']}")
     _render_lifecycle(payload["lifecycle"])
     if payload.get("read_only_paths"):
         print(f"read_only_paths: {', '.join(payload['read_only_paths'])}")

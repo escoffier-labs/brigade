@@ -13,6 +13,7 @@ brigade memory care status
 brigade memory care doctor
 brigade memory care import-issues
 brigade memory care closeout
+brigade memory care clear-read-recorder
 ```
 
 `init` writes `.brigade/memory-care.toml`. The config is host-local and should stay gitignored.
@@ -834,13 +835,34 @@ days count toward the observation window but never become card-use days.
 Longer gaps, broken authentication and recorded errors start a new window.
 Recording publishes a private intent before updating the ledger. A failed
 write leaves an error marker where storage permits. Reads still return their
-content when recording fails. Pending intents block transitions for up to
+content when recording fails. Repeated failures inside one day share that day's
+marker and only raise its count, so a persistent failure cannot fill the bounded
+marker scan: 1,000 failed reads in one day leave one marker with
+`count: 1000`, and the interval stays unhealthy. The day is the same interval
+the lifecycle uses for heartbeats and pending intents. Pending intents block
+transitions for up to
 `lifecycle.pending_intent_max_age_days` (one day by default). The next successful
 recorder resets the window before clearing expired intents, so the interrupted
 interval cannot authorize retirement. Missing or legacy coverage also starts
 a new observation window. If storage cannot persist any failure marker, the
 failure remains unhealthy within the reader process. No cross-process failure
-record can be guaranteed on completely unwritable storage.
+record can be guaranteed on completely unwritable storage. When even a marker
+cannot be written, Brigade stops recording at the workspace root with the
+sentinel `.brigade-read-recorder-disabled` and records the cause in it.
+`memory care status`, `memory care doctor` and `brigade doctor` report the
+sentinel and that cause, read with a byte cap and printed as an encoded value.
+After confirming why recording failed, clear it with:
+
+```bash
+brigade memory care clear-read-recorder --confirm --target .
+```
+
+The command refuses a sentinel that is not a plain single-link file inside the
+workspace root, never follows a link, removes it, and records the clear in
+`.brigade/memory/read-recorder-cleared.json` with the day and a hash of the
+recorded cause. Recording resumes on the next successful read; until then the
+lifecycle stays blocked. A TTY also prompts `y/N`; without `--confirm` the
+command refuses.
 Reference scans prune vendor, environment, cache and build directories and do
 not follow directory symlinks.
 Coverage and explicit-use records require an HMAC from the fixed workspace

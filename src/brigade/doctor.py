@@ -861,9 +861,17 @@ def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_memory_cards(ctx.target))
     checks.extend(_check_memory_index(ctx.target))
     checks.extend(_check_memory_care(ctx.target))
+    checks.extend(_check_read_recorder_sentinel(ctx.target))
     checks.extend(_check_care_schedule_health(ctx.target))
     checks.extend(_check_memory_care_producer_collision(ctx.target))
     return checks
+
+
+def _check_read_recorder_sentinel(target: Path) -> List[CheckResult]:
+    from . import memory_card_reads
+
+    message = memory_card_reads.disabled_message(target)
+    return [(WARN, "memory: read recorder", message)] if message else []
 
 
 def guard_station_checks(ctx: DoctorContext) -> List[CheckResult]:
