@@ -80,7 +80,10 @@ _PATH_CHAR = re.compile(r"[\w./-]")
 def _absolute_path_mentioned(text: str, name: str) -> bool:
     """Match ``/component/.../name`` at component boundaries without backtracking."""
     suffix = "/" + name
-    for line in text.splitlines():
+    # The old pattern treated only carriage returns and newlines as line ends.
+    # str.splitlines also breaks on form feeds and Unicode separators, which
+    # would split a path that the pattern still matches.
+    for line in text.replace("\r", "\n").split("\n"):
         position = line.find(suffix)
         if position == -1:
             continue
@@ -444,6 +447,13 @@ def _card_read_lock(target: Path) -> Iterator[bool]:
             yield True
 
 
+def _stage_wide_conflict(exc: BaseException) -> bool:
+    """A lock or protection conflict belongs to the workspace, not to one card."""
+    from .inbox_lock import InboxLockTimeout
+
+    return isinstance(exc, (journal.SymlinkPath, journal.ReadOnlyPath)) or isinstance(exc.__cause__, InboxLockTimeout)
+
+
 @journal.serialized
 def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
     rules, adjusted = _resolve_policy(target)
@@ -461,7 +471,13 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
         try:
             cards[rel] = journal.safe_path(target, rel).read_bytes().decode("utf-8")
         except UnicodeDecodeError:
-            continue
+            # One unreadable card file must not hide the others, and must not
+            # disappear from the report either.
+            payload["error"] = True
+            payload["skipped"].append({"path": rel, "reason": "card unreadable: content is not UTF-8"})
+        except OSError as exc:
+            payload["error"] = True
+            payload["skipped"].append({"path": rel, "reason": f"card unreadable: {exc}"})
     signals = _signals(target, cards, today=today)
     if cards and not dry_run:
         # Start an observation window even when no reader has ever opened a card.
@@ -666,7 +682,11 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                     payload["transitions"].append(entry)
                     previous, before = state, after
         except (OSError, ValueError, KeyError, subprocess.SubprocessError, journal.kernel.ProjectionError) as exc:
+            if _stage_wide_conflict(exc):
+                raise
             # One card that cannot be read or committed must not hide the
-            # transitions its siblings already committed in this pass.
+            # transitions its siblings already committed in this pass. The
+            # stage still fails, so the failure cannot pass as a clean run.
+            payload["error"] = True
             payload["skipped"].append({"path": rel, "reason": f"card unreadable: {exc}"})
     return payload

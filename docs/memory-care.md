@@ -737,11 +737,15 @@ The lifecycle stage keeps two stop conditions apart. `blocked` means the stage
 did nothing, for example when installed care schedules or local read coverage
 cannot be read. `archive_blocked` means only archiving stopped, such as when no
 hub reports read coverage, while stale transitions still commit. Per-card
-failures do not block the pass: the unreadable card is listed in `skipped` with
+failures do not stop the pass: the unreadable card is listed in `skipped` with
 a `card unreadable` reason, and transitions committed before and after it keep
-their decision ids. `memory care status` prints the last pass as
-`lifecycle_stage:`, so a stage that did nothing and a stage that only stopped
-archiving stay distinguishable.
+their decision ids. The stage still sets `error`, so `tend` counts it in
+`failed_stages` and exits nonzero. A card file that cannot be decoded is
+reported the same way instead of being dropped. A symlinked lifecycle state
+directory or a read-only protection conflict belongs to the workspace, so it
+fails the stage instead of skipping one card. `memory care status` prints the
+last pass as `lifecycle_stage:`, so a stage that did nothing and a stage that
+only stopped archiving stay distinguishable.
 
 Set `enabled = false` to disable this pass. `[tend] enabled = false` disables
 all tending. Preview with `memory care tend --stage lifecycle --dry-run --json`.
