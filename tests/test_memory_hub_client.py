@@ -885,6 +885,21 @@ def test_a_refused_scope_is_remembered_and_tried_again_after_the_ttl(hub, tmp_pa
     ]
 
 
+def test_a_pull_that_reads_a_scope_clears_its_remembered_refusal(hub, tmp_path):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a", "principal:alice"))
+    _put(hub, "repo:a", "a-card", "needle")
+    _put(hub, "principal:alice", "alice-card", "needle", token=ADMIN_CREDENTIAL)
+    first = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert first["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    # The grant is issued and a pull reads the scope, so the next search asks for it again.
+    hub.grants["node-1"] = {"fleet", "repo:a", "principal:alice"}
+    sync.pull(target, client(hub), settings(target))
+    hub.calls.clear()
+    second = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert [call["scopes"] for call in hub.calls if call["action"] == "search"] == [["repo:a", "principal:alice"]]
+    assert "skipped_scopes" not in second["retrieval"]
+
+
 def test_the_refused_scope_memory_is_bounded_and_private(tmp_path):
     scopes = tuple(f"principal:agent-{index}" for index in range(store.REFUSED_SCOPES_MAX))
     store.remember_refused_scopes(tmp_path, scopes, now=1_000.0)
@@ -894,7 +909,29 @@ def test_the_refused_scope_memory_is_bounded_and_private(tmp_path):
     assert len(remembered) == store.REFUSED_SCOPES_MAX
     assert set(newest) <= set(remembered)
     path = tmp_path / ".brigade" / "memory" / "hub" / "refused-scopes.json"
+    assert path.parent == store.root(tmp_path) and not path.is_symlink()
+    if os.name != "posix":
+        # Windows reports 0o666 whatever chmod asked; the file is private by
+        # living in the same private hub root as every other hub state file.
+        return
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_stored_refusal_expiry_is_clamped_to_the_ttl(tmp_path):
+    path = tmp_path / ".brigade" / "memory" / "hub" / "refused-scopes.json"
+    store.ensure_root(tmp_path)
+    store.write_json(path, {"scopes": {"principal:alice": 10**9}})
+    # A far-future or skewed expiry may not hide a scope past the TTL.
+    assert store.refused_scopes(tmp_path, now=1_000.0) == {"principal:alice": 1_600.0}
+
+
+def test_an_oversized_refused_scope_file_is_ignored(tmp_path):
+    path = tmp_path / ".brigade" / "memory" / "hub" / "refused-scopes.json"
+    store.ensure_root(tmp_path)
+    body = json.dumps({"scopes": {"principal:alice": 1_600.0}})
+    # Past the 64 KiB read cap the file is ignored instead of read into memory.
+    store.write_private(path, body + " " * (64 * 1024))
+    assert store.refused_scopes(tmp_path, now=1_000.0) == {}
 
 
 def test_a_refusal_that_leaves_no_readable_scope_still_answers_locally(hub, tmp_path, capsys):
@@ -911,6 +948,30 @@ def test_a_refusal_that_leaves_no_readable_scope_still_answers_locally(hub, tmp_
     assert payload["retrieval"]["hub"] == "refused" and payload["retrieval"]["degraded"] is True
     assert payload["retrieval"]["skipped_scopes"] == ["principal:alice", "principal:bob"]
     assert [match["source"] for match in payload["matches"]] == ["local"]
+
+
+def test_the_hub_budget_starts_after_local_matching(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a",))
+    _put(hub, "repo:a", "a-card", "needle")
+    clock = [0.0]
+    monkeypatch.setattr(hub_search, "_monotonic", lambda: clock[0], raising=False)
+    original = hub_search._local_matches
+
+    def slow_local(*args, **kwargs):
+        clock[0] += 0.25
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(hub_search, "_local_matches", slow_local)
+    timeouts: list[float] = []
+
+    def transport(url, token, body, timeout):
+        timeouts.append(timeout)
+        return hub(url, token, body, timeout)
+
+    payload = hub_search.search_payload(target, "needle", settings=settings(target), transport=transport)
+    # Local BM25 work never comes out of the hub's 800 ms.
+    assert timeouts == [pytest.approx(hubc.SEARCH_BUDGET_SECONDS)]
+    assert payload["retrieval"]["hub"] == "ok"
 
 
 def test_the_scope_probes_share_the_search_deadline(hub, tmp_path, monkeypatch):

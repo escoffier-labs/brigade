@@ -371,9 +371,10 @@ def search_payload(
 ) -> dict[str, Any]:
     target = target.expanduser().resolve()
     settings = settings or hubc.load_settings(target)
-    # One budget for the whole search: local cards, the hub calls and any probes.
-    deadline = _monotonic() + hubc.SEARCH_BUDGET_SECONDS
     local, _ = _local_matches(target, query)
+    # One budget for the hub calls and any probes, starting after local matching,
+    # so a big local corpus never eats into the hub's 800 ms.
+    deadline = _monotonic() + hubc.SEARCH_BUDGET_SECONDS
     lists: dict[str, list[dict[str, Any]]] = {"local": local}
     retrieval: dict[str, Any] = {"hub": "ok", "degraded": False}
     hub = ""

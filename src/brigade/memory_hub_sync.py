@@ -196,6 +196,19 @@ def pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings)
             raise
 
 
+def _forget_search_refusals(target: Path, readable: set[str]) -> None:
+    """A successful pull read these scopes, so a search no longer leaves them out.
+
+    A cache write never fails the pull; the next search just keeps the memory.
+    """
+    if not readable:
+        return
+    try:
+        store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+    except OSError:
+        pass
+
+
 def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
     status = read_status(client, settings)
     epoch = str(status.get("log_epoch") or "")
@@ -253,6 +266,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             f"{len(replica.missing)} card(s) are not replicated yet"
         )
     report.update(seq=replica.meta.get("seq"), cards=len(replica.heads), bytes=replica.bytes())
+    _forget_search_refusals(target, readable)
     return report
 
 
@@ -269,7 +283,7 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
     """
     hub = client.identity
     with store.pulling(target):
-        with store.locked(target):
+        with _state_lock(target):
             live = store.replica(target)
             epoch, principal = str(live.meta.get("log_epoch") or ""), live.meta.get("principal")
             stale = {
@@ -302,7 +316,7 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
                     f"the hub's {head['scope']}/{head['card_id']} differs from the replica. Run memory hub pull"
                 )
             fetched[key] = {name: card[name] for name in SCAN_FIELDS if name in card}
-        with store.locked(target):
+        with _state_lock(target):
             live = store.replica(target)
             if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
                 raise hubc.HubConfigError("the replica changed during the metadata refresh. Run memory hub pull")

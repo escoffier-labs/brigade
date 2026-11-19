@@ -72,6 +72,9 @@ LOCK_DEADLINE_SECONDS = 30.0
 # the scope is sent again, so a re-issued grant comes back.
 REFUSED_SCOPES_TTL_SECONDS = 600.0
 REFUSED_SCOPES_MAX = 64
+# Far above the 64 names the file may hold, and small enough that a corrupt or
+# oversized file is ignored instead of read into memory.
+REFUSED_SCOPES_MAX_BYTES = 64 * 1024
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 # Windows cannot open a directory to sync it.
@@ -595,22 +598,25 @@ def save_published(target: Path, value: dict[str, Any]) -> None:
 def refused_scopes(target: Path, *, now: float) -> dict[str, float]:
     """Scopes the hub refused for a missing grant that are still inside their TTL, with their expiry.
 
-    Only names and expiries are kept: no card, query or grant detail. A missing
-    or unreadable file means no memory, never a failed search.
+    Only names and expiries are kept: no card, query or grant detail. A missing,
+    oversized or unreadable file means no memory, never a failed search. A
+    stored expiry beyond the TTL is clamped, so clock skew or a hand-edited file
+    cannot hide a scope forever.
     """
     try:
-        value = read_json(root(target) / REFUSED_SCOPES)
+        value = read_json(root(target) / REFUSED_SCOPES, max_bytes=REFUSED_SCOPES_MAX_BYTES)
     except (OSError, ValueError):
         return {}
     entries = value.get("scopes") if isinstance(value, dict) else None
     if not isinstance(entries, dict):
         return {}
+    ceiling = now + REFUSED_SCOPES_TTL_SECONDS
     live: dict[str, float] = {}
     for name, expires in entries.items():
         if not isinstance(name, str) or isinstance(expires, bool):
             continue
         if isinstance(expires, (int, float)) and expires > now:
-            live[name] = float(expires)
+            live[name] = min(float(expires), ceiling)
     return live
 
 
