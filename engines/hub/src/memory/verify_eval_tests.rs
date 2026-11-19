@@ -47,6 +47,88 @@ async fn apply(h: &Hub, id: &Json, types: Json) -> Reply {
     h.call(AGENT_TOKEN, json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,"binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),"expected_op_types":types,"client_event_id":h.id()})).await
 }
 
+/// Attach a verifier manifest checked against the card's current version.
+async fn attach_manifest(h: &Hub, card_id: &str, evidence: &str) -> i64 {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let before = card(h, FIXTURE_SCOPE, card_id).await;
+    let revision = before["revision"].as_i64().unwrap();
+    let bytes = json!({"schema":"brigade.memory-verify-manifest.v1",
+        "card":{"scope":FIXTURE_SCOPE,"card_id":card_id,"base_revision":revision}})
+    .to_string();
+    let attached = h.call(AGENT_TOKEN, json!({"action":"evidence.attach","scope":FIXTURE_SCOPE,
+        "card_id":card_id,"workspace_id":"workspace-a","evidence_id":evidence,
+        "artifact_kind":"memory-verify-manifest","artifact_sha256":ids::sha256_hex(bytes.as_bytes()),
+        "artifact_base64":STANDARD.encode(&bytes),"observed_at":h.now(),"stance":"contrary",
+        "client_event_id":h.id()})).await;
+    assert_eq!(attached.status, 201, "{attached:?}");
+    revision
+}
+
+/// A real verifier correction: one block replacement plus the trailing
+/// authenticated manifest binding that class admission exempts.
+async fn verifier_correction(h: &Hub, card_id: &str, evidence: &str) -> Json {
+    let revision = attach_manifest(h, card_id, evidence).await;
+    let correction = op(FIXTURE_SCOPE, card_id, revision);
+    let mut binding = correction.clone();
+    binding.as_object_mut().unwrap().remove("text");
+    binding["type"] = json!("append_evidence");
+    binding["evidence_ids"] = json!([evidence]);
+    let opened = submit(h, AGENT_TOKEN, vec![correction, binding]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    opened.body["proposal_id"].clone()
+}
+
+fn held_classes(h: &Hub) -> Vec<String> {
+    let db = Connection::open(h.memory()).unwrap();
+    let mut st = db
+        .prepare("SELECT key FROM memory_meta WHERE key LIKE 'compensation_hold:%' ORDER BY key")
+        .unwrap();
+    st.query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// An automatic compensation actor needs reflect in scope, and Tier 0 needs to
+/// admit an ordinary evidence append for the not-held assertion.
+fn enable_compensation(h: &Hub) {
+    set_owner(h, "hub");
+    attestation_tests::change_policy(h, "reflect_principals", json!(["agent:dot"]));
+    attestation_tests::change_policy(h, "tier0_op_classes", json!(["append_evidence"]));
+}
+
+/// A hub with a verifier-flagged `agent:dot`, cards `a` and `b`, and an
+/// automatic compensation actor configured.
+async fn compensation_hub() -> Hub {
+    let h = Hub::with(clean(), None);
+    grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
+    let flagged = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"verifier","principal":"agent:dot","verifier":true,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(flagged.status, 200, "{flagged:?}");
+    enable_compensation(&h);
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "a", None, OLD).await;
+    h.put(ADMIN_TOKEN, FIXTURE_SCOPE, "b", None, OLD).await;
+    h
+}
+
+async fn compensate(h: &Hub, id: &Json) -> Reply {
+    h.set_clock(h.now() + 1);
+    h.call(AGENT_TOKEN, json!({"action":"rollback","proposal_id":id,"base_epoch":h.epoch().await,"client_event_id":h.id()})).await
+}
+
+/// An `append_evidence` op on the card's current version, citing `evidence`.
+fn append_op(card_id: &str, card: &Json, evidence: Json) -> Json {
+    let mut operation = op(FIXTURE_SCOPE, card_id, card["revision"].as_i64().unwrap());
+    operation["type"] = json!("append_evidence");
+    operation.as_object_mut().unwrap().remove("text");
+    operation["evidence_ids"] = evidence;
+    operation
+}
+
 async fn fleet_verifier_proposal() -> (Hub, Json, Json) {
     let h = Hub::with(clean(), None);
     grant(&h, "fleet", &["read", "reflect"]).await;
@@ -579,25 +661,110 @@ async fn verifier_applies_keep_the_card_cooldown() {
 
 #[tokio::test]
 async fn verifier_applies_respect_compensation_class_holds() {
-    let (h, id) = ready().await;
+    let h = compensation_hub().await;
+    let id = verifier_correction(&h, "a", "agent:dot/workspace-a/manifest-a").await;
     assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
-    // A successful automatic compensation held replace_block in this scope.
-    Connection::open(h.memory())
-        .unwrap()
-        .execute(
-            "INSERT INTO memory_meta VALUES(?1,'fixture')",
-            [compensation::hold_key(FIXTURE_SCOPE, "replace_block")],
-        )
-        .unwrap();
-    let request = json!({"action":"verify_auto_apply","proposal_id":id,"base_epoch":h.epoch().await,
-        "binding_sha256":"a".repeat(64),"policy_sha256":ids::sha256_hex(POLICY.as_bytes()),
-        "expected_op_types":["replace_block"],"client_event_id":h.id()});
-    let refused = h.call(AGENT_TOKEN, automatic_request(request)).await;
+    let applied = apply(&h, &id, json!(["replace_block", "append_evidence"])).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+
+    // Drive a real compensation of the verifier proposal, not a hand-inserted hold.
+    let compensated = compensate(&h, &id).await;
+    assert_eq!(compensated.body["state"], "applied", "{compensated:?}");
+    assert_eq!(
+        held_classes(&h),
+        vec![compensation::hold_key(FIXTURE_SCOPE, "replace_block")]
+    );
+    assert!(!held_classes(&h).contains(&compensation::hold_key(FIXTURE_SCOPE, "append_evidence")));
+
+    // Ordinary Tier 0 `append_evidence` in the same scope is not held.
+    let b = card(&h, FIXTURE_SCOPE, "b").await;
+    let ordinary = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![append_op("b", &b, json!(["hub:admin/workspace-a/plain"]))],
+    )
+    .await;
+    assert_eq!(ordinary.status, 201, "{ordinary:?}");
+    let report = attestation_tests::report(&h, &ordinary.body["proposal_id"]).await;
+    assert!(
+        report.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["code"] != "compensation_class_held"),
+        "{report:?}"
+    );
+
+    // A later verifier proposal in the same scope stops on the content class.
+    let later = submit(
+        &h,
+        AGENT_TOKEN,
+        vec![op(FIXTURE_SCOPE, "b", b["revision"].as_i64().unwrap())],
+    )
+    .await;
+    assert_eq!(later.status, 201, "{later:?}");
+    h.set_clock(h.now() + 60_001);
+    let refused = apply(&h, &later.body["proposal_id"], json!(["replace_block"])).await;
     assert_eq!(
         (refused.status, code(&refused)),
         (409, "compensation_class_held"),
         "{refused:?}"
     );
+    assert!(
+        refused.body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains(&format!("{FIXTURE_SCOPE}/replace_block"))),
+        "{refused:?}"
+    );
+    assert_eq!(card(&h, FIXTURE_SCOPE, "b").await, b);
+
+    // Releasing this exact scope and operation lets the apply proceed.
+    let released = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"auto_apply_switch","enabled":true,"scope":FIXTURE_SCOPE,"op_type":"replace_block","client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(released.status, 200, "{released:?}");
+    assert!(held_classes(&h).is_empty(), "{:?}", held_classes(&h));
+    h.set_clock(h.now() + 60_001);
+    let retried = apply(&h, &later.body["proposal_id"], json!(["replace_block"])).await;
+    assert_eq!(retried.body["state"], "applied", "{retried:?}");
+    assert_ne!(card(&h, FIXTURE_SCOPE, "b").await["text"], b["text"]);
+}
+
+#[tokio::test]
+async fn verifier_confirm_after_a_verifier_compensation_is_not_held() {
+    let h = compensation_hub().await;
+    let id = verifier_correction(&h, "a", "agent:dot/workspace-a/manifest-a").await;
+    assert_eq!(publish(&h, ADMIN_TOKEN, "correct").await.status, 201);
+    let applied = apply(&h, &id, json!(["replace_block", "append_evidence"])).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let compensated = compensate(&h, &id).await;
+    assert_eq!(compensated.body["state"], "applied", "{compensated:?}");
+
+    // A later confirm-only verifier proposal: one evidence append plus its
+    // trailing authenticated manifest binding.
+    let manifest = "agent:dot/workspace-a/manifest-b";
+    let revision = attach_manifest(&h, "b", manifest).await;
+    let mut evidence = op(FIXTURE_SCOPE, "b", revision);
+    evidence["type"] = json!("append_evidence");
+    evidence.as_object_mut().unwrap().remove("text");
+    evidence["evidence_ids"] = json!(["hub:admin/workspace-a/plain"]);
+    let mut binding = evidence.clone();
+    binding["evidence_ids"] = json!([manifest]);
+    let opened = submit(&h, AGENT_TOKEN, vec![evidence, binding]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    assert_eq!(publish(&h, ADMIN_TOKEN, "confirm").await.status, 201);
+    h.set_clock(h.now() + 60_001);
+    let confirmed = apply(
+        &h,
+        &opened.body["proposal_id"],
+        json!(["append_evidence", "append_evidence"]),
+    )
+    .await;
+    assert_eq!(confirmed.body["state"], "applied", "{confirmed:?}");
+    assert!(!held_classes(&h).contains(&compensation::hold_key(FIXTURE_SCOPE, "append_evidence")));
 }
 
 #[test]

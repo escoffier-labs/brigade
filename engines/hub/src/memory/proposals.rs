@@ -775,12 +775,18 @@ fn apply_cards(
                 "a changed card was applied or rolled back in the last 24 hours",
             )));
         }
-        // An automatic compensation's scope and operation hold stops verifier applies too.
-        if super::compensation::class_held(tx, body)? {
+        // An automatic compensation's scope and operation hold stops verifier applies
+        // for the same content class. Class admission exempts a verifier's trailing
+        // manifest binding, so the hold check exempts it too.
+        let ops = body["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        if let Some(held) = super::compensation::class_held_ops(
+            tx,
+            super::verify_eval::content_ops(tx, body, ops)?,
+        )? {
             return Ok(Some(error(
                 409,
                 "compensation_class_held",
-                "automatic changes of this operation type are held in this scope",
+                &format!("automatic changes of {held} are held in this scope"),
             )));
         }
         body["preflight"] = json!({"checks":[{"gate":"verify_evaluation","state":"satisfied"}]});

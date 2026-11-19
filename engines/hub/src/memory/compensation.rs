@@ -229,7 +229,11 @@ pub fn hold_key(scope: &str, op_type: &str) -> String {
 }
 
 pub fn hold(tx: &dyn WriteTx, original: &Json) -> rusqlite::Result<()> {
-    for op in original["ops"].as_array().into_iter().flatten() {
+    let ops = original["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    // Class admission exempts a verifier's trailing authenticated manifest
+    // binding, so the hold covers only the content classes it admits.
+    let content = super::verify_eval::applied_content_ops(tx, original, ops)?;
+    for op in content {
         tx.execute("INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &[t(&hold_key(string(op,"scope"), string(op,"type"))), t(string(original,"proposal_id"))])?;
     }
     Ok(())
@@ -271,19 +275,28 @@ pub fn in_window<T: ReadTx + ?Sized>(
 }
 
 /// A class stays held until an admin releases this exact scope and operation.
-pub fn class_held<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
-    for op in body["ops"].as_array().into_iter().flatten() {
+/// Returns the matched `scope/op_type` so the refusal can name it.
+pub fn class_held<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<Option<String>> {
+    class_held_ops(tx, body["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]))
+}
+
+pub fn class_held_ops<T: ReadTx + ?Sized>(
+    tx: &T,
+    ops: &[Json],
+) -> rusqlite::Result<Option<String>> {
+    for op in ops {
+        let (scope, op_type) = (string(op, "scope"), string(op, "type"));
         if !tx
             .query(
                 "SELECT 1 FROM memory_meta WHERE key=?1",
-                &[t(&hold_key(string(op, "scope"), string(op, "type")))],
+                &[t(&hold_key(scope, op_type))],
             )?
             .is_empty()
         {
-            return Ok(true);
+            return Ok(Some(format!("{scope}/{op_type}")));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 fn regresses(before: &Json, after: &Json) -> bool {

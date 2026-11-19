@@ -114,7 +114,14 @@ pub fn record(
 
 /// Recognize only _manifest_op's exact trailing shape and its authenticated binding.
 /// Other evidence appends, including mixed ids or duplicate bindings, remain corrections.
-fn has_manifest_binding(tx: &dyn WriteTx, body: &Json, ops: &[Json]) -> rusqlite::Result<bool> {
+/// `binding_state` is `pending_review` before apply and `active` once the
+/// verifier proposal holding the binding has applied.
+fn manifest_binding(
+    tx: &dyn WriteTx,
+    body: &Json,
+    ops: &[Json],
+    binding_state: &str,
+) -> rusqlite::Result<bool> {
     let Some((binding, corrections)) = ops.split_last().filter(|(_, rest)| !rest.is_empty()) else {
         return Ok(false);
     };
@@ -139,15 +146,49 @@ fn has_manifest_binding(tx: &dyn WriteTx, body: &Json, ops: &[Json]) -> rusqlite
     let rows = tx.query(
         "SELECT b.evidence_id FROM memory_evidence_bindings b JOIN memory_evidence e USING(evidence_id)
          WHERE b.evidence_id=?1 AND b.proposal_id=?2 AND b.principal=?3
-         AND b.state='pending_review' AND b.purged_ms IS NULL
-         AND b.scope=?4 AND b.base_revision=?5 AND e.card_id=?6
+         AND b.state=?4 AND b.purged_ms IS NULL
+         AND b.scope=?5 AND b.base_revision=?6 AND e.card_id=?7
          AND e.principal=b.principal AND e.scope=b.scope AND e.tombstoned=0
          AND e.artifact_kind='memory-verify-manifest'",
-        &[t(id), t(string(body,"proposal_id")), t(string(body,"proposer")),
+        &[t(id), t(string(body,"proposal_id")), t(string(body,"proposer")), t(binding_state),
           t(string(first,"scope")), rusqlite::types::Value::Integer(first["base_revision"].as_i64().unwrap_or(0)),
           t(string(first,"card_id"))],
     )?;
     Ok(!rows.is_empty())
+}
+
+fn has_manifest_binding(tx: &dyn WriteTx, body: &Json, ops: &[Json]) -> rusqlite::Result<bool> {
+    manifest_binding(tx, body, ops, "pending_review")
+}
+
+/// The ops class admission owns. A verifier's trailing authenticated manifest
+/// binding is an attach, not a content class, so admission exempts it.
+pub(super) fn content_ops<'a>(
+    tx: &dyn WriteTx,
+    body: &Json,
+    ops: &'a [Json],
+) -> rusqlite::Result<&'a [Json]> {
+    Ok(if has_manifest_binding(tx, body, ops)? {
+        &ops[..ops.len() - 1]
+    } else {
+        ops
+    })
+}
+
+/// The same exemption for an applied verifier proposal, whose binding has
+/// settled to `active`. Compensation holds its content classes only.
+pub(super) fn applied_content_ops<'a>(
+    tx: &dyn WriteTx,
+    body: &Json,
+    ops: &'a [Json],
+) -> rusqlite::Result<&'a [Json]> {
+    Ok(
+        if body["verifier"] == true && manifest_binding(tx, body, ops, "active")? {
+            &ops[..ops.len() - 1]
+        } else {
+            ops
+        },
+    )
 }
 
 /// Invoked under the writer transaction immediately before any card head changes.
@@ -173,11 +214,7 @@ pub fn check(
         .is_some_and(|r| s(&r[0]) != "true");
     let ops = body["ops"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     let op_types: Vec<_> = ops.iter().map(|op| op["type"].clone()).collect();
-    let corrections = if has_manifest_binding(tx, body, ops)? {
-        &op_types[..op_types.len() - 1]
-    } else {
-        &op_types
-    };
+    let corrections = content_ops(tx, body, ops)?;
     let class = |op: &Json| match op.as_str() {
         Some("append_evidence") => "confirm",
         Some("replace_block") => "correct",
@@ -216,7 +253,7 @@ pub fn check(
         || cmd.request["expected_op_types"] != json!(op_types)
         || corrections
             .iter()
-            .any(|op| r["classes"][class(op)]["decision"] != "go")
+            .any(|op| r["classes"][class(&op["type"])]["decision"] != "go")
     {
         Some("verify_class_not_admitted")
     } else if body["policy_digest"] != json!(authority.policy.as_ref().map(|a| &a.1))
