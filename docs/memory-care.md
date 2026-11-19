@@ -860,9 +860,13 @@ brigade memory care clear-read-recorder --confirm --target .
 The command refuses a sentinel that is not a plain single-link file inside the
 workspace root, never follows a link, removes it, and records the clear in
 `.brigade/memory/read-recorder-cleared.json` with the day and a hash of the
-recorded cause. Recording resumes on the next successful read; until then the
-lifecycle stays blocked. A TTY also prompts `y/N`; without `--confirm` the
-command refuses.
+recorded cause. Clearing first starts a fresh coverage window at the clear day,
+under the ledger lock. If that window cannot be written, the sentinel stays, so
+the outage days can never count as covered. The recorded clear is also a floor
+for later reads: a restored older ledger cannot claim coverage across a cleared
+outage. Recording resumes on the next successful read; until then the lifecycle
+stays blocked. A TTY also prompts `y/N`; without `--confirm` the command
+refuses.
 Reference scans prune vendor, environment, cache and build directories and do
 not follow directory symlinks.
 Coverage and explicit-use records require an HMAC from the fixed workspace

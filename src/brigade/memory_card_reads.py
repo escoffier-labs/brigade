@@ -18,7 +18,6 @@ from typing import Callable, Iterable
 
 from . import memory_hub_client as hubc
 from . import dirfd, receipt_signing
-from .bounded_read import read_regular_file
 from .run_dirfd import bound_run_dir, MAX_READ_BYTES
 
 READS_REL = ".brigade/memory/card-reads.json"
@@ -124,16 +123,50 @@ def _pending(target: Path) -> list[str]:
         return [f"{COVERAGE_REL}/{name}" for name in names if name.endswith(".json")]
 
 
-def _failures(target: Path) -> list[str]:
+def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _failures(target: Path) -> dict[str, tuple[int, int, int, int]]:
+    """Failure markers keyed by path, each with the identity seen at read time."""
     with bound_run_dir(target) as bound:
         try:
             parent = bound.dir_fd(*Path(FAILURES_REL).parts)
         except FileNotFoundError:
-            return []
+            return {}
         names = dirfd.child_names(parent, 10001)
         if len(names) > 10000:
             raise ValueError("read recorder failure limit exceeded")
-        return [f"{FAILURES_REL}/{name}" for name in names]
+        markers = {}
+        for name in names:
+            try:
+                markers[f"{FAILURES_REL}/{name}"] = _fingerprint(dirfd.stat_child(parent, name))
+            except FileNotFoundError:
+                continue
+        return markers
+
+
+def _unlink_if_unchanged(target: Path, rel: str, expected: tuple[int, int, int, int]) -> None:
+    """Consume a marker only while it is still the file that was read.
+
+    A failing process writes markers without the ledger lock, so it can replace
+    today's marker after this pass listed it. Keeping the newer entry leaves a
+    failure this pass never observed instead of deleting it.
+    """
+    parts = Path(rel).parts
+    with bound_run_dir(target) as bound:
+        try:
+            parent = bound.dir_fd(*parts[:-1])
+        except FileNotFoundError:
+            return
+        try:
+            current = _fingerprint(dirfd.stat_child(parent, parts[-1]))
+        except FileNotFoundError:
+            return
+        if current != expected:
+            return
+        dirfd.unlink_child(parent, parts[-1])
+        dirfd.fsync_directory(parent)
 
 
 def _disabled(target: Path) -> bool:
@@ -193,66 +226,54 @@ def _record_failure(target: Path, *, today: date | None = None) -> None:
         pass
 
 
-def _sentinel_path(target: Path) -> Path:
-    return target / DISABLED_REL
-
-
-def _sentinel_stat(target: Path) -> os.stat_result:
-    """The sentinel entry itself, never a link target."""
-    if dirfd.available():
-        try:
-            with bound_run_dir(target) as bound:
-                return bound.stat((), DISABLED_REL)
-        except FileNotFoundError:
-            raise
-        except OSError:
-            pass
-    return _sentinel_path(target).lstat()
-
-
-def _read_bound_sentinel(bound) -> bytes:
-    descriptor = bound.open_file((), DISABLED_REL, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-    try:
-        data = bytearray()
-        while len(data) <= DISABLED_CAUSE_BYTES:
-            chunk = os.read(descriptor, DISABLED_CAUSE_BYTES + 1 - len(data))
-            if not chunk:
-                break
-            data.extend(chunk)
-    finally:
-        os.close(descriptor)
+def _read_descriptor(descriptor: int) -> bytes:
+    data = bytearray()
+    while len(data) <= DISABLED_CAUSE_BYTES:
+        chunk = os.read(descriptor, DISABLED_CAUSE_BYTES + 1 - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
     return bytes(data[:DISABLED_CAUSE_BYTES])
 
 
-def _sentinel_read(target: Path) -> bytes | None:
-    """Bounded cause bytes, or ``None`` when the file cannot be read as one regular file."""
-    if dirfd.available():
-        try:
-            with bound_run_dir(target) as bound:
-                return _read_bound_sentinel(bound)
-        except FileNotFoundError:
-            return None
-        except OSError:
-            pass
-    read = read_regular_file(_sentinel_path(target), max_bytes=DISABLED_CAUSE_BYTES)
-    return read.data
+def _open_sentinel(bound) -> int:
+    return bound.open_file((), DISABLED_REL, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+
+
+def _sentinel_problem(info: os.stat_result) -> str | None:
+    if not stat.S_ISREG(info.st_mode):
+        return "not a regular file"
+    if info.st_nlink != 1:
+        return "multiple hard links"
+    return None
 
 
 def disabled_sentinel(target: Path) -> DisabledSentinel:
     """The root sentinel and its recorded cause, read without following a link."""
     try:
-        info = _sentinel_stat(target)
+        with bound_run_dir(target) as bound:
+            try:
+                entry = bound.stat((), DISABLED_REL)
+            except FileNotFoundError:
+                return DisabledSentinel(False, None)
+            problem = _sentinel_problem(entry)
+            if problem is not None:
+                return DisabledSentinel(True, problem)
+            descriptor = _open_sentinel(bound)
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
+                    return DisabledSentinel(True, "changed")
+                problem = _sentinel_problem(opened)
+                if problem is not None:
+                    return DisabledSentinel(True, problem)
+                data = _read_descriptor(descriptor)
+            finally:
+                os.close(descriptor)
     except FileNotFoundError:
         return DisabledSentinel(False, None)
     except OSError:
-        # An unverifiable sentinel is still a stop signal.
-        return DisabledSentinel(True, "unreadable")
-    if not stat.S_ISREG(info.st_mode):
-        return DisabledSentinel(True, "not a regular file")
-    if info.st_nlink != 1:
-        return DisabledSentinel(True, "multiple hard links")
-    data = _sentinel_read(target)
-    if data is None:
+        # A sentinel that cannot be verified without following a link is still a stop signal.
         return DisabledSentinel(True, "unreadable")
     cause = data.decode("utf-8", "replace").strip()
     return DisabledSentinel(True, cause or "empty")
@@ -272,24 +293,95 @@ def disabled_message(target: Path) -> str | None:
     )
 
 
+def _stored_since(target: Path) -> date | None:
+    try:
+        return date.fromisoformat(_read_json(target, READS_REL)["healthy_since"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _cleared_day(target: Path) -> date | None:
+    """Day of the last recorded sentinel clear, or ``None`` when absent or untrusted."""
+    try:
+        payload = _read_json(target, CLEARED_REL)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        day = date.fromisoformat(payload["day"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return day if day <= _day() else None
+
+
+def _reset_coverage(target: Path, *, today: date) -> bool:
+    """Start a fresh window at ``today`` so a cleared outage never counts as covered."""
+    ledger = load(target)
+    days = {key: day for key, day in ledger.last_read.items() if day <= today}
+    value = {
+        "tracking_since": min(ledger.tracking_since, today).isoformat(),
+        "healthy_since": today.isoformat(),
+        "heartbeat": today.isoformat(),
+        "coverage_days": [today.isoformat()],
+        "last_read": {key: day.isoformat() for key, day in days.items()},
+    }
+    mac = authenticate(target, READS_REL, value)
+    if mac is None:
+        return False
+    _write_json(target, READS_REL, {**value, "mac": mac})
+    return True
+
+
 def clear_disabled(target: Path, *, today: date | None = None) -> dict[str, object]:
-    """Remove a plain root sentinel and record the clear. Never follows a link."""
+    """Clear a plain root sentinel after starting a fresh coverage window.
+
+    The window reset runs under the ledger lock and happens before the unlink:
+    when it cannot be written the sentinel stays, so a cleared outage can never
+    be treated as covered. The sentinel is verified and removed through one
+    bound directory handle, never a path that could resolve to a link target.
+    """
+    from .inbox_lock import held_file_lock
+    from .memory_care_journal import safe_path
+
     target = target.expanduser().resolve()
+    today = today or _day()
     try:
-        info = _sentinel_stat(target)
-    except FileNotFoundError:
-        return {"cleared": False, "reason": "missing"}
-    except OSError:
-        return {"cleared": False, "reason": "unreadable"}
-    if not stat.S_ISREG(info.st_mode):
-        return {"cleared": False, "reason": "not a regular file"}
-    if info.st_nlink != 1:
-        return {"cleared": False, "reason": "multiple hard links"}
-    read = _sentinel_read(target)
-    if read is None:
-        return {"cleared": False, "reason": "unreadable"}
-    try:
-        os.unlink(_sentinel_path(target))
+        with bound_run_dir(target) as bound:
+            try:
+                entry = bound.stat((), DISABLED_REL)
+            except FileNotFoundError:
+                return {"cleared": False, "reason": "missing"}
+            problem = _sentinel_problem(entry)
+            if problem is not None:
+                return {"cleared": False, "reason": problem}
+            descriptor = _open_sentinel(bound)
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
+                    return {"cleared": False, "reason": "changed"}
+                problem = _sentinel_problem(opened)
+                if problem is not None:
+                    return {"cleared": False, "reason": problem}
+                cause = _read_descriptor(descriptor)
+            finally:
+                os.close(descriptor)
+            if receipt_signing.workspace_key(target) is not None:
+                try:
+                    with held_file_lock(safe_path(target, READS_REL).with_suffix(".lock"), deadline_seconds=5):
+                        if not _reset_coverage(target, today=today):
+                            return {"cleared": False, "reason": "coverage reset failed"}
+                except (OSError, ValueError):
+                    return {"cleared": False, "reason": "coverage reset failed"}
+            parent = bound.dir_fd()
+            try:
+                current = dirfd.stat_child(parent, DISABLED_REL)
+            except FileNotFoundError:
+                return {"cleared": False, "reason": "missing"}
+            if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino) or _sentinel_problem(current):
+                return {"cleared": False, "reason": "changed"}
+            dirfd.unlink_child(parent, DISABLED_REL)
+            dirfd.fsync_directory(parent)
     except FileNotFoundError:
         return {"cleared": False, "reason": "missing"}
     except OSError:
@@ -301,8 +393,8 @@ def clear_disabled(target: Path, *, today: date | None = None) -> dict[str, obje
             CLEARED_REL,
             {
                 "sentinel": DISABLED_REL,
-                "day": (today or _day()).isoformat(),
-                "cause_sha256": hashlib.sha256(read).hexdigest(),
+                "day": today.isoformat(),
+                "cause_sha256": hashlib.sha256(cause).hexdigest(),
             },
         )
     except (OSError, ValueError):
@@ -329,6 +421,11 @@ def load(target: Path) -> ReadLedger:
             or date.fromisoformat(p["tracking_since"]) > since
         ):
             raise ValueError("incomplete read coverage history")
+        # A recorded clear is a floor: coverage before it was never observed,
+        # even when a restored ledger still claims an earlier window.
+        cleared = _cleared_day(target)
+        if cleared is not None and cleared > since:
+            since = cleared
         return ReadLedger(
             date.fromisoformat(p["tracking_since"]),
             {k: date.fromisoformat(v) for k, v in p["last_read"].items()},
@@ -391,6 +488,9 @@ def _record_locked(target: Path, keys: Iterable[str], *, today: date | None = No
             return False
         _write_json(target, intent, {"state": "pending", "day": today.isoformat()})
         ledger = load(target)
+        cleared = _cleared_day(target)
+        stored = _stored_since(target)
+        clamped = cleared is not None and (stored is None or stored < cleared)
         limits = _coverage_policy(target)
         failures = _failures(target)
         errors = []
@@ -423,6 +523,7 @@ def _record_locked(target: Path, keys: Iterable[str], *, today: date | None = No
         if (
             errors
             or failures
+            or clamped
             or target.resolve() in _FAILED_ROOTS
             or since is None
             or ledger.heartbeat is None
@@ -449,8 +550,10 @@ def _record_locked(target: Path, keys: Iterable[str], *, today: date | None = No
             READS_REL,
             {**value, "mac": mac},
         )
-        for error in [*errors, *failures]:
+        for error in errors:
             _unlink(target, error)
+        for marker, fingerprint in failures.items():
+            _unlink_if_unchanged(target, marker, fingerprint)
         _unlink(target, intent)
         _FAILED_ROOTS.discard(target.resolve())
         return True
