@@ -89,8 +89,8 @@ def test_hostile_task_ids_stay_direct_children_of_the_cache_root(sandbox, task_i
     path = sandbox.path_for(task_id)
     assert path.parent == sandbox.cache_root
     assert path.resolve().parent == sandbox.cache_root
-    assert path.name.startswith("repo-batch-")
-    assert len(path.name) <= len("repo-batch-") + workspace.SLUG_LIMIT + 1 + workspace.DIGEST_SUFFIX_LIMIT
+    assert path.name.startswith("repo-") and "-batch-" in path.name
+    assert len(path.name) <= len("repo-12345678-batch-") + workspace.SLUG_LIMIT + 1 + workspace.DIGEST_SUFFIX_LIMIT
     assert workspace.expected_path(sandbox.repo, "run-one", task_id) == path
     assert workspace.expected_path(sandbox.repo, "run-two", task_id) != path
 
@@ -345,3 +345,55 @@ def test_workspace_binding_refuses_after_an_attempt(task_run):
     tasks.prepare_attempt(run_dir, workspace=workspace_dir, task_id="one")
     with pytest.raises(tasks.TaskJournalError, match="pristine queued task history"):
         tasks.record_workspace_binding(run_dir, workspace=workspace_dir, task_id="one", binding=_binding())
+
+
+def test_equal_repo_names_in_different_places_get_different_paths(sandbox, tmp_path):
+    other = tmp_path / "elsewhere" / "repo"
+    other.mkdir(parents=True)
+    assert workspace.expected_path(other, "run-one", "one") != sandbox.path_for("one")
+
+
+def test_reserve_refuses_a_dangling_symlink_without_following_it(sandbox, tmp_path):
+    path = sandbox.path_for("one")
+    outside = tmp_path / "outside"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(outside)
+    with pytest.raises(workspace.WorkspaceError) as refused:
+        workspace.reserve(path)
+    assert refused.value.code == workspace.WORKSPACE_EXISTS
+    assert not outside.exists()
+    assert not (outside.parent / ".run-locks").exists()
+
+
+def test_reserve_refusal_leaves_no_lease_behind(sandbox):
+    path = sandbox.path_for("one")
+    path.mkdir(parents=True)
+    with pytest.raises(workspace.WorkspaceError):
+        workspace.reserve(path)
+    path.rmdir()
+    # The refused attempt did not strand a lease that blocks the next one.
+    assert workspace.reserve(path).path == path
+
+
+def test_validate_refuses_when_git_status_fails(sandbox, monkeypatch):
+    binding = sandbox.bind("one")
+    real = workspace._git
+
+    def failing_status(args, *, cwd, timeout=workspace._GIT_TIMEOUT):
+        if args[:1] == ["status"]:
+            return workspace.proc.Result(code=128, stdout="", stderr="fatal")
+        return real(args, cwd=cwd, timeout=timeout)
+
+    monkeypatch.setattr(workspace, "_git", failing_status)
+    with pytest.raises(workspace.WorkspaceError) as refused:
+        workspace.validate(binding, sandbox.repo)
+    assert (refused.value.code, refused.value.reason) == (workspace.WORKSPACE_INVALID, "status-unreadable")
+
+
+def test_validate_does_not_run_a_worktree_fsmonitor_or_inherit_git_dir(sandbox, tmp_path, monkeypatch):
+    binding = sandbox.bind("one")
+    marker = tmp_path / "fsmonitor-ran"
+    _git(sandbox.repo, "config", "core.fsmonitor", f"touch {marker}; false")
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "nowhere"))
+    workspace.validate(binding, sandbox.repo)
+    assert not marker.exists()

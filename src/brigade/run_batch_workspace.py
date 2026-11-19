@@ -52,6 +52,31 @@ _SLUG_CHARS = re.compile(r"[^a-z0-9._-]+", re.ASCII)
 
 _GIT_TIMEOUT = 30.0
 _GIT_WORKTREE_TIMEOUT = 120.0
+# Ambient Git state that could redirect a probe away from the checkout it names.
+_GIT_ENV_DROP = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_CEILING_DIRECTORIES",
+)
+# A task worktree is written by a worker. Probes must not run its hooks or fsmonitor.
+_GIT_SAFE_FLAGS = ("--no-optional-locks", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}")
+
+
+def _git_env() -> dict[str, str]:
+    env = {
+        key: value for key, value in os.environ.items() if key not in _GIT_ENV_DROP and not key.startswith("GIT_CONFIG")
+    }
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _git(args: list[str], *, cwd: Path, timeout: float = _GIT_TIMEOUT) -> proc.Result:
+    return proc.run(["git", *_GIT_SAFE_FLAGS, *args], cwd=cwd, timeout=timeout, env=_git_env())
 
 
 class WorkspaceError(RuntimeError):
@@ -113,7 +138,8 @@ def expected_path(repo_root: Path, run_id: str, task_id: str) -> Path:
     identity. A path recorded in JSON is never authoritative.
     """
     repo = Path(repo_root).expanduser().resolve()
-    name = f"{slug(repo.name)}-batch-{slug(task_id)}-{task_digest(run_id, task_id)}"
+    repo_digest = hashlib.sha256(str(repo).encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    name = f"{slug(repo.name)}-{repo_digest}-batch-{slug(task_id)}-{task_digest(run_id, task_id)}"
     return cache_root() / name
 
 
@@ -130,7 +156,7 @@ def registered_worktree_roots(repo_root: Path) -> list[Path]:
     """Every worktree root Git has registered for the caller's repository."""
     repo = Path(repo_root).expanduser().resolve()
     try:
-        result = proc.run(["git", "worktree", "list", "--porcelain"], cwd=repo, timeout=_GIT_TIMEOUT)
+        result = _git(["worktree", "list", "--porcelain"], cwd=repo)
     except OSError as exc:
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "git-worktree-list") from exc
     if result.code != 0:
@@ -160,10 +186,11 @@ def check_disjoint(candidate: Path, repo_root: Path, other_paths: Iterable[Path]
     if _contains(target, repo):
         raise WorkspaceError(WORKSPACE_OVERLAP, "repo-root")
     for worktree in registered_worktree_roots(repo):
-        if _contains(worktree, target):
+        if _contains(worktree, target) or _contains(target, worktree):
             raise WorkspaceError(WORKSPACE_OVERLAP, "registered-worktree")
     for other in other_paths:
-        if _contains(Path(other).expanduser().resolve(), target):
+        resolved_other = Path(other).expanduser().resolve()
+        if _contains(resolved_other, target) or _contains(target, resolved_other):
             raise WorkspaceError(WORKSPACE_OVERLAP, "other-task")
 
 
@@ -175,18 +202,36 @@ def reserve(path: Path) -> Reservation:
     path or lease refuses with ``workspace-exists`` and nothing is deleted or
     changed.
     """
-    target = Path(path).expanduser().resolve()
+    given = Path(path).expanduser()
+    root = cache_root()
     try:
-        runguard.worktree_lock_dir(target).mkdir(parents=True, exist_ok=False)
+        parent = given.parent.resolve()
+    except OSError as exc:
+        raise WorkspaceError(WORKSPACE_UNAVAILABLE, "resolve") from exc
+    if parent != root:
+        raise WorkspaceError(WORKSPACE_OVERLAP, "outside-cache-root")
+    # Only the parent is resolved. Any entry at the name, including a dangling
+    # symlink, refuses instead of being followed.
+    target = root / given.name
+    if os.path.lexists(target):
+        raise WorkspaceError(WORKSPACE_EXISTS, "path")
+    lock_dir = runguard.worktree_lock_dir(target)
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
         raise WorkspaceError(WORKSPACE_EXISTS, "reservation") from None
     except OSError as exc:
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "reservation") from exc
     try:
         target.mkdir()
-    except FileExistsError:
-        raise WorkspaceError(WORKSPACE_EXISTS, "path") from None
     except OSError as exc:
+        # Release only the empty lease this call created. Nothing else is touched.
+        try:
+            lock_dir.rmdir()
+        except OSError:
+            pass
+        if isinstance(exc, FileExistsError):
+            raise WorkspaceError(WORKSPACE_EXISTS, "path") from None
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "mkdir") from exc
     try:
         info = target.lstat()
@@ -234,9 +279,10 @@ def create(
     if binding.branch != branch_name(run_id, task_id):
         raise WorkspaceError(WORKSPACE_INVALID, "branch")
     check_disjoint(binding.path, repo)
+    _check_identity(binding)
     try:
-        result = proc.run(
-            ["git", "worktree", "add", "-b", binding.branch, str(binding.path), base_sha],
+        result = _git(
+            ["worktree", "add", "-b", binding.branch, str(binding.path), base_sha],
             cwd=repo,
             timeout=_GIT_WORKTREE_TIMEOUT,
         )
@@ -259,7 +305,7 @@ def _lstat(path: Path) -> os.stat_result:
 
 def _git_line(checkout: Path, *args: str) -> str:
     try:
-        result = proc.run(["git", *args], cwd=checkout, timeout=_GIT_TIMEOUT)
+        result = _git(list(args), cwd=checkout)
     except OSError as exc:
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "git") from exc
     if result.code != 0:
@@ -275,7 +321,7 @@ def _git_state(checkout: Path, *args: str) -> str | None:
     refuse with their own reason token.
     """
     try:
-        result = proc.run(["git", *args], cwd=checkout, timeout=_GIT_TIMEOUT)
+        result = _git(list(args), cwd=checkout)
     except OSError as exc:
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "git") from exc
     if result.code != 0:
@@ -293,6 +339,16 @@ def _common_dir(checkout: Path) -> Path:
         raise WorkspaceError(WORKSPACE_UNAVAILABLE, "git-common-dir") from exc
 
 
+def _check_identity(binding: Binding) -> None:
+    info = _lstat(binding.path)
+    if stat.S_ISLNK(info.st_mode):
+        raise WorkspaceError(WORKSPACE_INVALID, "symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError(WORKSPACE_INVALID, "not-a-directory")
+    if (info.st_dev, info.st_ino) != (binding.dev, binding.ino):
+        raise WorkspaceError(WORKSPACE_INVALID, "identity-changed")
+
+
 def validate(binding: Binding, repo_root: Path, *, pristine: bool = True) -> None:
     """Refuse a worktree that is not exactly the reserved, isolated checkout.
 
@@ -306,13 +362,11 @@ def validate(binding: Binding, repo_root: Path, *, pristine: bool = True) -> Non
     repo = Path(repo_root).expanduser().resolve()
     if not isinstance(binding, Binding):
         raise WorkspaceError(WORKSPACE_INVALID, "binding")
-    info = _lstat(binding.path)
-    if stat.S_ISLNK(info.st_mode):
-        raise WorkspaceError(WORKSPACE_INVALID, "symlink")
-    if not stat.S_ISDIR(info.st_mode):
-        raise WorkspaceError(WORKSPACE_INVALID, "not-a-directory")
-    if (info.st_dev, info.st_ino) != (binding.dev, binding.ino):
-        raise WorkspaceError(WORKSPACE_INVALID, "identity-changed")
+    if not isinstance(binding.base_sha, str) or _BASE_SHA_RE.fullmatch(binding.base_sha) is None:
+        raise WorkspaceError(WORKSPACE_INVALID, "base-sha")
+    if binding.branch != branch_name(binding.run_id, binding.task_id):
+        raise WorkspaceError(WORKSPACE_INVALID, "branch")
+    _check_identity(binding)
     try:
         resolved = binding.path.resolve(strict=True)
     except OSError as exc:
@@ -322,7 +376,7 @@ def validate(binding: Binding, repo_root: Path, *, pristine: bool = True) -> Non
     reported_toplevel = Path(_git_line(binding.path, "rev-parse", "--show-toplevel"))
     if not reported_toplevel.is_absolute():
         reported_toplevel = binding.path / reported_toplevel
-    if reported_toplevel.resolve() != binding.path:
+    if reported_toplevel.resolve() != resolved:
         raise WorkspaceError(WORKSPACE_INVALID, "foreign-toplevel")
     if _common_dir(binding.path) != _common_dir(repo):
         raise WorkspaceError(WORKSPACE_INVALID, "foreign-common-dir")
@@ -330,9 +384,16 @@ def validate(binding: Binding, repo_root: Path, *, pristine: bool = True) -> Non
         raise WorkspaceError(WORKSPACE_INVALID, "branch")
     if _git_state(binding.path, "rev-parse", "HEAD") != binding.base_sha:
         raise WorkspaceError(WORKSPACE_INVALID, "head")
-    status = _git_state(binding.path, "status", "--porcelain", "--ignored")
-    if pristine and status:
-        raise WorkspaceError(WORKSPACE_INVALID, "dirty")
+    if pristine:
+        # A failed status is never read as clean.
+        try:
+            status = _git_line(binding.path, "status", "--porcelain", "--ignored")
+        except WorkspaceError:
+            raise WorkspaceError(WORKSPACE_INVALID, "status-unreadable") from None
+        if status:
+            raise WorkspaceError(WORKSPACE_INVALID, "dirty")
+    # The directory must still be the reserved one after every Git probe.
+    _check_identity(binding)
 
 
 def _digest(value: str) -> str:

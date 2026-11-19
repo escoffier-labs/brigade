@@ -383,20 +383,17 @@ def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHisto
             )
         elif event.event_type == "task.workspace-bound":
             # A binding never grants launch authority: the task stays queued,
-            # attempt-free, and cannot be bound twice or re-bound differently.
+            # attempt-free, and cannot be re-bound differently. An identical
+            # duplicate is a no-op so a repaired journal stays readable.
+            bound = TaskWorkspaceBinding(p["base_sha"], p["branch_digest"], p["path_digest"], p["dev_ino_digest"])
             if (
-                current.workspace is not None
+                (current.workspace is not None and current.workspace != bound)
                 or current.status != "queued"
                 or current.handle.attempt_id is not None
                 or current.launch_claim is not None
             ):
                 raise TaskJournalError("workspace binding requires pristine queued task history")
-            results[task_id] = replace(
-                current,
-                workspace=TaskWorkspaceBinding(
-                    p["base_sha"], p["branch_digest"], p["path_digest"], p["dev_ino_digest"]
-                ),
-            )
+            results[task_id] = replace(current, workspace=bound)
         prior_types[task_id] = event.event_type
         results[task_id] = replace(results[task_id], version=event.event_digest)
     return _TaskHistory(results, batches)
