@@ -33,6 +33,7 @@ from . import (
     hub_recall,
     manifest_loop,
     presence,
+    producer_session,
     skill_invocations,
     verification_mode,
     write_attribution,
@@ -1972,6 +1973,7 @@ def _normalize_state(
     normalized = _new_state(target, session_id, recorded, task_epoch=task_epoch)
     if not isinstance(payload, dict):
         return normalized
+    producer_session.carry(normalized, payload, target, task_epoch)
     if task_epoch is not None and payload.get("task_epoch") != task_epoch:
         # State written by an earlier dispatched task under the same reused
         # session id. ``write_observed`` must be re-earned by this task's own
@@ -2275,6 +2277,8 @@ def _handle_event(
     # No tool runs inside one hook event, so its fingerprints are reused within it.
     event_fingerprint = functools.cache(repo_worktree_fingerprint)
     state = _normalize_state(target, session_id, persisted_state, task_epoch=task_epoch, fingerprint=event_fingerprint)
+    if persisted_state is None:
+        producer_session.stamp_start(state, target)
     if persisted_state != state:
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
     if event not in {"Stop", "SessionEnd"}:
@@ -2446,6 +2450,7 @@ def _handle_event(
         if wrote:
             state["write_observed"] = True
             written_at = localio.utc_now_iso()
+            producer_session.record_write(state, target, payload, written_at)
             state["last_write_at"] = written_at
             state["last_attributed_write_at"] = written_at
             handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (

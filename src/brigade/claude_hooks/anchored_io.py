@@ -425,6 +425,44 @@ def append_sidecar(path: Path, payload: bytes, *, max_bytes: int | None) -> bool
         return False
 
 
+class SessionStateUnreadable(OSError):
+    """A session state file is not a readable regular JSON object. Never read this as absence."""
+
+
+def read_states_strict(target: Path, *, modified_since: datetime | None = None, max_bytes: int) -> list[dict[str, Any]]:
+    """Every session state modified since ``modified_since``, or an ``OSError`` naming what could not be read.
+
+    ``iter_states`` skips what it cannot stat, read or parse, which suits a listing. A caller that
+    must account for every other session's state (the hook producer's ownership check) cannot
+    afford that, so here a listing error, a stat failure, a non-regular ``.json`` entry, a file over
+    ``max_bytes``, an unreadable file and a malformed one all raise. A file last modified before
+    ``modified_since`` is not read: a session's writes always refresh its state file's mtime.
+    """
+    states: list[dict[str, Any]] = []
+    with session_directory(target) as anchor:
+        threshold = modified_since.timestamp() if modified_since is not None else None
+        for name in dirfd.child_names(anchor.fd, sys.maxsize):
+            if not name.endswith(".json"):
+                continue
+            info = dirfd.stat_child(anchor.fd, name, allow_reparse=True)
+            if not stat.S_ISREG(info.st_mode):
+                raise SessionStateUnreadable(f"session state is not a regular file: {name}")
+            if threshold is not None and info.st_mtime < threshold:
+                continue
+            raw = anchor.read_bytes(name, max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise SessionStateUnreadable(f"session state is over {max_bytes} bytes: {name}")
+            try:
+                value = json.loads(raw)
+            except (UnicodeError, ValueError) as exc:
+                raise SessionStateUnreadable(f"session state is malformed: {name}") from exc
+            if not isinstance(value, dict):
+                raise SessionStateUnreadable(f"session state is not an object: {name}")
+            states.append(value)
+        anchor.validate()
+    return states
+
+
 def iter_states(
     target: Path, *, modified_since: datetime | None = None, limit: int | None = None
 ) -> Iterator[dict[str, Any]]:

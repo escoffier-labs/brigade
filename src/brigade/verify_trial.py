@@ -13,7 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import generated_patch_quarantine, localio, verify_manifest
+from . import (
+    agent_identity,
+    generated_patch_quarantine,
+    git_status_snapshot,
+    localio,
+    outcome_attribution,
+    verify_manifest,
+)
+from .claude_hooks import producer_session as hook_producer
 
 VERIFY_INFRASTRUCTURE_FAILURE_CLASSES = frozenset(
     {
@@ -248,34 +256,9 @@ def owned_delta_sha256(patch_bytes: bytes, subject_path: str) -> str | None:
     return hashlib.sha256(delta).hexdigest()
 
 
-def _normalize_repo_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
-
-
-def subject_path_dirty_in_git_status(subject_path: str, dirty_files: object) -> bool:
-    if not isinstance(dirty_files, list):
-        return False
-    normalized = _normalize_repo_path(subject_path)
-    for line in dirty_files:
-        if not isinstance(line, str) or len(line) < 3:
-            continue
-        path_part = line[3:].strip()
-        if " -> " in path_part:
-            path_part = path_part.split(" -> ", 1)[1]
-        candidate = _normalize_repo_path(path_part)
-        if candidate == normalized or candidate.endswith(f"/{normalized}"):
-            return True
-    return False
-
-
-def start_git_dirty_files_fingerprint(dirty_files: object) -> str | None:
-    if not isinstance(dirty_files, list):
-        return None
-    lines = sorted(str(line) for line in dirty_files)
-    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
-
-
-def load_work_session_payload(target: Path, session_id: str) -> dict[str, Any] | None:
+def load_work_session_payload(target: Path, session_id: str, start_id: str | None = None) -> dict[str, Any] | None:
+    if hook_producer.fingerprint_from_producer_id(session_id) is not None:
+        return hook_producer.load_payload(target, session_id, start_id)
     session_json = target / ".brigade" / "work" / session_id / "session.json"
     try:
         payload = json.loads(session_json.read_text())
@@ -290,6 +273,7 @@ def build_producer_binding(
     session_payload: dict[str, Any] | None,
     subject_path: str,
     owned_delta: str | None,
+    target: Path | None = None,
 ) -> dict[str, Any]:
     binding: dict[str, Any] = {
         "work_session_id": session_id,
@@ -302,16 +286,29 @@ def build_producer_binding(
     if not isinstance(start, dict):
         binding["subject_clean_at_start"] = False
         return binding
+    if hook_producer.fingerprint_from_producer_id(session_id) is not None:
+        # A hook session's start snapshot cannot say who wrote the subject, so record the verdict
+        # of the live ownership check for a projection that has no target to rerun it against, and
+        # the start the receipt bound to so a later epoch's start cannot stand in for it.
+        start_id = start.get("id")
+        binding["hook_start_id"] = start_id
+        binding["hook_ownership"] = (
+            (hook_producer.ownership_reason(target, session_id, subject_path, start_id) or hook_producer.OWNED)
+            if target is not None and isinstance(start_id, str)
+            else "producer_session_missing"
+        )
     git = start.get("git")
     if not isinstance(git, dict):
         binding["subject_clean_at_start"] = False
         return binding
-    dirty_files = git.get("dirty_files")
-    fingerprint = start_git_dirty_files_fingerprint(dirty_files)
+    fingerprint = git_status_snapshot.fingerprint(git)
     if fingerprint is not None:
         binding["start_git"] = {"dirty_files_sha256": fingerprint}
-    binding["subject_clean_at_start"] = not subject_path_dirty_in_git_status(subject_path, dirty_files)
+    binding["subject_clean_at_start"] = not git_status_snapshot.subject_dirty(subject_path, git)
     return binding
+
+
+_HOOK_OWNERSHIP_REASONS = frozenset({"concurrent_session_ownership", "no_owned_work"})
 
 
 def _validate_producer_binding(
@@ -336,6 +333,11 @@ def _validate_producer_binding(
     if subject_clean_at_start is False:
         return "subject_pre_existing_dirty"
 
+    hook_session = hook_producer.fingerprint_from_producer_id(session_id) is not None
+    recorded_ownership = producer.get("hook_ownership")
+    if hook_session and recorded_ownership != hook_producer.OWNED:
+        return recorded_ownership if recorded_ownership in _HOOK_OWNERSHIP_REASONS else "producer_session_missing"
+
     if target is None:
         if subject_clean_at_start is not True:
             return "producer_session_missing"
@@ -344,7 +346,10 @@ def _validate_producer_binding(
             return "producer_session_missing"
         return None
 
-    session_payload = load_work_session_payload(target, session_id)
+    hook_start_id = producer.get("hook_start_id")
+    if hook_session and not isinstance(hook_start_id, str):
+        return "producer_session_missing"
+    session_payload = load_work_session_payload(target, session_id, hook_start_id if hook_session else None)
     if session_payload is None:
         return "producer_session_missing"
     if session_payload.get("id") != session_id:
@@ -357,14 +362,16 @@ def _validate_producer_binding(
     if not isinstance(git, dict):
         return "producer_session_missing"
 
-    dirty_files = git.get("dirty_files")
-    if subject_path_dirty_in_git_status(subject_path, dirty_files):
+    computed_fp = git_status_snapshot.fingerprint(git)
+    if computed_fp is None:
+        # A start snapshot in an older or unreadable format cannot show the subject clean.
+        return "producer_session_mismatch"
+    if git_status_snapshot.subject_dirty(subject_path, git):
         if producer.get("subject_clean_at_start") is True:
             return "concurrent_session_ownership"
         return "subject_pre_existing_dirty"
 
     start_git = producer.get("start_git")
-    computed_fp = start_git_dirty_files_fingerprint(dirty_files)
     if not isinstance(start_git, dict):
         return "producer_session_missing"
     stored_fp = start_git.get("dirty_files_sha256")
@@ -373,6 +380,8 @@ def _validate_producer_binding(
 
     if subject_clean_at_start is not True:
         return "producer_session_missing"
+    if hook_session:
+        return hook_producer.ownership_reason(target, session_id, subject_path, hook_start_id)
     return None
 
 
@@ -433,11 +442,19 @@ def subject_hash_for_path(target: Path, subject_path: str) -> str | None:
 
 
 def verifier_session_id() -> str | None:
-    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
-    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
-        return claude_session
+    """The verifying session: the hook-printed Claude session, else an explicit override, else the ambient one.
+
+    One resolver names the Claude session for the verifier id and for the receipt's
+    ``harness_session`` stamp (``agent_identity.claude_session_fingerprint``), so a
+    typed verify that found its session through ``CLAUDE_CODE_SESSION_ID`` is the
+    same session in both places and is never counted as an independent verifier of
+    its own edit.
+    """
+    explicit = os.environ.get(outcome_attribution.CLAUDE_SESSION_ENV, "")
+    if explicit and re.fullmatch(r"[0-9a-f]{16}", explicit):
+        return explicit
     override = os.environ.get("BRIGADE_VERIFY_SESSION_ID", "").strip()
-    return override or None
+    return override or agent_identity.claude_session_fingerprint()
 
 
 def _verifier_session_id() -> str | None:
@@ -765,7 +782,7 @@ def project_trial(
                 or not verifier_session
                 or not isinstance(producer_session, str)
                 or not producer_session
-                or verifier_session == producer_session
+                or hook_producer.same_session(producer_session, verifier_session)
             ):
                 return TrialProjection(eligible=False, reason="verifier_not_independent", attributed=True)
             quarantine_reason = generated_patch_quarantine.generated_patch_eligibility_reason(binding, receipt)

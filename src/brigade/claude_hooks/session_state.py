@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .. import inbox_lock, localio
-from . import anchored_io, check_events, dependencies, envelope
+from . import anchored_io, check_events, dependencies, envelope, producer_session
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
@@ -337,6 +337,7 @@ def _write_session_state_preserving_latch(
                     if key in current_state:
                         updated[key] = current_state[key]
             dependencies.merge_observations(updated, current_state, observed_fields=patch_fields or ())
+            producer_session.merge_events(updated, current_state)
             if updated.get("task_epoch") == current_epoch:
                 # Completed writes are monotonic within a task. Observation
                 # hooks must not erase them or rewind the verification boundary.

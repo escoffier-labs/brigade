@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from brigade import localio, verify_manifest, verify_trial, work_cmd
+from brigade import git_status_snapshot, localio, verify_manifest, verify_trial, work_cmd
 from brigade.verify_manifest import _WORKSPACE_MANIFESTS_REL
 from brigade.work_cmd import verification as verify_mod
 
@@ -359,6 +360,43 @@ def test_project_trial_pre_existing_dirty_subject_is_ineligible(scoreable_target
     projection = verify_trial.project_trial(receipt, target=scoreable_target)
     assert projection.eligible is False
     assert projection.reason == "subject_pre_existing_dirty"
+
+
+def test_git_snapshot_keeps_the_first_status_column(scoreable_target):
+    """F2: ``strip()`` on the whole status output dropped the first line's leading space."""
+    (scoreable_target / "skills" / "brigade-work" / "SKILL.md").write_text("# brigade-work\nunstaged\n")
+    snapshot = work_cmd._git_snapshot(scoreable_target)
+    assert snapshot["dirty_files"] == [" M skills/brigade-work/SKILL.md"]
+
+
+def test_project_trial_unstaged_subject_as_first_dirty_line_is_pre_existing_dirty(scoreable_target, monkeypatch):
+    _write_patch_manifest(scoreable_target)
+    _write_skill_subject(scoreable_target, content="# brigade-work\npre-existing unstaged\n")
+    assert work_cmd.start(target=scoreable_target, title="verify-trial") == 0
+    receipt = _run_manifest_verify(scoreable_target, "test-skill-patch", monkeypatch=monkeypatch, start_session=False)
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "subject_pre_existing_dirty"
+
+
+@pytest.mark.parametrize(
+    ("status_line", "subject", "expected"),
+    [
+        (" M skills/my skill/SKILL.md", "skills/my skill/SKILL.md", True),
+        ("?? skills/café/SKILL.md", "skills/café/SKILL.md", True),
+        ("R  skills/new name/SKILL.md", "skills/new name/SKILL.md", True),
+        ("R  skills/old/SKILL.md", "skills/old/SKILL.md", True),
+        ("?? skills/", "skills/brigade-work/SKILL.md", True),
+        ("?? skills/brigade-work/", "skills/brigade-work/SKILL.md", True),
+        ("?? skills/other/", "skills/brigade-work/SKILL.md", False),
+        ("?? skills/brigade/", "skills/brigade-work/SKILL.md", False),
+        (" M skills/brigade-work/OTHER.md", "skills/brigade-work/SKILL.md", False),
+        ("?? ./", "skills/brigade-work/SKILL.md", True),
+    ],
+)
+def test_subject_dirty_reads_unquoted_paths_and_collapsed_directories(status_line, subject, expected):
+    git = {"dirty_files": [status_line], "status_format": "z1", "prefix": ""}
+    assert git_status_snapshot.subject_dirty(subject, git) is expected
 
 
 def test_project_trial_concurrent_session_ownership_is_ineligible(scoreable_target, monkeypatch):
@@ -906,3 +944,14 @@ def test_project_trial_copied_binding_without_tracked_manifest_is_ineligible(sco
     projection = verify_trial.project_trial(forged, target=scoreable_target)
     assert projection.eligible is False
     assert projection.reason == "verifier_manifest_missing"
+
+
+def test_session_identity_env_is_isolated_by_the_suite() -> None:
+    """F5: the suite must not depend on the environment it was launched from."""
+    for name in (
+        "CLAUDE_CODE_SESSION_ID",
+        "BRIGADE_CLAUDE_SESSION",
+        "BRIGADE_AGENT_SESSION",
+        "BRIGADE_VERIFY_SESSION_ID",
+    ):
+        assert os.environ.get(name) is None, name

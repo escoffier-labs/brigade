@@ -145,6 +145,48 @@ so it is forgeable. It may only veto, never promote:
   `subject_binding`. They never read `session_observed` rows, and promotion
   stays verifier-only (see [skill scorecards](proposals/skill-scorecards.md)).
 
+## Producer session for a manifest trial
+
+A patch-backed manifest receipt scores only when it names the session that produced the edit
+and that session's start-of-session dirty files, so a subject that was already dirty, or that
+another session owns, is rejected (`subject_pre_existing_dirty`, `concurrent_session_ownership`).
+`brigade work verify run --manifest ...` resolves that producer in this order:
+
+1. The active `brigade work start` session, as before. It always wins.
+2. Otherwise the single hook-enabled Claude session the verify runs in, named
+   `claude-hook:<fingerprint>`. The hook records the target's dirty files in that session's state
+   when it first creates it (`start.git.dirty_files`, see
+   [session state](claude-hook-session-state.md#hook-session-as-the-producer-of-a-manifest-trial)).
+   The session comes from `BRIGADE_CLAUDE_SESSION` or from Claude Code's own `CLAUDE_CODE_SESSION_ID`.
+   It is never named from a bare `BRIGADE_AGENT_SESSION`, when that value disagrees with
+   `CLAUDE_CODE_SESSION_ID`, or inside a `brigade run` worker.
+3. Otherwise `producer_session_missing`, so a plain shell or a Codex repo scores nothing.
+
+A hook session is a producer only for a subject it wrote. Its own Edit, Write or NotebookEdit write
+events must name the subject since its start (otherwise `no_owned_work`). No other session in the target
+may have a write event since then that names the subject or names no path, a Bash write the hooks
+detected (`concurrent_session_ownership`). Events carry completion time, so a write that began before
+this session and finished after it counts. When another session's bounded event list lost events inside
+that window, when a state reports a write that has no event, or when any session state in the target
+cannot be listed, read or parsed, the result is also `concurrent_session_ownership`. A task-epoch reset
+(`/clear`) takes a fresh start, keeps up to three earlier starts, and a receipt records the
+`hook_start_id` it was made under, so it keeps resolving after a later reset. A subject changed only
+through Bash is never a hook-session trial. The check reruns against live hook state when the receipt is
+projected.
+
+Start snapshots, for hook sessions and for `brigade work start`, are NUL-separated porcelain status
+(`status_format` `z1`), so quoted names and renames whose names hold ` -> ` cannot hide a dirty subject,
+and a wholly untracked target reads as dirty. A snapshot in the older `--short` format reads as dirty for
+every subject, so a work session started before this format fails closed.
+
+The same resolver stamps the receipt's `harness_session` and the verifier id, so a verify typed in a
+session counts as that session's own receipt for the Stop gate. A `worktree` patch has no
+independent-verifier rule, so a session may verify its own edit and score it. Only a `generated`
+patch must be verified by a different session. A session never counts as independent of its own
+`claude-hook:<fingerprint>` producer id, and that holds when `BRIGADE_VERIFY_SESSION_ID` names the
+session either as the bare fingerprint or as the `claude-hook:` form. An override naming any other
+id is taken at its word, because it is as forgeable as the rest of the caller-side state.
+
 ## Weekly ratchet report
 
 `outcome reconcile` prints its decisions and then forgets them. The weekly memory-care ratchet runs it as a dry run, so a skill held for "withheld: verified regression present" left no structured trace. `--report` writes one small file per run:

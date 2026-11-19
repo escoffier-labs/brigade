@@ -9,7 +9,7 @@ import subprocess
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
-from .. import dogfood_cmd, localio
+from .. import dogfood_cmd, git_status_snapshot, localio
 from ..selection import Selection
 from . import constants
 
@@ -143,12 +143,14 @@ def _git_snapshot(target: Path) -> dict[str, Any]:
     if branch is None:
         branch = _git_value(target, "rev-parse", "--short", "HEAD") or "unknown"
         branch = f"detached:{branch}"
-    status_out = _git_value(target, "status", "--short") or ""
+    # NUL-separated porcelain, so quoting and renames cannot misread it. A failed status records no
+    # ``status_format``, which the dirty-subject check reads as dirty, never clean.
+    status = git_status_snapshot.snapshot(target, untracked_all=False, timeout=30) or {"dirty_files": []}
     return {
         "available": True,
         "repo": repo_root,
         "branch": branch,
-        "dirty_files": status_out.splitlines(),
+        **status,
     }
 
 
