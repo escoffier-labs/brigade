@@ -483,6 +483,73 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Path to a brigade.work-run archive directory.",
     )
     p_runs_validate_archive.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_runs_tasks = runs_sub.add_parser(
+        "tasks",
+        help="Read per-task status and results, or wait for tasks to become terminal.",
+    )
+    tasks_sub = p_runs_tasks.add_subparsers(dest="tasks_command", metavar="<tasks-command>")
+    tasks_sub.required = True
+    p_tasks_list = tasks_sub.add_parser("list", help="List durable task status rows for one run.")
+    p_tasks_list.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_list.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_tasks_list.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_tasks_list.add_argument("--json", action="store_true", help="Emit the brigade.runs_tasks.v1 JSON contract.")
+    p_tasks_show = tasks_sub.add_parser("show", help="Show one durable task row and its result reference.")
+    p_tasks_show.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_show.add_argument("task_id", help="Accepted task id to show.")
+    p_tasks_show.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_tasks_show.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_tasks_show.add_argument("--json", action="store_true", help="Emit the brigade.runs_tasks.v1 JSON contract.")
+    p_tasks_wait = tasks_sub.add_parser(
+        "wait",
+        help=(
+            "Wait for named tasks (default all) to be terminal. "
+            "Exit 0 when terminal, 3 on timeout. A timeout never cancels execution."
+        ),
+    )
+    p_tasks_wait.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_wait.add_argument(
+        "task_ids", nargs="*", metavar="task_id", help="Task ids to wait for. Default: every accepted task."
+    )
+    p_tasks_wait.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Maximum seconds to wait. Default: wait until terminal.",
+    )
+    p_tasks_wait.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_tasks_wait.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_tasks_wait.add_argument("--json", action="store_true", help="Emit the brigade.runs_tasks.v1 JSON contract.")
     p_runs.set_defaults(func=dispatch)
 
 
@@ -658,6 +725,10 @@ def dispatch(args) -> int:
             apply=args.apply,
             json_output=args.json,
         )
+    if args.runs_command == "tasks":
+        from .. import runs_cmd_tasks
+
+        return runs_cmd_tasks.dispatch(args, cwd=args.cwd, runs_dir=args.runs_dir)
     if args.runs_command == "validate-archive":
         from .. import work_run_archive
 

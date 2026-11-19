@@ -67,9 +67,32 @@ transport passes both to the appserver runner, so a batch turn registers under
 `("task", task_id, attempt_id)`. `brigade runs interrupt --task-id` then reaches
 one of two same-seat tasks, and a worker-name request for that seat reports
 `ambiguous-target` with the task IDs. Direct CLI workers have no per-task
-control path yet: the process registry still cancels as a whole. Durable
-results, parent delivery, wait semantics, T3 children, and cancellation
-containment remain integration work under #2046/#2049.
+control path yet: the process registry still cancels as a whole. Parent
+delivery, T3 children, and cancellation containment remain integration work
+under #2046/#2049.
+
+
+## Reading task status and results
+
+`brigade runs tasks list <run> [--json]` prints one row per accepted task: task
+id, status, attempt id, whether the status is terminal, whether its result was
+acknowledged, containment, result id, and artifact classification and digest.
+`brigade runs tasks show <run> <task_id> [--json]` prints the same fields for
+one task and, when the batch result receipt exists, its run-relative path and
+SHA-256 digest. Neither command prints task text, prompt text, receipt bodies,
+or worker output. An unknown task exits 2 with code `unknown-task` and at most
+10 sorted known task ids. A missing task journal exits 2 with code
+`no-task-journal`.
+
+`brigade runs tasks wait <run> [<task_id>...] [--timeout SECONDS] [--json]`
+polls the journal at a bounded interval until every named task (default all) is
+terminal. It exits 0 when all are terminal and 3 on timeout with the
+non-terminal ids listed. `waiting-for-children`, `waiting-for-input` and
+`unknown` are not terminal. A timeout records nothing and never cancels or
+changes execution. JSON output uses `brigade.runs_tasks.v1`.
+
+Task status is read-only: the verbs append no journal facts and take no write
+lock.
 
 
 ## Durable task control requests
