@@ -412,13 +412,19 @@ def _line_at(text: str, start: int, end: int) -> str:
 
 # An f-string opening quote with no other quote between it and the field.
 _FSTRING_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*$""")
-# A second, deliberately small grammar admits completed earlier fields with a
-# quoted subscript key (#1983). Quotes remain forbidden in literal text, and
-# fields must close before the candidate host's field starts. Unsupported
-# expressions keep the existing hostname detection rather than guessing.
+# A second, deliberately small grammar admits completed earlier fields with
+# quoted arguments, chained subscripts and a call (#1983). Quotes remain
+# forbidden in literal text, and fields must close before the candidate host's
+# field starts. Unsupported expressions keep the existing hostname detection.
+_FSTRING_ARG = (
+    r"""(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*|[0-9]+|"""
+    r"""'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*")"""
+)
 _FSTRING_EARLIER_FIELD = (
     r"\{\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-    r"""(?:\[\s*(?:'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*")\s*\])?\s*\}"""
+    r"(?:\[\s*" + _FSTRING_ARG + r"\s*\])*"
+    r"(?:\(\s*(?:" + _FSTRING_ARG + r"(?:\s*,\s*" + _FSTRING_ARG + r")*)?\s*\))?"
+    r"\s*\}"
 )
 _FSTRING_QUOTED_FIELD_OPEN = re.compile(
     r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')"""
@@ -460,6 +466,50 @@ def _whole_fstring_field(before: str, after: str) -> bool:
     if stem.lstrip().startswith(_LINE_START_COMMENT_PREFIXES) or _quote_at(stem, match.start(), None) is not None:
         return False
     return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
+
+
+# The last single '{' whose text to the end has no brace: an open field. A
+# doubled '{{' is literal text and never opens one.
+_FSTRING_OPEN_FIELD = re.compile(r"\{(?!\{)[^{}]*$")
+# A nested formatted literal opened inside the field just before the host.
+_FSTRING_NESTED_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*\{$""")
+
+
+def _fstring_expression_host(before: str) -> bool:
+    """Whether a host begins a bare sub-expression inside an f-string field.
+
+    Call arguments, subscripts, boolean operands and nested f-string fields put
+    the host in code. A quote opened inside the field, a closed field, a format
+    spec, URL text or a prose position keeps the existing hostname detection.
+    """
+    stem = before.rstrip()
+    nested = _FSTRING_NESTED_OPEN.search(stem)
+    if nested is not None:
+        outer = stem[: nested.start()]
+        braces = len(outer) - len(outer.rstrip("{"))
+        if braces % 2 == 0:
+            return False
+        outer = outer[:-1]
+        opener = _FSTRING_OPEN.search(outer) or _FSTRING_QUOTED_FIELD_OPEN.search(outer)
+        if opener is None or not _FSTRING_POSITION.search(outer[: opener.start()]):
+            return False
+        if _quote_at(outer, opener.start(), None) is not None:
+            return False
+        return _quote_at(outer, len(outer), None) is not None
+    match = _FSTRING_OPEN_FIELD.search(stem)
+    if match is None:
+        return False
+    code = stem[match.start() + 1 :]
+    # A format spec or a URL in the field text is not an expression operand.
+    if not code or "://" in code or code.rstrip().endswith(":") or _quote_at(code, len(code), None) is not None:
+        return False
+    prefix = stem[: match.start()]
+    opener = _FSTRING_OPEN.search(prefix) or _FSTRING_QUOTED_FIELD_OPEN.search(prefix)
+    if opener is None or not _FSTRING_POSITION.search(prefix[: opener.start()]):
+        return False
+    if _quote_at(prefix, opener.start(), None) is not None:
+        return False
+    return _quote_at(prefix, len(prefix), None) is not None
 
 
 _JS_WORD = re.compile(r"[A-Za-z_$][\w$]*")
@@ -1148,6 +1198,8 @@ def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | Non
         # A replacement field holding only the host is an expression even in a
         # formatted URL (#1918). Any other URL context keeps matching.
         if _whole_fstring_field(before, after):
+            return False
+        if _fstring_expression_host(before):
             return False
         if js_fields is not None:
             return not (start in js_fields and bool(re.match(r"\s*\}", after)))

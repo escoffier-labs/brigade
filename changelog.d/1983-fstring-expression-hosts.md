@@ -1,0 +1,3 @@
+- Stop the content guard from reporting a private hostname as a literal host when it sits as bare code inside a same-line f-string replacement field: a nested f-string field, a call argument, a subscript or a boolean operand (#1983).
+- Keep literal hostnames reported on the same line, including quoted operands, quoted subscript keys and format specs, and keep the existing whole-field detection intact.
+- Recognize completed earlier fields with a call or chained subscripts so a later whole-host field is still treated as code.
