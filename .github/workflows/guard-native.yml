@@ -65,6 +65,9 @@ jobs:
         run: TMPDIR=$(mktemp -d -p /tmp) brigade work verify run --target . --argv-json '["./scripts/verify-rust-guard"]' --capture brigade-work
       - name: Python parity both ways and all guard tests with native enabled
         run: TMPDIR=$(mktemp -d -p /tmp) brigade work verify run --target . --argv-json '["./scripts/verify-guard-native"]' --timeout 1800 --capture brigade-work
+      - name: TEMP diagnostic, remove before merge
+        if: failure()
+        run: tail -n 150 .brigade/work/verify-runs/*/command-1-stdout.log .brigade/work/verify-runs/*/command-1-stderr.log
       # Smoke only: proves the benchmark builds and runs on tiny inputs and
       # that the three backends agree. The cap catches a hang. No timing
       # threshold gates the job, because shared runners are too noisy for one.
