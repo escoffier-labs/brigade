@@ -23,15 +23,12 @@ from brigade.memory_retrieval_eval.metrics import (
 from brigade.card_identity import valid_card_id
 from brigade.memory_retrieval_eval.projection import (
     CATEGORIES,
-    LIFECYCLE_STATES,
     PROJECTION_SCHEMA,
     SCOPE_DIMENSIONS,
     adapter_projection_violation,
     build_projection_section,
     content_hash,
-    evaluate_scenario,
     external_contract_fields,
-    lifecycle_visible_state,
     load_manifest,
     load_projection_fixture_cards,
     load_scenarios,
@@ -455,88 +452,6 @@ def test_adapter_projection_violation_detects_trusted_path_leak():
         assert adapter_projection_violation(scenario, search=search)
 
 
-def test_manifest_maps_each_proposal_lifecycle_state_to_existing_scenarios():
-    """#1856: accepted, rejected, stale, contradictory, cross-scope and rolled-back are all covered."""
-    mapping = load_manifest()["proposal_lifecycle_states"]
-    assert tuple(mapping) == LIFECYCLE_STATES
-    by_id = {scenario.scenario_id: scenario for scenario in load_scenarios()}
-    expected_category = {
-        "proposal-accepted-after-state-only": "proposal_lifecycle",
-        "proposal-rejected-before-state-stays": "proposal_lifecycle",
-        "proposal-stale-base-moved": "proposal_lifecycle",
-        "proposal-rolled-back-restores-before": "proposal_lifecycle",
-        "stale-prior-snapshot": "stale_partial_scan",
-        "superseded-contradicted-body": "superseded_leakage",
-        "scope-cross-namespace": "scope_leakage",
-    }
-    for state, ids in mapping.items():
-        assert ids, state
-        for scenario_id in ids:
-            assert scenario_id in by_id, f"{state} maps to missing scenario {scenario_id}"
-            assert by_id[scenario_id].category == expected_category[scenario_id]
-    for scenario in by_id.values():
-        if scenario.category == "proposal_lifecycle":
-            assert scenario.payload["state"] in mapping
-            assert scenario.scenario_id in mapping[scenario.payload["state"]]
-
-
-def test_superseded_leakage_scenarios_still_pass():
-    scenarios = [s for s in load_scenarios() if s.category == "superseded_leakage"]
-    assert {s.scenario_id for s in scenarios} >= {"superseded-no-conflict", "superseded-contradicted-body"}
-    assert [evaluate_scenario(s) for s in scenarios] == [None] * len(scenarios)
-    section = build_projection_section(adapter="fixture-reference")
-    assert section["by_category"]["superseded_leakage"]["failed"] == 0
-    assert section["by_category"]["proposal_lifecycle"]["scenario_count"] == 4
-    assert section["coverage"]["proposal_lifecycle"] == 4
-
-
-@pytest.mark.parametrize(
-    "proposal,state,visible",
-    [
-        ({"decision": "applied", "base_moved": False, "reverted": False}, "accepted", "proposed"),
-        ({"decision": "rejected", "base_moved": False, "reverted": False}, "rejected", "before"),
-        ({"decision": "pending", "base_moved": True, "reverted": False}, "stale", "before"),
-        ({"decision": "applied", "base_moved": False, "reverted": True}, "rolled_back", "before"),
-    ],
-)
-def test_lifecycle_rule_only_applied_current_proposals_change_search(proposal, state, visible):
-    assert lifecycle_visible_state(proposal) == visible
-    # A stale base wins even over an applied decision: the proposed text must never surface.
-    assert lifecycle_visible_state({**proposal, "decision": "applied", "base_moved": True}) == "before"
-
-
-def test_lifecycle_fixture_cards_return_visible_text_and_hide_the_rest_through_search():
-    cards = load_projection_fixture_cards()
-    search = grep_adapter(cards)
-    scenarios = [s for s in load_scenarios() if s.category == "proposal_lifecycle"]
-    assert {s.payload["state"] for s in scenarios} == {"accepted", "rejected", "stale", "rolled_back"}
-    for scenario in scenarios:
-        card_id = scenario.payload["card_id"]
-        assert card_id in [cid for cid, _ in search(scenario.payload["query"], 20)], scenario.scenario_id
-        assert card_id not in [cid for cid, _ in search(scenario.payload["forbidden_query"], 20)], scenario.scenario_id
-        assert adapter_projection_violation(scenario, search=search) is None
-
-
-def test_lifecycle_adapter_violation_flags_a_leaking_or_missing_card():
-    scenario = next(s for s in load_scenarios() if s.scenario_id == "proposal-rejected-before-state-stays")
-    card_id = scenario.payload["card_id"]
-    leaks = adapter_projection_violation(scenario, search=lambda query, limit: [(card_id, 1.0)])
-    assert leaks and "must hide" in leaks
-    misses = adapter_projection_violation(scenario, search=lambda query, limit: [])
-    assert misses and "missing" in misses
-
-
-def test_lifecycle_fixture_rejects_a_state_that_contradicts_its_proposal_fields():
-    scenario = next(s for s in load_scenarios() if s.scenario_id == "proposal-accepted-after-state-only")
-    broken = type(scenario)(
-        scenario_id=scenario.scenario_id,
-        category=scenario.category,
-        scope_annotation=scenario.scope_annotation,
-        payload={**scenario.payload, "proposal": {"decision": "rejected", "base_moved": False, "reverted": False}},
-    )
-    assert "describe state 'rejected'" in (evaluate_scenario(broken) or "")
-
-
 def test_build_projection_section_fixture_reference_passes_without_search():
     section = build_projection_section(adapter="fixture-reference")
     assert section["summary"]["failed"] == 0
@@ -656,6 +571,14 @@ def _rebaseline(search, before):
 @pytest.mark.skipif(not SAFE_DIRECTORY_CAPABILITY, reason="safe directory descriptors unavailable")
 @pytest.mark.parametrize("workflow", ["accepted", "rejected", "stale", "contradictory", "cross-scope"])
 def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
+    """#845 / #1856 lifecycle coverage through real proposal and search code.
+
+    Drives `memory_proposals` create, review, reject and apply plus `current_adapter` search for the
+    accepted, rejected, stale, contradictory and cross-scope states. Rolled-back has no local path
+    (rollback lives in the hub), so its search proof is the hub test
+    `search_follows_apply_then_rollback_and_never_returns_reverted_text` in
+    engines/hub/src/memory/proposal_tests.rs.
+    """
     from brigade import memory_proposals as api
     from brigade.card_identity import IdentityIndex, card_identity
     from brigade.memory_cmd import _parse_frontmatter

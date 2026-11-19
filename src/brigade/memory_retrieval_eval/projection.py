@@ -11,6 +11,7 @@ import hashlib
 import json
 import shutil
 import statistics
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -31,11 +32,8 @@ CATEGORIES = (
     "scope_leakage",
     "provenance_completeness",
     "instruction_like_trusted_path",
-    "proposal_lifecycle",
     "cost",
 )
-# Proposal states #1856 requires fixtures for. The manifest maps each to the scenarios that cover it.
-LIFECYCLE_STATES = ("accepted", "rejected", "stale", "contradictory", "cross_scope", "rolled_back")
 IDENTITY_OPERATIONS = ("create", "edit", "rename", "move", "removal")
 
 EXPLANATION_495_REASON = "selection explanation contract owned by #495"
@@ -360,54 +358,6 @@ def _evaluate_provenance(scenario: ProjectionScenario) -> str | None:
     return None
 
 
-def lifecycle_visible_state(proposal: Mapping[str, Any]) -> str:
-    """Which card text search may return after a proposal: ``proposed`` or ``before``.
-
-    Only an applied proposal that is still current and not reverted changes what
-    search returns. Rejected, pending, stale (base moved) and rolled-back
-    proposals leave the before text searchable and never surface the proposed text.
-    """
-    if proposal.get("base_moved") or proposal.get("reverted"):
-        return "before"
-    return "proposed" if proposal.get("decision") == "applied" else "before"
-
-
-def _lifecycle_state_of(proposal: Mapping[str, Any]) -> str | None:
-    if proposal.get("base_moved"):
-        return "stale"
-    if proposal.get("decision") == "applied":
-        return "rolled_back" if proposal.get("reverted") else "accepted"
-    if proposal.get("decision") == "rejected":
-        return "rejected"
-    return None
-
-
-def _evaluate_proposal_lifecycle(scenario: ProjectionScenario) -> str | None:
-    expected = scenario.payload.get("expected") or {}
-    proposal = scenario.payload.get("proposal") or {}
-    markers = scenario.payload.get("markers") or {}
-    state = str(scenario.payload.get("state") or "")
-    if state not in LIFECYCLE_STATES:
-        return f"unknown lifecycle state {state!r}"
-    derived = _lifecycle_state_of(proposal)
-    if derived != state:
-        return f"proposal fields describe state {derived!r}, scenario declares {state!r}"
-    before, proposed = markers.get("before"), markers.get("proposed")
-    if not isinstance(before, str) or not isinstance(proposed, str) or not before or not proposed or before == proposed:
-        return "markers must name distinct before and proposed text"
-    visible = lifecycle_visible_state(proposal)
-    if expected.get("visible_state") != visible:
-        return f"expected visible state {expected.get('visible_state')!r}, lifecycle rule gives {visible!r}"
-    shown, hidden = (before, proposed) if visible == "before" else (proposed, before)
-    if scenario.payload.get("query") != shown:
-        return "query must search the visible marker"
-    if scenario.payload.get("forbidden_query") != hidden:
-        return "forbidden_query must search the hidden marker"
-    if not scenario.payload.get("card_id"):
-        return "lifecycle scenario missing card_id"
-    return None
-
-
 def _trusted_path_exclusions() -> set[str]:
     return {"proj-card-quarantined", "proj-card-injection-pending"}
 
@@ -433,8 +383,6 @@ def evaluate_scenario(
         return _evaluate_provenance(scenario)
     if category == "instruction_like_trusted_path":
         return _evaluate_instruction_fixture(scenario)
-    if category == "proposal_lifecycle":
-        return _evaluate_proposal_lifecycle(scenario)
     if category == "cost":
         return _evaluate_cost(scenario.payload.get("expected") or {}, cost_observed or {})
     return f"unknown category {category!r}"
@@ -455,8 +403,6 @@ def adapter_projection_violation(
     search: Callable[[str, int], list[tuple[str, float]]],
 ) -> str | None:
     """Return a violation when a lexical adapter leaks projection-sensitive content."""
-    if scenario.category == "proposal_lifecycle":
-        return _lifecycle_adapter_violation(scenario, search=search)
     if scenario.category != "instruction_like_trusted_path":
         return None
     expected = scenario.payload.get("expected") or {}
@@ -467,22 +413,6 @@ def adapter_projection_violation(
     ranked = [cid for cid, _ in search(query, 20)]
     if card_id in ranked:
         return f"quarantined/injection-pending card {card_id!r} appeared in trusted-path search"
-    return None
-
-
-def _lifecycle_adapter_violation(
-    scenario: ProjectionScenario,
-    *,
-    search: Callable[[str, int], list[tuple[str, float]]],
-) -> str | None:
-    """The fixture card holds the post-lifecycle text: its visible marker must hit, its hidden one must not."""
-    card_id = str(scenario.payload.get("card_id") or "")
-    shown = [cid for cid, _ in search(str(scenario.payload.get("query") or ""), 20)]
-    if card_id not in shown:
-        return f"lifecycle card {card_id!r} missing from search for its visible text"
-    leaked = [cid for cid, _ in search(str(scenario.payload.get("forbidden_query") or ""), 20)]
-    if card_id in leaked:
-        return f"lifecycle card {card_id!r} surfaced text a {scenario.payload.get('state')} proposal must hide"
     return None
 
 
@@ -643,20 +573,16 @@ def load_projection_fixture_cards(projection_root: Path | None = None) -> list[C
     cards_dir = root / "cards"
     if not cards_dir.is_dir():
         return []
-    temp_root = root / ".eval-projection-cards"
-    target_cards = temp_root / "memory" / "cards"
-    if temp_root.exists():
-        shutil.rmtree(temp_root)
-    target_cards.mkdir(parents=True)
-    for path in sorted(cards_dir.glob("*.md")):
-        shutil.copy2(path, target_cards / path.name)
-    try:
-        from .corpus import load_cards
+    from .corpus import load_cards
 
+    # A private temp dir per call: a fixed in-repo directory raced under concurrent loaders.
+    with tempfile.TemporaryDirectory(prefix="eval-projection-cards-") as temp_dir:
+        temp_root = Path(temp_dir)
+        target_cards = temp_root / "memory" / "cards"
+        target_cards.mkdir(parents=True)
+        for path in sorted(cards_dir.glob("*.md")):
+            shutil.copy2(path, target_cards / path.name)
         return load_cards(temp_root)
-    finally:
-        if temp_root.exists():
-            shutil.rmtree(temp_root)
 
 
 def projection_fixture_card_ids(projection_root: Path | None = None) -> list[str]:

@@ -10,17 +10,8 @@
     "scope_leakage",
     "provenance_completeness",
     "instruction_like_trusted_path",
-    "proposal_lifecycle",
     "cost"
   ],
   "scope_dimensions": ["repository", "task", "operator", "branch", "worktree"],
-  "identity_operations": ["create", "edit", "rename", "move", "removal"],
-  "proposal_lifecycle_states": {
-    "accepted": ["proposal-accepted-after-state-only"],
-    "rejected": ["proposal-rejected-before-state-stays"],
-    "stale": ["proposal-stale-base-moved", "stale-prior-snapshot"],
-    "contradictory": ["superseded-contradicted-body"],
-    "cross_scope": ["scope-cross-namespace"],
-    "rolled_back": ["proposal-rolled-back-restores-before"]
-  }
+  "identity_operations": ["create", "edit", "rename", "move", "removal"]
 }

@@ -71,6 +71,69 @@ async fn proposal_requires_decision_then_replays_and_rollback_requires_another_d
     assert_eq!(current["trust"], before["trust"]);
     assert_ne!(current["revision"], before["revision"]);
 }
+/// `(card_id, revision)` for every hub `search` match, after the index has caught up to the log.
+async fn search_hits(h: &Hub, query: &str) -> Vec<(String, i64)> {
+    let reply = h
+        .call(
+            ADMIN_TOKEN,
+            json!({"action":"search","query":query,"limit":20,"min_seq":h.events()}),
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{reply:?}");
+    reply.body["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["card_id"].as_str().unwrap().to_string(),
+                m["revision"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+/// #1856 / #845 rolled-back lifecycle state, through the real propose, decide, rollback and search path.
+/// The Python `test_reviewed_proposal_actual_current_retrieval` covers accepted, rejected, stale,
+/// contradictory and cross-scope; rollback only exists in the hub, so its retrieval proof lives here.
+/// An applied replace appends a "previously <before>, now <after>" note, so the before words stay
+/// searchable while the proposal is applied. The proof of the applied state is therefore the new
+/// words plus the revision search reports; the proof of rollback is that the new words disappear.
+#[tokio::test]
+async fn search_follows_apply_then_rollback_and_never_returns_reverted_text() {
+    let h = Hub::with(clean(), None);
+    let a = h.put(ADMIN_TOKEN, "fleet", "a", None, OLD).await;
+    let original = rev(&a);
+    // Baseline: the before text is searchable and the proposed text is not.
+    assert_eq!(search_hits(&h, "focused").await, [("a".into(), original)]);
+    assert!(search_hits(&h, "scoped").await.is_empty());
+
+    let opened = submit(&h, ADMIN_TOKEN, vec![op("fleet", "a", original)]).await;
+    assert_eq!(opened.status, 201, "{opened:?}");
+    // A pending proposal changes nothing search can see.
+    assert_eq!(search_hits(&h, "focused").await, [("a".into(), original)]);
+    assert!(search_hits(&h, "scoped").await.is_empty());
+
+    let applied = decide(&h, ADMIN_TOKEN, &opened.body["proposal_id"]).await;
+    assert_eq!(applied.body["state"], "applied", "{applied:?}");
+    let live = card(&h, "fleet", "a").await["revision"].as_i64().unwrap();
+    assert_ne!(live, original);
+    // After apply, search finds the proposed text, at the new revision only.
+    assert_eq!(search_hits(&h, "scoped").await, [("a".into(), live)]);
+    assert_eq!(search_hits(&h, "focused").await, [("a".into(), live)]);
+
+    let rollback = h.call(ADMIN_TOKEN,json!({"action":"rollback","proposal_id":opened.body["proposal_id"],"base_epoch":h.epoch().await,"client_event_id":h.id()})).await;
+    assert_eq!(rollback.status, 201, "{rollback:?}");
+    // A filed but undecided rollback is not a rollback yet: the applied text is still current.
+    assert_eq!(search_hits(&h, "scoped").await, [("a".into(), live)]);
+
+    let restored = decide(&h, ADMIN_TOKEN, &rollback.body["proposal_id"]).await;
+    assert_eq!(restored.body["state"], "applied", "{restored:?}");
+    let reverted = card(&h, "fleet", "a").await["revision"].as_i64().unwrap();
+    assert_ne!(reverted, live);
+    // After the rollback applies, the before text is found at the restored revision and the reverted text is gone.
+    assert_eq!(search_hits(&h, "focused").await, [("a".into(), reverted)]);
+    assert!(search_hits(&h, "scoped").await.is_empty());
+}
 #[tokio::test]
 async fn invalid_op_refuses_whole_submission_with_indexed_reasons_and_no_storage() {
     let h = Hub::with(clean(), None);

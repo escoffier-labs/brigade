@@ -291,16 +291,26 @@ def test_reflect_propose_retains_run_candidate_and_uses_existing_decisions(tmp_p
 @pytest.mark.parametrize(
     "owner,harnesses,inbox",
     [
-        # An owner outside the writer set (OpenClaw owns memory) routes to the first configured writer.
+        # An owner outside the writer set routes the notice to the first configured writer's inbox.
         ("openclaw", ["openclaw", "codex"], ".codex/memory-handoffs"),
-        # A handoff-only host whose owner is itself a writer harness keeps the notification in its own inbox.
+        # An owner that is itself a writer harness keeps the notice in its own inbox.
         ("claude", ["claude", "codex"], ".claude/memory-handoffs"),
     ],
-    ids=["external-owner", "handoff-only-writer-owner"],
+    ids=["non-writer-owner-routes-to-writer-inbox", "writer-owner-uses-own-inbox"],
 )
-def test_reflect_propose_under_external_or_handoff_only_owner_writes_handoff_and_never_applies(
+def test_reflect_propose_routes_handoff_notice_by_owner_and_leaves_cards_untouched(
     tmp_path, capsys, owner, harnesses, inbox
 ):
+    """Which inbox gets the proposal's handoff notice, and that proposing never edits a card.
+
+    This is local routing only: a non-writer owner sends the notice to the first writer harness's
+    inbox, a writer-owned host keeps it in its own. The owner is not what stops an apply here.
+    #1856 item 8 (an external or handoff-only owner never applies) is covered in the hub by
+    `attestation_tests.rs` (each_auto_apply_gate_independently_holds_without_card_or_vector_changes,
+    the "owner" and "handoff" cases, around lines 301-329), `verify_eval_tests.rs`
+    (owner_kill_policy_class_and_snapshot_rechecked_at_apply, "external" and "handoff-only", around
+    lines 476-503) and the `owner_not_hub` hold in `preflight.rs`.
+    """
     from brigade import config
     from brigade.selection import Selection
     from tests.test_memory_reflect import snapshot
