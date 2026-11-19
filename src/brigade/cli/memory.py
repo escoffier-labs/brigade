@@ -172,6 +172,18 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Print the queue that would be marked reviewed or deferred, grouped by issue kind, without writing.",
     )
     p_memory_care_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_care_clear_recorder = memory_care_sub.add_parser(
+        "clear-read-recorder",
+        help="Clear the root read-recorder sentinel after confirming the recording gap.",
+    )
+    p_memory_care_clear_recorder.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
+    )
+    p_memory_care_clear_recorder.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required. Confirm recording may resume for this workspace. A TTY also prompts y/N.",
+    )
     p_memory_topology = memory_sub.add_parser(
         "topology",
         help="Read-only ownership and harness-to-canonical flow graph for local memory.",
@@ -661,6 +673,10 @@ def dispatch(args) -> int:
                 dry_run=args.dry_run,
                 json_output=args.json,
             )
+        if args.memory_care_command == "clear-read-recorder":
+            from .. import memory_read_recorder_cmd
+
+            return memory_read_recorder_cmd.clear(target=args.target, confirm=args.confirm)
         args._brigade_parser.error(f"unknown memory care command: {args.memory_care_command}")
         return 2
     if args.memory_command == "anchor":

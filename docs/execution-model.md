@@ -102,14 +102,15 @@ evaluation, one-card blast cap (one merge pair counts as one card), 24-hour
 cooldown, card heads, pins, trust, scans and the admin kill switch in one
 transaction.
 
-On a real scope, the retrieval evaluation holds every automatic reflection
-apply. It admits only all-`append_evidence` Tier 0 proposals and then requires
-each target card's search projection to stay unchanged. Any applied edit
-changes it, including an evidence append, so reflection's Tier 0 applies happen
-only on the evaluation fixture scope. An exact-duplicate merge is the one
-exception, and a merge of trusted cards now applies on a real scope with no
-reviewer once every merge gate rule holds. The retrieval gate admits it under
-bounded drift: the retired card must be newer than the keeper by its content
+On a real scope a recorded evaluation report never grants permission. The
+retrieval gate instead recomputes each target's ranking projection from the
+live cards and can only hold. An evidence append leaves that projection
+unchanged, so the gate does not hold it. The scheduled reflect job opens no
+evidence-append proposals, though, so no automatic evidence apply ships from it.
+An exact-duplicate merge cannot keep a projection, because retiring a card
+shifts scope statistics. A merge of trusted cards applies on a real scope with
+no reviewer once every merge gate rule holds. The gate admits it under bounded
+drift: the retired card must be newer than the keeper by its content
 history, no live card may link to a retired id in any case or spacing, a keeper
 retires at most eight cards, the keeper's after text must be the exact merge of
 the live cards, and search must keep every token and literal the retired card
@@ -142,6 +143,38 @@ applies and automatic compensations take their own gates instead.
 External and handoff-only curation
 policies never pass the ownership gate. Local repository candidates stay
 proposal-only because their authority contracts are unbound.
+
+These cases still wait for a person or hold, with the code named where one
+exists:
+
+- Cross-writer exact merges (`retrieval_eval_merge_cross_writer`, or
+  `retrieval_eval_writer_changed` when the cards are `agent-unreviewed`).
+- Near-duplicate supersedes and link repairs, which are Tier 2.
+- Model-backed corrections, which need an admin `go` record.
+- Anchoring. The reflect job proposes anchors, but the fleet policy writer
+  rejects `anchor_blocks`, so none applies automatically.
+- A reflection apply on a scope over 2,000 live cards or 16 MiB, or with more
+  than 500 judged retrieval uses in the history window. The retrieval-history
+  check cannot run there, and it holds the apply with
+  `retrieval_eval_history_unavailable`. Verifier applies and compensations do
+  not take this check. A
+  scope with no judged history skips the replay but not the size bound.
+- A local repository with no hub, which stays proposal-only.
+
+Two operating limits show up in the output. The hub budgets diagnostics and
+the writer lock at 1000 ms each by default (`diagnostic_ms`, `lock_ms`). Five
+proposal commands are budgeted: `auto_apply`, `verify_auto_apply`, `propose`,
+`compensation_watch` and `rollback`. When any of them from a principal is
+refused with `memory_auto_apply_budget_exceeded`, that principal waits out a
+60 s cooldown (`auto_proposal_ms`), and its budgeted commands get 429
+`memory_auto_apply_cooldown` until it ends. Operators can change all three
+values under `memory.proposal_limits`. A reflect job whose principal is not in
+`reflect_principals` skips a merge it would otherwise open on a scope where a
+listed principal also reflects, and reports it as `reserved_automatic`. The
+listed principal's job proposes the merge, and applies it automatically only
+when that principal wrote both cards and every gate passes. Otherwise it waits
+for a reviewer. `status` carries the
+`memory_policy.reserved_scopes` list the job reads for this.
 
 `memory reflect auto-apply off --target .` sets the workspace policy to false.
 An in-flight run reads it before its next candidate. `memory reflect

@@ -137,9 +137,8 @@ def _unknown(task_id: str, known: Iterable[str]) -> int:
     return _fail("unknown-task", detail)
 
 
-def _result_sidecar(run_dir: Path, task_id: str) -> tuple[str | None, str | None]:
-    """The batch result receipt reference and digest, when that file exists."""
-    name = f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
+def _sidecar(run_dir: Path, name: str) -> tuple[str | None, str | None]:
+    """A receipt sidecar's reference and digest, when that regular file exists."""
     path = run_dir / name
     digest = hashlib.sha256()
     try:
@@ -164,6 +163,16 @@ def _result_sidecar(run_dir: Path, task_id: str) -> tuple[str | None, str | None
     return name, digest.hexdigest()
 
 
+def _result_sidecar(run_dir: Path, task_id: str) -> tuple[str | None, str | None]:
+    """The batch result receipt reference and digest, when that file exists."""
+    return _sidecar(run_dir, f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json")
+
+
+def _artifact_sidecar(run_dir: Path, task_id: str) -> tuple[str | None, str | None]:
+    """The batch task artifact reference and digest, when that file exists."""
+    return _sidecar(run_dir, f"batch-artifact-{hashlib.sha256(task_id.encode()).hexdigest()}.json")
+
+
 def _cell(row: TaskRow, field: str, width: int) -> str:
     value = getattr(row, field)
     if isinstance(value, bool):
@@ -182,7 +191,13 @@ def _print_table(rows: Sequence[TaskRow]) -> None:
         print("  ".join(_cell(row, field, width).ljust(width) for _label, field, width in _COLUMNS))
 
 
-def _print_detail(row: TaskRow, result_ref: str | None, result_sha256: str | None) -> None:
+def _print_detail(
+    row: TaskRow,
+    result_ref: str | None,
+    result_sha256: str | None,
+    artifact_ref: str | None,
+    artifact_sha256: str | None,
+) -> None:
     for field in (
         "task_id",
         "status",
@@ -198,6 +213,8 @@ def _print_detail(row: TaskRow, result_ref: str | None, result_sha256: str | Non
         print(f"{field}: {cell}")
     print(f"result_ref: {result_ref if result_ref is not None else '-'}")
     print(f"result_sha256: {result_sha256 if result_sha256 is not None else '-'}")
+    print(f"artifact_ref: {artifact_ref if artifact_ref is not None else '-'}")
+    print(f"artifact_sha256: {artifact_sha256 if artifact_sha256 is not None else '-'}")
 
 
 def _wait_payload(
@@ -264,16 +281,23 @@ def show_task(
         return _unknown(task_id, by_id)
     row = _row(by_id[task_id])
     result_ref, result_sha256 = _result_sidecar(run_dir, task_id)
+    artifact_ref, artifact_sha256 = _artifact_sidecar(run_dir, task_id)
     if json_output:
         _emit(
             {
                 "schema": RUN_TASKS_SCHEMA,
                 "run_id": run_dir.name,
-                "task": {**row.to_dict(), "result_ref": result_ref, "result_sha256": result_sha256},
+                "task": {
+                    **row.to_dict(),
+                    "result_ref": result_ref,
+                    "result_sha256": result_sha256,
+                    "artifact_ref": artifact_ref,
+                    "artifact_sha256": artifact_sha256,
+                },
             }
         )
     else:
-        _print_detail(row, result_ref, result_sha256)
+        _print_detail(row, result_ref, result_sha256, artifact_ref, artifact_sha256)
     return 0
 
 

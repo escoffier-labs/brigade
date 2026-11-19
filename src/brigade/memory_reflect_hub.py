@@ -39,6 +39,10 @@ REPLICA_FILE_SLACK = 1024 * 1024
 # Hub quota refusals end proposing for this run without counting as a failure.
 QUOTA_REFUSALS = hubc.QUOTA_REFUSALS
 DUPLICATE_PENDING = "memory_proposal_duplicate_pending"
+# Pending slots the hub keeps free for anchoring repairs. The client checks this
+# as a shortcut; the hub enforces it inside admission.
+ANCHOR_RESERVE_SLOTS = 4
+ANCHOR_RESERVE = hubc.ANCHOR_RESERVE_REFUSALS
 # Fair scheduling lanes. Keys are 128-bit digests of a scope and card ids, never card text.
 CLUSTER_KEY = re.compile(r"[0-9a-f]{32}")
 NEAR_LANE = "near_clusters"
@@ -351,10 +355,11 @@ def _ops(heads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, i
 
 
 # Outcomes of one `submit`.
-OPENED, DUPLICATE, QUOTA, FAILED, DENIED, UNAVAILABLE = (
+OPENED, DUPLICATE, QUOTA, RESERVED, FAILED, DENIED, UNAVAILABLE = (
     "opened",
     "duplicate",
     "quota",
+    "reserved",
     "failed",
     "denied",
     "unavailable",
@@ -388,8 +393,9 @@ def submit(
     `ledger[digest]` holds the request id, published through `save` before the
     call so a lost response replays the same request, then the proposal id or
     the final refusal code. An expired or conflicting id is re-minted once.
-    Quota refusals and hub unavailability are outcomes, not exceptions, and a
-    duplicate pending proposal records the existing id. With `provenance`, the
+    Quota refusals, a full anchoring repair reserve and hub unavailability are
+    outcomes, not exceptions, and a duplicate pending proposal records the
+    existing id. With `provenance`, the
     same save that records a proposal id also records whether this request
     opened it (`created`) or the hub named another one (`duplicate`). Raises ReflectError when
     the hub answers with no open proposal.
@@ -403,6 +409,8 @@ def submit(
             opened = client.call("propose", base_epoch=base_epoch, client_event_id=pending["client_event_id"], ops=ops)
         except hubc.HubRefusal as exc:
             code = exc.code if _code(exc.code) else "hub_refused"
+            if exc.status == 429 and code in ANCHOR_RESERVE:
+                return Submitted(RESERVED, code=code, refusals=tuple(refusals))
             if exc.status == 429 and code in QUOTA_REFUSALS:
                 return Submitted(QUOTA, code=code, refusals=tuple(refusals))
             if exc.status == 409 and code == DUPLICATE_PENDING:
@@ -783,7 +791,7 @@ def _reflect(
             if anchoring and not remembered_id:
                 quota = client.call("status").get("proposal_quota", {})
                 pending, cap = quota.get("pending"), quota.get("pending_per_principal")
-                if type(pending) is not int or type(cap) is not int or pending >= max(0, cap - 4):
+                if type(pending) is not int or type(cap) is not int or pending >= max(0, cap - ANCHOR_RESERVE_SLOTS):
                     skipped["anchor_quota_reserve"] = skipped.get("anchor_quota_reserve", 0) + 1
                     continue
             sent = (
@@ -800,6 +808,10 @@ def _reflect(
                 )
             )
             refused.extend({"op_digest": digest, "code": code} for code in sent.refusals)
+            if sent.outcome == RESERVED:
+                # The hub keeps pending slots free for repairs, so this anchor waits for a later run.
+                skipped["anchor_quota_reserve"] = skipped.get("anchor_quota_reserve", 0) + 1
+                continue
             if sent.outcome == QUOTA:
                 # A full quota is back pressure, not a failure: stop and leave the rest for later runs.
                 skipped["proposal_quota"] = skipped.get("proposal_quota", 0) + len(selected) - position

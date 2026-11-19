@@ -372,6 +372,31 @@ def test_anchor_quota_reserves_four_repair_slots(setup, capsys, monkeypatch):
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
     reason="safe directory descriptors unavailable",
 )
+def test_hub_anchor_reserve_refusal_is_back_pressure_not_a_failure(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    hub._commit("card.put", "fleet", "robot", card_text("Unique robot claim.", None), "live", "robot")
+    propose = hub.do_propose
+
+    def reserve(body):
+        if all(op["type"] == "anchor_blocks" for op in body["ops"]):
+            return 429, {"code": "memory_anchor_quota_reserve", "error": "the anchoring repair reserve is full"}
+        return propose(body)
+
+    monkeypatch.setattr(hub, "do_propose", reserve)
+    code, report = run(target, capsys, "run", "--limit", "100")
+    assert code == 0
+    assert report["status"] == "completed"
+    assert report["skipped_reasons"] == {"anchor_quota_reserve": 1}
+    # A repair proposal in the same run still reaches the hub.
+    submitted = [call["ops"][0]["type"] for call in writes(hub)]
+    assert submitted.count("anchor_blocks") == 1
+    assert submitted.count("merge_exact_duplicates") == 1
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
 def test_real_hold_reply_suppresses_revision_and_selects_fresh_head(setup, capsys, monkeypatch):
     import json
     from brigade import memory_reflect_policy as policy

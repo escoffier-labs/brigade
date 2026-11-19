@@ -180,7 +180,7 @@ def _latest_run(runs_dir: Path) -> tuple[Path, dict[str, Any]] | None:
             continue
         try:
             payload = json.loads((child / "run.json").read_text())
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, RecursionError):
             continue
         if not isinstance(payload, dict):
             continue
@@ -213,7 +213,7 @@ def _load_effective_paths(target: Path) -> tuple[Path, Path, DogfoodConfig | Non
 def _read_run_json(run_dir: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads((run_dir / "run.json").read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 

@@ -572,9 +572,11 @@ def install_selection(
             print("Agent: each work session, follow the `brigade-work` skill -")
             print("  1. `brigade work brief --target .`                                  (see pending work)")
             print(
-                '  2. `brigade work verify run --target . --command "<test>"`          (verify THROUGH brigade, not raw)'
+                '  2. `brigade work verify run --target . --command "<test>" --capture auto`  (verify THROUGH brigade, not raw)'
             )
-            print("  3. `brigade outcome capture <skill-or-card-id> --run-id latest`     (record the result)")
+            print(
+                "  3. `--capture auto` records the result. A typed id still works after the fact with `brigade outcome capture`"
+            )
             print(
                 "  4. write a Memory Handoff only if the session learned something durable, else end with `Nothing durable: <reason>`."
             )

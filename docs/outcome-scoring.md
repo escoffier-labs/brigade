@@ -9,17 +9,26 @@ Scheduled memory work runs separately from this scoring loop.
 Hub reflection opens pinned proposals for exact duplicate merges, near-duplicate
 supersedes, broken-link repairs and anchors. Stale-newer-evidence and
 opposite-polarity candidates are local only, and a contradicted card is a verify
-verdict. Of the reflection lanes, only evidence appends and exact duplicate
-merges are eligible for automatic apply under the supported policy writer, and
-only when workspace and fleet policies enable it and every hub gate passes. On a
-real scope the retrieval evaluation holds every automatic reflection apply,
-including all-`append_evidence` Tier 0 proposals and exact merges, so
-reflection applies nothing automatically outside the fixture scope
-`repo:brigade/retrieval-eval-fixture`. Verifier applies and automatic
-compensations take their own gates. Near-duplicate supersedes and broken-link repairs are Tier 2, so they
-wait for a reviewer. Local repository candidates stay proposal-only. The
+verdict.
+
+Scheduled reflect applies one class with no person on real memory. An
+exact-duplicate merge applies when both cards share one writer with the
+principal that proposes and applies it, the hub policy lists that principal in
+`reflect_principals` and enables
+`merge_exact_duplicates`, the workspace has opted in, and every preflight gate
+passes. Each automatic apply can be rolled back by exact compensation. A merge
+of cards written by different principals holds with
+`retrieval_eval_merge_cross_writer` (`retrieval_eval_writer_changed` when the
+cards are `agent-unreviewed`) and waits for a reviewer. Near-duplicate
+supersedes and broken-link repairs are Tier 2 and wait for a reviewer. The fleet
+policy writer rejects `anchor_blocks`, so no anchor applies automatically.
+Scheduled reflect opens no evidence-append proposals, though the hub can apply
+an attested evidence append when the policy enables it. A scope over 2,000 live
+cards, 16 MiB or 500 judged retrieval uses holds every automatic reflection
+apply, because the retrieval-history check cannot run on it. Local repository candidates stay proposal-only. The
 `[reflect] scopes` setting limits where the job proposes, applies and watches.
-Unlisted read scopes are still read, never changed.
+Unlisted read scopes are still read, never changed. See
+[memory operations](memory-operations.md) for the gates and limits.
 
 The verify pass uses two seats and opens correction proposals. Per-class go or
 no-go records gate `verify_auto_apply`, and without a current admin `go` record

@@ -628,6 +628,22 @@ def test_reconcile_apply_promotes_on_scorecard_evidence_without_any_install(tmp_
     assert status["artifacts"]["skill-x"]["status"] == "promoted"
 
 
+def test_reconcile_never_promotes_a_skill_on_caller_typed_ledger_rows(tmp_path, capsys):
+    # A typed id is recorded caller_typed. For a skill it can hold or roll back but never
+    # promote: promotion needs a scoreable manifest trial (receipt scorecard), not the ledger.
+    _write_registry_skill(tmp_path, "skill-x")
+    records = _helped("skill-x", 4)
+    assert len(records) > outcome.ReconcileConfig().install_min_helped
+    assert {r.attribution_source for r in records} == {outcome.CALLER_TYPED}
+    _seed(tmp_path, records)
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied"] == []
+    assert not [d for d in payload["decisions"] if d["artifact_id"] == "skill-x" and d["action"] == "install"]
+    status = json.loads(_status_file(tmp_path).read_text()) if _status_file(tmp_path).exists() else {}
+    assert status.get("artifacts", {}).get("skill-x", {}).get("status", "candidate") != "promoted"
+
+
 def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys, monkeypatch):
     _write_registry_skill(tmp_path, "skill-x")
     seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")

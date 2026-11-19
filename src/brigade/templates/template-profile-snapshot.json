@@ -579,16 +579,16 @@
         "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
-        "byte_size": 4859,
+        "byte_size": 4848,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "50d71f7495953b384b246fea5f2b4d58b65d38cee31198b7a6f248b16b5573b5"
+        "sha256": "e68f857c6f92591dd31efcad78317881ed8455e676956eda66d8b5e6b107874b"
       },
       {
-        "byte_size": 2562,
+        "byte_size": 2580,
         "dst": "CLAUDE.md",
         "rendered": true,
-        "sha256": "d74a39083998a405c9d9cb89a9f339e544020e9bbff73d93ede218d69949495e"
+        "sha256": "04f7566bf73b2357c48759b1e742753c5704295532c0ed154d59e75a4c449899"
       },
       {
         "byte_size": 6331,
@@ -623,22 +623,22 @@
         "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
-        "byte_size": 4859,
+        "byte_size": 4848,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "50d71f7495953b384b246fea5f2b4d58b65d38cee31198b7a6f248b16b5573b5"
+        "sha256": "e68f857c6f92591dd31efcad78317881ed8455e676956eda66d8b5e6b107874b"
       },
       {
-        "byte_size": 2562,
+        "byte_size": 2580,
         "dst": "CLAUDE.md",
         "rendered": true,
-        "sha256": "d74a39083998a405c9d9cb89a9f339e544020e9bbff73d93ede218d69949495e"
+        "sha256": "04f7566bf73b2357c48759b1e742753c5704295532c0ed154d59e75a4c449899"
       },
       {
-        "byte_size": 2468,
+        "byte_size": 2509,
         "dst": "INSTALL_FOR_AGENTS.md",
         "rendered": true,
-        "sha256": "46aa429bbcee2ce7b3521aa53e89787a437f39ed2e2dd79d0c40db2a26306aa0"
+        "sha256": "9930c698c3e9725dac16a3da4b02bf655e98648789ffbe6914f27d7bf916a30f"
       },
       {
         "byte_size": 6331,
@@ -659,10 +659,10 @@
         "sha256": "531a3b30619029b01ea7ffefb118638eea2fcc858ae9cfbd634e34723e9f2b9e"
       },
       {
-        "byte_size": 1194,
+        "byte_size": 1240,
         "dst": "rules/issue-tdd-loop.md",
         "rendered": true,
-        "sha256": "79bb1c9ed0b14c235614193fb26e2e15aaef971a0d9c9ff89b37e7ea3d09ba8b"
+        "sha256": "f5dca8ecd22fe5f4a41a8ce958a53706795e455031db8f993ec5faf1ccacd9d0"
       }
     ],
     "workspace-claude-codex": [
@@ -709,16 +709,16 @@
         "sha256": "5d1cfcb92ba69300e8194bbb7636f64aec1a2a445ac0e2b6e9551aca41323c88"
       },
       {
-        "byte_size": 10913,
+        "byte_size": 10902,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "1220b31c86e718322ff96fe0620f2ce82b5c286d27836253d0bd003694cfab80"
+        "sha256": "0a7b98df4c5ccea1d858a8b8cf2364f102cd282817ae0b17ca48a3823ce1990c"
       },
       {
-        "byte_size": 3572,
+        "byte_size": 3590,
         "dst": "CLAUDE.md",
         "rendered": true,
-        "sha256": "44bc485766a5752fee701846709fb9ef5bd20489976a1d4e126ace7432ea54cd"
+        "sha256": "38d99a3848090fb18f96a5a10dfcb561025f3be2e887f75b957535e3becfd0a0"
       },
       {
         "byte_size": 1578,
@@ -733,10 +733,10 @@
         "sha256": "f9d92ede54fd60564cb2b39dc776491111498f2b2f45ebbb0c5de759c6f8bd02"
       },
       {
-        "byte_size": 4689,
+        "byte_size": 4730,
         "dst": "INSTALL_FOR_AGENTS.md",
         "rendered": true,
-        "sha256": "a14b5f242f20856bed0a035499549f07717cc3e842c38582a15afa17b9b008b1"
+        "sha256": "5299620a93e46fc2c3ab8ad6c932de4d6838562ebad9af70f3ac0305743efb04"
       },
       {
         "byte_size": 5029,
@@ -853,10 +853,10 @@
         "sha256": "531a3b30619029b01ea7ffefb118638eea2fcc858ae9cfbd634e34723e9f2b9e"
       },
       {
-        "byte_size": 1194,
+        "byte_size": 1240,
         "dst": "rules/issue-tdd-loop.md",
         "rendered": true,
-        "sha256": "79bb1c9ed0b14c235614193fb26e2e15aaef971a0d9c9ff89b37e7ea3d09ba8b"
+        "sha256": "f5dca8ecd22fe5f4a41a8ce958a53706795e455031db8f993ec5faf1ccacd9d0"
       },
       {
         "byte_size": 5238,
@@ -865,10 +865,10 @@
         "sha256": "b2cf1874706813d40114192884450c374589b2b26fdb819f44aedd5008166970"
       },
       {
-        "byte_size": 9020,
+        "byte_size": 9294,
         "dst": "skills/brigade-work/SKILL.md",
         "rendered": true,
-        "sha256": "8850f5220d05e6c04120868003b7259301cfa3fe559e943196508a1233a47626"
+        "sha256": "c16d74d1b8c5d0cf9faef3857c44f611046f548541dea5ba2abd4eadf580c10c"
       },
       {
         "byte_size": 5347,
@@ -877,10 +877,10 @@
         "sha256": "457078ef56f4143910ba68729198285e204645d66ababc557e17b80496fe4cb1"
       },
       {
-        "byte_size": 2376,
+        "byte_size": 2364,
         "dst": "skills/ultra-work-scout/SKILL.md",
         "rendered": true,
-        "sha256": "dcac8b8a66195a861cb62d563b8f18a5b868b9d070d288e75f53d026d81445b5"
+        "sha256": "f826fb1a8fb4085f62b4db2f003169d0ecaf30e17a95919291d95627fe138e44"
       }
     ]
   },

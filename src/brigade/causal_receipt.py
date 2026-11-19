@@ -389,7 +389,7 @@ def read_parent_manifest(directory: Path, receipt: Mapping[str, Any]) -> dict[st
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, RecursionError):
         return None
     return dict(payload) if isinstance(payload, Mapping) else None
 

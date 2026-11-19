@@ -1346,10 +1346,30 @@ def test_heartbeat_and_exit_release_follow_a_rotated_node_token_on_the_bound_hub
     The hub stays pinned (#1780): when configuration names another hub, the
     rotated token never leaves for it and the bound credential stays in use.
     """
+    from brigade import fleet_claim_lifecycle
+
     home = tmp_path / "home"
     home.mkdir()
     token_file = tmp_path / "node-token"
     token_file.write_text("fake-token-one\n", encoding="utf-8")
+    # Trigger the heartbeat's next renewal from this test instead of waiting for
+    # a wall-clock tick. The connection read is gated until rotation is fully set
+    # up, so the renewal observes the final token and config together.
+    renew_gate = threading.Event()
+    gating = [False]
+    bound_connection = fleet_claim_lifecycle._bound_connection
+
+    def gated_bound_connection(hub_url, token, **kwargs):
+        current = bound_connection(hub_url, token, **kwargs)
+
+        def connect():
+            if gating[0]:
+                assert renew_gate.wait(10), "renewal gate was never released"
+            return current()
+
+        return connect
+
+    monkeypatch.setattr(fleet_claim_lifecycle, "_bound_connection", gated_bound_connection)
 
     def configure(hub_url):
         (home / "fleet.toml").write_text(
@@ -1388,12 +1408,14 @@ def test_heartbeat_and_exit_release_follow_a_rotated_node_token_on_the_bound_hub
         "fake-target", ttl_seconds=60, on_credential_failure=credential_failures.append
     ) as decision:
         assert decision.granted
+        gating[0] = True
         if hub_switch:
             configure("https://hub-two.example.invalid")
         else:
             accepted.add("fake-token-two")
         token_file.write_text("fake-token-two\n", encoding="utf-8")
         rotated.set()
+        renew_gate.set()
         assert renewed_after_rotation.wait(5), f"no renewal succeeded after rotation: {posts[-3:]}"
         assert not decision.cancel_event.is_set()
     assert credential_failures == []

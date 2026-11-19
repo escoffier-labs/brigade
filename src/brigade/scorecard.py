@@ -69,7 +69,7 @@ def discover_verify_receipt_paths(target: Path) -> list[Path]:
 def _load_receipt(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 

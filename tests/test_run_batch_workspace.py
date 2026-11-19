@@ -384,14 +384,14 @@ def test_reserve_refusal_leaves_no_lease_behind(sandbox):
 
 def test_validate_refuses_when_git_status_fails(sandbox, monkeypatch):
     binding = sandbox.bind("one")
-    real = workspace._git
+    real = workspace.git
 
-    def failing_status(args, *, cwd, timeout=workspace._GIT_TIMEOUT):
+    def failing_status(args, *, cwd, timeout=workspace._GIT_TIMEOUT, stdout_file=None):
         if args[:1] == ["status"]:
             return workspace.proc.Result(code=128, stdout="", stderr="fatal")
-        return real(args, cwd=cwd, timeout=timeout)
+        return real(args, cwd=cwd, timeout=timeout, stdout_file=stdout_file)
 
-    monkeypatch.setattr(workspace, "_git", failing_status)
+    monkeypatch.setattr(workspace, "git", failing_status)
     with pytest.raises(workspace.WorkspaceError) as refused:
         workspace.validate(binding, sandbox.repo)
     assert (refused.value.code, refused.value.reason) == (workspace.WORKSPACE_INVALID, "status-unreadable")

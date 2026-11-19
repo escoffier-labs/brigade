@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from .budgets import (
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
-from . import config, engine_paths, localio
+from . import config, engine_paths, localio, memory_read_recorder_doctor
 from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
@@ -152,7 +152,7 @@ def _check_outcome_loop(ctx: DoctorContext) -> List[CheckResult]:
                     WARN,
                     _OUTCOME_LOOP_DORMANT_NAME,
                     "wired but no verify run ever captured; "
-                    'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+                    'run `brigade work verify run --target . --command "<test>" --capture auto`',
                 )
             )
         elif name == "outcome_loop_half_fed":
@@ -196,7 +196,7 @@ def _outcome_ledger_stale_finding(
             WARN,
             _OUTCOME_LOOP_STALE_NAME,
             f"unparseable latest outcome ledger timestamp {ts_raw!r}; "
-            'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+            'run `brigade work verify run --target . --command "<test>" --capture auto`',
         )
     if latest_dt.tzinfo is None:
         latest_dt = latest_dt.replace(tzinfo=timezone.utc)
@@ -207,7 +207,7 @@ def _outcome_ledger_stale_finding(
         WARN,
         _OUTCOME_LOOP_STALE_NAME,
         f"outcome ledger empty for {age_days} days (threshold {stale_days}); "
-        'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+        'run `brigade work verify run --target . --command "<test>" --capture auto`',
     )
 
 
@@ -860,7 +860,7 @@ def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_handoff_sources(ctx.target))
     checks.extend(_check_memory_cards(ctx.target))
     checks.extend(_check_memory_index(ctx.target))
-    checks.extend(_check_memory_care(ctx.target))
+    checks.extend([*_check_memory_care(ctx.target), *memory_read_recorder_doctor.checks(ctx.target)])
     checks.extend(_check_care_schedule_health(ctx.target))
     checks.extend(_check_memory_care_producer_collision(ctx.target))
     return checks

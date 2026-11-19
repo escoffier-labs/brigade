@@ -16,6 +16,7 @@ from . import (
     fleet_client,
     inbox_lock,
     localio,
+    run_batch_artifacts,
     run_batch_launch,
     run_batch_workspace,
     run_journal,
@@ -311,14 +312,38 @@ class BatchExecution:
         localio.write_json(path, run_receipts.worker_payload_one(result))
         run_journal._fsync_directory(self.run_dir)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        artifact_kind, artifact_digest = "receipt", digest
+        binding = self.workspaces.get(task_id)
+        if binding is not None:
+            # Collection runs inside the per-task run lock the batch holds from
+            # creation through worker exit, so nothing else can be writing the
+            # checkout while its candidate is committed and patched.
+            artifact = run_batch_artifacts.collect(
+                binding,
+                self.workspace,
+                self.run_dir,
+                execution=run_batch_artifacts.execution_state(result),
+                attempt_id=handle.attempt_id,
+            )
+            try:
+                _, sidecar_digest = run_batch_artifacts.write_sidecar(self.run_dir, artifact)
+            except OSError:
+                # The terminal observation still stands on the receipt alone.
+                artifact_digest = digest
+            else:
+                run_journal._fsync_directory(self.run_dir)
+                if artifact.get("candidate_commit") is not None:
+                    # A candidate exists: the artifact is the commit, and only
+                    # then does the observation name the artifact sidecar.
+                    artifact_kind, artifact_digest = "commit", sidecar_digest
         run_tasks.observe_task(
             self.run_dir,
             workspace=self.workspace,
             handle=handle,
             observation=run_tasks.TaskObservation(
                 status="completed" if result.ok else "failed",
-                artifact_kind="receipt",
-                artifact_digest=digest,
+                artifact_kind=artifact_kind,
+                artifact_digest=artifact_digest,
                 containment="quiescent",
                 provider_task_id=_reference(result.provider_task_id),
                 original_run_id=_reference(result.original_run_id),
@@ -435,13 +460,30 @@ class BatchExecution:
         return orchestrator.OrchestratorHealthRoutingDecision(roster=roster)
 
     def finish(self, results: list[WorkerResult]) -> agents.AgentResult:
+        failures: list[str] = []
+        lines = []
         for result in results:
-            self.observe(result)
+            try:
+                self.observe(result)
+            except Exception as exc:
+                # Dispatch guards on_result failures, so finish is the last
+                # chance to record that a result file or journal observation
+                # could not be written. Keep it inside the batch summary path
+                # instead of escaping as an unexpected run failure.
+                failures.append(f"task {result.task_id} observation failed: {exc}")
+            lines.append(f"{result.task_id}: {'completed' if result.ok else result.status or 'failed'}")
         # Use the planned-run finish path with no synthesis invocation. It
         # records incomplete workers and retains every result and artifact.
+        ok = all(r.ok for r in results) and not failures
+        detail = "; ".join(failures)
+        if detail:
+            lines.append(detail)
         return agents.AgentResult(
-            text="\n".join(f"{r.task_id}: {'completed' if r.ok else r.status or 'failed'}" for r in results),
-            ok=all(r.ok for r in results),
+            text="\n".join(lines),
+            ok=ok,
+            detail=detail,
+            failure_phase="result-processing" if failures else None,
+            failure_kind="observation-write-failed" if failures else None,
         )
 
 
@@ -467,12 +509,15 @@ def stored_result(
         state = states.get(task_id)
         path = run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
         refusal = refusals.get(task_id)
+        worktree = task.get("isolation") == "worktree"
+        artifact = run_batch_artifacts.summary(run_batch_artifacts.read(run_dir, task_id)) if worktree else None
         tasks[task_id] = {
             "status": state.status if state else "unknown",
             "not_run": bool(state and state.status == "queued"),
             "result_id": state.result_id if state else None,
             "result_ref": str(path.relative_to(run_dir)) if path.is_file() else None,
-            "workspace": "worktree" if task.get("isolation") == "worktree" else "shared",
+            "workspace": "worktree" if worktree else "shared",
+            "artifact": artifact,
             "refusal": {"code": refusal[0], "reason": refusal[1]} if refusal is not None else None,
         }
     return {
@@ -486,6 +531,11 @@ def stored_result(
 
 def retryable_before_launch(run_dir: Path) -> bool:
     """Fail closed on damaged journals or any evidence of a possible launch."""
+    # A result file is written only after a worker returns, so its presence is
+    # evidence of a possible launch even when the lifecycle journal is gone.
+    # A preflight refusal writes none, so its retry stays allowed.
+    if any(run_dir.glob("batch-result-*.json")):
+        return False
     if not run_lifecycle._journal_path(run_dir).exists():
         return True
     try:

@@ -697,3 +697,25 @@ def test_cleanup_failure_keeps_an_uncaused_refusal_visible(state_tree, monkeypat
     assert caught.value.__cause__ is None
     assert not caught.value.__suppress_context__
     assert caught.value.__context__.errno == errno.EACCES
+
+
+DEEP_JSON = b"[" * 200000
+
+
+def test_read_json_treats_json_nested_past_the_parser_limit_as_malformed(state_tree) -> None:
+    target, sessions, _ = state_tree
+    name = runtime._state_path(target, "s").name
+    (sessions / name).write_bytes(DEEP_JSON)
+
+    with anchored_io.session_directory(target) as anchor:
+        assert anchored_io._read_json(anchor, name) is None
+
+
+def test_read_states_strict_raises_unreadable_for_json_nested_past_the_parser_limit(state_tree) -> None:
+    target, sessions, _ = state_tree
+    path = sessions / runtime._state_path(target, "s").name
+    path.write_bytes(DEEP_JSON)
+    os.utime(path, (1_900_000_000, 1_900_000_000))
+
+    with pytest.raises(anchored_io.SessionStateUnreadable, match="malformed"):
+        anchored_io.read_states_strict(target, max_bytes=1 << 20)

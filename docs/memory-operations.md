@@ -2126,6 +2126,17 @@ and scope quota refusals return HTTP 429 with `memory_proposal_principal_quota`
 or `memory_proposal_scope_quota`. These refusals leave no event, blob, proposal
 or idempotency row. New proposed text enters the blob table only when applied.
 
+An all-`anchor_blocks` proposal is refused with HTTP 429
+`memory_anchor_quota_reserve` once the principal's pending and held proposals
+would leave fewer than four slots free, which keeps that reserve for anchoring
+repairs. Admission counts those proposals in the same writer transaction as the
+insert, so two reflectors sharing a principal cannot both spend the reserve
+after reading one `status` count. A proposal with any other op kind is admitted
+under the normal limits, so repairs can still use the last four slots.
+Reflection checks the same boundary before submitting as a shortcut, and counts
+a hub refusal as `anchor_quota_reserve` before continuing with repair proposals
+in the same run.
+
 Idle retention sweeps compact rejected, stale and applied bodies in bounded
 transactions. The immutable audit retains proposal and card ids, revisions,
 content and body digests, policy digests, state, decision, actor and timestamps.

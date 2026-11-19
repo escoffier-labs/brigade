@@ -1025,7 +1025,7 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
         "next_command": (
             "brigade search doctor --target ."
             if not graph_ready
-            else "brigade work verify run --target . --command '<check>' --capture brigade-work"
+            else "brigade work verify run --target . --command '<check>' --capture auto"
         )
         if not ready
         else None,
