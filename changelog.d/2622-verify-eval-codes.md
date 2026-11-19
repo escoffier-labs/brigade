@@ -1,0 +1,1 @@
+- Record the specific `verify_eval_*` code from the evaluation allowlist in the `memory verify gate` decision record, so a malformed corpus, a duplicate case id and a timeout are distinguishable instead of all reading `verify_eval_unavailable`. An unclassified failure still records `verify_eval_unavailable`, and every failure stays a no-go with the same exit code.

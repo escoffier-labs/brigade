@@ -167,6 +167,14 @@ def allowed(
         return set()
 
 
+def _failure_code(exc: BaseException) -> str:
+    """Keep eval's fixed code when it is on the allowlist, so an operator can tell a malformed corpus from a timeout."""
+    from .memory_verify_cmd import EVAL_CODE
+
+    code = str(exc)
+    return code if EVAL_CODE.fullmatch(code) else "verify_eval_unavailable"
+
+
 def run(
     target: Path, *, pair: Sequence[seats.Seat], binding: str, now_ms: int, previous: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -191,8 +199,17 @@ def run(
         if start != binding_digest(target, pair, binding):
             raise ValueError("verify_eval_inputs_changed")
     # vc.Abstain covers a corpus card that cannot be parsed, which must record a no-go, not crash.
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, runner.SeatStop, vc.Abstain):
-        report = {"status": "failed", "code": "verify_eval_unavailable"}
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        RecursionError,
+        runner.SeatStop,
+        vc.Abstain,
+    ) as exc:
+        report = {"status": "failed", "code": _failure_code(exc)}
     return record(target, report, pair=pair, binding=binding, now_ms=now_ms, previous=previous)
 
 
