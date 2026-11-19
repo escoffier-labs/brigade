@@ -17,6 +17,16 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
+/// One credential lookup answers both questions a request asks: whether the
+/// bearer token is admitted, and which kind of row it matched for the request
+/// log.
+pub struct Credential {
+    /// `anonymous`, `admin`, `node` or `principal`.
+    pub kind: &'static str,
+    /// The admission key: the token's digest, when the token was found.
+    pub key: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Lookup {
     pool: Arc<ReaderPool>,
@@ -33,43 +43,26 @@ impl Lookup {
             slow: None,
         }
     }
-    pub async fn kind(&self, authorization: Option<&str>) -> &'static str {
+    /// The one lookup a request makes. The label the request log records comes
+    /// from the same query as the admission decision, so a request never pays
+    /// for a second reader job just to name its credential.
+    pub async fn credential(&self, authorization: Option<&str>) -> Result<Credential, ()> {
         let Some(token) = authorization
             .and_then(|v| v.strip_prefix("Bearer "))
             .filter(|v| !v.is_empty())
         else {
-            return "anonymous";
-        };
-        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        if bool::from(digest.ct_eq(&self.admin)) {
-            return "admin";
-        }
-        let key = hex(&digest);
-        // The kind only labels request logs, so a slow reader falls back to
-        // "anonymous" after the same 2-second deadline credential() uses.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        let job = self.pool.submit(move |c| {
-            c.query_row("SELECT 'node' FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT 'principal' FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1",[key],|r|r.get::<_,String>(0)).optional()
-        });
-        tokio::time::timeout_at(deadline, job)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
-            .map(|kind| if kind == "node" { "node" } else { "principal" })
-            .unwrap_or("anonymous")
-    }
-    pub async fn credential(&self, authorization: Option<&str>) -> Result<Option<String>, ()> {
-        let Some(token) = authorization
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .filter(|v| !v.is_empty())
-        else {
-            return Ok(None);
+            return Ok(Credential {
+                kind: "anonymous",
+                key: None,
+            });
         };
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let key = hex(&digest);
         if bool::from(digest.ct_eq(&self.admin)) {
-            return Ok(Some(key));
+            return Ok(Credential {
+                kind: "admin",
+                key: Some(key),
+            });
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let lookup_key = key.clone();
@@ -81,10 +74,18 @@ impl Lookup {
                 active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(400));
             }
+            // One row answers both questions: the stored digest for the
+            // constant-time comparison and the table it came from for the label.
             let mut statement = connection.prepare_cached(
-                "SELECT token_sha256 FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT token_hash FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1"
+                "SELECT 'node', token_sha256 FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT 'principal', token_hash FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1"
             )?;
-            let found = statement.query_row([&lookup_key], |r| r.get::<_, String>(0)).optional()?.is_some_and(|stored| bool::from(stored.as_bytes().ct_eq(lookup_key.as_bytes())));
+            let found = statement
+                .query_row([&lookup_key], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .optional()?
+                .filter(|(_, stored)| bool::from(stored.as_bytes().ct_eq(lookup_key.as_bytes())))
+                .map(|(row, _)| row);
             drop(statement);
             Ok(found)
         });
@@ -92,7 +93,16 @@ impl Lookup {
             .await
             .map_err(|_| ())?
             .map_err(|_| ())?;
-        Ok(found.then_some(key))
+        Ok(match found {
+            None => Credential {
+                kind: "anonymous",
+                key: None,
+            },
+            Some(row) => Credential {
+                kind: if row == "node" { "node" } else { "principal" },
+                key: Some(key),
+            },
+        })
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -356,11 +366,100 @@ mod tests {
             );
         };
         let ((a, b), ()) = tokio::join!(queries, observe);
-        assert_eq!(a.unwrap(), None);
-        assert_eq!(b.unwrap(), None);
+        assert_eq!(a.unwrap().key, None);
+        assert_eq!(b.unwrap().key, None);
         drop(lookup);
         drop(c);
         std::fs::remove_file(path).unwrap();
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn held_handler_readers_never_delay_a_credential_lookup() {
+        let directory =
+            std::env::temp_dir().join(format!("hub-credential-pool-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("hub.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE nodes(token_sha256 TEXT,revoked_at TEXT); CREATE TABLE fleet_message_principals(token_hash TEXT,revoked_at TEXT);").unwrap();
+        let digest = hex(&Sha256::digest(b"fake-node"));
+        connection
+            .execute("INSERT INTO nodes VALUES (?1,NULL)", [&digest])
+            .unwrap();
+        // A one-reader handler pool, as a 1-core hub had before the reader floor.
+        let handlers =
+            Arc::new(ReaderPool::open_unchecked(&path, 1, 8, Duration::from_secs(2)).unwrap());
+        let (entered, entering) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let pool = handlers.clone();
+        let held = tokio::spawn(async move {
+            pool.submit(move |_| {
+                entered.send(()).unwrap();
+                released.recv().ok();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        });
+        entering.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The credential pool from main's wiring stays free while that read runs.
+        let lookup = Lookup::new(
+            Arc::new(
+                ReaderPool::open_unchecked(
+                    &path,
+                    brigade_hub::read::LOOKUP_THREADS,
+                    brigade_hub::read::LOOKUP_QUEUE,
+                    Duration::from_secs(2),
+                )
+                .unwrap(),
+            ),
+            "fake-admin",
+        );
+        let started = std::time::Instant::now();
+        let found = lookup.credential(Some("Bearer fake-node")).await.unwrap();
+        assert_eq!(found.kind, "node");
+        assert!(found.key.is_some());
+        eprintln!(
+            "credential lookup: kind={} in {:?}",
+            found.kind,
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the credential lookup waited {:?} behind a handler read",
+            started.elapsed()
+        );
+        let mut app = crate::App::new(
+            format!("http://{}:1", std::net::Ipv4Addr::LOCALHOST),
+            crate::Client::builder(crate::TokioExecutor::new()).build_http(),
+            false,
+            false,
+        );
+        app.lookup = Some(lookup.clone());
+        let request_started = std::time::Instant::now();
+        let reply = crate::handle(
+            crate::State(app),
+            crate::Request::builder()
+                .method("GET")
+                .uri("/claims")
+                .header("authorization", "Bearer fake-node")
+                .body(crate::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(reply.status(), 503);
+        let bytes = axum::body::to_bytes(reply.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        assert_ne!(value["reason"], "credential-lookup");
+        eprintln!(
+            "GET /claims reason={} in {:?}",
+            value["reason"],
+            request_started.elapsed()
+        );
+        release.send(()).unwrap();
+        let _ = held.await;
+        drop(lookup);
+        drop(handlers);
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[tokio::test]
     async fn lookup_revocation_timeout_recovery_and_no_snapshot() {
@@ -385,6 +484,7 @@ mod tests {
                 .credential(Some("Bearer fake-node"))
                 .await
                 .unwrap()
+                .key
                 .is_some()
         );
         let p = lookup.pool.clone();
@@ -431,6 +531,7 @@ mod tests {
                 .credential(Some("Bearer fake-node"))
                 .await
                 .unwrap()
+                .key
                 .is_some()
         );
         connection
@@ -441,6 +542,7 @@ mod tests {
                 .credential(Some("Bearer fake-node"))
                 .await
                 .unwrap()
+                .key
                 .is_none()
         );
         assert!(
@@ -448,6 +550,7 @@ mod tests {
                 .credential(Some("Bearer fake-admin"))
                 .await
                 .unwrap()
+                .key
                 .is_some()
         );
         // A write through a separate connection succeeds after every request.

@@ -560,19 +560,17 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     } else if f == "health" {
         // Liveness and readiness never wait on the reader pool for a log label.
         "unchecked"
-    } else if let Some(lookup) = &app.lookup {
-        lookup
-            .kind(
-                req.headers()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok()),
-            )
-            .await
     } else {
+        // handle_inner names the credential from the single lookup it admits on.
         "anonymous"
     };
+    // Filled by that lookup. Kept out of the health path, whose label is fixed.
+    let kind_slot = (f != "health").then(|| Arc::new(std::sync::OnceLock::<&'static str>::new()));
     let request_bytes = log.request_bytes.clone();
     let (mut parts, body) = req.into_parts();
+    if let Some(slot) = &kind_slot {
+        parts.extensions.insert(slot.clone());
+    }
     // handle_inner fills this in for POST /messages once the body is buffered.
     let action_family = FamilySlot::default();
     parts.extensions.insert(action_family.clone());
@@ -665,6 +663,9 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     };
     if let Some(family) = action_family.0.get() {
         log.family = family;
+    }
+    if let Some(kind) = kind_slot.as_ref().and_then(|slot| slot.get()).copied() {
+        log.credential_kind = kind;
     }
     log.status = response.status().as_u16();
     let (parts, body) = response.into_parts();
@@ -864,7 +865,17 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             )
             .await
         {
-            Ok(value) => value,
+            Ok(found) => {
+                // The request log's credential label comes from this lookup,
+                // not from a second reader job.
+                if let Some(slot) = req
+                    .extensions()
+                    .get::<Arc<std::sync::OnceLock<&'static str>>>()
+                {
+                    let _ = slot.set(found.kind);
+                }
+                found.key
+            }
             // A checked reader can refuse a malformed fence schema before the
             // route runs. Read-only heartbeat falls through to Python, which
             // authenticates and returns the authoritative database error.
@@ -1486,11 +1497,12 @@ async fn start_and_serve(
                 .map(|v| v.trim().to_owned())
         })
         .ok_or("no fleet hub token")?;
-    let readers = Arc::new(brigade_hub::read::ReaderPool::open(
-        &path,
-        brigade_hub::read::hub_threads(),
-        brigade_hub::read::HUB_QUEUE,
-    )?);
+    // Handler reads and credential lookups read the same file on separate
+    // pools, so a slow status or claims read never holds a request's
+    // two-second credential deadline.
+    let pools = brigade_hub::read::HubPools::open(&path)?;
+    let readers = Arc::new(pools.readers);
+    let lookups = Arc::new(pools.lookups);
     // Shared by every writer of the hub file, the memory writer included (D23).
     let arbiter = Arc::new(brigade_hub::writer::Arbiter::default());
     let memory_path = path.with_file_name("fleet-hub-memory.db");
@@ -1602,8 +1614,12 @@ async fn start_and_serve(
         config.trust_forwarded_proto,
     );
     state.telemetry.attach_readers(readers.queue_probe());
+    state.telemetry.attach_reader_stats(readers.stats());
+    state.telemetry.attach_readers(lookups.queue_probe());
+    state.telemetry.attach_reader_stats(lookups.stats());
     if let Some(memory_route::MemoryRoute::Store(store)) = &memory {
         state.telemetry.attach_readers(store.reader_probe());
+        state.telemetry.attach_reader_stats(store.reader_stats());
     }
     state.telemetry.attach_cpu(cpu.queue_probe());
     // Only a native family's writer commits here. Without one the writer
@@ -1618,7 +1634,7 @@ async fn start_and_serve(
         use sha2::Digest;
         state.admin_digest = Some(sha2::Sha256::digest(admin.as_bytes()).into());
     }
-    state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
+    state.lookup = Some(admission::Lookup::new(lookups.clone(), &admin));
     let native = |family| state.modes.get(family) == brigade_hub::modes::Mode::Native;
     let families =
         native("registration") || native("claims") || native("messages") || native("heartbeat");

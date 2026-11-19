@@ -953,6 +953,10 @@ impl Store {
     pub fn reader_probe(&self) -> crate::telemetry::QueueProbe {
         self.readers.queue_probe()
     }
+    /// The memory reader counters, for `/metrics`.
+    pub fn reader_stats(&self) -> std::sync::Arc<crate::telemetry::ReaderStats> {
+        self.readers.stats()
+    }
     /// The arbiter's residence bucket, for `/metrics`.
     pub fn bucket(&self) -> f64 {
         self.arbiter.balance()

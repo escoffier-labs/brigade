@@ -577,6 +577,12 @@ handler interrupts it and the request gets 503. A queue timeout answers
 `503 {"error": "hub busy", "reason": "reader-queue-full"}`, the same
 `{error, reason}` shape the Python hub uses for its existing 503 answers.
 
+The deadline that caps a job counts from when the caller queued it, so a
+request never waits out a queue wait and then a run window no one reads. The
+handler pool keeps at least two readers even on a single-CPU machine, and
+credential lookups read on their own two-worker pool, so a slow status or
+claims read cannot hold a request's 2 s credential deadline.
+
 Python reads pick up enrollments and revocations by opening a new connection
 per request. The Rust readers see them because every request starts a new
 read transaction, which sees all committed data. There is no token cache and

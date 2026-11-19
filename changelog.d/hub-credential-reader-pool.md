@@ -1,0 +1,4 @@
+- Keep fleet hub credential lookups on their own two-reader pool, so a slow status or claims read no longer holds the 2 s credential deadline and answers `503 {"error":"hub busy","reason":"credential-lookup"}`.
+- Give the hub at least two handler readers on a single-CPU machine, and count a read job's 2 s deadline from when it was queued rather than when a reader starts it, so no caller waits out a queue wait and then a run window it will not read.
+- Name the request log's `credential_kind` from the same lookup that authenticates the request, halving the reader jobs each request queues.
+- Add `brigade_hub_reader_jobs_total`, `brigade_hub_reader_queue_wait_seconds_total`, `brigade_hub_reader_run_seconds_total` and `brigade_hub_reader_timeouts_total{reason=...}` to `/metrics`.
