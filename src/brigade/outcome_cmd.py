@@ -2562,9 +2562,13 @@ def rank(
                 f"helped={lifetime.helped} hurt={lifetime.hurt}, "
                 f"stale={cohorts.stale_records} legacy={cohorts.legacy_records}]"
             )
+        scorecard_entry = scorecards_by_artifact.get(artifact_id)
+        trials_tail = ""
+        if scorecard_entry is not None:
+            trials_tail = f" trials={int(scorecard_entry.dimensions.get('effectiveness', {}).get('trials', 0))}"
         print(
             f"- {artifact_id} score={current.score:.3f} helped={current.helped} "
-            f"hurt={current.hurt}{recency_tail}{fingerprint_tail}{capability_tail}{graph_tail}{brief_tail}"
+            f"hurt={current.hurt}{trials_tail}{recency_tail}{fingerprint_tail}{capability_tail}{graph_tail}{brief_tail}"
         )
     return 0
 

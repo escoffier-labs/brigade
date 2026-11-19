@@ -31,6 +31,7 @@ from . import (
     fleet_inbox,
     heartbeat,
     hub_recall,
+    manifest_loop,
     presence,
     skill_invocations,
     verification_mode,
@@ -1905,13 +1906,51 @@ def _verify_replacement(
         or exercised_artifact_for_fingerprint(target, session_fingerprint)
         or outcome_attribution.AUTO_CAPTURE
     )
-    # The session state lives where the hook fired; point a verifier in another checkout at it.
-    state_at = f"{outcome_attribution.SESSION_TARGET_ENV}={shlex.quote(str(hook_target))} " if hook_target else ""
     return (
-        f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} {state_at}"
+        f"{_verify_env_prefix(session_fingerprint, hook_target)}"
         f"brigade work verify run --target {shlex.quote(str(target))} "
         f"--command {shlex.quote(command)} --capture {shlex.quote(artifact_id)}"
     )
+
+
+def _verify_env_prefix(session_fingerprint: str, hook_target: Path | None) -> str:
+    from .. import outcome_attribution
+
+    # The session state lives where the hook fired; point a verifier in another checkout at it.
+    state_at = f"{outcome_attribution.SESSION_TARGET_ENV}={shlex.quote(str(hook_target))} " if hook_target else ""
+    return f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} {state_at}"
+
+
+def _manifest_replacements(
+    target: Path,
+    covered: list[manifest_loop.CoveredManifest],
+    session_fingerprint: str,
+    *,
+    hook_target: Path | None = None,
+) -> list[str]:
+    """One manifest verify per covered manifest. The manifest, not the agent, decides the scored subject."""
+    prefix = _verify_env_prefix(session_fingerprint, hook_target)
+    return [f"{prefix}{manifest_loop.verify_command(target, item.manifest_id)}" for item in covered]
+
+
+def _manifest_deny_hint(
+    target: Path,
+    session_fingerprint: str,
+    *,
+    hook_target: Path | None = None,
+) -> str:
+    """Extra deny text naming the manifest verify for a changed manifest subject, or ``""``."""
+    covered = manifest_loop.covered_manifests(target)
+    if not covered:
+        return ""
+    lines = [
+        "This change touches the subject of a tracked verify manifest. Keep your own check, and also run the "
+        "manifest verify, the scoreable one (the manifest picks what it scores):"
+    ]
+    commands = _manifest_replacements(target, covered, session_fingerprint, hook_target=hook_target)
+    for item, command in zip(covered, commands, strict=True):
+        lines.append(f"- {item.subject_path}: {command}")
+    return "\n".join(lines)
 
 
 def _new_state(target: Path, session_id: str, repo_fp: str | None, *, task_epoch: str | None = None) -> dict[str, Any]:
@@ -2383,6 +2422,13 @@ def _handle_event(
                 "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
                 f"Use: {replacement}"
             )
+            manifest_hint = _manifest_deny_hint(
+                verify_target,
+                str(state["session_fingerprint"]),
+                hook_target=target if verify_target != target else None,
+            )
+            if manifest_hint:
+                reason = f"{reason}\n{manifest_hint}"
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -2467,6 +2513,7 @@ def _handle_event(
         if payload.get("stop_hook_active") is True:
             return None
         blocking_failures: list[str] = []
+        manifest_failures: list[str] = []
         shared_tree_notes: list[str] = []
         handoff_target: Path | None = None
         unverified_handoff: Path | None = None
@@ -2516,14 +2563,25 @@ def _handle_event(
                 blocking_failures.append(f"{stop_target}: run `{replacement}`")
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
                 handoff_target = stop_target
-        if blocking_failures:
-            return {
-                "decision": "block",
-                "reason": (
+            gaps = manifest_loop.unverified_manifests(stop_target, stop_state.get("started_at"))
+            manifest_failures.extend(
+                f"{stop_target}: {gap.subject_path} changed and manifest `{gap.manifest_id}` has no completed "
+                f"receipt since the write, run `{command}`"
+                for gap, command in zip(gaps, _manifest_replacements(stop_target, gaps, fingerprint), strict=True)
+            )
+        if blocking_failures or manifest_failures:
+            parts: list[str] = []
+            if blocking_failures:
+                parts.append(
                     "Recent write work in Brigade-wired repos has no verification receipt for this session.\n- "
                     + "\n- ".join(blocking_failures)
-                ),
-            }
+                )
+            if manifest_failures:
+                parts.append(
+                    "A tracked verify manifest covers a file changed this session and has not been run since.\n- "
+                    + "\n- ".join(manifest_failures)
+                )
+            return {"decision": "block", "reason": "\n".join(parts)}
         if closed_without_handoff:
             handoff_target = None
         if shared_tree_notes:
