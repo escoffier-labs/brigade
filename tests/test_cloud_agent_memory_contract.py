@@ -236,6 +236,26 @@ class PrincipalReads(ReadHelpers):
             assert found["matches"] == [] and "local_matches" in found
 
     @requires_local_state
+    def test_a_skipped_scope_is_kept_and_warned_about(self):
+        self.hub_on()
+        body = {
+            "match_count": 1,
+            "matches": [self.match("fleet-card", "hub")],
+            "retrieval": {
+                "hub": "ok",
+                "skipped_scopes": ["principal:alice", "not a scope", 7],
+                "unprobed_scopes": ["repo:other"],
+            },
+            "warning": "the hub refused a read grant on principal:alice",
+        }
+        self.runner.handler = lambda argv, stdin: CommandResult(0, json.dumps(body).encode())
+        found = self.pinned().memory_search("fleet")
+        # The answer is not complete-looking: the withheld scopes and a warning code survive.
+        assert found["retrieval"]["skipped_scopes"] == ["principal:alice"]
+        assert found["retrieval"]["unprobed_scopes"] == ["repo:other"]
+        assert found["warning"] == "hub_scope_skipped"
+
+    @requires_local_state
     def test_a_swapped_token_file_is_refused_before_the_child_runs(self):
         self.hub_on()
         self.reply(self.match("fleet-card", "hub"))

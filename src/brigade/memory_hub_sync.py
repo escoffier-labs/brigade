@@ -11,19 +11,29 @@ refuses an admin credential (`memory_hub_client.refuse_admin`).
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
+from .inbox_lock import InboxLockTimeout
 
 SPOOL_MAX_AGE_MS = 28 * 24 * 3600 * 1000
 CLOCK_SKEW_WARN_SECONDS = 60
 LOG_PAGE = 500
 SAVE_EVERY_PAGES = 50
+# A push holds the state lock for its whole run, one `put` after another (each
+# up to 10s), so a pull's state writes wait it out instead of failing the pull
+# after the ordinary deadline. One deadline covers the whole wait, below the 90
+# second start timeout a sync oneshot gets; each attempt is shorter so the wait
+# is re-checked, and the busy lock is still reported when the deadline passes.
+PULL_STATE_LOCK_WAIT_SECONDS = 60.0
+PULL_STATE_LOCK_ATTEMPT_SECONDS = 30.0
+PULL_STATE_LOCK_PAUSE_SECONDS = 0.5
 # Refusals that mean "this exact write can never apply": review it as a proposal.
 CONFLICT_CODES = {
     "memory_base_mismatch",
@@ -59,6 +69,45 @@ class _ScopeRefused(Exception):
         self.scope = scope
 
 
+def _state_lock_pause(seconds: float) -> None:
+    """Wait between state-lock attempts. Separate so a test can release the holder."""
+    time.sleep(seconds)
+
+
+@contextlib.contextmanager
+def _state_lock(target: Path) -> Iterator[None]:
+    """`store.locked` for a pull's state writes, waiting out a concurrent push.
+
+    One deadline bounds the whole wait, and each attempt re-checks it, so a
+    busy lock is still reported as `InboxLockTimeout` after a bounded wait and
+    the pull can simply be run again. The retry only covers acquiring the
+    lock; an error inside the protected write is never retried.
+    """
+    deadline = time.monotonic() + PULL_STATE_LOCK_WAIT_SECONDS
+    last: InboxLockTimeout | None = None
+    with contextlib.ExitStack() as stack:
+        acquired = False
+        while not acquired:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                stack.enter_context(
+                    store.locked(target, deadline_seconds=min(remaining, PULL_STATE_LOCK_ATTEMPT_SECONDS))
+                )
+                acquired = True
+            except InboxLockTimeout as exc:
+                last = exc
+                pause = min(PULL_STATE_LOCK_PAUSE_SECONDS, deadline - time.monotonic())
+                if pause > 0:
+                    _state_lock_pause(pause)
+        if not acquired:
+            raise last or InboxLockTimeout(
+                f"hub state lock stayed busy for {PULL_STATE_LOCK_WAIT_SECONDS:g}s: {store.root(target) / store.LOCK}"
+            )
+        yield
+
+
 def read_status(client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
     """The hub's memory status with the principal and which configured read scopes it can read now.
 
@@ -83,7 +132,7 @@ def forget_other_principal(target: Path, hub: str, principal: object) -> bool:
 
 def forget_hub_replica(target: Path, hub: str) -> None:
     """Discard the live replica and any rebuild pulled from `hub`. Takes the state lock."""
-    with store.locked(target):
+    with _state_lock(target):
         if store.replica(target).meta.get("hub") == hub:
             store.discard_replica(target)
         if store.building(target).meta.get("hub") == hub:
@@ -147,6 +196,19 @@ def pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings)
             raise
 
 
+def _forget_search_refusals(target: Path, readable: set[str]) -> None:
+    """A successful pull read these scopes, so a search no longer leaves them out.
+
+    A cache write never fails the pull; the next search just keeps the memory.
+    """
+    if not readable:
+        return
+    try:
+        store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+    except OSError:
+        pass
+
+
 def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
     status = read_status(client, settings)
     epoch = str(status.get("log_epoch") or "")
@@ -161,7 +223,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         "applied": 0,
         "warnings": [],
     }
-    with store.locked(target):
+    with _state_lock(target):
         swap, replica = _prepare(target, hub, epoch, principal, readable, report)
 
     def save_held() -> None:
@@ -174,7 +236,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         replica.save()
 
     def save() -> None:
-        with store.locked(target):
+        with _state_lock(target):
             save_held()
 
     try:
@@ -182,13 +244,13 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         if str(client.call("status").get("log_epoch") or "") != epoch:
             raise _EpochMoved
         replica.meta["read_scopes"] = sorted(readable)
-        with store.locked(target):
+        with _state_lock(target):
             save_held()
             if swap:
                 replica = store.finish_building(target)
     except _EpochMoved:
         # Heads pulled so far belong to the old epoch: never serve them.
-        with store.locked(target):
+        with _state_lock(target):
             store.discard_replica(target)
             store.discard_building(target)
         report["warnings"].append("the hub's log_epoch changed during the pull; run pull again to rebuild")
@@ -204,6 +266,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             f"{len(replica.missing)} card(s) are not replicated yet"
         )
     report.update(seq=replica.meta.get("seq"), cards=len(replica.heads), bytes=replica.bytes())
+    _forget_search_refusals(target, readable)
     return report
 
 
@@ -220,7 +283,7 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
     """
     hub = client.identity
     with store.pulling(target):
-        with store.locked(target):
+        with _state_lock(target):
             live = store.replica(target)
             epoch, principal = str(live.meta.get("log_epoch") or ""), live.meta.get("principal")
             stale = {
@@ -253,7 +316,7 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
                     f"the hub's {head['scope']}/{head['card_id']} differs from the replica. Run memory hub pull"
                 )
             fetched[key] = {name: card[name] for name in SCAN_FIELDS if name in card}
-        with store.locked(target):
+        with _state_lock(target):
             live = store.replica(target)
             if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
                 raise hubc.HubConfigError("the replica changed during the metadata refresh. Run memory hub pull")
@@ -285,7 +348,7 @@ def _drop_revoked_scope(target: Path, hub: str, principal: object, epoch: str, s
     Only when the replica is still this hub, principal and log_epoch. A refusal
     that is not about a grant never reaches here, so an ordinary outage keeps the replica.
     """
-    with store.locked(target):
+    with _state_lock(target):
         live = store.replica(target)
         if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
             return

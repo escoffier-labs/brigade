@@ -902,6 +902,7 @@ _HTTP_REASON = re.compile(r"http-[1-5][0-9]{2}")
 # A search warning leaves only as one of these codes, never the CLI's text (it embeds a hub reason).
 WARNING_HUB_REFUSED = "hub_search_refused"
 WARNING_HUB_UNAVAILABLE = "hub_search_unavailable"
+WARNING_HUB_SCOPE_SKIPPED = "hub_scope_skipped"
 WARNING_HUB_LIMIT = "hub_limit_capped"
 
 
@@ -965,6 +966,15 @@ def _known_str(value: object, known: frozenset[str]) -> bool:
     return isinstance(value, str) and value in known
 
 
+def _known_scopes(value: object) -> list[str]:
+    """Hub scope names from a list, cut to the configured scope ceiling and to valid scopes."""
+    from ..memory_hub_client import READ_SCOPES_MAX, valid_scope
+
+    if not isinstance(value, list):
+        return []
+    return [scope for scope in value if isinstance(scope, str) and valid_scope(scope)][:READ_SCOPES_MAX]
+
+
 def _known_retrieval(retrieval: dict[str, Any]) -> dict[str, Any]:
     """The hub's retrieval report cut to the keys and values the CLI documents; the rest is dropped."""
     known: dict[str, Any] = {}
@@ -983,6 +993,10 @@ def _known_retrieval(retrieval: dict[str, Any]) -> dict[str, Any]:
         value = retrieval.get(key)
         if type(value) is int and 0 <= value <= 599:
             known[key] = value
+    for key in ("skipped_scopes", "unprobed_scopes"):
+        scopes = _known_scopes(retrieval.get(key))
+        if scopes:
+            known[key] = scopes
     fallback = retrieval.get("fallback")
     if isinstance(fallback, list):
         known["fallback"] = [source for source in fallback if _known_str(source, _SOURCES)]
@@ -997,6 +1011,8 @@ def _warning_code(warning: object, retrieval: dict[str, Any]) -> str | None:
         return WARNING_HUB_REFUSED
     if retrieval.get("hub") == "unavailable":
         return WARNING_HUB_UNAVAILABLE
+    if retrieval.get("skipped_scopes") or retrieval.get("unprobed_scopes"):
+        return WARNING_HUB_SCOPE_SKIPPED
     return WARNING_HUB_LIMIT if "hub_limit" in retrieval else None
 
 

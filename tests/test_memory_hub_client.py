@@ -787,6 +787,215 @@ def test_search_cli_labels_a_degraded_answer(hub, tmp_path, capsys):
     assert "[local]" in out
 
 
+def test_one_unreadable_read_scope_does_not_disable_hub_search(hub, tmp_path, capsys):
+    # The hub refuses the whole search when any requested scope has no grant (#2302).
+    target = workspace(tmp_path, mode="read", scope="repo:test/app", read_scopes=("repo:test/app", "principal:alice"))
+    _put(hub, "repo:test/app", "searchable", "the searchable words")
+    code, out, err = run(["memory", "search", "--target", str(target), "--json", "searchable"], capsys)
+    assert code == 0 and err == ""
+    payload = json.loads(out)
+    assert payload["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    assert [(m["card_id"], m["scope"], m["source"]) for m in payload["matches"]] == [
+        ("searchable", "repo:test/app", "hub")
+    ]
+    assert "principal:alice" in payload["warning"]
+    searches = [call for call in hub.calls if call["action"] == "search"]
+    assert searches[0]["scopes"] == ["repo:test/app", "principal:alice"]
+    assert [call["scopes"] for call in searches[1:]] == [["repo:test/app"], ["principal:alice"]]
+    # The refusal is remembered beside the hub state, so the next search is one request.
+    assert (target / ".brigade" / "memory" / "hub" / "refused-scopes.json").is_file()
+
+
+def test_merged_scope_replies_keep_hub_order_and_put_demoted_hits_last():
+    first = {
+        "matches": [
+            {"card_id": "a0", "scope": "repo:a"},
+            {"card_id": "a1", "scope": "repo:a", "source_demoted": True},
+        ],
+        "match_count": 2,
+        "retrieval": {"mode": "lexical", "stale": False},
+    }
+    second = {
+        "matches": [
+            {"card_id": "b0", "scope": "repo:b", "source_demoted": True},
+            {"card_id": "b1", "scope": "repo:b"},
+        ],
+        "match_count": 2,
+        "retrieval": {"mode": "hybrid", "stale": True},
+    }
+    merged = hub_search._merge_scope_replies([first, second], 3)
+    # Rank order across scopes, never a score re-sort, and every demoted hit after the others.
+    assert [match["card_id"] for match in merged["matches"]] == ["a0", "b1", "b0"]
+    assert merged["match_count"] == 4
+    assert merged["retrieval"] == {"mode": "lexical", "stale": True}
+
+
+def test_two_readable_scopes_and_one_refused_keep_each_hubs_order(hub, tmp_path):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a", "repo:b", "principal:alice"))
+    _put(hub, "repo:a", "a-strong", "needle needle")
+    _put(hub, "repo:a", "a-weak", "needle")
+    _put(hub, "repo:b", "b-weak", "needle")
+    payload = hub_search.search_payload(target, "needle", limit=2, settings=settings(target))
+    assert payload["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    # A single search would take the top hit of each scope before the next rank,
+    # not both of the scope whose own score happens to be higher.
+    assert [match["card_id"] for match in payload["matches"]] == ["a-strong", "b-weak"]
+    assert payload["hub_match_count"] == 3
+
+
+def test_a_403_that_is_not_a_missing_grant_is_not_probed(hub, tmp_path):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a", "repo:b"))
+    hub.search_reply = (403, {"error": "no", "code": "memory_query_invalid"})
+    payload = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert payload["retrieval"]["hub"] == "refused"
+    assert payload["retrieval"]["reason"] == "memory_query_invalid"
+    assert "skipped_scopes" not in payload["retrieval"]
+    assert [call["scopes"] for call in hub.calls if call["action"] == "search"] == [["repo:a", "repo:b"]]
+    assert not (target / ".brigade" / "memory" / "hub" / "refused-scopes.json").exists()
+
+
+def test_a_refused_scope_is_remembered_and_tried_again_after_the_ttl(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a", "principal:alice"))
+    _put(hub, "repo:a", "a-card", "needle")
+    now = [1_000.0]
+    monkeypatch.setattr(hub_search, "_now", lambda: now[0], raising=False)
+    first = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert first["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    assert [call["scopes"] for call in hub.calls if call["action"] == "search"] == [
+        ["repo:a", "principal:alice"],
+        ["repo:a"],
+        ["principal:alice"],
+    ]
+    hub.calls.clear()
+    second = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert [call["scopes"] for call in hub.calls if call["action"] == "search"] == [["repo:a"]]
+    assert second["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    assert "remembered" in second["warning"]
+    now[0] += 599.0
+    hub.calls.clear()
+    hub_search.search_payload(target, "needle", settings=settings(target))
+    assert [call["scopes"] for call in hub.calls if call["action"] == "search"] == [["repo:a"]]
+    now[0] += 2
+    hub.calls.clear()
+    hub_search.search_payload(target, "needle", settings=settings(target))
+    assert [call["scopes"] for call in hub.calls if call["action"] == "search"] == [
+        ["repo:a", "principal:alice"],
+        ["repo:a"],
+        ["principal:alice"],
+    ]
+
+
+def test_a_pull_that_reads_a_scope_clears_its_remembered_refusal(hub, tmp_path):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a", "principal:alice"))
+    _put(hub, "repo:a", "a-card", "needle")
+    _put(hub, "principal:alice", "alice-card", "needle", token=ADMIN_CREDENTIAL)
+    first = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert first["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    # The grant is issued and a pull reads the scope, so the next search asks for it again.
+    hub.grants["node-1"] = {"fleet", "repo:a", "principal:alice"}
+    sync.pull(target, client(hub), settings(target))
+    hub.calls.clear()
+    second = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert [call["scopes"] for call in hub.calls if call["action"] == "search"] == [["repo:a", "principal:alice"]]
+    assert "skipped_scopes" not in second["retrieval"]
+
+
+def test_the_refused_scope_memory_is_bounded_and_private(tmp_path):
+    scopes = tuple(f"principal:agent-{index}" for index in range(store.REFUSED_SCOPES_MAX))
+    store.remember_refused_scopes(tmp_path, scopes, now=1_000.0)
+    newest = ("principal:new-a", "principal:new-b", "principal:new-c")
+    store.remember_refused_scopes(tmp_path, newest, now=1_100.0)
+    remembered = store.refused_scopes(tmp_path, now=1_100.0)
+    assert len(remembered) == store.REFUSED_SCOPES_MAX
+    assert set(newest) <= set(remembered)
+    path = tmp_path / ".brigade" / "memory" / "hub" / "refused-scopes.json"
+    assert path.parent == store.root(tmp_path) and not path.is_symlink()
+    if os.name != "posix":
+        # Windows reports 0o666 whatever chmod asked; the file is private by
+        # living in the same private hub root as every other hub state file.
+        return
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_stored_refusal_expiry_is_clamped_to_the_ttl(tmp_path):
+    path = tmp_path / ".brigade" / "memory" / "hub" / "refused-scopes.json"
+    store.ensure_root(tmp_path)
+    store.write_json(path, {"scopes": {"principal:alice": 10**9}})
+    # A far-future or skewed expiry may not hide a scope past the TTL.
+    assert store.refused_scopes(tmp_path, now=1_000.0) == {"principal:alice": 1_600.0}
+
+
+def test_an_oversized_refused_scope_file_is_ignored(tmp_path):
+    path = tmp_path / ".brigade" / "memory" / "hub" / "refused-scopes.json"
+    store.ensure_root(tmp_path)
+    body = json.dumps({"scopes": {"principal:alice": 1_600.0}})
+    # Past the 64 KiB read cap the file is ignored instead of read into memory.
+    store.write_private(path, body + " " * (64 * 1024))
+    assert store.refused_scopes(tmp_path, now=1_000.0) == {}
+
+
+def test_a_refusal_that_leaves_no_readable_scope_still_answers_locally(hub, tmp_path, capsys):
+    target = workspace(
+        tmp_path,
+        mode="read",
+        scope="repo:test/app",
+        read_scopes=("principal:alice", "principal:bob"),
+        mine="# Mine\nsearchable\n",
+    )
+    code, out, err = run(["memory", "search", "--target", str(target), "--json", "searchable"], capsys)
+    assert code == 0 and err == ""
+    payload = json.loads(out)
+    assert payload["retrieval"]["hub"] == "refused" and payload["retrieval"]["degraded"] is True
+    assert payload["retrieval"]["skipped_scopes"] == ["principal:alice", "principal:bob"]
+    assert [match["source"] for match in payload["matches"]] == ["local"]
+
+
+def test_the_hub_budget_starts_after_local_matching(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a",))
+    _put(hub, "repo:a", "a-card", "needle")
+    clock = [0.0]
+    monkeypatch.setattr(hub_search, "_monotonic", lambda: clock[0], raising=False)
+    original = hub_search._local_matches
+
+    def slow_local(*args, **kwargs):
+        clock[0] += 0.25
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(hub_search, "_local_matches", slow_local)
+    timeouts: list[float] = []
+
+    def transport(url, token, body, timeout):
+        timeouts.append(timeout)
+        return hub(url, token, body, timeout)
+
+    payload = hub_search.search_payload(target, "needle", settings=settings(target), transport=transport)
+    # Local BM25 work never comes out of the hub's 800 ms.
+    assert timeouts == [pytest.approx(hubc.SEARCH_BUDGET_SECONDS)]
+    assert payload["retrieval"]["hub"] == "ok"
+
+
+def test_the_scope_probes_share_the_search_deadline(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a", "principal:alice"))
+    _put(hub, "repo:a", "a-card", "needle")
+    clock = [0.0]
+    monkeypatch.setattr(hub_search, "_monotonic", lambda: clock[0], raising=False)
+    timeouts: list[float] = []
+
+    def slow(url, token, body, timeout):
+        timeouts.append(timeout)
+        clock[0] += 0.5
+        return hub(url, token, body, timeout)
+
+    payload = hub_search.search_payload(target, "needle", settings=settings(target), transport=slow)
+    assert len(timeouts) == 2
+    assert timeouts[0] == pytest.approx(hubc.SEARCH_BUDGET_SECONDS)
+    assert payload["retrieval"]["unprobed_scopes"] == ["principal:alice"]
+    assert "principal:alice" in payload["warning"]
+    assert [match["card_id"] for match in payload["matches"]] == ["a-card"]
+    # A scope the budget never reached is not remembered as refused.
+    assert not (target / ".brigade" / "memory" / "hub" / "refused-scopes.json").exists()
+
+
 @pytest.mark.parametrize(
     ("lineage", "source_demoted", "ranks"),
     [([{"scope": "fleet", "card_id": "ancestor", "revision": 1}], True, {"lexical": 2, "dense": 1}), ([], False, {})],
@@ -1107,15 +1316,22 @@ def test_a_refused_search_never_answers_from_the_replica(hub, tmp_path, status):
     code = "memory_grant_missing" if status == 403 else "unauthorized"
     hub.search_reply = (status, {"error": "refused", "code": code} if status == 403 else {"error": "unauthorized"})
     payload = hub_search.search_payload(target, "wombat", settings=settings(target))
-    assert payload["retrieval"] == {
+    expected = {
         "hub": "refused",
         "degraded": True,
         "reason": code,
         "status": status,
         "fallback": ["local"],
     }
+    if status == 403:
+        # Every configured scope answered the missing grant, so each one is named.
+        expected["skipped_scopes"] = ["fleet", "repo:test/app"]
+    assert payload["retrieval"] == expected
     assert {(m["card_id"], m["source"]) for m in payload["matches"]} == {("mine", "local")}
-    assert payload["warning"] == f"hub search refused ({status} {code}); answered from local"
+    warning = f"hub search refused ({status} {code}); answered from local"
+    if status == 403:
+        warning += "; the hub refused a read grant on fleet, repo:test/app"
+    assert payload["warning"] == warning
 
 
 # --- review round 1: pull ------------------------------------------------------------------
@@ -1494,6 +1710,9 @@ def test_a_long_pull_never_blocks_a_push_and_a_busy_lock_says_so(hub, tmp_path, 
     assert free and _card_ids(store.replica(target)) == {"theirs"}
     hub.do_log = original
     monkeypatch.setattr(store, "LOCK_DEADLINE_SECONDS", 0.1)
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_ATTEMPT_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_WAIT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(sync, "_state_lock_pause", lambda seconds: None)
     with store.pulling(target):
         code, out, err = run(["memory", "hub", "push", "--target", str(target), "--yes"], capsys)
         assert code == 0 and "1 published" in out
@@ -1502,6 +1721,103 @@ def test_a_long_pull_never_blocks_a_push_and_a_busy_lock_says_so(hub, tmp_path, 
     with store.locked(target):
         code, out, err = run(["memory", "hub", "push", "--target", str(target)], capsys)
         assert code == 75 and "another memory hub push or pull is running" in err and "unusable" not in err
+
+
+def test_a_pull_save_waits_out_a_push_that_holds_the_state_lock(hub, tmp_path, monkeypatch):
+    # A push holds the state lock for its whole run (#2302). The pull's save waits
+    # instead of failing the pull after the ordinary deadline.
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    monkeypatch.setattr(store, "LOCK_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_ATTEMPT_SECONDS", 0.05, raising=False)
+    holding = threading.Event()
+    release = threading.Event()
+    released = threading.Event()
+    pauses: list[float] = []
+
+    def hold_like_a_push() -> None:
+        with store.locked(target, deadline_seconds=10):
+            holding.set()
+            release.wait(10)
+        released.set()
+
+    original = hub.do_log
+
+    def log_while_a_push_holds_the_lock(body):
+        thread = threading.Thread(target=hold_like_a_push, daemon=True)
+        thread.start()
+        assert holding.wait(5)
+        return original(body)
+
+    hub.do_log = log_while_a_push_holds_the_lock
+
+    def wait_for_the_push(seconds: float) -> None:
+        pauses.append(seconds)
+        release.set()
+        assert released.wait(5)
+
+    monkeypatch.setattr(sync, "_state_lock_pause", wait_for_the_push)
+    report = sync.pull(target, client(hub), settings(target))
+    assert pauses, "the save should have waited for the push"
+    assert report["cards"] == 1
+    assert _card_ids(store.replica(target)) == {"theirs"}
+
+
+def test_the_pull_state_lock_wait_fits_a_oneshot_start_timeout():
+    # The sync oneshot's default start timeout is 90 seconds, so one pull state
+    # write may not wait longer than this, and its attempts never extend it.
+    assert sync.PULL_STATE_LOCK_WAIT_SECONDS <= 60.0
+    assert sync.PULL_STATE_LOCK_ATTEMPT_SECONDS <= sync.PULL_STATE_LOCK_WAIT_SECONDS
+
+
+def test_a_pull_reports_busy_when_the_state_lock_outlasts_its_wait(hub, tmp_path, monkeypatch, capsys):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    monkeypatch.setattr(store, "LOCK_DEADLINE_SECONDS", 0.02)
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_ATTEMPT_SECONDS", 0.02, raising=False)
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_WAIT_SECONDS", 0.08, raising=False)
+    monkeypatch.setattr(sync, "_state_lock_pause", lambda seconds: None)
+    with store.locked(target):
+        code, out, err = run(["memory", "hub", "pull", "--target", str(target)], capsys)
+    assert code == 75 and "another memory hub push or pull is running" in err and "unusable" not in err
+
+
+def test_a_refused_pull_discards_the_replica_through_the_state_lock(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    sync.pull(target, client(hub), settings(target))
+    assert store.replica(target).exists
+    monkeypatch.setattr(store, "LOCK_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_ATTEMPT_SECONDS", 0.05, raising=False)
+    holding = threading.Event()
+    release = threading.Event()
+    released = threading.Event()
+    pauses: list[float] = []
+
+    def hold_like_a_push() -> None:
+        with store.locked(target, deadline_seconds=10):
+            holding.set()
+            release.wait(10)
+        released.set()
+
+    def status_while_a_push_holds_the_lock():
+        thread = threading.Thread(target=hold_like_a_push, daemon=True)
+        thread.start()
+        assert holding.wait(5)
+
+    hub.status_reply = (403, {"error": "no read grant", "code": "memory_grant_missing"})
+    hub.on_status = status_while_a_push_holds_the_lock
+
+    def wait_for_the_push(seconds: float) -> None:
+        pauses.append(seconds)
+        release.set()
+        assert released.wait(5)
+
+    monkeypatch.setattr(sync, "_state_lock_pause", wait_for_the_push)
+    with pytest.raises(hubc.HubRefusal):
+        sync.pull(target, client(hub), settings(target))
+    assert pauses, "the discard should have waited for the push"
+    assert not store.replica(target).exists
 
 
 def test_keep_hub_rewrites_the_card_and_keeps_the_local_text(hub, tmp_path, capsys):
