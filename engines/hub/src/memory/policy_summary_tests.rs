@@ -407,3 +407,22 @@ async fn a_noncanonical_reflect_token_neither_grants_nor_reserves() {
         Some(std::collections::BTreeSet::new())
     );
 }
+
+/// A `rights` value stored as a blob reads as no rights in `has_right`, so it
+/// reserves nothing even when its bytes spell `reflect`.
+#[tokio::test]
+async fn a_blob_rights_value_neither_grants_nor_reserves() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    let memory = Connection::open(h.memory()).unwrap();
+    memory
+        .execute(
+            "INSERT INTO memory_grants VALUES('node-1',?1,CAST('read,reflect' AS BLOB),'2026-02-01','hub:admin')",
+            [A],
+        )
+        .unwrap();
+    assert_eq!(
+        caps_run(&h, &["node-1"], auth::RESERVED_CAPS),
+        Some(std::collections::BTreeSet::new())
+    );
+}

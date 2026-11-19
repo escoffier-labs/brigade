@@ -231,9 +231,11 @@ impl ReflectPatterns {
 }
 
 /// `SELECT ... FROM memory_grants` rows holding reflect, one more than `cap`.
-/// `instr` is case-sensitive, so the match is the exact comma token `has_right`
-/// reads through `rights_set`; `LIKE` would also accept `REFLECT`.
-/// `None` when the cap is exceeded.
+/// The SQL only narrows the read: `rights_set`, the parser `has_right` uses,
+/// decides each row, so a noncanonical or non-text `rights` value counts
+/// exactly as it does for `has_right`. Rows the SQL admits still count toward
+/// the cap, which can only make the answer empty. `None` when the cap is
+/// exceeded.
 fn reflect_grant_rows<T: ReadTx + ?Sized>(
     tx: &T,
     filter: &str,
@@ -245,11 +247,18 @@ fn reflect_grant_rows<T: ReadTx + ?Sized>(
     let rows = tx.query(
         &format!(
             "SELECT principal,scope,rights FROM memory_grants WHERE {filter} \
-             AND instr(','||rights||',', ',reflect,')>0 LIMIT ?{n}"
+             AND typeof(rights)='text' AND instr(','||rights||',', ',reflect,')>0 LIMIT ?{n}"
         ),
         &params,
     )?;
-    Ok((rows.len() <= cap).then_some(rows))
+    if rows.len() > cap {
+        return Ok(None);
+    }
+    Ok(Some(
+        rows.into_iter()
+            .filter(|r| rights_set(&r[2]).contains("reflect"))
+            .collect(),
+    ))
 }
 
 /// For a credential that holds `reflect` on some scope, the scopes where it
