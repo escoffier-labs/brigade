@@ -821,6 +821,9 @@ class DigestAvailability(Fixture):
 
                 for method in ("_digest_overview", "_digest_work_next", "_digest_inbox", "_digest_prs"):
                     stack.enter_context(patch.object(self.adapter.hub, method, side_effect=fail))
+                # Patch the unread section too. Left unpatched, its outcome at a
+                # zero deadline depends on whether the worker finished in time.
+                stack.enter_context(patch.object(self.adapter.inbox, "unread_by_principal", side_effect=fail))
                 stack.enter_context(patch.object(BridgeState, "subscription_count", side_effect=lambda owner: fail()))
                 if timed_out:
                     stack.enter_context(patch.object(hub_module, "DIGEST_DEADLINE", 0))
@@ -839,11 +842,9 @@ class DigestAvailability(Fixture):
                         ],
                     },
                 )
-                # The unread section is not patched: it answers in time and misses a zero deadline.
                 self.assertEqual(
                     result["section_errors"],
-                    ["brigade_prs", "fleet_overview", "fleet_work_next", "inbox", "subscriptions"]
-                    + (["unread"] if timed_out else []),
+                    ["brigade_prs", "fleet_overview", "fleet_work_next", "inbox", "subscriptions", "unread"],
                 )
                 self.assertNotIn("private exception", json.dumps(result))
                 if timed_out:

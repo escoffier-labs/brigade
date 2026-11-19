@@ -455,6 +455,13 @@ def test_cancelled_inbox_releases_its_hub_wait_slot(stations, hub, monkeypatch):
     # One injected hub wait bound: after a cancellation the loop must not open
     # another wait, so the slot frees in one chunk instead of the full 120 s.
     monkeypatch.setattr(fleet_mcp, "MAX_WAIT_MS", 300)
+    # Freeze the hub's wait clock while the cap is established. Both inbox waits
+    # then stay parked, so the probe cannot land in a gap between their 300 ms
+    # chunks (which is what made the Windows nightly never observe the cap).
+    real_monotonic = fleet_hub_messages.monotonic
+    frozen_at = real_monotonic()
+    parked = [True]
+    monkeypatch.setattr(fleet_hub_messages, "monotonic", lambda: frozen_at if parked[0] else real_monotonic())
     replies: dict[int, tuple[int, dict[str, str], bytes]] = {}
 
     def inbox(station, request_id):
@@ -475,14 +482,9 @@ def test_cancelled_inbox_releases_its_hub_wait_slot(stations, hub, monkeypatch):
         for worker in workers:
             worker.start()
         _wait_for_active_waiters(NODE_B, 2, timeout=30)
-        # The per-caller cap of 2 is real: a third wait is refused. Each inbox call
-        # reopens its 300 ms chunk, so a probe can land in that gap and be admitted;
-        # probe until the cap is observed rather than asserting on one attempt.
-        deadline = time.monotonic() + 30
-        statuses = [hub_wait()[0]]
-        while statuses[-1] != 429 and time.monotonic() < deadline:
-            statuses.append(hub_wait()[0])
-        assert statuses[-1] == 429, statuses
+        # Both slots are held by parked waits: one probe establishes the cap.
+        assert hub_wait()[0] == 429
+        parked[0] = False  # let the chunks expire so cancellation can free the slots
 
         for request_id in (1, 2):
             status, _headers, _body = station.rpc(
