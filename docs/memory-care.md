@@ -80,14 +80,22 @@ for example because automatic apply is off or the kill switch is engaged, the
 referral stays open and the hub rechecks the strict pending totals before
 releasing the savepoint. An inverse that would leave the principal or a scope
 over its limit is rolled back with the usual `memory_proposal_principal_quota`
-or `memory_proposal_scope_quota` code.
+or `memory_proposal_scope_quota` code. Retained bytes are checked strictly at
+admission, so a principal or scope already at `bytes_per_principal` or
+`bytes_per_scope` cannot apply the inverse automatically: each watch cycle holds
+it with the quota code and retries until a reviewer decides the referral or
+compaction frees bytes.
 
 Recorded decision: a human rejection of the watch review referral vetoes every
 automatic inverse for the same `rollback_of`. The reviewed decision writes a
 `compensation_veto:<rollback_of>` marker in the same transaction, and the hub
 reads that key in the transaction that would apply the inverse, so no client
-retry can apply it and the veto survives body compaction. A rejected manual
-rollback proposal is not a review referral and writes no marker. Rejections
+retry can apply it and the veto survives body compaction. Only the rejection of
+a proposal carrying a watch review requirement writes the marker. Manual
+rollbacks are not automatic compensation, so a marker can never block one.
+The marker is permanent: it is not cleaned up with the watch journal and there
+is no reopen, so after a mistaken rejection that trip can only be reversed by
+a reviewed manual rollback. Rejections
 recorded before this marker existed do not veto, which matches how hubs behaved
 before the veto existed. A refused inverse records `reason: compensation_vetoed`
 with `compensation_result: failed`, the watch journal ends retries for that trip,
