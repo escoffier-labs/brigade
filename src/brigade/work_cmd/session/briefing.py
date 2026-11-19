@@ -18,7 +18,7 @@ from uuid import uuid4
 from ... import dogfood_cmd, localio, memory_care_instructions, outcome_ratchet_report
 from ...config import load_config
 from ...install import apply_gitignore
-from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
+from .. import brief_values, constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from .. import scanners as scanners_mod, reviews as reviews_mod
 
 from .lifecycle import _resolve_next_task
@@ -886,7 +886,7 @@ def _outcome_ratchet_line(ratchet: object) -> str:
     report = ratchet if isinstance(ratchet, dict) else {}
     if not report.get("present"):
         return "outcome_ratchet: no report yet"
-    ids = [str(item) for item in report.get("regression_hold_ids") or []]
+    ids = [brief_values.name(item) for item in report.get("regression_hold_ids") or []]
     raw_total = report.get("regression_holds")
     total = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else len(ids)
     if ids:
@@ -900,11 +900,11 @@ def _outcome_ratchet_line(ratchet: object) -> str:
     else:
         listed = "none"
     return (
-        f"outcome_ratchet: generated_at={report.get('generated_at')} "
-        f"mode={report.get('mode') or 'dry-run'} "
+        f"outcome_ratchet: generated_at={brief_values.name(report.get('generated_at'))} "
+        f"mode={brief_values.name(report.get('mode') or 'dry-run')} "
         f"regression_holds={report.get('regression_holds')} ({listed}) "
         f"ineligibility_rate={report.get('ineligibility_rate')} "
-        f"leading={report.get('leading_reason') or 'none'} "
+        f"leading={brief_values.name(report.get('leading_reason') or 'none')} "
         f"pending_physical_actions={report.get('pending_physical_actions') or 0}"
         + (f" stale={report['stale_physical_actions']}" if report.get("stale_physical_actions") else "")
     )
@@ -933,6 +933,25 @@ def _outcome_proposals_line(ratchet: object) -> str:
     return "outcome_proposals: " + " ".join(f"{key}={counts.get(key, 0)}" for key in keys)
 
 
+def _top_issue_line(label: str, issue: object) -> str:
+    """A health row's top issue: the name encoded, the detail Brigade's own text."""
+    row = issue if isinstance(issue, dict) else {}
+    return f"{label}: {brief_values.name(row.get('name'))} {helpers._short(str(row.get('detail', '')))}"
+
+
+def _next_line(payload: dict[str, Any]) -> str:
+    """The next task text, encoded unless Brigade itself wrote the default review text."""
+    raw = str(payload.get("next") or "")
+    shown = helpers._short(raw) if payload.get("next_source") == "default_review" else brief_values.text(raw)
+    return f"next: {shown}"
+
+
+def _suggested_command_line(payload: dict[str, Any]) -> str:
+    """The suggested command, with any untrusted task text encoded where it is quoted."""
+    command = brief_values.encoded_command(payload.get("suggested_command"), payload.get("next"))
+    return f"suggested_command: {command}"
+
+
 def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
@@ -946,7 +965,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     if not json_output:
         # Print the header before collecting, so an outer timeout still leaves
         # a non-empty brief instead of a silent hang.
-        print(f"work brief: {target}", flush=True)
+        print(f"work brief: {brief_values.name(target)}", flush=True)
     payload = _brief_payload(target, limit=limit, include_code_graph=json_output)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -960,7 +979,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     for line in brief_sections.render_brief_session_close_lines(mode=str(work_mode_payload.get("mode") or "unknown")):
         print(line)
     if "pin_error" in work_mode_payload:
-        print(f"work_mode_pin: {work_mode_payload['pin_error']}")
+        print(f"work_mode_pin: {brief_values.text(work_mode_payload['pin_error'])}")
     if work_mode_payload.get("rails") == "off":
         print("safety_rails: off (pre-push content guard and secret scanning are skipped)")
     section_issues = payload.get("status_section_issue_count")
@@ -971,15 +990,18 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"top_status_section_issue: {top_section_issue.get('name')} {top_section_issue.get('detail')}")
     update = payload.get("update")
     if isinstance(update, dict):
-        print(f'update_available: {update.get("latest")} (installed {update.get("installed")}); run "brigade update"')
+        print(
+            f"update_available: {brief_values.name(update.get('latest'))} "
+            f'(installed {brief_values.name(update.get("installed"))}); run "brigade update"'
+        )
     git = payload.get("git")
     if isinstance(git, dict) and git.get("available"):
-        print(f"branch: {git.get('branch')}")
+        print(f"branch: {brief_values.name(git.get('branch'))}")
         raw_dirty = git.get("dirty_files")
         dirty: list[Any] = raw_dirty if isinstance(raw_dirty, list) else []
         print(f"dirty_files: {len(dirty)}")
         for item in dirty[:8]:
-            print(f"  {item}")
+            print(f"  {brief_values.status_entry(item)}")
         if len(dirty) > 8:
             print(f"  ... {len(dirty) - 8} more")
     else:
@@ -991,21 +1013,21 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 continue
             raw_paths = warning.get("paths")
             paths: list[Any] = raw_paths if isinstance(raw_paths, list) else []
-            shown = [str(path) for path in paths[:8]]
+            shown = [brief_values.name(path) for path in paths[:8]]
             print(
                 "overlap: "
-                f"{warning.get('node_id')} {warning.get('harness')} "
-                f"{warning.get('session_id')} {' '.join(shown)}"
+                f"{brief_values.name(warning.get('node_id'))} {brief_values.name(warning.get('harness'))} "
+                f"{brief_values.name(warning.get('session_id'))} {' '.join(shown)}"
             )
 
     active = payload.get("active_session")
     if isinstance(active, dict):
         if active.get("valid"):
-            print(f"active_session: {active.get('path')}")
+            print(f"active_session: {brief_values.name(active.get('path'))}")
             if active.get("title"):
-                print(f"active_session_title: {helpers._short(str(active['title']))}")
+                print(f"active_session_title: {brief_values.text(active['title'])}")
         else:
-            print(f"active_session: invalid ({active.get('path')})")
+            print(f"active_session: invalid ({brief_values.name(active.get('path'))})")
     elif _brief_section_failed(payload, "active-session"):
         print("active_session: unavailable (section timed out or failed)")
     else:
@@ -1013,33 +1035,34 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
 
     latest_session = payload.get("latest_session")
     if isinstance(latest_session, dict):
-        print(f"latest_session: {latest_session.get('path')}")
+        print(f"latest_session: {brief_values.name(latest_session.get('path'))}")
         if latest_session.get("title"):
-            print(f"latest_session_title: {helpers._short(str(latest_session['title']))}")
+            print(f"latest_session_title: {brief_values.text(latest_session['title'])}")
         if latest_session.get("note"):
-            print(f"latest_session_note: {helpers._short(str(latest_session['note']))}")
+            print(f"latest_session_note: {brief_values.text(latest_session['note'])}")
         if latest_session.get("handoff"):
-            print(f"latest_session_handoff: {latest_session['handoff']}")
+            print(f"latest_session_handoff: {brief_values.text(latest_session['handoff'])}")
     elif _brief_section_failed(payload, "sessions"):
         print("latest_session: unavailable (section timed out or failed)")
     else:
-        print(f"latest_session: none ({helpers._work_root(target)})")
+        print(f"latest_session: none ({brief_values.name(helpers._work_root(target))})")
 
     dogfood = payload.get("dogfood")
     if not isinstance(dogfood, dict):
         dogfood = {}
     print(f"dogfood_ready: {dogfood.get('ready')}")
     if dogfood.get("error"):
-        print(f"dogfood_error: {dogfood['error']}")
+        print(f"dogfood_error: {brief_values.text(dogfood['error'])}")
     latest_run = dogfood.get("latest_run")
     if isinstance(latest_run, dict):
         print(
             "latest_run: "
-            f"{latest_run.get('started_at', '')} "
-            f"[{latest_run.get('status', 'unknown')}] {latest_run.get('path')}"
+            f"{brief_values.name(latest_run.get('started_at', ''))} "
+            f"[{brief_values.name(latest_run.get('status', 'unknown'))}] "
+            f"{brief_values.name(latest_run.get('path'))}"
         )
         if latest_run.get("task"):
-            print(f"latest_task: {helpers._short(str(latest_run['task']))}")
+            print(f"latest_task: {brief_values.text(latest_run['task'])}")
     else:
         print("latest_run: none")
 
@@ -1063,7 +1086,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         )
         manifest_ids = outcome_loop.get("registered_verify_manifest_ids")
         if isinstance(manifest_ids, list):
-            listed = ", ".join(str(item) for item in manifest_ids) if manifest_ids else "none"
+            listed = ", ".join(brief_values.name(item) for item in manifest_ids) if manifest_ids else "none"
             print(f"outcome_verify_manifests: {listed}")
         bands = outcome_loop.get("exploration_bands") if isinstance(outcome_loop.get("exploration_bands"), dict) else {}
         if bands:
@@ -1076,7 +1099,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             )
         top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
         if top_outcome:
-            print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")
+            print(_top_issue_line("outcome_loop_issue", top_outcome))
     ratchet = payload.get("outcome_ratchet")
     if isinstance(ratchet, dict):
         print(_outcome_ratchet_line(ratchet))
@@ -1092,9 +1115,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
         top_notification = notifications.get("top_issue") if isinstance(notifications.get("top_issue"), dict) else None
         if top_notification:
-            print(
-                f"notifications_top_issue: {top_notification.get('name')} {helpers._short(str(top_notification.get('detail', '')))}"
-            )
+            print(_top_issue_line("notifications_top_issue", top_notification))
 
     raw_cloud = payload.get("cloud_tracker")
     cloud: dict[str, Any] = raw_cloud if isinstance(raw_cloud, dict) else {}
@@ -1107,40 +1128,45 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         for row in cloud.get("stale_entries") or []:
             if not isinstance(row, dict):
                 continue
+            branch = row.get("branch")
+            if not branch and isinstance(row.get("artifact_refs"), dict):
+                branch = (row.get("artifact_refs") or {}).get("branch")
             print(
-                f"  - {row.get('label')} provider={row.get('provider')} "
-                f"task={row.get('task_id') or row.get('job_id')} "
-                f"branch={row.get('branch') or ((row.get('artifact_refs') or {}).get('branch') if isinstance(row.get('artifact_refs'), dict) else None)}"
+                f"  - {brief_values.name(row.get('label'))} provider={brief_values.name(row.get('provider'))} "
+                f"task={brief_values.name(row.get('task_id') or row.get('job_id'))} "
+                f"branch={brief_values.name(branch)}"
             )
 
     print(f"next_source: {payload.get('next_source')}")
     if payload.get("task_id"):
-        print(f"task_id: {payload['task_id']}")
+        print(f"task_id: {brief_values.name(payload['task_id'])}")
     next_task = payload.get("next_task") if isinstance(payload.get("next_task"), dict) else None
     if next_task:
-        print(f"next_type: {next_task.get('type')}")
-        print(f"next_priority: {next_task.get('priority')}")
+        print(f"next_type: {brief_values.name(next_task.get('type'))}")
+        print(f"next_priority: {brief_values.name(next_task.get('priority'))}")
         if next_task.get("template"):
-            print(f"next_template: {next_task.get('template')}")
+            print(f"next_template: {brief_values.name(next_task.get('template'))}")
         if next_task.get("acceptance_missing"):
             print("next_acceptance: missing")
         else:
             print(f"next_acceptance: {next_task.get('acceptance_count')}")
     next_issue = payload.get("next_issue") if isinstance(payload.get("next_issue"), dict) else None
     if next_issue:
-        print(f"issue: {next_issue.get('url') or next_issue.get('number')}")
+        print(f"issue: {brief_values.name(next_issue.get('url') or next_issue.get('number'))}")
         if next_issue.get("state"):
-            print(f"issue_state: {next_issue['state']}")
+            print(f"issue_state: {brief_values.name(next_issue['state'])}")
         labels = next_issue.get("labels")
         if isinstance(labels, list) and labels:
-            print(f"issue_labels: {', '.join(str(label) for label in labels)}")
-    print(f"next: {helpers._short(str(payload.get('next') or ''))}")
-    print(f"suggested_command: {payload.get('suggested_command')}")
+            print(f"issue_labels: {', '.join(brief_values.name(label) for label in labels)}")
+    print(_next_line(payload))
+    print(_suggested_command_line(payload))
 
     patrol = payload.get("patrol")
     if isinstance(patrol, dict):
         counts = patrol.get("counts", {})
-        patrol_summary = ", ".join(f"{state}={count}" for state, count in counts.items()) or "no local lanes"
+        patrol_summary = (
+            ", ".join(f"{brief_values.name(state)}={count}" for state, count in counts.items()) or "no local lanes"
+        )
         print(f"patrol: {patrol_summary}" + (" (truncated)" if patrol.get("truncated") else ""))
     orphaned_runs = payload.get("orphaned_runs")
     if isinstance(orphaned_runs, list) and orphaned_runs:
@@ -1149,12 +1175,13 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if not isinstance(row, dict):
                 continue
             print(
-                f"  {row.get('run_id')} last={row.get('last_observed_status')} "
+                f"  {brief_values.name(row.get('run_id'))} "
+                f"last={brief_values.name(row.get('last_observed_status'))} "
                 f"dirty={row.get('uncommitted_change_count')}"
             )
             command = row.get("suggested_command")
             if isinstance(command, str) and command.strip():
-                print(f"  {command}")
+                print(f"  {brief_values.encoded_command(command, row.get('run_id'))}")
         print("orphaned_trap: recorded dirty count only; inspect before assuming the tree is clean")
 
     pending = payload.get("pending_tasks")
@@ -1166,9 +1193,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             summary = ledger_mod._task_summary(task)
             print(
                 "  - "
-                f"{task.get('id')} "
-                f"[{summary['type']} {summary['priority']} acceptance={summary['acceptance_count']}] "
-                f"{helpers._short(str(task.get('text', '')))}"
+                f"{brief_values.name(task.get('id'))} "
+                f"[{brief_values.name(summary['type'])} {brief_values.name(summary['priority'])} "
+                f"acceptance={summary['acceptance_count']}] "
+                f"{brief_values.text(task.get('text', ''))}"
             )
         if len(pending) > 5:
             print(f"  ... {len(pending) - 5} more")
@@ -1176,7 +1204,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     plan_coverage = payload.get("plan_coverage")
     if isinstance(plan_coverage, dict):
         if plan_coverage.get("significant_without_plan"):
-            ids = ", ".join(plan_coverage.get("task_ids", [])[:5])
+            ids = ", ".join(brief_values.name(item) for item in plan_coverage.get("task_ids", [])[:5])
             print(f"plans: {plan_coverage['significant_without_plan']} pending task(s) without a plan artifact ({ids})")
         elif not plan_coverage.get("pending_total"):
             print("plans: no pending tasks")
@@ -1192,42 +1220,48 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if by_source:
                 print("pending_imports_by_source:")
                 for source, count in by_source.items():
-                    print(f"  {source}: {count}")
+                    print(f"  {brief_values.name(source)}: {count}")
             by_kind = counts.get("by_kind") if isinstance(counts.get("by_kind"), dict) else {}
             if by_kind:
                 print("pending_imports_by_kind:")
                 for kind, count in by_kind.items():
-                    print(f"  {kind}: {count}")
+                    print(f"  {brief_values.name(kind)}: {count}")
         print("pending_imports:")
         for item in pending_imports[:5]:
             if not isinstance(item, dict):
                 continue
             source = item.get("source") or "unknown"
             kind = item.get("kind") or "task"
-            print(f"  - {item.get('id')} [{kind}] {source}: {helpers._short(str(item.get('text', '')))}")
+            print(
+                f"  - {brief_values.name(item.get('id'))} [{brief_values.name(kind)}] "
+                f"{brief_values.name(source)}: {brief_values.text(item.get('text', ''))}"
+            )
         if len(pending_imports) > 5:
             print(f"  ... {len(pending_imports) - 5} more")
     scanner_candidate = payload.get("scanner_candidate")
     if isinstance(scanner_candidate, dict):
-        print(f"scanner_next_import: {scanner_candidate.get('id')}")
-        print(f"scanner_next_source: {scanner_candidate.get('source')}")
-        print(f"scanner_next_kind: {scanner_candidate.get('kind')}")
+        print(f"scanner_next_import: {brief_values.name(scanner_candidate.get('id'))}")
+        print(f"scanner_next_source: {brief_values.name(scanner_candidate.get('source'))}")
+        print(f"scanner_next_kind: {brief_values.name(scanner_candidate.get('kind'))}")
         if scanner_candidate.get("kind") == "task":
             print(
                 "scanner_next_task: "
-                f"[{scanner_candidate.get('type')} {scanner_candidate.get('priority')} "
+                f"[{brief_values.name(scanner_candidate.get('type'))} "
+                f"{brief_values.name(scanner_candidate.get('priority'))} "
                 f"acceptance={scanner_candidate.get('acceptance_count')}] "
-                f"{helpers._short(str(scanner_candidate.get('text', '')))}"
+                f"{brief_values.text(scanner_candidate.get('text', ''))}"
             )
-            print(f"scanner_next_command: brigade work import plan {scanner_candidate.get('id')}")
+            print(f"scanner_next_command: brigade work import plan {brief_values.name(scanner_candidate.get('id'))}")
     handoff_candidate = payload.get("handoff_candidate")
     pending_tasks = payload.get("pending_tasks") if isinstance(payload.get("pending_tasks"), list) else []
     if isinstance(handoff_candidate, dict) and not pending_tasks:
-        print(f"handoff_next_import: {handoff_candidate.get('id')}")
-        print(f"handoff_next_source: {handoff_candidate.get('source')}")
-        print(f"handoff_next_kind: {handoff_candidate.get('kind')}")
-        print(f"handoff_next_target: {handoff_candidate.get('target_document')}")
-        print(f"handoff_next_command: brigade work import plan-handoff {handoff_candidate.get('id')}")
+        print(f"handoff_next_import: {brief_values.name(handoff_candidate.get('id'))}")
+        print(f"handoff_next_source: {brief_values.name(handoff_candidate.get('source'))}")
+        print(f"handoff_next_kind: {brief_values.name(handoff_candidate.get('kind'))}")
+        print(f"handoff_next_target: {brief_values.name(handoff_candidate.get('target_document'))}")
+        print(
+            f"handoff_next_command: brigade work import plan-handoff {brief_values.name(handoff_candidate.get('id'))}"
+        )
 
     inbox_hygiene = payload.get("inbox_hygiene") if isinstance(payload.get("inbox_hygiene"), dict) else {}
     if inbox_hygiene:
@@ -1235,7 +1269,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"inbox_hygiene: {helpers._count_status(issue_count)}")
         top_inbox = inbox_hygiene.get("top_issue") if isinstance(inbox_hygiene.get("top_issue"), dict) else None
         if top_inbox:
-            print(f"inbox_top_issue: {top_inbox.get('name')} {helpers._short(str(top_inbox.get('detail', '')))}")
+            print(_top_issue_line("inbox_top_issue", top_inbox))
 
     raw_scanner_health = payload.get("scanner_health")
     scanner_health: dict[str, Any] = raw_scanner_health if isinstance(raw_scanner_health, dict) else {}
@@ -1244,12 +1278,14 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         warnings = [
             check for check in scanner_checks if isinstance(check, dict) and check.get("status") != constants.OK
         ]
-        print(f"scanner_config: {scanner_health.get('config_path')}")
+        print(f"scanner_config: {brief_values.name(scanner_health.get('config_path'))}")
         print(f"scanner_health: {helpers._count_status(len(warnings), 'warning')}")
         next_scanner = scanner_health.get("next_run") if isinstance(scanner_health.get("next_run"), dict) else None
         if next_scanner:
             print(
-                f"scanner_next_run: {next_scanner.get('id')} {next_scanner.get('start')} {next_scanner.get('cadence')}"
+                f"scanner_next_run: {brief_values.name(next_scanner.get('id'))} "
+                f"{brief_values.name(next_scanner.get('start'))} "
+                f"{brief_values.name(next_scanner.get('cadence'))}"
             )
         latest_scanner_run = (
             scanner_health.get("latest_run") if isinstance(scanner_health.get("latest_run"), dict) else None
@@ -1257,13 +1293,15 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if latest_scanner_run:
             print(
                 "scanner_latest_run: "
-                f"{latest_scanner_run.get('scanner_id')} "
-                f"[{latest_scanner_run.get('status')}] {latest_scanner_run.get('run_id')}"
+                f"{brief_values.name(latest_scanner_run.get('scanner_id'))} "
+                f"[{brief_values.name(latest_scanner_run.get('status'))}] "
+                f"{brief_values.name(latest_scanner_run.get('run_id'))}"
             )
         due_scanners = scanner_health.get("due") if isinstance(scanner_health.get("due"), list) else []
         if due_scanners:
             print(
-                f"scanner_due: {', '.join(str(item.get('id')) for item in due_scanners[:5] if isinstance(item, dict))}"
+                "scanner_due: "
+                f"{', '.join(brief_values.name(item.get('id')) for item in due_scanners[:5] if isinstance(item, dict))}"
             )
 
     raw_scanner_sweeps = payload.get("scanner_sweeps")
@@ -1271,42 +1309,46 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     if scanner_sweeps:
         latest_sweep = scanner_sweeps.get("latest") if isinstance(scanner_sweeps.get("latest"), dict) else None
         if latest_sweep:
-            print(f"scanner_latest_sweep: {latest_sweep.get('sweep_id')} [{latest_sweep.get('status')}]")
+            print(
+                f"scanner_latest_sweep: {brief_values.name(latest_sweep.get('sweep_id'))} "
+                f"[{brief_values.name(latest_sweep.get('status'))}]"
+            )
         if scanner_sweeps.get("suggested_command"):
             print(f"scanner_sweep_command: {scanner_sweeps.get('suggested_command')}")
         raw_review = scanner_sweeps.get("review")
         review: dict[str, Any] = raw_review if isinstance(raw_review, dict) else {}
         top_pending = review.get("top_pending_import") if isinstance(review.get("top_pending_import"), dict) else None
         if top_pending and latest_sweep:
-            print(f"scanner_unreviewed_sweep: {latest_sweep.get('sweep_id')}")
+            print(f"scanner_unreviewed_sweep: {brief_values.name(latest_sweep.get('sweep_id'))}")
             print(
-                f"scanner_sweep_import: {top_pending.get('id')} {top_pending.get('source')} {helpers._short(str(top_pending.get('text', '')))}"
+                f"scanner_sweep_import: {brief_values.name(top_pending.get('id'))} "
+                f"{brief_values.name(top_pending.get('source'))} "
+                f"{brief_values.text(top_pending.get('text', ''))}"
             )
-            print(f"scanner_sweep_review: brigade work sweep-review {latest_sweep.get('sweep_id')}")
+            print(f"scanner_sweep_review: brigade work sweep-review {brief_values.name(latest_sweep.get('sweep_id'))}")
 
     raw_chat_surfaces = payload.get("chat_surfaces")
     chat_surfaces: dict[str, Any] = raw_chat_surfaces if isinstance(raw_chat_surfaces, dict) else {}
     if chat_surfaces:
-        print(f"chat_surfaces_config: {chat_surfaces.get('config_path')}")
+        print(f"chat_surfaces_config: {brief_values.name(chat_surfaces.get('config_path'))}")
         chat_issue_count = int(chat_surfaces.get("issue_count", 0) or 0)
         print(f"chat_surfaces_health: {helpers._count_status(chat_issue_count)}")
         top_chat = chat_surfaces.get("top_issue") if isinstance(chat_surfaces.get("top_issue"), dict) else None
         if top_chat:
-            print(f"chat_surfaces_top_issue: {top_chat.get('name')} {helpers._short(str(top_chat.get('detail', '')))}")
+            print(_top_issue_line("chat_surfaces_top_issue", top_chat))
 
     raw_memory_care = payload.get("memory_care")
     memory_care: dict[str, Any] = raw_memory_care if isinstance(raw_memory_care, dict) else {}
     if memory_care:
-        print(f"memory_care_config: {memory_care.get('config_path')}")
+        print(f"memory_care_config: {brief_values.name(memory_care.get('config_path'))}")
         issue_count = memory_care.get("issue_count")
         print(f"memory_care_health: {helpers._count_status(issue_count)}")
         top_memory = memory_care.get("top_issue") if isinstance(memory_care.get("top_issue"), dict) else None
         if top_memory:
-            print(
-                "memory_care_top_issue: "
-                f"{top_memory.get('issue_type') or top_memory.get('name')} "
-                f"{top_memory.get('file') or helpers._short(str(top_memory.get('detail', '')))}"
-            )
+            memory_issue = brief_values.name(top_memory.get("issue_type") or top_memory.get("name"))
+            memory_subject = brief_values.name(top_memory["file"]) if top_memory.get("file") else ""
+            memory_subject = memory_subject or helpers._short(str(top_memory.get("detail", "")))
+            print(f"memory_care_top_issue: {memory_issue} {memory_subject}")
         raw_autofix_plan = memory_care.get("autofix_plan")
         autofix_plan: dict[str, Any] = raw_autofix_plan if isinstance(raw_autofix_plan, dict) else {}
         if autofix_plan.get("plan_count"):
@@ -1325,14 +1367,21 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         for rec in scheduled_care.get("entries") or []:
             if not isinstance(rec, dict):
                 continue
-            print(f"care_repeated_failure: {rec.get('id')} consecutive={rec.get('consecutive_failures')}")
+            print(
+                f"care_repeated_failure: {brief_values.name(rec.get('id'))} "
+                f"consecutive={rec.get('consecutive_failures')}"
+            )
 
     raw_schedule_health = payload.get("care_schedule_health")
     schedule_health: dict[str, Any] = raw_schedule_health if isinstance(raw_schedule_health, dict) else {}
     for warning in schedule_health.get("warnings") or []:
         if not isinstance(warning, dict):
             continue
-        print(f"care_schedule_warning: {warning.get('entry')} {warning.get('code')} fix={warning.get('fix_command')}")
+        print(
+            f"care_schedule_warning: {brief_values.name(warning.get('entry'))} "
+            f"{warning.get('code')} "
+            f"fix={brief_values.encoded_command(warning.get('fix_command'), warning.get('entry'))}"
+        )
 
     raw_instruction_budget = payload.get("instruction_budget")
     instruction_budget: dict[str, Any] = raw_instruction_budget if isinstance(raw_instruction_budget, dict) else {}
@@ -1342,7 +1391,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     raw_security_health = payload.get("security_health")
     security_health: dict[str, Any] = raw_security_health if isinstance(raw_security_health, dict) else {}
     if security_health:
-        print(f"security_config: {security_health.get('config_path')}")
+        print(f"security_config: {brief_values.name(security_health.get('config_path'))}")
         if security_health.get("wiring_scan_mode"):
             print("security_wiring_scan: known-roots (full search: brigade security health)")
         issue_count = security_health.get("issue_count")
@@ -1365,15 +1414,16 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if top_security:
             print(
                 "security_top_finding: "
-                f"{top_security.get('id')} [{top_security.get('severity')}] "
-                f"{top_security.get('path')}:{top_security.get('line')} "
-                f"{helpers._short(str(top_security.get('title', '')))}"
+                f"{brief_values.name(top_security.get('id'))} "
+                f"[{brief_values.name(top_security.get('severity'))}] "
+                f"{brief_values.name(top_security.get('path'))}:{top_security.get('line')} "
+                f"{brief_values.text(top_security.get('title', ''))}"
             )
 
     raw_backup_health = payload.get("backup_health")
     backup_health: dict[str, Any] = raw_backup_health if isinstance(raw_backup_health, dict) else {}
     if backup_health:
-        print(f"backup_config: {backup_health.get('config_path')}")
+        print(f"backup_config: {brief_values.name(backup_health.get('config_path'))}")
         issue_count = backup_health.get("issue_count")
         print(f"backup_health: {helpers._count_status(issue_count)}")
         if backup_health.get("operator_summary"):
@@ -1382,28 +1432,33 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if top_backup:
             print(
                 "backup_top_issue: "
-                f"{top_backup.get('destination')}/{top_backup.get('issue_type')} "
+                f"{brief_values.name(top_backup.get('destination'))}/"
+                f"{brief_values.name(top_backup.get('issue_type'))} "
                 f"{helpers._short(str(top_backup.get('detail', '')))}"
             )
 
     raw_daily_driver = payload.get("daily_driver")
     daily_driver: dict[str, Any] = raw_daily_driver if isinstance(raw_daily_driver, dict) else {}
     if daily_driver:
-        print(f"daily_config: {daily_driver.get('config_path')}")
+        print(f"daily_config: {brief_values.name(daily_driver.get('config_path'))}")
         print(f"daily_driver: {helpers._count_status(daily_driver.get('issue_count'))}")
         latest_daily = daily_driver.get("latest_run") if isinstance(daily_driver.get("latest_run"), dict) else None
         if latest_daily:
-            print(f"daily_latest_run: {latest_daily.get('run_id')} [{latest_daily.get('status')}]")
+            print(
+                f"daily_latest_run: {brief_values.name(latest_daily.get('run_id'))} "
+                f"[{brief_values.name(latest_daily.get('status'))}]"
+            )
         top_daily = daily_driver.get("top_issue") if isinstance(daily_driver.get("top_issue"), dict) else None
         if top_daily:
-            print(f"daily_top_issue: {top_daily.get('name')} {helpers._short(str(top_daily.get('detail', '')))}")
+            print(_top_issue_line("daily_top_issue", top_daily))
         raw_approvals = daily_driver.get("approvals")
         approvals: dict[str, Any] = raw_approvals if isinstance(raw_approvals, dict) else {}
         if approvals.get("pending_count"):
             raw_top_approval = approvals.get("top_pending")
             top_approval: dict[str, Any] = raw_top_approval if isinstance(raw_top_approval, dict) else {}
             print(
-                f"daily_pending_approval: {top_approval.get('approval_id')} {helpers._short(str(top_approval.get('safe_summary', '')))}"
+                f"daily_pending_approval: {brief_values.name(top_approval.get('approval_id'))} "
+                f"{brief_values.text(top_approval.get('safe_summary', ''))}"
             )
 
     phase_ledger = payload.get("phase_ledger") if isinstance(payload.get("phase_ledger"), dict) else {}
@@ -1415,7 +1470,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
         )
         if latest_phase_session:
-            print(f"phase_session: {latest_phase_session.get('session_id')} [{latest_phase_session.get('status')}]")
+            print(
+                f"phase_session: {brief_values.name(latest_phase_session.get('session_id'))} "
+                f"[{brief_values.name(latest_phase_session.get('status'))}]"
+            )
         latest_checkpoint = (
             phase_ledger.get("latest_session_checkpoint")
             if isinstance(phase_ledger.get("latest_session_checkpoint"), dict)
@@ -1431,27 +1489,30 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 latest_checkpoint_compare.get("issue_count") if isinstance(latest_checkpoint_compare, dict) else 0
             )
             print(
-                f"phase_checkpoint: {latest_checkpoint.get('checkpoint_id')} [{latest_checkpoint.get('status')}] issues={compare_count}"
+                f"phase_checkpoint: {brief_values.name(latest_checkpoint.get('checkpoint_id'))} "
+                f"[{brief_values.name(latest_checkpoint.get('status'))}] issues={compare_count}"
             )
         top_phase = phase_ledger.get("top_issue") if isinstance(phase_ledger.get("top_issue"), dict) else None
         if top_phase:
-            print(f"phase_top_issue: {top_phase.get('name')} {helpers._short(str(top_phase.get('detail', '')))}")
+            print(_top_issue_line("phase_top_issue", top_phase))
         top_phase_action = phase_ledger.get("top_action") if isinstance(phase_ledger.get("top_action"), dict) else None
         if top_phase_action:
             print(
-                f"phase_top_action: {top_phase_action.get('action_id')} {helpers._short(str(top_phase_action.get('safe_summary', '')))}"
+                f"phase_top_action: {brief_values.name(top_phase_action.get('action_id'))} "
+                f"{brief_values.text(top_phase_action.get('safe_summary', ''))}"
             )
 
     tool_catalog = payload.get("tool_catalog") if isinstance(payload.get("tool_catalog"), dict) else {}
     if tool_catalog:
-        print(f"tool_config: {tool_catalog.get('config_path')}")
+        print(f"tool_config: {brief_values.name(tool_catalog.get('config_path'))}")
         issue_count = tool_catalog.get("issue_count")
         print(f"tool_catalog: {helpers._count_status(issue_count)}")
         top_tool = tool_catalog.get("top_issue") if isinstance(tool_catalog.get("top_issue"), dict) else None
         if top_tool:
             print(
                 "tool_top_issue: "
-                f"{top_tool.get('tool_id') or 'catalog'}/{top_tool.get('issue_type')} "
+                f"{brief_values.name(top_tool.get('tool_id') or 'catalog')}/"
+                f"{brief_values.name(top_tool.get('issue_type'))} "
                 f"{helpers._short(str(top_tool.get('detail', '')))}"
             )
         call_queue = tool_catalog.get("call_queue") if isinstance(tool_catalog.get("call_queue"), dict) else {}
@@ -1461,7 +1522,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if call_top:
                 print(
                     "tool_call_top_issue: "
-                    f"{call_top.get('call_id')} {call_top.get('issue_type')} "
+                    f"{brief_values.name(call_top.get('call_id'))} "
+                    f"{brief_values.name(call_top.get('issue_type'))} "
                     f"{helpers._short(str(call_top.get('detail', '')))}"
                 )
         run_history = tool_catalog.get("run_history") if isinstance(tool_catalog.get("run_history"), dict) else {}
@@ -1471,7 +1533,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if run_top:
                 print(
                     "tool_run_top_issue: "
-                    f"{run_top.get('run_id')} {run_top.get('issue_type')} "
+                    f"{brief_values.name(run_top.get('run_id'))} "
+                    f"{brief_values.name(run_top.get('issue_type'))} "
                     f"{helpers._short(str(run_top.get('detail', '')))}"
                 )
         checkpoints = tool_catalog.get("checkpoints") if isinstance(tool_catalog.get("checkpoints"), dict) else {}
@@ -1481,7 +1544,8 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if checkpoint_top:
                 print(
                     "tool_checkpoint_top_issue: "
-                    f"{checkpoint_top.get('checkpoint_id')} {checkpoint_top.get('issue_type')} "
+                    f"{brief_values.name(checkpoint_top.get('checkpoint_id'))} "
+                    f"{brief_values.name(checkpoint_top.get('issue_type'))} "
                     f"{helpers._short(str(checkpoint_top.get('detail', '')))}"
                 )
 
@@ -1495,16 +1559,16 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             roadmap_completion.get("top_issue") if isinstance(roadmap_completion.get("top_issue"), dict) else None
         )
         if top_roadmap:
-            print(f"roadmap_top_issue: {top_roadmap.get('name')} {helpers._short(str(top_roadmap.get('detail', '')))}")
+            print(_top_issue_line("roadmap_top_issue", top_roadmap))
 
     repo_fleet = payload.get("repo_fleet") if isinstance(payload.get("repo_fleet"), dict) else {}
     if repo_fleet:
-        print(f"repo_fleet_config: {repo_fleet.get('config_path')}")
+        print(f"repo_fleet_config: {brief_values.name(repo_fleet.get('config_path'))}")
         issue_count = repo_fleet.get("issue_count")
         print(f"repo_fleet: {helpers._count_status(issue_count)}")
         top_repo = repo_fleet.get("top_issue") if isinstance(repo_fleet.get("top_issue"), dict) else None
         if top_repo:
-            print(f"repo_fleet_top_issue: {top_repo.get('name')} {helpers._short(str(top_repo.get('detail', '')))}")
+            print(_top_issue_line("repo_fleet_top_issue", top_repo))
 
     context_packs = payload.get("context_packs") if isinstance(payload.get("context_packs"), dict) else {}
     if context_packs:
@@ -1512,9 +1576,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if context_packs.get("issue_count"):
             top_context = context_packs.get("top_issue") if isinstance(context_packs.get("top_issue"), dict) else None
             if top_context:
-                print(
-                    f"context_top_issue: {top_context.get('name')} {helpers._short(str(top_context.get('detail', '')))}"
-                )
+                print(_top_issue_line("context_top_issue", top_context))
 
     project_consolidation = (
         payload.get("project_consolidation") if isinstance(payload.get("project_consolidation"), dict) else {}
@@ -1526,18 +1588,14 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             project_consolidation.get("top_issue") if isinstance(project_consolidation.get("top_issue"), dict) else None
         )
         if top_project:
-            print(
-                f"project_consolidation_top_issue: {top_project.get('name')} {helpers._short(str(top_project.get('detail', '')))}"
-            )
+            print(_top_issue_line("project_consolidation_top_issue", top_project))
 
     learning = payload.get("learning") if isinstance(payload.get("learning"), dict) else {}
     if learning:
         print(f"learning_candidates: {learning.get('candidate_count', 0)}")
         top_learning = learning.get("top_issue") if isinstance(learning.get("top_issue"), dict) else None
         if top_learning:
-            print(
-                f"learning_top_issue: {top_learning.get('name')} {helpers._short(str(top_learning.get('detail', '')))}"
-            )
+            print(_top_issue_line("learning_top_issue", top_learning))
 
     research_handoffs = payload.get("research_handoffs") if isinstance(payload.get("research_handoffs"), dict) else {}
     if research_handoffs:
@@ -1546,24 +1604,34 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             research_handoffs.get("top_issue") if isinstance(research_handoffs.get("top_issue"), dict) else None
         )
         if top_research:
-            print(f"research_handoff_top_issue: {top_research.get('run_id')} {top_research.get('status')}")
+            print(
+                f"research_handoff_top_issue: {brief_values.name(top_research.get('run_id'))} "
+                f"{brief_values.name(top_research.get('status'))}"
+            )
             if top_research.get("suggested_next_command"):
-                print(f"research_handoff_command: {top_research.get('suggested_next_command')}")
+                print(
+                    f"research_handoff_command: "
+                    f"{brief_values.encoded_command(top_research.get('suggested_next_command'), top_research.get('run_id'))}"
+                )
 
     operator_report = payload.get("operator_report") if isinstance(payload.get("operator_report"), dict) else {}
     if operator_report:
         latest_report = operator_report.get("latest") if isinstance(operator_report.get("latest"), dict) else None
         if latest_report:
-            print(f"operator_report_latest: {latest_report.get('report_id')} {latest_report.get('created_at')}")
+            print(
+                f"operator_report_latest: {brief_values.name(latest_report.get('report_id'))} "
+                f"{brief_values.name(latest_report.get('created_at'))}"
+            )
         issue_count = operator_report.get("issue_count")
         print(f"operator_report: {helpers._count_status(issue_count)}")
         top_report = operator_report.get("top_issue") if isinstance(operator_report.get("top_issue"), dict) else None
         if top_report:
-            print(
-                f"operator_report_top_issue: {top_report.get('name')} {helpers._short(str(top_report.get('detail', '')))}"
-            )
+            print(_top_issue_line("operator_report_top_issue", top_report))
             if top_report.get("suggested_next_command"):
-                print(f"operator_report_command: {top_report.get('suggested_next_command')}")
+                print(
+                    f"operator_report_command: "
+                    f"{brief_values.encoded_command(top_report.get('suggested_next_command'), top_report.get('report_id'))}"
+                )
 
     operator_actions = payload.get("operator_actions") if isinstance(payload.get("operator_actions"), dict) else {}
     if operator_actions:
@@ -1573,24 +1641,33 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         )
         if top_action:
             print(
-                f"operator_action_top: {top_action.get('action_id')} {top_action.get('source_group')} {helpers._short(str(top_action.get('safe_summary', '')))}"
+                f"operator_action_top: {brief_values.name(top_action.get('action_id'))} "
+                f"{brief_values.name(top_action.get('source_group'))} "
+                f"{brief_values.text(top_action.get('safe_summary', ''))}"
             )
             if top_action.get("suggested_command"):
-                print(f"operator_action_command: {top_action.get('suggested_command')}")
+                print(
+                    f"operator_action_command: "
+                    f"{brief_values.encoded_command(top_action.get('suggested_command'), top_action.get('action_id'))}"
+                )
 
     code_review = payload.get("code_review")
     if isinstance(code_review, dict):
         latest_review = code_review.get("latest_run") if isinstance(code_review.get("latest_run"), dict) else None
         if latest_review:
             print(
-                f"review_latest: {latest_review.get('run_id')} "
-                f"{latest_review.get('reviewer_id')} [{latest_review.get('status')}]"
+                f"review_latest: {brief_values.name(latest_review.get('run_id'))} "
+                f"{brief_values.name(latest_review.get('reviewer_id'))} "
+                f"[{brief_values.name(latest_review.get('status'))}]"
             )
         unclosed_review = (
             code_review.get("latest_unclosed_run") if isinstance(code_review.get("latest_unclosed_run"), dict) else None
         )
         if unclosed_review:
-            print(f"review_unclosed: {unclosed_review.get('run_id')} {unclosed_review.get('reviewer_id')}")
+            print(
+                f"review_unclosed: {brief_values.name(unclosed_review.get('run_id'))} "
+                f"{brief_values.name(unclosed_review.get('reviewer_id'))}"
+            )
         if code_review.get("pending_finding_count"):
             print(f"review_pending_findings: {code_review.get('pending_finding_count')}")
         if code_review.get("unresolved_finding_count"):
@@ -1606,8 +1683,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             )
         if top_review:
             finding_id = top_review.get("id") or top_review.get("import_id")
-            print(f"review_top_finding: {finding_id} {helpers._short(str(top_review.get('text', '')))}")
-            print(f"review_top_command: brigade work review finding-show {finding_id}")
+            print(
+                f"review_top_finding: {brief_values.name(finding_id)} {brief_values.text(top_review.get('text', ''))}"
+            )
+            print(f"review_top_command: brigade work review finding-show {brief_values.name(finding_id)}")
 
     handoff_issues = payload.get("handoff_issues")
     if isinstance(handoff_issues, dict) and handoff_issues.get("count"):
@@ -1616,7 +1695,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if isinstance(by_category, dict) and by_category:
             print("handoff_ingest_issues_by_category:")
             for category, count in by_category.items():
-                print(f"  {category}: {count}")
+                print(f"  {brief_values.name(category)}: {count}")
     if isinstance(handoff_issues, dict) and handoff_issues.get("known_count"):
         print(f"handoff_ingest_issues_known: {handoff_issues.get('known_count')}")
     handoff_drafts = payload.get("handoff_drafts")
@@ -1634,19 +1713,20 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             )
             if latest_ingest:
                 print(
-                    f"handoff_ingest_latest: {latest_ingest.get('run_id')} "
-                    f"completed={latest_ingest.get('completed_at')}"
+                    f"handoff_ingest_latest: {brief_values.name(latest_ingest.get('run_id'))} "
+                    f"completed={brief_values.name(latest_ingest.get('completed_at'))}"
                 )
             top_issue = handoff_drafts.get("top_issue") if isinstance(handoff_drafts.get("top_issue"), dict) else None
             if top_issue:
-                print(
-                    f"handoff_draft_top_issue: {top_issue.get('name')} {helpers._short(str(top_issue.get('detail', '')))}"
-                )
+                print(_top_issue_line("handoff_draft_top_issue", top_issue))
             drafts = handoff_drafts.get("drafts") if isinstance(handoff_drafts.get("drafts"), list) else []
             if drafts:
                 first = drafts[0]
-                print(f"handoff_draft_next: {first.get('id')} {first.get('status')} {first.get('path')}")
-                print(f"handoff_draft_next_command: brigade handoff show {first.get('id')}")
+                print(
+                    f"handoff_draft_next: {brief_values.name(first.get('id'))} "
+                    f"{brief_values.name(first.get('status'))} {brief_values.name(first.get('path'))}"
+                )
+                print(f"handoff_draft_next_command: brigade handoff show {brief_values.name(first.get('id'))}")
 
     recent = payload.get("recent_sessions")
     if isinstance(recent, list) and recent:
@@ -1655,7 +1735,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             if not isinstance(item, dict):
                 continue
             title = item.get("title") or item.get("id")
-            print(f"  - {item.get('started_at')} [{item.get('status')}] {helpers._short(str(title))}")
+            print(
+                f"  - {brief_values.name(item.get('started_at'))} "
+                f"[{brief_values.name(item.get('status'))}] {brief_values.text(title)}"
+            )
     if payload.get("skipped_sessions"):
         print(f"skipped_sessions: {payload['skipped_sessions']}", file=sys.stderr)
     return 0

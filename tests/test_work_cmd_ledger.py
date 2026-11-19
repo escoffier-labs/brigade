@@ -1682,7 +1682,7 @@ def test_work_brief_reports_next_task_acceptance(tmp_path, monkeypatch, capsys):
     assert "next_type: workflow" in out
     assert "next_priority: urgent" in out
     assert "next_acceptance: 1" in out
-    assert "[workflow urgent acceptance=1] Build accepted task" in out
+    assert "[workflow urgent acceptance=1] Build\\x20accepted\\x20task" in out
 
 
 def test_work_brief_surfaces_issue_backed_next_task_context(tmp_path, monkeypatch, capsys):
@@ -1721,7 +1721,7 @@ def test_work_brief_surfaces_issue_backed_next_task_context(tmp_path, monkeypatc
 
     assert work_cmd.brief(target=tmp_path) == 0
     out = capsys.readouterr().out
-    assert "issue: https://github.com/acme/widgets/issues/7" in out
+    assert "issue: https\\x3a//github.com/acme/widgets/issues/7" in out
     assert "issue_state: OPEN" in out
     assert "issue_labels: docs" in out
 

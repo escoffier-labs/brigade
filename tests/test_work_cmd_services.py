@@ -3872,7 +3872,7 @@ no-card
     out = capsys.readouterr().out
     assert "handoff_drafts_pending: 1" in out
     assert "handoff_drafts_reviewed: 1" in out
-    assert "handoff_ingest_latest: run-brief completed=2026-05-28T10:01:00+00:00" in out
+    assert "handoff_ingest_latest: run-brief completed=2026-05-28T10\\x3a01\\x3a00\\x2b00\\x3a00" in out
     assert "handoff_draft_next_command: brigade handoff show" in out
 
     assert work_cmd.doctor(target=tmp_path) == 1
