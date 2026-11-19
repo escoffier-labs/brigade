@@ -384,3 +384,26 @@ async fn too_many_card_scopes_with_wildcards_on_both_sides_reserve_nothing() {
         Some(Default::default())
     );
 }
+
+/// `has_right` reads rights as exact comma tokens, so a noncanonical `REFLECT`
+/// row (written outside the grant action) grants nothing and reserves nothing,
+/// on the listed holder's side or on the caller's.
+#[tokio::test]
+async fn a_noncanonical_reflect_token_neither_grants_nor_reserves() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    grant_to(&h, "node-1", B, &["read", "reflect"]).await;
+    let memory = Connection::open(h.memory()).unwrap();
+    for (principal, scope, rights) in [("node-1", A, "READ,REFLECT"), ("agent:dot", B, "Reflect")] {
+        memory
+            .execute(
+                "INSERT INTO memory_grants VALUES(?1,?2,?3,'2026-02-01','hub:admin')",
+                [principal, scope, rights],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        caps_run(&h, &["node-1"], auth::RESERVED_CAPS),
+        Some(std::collections::BTreeSet::new())
+    );
+}

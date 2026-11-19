@@ -231,6 +231,8 @@ impl ReflectPatterns {
 }
 
 /// `SELECT ... FROM memory_grants` rows holding reflect, one more than `cap`.
+/// `instr` is case-sensitive, so the match is the exact comma token `has_right`
+/// reads through `rights_set`; `LIKE` would also accept `REFLECT`.
 /// `None` when the cap is exceeded.
 fn reflect_grant_rows<T: ReadTx + ?Sized>(
     tx: &T,
@@ -243,7 +245,7 @@ fn reflect_grant_rows<T: ReadTx + ?Sized>(
     let rows = tx.query(
         &format!(
             "SELECT principal,scope,rights FROM memory_grants WHERE {filter} \
-             AND ','||rights||',' LIKE '%,reflect,%' LIMIT ?{n}"
+             AND instr(','||rights||',', ',reflect,')>0 LIMIT ?{n}"
         ),
         &params,
     )?;
