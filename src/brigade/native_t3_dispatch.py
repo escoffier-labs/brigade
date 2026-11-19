@@ -22,12 +22,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, NamedTuple, Sequence
+from urllib.parse import quote, unquote
 
 from . import fleet_t3_transport, run_budget, run_events, run_journal, run_lifecycle, run_tasks, runguard
 from . import native_t3_admission as admission
@@ -64,6 +66,27 @@ _STATUS_MAP = {
     "cancelled": "cancelled",
     "interrupted": "interrupted",
 }
+# T3 Code revision c52df24d285a072ad9c3f7ab5b3656c0be1cb0f5 builds the
+# `delegate_task` task node identity in three steps.
+#   1. The request key is the caller's `clientRequestId` verbatim
+#      (apps/server/src/mcp/OrchestratorMcpService.ts:1476-1477).
+#   2. The command id is "command:mcp:" + enc(requestNamespace) +
+#      ":delegate-task:" + enc(requestKey), where enc is encodeURIComponent
+#      (OrchestratorMcpService.ts:679-695 and the delegate handler at :2435-2439).
+#   3. The task node id is "node:delegated-task:" + enc(commandId)
+#      (packages/provider-core/src/server/IdAllocator.ts:191-194, :259, called
+#      from apps/server/src/orchestration-v2/Orchestrator.ts:7973-7975).
+# Because the request key is encoded twice, ":" appears as "%253A". A future T3
+# revision that changes this encoding makes `accepted` refuse with
+# native-mismatch, so the task holds instead of correlating to a guess.
+_T3_NODE_PREFIX = "node:delegated-task:"
+_T3_COMMAND_PREFIX = "command:mcp:"
+_T3_OPERATION = "delegate-task"
+# Request namespaces are T3 provider-session UUIDs or prefixed client, provider
+# and remote-task tokens. They are opaque, bounded and ASCII in the reviewed
+# revision, and never contain whitespace.
+_T3_NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:~+=@/-]{0,255}", re.ASCII)
+
 _TERMINAL_NATIVE = frozenset({"completed", "failed", "cancelled", "interrupted"})
 _WORK_STATES = frozenset({"working", "waiting_for_children", "result_available"})
 _APPROVAL_KINDS = frozenset({"command", "file-read", "file-change", "mcp-elicitation", "permission"})
@@ -98,6 +121,58 @@ def _digest(material: Mapping[str, Any], domain: str) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# encodeURIComponent leaves exactly these ASCII punctuation characters alone.
+_URI_COMPONENT_SAFE = "-_.!~*'()"
+
+
+def _encode_t3_component(value: str) -> str:
+    """Mirror JavaScript ``encodeURIComponent`` for the pinned T3 revision."""
+    return quote(value, safe=_URI_COMPONENT_SAFE)
+
+
+def _decode_t3_component(value: str) -> str | None:
+    """Decode one T3 component, refusing anything that is not its canonical encoding."""
+    try:
+        decoded = unquote(value, encoding="utf-8", errors="strict")
+        # A lone surrogate survives unquote and then fails to re-encode.
+        canonical = _encode_t3_component(decoded)
+    except UnicodeError:
+        return None
+    if not decoded or canonical != value:
+        return None
+    return decoded
+
+
+def _is_t3_task_node(value: object, request_key: str) -> bool:
+    """Accept exactly the node id T3 builds for our ``delegate_task`` request key.
+
+    The check is structural and canonical. It decodes the single encoded command
+    id, requires the fixed command prefix and operation, requires a plausible
+    namespace, and requires the decoded request key to equal ours exactly with
+    nothing trailing. Any other shape refuses so the caller can fail closed.
+    """
+    if (
+        type(value) is not str
+        or len(value) > run_events.MAX_PAYLOAD_STR_LEN
+        or not value.startswith(_T3_NODE_PREFIX)
+        or not request_key
+    ):
+        return False
+    command = _decode_t3_component(value[len(_T3_NODE_PREFIX) :])
+    if command is None or not command.startswith(_T3_COMMAND_PREFIX):
+        return False
+    parts = command[len(_T3_COMMAND_PREFIX) :].split(":")
+    if len(parts) != 3:
+        return False
+    namespace, operation, encoded_key = parts
+    if operation != _T3_OPERATION:
+        return False
+    decoded_namespace = _decode_t3_component(namespace)
+    if decoded_namespace is None or _T3_NAMESPACE.fullmatch(decoded_namespace) is None:
+        return False
+    return _decode_t3_component(encoded_key) == request_key
+
+
 @dataclass(frozen=True)
 class ClaimBinding:
     """The durable claim intent for one task attempt, without task text."""
@@ -127,6 +202,7 @@ class NativeResult:
     """The validated ``delegate_task`` result projection, without raw payload."""
 
     task_id: str
+    provider_task_id: str
     child_thread_id: str
     child_run_id: str
     child_node_id: str
@@ -154,6 +230,14 @@ class _Verified:
     result: run_tasks.TaskResult
     retained: enrollment.DelegationInput
     template: NativeIntentTemplate
+
+
+class _Correlation(NamedTuple):
+    mode: str
+    handle_digest: str
+    # Optional legacy input. Correlations recorded before the native task node
+    # identity was pinned carry only the digest.
+    provider_task_id: str | None = None
 
 
 def _run_dir(workspace: Path, run_id: str) -> Path:
@@ -310,14 +394,19 @@ def _claim_binding(events: Sequence[run_journal.RunEvent], task_id: str) -> Clai
         raise _refuse("journal-refused", "the claim binding is not usable") from None
 
 
-def _correlation(events: Sequence[run_journal.RunEvent], task_id: str) -> tuple[str, str] | None:
+def _correlation(events: Sequence[run_journal.RunEvent], task_id: str) -> _Correlation | None:
     payload = _latest(events, CORRELATION_EVENT, task_id)
     if payload is None:
         return None
     mode, handle = payload.get("mode"), payload.get("handle_digest")
-    if mode not in {PARENT_REPORTED, OPERATOR_ASSERTED} or not journal.digest(handle):
+    provider_task_id = payload.get("provider_task_id")
+    if (
+        mode not in {PARENT_REPORTED, OPERATOR_ASSERTED}
+        or not journal.digest(handle)
+        or (provider_task_id is not None and not journal.provider_reference(provider_task_id))
+    ):
         raise _refuse("journal-refused", "the correlation record is not usable")
-    return str(mode), str(handle)
+    return _Correlation(str(mode), str(handle), provider_task_id)
 
 
 def _held(events: Sequence[run_journal.RunEvent], task_id: str) -> str | None:
@@ -611,16 +700,23 @@ def _require_local_child(payload: Mapping[str, object]) -> None:
     raise _refuse("native-mismatch", "the native result names a remote child outside the enrolled target")
 
 
-def parse_native_result(payload: object, *, task_id: str) -> NativeResult:
+def parse_native_result(payload: object, *, task_id: str, request_key: str) -> NativeResult:
     """Validate the full ``delegate_task`` projection; never retain raw fields.
 
-    Every field the classifier reads is type checked here. The classifier then
-    decides whether the projection is terminal, because a terminal status alone
-    never proves that descendants, questions, approvals or waits are settled.
+    The reply must name the exact T3 task node built for the retained claim's
+    ``clientRequestId``. Brigade's own batch task id never appears in a real
+    reply, so it is not the correlation identity. ``childNodeId`` must repeat
+    that same node id. Every other field the classifier reads is type checked
+    here. The classifier then decides whether the projection is terminal,
+    because a terminal status alone never proves that descendants, questions,
+    approvals or waits are settled.
     """
+    if not journal.provider_reference(request_key):
+        raise _refuse("native-invalid", "the native request key is not usable")
     if not isinstance(payload, Mapping) or not _RESULT_REQUIRED.issubset(payload):
         raise _refuse("native-invalid", "the native result is missing required projection fields")
-    if payload["taskId"] != task_id or payload["childNodeId"] != task_id:
+    provider_task_id = payload["taskId"]
+    if not _is_t3_task_node(provider_task_id, request_key) or payload["childNodeId"] != provider_task_id:
         raise _refuse("native-mismatch", "the native result does not identify this task")
     status, work_state = payload["status"], payload["workState"]
     if type(status) is not str or status not in _STATUS_MAP:
@@ -641,6 +737,7 @@ def parse_native_result(payload: object, *, task_id: str) -> NativeResult:
     _require_local_child(payload)
     result = NativeResult(
         task_id=task_id,
+        provider_task_id=str(provider_task_id),
         child_thread_id=_reference(payload["childThreadId"]),
         child_run_id=_reference(payload["childRunId"]),
         child_node_id=_reference(payload["childNodeId"]),
@@ -717,6 +814,25 @@ def _require_target(result: NativeResult, target: NativeTarget) -> None:
         raise _refuse("options-mismatch", "the native options do not match the finalized intent")
 
 
+def _client_request_id(verified: _Verified, binding: ClaimBinding) -> str:
+    """Return the retained claim's ``clientRequestId`` for this run, task and attempt."""
+    try:
+        return enrollment.request_key(
+            verified.result.handle.run_id, verified.result.handle.spec.task_id, binding.attempt_id
+        )
+    except ValueError:
+        raise _refuse("native-invalid", "the native correlation reference is not usable") from None
+
+
+def parse_claimed_result(payload: object, *, verified: _Verified, binding: ClaimBinding) -> NativeResult:
+    """Parse a reply against the client request id the durable claim printed."""
+    return parse_native_result(
+        payload,
+        task_id=verified.result.handle.spec.task_id,
+        request_key=_client_request_id(verified, binding),
+    )
+
+
 def _classify(verified: _Verified, binding: ClaimBinding, result: NativeResult) -> observations.NativeObservation:
     """Route the projection through the shipped lifecycle classifier.
 
@@ -725,21 +841,20 @@ def _classify(verified: _Verified, binding: ClaimBinding, result: NativeResult) 
     evidence this verb can supply. Any pending child run, question, approval or
     wait timeout classifies as awaiting no matter what the status field says.
     The origin is the enrolled intent's declared origin, because the projection
-    carries no origin of its own.
+    carries no origin of its own. The accepted task identity is T3's task node
+    id, not Brigade's batch task id.
     """
     target = verified.retained.target
     try:
         reference = observations.NativeTaskReference(
             origin_environment_id=target.origin_environment,
-            native_client_request_key=enrollment.request_key(
-                verified.result.handle.run_id, result.task_id, binding.attempt_id
-            ),
-            task_id=result.task_id,
+            native_client_request_key=_client_request_id(verified, binding),
+            task_id=result.provider_task_id,
         )
     except ValueError:
         raise _refuse("native-invalid", "the native correlation reference is not usable") from None
     snapshot = {
-        "taskId": result.task_id,
+        "taskId": result.provider_task_id,
         "status": result.status,
         "workState": result.work_state,
         "hasPendingChildRuns": result.has_pending_child_runs,
@@ -818,7 +933,7 @@ def _correlate(
     """Record a caller-reported handle. This is correlation, never acceptance proof."""
     handle_digest = _handle_digest(result, binding.parent_thread)
     prior = _correlation(_read(run_dir), result.task_id)
-    if prior is not None and prior[1] != handle_digest:
+    if prior is not None and prior.handle_digest != handle_digest:
         if mode == PARENT_REPORTED:
             _record_held(workspace, run_dir, result.task_id, binding.attempt_id, ACCEPT_CONFLICT, handle_digest)
             raise _refuse("accept-conflict", "a different native handle already correlates this task")
@@ -839,6 +954,7 @@ def _correlate(
             "attempt_id": binding.attempt_id,
             "mode": mode,
             "handle_digest": handle_digest,
+            "provider_task_id": result.provider_task_id,
         },
         key=_key("correlated", result.task_id, binding.attempt_id, mode, handle_digest),
     )
@@ -1051,7 +1167,7 @@ def accepted(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, 
         held = _held(events, task_id)
         if held is not None:
             raise _refuse("task-held", f"the task is held ({held})")
-        result = parse_native_result(payload, task_id=task_id)
+        result = parse_claimed_result(payload, verified=verified, binding=binding)
         _require_target(result, verified.retained.target)
         return _correlate(
             workspace=workspace,
@@ -1119,7 +1235,7 @@ def hold_resolve(
             if not replay:
                 _record_held(workspace, run_dir, task_id, binding.attempt_id, ABANDONED, binding.intent_digest)
             return {**base, "mode": ABANDONED, "status": verified.result.status, "replayed": replay}
-        result = parse_native_result(payload, task_id=task_id)
+        result = parse_claimed_result(payload, verified=verified, binding=binding)
         _require_target(result, verified.retained.target)
         if held == ACCEPT_CONFLICT:
             return _resolve_hold(workspace, run_dir, verified, result, binding, base)
@@ -1149,7 +1265,11 @@ def _resolve_hold(
     """
     prior = _correlation(_read(run_dir), result.task_id)
     handle_digest = _handle_digest(result, binding.parent_thread)
-    if prior is None or prior[1] != handle_digest:
+    if (
+        prior is None
+        or prior.handle_digest != handle_digest
+        or (prior.provider_task_id is not None and prior.provider_task_id != result.provider_task_id)
+    ):
         raise _refuse("accept-conflict", "the operator assertion contradicts the recorded native handle")
     observation = _classify(verified, binding, result)
     if observation.family == "refused":

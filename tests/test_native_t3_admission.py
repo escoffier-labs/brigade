@@ -35,9 +35,9 @@ from tests.test_native_t3_claim import (
     TASK_TEXT,
     THREAD,
     _claim,
-    _native,
+    _reply,
     _run_dir,
-    _terminal,
+    _terminal_reply,
 )
 
 
@@ -357,14 +357,16 @@ def test_per_seat_max_live_caps_one_seat_only(tmp_path):
 def test_held_and_post_launch_abandoned_tasks_keep_occupying(tmp_path):
     workspace, run_id = _enroll(tmp_path, ids=("one", "two"))
     _claim(workspace, run_id, "one")
-    dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_native("one"))
+    dispatch.accepted(
+        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
+    )
     with pytest.raises(dispatch.DispatchError) as conflict:
         dispatch.accepted(
             workspace=workspace,
             run_id=run_id,
             task_id="one",
             parent_thread=THREAD,
-            payload=_native("one", childThreadId="thread-other"),
+            payload=_reply(workspace, run_id, childThreadId="thread-other"),
         )
     assert conflict.value.code == "accept-conflict"
     _claim(workspace, run_id, "two")
@@ -396,7 +398,11 @@ def test_terminal_quiescent_result_frees_only_after_ack(tmp_path):
     workspace, run_id = _enroll(tmp_path)
     _claim(workspace, run_id, "one")
     report = dispatch.accepted(
-        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_terminal("one")
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id),
     )
     assert report["result_id"] is not None
     assert capacity.governed_occupancy(workspace).live == 1
@@ -408,7 +414,9 @@ def test_terminal_quiescent_result_frees_only_after_ack(tmp_path):
 def test_nonterminal_correlated_task_keeps_occupying(tmp_path):
     workspace, run_id = _enroll(tmp_path)
     _claim(workspace, run_id, "one")
-    dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_native("one"))
+    dispatch.accepted(
+        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
+    )
     assert capacity.governed_occupancy(workspace).live == 1
 
 

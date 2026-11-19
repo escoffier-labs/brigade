@@ -233,9 +233,19 @@ EVENT_TYPES.update(
         ),
         # Child thread and run ids are optional legacy input. New correlation
         # events carry no child identities, so a status projection cannot leak
-        # them back out of the journal.
+        # them back out of the journal. The provider task id is T3's task node
+        # identity, never Brigade's batch task id, and it is optional so older
+        # digest-only records stay readable.
         "task.native-correlated": frozenset(
-            {"task_id", "attempt_id", "mode", "handle_digest", "child_thread_id", "child_run_id"}
+            {
+                "task_id",
+                "attempt_id",
+                "mode",
+                "handle_digest",
+                "child_thread_id",
+                "child_run_id",
+                "provider_task_id",
+            }
         ),
         "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
         "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
@@ -545,7 +555,7 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
             raise CanonicalizationError("task.native-correlated mode is invalid")
         if not run_task_journal.digest(payload.get("handle_digest")):
             raise CanonicalizationError("task.native-correlated handle digest is invalid")
-        for field in ("child_thread_id", "child_run_id"):
+        for field in ("child_thread_id", "child_run_id", "provider_task_id"):
             if field in payload and not run_task_journal.provider_reference(payload.get(field)):
                 raise CanonicalizationError(f"task.native-correlated {field} is invalid")
         return

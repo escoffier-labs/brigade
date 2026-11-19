@@ -104,10 +104,12 @@ def observe(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, p
         prior = dispatch._correlation(events, task_id)
         if prior is None:
             raise dispatch._refuse("no-correlation", "the task has no recorded native correlation")
-        result = dispatch.parse_native_result(payload, task_id=task_id)
+        result = dispatch.parse_claimed_result(payload, verified=verified, binding=binding)
         dispatch._require_target(result, verified.retained.target)
         handle_digest = dispatch._handle_digest(result, binding.parent_thread)
-        if handle_digest != prior[1]:
+        if handle_digest != prior.handle_digest or (
+            prior.provider_task_id is not None and prior.provider_task_id != result.provider_task_id
+        ):
             raise dispatch._refuse("handle-mismatch", "the status handle does not match the recorded correlation")
         observation = dispatch._classify(verified, binding, result)
         if observation.family == "refused":
@@ -151,7 +153,10 @@ def cancel(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) ->
         prior = dispatch._correlation(events, task_id)
         if prior is None:
             raise dispatch._refuse("no-correlation", "the task has no recorded native correlation")
-        handle_digest = prior[1]
+        handle_digest = prior.handle_digest
+        # The recorded provider handle is T3's task node id. A legacy digest-only
+        # correlation has no provider id to print, so it keeps the old value.
+        provider_task_id = prior.provider_task_id or task_id
         client_request_id = cancel_key(run_dir.name, task_id, binding.attempt_id, handle_digest)
         replay = dispatch._latest(events, CANCEL_EVENT, task_id) is not None
         if not replay:
@@ -173,7 +178,7 @@ def cancel(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) ->
             "task_id": task_id,
             "attempt_id": binding.attempt_id,
             "handle_digest": handle_digest,
-            "task_cancel": {"taskId": task_id, "clientRequestId": client_request_id},
+            "task_cancel": {"taskId": provider_task_id, "clientRequestId": client_request_id},
             "replayed": replay,
         }
 

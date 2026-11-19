@@ -8,6 +8,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -138,12 +139,39 @@ def _events(workspace: Path, run_id: str) -> list[run_journal.RunEvent]:
     return list(run_journal.read_journal_bounded(_run_dir(workspace, run_id) / "events" / "lifecycle.jsonl").events)
 
 
-def _native(task_id: str = "one", **changes: object) -> dict:
+def t3_task_id(client_request_id: str, *, namespace: str = "3f1c2b44-7a1e-4b8c-9f2d-0a1b2c3d4e5f") -> str:
+    """Mirror T3 Code's ``delegate_task`` task node id at revision c52df24d28.
+
+    ``OrchestratorMcpService.stableCommandId`` joins "command", "mcp", the
+    encoded request namespace, "delegate-task" and the encoded client request id
+    with ":" and ``IdAllocator.derive.delegatedTaskNode`` encodes the whole
+    command id again behind "node:delegated-task:". JavaScript's
+    ``encodeURIComponent`` leaves only ``-_.!~*'()`` punctuation alone here.
+    """
+
+    def encode(value: str) -> str:
+        return quote(value, safe="-_.!~*'()")
+
+    command = ":".join(("command", "mcp", encode(namespace), "delegate-task", encode(client_request_id)))
+    return "node:delegated-task:" + encode(command)
+
+
+def _request_key(workspace: Path, run_id: str, task_id: str = "one") -> str:
+    """Read the durable attempt and return the client request id the claim printed."""
+    result = next(
+        item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == task_id
+    )
+    assert result.handle.attempt_id is not None
+    return enrollment.request_key(run_id, task_id, result.handle.attempt_id)
+
+
+def _native(*, request_key: str, **changes: object) -> dict:
+    node_id = t3_task_id(request_key)
     payload = {
-        "taskId": task_id,
+        "taskId": node_id,
         "childThreadId": "thread-child",
         "childRunId": "run-child",
-        "childNodeId": task_id,
+        "childNodeId": node_id,
         "status": "running",
         "workState": "working",
         "hasPendingChildRuns": False,
@@ -164,9 +192,14 @@ def _native(task_id: str = "one", **changes: object) -> dict:
     return payload
 
 
-def _terminal(task_id: str = "one", *, status: str = "completed", **changes: object) -> dict:
+def _reply(workspace: Path, run_id: str, task_id: str = "one", **changes: object) -> dict:
+    """Build the reply T3 would return for this task's durable claim."""
+    return _native(request_key=_request_key(workspace, run_id, task_id), **changes)
+
+
+def _terminal(*, request_key: str, status: str = "completed", **changes: object) -> dict:
     payload = _native(
-        task_id,
+        request_key=request_key,
         status=status,
         workState="result_available",
         latestTerminalStatus=status,
@@ -176,6 +209,13 @@ def _terminal(task_id: str = "one", *, status: str = "completed", **changes: obj
     )
     payload.update(changes)
     return payload
+
+
+def _terminal_reply(
+    workspace: Path, run_id: str, task_id: str = "one", *, status: str = "completed", **changes: object
+) -> dict:
+    """Build the terminal reply T3 would return for this task's durable claim."""
+    return _terminal(request_key=_request_key(workspace, run_id, task_id), status=status, **changes)
 
 
 def _claim(workspace: Path, run_id: str, task_id: str = "one", *, parent: str = THREAD) -> dict:
@@ -416,13 +456,17 @@ def test_legacy_retained_app_server_still_completes_existing_task_verbs(tmp_path
     workspace = _workspace(tmp_path)
     run_id = _legacy_claim_run(workspace, claimed=True)
     accepted = dispatch.accepted(
-        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_native("one")
+        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
     )
     assert accepted["mode"] == dispatch.PARENT_REPORTED
     cancelled = lifecycle.cancel(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD)
-    assert cancelled["task_cancel"]["taskId"] == "one"
+    assert cancelled["task_cancel"]["taskId"] == t3_task_id(_request_key(workspace, run_id))
     observed = lifecycle.observe(
-        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_terminal("one")
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id),
     )
     assert observed["status"] == "completed"
     abandoned = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=None, abandon=True)
@@ -539,7 +583,7 @@ def test_refusal_paths_have_empty_stdout_and_no_task_text(tmp_path, capsys):
         return ["t3", *extra, "--target", str(workspace)]
 
     native_file = tmp_path / "native.json"
-    native_file.write_text(json.dumps(_native("two")), encoding="utf-8")
+    native_file.write_text(json.dumps(_reply(workspace, run_id)), encoding="utf-8")
     cases = [
         (argv("claim", run_id, "one", "--parent-thread", THREAD), "already-claimed"),
         (argv("claim", "t3-" + "0" * 64, "one", "--parent-thread", THREAD), "run-missing"),
@@ -604,8 +648,8 @@ def test_asset_integrity_refuses_the_whole_run(tmp_path, tamper):
         ("providerInstanceId", "other-provider", "provider-mismatch"),
         ("model", "other-model", "model-mismatch"),
         ("options", [], "options-mismatch"),
-        ("childNodeId", "two", "native-mismatch"),
-        ("taskId", "two", "native-mismatch"),
+        ("childNodeId", t3_task_id("brigade-t3:" + "1" * 64), "native-mismatch"),
+        ("taskId", t3_task_id("brigade-t3:" + "2" * 64), "native-mismatch"),
         ("childThreadId", None, "native-invalid"),
         ("childRunId", None, "native-invalid"),
     ],
@@ -622,10 +666,115 @@ def test_accepted_refuses_mismatches(tmp_path, field, value, code):
             run_id=run_id,
             task_id="one",
             parent_thread=THREAD,
-            payload=_native(**{field: value}),
+            payload=_reply(workspace, run_id, **{field: value}),
         )
     assert refused.value.code == code
     assert journal_path.read_bytes() == before
+
+
+@POSIX_ONLY
+def test_accepted_matches_the_t3_task_node_built_from_the_claim_key(tmp_path):
+    workspace, run_id = _enroll(tmp_path)
+    claim = _claim(workspace, run_id, "one")
+    node_id = t3_task_id(claim["clientRequestId"])
+    report = dispatch.accepted(
+        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
+    )
+    assert report["child_node_id"] == node_id and report["task_id"] == "one"
+    task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
+    assert task.provider_task_id == node_id
+
+
+@POSIX_ONLY
+def test_accepted_refuses_a_sibling_tasks_request_key(tmp_path):
+    workspace, run_id = _enroll(tmp_path)
+    _claim(workspace, run_id, "one")
+    sibling = _claim(workspace, run_id, "two")
+    journal_path = _run_dir(workspace, run_id) / "events" / "lifecycle.jsonl"
+    before = journal_path.read_bytes()
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.accepted(
+            workspace=workspace,
+            run_id=run_id,
+            task_id="one",
+            parent_thread=THREAD,
+            payload=_native(request_key=sibling["clientRequestId"]),
+        )
+    assert refused.value.code == "native-mismatch"
+    assert journal_path.read_bytes() == before
+
+
+@POSIX_ONLY
+def test_accepted_refuses_a_child_node_that_differs_from_the_task_node(tmp_path):
+    workspace, run_id = _enroll(tmp_path)
+    _claim(workspace, run_id, "one")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.accepted(
+            workspace=workspace,
+            run_id=run_id,
+            task_id="one",
+            parent_thread=THREAD,
+            payload=_reply(workspace, run_id, childNodeId=t3_task_id("brigade-t3:" + "b" * 64)),
+        )
+    assert refused.value.code == "native-mismatch"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda node: node[: len(node) - 1],
+        lambda node: node + ":1",
+        lambda node: node + "%3A1",
+        lambda node: node.replace("%3Adelegate-task", ":delegate-task", 1),
+        lambda node: node.replace("%3Adelegate-task", "%3Aother-task", 1),
+        lambda node: node.replace("%253A", "%3A", 1),
+        lambda node: node.replace("%3A", "%3a", 1),
+        lambda node: "node:run:" + node,
+        lambda node: node.rsplit("%3A", 1)[0],
+        lambda node: "",
+    ],
+    ids=[
+        "truncated",
+        "trailing-raw-segment",
+        "trailing-encoded-segment",
+        "non-canonical-separator",
+        "wrong-operation",
+        "single-encoded-key",
+        "lowercase-escape",
+        "wrong-node-kind",
+        "missing-key",
+        "empty",
+    ],
+)
+@POSIX_ONLY
+def test_accepted_refuses_a_malformed_task_node(tmp_path, mutate):
+    workspace, run_id = _enroll(tmp_path)
+    claim = _claim(workspace, run_id, "one")
+    node_id = mutate(t3_task_id(claim["clientRequestId"]))
+    journal_path = _run_dir(workspace, run_id) / "events" / "lifecycle.jsonl"
+    before = journal_path.read_bytes()
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.accepted(
+            workspace=workspace,
+            run_id=run_id,
+            task_id="one",
+            parent_thread=THREAD,
+            payload=_reply(workspace, run_id, taskId=node_id, childNodeId=node_id),
+        )
+    assert refused.value.code == "native-mismatch"
+    assert journal_path.read_bytes() == before
+
+
+def test_literal_t3_node_shape_round_trips():
+    """Pin the reviewed encoding: a single-colon request key becomes %253A."""
+    request_key = "brigade-t3:" + "0378" + "9f" * 30
+    namespace = "3f1c2b44-7a1e-4b8c-9f2d-0a1b2c3d4e5f"
+    node_id = t3_task_id(request_key, namespace=namespace)
+    assert node_id == (
+        "node:delegated-task:command%3Amcp%3A" + namespace + "%3Adelegate-task%3Abrigade-t3%253A" + "0378" + "9f" * 30
+    )
+    result = dispatch.parse_native_result(_native(request_key=request_key), task_id="one", request_key=request_key)
+    assert result.provider_task_id == node_id and result.child_node_id == node_id
 
 
 @POSIX_ONLY
@@ -638,7 +787,7 @@ def test_accepted_refuses_a_different_parent_thread(tmp_path):
             run_id=run_id,
             task_id="one",
             parent_thread="thread-other",
-            payload=_native(),
+            payload=_reply(workspace, run_id),
         )
     assert refused.value.code == "parent-mismatch"
 
@@ -648,21 +797,23 @@ def test_accepted_records_parent_reported_correlation_idempotently(tmp_path):
     workspace, run_id = _enroll(tmp_path)
     _claim(workspace, run_id, "one")
     first = dispatch.accepted(
-        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_native()
+        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
     )
     assert first["mode"] == dispatch.PARENT_REPORTED and first["replayed"] is False
     assert first["status"] == "running" and first["child_run_id"] == "run-child"
     journal_path = _run_dir(workspace, run_id) / "events" / "lifecycle.jsonl"
     before = journal_path.read_bytes()
     replay = dispatch.accepted(
-        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_native()
+        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
     )
     assert replay == {**first, "replayed": True}
     assert journal_path.read_bytes() == before
     correlated = [event for event in _events(workspace, run_id) if event.event_type == dispatch.CORRELATION_EVENT]
     assert len(correlated) == 1 and correlated[0].payload["mode"] == dispatch.PARENT_REPORTED
+    assert correlated[0].payload["provider_task_id"] == t3_task_id(_request_key(workspace, run_id))
     task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
-    assert task.provider_task_id == "one" and task.original_run_id == "run-child"
+    assert task.provider_task_id == t3_task_id(_request_key(workspace, run_id))
+    assert task.original_run_id == "run-child"
     assert TASK_TEXT not in journal_path.read_text(encoding="utf-8")
 
 
@@ -671,7 +822,7 @@ def test_accepted_records_parent_reported_correlation_idempotently(tmp_path):
 def test_accepted_records_a_terminal_projection(tmp_path, transfers):
     workspace, run_id = _enroll(tmp_path)
     _claim(workspace, run_id, "one")
-    payload = _terminal()
+    payload = _terminal_reply(workspace, run_id)
     if transfers == "latest-only":
         payload["resultContextTransferId"] = None
     elif transfers == "result-only":
@@ -699,7 +850,9 @@ def test_accepted_refuses_after_its_asset_is_tampered(tmp_path):
     asset = _run_dir(workspace, run_id) / result.enrollment.asset_path
     asset.write_bytes(asset.read_bytes().replace(TASK_TEXT.encode(), b"tampered-marker!"))
     with pytest.raises(dispatch.DispatchError) as refused:
-        dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_native())
+        dispatch.accepted(
+            workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
+        )
     assert refused.value.code == "asset-digest"
 
 
@@ -708,14 +861,20 @@ def test_second_different_handle_holds_the_task_only(tmp_path):
     workspace, run_id = _enroll(tmp_path)
     _claim(workspace, run_id, "one")
     first = {"childThreadId": "thread-child-a", "childRunId": "run-child-a"}
-    dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_native(**first))
+    dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_reply(workspace, run_id, **first),
+    )
     with pytest.raises(dispatch.DispatchError) as conflict:
         dispatch.accepted(
             workspace=workspace,
             run_id=run_id,
             task_id="one",
             parent_thread=THREAD,
-            payload=_native(childThreadId="thread-child-b", childRunId="run-child-b"),
+            payload=_reply(workspace, run_id, childThreadId="thread-child-b", childRunId="run-child-b"),
         )
     assert conflict.value.code == "accept-conflict"
     held = [event for event in _events(workspace, run_id) if event.event_type == dispatch.HELD_EVENT]
@@ -747,7 +906,9 @@ def test_hold_resolve_abandon_never_regrants(tmp_path):
 def test_hold_resolve_assertion_is_operator_correlation(tmp_path):
     workspace, run_id = _enroll(tmp_path)
     _claim(workspace, run_id, "one")
-    report = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=_native(), abandon=False)
+    report = dispatch.hold_resolve(
+        workspace=workspace, run_id=run_id, task_id="one", payload=_reply(workspace, run_id), abandon=False
+    )
     assert report["mode"] == dispatch.OPERATOR_ASSERTED
     assert report["child_run_id"] == "run-child"
     with pytest.raises(dispatch.DispatchError):
@@ -755,7 +916,7 @@ def test_hold_resolve_assertion_is_operator_correlation(tmp_path):
             workspace=workspace,
             run_id=run_id,
             task_id="one",
-            payload=_native(childRunId="run-child-other"),
+            payload=_reply(workspace, run_id, childRunId="run-child-other"),
             abandon=False,
         )
     journal_text = (_run_dir(workspace, run_id) / "events" / "lifecycle.jsonl").read_text(encoding="utf-8")
@@ -773,7 +934,11 @@ def test_long_task_id_keeps_fixed_length_idempotency_keys(tmp_path):
     workspace, run_id = _enroll(tmp_path, (task_id,))
     report = _claim(workspace, run_id, task_id)
     accepted = dispatch.accepted(
-        workspace=workspace, run_id=run_id, task_id=task_id, parent_thread=THREAD, payload=_native(task_id)
+        workspace=workspace,
+        run_id=run_id,
+        task_id=task_id,
+        parent_thread=THREAD,
+        payload=_reply(workspace, run_id, task_id),
     )
     assert accepted["mode"] == dispatch.PARENT_REPORTED
     abandoned = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id=task_id, payload=None, abandon=True)
@@ -806,7 +971,9 @@ def test_native_json_closes_a_lost_dispatch_request(tmp_path, monkeypatch):
         _claim(workspace, run_id, "two")
     assert blocked.value.code == "run-barrier"
 
-    report = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=_native(), abandon=False)
+    report = dispatch.hold_resolve(
+        workspace=workspace, run_id=run_id, task_id="one", payload=_reply(workspace, run_id), abandon=False
+    )
     assert report["mode"] == dispatch.OPERATOR_ASSERTED
     requested = [
         event.payload["attempt"] for event in _events(workspace, run_id) if event.event_type == "run.dispatch.requested"
@@ -836,7 +1003,9 @@ def test_crash_before_the_launch_claim_blocks_and_abandon_resolves(tmp_path, mon
         _claim(workspace, run_id, "two")
     assert blocked.value.code == "run-barrier"
     with pytest.raises(dispatch.DispatchError) as prelaunch:
-        dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=_native(), abandon=False)
+        dispatch.hold_resolve(
+            workspace=workspace, run_id=run_id, task_id="one", payload=_reply(workspace, run_id), abandon=False
+        )
     assert prelaunch.value.code == "no-claim"
 
     report = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=None, abandon=True)
@@ -856,7 +1025,9 @@ def test_native_json_refuses_an_abandoned_task(tmp_path):
     journal_path = _run_dir(workspace, run_id) / "events" / "lifecycle.jsonl"
     before = journal_path.read_bytes()
     with pytest.raises(dispatch.DispatchError) as refused:
-        dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=_native(), abandon=False)
+        dispatch.hold_resolve(
+            workspace=workspace, run_id=run_id, task_id="one", payload=_reply(workspace, run_id), abandon=False
+        )
     assert refused.value.code == "task-held"
     assert journal_path.read_bytes() == before
 
@@ -1037,7 +1208,7 @@ def test_pending_evidence_never_records_a_terminal_result(tmp_path, pending, sta
         run_id=run_id,
         task_id="one",
         parent_thread=THREAD,
-        payload=_terminal(status=status, **changes),
+        payload=_terminal_reply(workspace, run_id, status=status, **changes),
     )
     assert report["status"] not in BRIGADE_TERMINAL
     task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
@@ -1045,7 +1216,11 @@ def test_pending_evidence_never_records_a_terminal_result(tmp_path, pending, sta
 
     # The normal path: a later clean projection records the terminal result.
     clean = dispatch.accepted(
-        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_terminal(status=status)
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id, status=status),
     )
     assert clean["status"] == status
     task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
@@ -1061,13 +1236,17 @@ def test_failed_with_active_children_stays_recoverable(tmp_path):
         run_id=run_id,
         task_id="one",
         parent_thread=THREAD,
-        payload=_terminal(status="failed", hasPendingChildRuns=True),
+        payload=_terminal_reply(workspace, run_id, status="failed", hasPendingChildRuns=True),
     )
     assert report["status"] == "waiting-for-children"
     task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
     assert task.status == "waiting-for-children" and task.result_id is None
     corrected = dispatch.accepted(
-        workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_terminal(status="failed")
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id, status="failed"),
     )
     assert corrected["status"] == "failed"
     task = next(item for item in run_tasks.read_tasks(_run_dir(workspace, run_id)) if item.handle.spec.task_id == "one")
@@ -1103,7 +1282,7 @@ def test_malformed_projection_refuses(tmp_path, field, value, code):
             run_id=run_id,
             task_id="one",
             parent_thread=THREAD,
-            payload=_native(**{field: value}),
+            payload=_reply(workspace, run_id, **{field: value}),
         )
     assert refused.value.code == code
     assert journal_path.read_bytes() == before
@@ -1139,7 +1318,7 @@ def test_native_json_refuses_pipes_and_symlinks(tmp_path, capsys):
     assert captured.out == "" and "[native-unreadable]" in captured.err
 
     real = tmp_path / "native.json"
-    real.write_text(json.dumps(_native()), encoding="utf-8")
+    real.write_text(json.dumps(_reply(workspace, run_id)), encoding="utf-8")
     link = tmp_path / "native-link.json"
     try:
         os.symlink(real, link)

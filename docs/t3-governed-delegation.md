@@ -330,9 +330,40 @@ operation. None is implemented here.
 `t3 accepted` parses the full `delegate_task` result projection, including
 `status`, `workState`, the pending-child and pending-question flags, the
 terminal metadata and the pending approval shape. It requires a non-null
-`childThreadId` and `childRunId`, `childNodeId` equal to the task identity, the
-provider instance, model and options exactly equal to the finalized intent, and
-the supplied parent thread equal to the claim binding.
+`childThreadId` and `childRunId`, a `taskId` that is exactly the T3 task node
+built for the claim's `clientRequestId`, `childNodeId` equal to that same node
+id, the provider instance, model and options exactly equal to the finalized
+intent, and the supplied parent thread equal to the claim binding.
+
+### The native task identity
+
+A real `delegate_task` reply never echoes Brigade's batch task id. T3 builds
+the task node identity in three steps, pinned to revision
+`c52df24d285a072ad9c3f7ab5b3656c0be1cb0f5`:
+
+1. The request key is the caller's `clientRequestId` verbatim
+   (`apps/server/src/mcp/OrchestratorMcpService.ts:1476-1477`).
+2. The command id is `command:mcp:` plus the encoded request namespace, then
+   `:delegate-task:`, then the encoded request key
+   (`OrchestratorMcpService.ts:679-695` and the delegate handler at `:2435-2439`).
+3. The task node id is `node:delegated-task:` plus the encoded command id
+   (`packages/provider-core/src/server/IdAllocator.ts:191-194, :259`, called from
+   `apps/server/src/orchestration-v2/Orchestrator.ts:7973-7975`).
+
+`encodeURIComponent` runs twice on the request key, so a `brigade-t3:<hex>` key
+appears as `brigade-t3%253A<hex>`. Brigade decodes the command id once, requires
+the fixed command prefix, the `delegate-task` operation and a bounded
+non-whitespace namespace, then requires the decoded request key to equal the
+retained claim's key exactly with nothing trailing. A future T3 revision that
+changes this encoding makes `accepted` refuse with `native-mismatch`, so the
+task holds instead of correlating to a guess. That is the intended fail-closed
+behavior, not a defect to paper over.
+
+The correlation record keeps the handle digest and stores T3's task node id as
+`provider_task_id`. `t3 observe` and `t3 hold-resolve --native-json` parse later
+replies through the same rules and compare the recorded handle exactly. A
+digest-only correlation from an older journal stays readable, and `t3 cancel`
+falls back to the old value for it.
 
 Those checks prove consistency with what Brigade already recorded. They do not
 authenticate T3. All correlation records are parent-reported, and an operator
@@ -358,10 +389,11 @@ flags, work state and quiescence into the result artifact digest, which is part
 of the result id. A contradictory terminal refuses with `observation-conflict`,
 and an identical replay appends nothing.
 
-`t3 cancel` records a digests-only request and prints the `task_cancel`
-`taskId` and `clientRequestId` derived from length-prefixed run, task, attempt
-and handle digest. A replay while nonterminal returns the same arguments. A
-terminal or held task refuses with empty stdout. `t3 ack` acknowledges one
+`t3 cancel` records a digests-only request and prints the correlated provider
+task node as the `task_cancel` `taskId`, plus a `clientRequestId` derived from
+length-prefixed run, task, attempt and handle digest. A replay while
+nonterminal returns the same arguments. A terminal or held task refuses with
+empty stdout. `t3 ack` acknowledges one
 exact result id, idempotently, and stays readable after finalization.
 
 `t3 finalize` is explicit, never automatic. Under the run lock it re-reads
