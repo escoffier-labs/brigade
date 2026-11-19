@@ -4,7 +4,8 @@ Outcome capture classifies runs when it reads stored receipts and persists the r
 ([capture and ranking](../src/brigade/outcome_cmd.py), [scorecard projection](../src/brigade/scorecard.py)).
 
 This is outcome-based skill scoring, promotion, and rollback from verification evidence.
-Scheduled memory work runs separately from this scoring loop.
+[The default loop](#the-default-loop) below describes what runs without an operator command and what stays manual.
+The scheduled memory reflection and verification described next run separately from this scoring loop.
 
 Hub reflection opens pinned proposals for exact duplicate merges, near-duplicate
 supersedes, broken-link repairs and anchors. Stale-newer-evidence and
@@ -41,19 +42,64 @@ no longer matches its pins. See
 [Automatic Tier 0 reflection](memory-care.md#automatic-tier-0-reflection)
 for the `auto_apply` policy field, the switch and rollback.
 
+## The default loop
+
+This is the setup the rest of this page assumes. Three one-time operator commands turn it on. After that, scoring keeps running without anyone remembering to capture, rank or reconcile.
+
+```bash
+brigade work hooks install --scope user   # Claude Code work-loop hooks
+brigade extras on                         # once per machine, runbook steps are extras-gated
+brigade care install --target .           # schedules the care entries, including the weekly ratchet
+```
+
+`brigade init` does none of these. It writes no hook and no timer, so a newly initialized workspace has no automated loop until the commands above run. To schedule only the ratchet, use `brigade care install --target . --entry weekly-outcome-ratchet`. See [scheduled care](scheduled-care.md#weekly-outcome-ratchet) for what install writes and how to confirm it ran.
+
+With the hooks and the schedule on, this happens with no operator command:
+
+1. **Verify is routed with automatic attribution.** In a hook-enabled Claude Code session, the hook denies a raw test command and supplies the Brigade replacement: `brigade work verify run --target . --command "<check>" --capture auto`. The receipt records the real exit code. `auto` writes one `session_observed` row for each skill the session read or invoked. When nothing resolves, it writes one `caller_typed` `brigade-work` row instead. If the session state already holds an artifact id from an earlier typed capture, the replacement uses that id. Neither kind of row can promote a skill. See [Attribution sources](#attribution-sources).
+2. **A manifest subject change gets the manifest verify.** When the working tree changes the exact `subject_path` of a tracked manifest, the same deny adds `brigade work verify run --manifest <manifest> --capture auto` beside the agent's own check. A match on `scope_globs` alone does not count. The Stop gate then holds closeout until a completed receipt from that manifest postdates the write. If the hook session wrote the subject itself and no other session did, that receipt can be a scoreable trial. See [Producer session for a manifest trial](#producer-session-for-a-manifest-trial).
+3. **The weekly ratchet runs.** The `weekly-outcome-ratchet` care entry fires Monday at 07:00 local time and runs two steps from its shipped runbook: `brigade outcome rank --target .`, then `brigade outcome reconcile --target . --report --proposals`. Both are dry runs. Reconcile evaluates every ranked artifact, flags a verified regression as a `regression_hold` decision and a bounded session-observed one as `observed_regression_hold`, writes the [ratchet report](#weekly-ratchet-report), and files one skills inbox proposal for each verified regression on a Brigade-bundled skill (see [Regression proposals](#regression-proposals)).
+4. **The report is shown.** `brigade work brief` prints an `outcome_ratchet:` line, the Center dashboard outcomes view shows a ratchet panel, and `brigade outcome ratchet --target .` prints the report. A report older than seven days is labeled stale on the dashboard.
+
+To check that the loop ran, run `brigade care status --target .` and look for a completed receipt on `weekly-outcome-ratchet`, then run `brigade outcome ratchet --target .` and read its `generated_at`.
+
+```mermaid
+flowchart TD
+    A[Claude Code session with hooks] -->|verify routed| B["verify run --capture auto"]
+    A -->|manifest subject changed| C["verify run --manifest --capture auto"]
+    B --> D[Receipt and ledger rows]
+    C --> D
+    D --> E["Weekly care timer: outcome rank"]
+    E --> F["outcome reconcile --report --proposals (dry run)"]
+    F --> G[Ratchet report and inbox proposals]
+    G --> H["Brief, dashboard, outcome ratchet"]
+    H -.->|operator decides| I["skills install, rollback, reconcile --apply"]
+```
+
+### What stays manual or proposal-only
+
+- **Physical install and rollback.** No scheduled or hook step installs, rolls back or uninstalls a skill file. Reconcile lists the exact `brigade skills install` or `brigade skills rollback` command for each pending change, and the report and the brief count them. An operator runs them. See [Routing only](#routing-only).
+- **Promotion.** The weekly run is a dry run and changes no status. A promotion needs a person to run `brigade outcome reconcile --apply`, and even then it sets only the status and route policy marker.
+- **Regression response.** The weekly run reports the regression and files a review request. It does not roll anything back.
+
+The reason is the trust model. A receipt from ordinary work carries attribution the scored agent chose, and the local state around it (receipts, status, git, session files) is writable by that agent on a single-user host. Forgeable evidence may veto or raise a flag, and it never authorizes a change. The same limit applies to manifest trials produced by a hook session, because their ownership proof is local session state. Until [#2779](https://github.com/escoffier-labs/brigade/issues/2779) lands, treat them as input to ranking and proposals. Brigade does not set them apart in the scorecard, so read the dry run before you run `--apply`. The detail is in [Attribution sources](#attribution-sources), [Producer session for a manifest trial](#producer-session-for-a-manifest-trial) and [Routing only](#routing-only).
+
 ## Workflow
+
+The commands below are what the default loop runs for you. Run them by hand to score outside a hook-enabled session or to inspect a result.
 
 ```bash
 # scoreable evidence: a git-tracked manifest under verify/manifests/ authors subject_binding
-brigade work verify run --manifest verify/manifests/work-cmd-verification.json --capture brigade-work
+brigade work verify run --manifest verify/manifests/work-cmd-verification.json --capture auto
 
 # audit-only evidence: a receipt a human can read, never a scoreable trial
-brigade work verify run --target . --command "pytest -q" --capture brigade-work
-
-# let Brigade name the skills this session read (no hand-typed id; veto-only, see below)
 brigade work verify run --target . --command "pytest -q" --capture auto
 
+# a typed id is still allowed. It is recorded as caller_typed and never promotes a skill
+brigade work verify run --target . --command "pytest -q" --capture brigade-work
+
 # or, after a verify without --capture:
+brigade outcome capture auto --run-id latest
 brigade outcome capture brigade-work --run-id latest --kind skill
 
 brigade outcome rank --target .
@@ -86,7 +132,7 @@ Why: every local input to a physical change is writable by the agent being gated
 
 The commands you run by hand keep their own guards (see `docs/skill-registry.md`): `install --force` and `rollback` refuse an installed copy with local edits unless `--discard-local-edits` is passed, in which case the edit is snapshotted first, and both re-verify the copy's bytes immediately before they remove it.
 
-Capture against an id that actually guided the work. Invented skill names pollute the ranking. Capture failures too: a `-1` is how a bad skill gets rolled back. Ledger files live under `memory/outcome/` as plain JSON and markdown.
+Prefer `--capture auto`, so Brigade names the skills the session actually read and nobody types an id. If you type an id, use one that guided the work, because an invented skill name pollutes the ranking. Capture failures too: a `-1` is how a regression gets held and reported, and the rollback that follows is an operator command. Ledger files live under `memory/outcome/` as plain JSON and markdown.
 
 ## Attribution sources
 
@@ -269,11 +315,13 @@ A repo with no tracked manifest cannot produce an eligible receipt at all. That 
 
 ## Tracked manifests in this checkout
 
-The work loop should call:
+For a change to a manifest's subject, the work loop calls:
 
 ```bash
-brigade work verify run --manifest <path> --capture <id>
+brigade work verify run --manifest <path> --capture auto
 ```
+
+In a hook-enabled Claude Code session the hook names this command for you (see [The default loop](#the-default-loop)).
 
 `--manifest` accepts a registered `manifest_id` or the workspace source path (`verify/manifests/<id>.json`). Both resolve through `verify_manifest.resolve_manifest`. Untracked files under that directory are refused.
 
@@ -286,18 +334,19 @@ This checkout ships patch-backed manifests for the focused suites agents actuall
 | `verify/manifests/fleet-claims.json` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py` | `src/brigade/fleet_hub.py` |
 | `verify/manifests/run-resume.json` | `tests/test_run_resume.py` | `src/brigade/run_resume.py` |
 | `verify/manifests/verify-manifest.json` | `tests/test_verify_manifest_tracked.py` | `src/brigade/verify_manifest.py` |
+| `verify/manifests/outcome-attribution.json` | `tests/test_outcome_attribution.py` | `src/brigade/outcome_attribution.py` |
 
 Every `*.json` under `verify/manifests/` must resolve through `verify_manifest.resolve_manifest` by id and by source path. `tests/test_verify_manifest_tracked.py` walks that directory and asserts both lookups.
 
 Write check commands as the argv the receipt will record. Do not prefix `PYTHONPATH=src`: receipts store env assignments separately, and a plan mismatch makes the trial `verifier_manifest_mismatch`.
 
-When dirty paths match a tracked manifest's `subject_path` or `scope_globs`, `suggested_command` should name that manifest instead of an ad-hoc `--command`:
+When the working tree changes a tracked manifest's exact `subject_path`, the Claude Code hook adds the manifest verify to its verify deny and to the Stop gate:
 
 ```text
-brigade work verify run --manifest "verify/manifests/<id>.json" --capture <artifact-id>
+brigade work verify run --target <target> --manifest "<manifest source path>" --capture auto
 ```
 
-`verify_manifest.suggested_manifest_command` returns that string from dirty paths so `brigade work verify plan` and `brigade work brief` can surface it.
+Only the `subject_path` triggers the hint. A change that matches `scope_globs` alone does not. Outside a hook-enabled Claude Code session nothing suggests the manifest, so name it yourself.
 
 When a patch-backed manifest declares `scope_globs`, every path in the receipt's `changes.patch` must be the `subject_path` or match one of the globs. A receipt whose patch touches any other path, or whose patch headers cannot be parsed, is ineligible with reason `out_of_scope_changes` and counts under that key in `brigade outcome backfill scorecard --json` `ineligible_by_reason`. Manifests without `scope_globs` keep scoring the whole patch. This check only sees changed files: a check that reads an unchanged file outside the scope, such as a repository-wide scan, can still fail on state the subject did not cause, so keep check commands narrowed to the scope.
 

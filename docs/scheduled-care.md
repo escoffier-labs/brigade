@@ -119,7 +119,7 @@ are `handoff-ingest`, `care-scan`, `memory-refresh`, `evidence-crawl`, and
 `memory-closeout`. `memory-refresh` and `evidence-crawl` require an
 operator-approved runbook at `.brigade/memory-care/runbooks/<job-id>.json`; if
 that file is missing, install writes nothing and says why. Omitting `--entry`
-still installs the atomic five-recipe set above. Status and uninstall take the
+still installs the default set: `daily-care`, `ingest-sweep`, `weekly-outcome-ratchet`, `daily-observability`, `nightly-ops` and `memory-reflect`. Status and uninstall take the
 same selector, and namespaced backends still key registrations by
 `(target identity, job_id)`. Per-job installs support systemd and launchd. The
 crontab examples below remain operator-owned manual recipes.
@@ -176,7 +176,7 @@ therefore fails that scheduled runbook step.
 The crontab backend keeps one atomic managed block. `care install --backend
 crontab` without `--entry` includes run-patrol in that block. `--entry
 run-patrol` still refuses crontab. Systemd and launchd default installs retain
-the existing five-recipe set until run-patrol is explicitly selected.
+the same default set until run-patrol is explicitly selected.
 Existing CARE crontab blocks show as stale after upgrading, and `brigade care install --target .` refreshes the managed block.
 
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).
@@ -457,34 +457,64 @@ jobs:
 
 ## Weekly outcome ratchet
 
-Rank verified-learning outcomes, then reconcile skill promotion state. `reconcile` is dry-run by default. Pass `--apply` to record promotion and demotion status and route policy. `--apply` is routing only: it never installs or rolls back a skill file, and it lists the `brigade skills install` or `brigade skills rollback` commands an operator would run (also counted as `pending_physical_actions` in the ratchet report and the session brief).
+The weekly ratchet is the scheduled half of the automated scoring loop described in [Outcome scoring](outcome-scoring.md#the-default-loop). It is part of the default care set, so `brigade care install --target .` with no `--entry` installs it. `brigade init` does not install it, so a new workspace has no ratchet until you run that command. To schedule only the ratchet:
+
+```bash
+brigade extras on   # once per machine, runbook steps are extras-gated
+brigade care install --target . --entry weekly-outcome-ratchet
+```
+
+### What install writes
+
+On Linux, install writes `brigade-care-<hash>-weekly-outcome-ratchet.service` and `.timer` under `~/.config/systemd/user/`, links the timer into `timers.target.wants` and starts it (see [brigade care](#brigade-care-opt-in-scaffold) above). On macOS it writes a LaunchAgent. It also writes the shipped runbook `.brigade/memory-care/runbooks/weekly-outcome-ratchet.json` when that file is missing. The default schedule is Monday at 07:00 local time (`Mon *-*-* 07:00:00`). Change it with `--schedule 'weekly-outcome-ratchet=<value>'`.
+
+### What it runs
+
+The runbook has two steps, run in order in one approved run:
 
 ```bash
 brigade outcome rank --target .
-brigade outcome reconcile --target . --report
+brigade outcome reconcile --target . --report --proposals
 ```
 
-The shipped weekly runbook also passes `--proposals`, which files one skills inbox review request per verified regression on a Brigade-bundled skill (see [Outcome scoring](outcome-scoring.md#regression-proposals)). It is a review request only and never changes a status or a skill file.
+Both steps are dry runs. `reconcile` is dry-run by default and the runbook never passes `--apply`, so a scheduled run changes no skill status, no route policy and no skill file. It evaluates every ranked artifact, writes the advisory report, and `--proposals` files one skills inbox review request per verified regression on a Brigade-bundled skill (see [Outcome scoring](outcome-scoring.md#regression-proposals)). A proposal is a review request only.
 
-`--report` writes `.brigade/memory-care/outcome/ratchet-report.json`, a versioned summary of that run: decision counts by action, regression holds and rollbacks with their reason codes and helped/hurt counts, the receipt ineligibility rate, and the leading ineligibility reason. It stays a dry run; the flag adds an advisory file, never a status change. `brigade outcome ratchet --target .` prints the last report without ranking or reconciling, `brigade work brief` adds one `outcome_ratchet:` line, and the Center dashboard outcomes view shows the same summary below the ranking and marks a report older than seven days as stale. See [Outcome scoring](outcome-scoring.md#weekly-ratchet-report).
-
-Deliberate promotion or demotion (status and routing only):
+`--apply` is routing only and stays a deliberate operator choice. It records promotion and demotion status and route policy. It never installs or rolls back a skill file, and it lists the `brigade skills install` or `brigade skills rollback` commands an operator would run (also counted as `pending_physical_actions` in the ratchet report and the session brief):
 
 ```bash
 brigade outcome reconcile --apply --target .
 ```
 
-Schedule rank first, then reconcile 30 to 60 minutes later so new verify receipts land before decisions run.
+### Where the output appears
+
+`--report` writes `.brigade/memory-care/outcome/ratchet-report.json`, a versioned summary of that run: decision counts by action, regression holds and rollbacks with their reason codes and helped/hurt counts, the receipt ineligibility rate, and the leading ineligibility reason. The report is advisory and never changes a status. It shows up in three places with no command:
+
+- `brigade work brief` prints one `outcome_ratchet:` line.
+- The Center dashboard outcomes view shows the same summary below the ranking and marks a report older than seven days as stale.
+- `brigade outcome ratchet --target .` prints the last report without ranking or reconciling.
+
+See [Outcome scoring](outcome-scoring.md#weekly-ratchet-report) for the fields.
+
+### How to check it ran
+
+```bash
+brigade care status --target . --entry weekly-outcome-ratchet
+brigade outcome ratchet --target .
+```
+
+`care status` should show `enabled: True`, an empty `schedule_warnings` list and a `last_receipt` of `completed@<time>`. A `last_receipt` of `none` right after install means the timer has not fired yet. After the timer has been enabled for longer than its period without a receipt, `care status`, `brigade work brief` and `brigade doctor` warn `never-ran` and name the fix. `outcome ratchet` prints `report: none` until the first run writes a report, and its `generated_at` shows the age of the last one. To run it now, use `systemctl --user start brigade-care-<hash>-weekly-outcome-ratchet.service` (`brigade care status --json` lists the unit names) or `brigade runbook run --approved .brigade/memory-care/runbooks/weekly-outcome-ratchet.json`.
+
+If you schedule the ratchet by hand instead, pass `--report` to `reconcile` so the brief and dashboard have a report to show. Schedule rank first, then reconcile 30 to 60 minutes later so new verify receipts land before decisions run.
 
 ### Crontab
 
 ```cron
 PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 7 * * 1 cd "WORKSPACE" && brigade outcome rank --target .
-30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target . --report
+30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target . --report --proposals
 ```
 
-To apply promotions automatically after review:
+Scheduling `--apply` is not part of the default setup. It records status and route policy only, so read a dry run first if you add it:
 
 ```cron
 30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --apply --target .
@@ -529,7 +559,7 @@ Description=Brigade weekly outcome reconcile
 Type=oneshot
 WorkingDirectory=WORKSPACE
 Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=brigade outcome reconcile --target . --report
+ExecStart=brigade outcome reconcile --target . --report --proposals
 ```
 
 `~/.config/systemd/user/brigade-outcome-reconcile.timer`:
@@ -605,7 +635,7 @@ jobs:
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - run: brigade outcome reconcile --target . --report
+      - run: brigade outcome reconcile --target . --report --proposals
 ```
 
 The GitHub Actions recipe runs reconcile immediately after rank in the same workflow (`needs: outcome-rank`), not 30 to 60 minutes later. That is fine for CI: both jobs share the same restored `.brigade` cache and rank only reads receipts already on disk. On a laptop, keep the cron or timer gap so verify runs between rank and reconcile can finish first.
