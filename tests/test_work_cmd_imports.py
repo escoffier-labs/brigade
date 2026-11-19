@@ -651,6 +651,217 @@ def test_work_import_ingest_field_redaction_failure_quarantines_row(tmp_path, ca
     assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 2
 
 
+def test_work_import_ingest_retries_metadata_redaction_after_recovery(tmp_path, capsys, monkeypatch):
+    """#1886: identical re-ingest retries a failed metadata redaction in place."""
+    from brigade import evidence_redaction
+
+    real_apply = evidence_redaction.apply_and_record
+    failing = {"active": True}
+    email = "person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+
+    def flaky_apply(text, *, origin, scanner=None):
+        if failing["active"] and "force-scan-failure" in text:
+            return evidence_redaction.FAILED_PLACEHOLDER, evidence_redaction._error_verdict(origin).record(), True
+        return real_apply(text, origin=origin, scanner=scanner)
+
+    monkeypatch.setattr(evidence_redaction, "apply_and_record", flaky_apply)
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    line = json.dumps(
+        {
+            "text": "Review the rollout notes",
+            "kind": "task",
+            "metadata": {"owner": f"force-scan-failure {email}", "team": "platform"},
+        }
+    )
+    import_file.write_text("\n".join([line, line, line]) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    assert first["skipped"] == 2
+    quarantined = first["imports"][0]
+    assert quarantined["metadata"]["owner"] == evidence_redaction.FAILED_PLACEHOLDER
+    assert quarantined["metadata"]["field_redaction"]["status"] == "error"
+    assert quarantined["metadata"]["provenance"]["trust"]["label"] == "quarantined"
+    assert work_cmd.import_promote(target=tmp_path, import_id=quarantined["id"]) == 2
+    capsys.readouterr()
+
+    failing["active"] = False
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    retried = json.loads(capsys.readouterr().out)
+    assert retried["created"] == 0
+    assert retried["skipped"] == 2
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    stored = json.loads(capsys.readouterr().out)["imports"]
+    assert len(stored) == 1
+    recovered = stored[0]
+    assert recovered["id"] == quarantined["id"]
+    assert recovered["status"] == "pending"
+    assert recovered["text"] == quarantined["text"]
+    assert recovered["metadata"]["team"] == "platform"
+    assert email not in json.dumps(recovered)
+    assert evidence_redaction.FAILED_PLACEHOLDER not in json.dumps(recovered)
+    assert recovered["metadata"]["field_redaction"]["status"] == "redacted"
+    assert recovered["metadata"]["provenance"]["trust"]["label"] != "quarantined"
+    assert work_cmd.ledger._has_persisted_import_proof(recovered, target=tmp_path)
+    assert retried["retried"] == 1
+    for path in (tmp_path / ".brigade" / "work" / "imports").rglob("*"):
+        if path.is_file():
+            assert email.encode() not in path.read_bytes()
+            assert evidence_redaction.FAILED_PLACEHOLDER.encode() not in path.read_bytes()
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=recovered["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert task["text"] == "Review the rollout notes"
+    assert task["metadata"]["owner"] == "force-scan-failure <PRIVATE_EMAIL>"
+    assert email not in json.dumps(task)
+
+
+def test_work_import_ingest_keeps_metadata_redaction_quarantine_when_scan_still_fails(tmp_path, capsys, monkeypatch):
+    """#1886: a still-failing scan keeps one quarantined row and never promotes it."""
+    from brigade import evidence_redaction
+
+    real_apply = evidence_redaction.apply_and_record
+
+    def failing_apply(text, *, origin, scanner=None):
+        if "force-scan-failure" in text:
+            return evidence_redaction.FAILED_PLACEHOLDER, evidence_redaction._error_verdict(origin).record(), True
+        return real_apply(text, origin=origin, scanner=scanner)
+
+    monkeypatch.setattr(evidence_redaction, "apply_and_record", failing_apply)
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    line = json.dumps(
+        {
+            "text": "Review the rollout notes",
+            "kind": "task",
+            "metadata": {"owner": "force-scan-failure entry", "team": "platform"},
+        }
+    )
+    import_file.write_text("\n".join([line, line, line]) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    assert first["skipped"] == 2
+    quarantined = first["imports"][0]
+    assert quarantined["metadata"]["owner"] == evidence_redaction.FAILED_PLACEHOLDER
+    assert quarantined["metadata"]["field_redaction"]["status"] == "error"
+    assert quarantined["metadata"]["provenance"]["trust"]["label"] == "quarantined"
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["created"] == 0
+    assert repeated["skipped"] == 3
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    stored = json.loads(capsys.readouterr().out)["imports"]
+    assert len(stored) == 1
+    assert stored[0]["id"] == quarantined["id"]
+    assert stored[0]["metadata"]["owner"] == evidence_redaction.FAILED_PLACEHOLDER
+    assert stored[0]["metadata"]["field_redaction"]["status"] == "error"
+    assert stored[0]["metadata"]["provenance"]["trust"]["label"] == "quarantined"
+    assert work_cmd.import_promote(target=tmp_path, import_id=stored[0]["id"]) == 2
+
+
+def _quarantine_metadata_redaction_row(tmp_path, capsys, monkeypatch, *, failing: dict[str, bool]) -> dict:
+    from brigade import evidence_redaction
+
+    real_apply = evidence_redaction.apply_and_record
+
+    def flaky_apply(text, *, origin, scanner=None):
+        if failing["active"] and "force-scan-failure" in text:
+            return evidence_redaction.FAILED_PLACEHOLDER, evidence_redaction._error_verdict(origin).record(), True
+        return real_apply(text, origin=origin, scanner=scanner)
+
+    monkeypatch.setattr(evidence_redaction, "apply_and_record", flaky_apply)
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review the rollout notes",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure entry", "team": "platform"},
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert item["metadata"]["field_redaction"]["status"] == "error"
+    return item
+
+
+def test_work_import_ingest_redaction_retry_keeps_row_when_other_metadata_changed(tmp_path, capsys, monkeypatch):
+    """#1886: the retry only replaces fields the failed scan bypassed."""
+    failing = {"active": True}
+    quarantined = _quarantine_metadata_redaction_row(tmp_path, capsys, monkeypatch, failing=failing)
+    import_before = work_cmd.helpers._imports_path(tmp_path).read_bytes()
+    proof_before = work_cmd.ledger._has_persisted_import_proof(quarantined, target=tmp_path)
+
+    failing["active"] = False
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review the rollout notes",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure entry", "team": "different"},
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["created"] == 0
+    assert repeated["retried"] == 0
+    assert repeated["skipped"] == 1
+    assert work_cmd.helpers._imports_path(tmp_path).read_bytes() == import_before
+    assert proof_before
+    assert work_cmd.ledger._has_persisted_import_proof(quarantined, target=tmp_path)
+    assert quarantined["metadata"]["provenance"]["trust"]["label"] == "quarantined"
+
+
+def test_work_import_ingest_redaction_retry_restores_row_when_proof_rewrite_fails(tmp_path, capsys, monkeypatch):
+    """#1886: a proof-rewrite failure leaves the quarantined row and proof untouched."""
+    failing = {"active": True}
+    quarantined = _quarantine_metadata_redaction_row(tmp_path, capsys, monkeypatch, failing=failing)
+    import_before = work_cmd.helpers._imports_path(tmp_path).read_bytes()
+
+    def fail_record(*_args, **_kwargs):
+        raise OSError("proof binding failed")
+
+    from brigade.work_cmd.ledger import descriptor_anchors
+
+    monkeypatch.setattr(descriptor_anchors, "_record_verifier_owned_file", fail_record)
+    failing["active"] = False
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review the rollout notes",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure entry", "team": "platform"},
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(OSError):
+        work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True)
+    capsys.readouterr()
+
+    assert work_cmd.helpers._imports_path(tmp_path).read_bytes() == import_before
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    stored = json.loads(capsys.readouterr().out)["imports"]
+    assert len(stored) == 1
+    assert stored[0]["id"] == quarantined["id"]
+    assert stored[0]["metadata"]["field_redaction"]["status"] == "error"
+    assert stored[0]["metadata"]["provenance"]["trust"]["label"] == "quarantined"
+    assert work_cmd.ledger._has_persisted_import_proof(stored[0], target=tmp_path)
+
+
 def test_work_import_ingest_keeps_distinct_raw_identities_after_redaction(tmp_path, capsys):
     _init_git_repo(tmp_path)
     import_file = tmp_path / "imports.jsonl"

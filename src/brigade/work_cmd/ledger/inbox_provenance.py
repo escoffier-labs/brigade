@@ -1100,6 +1100,108 @@ def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return _parse_import_jsonl(text)
 
 
+# Only the ingest-owned verdict and the re-stamped envelope change when a
+# failed field redaction is retried; every other metadata value must match.
+_IMPORT_REDACTION_RETRY_IGNORED_METADATA_KEYS: frozenset[str] = frozenset({"provenance", "field_redaction"})
+
+
+def _redaction_recovery_matches(stored: object, recovered: object) -> bool:
+    """Compare stored and retried values, allowing only failed-scan placeholders to differ."""
+    if isinstance(stored, str) and stored == evidence_redaction.FAILED_PLACEHOLDER:
+        return True
+    if isinstance(stored, dict) and isinstance(recovered, dict):
+        if set(stored) != set(recovered):
+            return False
+        return all(_redaction_recovery_matches(value, recovered[key]) for key, value in stored.items())
+    if isinstance(stored, list) and isinstance(recovered, list):
+        if len(stored) != len(recovered):
+            return False
+        return all(_redaction_recovery_matches(left, right) for left, right in zip(stored, recovered, strict=True))
+    return stored == recovered
+
+
+def _redaction_retry_preserves_content(
+    existing_item: dict[str, Any],
+    recovered_item: dict[str, Any],
+) -> bool:
+    """Return whether a retried row body differs from the stored one only where bypassed."""
+    for key in ("kind", "type", "priority", "template"):
+        if existing_item.get(key) != recovered_item.get(key):
+            return False
+    for key in ("text", "acceptance"):
+        if not _redaction_recovery_matches(existing_item.get(key), recovered_item.get(key)):
+            return False
+    stored_metadata = {
+        key: value
+        for key, value in _metadata(existing_item).items()
+        if key not in _IMPORT_REDACTION_RETRY_IGNORED_METADATA_KEYS
+    }
+    recovered_metadata = {
+        key: value
+        for key, value in _metadata(recovered_item).items()
+        if key not in _IMPORT_REDACTION_RETRY_IGNORED_METADATA_KEYS
+    }
+    return _redaction_recovery_matches(stored_metadata, recovered_metadata)
+
+
+def _retry_quarantined_field_redaction(
+    existing_item: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    provenance_source: str | None,
+    trusted_existing_row: bool,
+) -> dict[str, Any] | None:
+    """Rebuild one quarantined row when an identical re-ingest scans cleanly (#1886).
+
+    The retry only re-runs the scan for rows the ingest writer itself stored
+    with a field-redaction error verdict, whose persisted proof still binds the
+    current bytes, and whose incoming record carries the same content identity.
+    Any still-failing scan, injection quarantine, or content difference returns
+    None so the caller keeps the original quarantined row untouched.
+    """
+    if not trusted_existing_row or existing_item.get("status") != "pending":
+        return None
+    stored_field = _metadata(existing_item).get("field_redaction")
+    if not isinstance(stored_field, Mapping) or stored_field.get("status") != "error":
+        return None
+    source = _resolve_import_provenance_source(record, provenance_source)
+    origin, _modality = _import_origin_modality(source, kind=str(record["kind"]))
+    if tasks_plans._import_field_redaction(source, origin) is None:
+        return None
+    try:
+        recovered = tasks_plans._make_import(
+            str(record["text"]),
+            kind=str(record["kind"]),
+            source=str(record["source"]),
+            metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+            task_type=record.get("type") if isinstance(record.get("type"), str) else None,
+            priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
+            acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
+            template=record.get("template") if isinstance(record.get("template"), str) else None,
+            provenance_source=source,
+        )
+    except _ImportProvenanceError:
+        return None
+    recovered_field = _metadata(recovered).get("field_redaction")
+    if not isinstance(recovered_field, Mapping) or recovered_field.get("status") == "error":
+        return None
+    if trust_gate.trust_label_of(recovered) == "quarantined":
+        return None
+    if not _redaction_retry_preserves_content(existing_item, recovered):
+        return None
+    return recovered
+
+
+def _apply_redaction_retry(existing_item: dict[str, Any], recovered_item: dict[str, Any]) -> None:
+    """Swap a quarantined row body for its recovered retry, keeping its identity."""
+    preserved: dict[str, Any] = {
+        key: existing_item[key] for key in ("id", "status", "created_at") if key in existing_item
+    }
+    existing_item.clear()
+    existing_item.update(recovered_item)
+    existing_item.update(preserved)
+
+
 def _append_import_records(
     target: Path,
     records: list[dict[str, Any]],
@@ -1111,6 +1213,7 @@ def _append_import_records(
     preserve_existing_raw: Callable[[bytes], None] | None = None,
     restore_existing_raw: Callable[[bytes, bool], None] | None = None,
     existing_imports: list[dict[str, Any]] | None = None,
+    retried_out: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Append records as one locked inbox read-modify-write transaction.
 
@@ -1130,6 +1233,7 @@ def _append_import_records(
             preserve_existing_raw=preserve_existing_raw,
             restore_existing_raw=restore_existing_raw,
             existing_imports=existing_imports,
+            retried_out=retried_out,
         )
 
 
@@ -1144,6 +1248,7 @@ def _append_import_records_locked(
     preserve_existing_raw: Callable[[bytes], None] | None = None,
     restore_existing_raw: Callable[[bytes, bool], None] | None = None,
     existing_imports: list[dict[str, Any]] | None = None,
+    retried_out: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = existing_imports if existing_imports is not None else import_model._read_imports(target)
     # One authenticated view of authority state for the whole append: the
@@ -1185,6 +1290,7 @@ def _append_import_records_locked(
     skipped: list[dict[str, Any]] = []
     skipped_dismissed: list[dict[str, Any]] = []
     rejected: list[str] = []
+    retried_rows: list[dict[str, Any]] = []
     for record in records:
         key = import_model._import_record_key(record)
         identity = _import_source_identity(record)
@@ -1263,7 +1369,24 @@ def _append_import_records_locked(
                     skipped_dismissed.append(record)
                     continue
             elif _import_fingerprint(existing_item) == _import_fingerprint(record):
-                skipped.append(record)
+                recovered_item = None
+                if preserve_existing_raw is None and id(existing_item) not in batch_item_ids:
+                    recovered_item = _retry_quarantined_field_redaction(
+                        existing_item,
+                        record,
+                        provenance_source=provenance_source,
+                        trusted_existing_row=trusted_existing_row,
+                    )
+                if recovered_item is None or dry_run:
+                    skipped.append(record)
+                    continue
+                # The row keeps its id, status, and creation time; only the
+                # previously bypassed field values and verdict change.
+                _apply_redaction_retry(existing_item, recovered_item)
+                retried_rows.append(existing_item)
+                # This transaction republishes the row's proof, so later
+                # records in the same batch may dedupe against it again.
+                batch_item_ids.add(id(existing_item))
                 continue
         elif (
             key[2]
@@ -1306,7 +1429,7 @@ def _append_import_records_locked(
         existing.add(key)
         if identity is not None:
             existing_by_source[identity] = item
-    if imported and not dry_run:
+    if (imported or retried_rows) and not dry_run:
         verify_canonical_write_locks(target)
         inbox_parent, inbox_name, previous_raw, previous_exists = _snapshot_import_inbox(target)
         published = False
@@ -1329,7 +1452,12 @@ def _append_import_records_locked(
                     _restore_import_inbox_snapshot(inbox_parent, inbox_name, previous_raw, previous_exists)
                     raise
             try:
-                descriptor_anchors._write_persisted_import_proofs(target, imported, operation_id=uuid4().hex)
+                if imported:
+                    descriptor_anchors._write_persisted_import_proofs(target, imported, operation_id=uuid4().hex)
+                if retried_rows:
+                    # The refreshed rows keep their ids, so their proofs are
+                    # replaced in place rather than created.
+                    descriptor_anchors._rewrite_persisted_import_proofs(target, retried_rows, operation_id=uuid4().hex)
             except BaseException:
                 try:
                     if published:
@@ -1346,4 +1474,6 @@ def _append_import_records_locked(
         finally:
             if inbox_parent != -1:
                 os.close(inbox_parent)
+    if retried_out is not None:
+        retried_out.extend(retried_rows)
     return imported, skipped, skipped_dismissed, rejected

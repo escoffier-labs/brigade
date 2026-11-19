@@ -497,6 +497,127 @@ def _persisted_import_proof_payload(item: dict[str, Any], *, operation_id: str) 
     }
 
 
+def _read_import_proof_bytes(parent: int, name: str) -> bytes | None:
+    """Read one existing proof through its verifier-owned descriptor, or None when absent."""
+    try:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        _validate_import_proof_descriptor(descriptor)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 64 * 1024):
+            chunks.append(chunk)
+        _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _replace_import_proof_bytes(parent: int, name: str, data: bytes) -> None:
+    """Rewrite one proof in place, proving the descriptor before truncating it."""
+    try:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            name,
+            os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+    try:
+        # A planted hardlink or FIFO is refused before the target loses a byte.
+        _validate_import_proof_descriptor(descriptor)
+        os.ftruncate(descriptor, 0)
+        with os.fdopen(os.dup(descriptor), "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _rewrite_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *, operation_id: str) -> None:
+    """Replace verifier-owned proofs for rows the ingest writer refreshed in place.
+
+    The row id, and therefore the proof name, is unchanged, so each proof is
+    truncated and rewritten instead of created. A failure restores every prior
+    proof body and its authority binding before the error propagates.
+    """
+    parent = _open_import_proof_directory(target, create=True)
+    prior: list[tuple[str, bytes | None]] = []
+    prior_files = _snapshot_external_file_authorities(target)
+    try:
+        for item in items:
+            payload = _persisted_import_proof_payload(item, operation_id=operation_id)
+            name = import_model._import_proof_name(item.get("id"))
+            if payload is None or name is None:
+                raise OSError("cannot persist import proof for malformed local item")
+            prior.append((name, _read_import_proof_bytes(parent, name)))
+            _replace_import_proof_bytes(
+                parent,
+                name,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            )
+        authority_store._dirfd_fsync(parent)
+        for item in items:
+            payload = _persisted_import_proof_payload(item, operation_id=operation_id)
+            name = import_model._import_proof_name(item.get("id"))
+            if payload is None or name is None:
+                raise OSError("cannot persist import proof for malformed local item")
+            data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            descriptor = authority_store._dirfd_open_file(
+                parent,
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                _validate_import_proof_name_matches_descriptor(parent, name, descriptor)
+                _record_verifier_owned_file(
+                    target,
+                    components=(".brigade", "work", "imports", "proofs", name),
+                    descriptor=descriptor,
+                    data=data,
+                )
+            finally:
+                os.close(descriptor)
+    except BaseException:
+        for name, previous in prior:
+            try:
+                if previous is None:
+                    authority_store._dirfd_unlink(parent, name)
+                else:
+                    _replace_import_proof_bytes(parent, name, previous)
+            except OSError:
+                pass
+        authority_store._dirfd_fsync(parent)
+        try:
+            # Rewriting preserves each inode, so the retained snapshot binds the
+            # restored bytes again instead of needing a fresh record.
+            _restore_external_file_authorities(
+                target,
+                prior_files,
+                owned=[
+                    authority_store._directory_authority_scope((".brigade", "work", "imports", "proofs", name))
+                    for name, _previous in prior
+                ],
+            )
+        except OSError as exc:
+            raise OSError("import proof rewrite rollback could not restore its retained snapshot") from exc
+        raise
+    finally:
+        os.close(parent)
+
+
 def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *, operation_id: str) -> None:
     """Record verifier-owned proof only after the corresponding inbox write succeeds."""
     parent = _open_import_proof_directory(target, create=True)
