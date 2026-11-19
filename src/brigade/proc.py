@@ -1585,6 +1585,127 @@ def run_to_file(
     )
 
 
+@dataclass(frozen=True)
+class StreamedResult:
+    """A child run whose stdout the caller consumed in bounded chunks."""
+
+    code: int
+    stderr: str
+    stdout_bytes: int = 0
+    stopped: bool = False
+    timed_out: bool = False
+
+
+def run_streaming(
+    args: List[str],
+    consumer: Callable[[bytes], bool],
+    *,
+    timeout: float = 30.0,
+    env: Optional[dict] = None,
+    cwd: Optional[Path] = None,
+) -> StreamedResult:
+    """Stream a child's stdout to ``consumer`` in bounded chunks.
+
+    The consumer sees at most ``_READ_CHUNK_BYTES`` per call and returns
+    ``False`` to stop reading; the child is then terminated and reaped, so it
+    cannot keep writing past the caller's decision. Nothing is buffered here:
+    the caller owns every byte it is handed. A consumer that raises stops the
+    child and the exception is re-raised.
+    """
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            cwd=cwd,
+            shell=False,
+            **_process_group_kwargs(),
+        )
+    except OSError as exc:
+        code, message = _launch_failure(args, exc)
+        return StreamedResult(code=code, stderr=message)
+
+    stopped = threading.Event()
+    seen: dict[str, Any] = {"bytes": 0, "error": None}
+    stderr_budget = ByteBudget()
+    stderr_buf = bytearray()
+
+    def read_stdout() -> None:
+        stdout = process.stdout
+        assert stdout is not None
+        try:
+            while True:
+                chunk = stdout.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                seen["bytes"] += len(chunk)
+                if not consumer(chunk):
+                    stopped.set()
+                    break
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread
+            seen["error"] = exc
+            stopped.set()
+
+    def drain_stderr() -> None:
+        stderr = process.stderr
+        assert stderr is not None
+        try:
+            while True:
+                chunk = stderr.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if stderr_budget.try_add(len(chunk)):
+                    stderr_buf.extend(chunk)
+        except OSError:
+            pass
+
+    readers = [threading.Thread(target=read_stdout, daemon=True), threading.Thread(target=drain_stderr, daemon=True)]
+    for reader in readers:
+        reader.start()
+    timed_out = False
+    deadline = time.monotonic() + max(timeout, 0.0)
+    try:
+        while not stopped.wait(timeout=0.02):
+            if process.poll() is not None and not _readers_alive(readers):
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+    finally:
+        if timed_out or stopped.is_set() or process.poll() is None:
+            _stop_child(process, None)
+        _join_readers(readers, _TIMED_OUT_DRAIN_SECONDS)
+        if _readers_alive(readers):
+            _stop_child(process, None)
+            _join_readers(readers, _TIMED_OUT_DRAIN_SECONDS)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    if seen["error"] is not None:
+        raise seen["error"]
+    err_text, _err_error = _decode_stream(bytes(stderr_buf), stream="stderr")
+    if timed_out:
+        err_text = (err_text + "\n" if err_text else "") + f"timeout after {timeout}s"
+    if stderr_budget.overflowed:
+        err_text = (
+            err_text + "\n" if err_text else ""
+        ) + f"stderr capture exceeded {stderr_budget.max_bytes} byte limit"
+    code = 124 if timed_out else (process.returncode if process.returncode is not None else -1)
+    return StreamedResult(
+        code=code,
+        stderr=err_text,
+        stdout_bytes=seen["bytes"],
+        stopped=stopped.is_set(),
+        timed_out=timed_out,
+    )
+
+
 def _launch_and_collect(
     args: List[str],
     stdout_target: Any,

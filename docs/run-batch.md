@@ -198,6 +198,9 @@ Known limits:
   checkout, which shares the same repository.
 - A batch with any remote route refuses all worktree tasks
   (`isolation-remote-unsupported`).
+- Repository-configured clean or process filters can still run during `git add`
+  when collection commits a worker's leftovers, consistent with workers being
+  cooperative rather than adversarial.
 
 ## Task artifacts
 
@@ -256,11 +259,23 @@ worker created, so `batch-artifact-*` files are excluded from every
 `brigade runs export` and archive surface. Copy a patch out yourself if you need
 one, and treat it as sensitive.
 
-A patch is capped at 32 MiB. Above that, no patch file is written and the
-sidecar records `patch-oversize` as its reason; the candidate commit on the task
-branch is still the retained copy. Nothing in this path removes a checkout, a
-branch or a commit. Applying a candidate to a base and disposing of the
-checkouts are later work.
+A patch is capped at 32 MiB. Git's diff is streamed through a bounded pipe and
+stopped as soon as the next chunk would pass the cap, so an oversize diff is
+never written to disk in full: the partial file is removed and the sidecar
+records `patch-oversize` as its reason. A diff that times out is recorded the
+same way with reason `patch-timeout`. Either way the candidate commit on the
+task branch is still the retained copy. Nothing in this path removes a
+checkout, a branch or a commit. Applying a candidate to a base and disposing of
+the checkouts are later work.
+
+Collecting the same attempt again — a crash after the patch was written but
+before the observation, or a repeated observe — reuses the sidecar already on
+disk when it still describes what is there: the same attempt, base and branch,
+a candidate equal to the branch's current `HEAD`, and a recorded patch whose
+size and digest match. A patch left behind without its sidecar is re-adopted
+only when streaming the same diff reproduces its exact size and digest. A
+sidecar that no longer matches is never overwritten: the delivery is
+`collection-failed` with reason `artifact-conflict`, and nothing is touched.
 
 The journal links the artifact: `task.observed` uses `artifact_kind="commit"`
 and the artifact sidecar's SHA-256 as `artifact_digest` when a candidate exists,

@@ -61,8 +61,25 @@ _GIT_ENV_DROP = (
     "GIT_OBJECT_DIRECTORY",
     "GIT_CEILING_DIRECTORIES",
 )
-# A task worktree is written by a worker. Probes must not run its hooks or fsmonitor.
-_GIT_SAFE_FLAGS = ("--no-optional-locks", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}")
+# A task worktree is written by a worker, so its repository config is untrusted:
+# no hooks, no fsmonitor, no signing, no pager, no external diff or global
+# attributes file. Repository `.gitattributes` and clean/process filters are not
+# covered here; they need a different mechanism and are a documented limit.
+_GIT_SAFE_FLAGS = (
+    "--no-optional-locks",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    f"core.hooksPath={os.devnull}",
+    "-c",
+    "commit.gpgSign=false",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "diff.external=",
+    "-c",
+    f"core.attributesFile={os.devnull}",
+)
 # Collection commits a worker's leftovers. The identity is Brigade's own and is
 # pinned through the environment, so a caller's Git config is never consulted.
 GIT_IDENTITY_NAME = "Brigade"
@@ -100,6 +117,23 @@ def git(
     if stdout_file is not None:
         return proc.run_to_file(argv, stdout_file, cwd=cwd, timeout=timeout, env=_git_env())
     return proc.run(argv, cwd=cwd, timeout=timeout, env=_git_env())
+
+
+def git_stream(
+    args: list[str],
+    *,
+    cwd: Path,
+    on_chunk: Any,
+    timeout: float = _GIT_TIMEOUT,
+) -> proc.StreamedResult:
+    """Stream one Git command's stdout through ``on_chunk`` under the same hardening.
+
+    A caller that must bound an unbounded result (a patch) reads it here instead
+    of letting Git write the whole thing to a file first. ``on_chunk`` receives
+    bounded chunks and returns ``False`` to stop the command.
+    """
+    argv = ["git", *_GIT_SAFE_FLAGS, *args]
+    return proc.run_streaming(argv, on_chunk, cwd=cwd, timeout=timeout, env=_git_env())
 
 
 class WorkspaceError(RuntimeError):

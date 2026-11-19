@@ -114,7 +114,7 @@ ones included.
 | `attempt_id` | string \| null | The task attempt this result belongs to |
 | `execution` | string | `completed` or `failed`, from the worker result |
 | `delivery` | string | `retained`, `no-changes`, `base-diverged`, or `collection-failed` |
-| `reason` | string \| null | A closed reason token; `patch-oversize` marks a retained commit whose patch exceeded the cap |
+| `reason` | string \| null | A closed reason token; `patch-oversize` or `patch-timeout` marks a retained commit whose patch was not written, and `artifact-conflict` marks a refusal to replace an existing artifact |
 | `base_sha` | string | The pinned 40-hex base revision the checkout was created at |
 | `branch` | string | The bound `brigade/batch/...` branch |
 | `candidate_commit` | string \| null | The 40-hex candidate commit; null when there is no candidate |

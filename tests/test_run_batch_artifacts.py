@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import agents, cli, run_batch_artifacts, run_journal, run_lifecycle, run_tasks
+from brigade import agents, cli, proc, run_batch_artifacts, run_journal, run_lifecycle, run_tasks
 from brigade import run_batch_workspace as workspace
 from tests.test_run_batch_worktrees import Site, _files, _git, invoke
 from tests.test_run_batch_worktrees import site as worktree_site  # noqa: F401  (fixture for getfixturevalue)
@@ -162,8 +162,14 @@ def test_untouched_checkout_is_no_changes(site, capsys, monkeypatch):
     assert record["candidate_commit"] is None
     assert record["patch_ref"] is None and record["patch_sha256"] is None and record["patch_bytes"] is None
     assert not list(run_dir.glob("batch-artifact-*.patch"))
-    # No candidate means the journal keeps the receipt artifact kind.
-    assert observation(site).payload["artifact_kind"] == "receipt"
+    # No candidate means the journal keeps the receipt artifact kind and the
+    # receipt's own digest, never the artifact sidecar's.
+    event = observation(site)
+    assert event.payload["artifact_kind"] == "receipt"
+    receipt = run_dir / f"batch-result-{hashlib.sha256(b'a').hexdigest()}.json"
+    assert event.payload["artifact_digest"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+    artifact_digest = hashlib.sha256((run_dir / ARTIFACT.sidecar_name("a")).read_bytes()).hexdigest()
+    assert event.payload["artifact_digest"] != artifact_digest
     assert result["tasks"]["a"]["artifact"] == {
         "delivery": "no-changes",
         "candidate_commit": None,
@@ -222,6 +228,49 @@ def test_oversize_patch_keeps_only_the_commit(site, capsys, monkeypatch):
     assert not list(site.run_dir().glob("batch-artifact-*.patch"))
     assert observation(site).payload["artifact_kind"] == "commit"
     assert result["tasks"]["a"]["artifact"]["candidate_commit"] == record["candidate_commit"]
+
+
+def test_oversize_patch_stops_the_diff_before_it_is_written(site, capsys, monkeypatch):
+    cap = 64 * 1024
+    monkeypatch.setattr(ARTIFACT, "PATCH_MAX_BYTES", cap)
+
+    def model(agent, prompt, **kwargs):
+        # A change several times the cap, so reading to EOF would show up.
+        (Path(kwargs["cwd"]) / "big.txt").write_text("x" * (cap * 8) + "\n")
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    reads: list[int] = []
+    written: list[int] = []
+    real_stream = workspace.git_stream
+    real_unlink = ARTIFACT._unlink_partial
+
+    def watched_stream(*args, **kwargs):
+        result = real_stream(*args, **kwargs)
+        if any(part == "diff" for part in args[0]):
+            reads.append(result.stdout_bytes)
+            assert result.stopped
+        return result
+
+    def watched_unlink(path):
+        written.append(path.stat().st_size)
+        real_unlink(path)
+
+    monkeypatch.setattr(workspace, "git_stream", watched_stream)
+    monkeypatch.setattr(ARTIFACT, "_unlink_partial", watched_unlink)
+    rc, _, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    record = sidecar(site)
+    assert record["delivery"] == "retained"
+    assert record["reason"] == "patch-oversize"
+    assert record["candidate_commit"] == branch_tip(site)
+    # Git was stopped once the next chunk would pass the cap: it delivered at
+    # most one chunk past it, not the whole diff, and nothing was written past
+    # the cap at all. The partial file this call created is gone.
+    assert len(reads) == 1 and reads[0] <= cap + proc._READ_CHUNK_BYTES
+    assert reads[0] < cap * 8
+    assert written and written[0] <= cap + proc._READ_CHUNK_BYTES
+    assert not list(site.run_dir().glob("batch-artifact-*.patch"))
 
 
 def test_ignored_files_are_counted_and_never_committed(site, capsys, monkeypatch):
@@ -327,3 +376,170 @@ def test_runs_tasks_show_reports_the_artifact_sidecar(site, capsys, monkeypatch)
     output = capsys.readouterr().out
     assert f"artifact_ref: {name}" in output
     assert f"artifact_sha256: {digest}" in output
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the signing shim needs a POSIX shell")
+def test_configured_gpg_signing_never_runs_during_collection(site, capsys, monkeypatch):
+    marker = site.home / "gpg-ran"
+    script = site.home / "fake-gpg.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    script.chmod(0o755)
+    _git(site.repo, "config", "commit.gpgSign", "true")
+    _git(site.repo, "config", "gpg.program", str(script))
+
+    edit_worker(site, monkeypatch)
+    rc, _, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    assert sidecar(site)["delivery"] == "retained"
+    assert branch_tip(site) != site.base_sha
+    assert not marker.exists()
+
+
+def test_untracked_files_are_collected_despite_status_config(site, capsys, monkeypatch):
+    _git(site.repo, "config", "status.showUntrackedFiles", "no")
+
+    def model(agent, prompt, **kwargs):
+        (Path(kwargs["cwd"]) / "new.txt").write_text("untracked content\n")
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, _, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    record = sidecar(site)
+    assert record["delivery"] == "retained"
+    assert record["changed_paths"] == 1
+    assert "new.txt" in _git(site.path_for("a"), "ls-tree", "-r", "--name-only", "HEAD")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the textconv shim needs a POSIX shell")
+def test_configured_textconv_never_runs_during_collection(site, capsys, monkeypatch):
+    marker = site.home / "textconv-ran"
+    script = site.home / "textconv.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{marker}'\ncat \"$1\"\n")
+    script.chmod(0o755)
+    _git(site.repo, "config", "diff.big.textconv", str(script))
+
+    def model(agent, prompt, **kwargs):
+        cwd = Path(kwargs["cwd"])
+        (cwd / ".gitattributes").write_text("*.big diff=big\n")
+        (cwd / "data.big").write_text("payload\n")
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, _, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    assert sidecar(site)["delivery"] == "retained"
+    assert not marker.exists()
+    # The driver is live in this checkout: an unhardened diff runs it.
+    _git(site.path_for("a"), "diff", site.base_sha, "HEAD")
+    assert marker.exists()
+
+
+def binding_for(site, task_id: str = "a") -> workspace.Binding:
+    path = site.path_for(task_id)
+    info = path.lstat()
+    run_id = site.run_dir().name
+    return workspace.Binding(
+        task_id=task_id,
+        run_id=run_id,
+        base_sha=site.base_sha,
+        branch=workspace.branch_name(run_id, task_id),
+        path=path,
+        dev=info.st_dev,
+        ino=info.st_ino,
+    )
+
+
+def attempt_of(site, task_id: str = "a") -> str | None:
+    return next(
+        task.handle.attempt_id for task in run_tasks.read_tasks(site.run_dir()) if task.handle.spec.task_id == task_id
+    )
+
+
+def test_second_collection_reuses_the_artifact_for_the_same_attempt(site, capsys, monkeypatch):
+    edit_worker(site, monkeypatch)
+    rc, _, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    run_dir = site.run_dir()
+    name = ARTIFACT.sidecar_name("a")
+    before = (run_dir / name).read_bytes()
+    patch = run_dir / ARTIFACT.patch_name("a")
+    patch_before = patch.read_bytes()
+
+    record = ARTIFACT.collect(binding_for(site), site.repo, run_dir, execution="completed", attempt_id=attempt_of(site))
+    assert record["delivery"] == "retained"
+    assert record["candidate_commit"] == branch_tip(site)
+    assert json.loads(before) == record
+    assert (run_dir / name).read_bytes() == before
+    assert patch.read_bytes() == patch_before
+
+    # A crash before the sidecar was recorded leaves only the patch: the same
+    # diff is re-adopted instead of refusing with patch-exists.
+    (run_dir / name).unlink()
+    replayed = ARTIFACT.collect(
+        binding_for(site), site.repo, run_dir, execution="completed", attempt_id=attempt_of(site)
+    )
+    assert replayed["delivery"] == "retained"
+    assert replayed["patch_sha256"] == json.loads(before)["patch_sha256"]
+    assert patch.read_bytes() == patch_before
+
+
+def test_mismatched_artifact_refuses_and_touches_nothing(site, capsys, monkeypatch):
+    edit_worker(site, monkeypatch)
+    rc, _, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    run_dir = site.run_dir()
+    name = ARTIFACT.sidecar_name("a")
+    path = run_dir / name
+    document = json.loads(path.read_text())
+    document["attempt_id"] = "attempt-from-somewhere-else"
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+    before = path.read_bytes()
+    patch = run_dir / ARTIFACT.patch_name("a")
+    patch_before = patch.read_bytes()
+    checkout = site.path_for("a")
+    head_before = _git(checkout, "rev-parse", "HEAD")
+    status_before = _git(checkout, "status", "--porcelain")
+
+    record = ARTIFACT.collect(binding_for(site), site.repo, run_dir, execution="completed", attempt_id=attempt_of(site))
+    assert record["delivery"] == "collection-failed"
+    assert record["reason"] == "artifact-conflict"
+    assert record["candidate_commit"] is None
+    assert path.read_bytes() == before
+    assert patch.read_bytes() == patch_before
+    assert _git(checkout, "rev-parse", "HEAD") == head_before
+    assert _git(checkout, "status", "--porcelain") == status_before
+
+
+def test_switched_branch_fails_collection_and_leaves_the_checkout_alone(site, capsys, monkeypatch):
+    def model(agent, prompt, **kwargs):
+        cwd = Path(kwargs["cwd"])
+        (cwd / "README.md").write_text("worker edit\n")
+        (cwd / "left-over.txt").write_text("keep me\n")
+        _git(cwd, "checkout", "-q", "-b", "worker-side")
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, result, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    run_dir = site.run_dir()
+    checkout = site.path_for("a")
+    record = sidecar(site)
+    assert record["delivery"] == "collection-failed"
+    assert record["reason"] == "branch"
+    assert record["candidate_commit"] is None
+    assert not list(run_dir.glob("batch-artifact-*.patch"))
+    # Exactly as the worker left it: its branch, its base, its files, its status.
+    assert _git(checkout, "symbolic-ref", "--short", "HEAD") == "worker-side"
+    assert _git(checkout, "rev-parse", "HEAD") == site.base_sha
+    assert (checkout / "README.md").read_text() == "worker edit\n"
+    assert (checkout / "left-over.txt").read_text() == "keep me\n"
+    # The status keeps both the worker's edit and its untracked file (the
+    # leading porcelain column space is stripped by the helper).
+    assert _git(checkout, "status", "--porcelain") == "M README.md\n?? left-over.txt"
+    # No candidate: the observation keeps the receipt kind and digest.
+    event = observation(site)
+    receipt = run_dir / f"batch-result-{hashlib.sha256(b'a').hexdigest()}.json"
+    assert event.payload["artifact_kind"] == "receipt"
+    assert event.payload["artifact_digest"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+    assert result["tasks"]["a"]["artifact"]["delivery"] == "collection-failed"

@@ -19,6 +19,7 @@ import json
 import os
 import re
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -43,9 +44,14 @@ EXECUTION_STATES = frozenset({EXECUTION_COMPLETED, EXECUTION_FAILED})
 PATCH_MAX_BYTES = 32 * 1024 * 1024
 COMMIT_MESSAGE_PREFIX = "brigade batch task "
 _REASON_PATCH_OVERSIZE = "patch-oversize"
+_REASON_PATCH_TIMEOUT = "patch-timeout"
+_REASON_ARTIFACT_CONFLICT = "artifact-conflict"
 _SIDECAR_CHUNK_BYTES = 1024 * 1024
 _SIDECAR_MAX_BYTES = 1024 * 1024
 _COLLECT_TIMEOUT = 120.0
+# The patch is the base-to-candidate binary diff; nothing on this command line
+# may consult a driver, a pager, or an external diff program.
+_DIFF_ARGS = ("diff", "--binary", "--no-color", "--no-textconv", "--no-ext-diff")
 _SHA_RE = re.compile(r"[0-9a-f]{40}", re.ASCII)
 _SUMMARY_FIELDS = ("delivery", "candidate_commit", "patch_ref", "patch_sha256")
 
@@ -112,48 +118,159 @@ def _split_status(text: str) -> tuple[int, int]:
     return changed, ignored
 
 
-def _write_patch(checkout: Path, binding: run_batch_workspace.Binding, candidate: str, run_dir: Path) -> dict[str, Any]:
-    """Write the bounded patch, created exclusively with mode ``0600``.
+def _unlink_partial(path: Path) -> None:
+    """Remove only the partial patch this call created exclusively."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
-    An oversize diff removes its own partial file and leaves the candidate
-    commit as the retained copy. A pre-existing entry is never replaced.
+
+def _patch_writer(fd: int | None, digest: Any, state: dict[str, Any]) -> Callable[[bytes], bool]:
+    """A bounded ``git diff`` consumer: write when given a handle, digest, and stop past the cap."""
+
+    def consume(chunk: bytes) -> bool:
+        if state["bytes"] + len(chunk) > PATCH_MAX_BYTES:
+            state["oversize"] = True
+            return False
+        if fd is not None:
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(fd, view) :]
+        digest.update(chunk)
+        state["bytes"] += len(chunk)
+        return True
+
+    return consume
+
+
+def _measure_diff(checkout: Path, binding: run_batch_workspace.Binding, candidate: str) -> tuple[str, int] | None:
+    """This diff's digest and size without writing it, or ``None`` when unbounded."""
+    digest = hashlib.sha256()
+    state: dict[str, Any] = {"bytes": 0, "oversize": False}
+    result = run_batch_workspace.git_stream(
+        [*_DIFF_ARGS, binding.base_sha, candidate],
+        cwd=checkout,
+        on_chunk=_patch_writer(None, digest, state),
+        timeout=_COLLECT_TIMEOUT,
+    )
+    if result.timed_out or result.stopped or result.code != 0:
+        return None
+    return digest.hexdigest(), state["bytes"]
+
+
+def _write_patch(checkout: Path, binding: run_batch_workspace.Binding, candidate: str, run_dir: Path) -> dict[str, Any]:
+    """Stream the bounded patch into an exclusively created mode ``0600`` file.
+
+    Git's stdout is read in bounded chunks: as soon as the next chunk would pass
+    ``PATCH_MAX_BYTES`` the command is stopped and reaped, so an oversize diff is
+    never written to disk in full. An oversize or timed-out diff removes its own
+    partial file and leaves the candidate commit as the retained copy. A
+    pre-existing entry is never replaced.
     """
     name = patch_name(binding.task_id)
     path = run_dir / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    # O_NOFOLLOW is absent on Windows; where it exists it refuses a symlinked name.
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-    except OSError as exc:
-        raise run_batch_workspace.WorkspaceError(run_batch_workspace.WORKSPACE_UNAVAILABLE, "patch-exists") from exc
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            fd = -1
-            try:
-                result = run_batch_workspace.git(
-                    ["diff", "--binary", "--no-color", "--no-ext-diff", binding.base_sha, candidate],
-                    cwd=checkout,
-                    timeout=_COLLECT_TIMEOUT,
-                    stdout_file=handle,
-                )
-            except OSError as exc:
-                raise run_batch_workspace.WorkspaceError(run_batch_workspace.WORKSPACE_UNAVAILABLE, "git-diff") from exc
-            if result.code != 0:
-                raise run_batch_workspace.WorkspaceError(run_batch_workspace.WORKSPACE_UNAVAILABLE, "git-diff")
-            handle.flush()
-            os.fsync(handle.fileno())
-        size = path.stat().st_size
-        if size > PATCH_MAX_BYTES:
-            path.unlink()
-            return {"patch_ref": None, "patch_sha256": None, "patch_bytes": None, "reason": _REASON_PATCH_OVERSIZE}
-        digest = localio.file_sha256(path)
-    except BaseException:
-        if fd >= 0:
-            os.close(fd)
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        # A crash between writing the patch and recording its sidecar leaves the
+        # patch behind. The same diff is re-adopted; anything else conflicts and
+        # is left exactly as it is.
+        measured = _measure_diff(checkout, binding, candidate)
         try:
-            path.unlink()
+            matches = (
+                measured is not None and path.stat().st_size == measured[1] and localio.file_sha256(path) == measured[0]
+            )
+        except OSError:
+            matches = False
+        if not matches or measured is None:
+            raise run_batch_workspace.WorkspaceError(
+                run_batch_workspace.WORKSPACE_UNAVAILABLE, _REASON_ARTIFACT_CONFLICT
+            ) from None
+        return {"patch_ref": name, "patch_sha256": measured[0], "patch_bytes": measured[1], "reason": None}
+    except OSError as exc:
+        raise run_batch_workspace.WorkspaceError(run_batch_workspace.WORKSPACE_UNAVAILABLE, "patch-open") from exc
+    digest = hashlib.sha256()
+    state: dict[str, Any] = {"bytes": 0, "oversize": False}
+    reason: str | None = None
+    failed = False
+    try:
+        try:
+            result = run_batch_workspace.git_stream(
+                [*_DIFF_ARGS, binding.base_sha, candidate],
+                cwd=checkout,
+                on_chunk=_patch_writer(fd, digest, state),
+                timeout=_COLLECT_TIMEOUT,
+            )
+        except OSError as exc:
+            raise run_batch_workspace.WorkspaceError(run_batch_workspace.WORKSPACE_UNAVAILABLE, "git-diff") from exc
+        if result.timed_out:
+            reason = _REASON_PATCH_TIMEOUT
+        elif state["oversize"]:
+            reason = _REASON_PATCH_OVERSIZE
+        elif result.code != 0:
+            raise run_batch_workspace.WorkspaceError(run_batch_workspace.WORKSPACE_UNAVAILABLE, "git-diff")
+        else:
+            os.fsync(fd)
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        # The handle is closed before any unlink, because Windows refuses to
+        # remove a file that is still open.
+        try:
+            os.close(fd)
         except OSError:
             pass
-        raise
-    return {"patch_ref": name, "patch_sha256": digest, "patch_bytes": size, "reason": None}
+        if failed or reason is not None:
+            _unlink_partial(path)
+    if reason is not None:
+        return {"patch_ref": None, "patch_sha256": None, "patch_bytes": None, "reason": reason}
+    size = state["bytes"]
+    # The digest comes from the bytes that were streamed, never from reopening
+    # a path another process could have swapped.
+    return {"patch_ref": name, "patch_sha256": digest.hexdigest(), "patch_bytes": size, "reason": None}
+
+
+def _replayed(
+    existing: dict[str, Any],
+    binding: run_batch_workspace.Binding,
+    attempt_id: str | None,
+    run_dir: Path,
+) -> bool:
+    """Whether an artifact already written for this exact attempt still holds.
+
+    A second collection for the same attempt must not refuse or overwrite. The
+    sidecar is reused only while it still describes the disk: same attempt, base
+    and branch, a candidate equal to the branch's current ``HEAD``, and a
+    recorded patch whose size and digest match.
+    """
+    if existing.get("attempt_id") != attempt_id or existing.get("base_sha") != binding.base_sha:
+        return False
+    if existing.get("branch") != binding.branch:
+        return False
+    try:
+        head = _git_line(binding.path, "rev-parse", "HEAD", reason="git-head")
+    except run_batch_workspace.WorkspaceError:
+        return False
+    candidate = existing.get("candidate_commit")
+    if head != (candidate if candidate is not None else binding.base_sha):
+        return False
+    recorded = existing.get("patch_ref")
+    if recorded is None:
+        return existing.get("patch_sha256") is None and existing.get("patch_bytes") is None
+    if recorded != patch_name(binding.task_id):
+        return False
+    path = run_dir / recorded
+    try:
+        return path.stat().st_size == existing.get("patch_bytes") and localio.file_sha256(path) == existing.get(
+            "patch_sha256"
+        )
+    except OSError:
+        return False
 
 
 def _collect(
@@ -167,7 +284,14 @@ def _collect(
     # Everything else still has to be this task's own, bound checkout.
     run_batch_workspace.validate(binding, repo_root, pristine=False, allow_head_moved=True)
     checkout = binding.path
-    status = _git_line(checkout, "status", "--porcelain", "--ignored", reason="status-unreadable")
+    status = _git_line(
+        checkout,
+        "status",
+        "--porcelain",
+        "--ignored",
+        "--untracked-files=normal",
+        reason="status-unreadable",
+    )
     changed, ignored = _split_status(status)
     record["ignored_left"] = ignored
     if changed:
@@ -178,6 +302,7 @@ def _collect(
             checkout,
             "commit",
             "--no-verify",
+            "--no-gpg-sign",
             "-m",
             f"{COMMIT_MESSAGE_PREFIX}{binding.task_id}",
             reason="git-commit",
@@ -213,7 +338,7 @@ def _collect(
 def _changed_paths(checkout: Path, base_sha: str, candidate: str) -> int:
     try:
         result = run_batch_workspace.git(
-            ["diff", "--name-only", "--no-color", "--no-ext-diff", base_sha, candidate],
+            ["diff", "--name-only", "--no-color", "--no-textconv", "--no-ext-diff", base_sha, candidate],
             cwd=checkout,
             timeout=_COLLECT_TIMEOUT,
         )
@@ -239,6 +364,14 @@ def collect(
     candidate already determined before the failure stays recorded.
     """
     record = _record(binding, attempt_id, execution)
+    existing = read(run_dir, binding.task_id)
+    if existing is not None:
+        if _replayed(existing, binding, attempt_id, run_dir):
+            # A second collection for the same attempt reuses what was already
+            # written instead of refusing or overwriting it.
+            return existing
+        record["reason"] = _REASON_ARTIFACT_CONFLICT
+        return record
     try:
         _collect(binding, repo_root, run_dir, record)
     except run_batch_workspace.WorkspaceError as exc:
@@ -251,9 +384,19 @@ def collect(
 
 
 def write_sidecar(run_dir: Path, record: dict[str, Any]) -> tuple[str, str]:
-    """Persist the sanitized sidecar and return its file name and SHA-256."""
+    """Persist the sanitized sidecar and return its file name and SHA-256.
+
+    An existing sidecar is reused only when it already holds exactly this
+    record, which a same-attempt replay produces. Anything else raises
+    ``OSError`` and leaves the existing artifact untouched.
+    """
     path = run_dir / sidecar_name(str(record["task_id"]))
-    localio.write_json(path, record)
+    expected = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        localio.write_json_exclusive(path, record)
+    except FileExistsError:
+        if _bounded_bytes(path) != expected:
+            raise OSError(f"artifact sidecar already exists: {path.name}") from None
     return path.name, localio.file_sha256(path)
 
 

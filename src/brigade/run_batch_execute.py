@@ -326,16 +326,16 @@ class BatchExecution:
                 attempt_id=handle.attempt_id,
             )
             try:
-                _, artifact_digest = run_batch_artifacts.write_sidecar(self.run_dir, artifact)
+                _, sidecar_digest = run_batch_artifacts.write_sidecar(self.run_dir, artifact)
             except OSError:
                 # The terminal observation still stands on the receipt alone.
                 artifact_digest = digest
             else:
                 run_journal._fsync_directory(self.run_dir)
                 if artifact.get("candidate_commit") is not None:
-                    # A candidate exists: the artifact is the commit, and its
-                    # digest names the sidecar that records it.
-                    artifact_kind = "commit"
+                    # A candidate exists: the artifact is the commit, and only
+                    # then does the observation name the artifact sidecar.
+                    artifact_kind, artifact_digest = "commit", sidecar_digest
         run_tasks.observe_task(
             self.run_dir,
             workspace=self.workspace,
