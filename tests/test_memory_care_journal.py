@@ -506,3 +506,80 @@ def test_named_recovery_abandon_clears_the_hold_marker(tmp_path, monkeypatch):
     assert result[0]["phase"] == "abandoned"
     assert journal._payload(tmp_path, decision_id)["phase"] == "abandoned"
     assert not journal._automatic_hold(tmp_path, decision_id).exists()
+
+
+def _interrupted_undo(target, monkeypatch):
+    """Leave a real undo decision whose kernel operation crashed before any write."""
+    path = target / "card.md"
+    path.write_bytes(b"old a")
+    original = journal.commit(
+        target, kind="fix", reason="test", card_id=None, changes=[journal.Change("card.md", b"old a", b"new a")]
+    )
+    execute = journal.kernel.execute
+
+    def crash(plan, *, target, **kwargs):
+        execute(plan, target=target, inject=journal.kernel.FailureInjector(crash_after=0))
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal.kernel, "execute", crash)
+        with pytest.raises(KeyboardInterrupt):
+            journal.revert(target, original.decision_id, reason="undo")
+    unfinished = [operation.operation_id for operation in journal.kernel.unfinished_operations(target)]
+    assert len(unfinished) == 1
+    return path, unfinished[0]
+
+
+def test_named_recovery_addresses_an_interrupted_undo_by_operation_id(tmp_path, monkeypatch):
+    path, undo_id = _interrupted_undo(tmp_path, monkeypatch)
+    # commit() plans under the decision id itself, without the care- prefix.
+    assert journal.load(tmp_path, undo_id).kind == "undo"
+    result = journal.resolve_prepared(tmp_path, decision_id=undo_id)
+    assert result == [
+        {
+            "decision_id": undo_id,
+            "phase": "abandoned",
+            "reason": "interrupted operation recovered; decision not applied",
+        }
+    ]
+    assert journal.kernel.unfinished_operations(tmp_path) == []
+    assert path.read_bytes() == b"new a"
+    assert journal._payload(tmp_path, undo_id)["phase"] == "abandoned"
+    assert journal.resolve_prepared(tmp_path, decision_id=undo_id) == []
+
+
+def test_memory_care_recover_clears_an_interrupted_undo_by_its_id(tmp_path, monkeypatch, capsys):
+    import json
+    from types import SimpleNamespace
+
+    from brigade import memory_care_tend as tend
+
+    path, undo_id = _interrupted_undo(tmp_path, monkeypatch)
+    args = SimpleNamespace(memory_care_command="recover", target=tmp_path, decision_id=undo_id, json=True)
+    assert tend.dispatch(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["recovery"][0]["decision_id"] == undo_id
+    assert payload["recovery"][0]["phase"] == "abandoned"
+    assert journal.kernel.unfinished_operations(tmp_path) == []
+    assert path.read_bytes() == b"new a"
+
+
+def test_refused_prepare_cleanup_keeps_a_directory_holding_state(tmp_path):
+    decision_id = "20261112T000000Z-archive-12345678"
+    directory = journal._directory(tmp_path, decision_id)
+    journal.store.private_dir(directory / "before")
+    assert journal._discard_refused_prepare(tmp_path, decision_id) is None
+    assert not directory.exists()
+
+    directory = journal._directory(tmp_path, decision_id)
+    journal.store.private_dir(directory / "before")
+    (directory / "automatic-hold").write_text("operator recovery required\n", encoding="utf-8")
+    journal._discard_refused_prepare(tmp_path, decision_id)
+    assert directory.exists()
+    assert (directory / "automatic-hold").exists()
+
+    recorded = journal._directory(tmp_path, "20261112T000001Z-archive-12345678")
+    journal.store.private_dir(recorded / "before")
+    (recorded / "decision.json").write_text("{}\n", encoding="utf-8")
+    journal._discard_refused_prepare(tmp_path, "20261112T000001Z-archive-12345678")
+    assert recorded.exists()

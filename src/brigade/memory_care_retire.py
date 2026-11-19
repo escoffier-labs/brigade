@@ -128,6 +128,7 @@ def plan(target: Path, config: memory_cmd.MemoryCareConfig, tend: TendConfig, *,
         "candidate_count": len(candidates),
         "candidates": candidates,
         "skipped": skipped,
+        "projection_blocked": [],
     }
 
 
@@ -143,6 +144,9 @@ def apply(
     payload = plan(target, config, tend, today=today)
     decisions: list[str] = []
     refused = []
+    # A card the kernel refused to overlap is one report, in one place. Its
+    # blocking operation is not also a refusal, and skipped stays counters only.
+    projection_blocked: dict[str, str] = {}
     from . import memory_lifecycle as lifecycle
     from .inbox_lock import held_file_lock
 
@@ -189,16 +193,19 @@ def apply(
                     )
                     decisions.append(d.decision_id)
             except journal.kernel.ProjectionError as exc:
-                payload["skipped"].setdefault("projection_blocked", []).append(
-                    {"path": candidate["file"], "reason": str(exc)}
-                )
+                projection_blocked.setdefault(candidate["file"], str(exc))
             except (memory_archive.ArchiveRefused, OSError, journal.JournalConflict) as exc:
                 if isinstance(exc.__cause__, journal.kernel.ProjectionError):
-                    payload["skipped"].setdefault("projection_blocked", []).append(
-                        {"path": candidate["file"], "reason": str(exc)}
-                    )
-                refused.append(str(exc))
-    return {**payload, "archived": len(decisions), "decision_ids": decisions, "refused": refused}
+                    projection_blocked.setdefault(candidate["file"], str(exc))
+                else:
+                    refused.append(str(exc))
+    return {
+        **payload,
+        "archived": len(decisions),
+        "decision_ids": decisions,
+        "projection_blocked": [{"path": path, "reason": reason} for path, reason in projection_blocked.items()],
+        "refused": refused,
+    }
 
 
 def status_view(target: Path, config: memory_cmd.MemoryCareConfig) -> dict[str, Any]:
@@ -217,4 +224,6 @@ def status_view(target: Path, config: memory_cmd.MemoryCareConfig) -> dict[str, 
         "would_archive": memory_care_tend.load_config(target).enabled,
         "candidate_count": retirement.get("candidate_count", 0),
         "candidates": retirement.get("candidates", []),
+        "skipped": retirement.get("skipped", {}),
+        "projection_blocked": retirement.get("projection_blocked", []),
     }

@@ -320,7 +320,7 @@ Contradiction detection is deliberately conservative. Brigade only flags explici
 
 `status` and JSON output summarize freshness metadata coverage: reviewed dates present, missing, and stale, freshness dates present, missing, and expired, confidence distribution, and evidence metadata present or missing. These checks only explain review needs. `status` and `scan` do not edit memory cards. Automatic edits come only from tending, described below.
 
-`status` reports `archive_candidates` schema 2 from the latest tend result, without walking the card tree. It reports use-and-subject retirement candidates, `approval_required=false` and whether tending is enabled. Status itself never writes or archives cards.
+`status` reports `archive_candidates` schema 2 from the latest tend result, without walking the card tree. It reports use-and-subject retirement candidates, `approval_required=false` and whether tending is enabled. The latest retirement stage also reports `projection_blocked` at the top level, one entry per card it could not move because an unfinished projection already owns that destination; the same card is not repeated in `refused`, and `skipped` holds integer counters only. `status` prints those blocked cards as `archive_projection_blocked`. Status itself never writes or archives cards.
 
 ## Card identity
 
@@ -834,6 +834,11 @@ running care again. Brigade never overwrites the existing archive copy.
 Prepared removals, moves and effects outside the automatic recovery allowlist
 require `brigade memory care recover DECISION_ID --target .`. Automatic recovery only
 replays file creations and byte replacements that leave each file present.
+A refused prepare leaves no decision directory behind: the kernel refuses the
+overlap before it writes anything, so the before-images of that attempt go with
+it. Named recovery also accepts the id of an interrupted undo operation, even
+though that operation is planned under the decision id without the `care-`
+prefix, so a card blocked by one can be unblocked by id.
 Quoted native Windows reference paths can contain spaces. Unquoted native
 Windows paths with spaces remain unsupported by the reference scanner.
 

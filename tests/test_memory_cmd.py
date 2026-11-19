@@ -1731,6 +1731,50 @@ def test_memory_care_status_prints_archive_candidates_in_human_output(tmp_path, 
     assert "archive_candidates: count=0 approval_required=False would_archive=True" in out
 
 
+def test_memory_care_status_prints_projection_blocked_archive_cards(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
+    state = tmp_path / ".brigade" / "memory-care" / "tend" / "latest.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "stages": {
+                    "retire": {
+                        "schema_version": 2,
+                        "would_archive": True,
+                        "candidate_count": 1,
+                        "candidates": [{"file": "memory/cards/old.md", "signal": "subject-expired"}],
+                        "skipped": {"exempt": 0},
+                        "projection_blocked": [
+                            {
+                                "path": "memory/cards/old.md",
+                                "reason": "unfinished projection 20261112T000000Z-undo-deadbeef overlaps"
+                                " the planned destination set",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+    )
+
+    assert memory_cmd.status(target=tmp_path, json_output=True) == 0
+    archive = json.loads(capsys.readouterr().out)["archive_candidates"]
+    assert archive["projection_blocked"] == [
+        {
+            "path": "memory/cards/old.md",
+            "reason": "unfinished projection 20261112T000000Z-undo-deadbeef overlaps the planned destination set",
+        }
+    ]
+    assert archive["skipped"] == {"exempt": 0}
+
+    assert memory_cmd.status(target=tmp_path, json_output=False) == 0
+    out = capsys.readouterr().out
+    assert "archive_projection_blocked: count=1" in out
+    assert "  archive_blocked: memory/cards/old.md" in out
+
+
 def test_memory_care_archive_candidates_unassessable_when_saved_scan_date_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 8, 1))
     _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
