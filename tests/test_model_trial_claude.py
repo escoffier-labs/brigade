@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, model_trial_claude, model_trials, proc, runguard
+from brigade import cli, model_trial_claude, model_trials, proc
 from brigade.memory_verify_seat import CLAUDE_SETTINGS
 from brigade.model_trial_claude import (
     ADAPTER_ID,
@@ -76,21 +76,6 @@ def clean_temp_root():
         pytest.skip("no temp directory without CLAUDE.md or AGENTS.md in its ancestors")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(tempfile, "tempdir", str(root))
-        original_remove = model_trial_claude.remove_work_dir
-
-        def remove_work_dir_after_server(path, *, windows=os.name == "nt"):
-            pid_file = path / "server.pid"
-            if pid_file.is_file():
-                try:
-                    pid = int(pid_file.read_text().strip())
-                except ValueError:
-                    pid = 0
-                deadline = time.monotonic() + 30
-                while runguard._pid_is_active(pid) and time.monotonic() < deadline:
-                    time.sleep(0.01)
-            return original_remove(path, windows=windows)
-
-        patch.setattr(model_trial_claude, "remove_work_dir", remove_work_dir_after_server)
         yield root
     shutil.rmtree(root, ignore_errors=True)
 
@@ -101,8 +86,65 @@ def _live(tmp_path, fake_dir="fake", output="evidence", **scenario):
     return result, tmp_path / fake_dir, tmp_path / output
 
 
+def _stop_child(proc, *, timeout=2.0):
+    """Stop a child through its Popen handle with bounded waits, or fail loudly."""
+    try:
+        if proc.stdin is not None:
+            proc.stdin.close()
+    except (OSError, ValueError):
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise AssertionError("child could not be stopped within the cleanup bound") from exc
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
+
+
 def _failures(result):
     return sorted({a["failure"] for a in result["attempts"]})
+
+
+def test_stubborn_server_child_is_stopped_within_the_cleanup_bound():
+    """A child that keeps running past stdin close is stopped, never waited on forever."""
+    code = (
+        "import signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN) if sys.platform != 'win32' else None; "
+        "time.sleep(60)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    started = time.monotonic()
+    try:
+        _stop_child(child, timeout=0.5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+    assert child.poll() is not None
+    assert time.monotonic() - started < 5
 
 
 @pytest.fixture(scope="module")
