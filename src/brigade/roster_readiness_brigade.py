@@ -14,6 +14,20 @@ from .roster_readiness import Observation, ReadinessRequest, operation_scope
 from .worker_failure import safe_detail
 
 
+def _governance(
+    status: str, observed_at: float, scope: str, detail: str = "", capacity: int | None = None
+) -> Observation:
+    """One Brigade-governance observation; the brigade route owns these facts."""
+    return Observation(
+        status,
+        observed_at,
+        scope,
+        detail=detail,
+        capacity=capacity,
+        source="brigade-governance",
+    )
+
+
 @dataclass(frozen=True)
 class _HubAdmissionOutcome:
     effective_roster: roster_mod.Roster
@@ -35,7 +49,7 @@ def _local_lock_capacity_observation(
     extra_source: str | None = None,
 ) -> Observation:
     if lock_state == "live":
-        return Observation(
+        return _governance(
             "passed",
             observed_at,
             scope,
@@ -43,14 +57,14 @@ def _local_lock_capacity_observation(
             capacity=0,
         )
     if lock_state == "skipped":
-        return Observation(
+        return _governance(
             "failed",
             observed_at,
             scope,
             detail="local run lock (unrecovered active run requires brigade runs recover)",
         )
     if lock_state not in {"absent", "unreconciled"}:
-        return Observation(
+        return _governance(
             "unknown",
             observed_at,
             scope,
@@ -58,7 +72,7 @@ def _local_lock_capacity_observation(
         )
     lock_desc = "local run lock (absent)" if lock_state == "absent" else "local run lock (reconcileable dead owner)"
     detail = f"{lock_desc}, {extra_source}" if extra_source else f"{lock_desc} and roster max_workers"
-    return Observation("passed", observed_at, scope, detail=detail, capacity=max_workers)
+    return _governance("passed", observed_at, scope, detail=detail, capacity=max_workers)
 
 
 def _capacity_or_unknown(
@@ -76,7 +90,7 @@ def _capacity_or_unknown(
             observed_at=observed_at,
             scope=scope,
         )
-    return Observation("unknown", observed_at, scope, detail=detail)
+    return _governance("unknown", observed_at, scope, detail=detail)
 
 
 def _hub_seat_usage_capacity(
@@ -96,7 +110,7 @@ def _hub_seat_usage_capacity(
     from . import fleet_client_policy
 
     def _unknown(detail: str) -> Observation:
-        return Observation("unknown", observed_at, scope, detail=detail)
+        return _governance("unknown", observed_at, scope, detail=detail)
 
     try:
         usage = fleet_client_policy.read_seat_usage()
@@ -124,7 +138,7 @@ def _hub_seat_usage_capacity(
         details.append(f"seat {seat_name!r} limit {limit}, occupied {occupied}")
     if capacity is None:
         return _unknown("hub seat usage had no limited seat to check")
-    return Observation(
+    return _governance(
         "passed",
         observed_at,
         scope,
@@ -210,7 +224,7 @@ def _brigade_hub_claim_capacity(
         return None, False
     except (fleet_client.FleetClientError, OSError, ValueError) as exc:
         return (
-            Observation(
+            _governance(
                 "unknown",
                 observed_at,
                 scope,
@@ -222,7 +236,7 @@ def _brigade_hub_claim_capacity(
         reason = claim_decision.reason or "hub-unavailable"
         if reason == "auth-failed":
             return (
-                Observation(
+                _governance(
                     "failed",
                     observed_at,
                     scope,
@@ -234,7 +248,7 @@ def _brigade_hub_claim_capacity(
                 False,
             )
         return (
-            Observation(
+            _governance(
                 "unknown",
                 observed_at,
                 scope,
@@ -247,7 +261,7 @@ def _brigade_hub_claim_capacity(
         return None, True
     if not isinstance(claim, Mapping):
         return (
-            Observation(
+            _governance(
                 "unknown",
                 observed_at,
                 scope,
@@ -276,7 +290,7 @@ def _brigade_hub_claim_capacity(
         return None, True
     owner = claim.get("owner_node") or "another node"
     return (
-        Observation(
+        _governance(
             "passed",
             observed_at,
             scope,
@@ -308,7 +322,7 @@ def _local_route_observations(
     except fleet_client.FleetSpoolLockTimeout as exc:
         detail = f"local admission unverified ({safe_detail(str(exc))})"
         return {
-            "admission": Observation("unknown", observed_at, scope, detail=detail),
+            "admission": _governance("unknown", observed_at, scope, detail=detail),
             "capacity": _capacity_or_unknown(
                 lock_state,
                 roster.max_workers,
@@ -319,7 +333,7 @@ def _local_route_observations(
         }
     if activated:
         return {
-            "admission": Observation(
+            "admission": _governance(
                 "denied",
                 observed_at,
                 scope,
@@ -337,7 +351,7 @@ def _local_route_observations(
     admission_obs: Observation | None = None
     for seat_name in workers:
         if seat_name not in admissible:
-            admission_obs = Observation(
+            admission_obs = _governance(
                 "denied",
                 observed_at,
                 scope,
@@ -349,7 +363,7 @@ def _local_route_observations(
         model = agents_mod.model_policy_model(agent.cli or "", agent.model)
         retired = fleet_model_roster.retired_reason(provider, model)
         if retired is not None:
-            admission_obs = Observation(
+            admission_obs = _governance(
                 "denied",
                 observed_at,
                 scope,
@@ -357,7 +371,7 @@ def _local_route_observations(
             )
             break
     if admission_obs is None:
-        admission_obs = Observation(
+        admission_obs = _governance(
             "passed",
             observed_at,
             scope,
@@ -405,21 +419,21 @@ def _hub_admission(
         return _HubAdmissionOutcome(
             effective_roster=roster,
             scope=resolved_scope,
-            admission=Observation("unknown", observed_at, resolved_scope, detail=detail),
+            admission=_governance("unknown", observed_at, resolved_scope, detail=detail),
             early_capacity_detail=detail,
         )
 
     if not decision.ok:
         resolved_scope = _early_scope()
         if decision.reason == "enrollment-downgrade":
-            early_admission = Observation(
+            early_admission = _governance(
                 "denied",
                 observed_at,
                 resolved_scope,
                 detail="hub model admission: enrollment downgrade rejected",
             )
         else:
-            early_admission = Observation(
+            early_admission = _governance(
                 "unknown",
                 observed_at,
                 resolved_scope,
@@ -438,7 +452,7 @@ def _hub_admission(
         return _HubAdmissionOutcome(
             effective_roster=roster,
             scope=resolved_scope,
-            admission=Observation("unknown", observed_at, resolved_scope, detail=detail),
+            admission=_governance("unknown", observed_at, resolved_scope, detail=detail),
             early_capacity_detail=detail,
         )
 
@@ -456,7 +470,7 @@ def _hub_admission(
         return _HubAdmissionOutcome(
             effective_roster=roster,
             scope=resolved_scope,
-            admission=Observation("unknown", observed_at, resolved_scope, detail=detail),
+            admission=_governance("unknown", observed_at, resolved_scope, detail=detail),
             early_capacity_detail=detail,
         )
 
@@ -468,7 +482,7 @@ def _hub_admission(
         return _HubAdmissionOutcome(
             effective_roster=roster,
             scope=resolved_scope,
-            admission=Observation("unknown", observed_at, resolved_scope, detail=detail),
+            admission=_governance("unknown", observed_at, resolved_scope, detail=detail),
             early_capacity_detail=detail,
         )
 
@@ -488,7 +502,7 @@ def _hub_admission(
         return _HubAdmissionOutcome(
             effective_roster=roster,
             scope=resolved_scope,
-            admission=Observation("unknown", observed_at, resolved_scope, detail=detail),
+            admission=_governance("unknown", observed_at, resolved_scope, detail=detail),
             early_capacity_detail=detail,
         )
 
@@ -511,7 +525,7 @@ def _hub_admission(
         return _HubAdmissionOutcome(
             effective_roster=effective_roster,
             scope=resolved_scope,
-            admission=Observation("unknown", observed_at, resolved_scope, detail=detail),
+            admission=_governance("unknown", observed_at, resolved_scope, detail=detail),
             snapshot=snapshot,
             source=source,
             early_capacity_detail=detail,
@@ -523,7 +537,7 @@ def _hub_admission(
     for seat_name in workers:
         seat_decision = decisions_by_seat.get(seat_name)
         if seat_decision is None:
-            admission_obs = Observation(
+            admission_obs = _governance(
                 "unknown",
                 observed_at,
                 resolved_scope,
@@ -531,7 +545,7 @@ def _hub_admission(
             )
             break
         if seat_decision.get("outcome") != "enabled" and stale_lkg:
-            admission_obs = Observation(
+            admission_obs = _governance(
                 "unknown",
                 observed_at,
                 resolved_scope,
@@ -542,7 +556,7 @@ def _hub_admission(
             )
             break
         if seat_decision.get("outcome") != "enabled":
-            admission_obs = Observation(
+            admission_obs = _governance(
                 "denied",
                 observed_at,
                 resolved_scope,
@@ -556,7 +570,7 @@ def _hub_admission(
     parsed_policy: Mapping[str, Any] | None = None
     if admission_obs is None:
         if enrollment == "denied":
-            admission_obs = Observation(
+            admission_obs = _governance(
                 "denied",
                 observed_at,
                 resolved_scope,
@@ -570,7 +584,7 @@ def _hub_admission(
                     raise fleet_policy.FleetPolicyError("fleet policy response is missing document")
                 parsed_policy = fleet_policy.parse_document(raw_doc)
                 if fleet_session_bootstrap.CONSUMER_BRIGADE_RUN not in (parsed_policy.get("consumers") or {}):
-                    admission_obs = Observation(
+                    admission_obs = _governance(
                         "denied",
                         observed_at,
                         resolved_scope,
@@ -590,7 +604,7 @@ def _hub_admission(
                         )
                         if not verdict.get("admissible"):
                             reasons = ", ".join(str(item) for item in verdict.get("reasons") or ())
-                            admission_obs = Observation(
+                            admission_obs = _governance(
                                 "denied",
                                 observed_at,
                                 resolved_scope,
@@ -605,7 +619,7 @@ def _hub_admission(
                 OSError,
                 ValueError,
             ) as exc:
-                admission_obs = Observation(
+                admission_obs = _governance(
                     "unknown",
                     observed_at,
                     resolved_scope,
@@ -614,21 +628,21 @@ def _hub_admission(
             else:
                 if admission_obs is None:
                     if source != "hub":
-                        admission_obs = Observation(
+                        admission_obs = _governance(
                             "unknown",
                             observed_at,
                             resolved_scope,
                             detail=f"{source_label} + fleet policy: enrolled launch requires live hub admission",
                         )
                     else:
-                        admission_obs = Observation(
+                        admission_obs = _governance(
                             "passed",
                             observed_at,
                             resolved_scope,
                             detail=f"{source_label} + fleet policy",
                         )
         else:
-            admission_obs = Observation("passed", observed_at, resolved_scope, detail=source_label)
+            admission_obs = _governance("passed", observed_at, resolved_scope, detail=source_label)
 
     return _HubAdmissionOutcome(
         effective_roster=effective_roster,
@@ -670,7 +684,7 @@ def _hub_capacity(
         )
 
     if source != "hub":
-        return Observation(
+        return _governance(
             "unknown",
             observed_at,
             scope,
@@ -696,7 +710,7 @@ def _hub_capacity(
                 elif concurrency > 0:
                     positive_seats.append((seat_name, concurrency))
             if zero_seat is not None:
-                return Observation(
+                return _governance(
                     "passed",
                     observed_at,
                     scope,
@@ -705,7 +719,7 @@ def _hub_capacity(
                 )
             if positive_seats:
                 return _hub_seat_usage_capacity(positive_seats, snapshot, observed_at=observed_at, scope=scope)
-        return Observation(
+        return _governance(
             "unknown",
             observed_at,
             scope,
@@ -737,7 +751,7 @@ def _hub_capacity(
             positive_limit_seats.append((seat_name, limit))
 
     if zero_limit_seat is not None:
-        return Observation(
+        return _governance(
             "passed",
             observed_at,
             scope,
@@ -745,7 +759,7 @@ def _hub_capacity(
             capacity=0,
         )
     if malformed_seat is not None:
-        return Observation(
+        return _governance(
             "unknown",
             observed_at,
             scope,
@@ -782,13 +796,13 @@ def _worktree_isolation_observation(
     if request.isolation != "worktree":
         return None
     if runguard.is_git_checkout_with_commit(workspace):
-        return Observation(
+        return _governance(
             "passed",
             observed_at,
             scope,
             detail="git-eligible: Git checkout with a committed HEAD; worktree creation was not attempted",
         )
-    return Observation(
+    return _governance(
         "failed",
         observed_at,
         scope,
@@ -826,7 +840,7 @@ def brigade_route_readiness(
         resolved_scope = operation_scope(roster, request, workspace) if scope is None else scope
         detail = f"fleet configuration unavailable ({safe_detail(str(exc))})"
         observations = {
-            "admission": Observation("unknown", observed_at, resolved_scope, detail=detail),
+            "admission": _governance("unknown", observed_at, resolved_scope, detail=detail),
             "capacity": _capacity_or_unknown(
                 lock_state, roster.max_workers, detail, observed_at=observed_at, scope=resolved_scope
             ),

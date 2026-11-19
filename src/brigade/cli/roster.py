@@ -50,6 +50,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_ready.add_argument("--route", choices=("brigade", "t3"), default="brigade")
     p_ready.add_argument("--isolation", choices=("shared", "worktree"), default="shared")
     p_ready.add_argument("--capability", default=None)
+    p_ready.add_argument(
+        "--t3-capabilities",
+        default=None,
+        metavar="<file|->",
+        help="Parent-reported T3 orchestrator capabilities envelope for --route t3. "
+        "Use - to read the envelope from stdin.",
+    )
     p_ready.add_argument("--json", action="store_true", dest="json_output")
     p_roster_suggest = roster_sub.add_parser(
         "suggest",
@@ -88,6 +95,7 @@ def dispatch(args) -> int:
             route=args.route,
             isolation=args.isolation,
             capability=args.capability,
+            t3_capabilities=args.t3_capabilities,
             json_output=args.json_output,
         )
     if args.roster_command == "suggest":

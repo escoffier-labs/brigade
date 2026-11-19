@@ -1,0 +1,2 @@
+- Let `brigade roster ready --route t3` check a parent-reported T3 capabilities envelope supplied with `--t3-capabilities`, and report parent-reported route support alongside Brigade isolation, admission and capacity evidence.
+- Keep route t3 readiness explicitly non-reserving with `assurance`, `launch_guaranteed`, `capacity_reserved` and `parent_active` qualifiers.

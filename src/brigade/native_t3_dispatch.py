@@ -866,6 +866,29 @@ def _context(workspace: Path, run_id: str, task_id: str) -> Path:
     return _run_dir(workspace, run_id)
 
 
+def delegate_target_arguments(target: NativeTarget) -> dict[str, Any]:
+    """The target-derived ``delegate_task`` fields, without attempt-scoped values.
+
+    Readiness binds these exact fields so a target change invalidates evidence.
+    The task text and client request id arrive only with a claimed attempt.
+    """
+    arguments: dict[str, Any] = {
+        "target": {
+            "providerInstanceId": target.provider_instance,
+            "driverKind": target.driver,
+            "model": target.launch_model,
+            "projectId": target.target_project,
+            "options": [{"id": key, "value": value} for key, value in target.options],
+        },
+        "isolation": "worktree",
+    }
+    if target.runtime_mode != INHERIT_MODE:
+        arguments["runtimeMode"] = target.runtime_mode
+    if target.interaction_mode != INHERIT_MODE:
+        arguments["interactionMode"] = target.interaction_mode
+    return arguments
+
+
 def _delegate_arguments(text: str, target: NativeTarget, client_request_id: str) -> dict[str, Any]:
     """Build exactly the reviewed ``delegate_task`` input for one claim.
 
@@ -876,20 +899,9 @@ def _delegate_arguments(text: str, target: NativeTarget, client_request_id: str)
     """
     arguments: dict[str, Any] = {
         "task": text,
-        "target": {
-            "providerInstanceId": target.provider_instance,
-            "driverKind": target.driver,
-            "model": target.launch_model,
-            "projectId": target.target_project,
-            "options": [{"id": key, "value": value} for key, value in target.options],
-        },
-        "isolation": "worktree",
+        **delegate_target_arguments(target),
         "clientRequestId": client_request_id,
     }
-    if target.runtime_mode != INHERIT_MODE:
-        arguments["runtimeMode"] = target.runtime_mode
-    if target.interaction_mode != INHERIT_MODE:
-        arguments["interactionMode"] = target.interaction_mode
     return arguments
 
 
