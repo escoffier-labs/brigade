@@ -89,6 +89,20 @@ def _edit_subject(target: Path, text: str = "patched") -> None:
     subprocess.run(["git", "add", str(skill.relative_to(target))], cwd=target, check=True)
 
 
+def _hook_write(target: Path, session_id: str = SESSION_ID, text: str = "patched") -> None:
+    """One Write on the subject as the hooks see it: PreToolUse records the check, then the edit, then PostToolUse."""
+    subject = target / "skills" / "brigade-work" / "SKILL.md"
+    event = {
+        "session_id": session_id,
+        "cwd": str(target),
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(subject), "content": f"# brigade-work\n{text}\n"},
+    }
+    runtime.handle_payload("PreToolUse", {**event, "hook_event_name": "PreToolUse"})
+    _edit_subject(target, text)
+    runtime.handle_payload("PostToolUse", {**event, "hook_event_name": "PostToolUse"})
+
+
 def _verify(target: Path, monkeypatch) -> dict:
     return _run_manifest_verify(target, MANIFEST_ID, monkeypatch=monkeypatch, start_session=False)
 
@@ -212,7 +226,7 @@ def test_load_payload_rejects_a_state_copied_from_another_target(hook_target: Pa
 def test_hook_session_trial_is_eligible_and_scores(hook_target: Path, monkeypatch) -> None:
     """The headline case: no work session, a hook session that edits the subject and verifies it."""
     _session_start(hook_target)
-    _edit_subject(hook_target)
+    _hook_write(hook_target)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
 
     receipt = _verify(hook_target, monkeypatch)
@@ -228,7 +242,7 @@ def test_hook_session_trial_is_eligible_and_scores(hook_target: Path, monkeypatc
 
 def test_hook_printed_session_value_also_resolves_the_producer(hook_target: Path, monkeypatch) -> None:
     _session_start(hook_target)
-    _edit_subject(hook_target)
+    _hook_write(hook_target)
     monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", _fingerprint())
     receipt = _verify(hook_target, monkeypatch)
     assert verify_trial.project_trial(receipt, target=hook_target).eligible is True
@@ -349,7 +363,7 @@ def test_generated_patch_verified_by_its_own_hook_session_is_not_independent(hoo
     verify_manifest.write_workspace_manifest(hook_target, payload)
     _track_workspace_manifest(hook_target, "generated-patch")
     _session_start(hook_target)
-    _edit_subject(hook_target, "generated")
+    _hook_write(hook_target, text="generated")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
     monkeypatch.setenv("BRIGADE_GENERATED_PATCH_CANDIDATE_COUNT", "3")
     monkeypatch.setenv("BRIGADE_GENERATED_PATCH_MODEL", "gpt-test")
@@ -373,3 +387,170 @@ def test_bare_ambient_agent_session_names_no_producer(hook_target: Path, monkeyp
     receipt = _verify(hook_target, monkeypatch)
     assert "harness_session" not in receipt
     assert verify_trial.project_trial(receipt, target=hook_target).reason == "producer_session_missing"
+
+
+def _project(target: Path, receipt: dict) -> verify_trial.TrialProjection:
+    return verify_trial.project_trial(receipt, target=target)
+
+
+def test_other_sessions_edit_is_not_this_sessions_trial(hook_target: Path, monkeypatch) -> None:
+    """F1: B starts clean, A edits the subject, B verifies. B's clean start snapshot must not make it B's trial."""
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, OTHER_SESSION_ID, "edited by the other session")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+
+    receipt = _verify(hook_target, monkeypatch)
+
+    projection = _project(hook_target, receipt)
+    assert projection.eligible is False
+    assert projection.reason == "concurrent_session_ownership"
+
+
+def test_both_sessions_writing_the_subject_is_concurrent(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, OTHER_SESSION_ID, "first")
+    _hook_write(hook_target, SESSION_ID, "second")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    projection = _project(hook_target, _verify(hook_target, monkeypatch))
+    assert projection.eligible is False
+    assert projection.reason == "concurrent_session_ownership"
+
+
+def test_a_session_that_never_wrote_the_subject_has_no_owned_work(hook_target: Path, monkeypatch) -> None:
+    """A change made only through Bash leaves no write record, so it fails closed."""
+    _session_start(hook_target)
+    _edit_subject(hook_target)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    projection = _project(hook_target, _verify(hook_target, monkeypatch))
+    assert projection.eligible is False
+    assert projection.reason == "no_owned_work"
+
+
+def test_a_foreign_write_before_this_session_started_does_not_veto(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, OTHER_SESSION_ID, "landed earlier")
+    _commit_all(hook_target, "the other session's change landed")
+    _session_start(hook_target, SESSION_ID)
+    _hook_write(hook_target, SESSION_ID, "this session's change")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    projection = _project(hook_target, _verify(hook_target, monkeypatch))
+    assert projection.reason == "eligible"
+
+
+def test_a_foreign_write_to_another_file_does_not_veto(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    other = {
+        "session_id": OTHER_SESSION_ID,
+        "cwd": str(hook_target),
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(hook_target / "notes.txt"), "content": "x\n"},
+    }
+    runtime.handle_payload("PreToolUse", {**other, "hook_event_name": "PreToolUse"})
+    (hook_target / "notes.txt").write_text("x\n")
+    runtime.handle_payload("PostToolUse", {**other, "hook_event_name": "PostToolUse"})
+    _hook_write(hook_target, SESSION_ID)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    assert _project(hook_target, _verify(hook_target, monkeypatch)).reason == "eligible"
+
+
+def test_a_foreign_write_with_no_recorded_path_is_treated_as_concurrent(hook_target: Path, monkeypatch) -> None:
+    """Another session's Bash write names no path, so it cannot be ruled out as the subject."""
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, SESSION_ID)
+    sessions = runtime._sessions_root(hook_target.resolve())
+    other_path = next(
+        path for path in sessions.glob("*.json") if json.loads(path.read_text()).get("session_id") == OTHER_SESSION_ID
+    )
+    other = json.loads(other_path.read_text())
+    other["write_observed"] = True
+    other["last_write_at"] = localio.utc_now_iso()
+    other_path.write_text(json.dumps(other))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    projection = _project(hook_target, _verify(hook_target, monkeypatch))
+    assert projection.reason == "concurrent_session_ownership"
+
+
+def test_a_foreign_write_after_the_receipt_is_caught_at_projection_time(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, SESSION_ID)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    receipt = _verify(hook_target, monkeypatch)
+    assert _project(hook_target, receipt).reason == "eligible"
+    _hook_write(hook_target, OTHER_SESSION_ID, "later foreign edit")
+    assert _project(hook_target, receipt).reason == "concurrent_session_ownership"
+
+
+def test_the_binding_carries_the_ownership_verdict_for_a_target_less_projection(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target, SESSION_ID)
+    _session_start(hook_target, OTHER_SESSION_ID)
+    _hook_write(hook_target, OTHER_SESSION_ID)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    receipt = _verify(hook_target, monkeypatch)
+    producer = receipt["subject_binding"]["producer_binding"]
+    assert producer["hook_ownership"] == "concurrent_session_ownership"
+    assert verify_trial.project_trial(receipt, target=None).reason != "eligible"
+
+
+def test_a_clean_hook_trial_records_ownership_in_the_binding(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target)
+    _hook_write(hook_target)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    receipt = _verify(hook_target, monkeypatch)
+    assert receipt["subject_binding"]["producer_binding"]["hook_ownership"] == "owned"
+
+
+def test_override_naming_the_producers_own_session_is_not_independent() -> None:
+    """F4: BRIGADE_VERIFY_SESSION_ID must not defeat same-session detection."""
+    fingerprint = _fingerprint()
+    pid = producer_session.producer_id(fingerprint)
+    assert producer_session.same_session(pid, producer_session.producer_id(fingerprint))
+    assert producer_session.same_session(fingerprint, pid)
+    assert not producer_session.same_session(pid, _fingerprint(OTHER_SESSION_ID))
+    assert not producer_session.same_session(pid, producer_session.producer_id(_fingerprint(OTHER_SESSION_ID)))
+
+
+def test_generated_patch_verified_through_an_override_naming_its_own_session_is_not_independent(
+    hook_target: Path, monkeypatch
+) -> None:
+    payload = _write_patch_manifest(hook_target, manifest_id="generated-patch")
+    payload["patch_source"] = "generated"
+    verify_manifest.write_workspace_manifest(hook_target, payload)
+    _track_workspace_manifest(hook_target, "generated-patch")
+    _session_start(hook_target)
+    _hook_write(hook_target, text="generated")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION_ID)
+    monkeypatch.setenv("BRIGADE_VERIFY_SESSION_ID", producer_session.producer_id(_fingerprint()))
+    monkeypatch.setenv("BRIGADE_GENERATED_PATCH_CANDIDATE_COUNT", "3")
+    monkeypatch.setenv("BRIGADE_GENERATED_PATCH_MODEL", "gpt-test")
+    monkeypatch.setenv("BRIGADE_GENERATED_PATCH_MODEL_VERSION", "2024-01")
+    receipt = _run_manifest_verify(hook_target, "generated-patch", monkeypatch=monkeypatch, start_session=False)
+    assert receipt["subject_binding"]["verifier_identity"]["session_id"] == producer_session.producer_id(_fingerprint())
+    assert _project(hook_target, receipt).reason == "verifier_not_independent"
+
+
+def test_hook_snapshot_lists_untracked_files_individually(hook_target: Path) -> None:
+    """F3: a collapsed ``?? newdir/`` line would hide every file under it."""
+    (hook_target / "newdir").mkdir()
+    (hook_target / "newdir" / "a.txt").write_text("a\n")
+    state = _session_start(hook_target)
+    assert "?? newdir/a.txt" in state["start"]["git"]["dirty_files"]
+    assert "?? newdir/" not in state["start"]["git"]["dirty_files"]
+
+
+def test_unreadable_session_directory_fails_closed(hook_target: Path, monkeypatch) -> None:
+    _session_start(hook_target)
+    _hook_write(hook_target)
+
+    def refuse(*_args, **_kwargs):
+        raise producer_session.anchored_io.SessionIntegrityError("refused")
+
+    monkeypatch.setattr(producer_session.anchored_io, "iter_states", refuse)
+    reason = producer_session.ownership_reason(
+        hook_target, producer_session.producer_id(_fingerprint()), "skills/brigade-work/SKILL.md"
+    )
+    assert reason == "producer_session_missing"

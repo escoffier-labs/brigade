@@ -162,11 +162,19 @@ another session owns, is rejected (`subject_pre_existing_dirty`, `concurrent_ses
    `CLAUDE_CODE_SESSION_ID`, or inside a `brigade run` worker.
 3. Otherwise `producer_session_missing`, so a plain shell or a Codex repo scores nothing.
 
+A hook session is a producer only for a subject it wrote. Its own Edit, Write or NotebookEdit record
+must name the subject (otherwise `no_owned_work`), and no other session's hook state in the target may
+record a write to the subject, or an unattributable write, since this session started
+(`concurrent_session_ownership`). A subject changed only through Bash has no write record, so it is
+never a hook-session trial. The check reruns against live hook state when the receipt is projected.
+
 The same resolver stamps the receipt's `harness_session` and the verifier id, so a verify typed in a
 session counts as that session's own receipt for the Stop gate. A `worktree` patch has no
 independent-verifier rule, so a session may verify its own edit and score it. Only a `generated`
-patch must be verified by a different session, and a session never counts as independent of its own
-`claude-hook:<fingerprint>` producer id.
+patch must be verified by a different session. A session never counts as independent of its own
+`claude-hook:<fingerprint>` producer id, and that holds when `BRIGADE_VERIFY_SESSION_ID` names the
+session either as the bare fingerprint or as the `claude-hook:` form. An override naming any other
+id is taken at its word, because it is as forgeable as the rest of the caller-side state.
 
 ## Weekly ratchet report
 

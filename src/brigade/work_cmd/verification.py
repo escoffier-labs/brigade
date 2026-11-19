@@ -414,6 +414,7 @@ def _build_subject_binding(
         session_payload=session_payload,
         subject_path=manifest.subject_path,
         owned_delta=owned_delta,
+        target=target,
     )
     binding["patch_binding"] = {
         "baseline_commit": receipt.get("baseline_commit"),

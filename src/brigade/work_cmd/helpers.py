@@ -48,6 +48,15 @@ def _git_value(target: Path, *args: str) -> str | None:
     return value or None
 
 
+def _git_raw_value(target: Path, *args: str) -> str | None:
+    """Like ``_git_value`` but keeps leading whitespace, which ``git status --short`` uses as a column."""
+    result = _git(target, *args)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.rstrip("\n")
+    return value if value.strip() else None
+
+
 def _short(text: str, limit: int = 96) -> str:
     rendered = " ".join(text.split())
     if len(rendered) <= limit:
@@ -143,7 +152,7 @@ def _git_snapshot(target: Path) -> dict[str, Any]:
     if branch is None:
         branch = _git_value(target, "rev-parse", "--short", "HEAD") or "unknown"
         branch = f"detached:{branch}"
-    status_out = _git_value(target, "status", "--short") or ""
+    status_out = _git_raw_value(target, "status", "--short") or ""
     return {
         "available": True,
         "repo": repo_root,

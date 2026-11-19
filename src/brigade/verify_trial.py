@@ -253,19 +253,39 @@ def _normalize_repo_path(path: str) -> str:
     return path.replace("\\", "/").lstrip("./")
 
 
+def _status_paths(line: str) -> list[str]:
+    """Repo-relative paths one ``git status --short`` line names, unquoted. A rename names both ends."""
+    body = line[3:].strip()
+    if not body:
+        return []
+    parts = body.split(" -> ", 1) if " -> " in body else [body]
+    return [_normalize_repo_path(_unquote_patch_path(part.strip())) for part in parts]
+
+
 def subject_path_dirty_in_git_status(subject_path: str, dirty_files: object) -> bool:
+    """Whether a ``git status --short`` listing marks the subject dirty.
+
+    Quoted paths (spaces, non-ASCII) are unquoted first. A line for a directory, such as the
+    collapsed ``?? newdir/`` git prints for an untracked tree, marks every subject under it dirty.
+    """
     if not isinstance(dirty_files, list):
         return False
     normalized = _normalize_repo_path(subject_path)
     for line in dirty_files:
         if not isinstance(line, str) or len(line) < 3:
             continue
-        path_part = line[3:].strip()
-        if " -> " in path_part:
-            path_part = path_part.split(" -> ", 1)[1]
-        candidate = _normalize_repo_path(path_part)
-        if candidate == normalized or candidate.endswith(f"/{normalized}"):
-            return True
+        for candidate in _status_paths(line):
+            if not candidate:
+                continue
+            if candidate == normalized or candidate.endswith(f"/{normalized}"):
+                return True
+            directory = candidate.rstrip("/")
+            if (
+                candidate.endswith("/")
+                and directory
+                and (normalized.startswith(f"{directory}/") or f"/{directory}/" in f"/{normalized}")
+            ):
+                return True
     return False
 
 
@@ -293,11 +313,20 @@ def build_producer_binding(
     session_payload: dict[str, Any] | None,
     subject_path: str,
     owned_delta: str | None,
+    target: Path | None = None,
 ) -> dict[str, Any]:
     binding: dict[str, Any] = {
         "work_session_id": session_id,
         "owned_delta_sha256": owned_delta,
     }
+    if session_id and hook_producer.fingerprint_from_producer_id(session_id) is not None:
+        # A hook session's start snapshot cannot say who wrote the subject, so record the verdict
+        # of the live ownership check for a projection that has no target to rerun it against.
+        binding["hook_ownership"] = (
+            (hook_producer.ownership_reason(target, session_id, subject_path) or hook_producer.OWNED)
+            if target is not None
+            else "producer_session_missing"
+        )
     if session_payload is None or not session_id:
         binding["subject_clean_at_start"] = False
         return binding
@@ -315,6 +344,9 @@ def build_producer_binding(
         binding["start_git"] = {"dirty_files_sha256": fingerprint}
     binding["subject_clean_at_start"] = not subject_path_dirty_in_git_status(subject_path, dirty_files)
     return binding
+
+
+_HOOK_OWNERSHIP_REASONS = frozenset({"concurrent_session_ownership", "no_owned_work"})
 
 
 def _validate_producer_binding(
@@ -338,6 +370,11 @@ def _validate_producer_binding(
     subject_clean_at_start = producer.get("subject_clean_at_start")
     if subject_clean_at_start is False:
         return "subject_pre_existing_dirty"
+
+    hook_session = hook_producer.fingerprint_from_producer_id(session_id) is not None
+    recorded_ownership = producer.get("hook_ownership")
+    if hook_session and recorded_ownership != hook_producer.OWNED:
+        return recorded_ownership if recorded_ownership in _HOOK_OWNERSHIP_REASONS else "producer_session_missing"
 
     if target is None:
         if subject_clean_at_start is not True:
@@ -376,6 +413,8 @@ def _validate_producer_binding(
 
     if subject_clean_at_start is not True:
         return "producer_session_missing"
+    if hook_session:
+        return hook_producer.ownership_reason(target, session_id, subject_path)
     return None
 
 

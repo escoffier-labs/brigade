@@ -170,12 +170,18 @@ def _isolate_orchestrator_run_id(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_native_claude_session(monkeypatch):
-    """A suite run from inside Claude Code must not read that session's own id.
+    """A suite run from inside a Claude or Brigade session must not read that session's ids.
 
-    Receipt identity and the manifest producer resolve a session from it (#2589).
-    Tests that need one set ``CLAUDE_CODE_SESSION_ID`` explicitly.
+    Receipt identity, the verifier id and the manifest producer resolve a session from these (#2589).
+    Tests that need one set it explicitly.
     """
-    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    for name in (
+        "CLAUDE_CODE_SESSION_ID",
+        "BRIGADE_CLAUDE_SESSION",
+        "BRIGADE_AGENT_SESSION",
+        "BRIGADE_VERIFY_SESSION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
