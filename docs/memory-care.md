@@ -712,6 +712,10 @@ recovery commands. Use `brigade memory care recover DECISION_ID --target .`
 for named operator recovery. It finishes the decision or rolls back unchanged
 prepared paths when a conflict prevents completion. `brigade memory care undo
 DECISION_ID --target .` first recovers that named decision, then reverses it.
+A hold is sticky once automatic recovery hands a decision to an operator: later
+automatic runs leave it alone even if the conflicting bytes return, and only a
+named recovery that commits or abandons the decision clears the marker, which
+`plan-fixes --apply` reports when it makes one.
 A committed
 archive whose stored decision cannot be reloaded reports `recovery_unverified`
 with its decision id. The archive move is never retried.

@@ -336,3 +336,173 @@ def test_automatic_recovery_holds_a_projection_blocked_decision(tmp_path, monkey
     assert (tmp_path / "a.md").read_bytes() == b"old a"
     journal.resolve_prepared(tmp_path, decision_id=saved[0])
     assert journal._payload(tmp_path, saved[0])["phase"] != "prepared"
+
+
+def _leave_prepared(target, monkeypatch, changes, *, prepared_paths=()):
+    """Leave a decision prepared where a crash interrupted its finish phase."""
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            journal.commit_phased(
+                target,
+                kind="fix",
+                reason="test",
+                card_id=None,
+                changes=changes,
+                prepared_paths=list(prepared_paths),
+                hub={},
+            )
+    return saved[0]
+
+
+def _conflict_hold(target, monkeypatch):
+    """Hold a prepared decision whose unprepared path changed after capture."""
+    (target / "a.md").write_bytes(b"old a")
+    (target / "b.md").write_bytes(b"old b")
+    decision_id = _leave_prepared(
+        target,
+        monkeypatch,
+        [journal.Change("a.md", b"old a", b"new a"), journal.Change("b.md", b"old b", b"new b")],
+        prepared_paths=["a.md"],
+    )
+    (target / "b.md").write_bytes(b"edited")
+    assert journal.resolve_prepared(target, automatic=True)[0]["phase"] == "operator_required"
+    return decision_id
+
+
+def test_automatic_hold_write_failure_keeps_the_reason_and_writes_nothing(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    (tmp_path / "b.md").write_bytes(b"old b")
+    decision_id = _leave_prepared(
+        tmp_path,
+        monkeypatch,
+        [journal.Change("a.md", b"old a", b"new a"), journal.Change("b.md", b"old b", b"new b")],
+        prepared_paths=["a.md"],
+    )
+    (tmp_path / "b.md").write_bytes(b"edited")
+
+    def unwritable(path, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(journal.store, "write_private", unwritable)
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    reason = result[0]["reason"]
+    assert result[0]["phase"] == "operator_required"
+    assert "changed or read-only paths require operator recovery" in reason
+    assert "automatic hold not recorded" in reason
+    assert "No space left on device" in reason
+    assert "unreadable recovery operations" not in reason
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
+    assert (tmp_path / "b.md").read_bytes() == b"edited"
+    monkeypatch.undo()
+    assert not journal._automatic_hold(tmp_path, decision_id).exists()
+
+
+def test_automatic_hold_marker_names_the_blocking_projection_and_echoes_it(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    decision_id = _leave_prepared(tmp_path, monkeypatch, [journal.Change("a.md", b"old a", b"new a")])
+    blocker = journal.kernel.OperationSummary("projection-blocker-0001", "committing", ())
+    monkeypatch.setattr(journal.kernel, "unfinished_operations", lambda target: [blocker])
+
+    def blocked(*args, **kwargs):
+        raise journal.kernel.OverlapBlockedError(
+            "unfinished projection projection-blocker-0001 overlaps the planned destination set"
+        )
+
+    monkeypatch.setattr(journal, "_execute_phase", blocked)
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    assert result[0]["phase"] == "operator_required"
+    assert "projection-blocker-0001" in result[0]["reason"]
+    marker = journal._automatic_hold(tmp_path, decision_id).read_text(encoding="utf-8")
+    assert "blocking_operation: projection-blocker-0001" in marker
+    assert "blocking_status: committing" in marker
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"old a"
+    # A later run echoes the recorded blocker instead of a constant reason, even once the blocker clears.
+    monkeypatch.undo()
+    again = journal.resolve_prepared(tmp_path, automatic=True)
+    assert again[0]["phase"] == "operator_required"
+    assert "projection-blocker-0001" in again[0]["reason"]
+    assert "committing" in again[0]["reason"]
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"old a"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"operator recovery required\nreason: ok\x1b[31mFAKE\x1b[0m\x08\x07\nblocking_operation: op\x1b]8;;x\x07\n",
+        b"operator recovery required\nreason: " + b"A" * 10_000 + b"\n",
+        b"\xff\xfe not utf-8 at all",
+        b"",
+    ],
+    ids=["control-characters", "oversized", "undecodable", "empty"],
+)
+def test_untrusted_hold_marker_body_stays_held_and_echoes_only_bounded_text(tmp_path, monkeypatch, body):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    decision_id = _leave_prepared(tmp_path, monkeypatch, [journal.Change("a.md", b"old a", b"new a")])
+    (journal._directory(tmp_path, decision_id) / "automatic-hold").write_bytes(body)
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    reason = result[0]["reason"]
+    assert result[0]["phase"] == "operator_required"
+    assert reason.startswith("an earlier automatic run held this decision")
+    assert all(ch.isprintable() for ch in reason)
+    assert len(reason) < 600
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"old a"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs")
+def test_fifo_at_the_hold_marker_stays_held_without_blocking(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    decision_id = _leave_prepared(tmp_path, monkeypatch, [journal.Change("a.md", b"old a", b"new a")])
+    os.mkfifo(journal._directory(tmp_path, decision_id) / "automatic-hold")
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    assert result[0]["phase"] == "operator_required"
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
+
+
+def test_dangling_symlink_at_the_hold_marker_counts_as_held(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_bytes(b"old a")
+    decision_id = _leave_prepared(tmp_path, monkeypatch, [journal.Change("a.md", b"old a", b"new a")])
+    marker = journal._directory(tmp_path, decision_id) / "automatic-hold"
+    try:
+        marker.symlink_to(tmp_path / "missing-target")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    result = journal.resolve_prepared(tmp_path, automatic=True)
+    assert result[0]["phase"] == "operator_required"
+    assert "symlink" in result[0]["reason"]
+    assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"
+    assert (tmp_path / "a.md").read_bytes() == b"old a"
+    assert marker.is_symlink()
+
+
+def test_named_recovery_commit_clears_the_hold_marker(tmp_path, monkeypatch):
+    decision_id = _conflict_hold(tmp_path, monkeypatch)
+    assert journal._automatic_hold(tmp_path, decision_id).exists()
+    # Automatic recovery never clears the marker, even when the bytes return.
+    (tmp_path / "b.md").write_bytes(b"old b")
+    assert journal.resolve_prepared(tmp_path, automatic=True)[0]["phase"] == "operator_required"
+    assert journal._automatic_hold(tmp_path, decision_id).exists()
+    result = journal.resolve_prepared(tmp_path, decision_id=decision_id)
+    assert result[0]["phase"] == "committed"
+    assert journal._payload(tmp_path, decision_id)["phase"] == "committed"
+    assert (tmp_path / "a.md").read_bytes() == b"new a"
+    assert (tmp_path / "b.md").read_bytes() == b"new b"
+    assert not journal._automatic_hold(tmp_path, decision_id).exists()
+
+
+def test_named_recovery_abandon_clears_the_hold_marker(tmp_path, monkeypatch):
+    decision_id = _conflict_hold(tmp_path, monkeypatch)
+    assert journal._automatic_hold(tmp_path, decision_id).exists()
+    result = journal.resolve_prepared(tmp_path, decision_id=decision_id)
+    assert result[0]["phase"] == "abandoned"
+    assert journal._payload(tmp_path, decision_id)["phase"] == "abandoned"
+    assert not journal._automatic_hold(tmp_path, decision_id).exists()

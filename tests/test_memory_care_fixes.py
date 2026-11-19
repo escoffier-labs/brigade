@@ -417,3 +417,35 @@ def test_git_being_unavailable_only_stops_the_fix_that_needs_it(tmp_path, monkey
     else:
         assert result["reasons"] == {"date-unavailable": 1}
         assert path.read_bytes() == before
+
+
+def test_apply_surfaces_a_hold_written_by_automatic_recovery(tmp_path, monkeypatch):
+    from brigade import memory_care_fixes as fixes
+
+    (tmp_path / "a.md").write_bytes(b"old a")
+    (tmp_path / "b.md").write_bytes(b"old b")
+    saved = []
+
+    def interrupted(target, decision_id):
+        saved.append(decision_id)
+        raise RuntimeError("interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "finish_prepared", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            journal.commit_phased(
+                tmp_path,
+                kind="fix",
+                reason="test",
+                card_id=None,
+                changes=[journal.Change("a.md", b"old a", b"new a"), journal.Change("b.md", b"old b", b"new b")],
+                prepared_paths=["a.md"],
+                hub={},
+            )
+    (tmp_path / "b.md").write_bytes(b"edited")
+    result = fixes.apply_fixes(tmp_path, care._config_or_default(tmp_path), today=TODAY, plan={"items": []})
+    assert result["applied"] == 0
+    assert [item["decision_id"] for item in result["recovery"]] == saved
+    assert result["recovery"][0]["phase"] == "operator_required"
+    assert result["operator_recovery"] == [f"brigade memory care recover {saved[0]} --target ."]
+    assert "operator_required=1" in fixes.summary(result)

@@ -693,7 +693,9 @@ def resolve_prepared(target: Path, *, automatic: bool = False, decision_id: str 
             return _resolve_automatic(target, rows, selected=decision_id)
         if decision_id is not None:
             _directory(target, decision_id)
-        return _resolve_prepared_locked(target, selected=decision_id)
+        resolved = _resolve_prepared_locked(target, selected=decision_id)
+        _release_automatic_holds(target, resolved)
+        return resolved
 
 
 def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | None = None) -> list[dict[str, Any]]:
@@ -705,8 +707,9 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
     import base64
     from .memory_cmd import _config_or_default
 
+    operations = kernel.unfinished_operations(target)
     inflight = set()
-    for operation in kernel.unfinished_operations(target):
+    for operation in operations:
         match = re.fullmatch(rf"care-({DECISION_ID})-(prepare|finish|repair)", operation.operation_id)
         if match:
             inflight.add(match[1])
@@ -749,12 +752,16 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
                             for c in changes
                         )
                         if conflict:
-                            _hold_automatic(target, decision_id)
+                            reason = _record_automatic_hold(
+                                target,
+                                decision_id,
+                                "changed or read-only paths require operator recovery",
+                            )
                             results.append(
                                 {
                                     "decision_id": decision_id,
                                     "phase": "operator_required",
-                                    "reason": "changed or read-only paths require operator recovery",
+                                    "reason": reason,
                                 }
                             )
                             continue
@@ -767,19 +774,29 @@ def _resolve_automatic(target: Path, rows: dict[str, Any], *, selected: str | No
                         except kernel.ProjectionError as exc:
                             # Another unfinished operation overlaps these paths. The kernel refused
                             # before writing, so the decision stays prepared for named recovery.
-                            _hold_automatic(target, decision_id)
+                            reason = _record_automatic_hold(
+                                target,
+                                decision_id,
+                                f"blocked by an unfinished projection: {exc}",
+                                blocker=_blocking_projection(str(exc), operations),
+                            )
                             results.append(
                                 {
                                     "decision_id": decision_id,
                                     "phase": "operator_required",
-                                    "reason": f"blocked by an unfinished projection: {exc}",
+                                    "reason": reason,
                                 }
                             )
                             continue
                         results.append({"decision_id": decision_id, "phase": "committed", "reason": ""})
                         continue
         except _AutomaticHeld:
+            held = _automatic_hold_reason(target, decision_id)
             reason = "an earlier automatic run held this decision for operator recovery"
+            if held:
+                reason = f"{reason}: {held}"
+        except SymlinkPath:
+            reason = "a symlink in the memory-care journal requires operator recovery"
         except (JournalConflict, store.StoreError, OSError, ValueError):
             reason = "unreadable recovery operations require operator recovery"
         results.append({"decision_id": decision_id, "phase": "operator_required", "reason": reason})
@@ -791,18 +808,115 @@ class _AutomaticHeld(Exception):
 
 
 def _automatic_hold(target: Path, decision_id: str) -> Path:
-    return _directory(target, decision_id) / "automatic-hold"
+    """Resolve the hold marker, so a symlink here is refused like every journal path."""
+    return safe_path(target, f"{JOURNAL_REL}/{decision_id}/automatic-hold")
 
 
-def _hold_automatic(target: Path, decision_id: str) -> None:
+def _hold_automatic(target: Path, decision_id: str, *, reason: str, blocker: tuple[str, str] | None = None) -> None:
     """Keep later automatic runs off a decision that once needed an operator.
 
     The conflict can clear later, for example when edited bytes return to their
     captured state. Only named recovery may finish the decision after that. The
     marker is a separate file, so it never touches paths a kernel operation owns.
+    The body names the reason and the blocking operation so a later run can echo
+    them instead of reporting a constant.
     """
-    store.write_private(_automatic_hold(target, decision_id), "operator recovery required\n")
+    lines = ["operator recovery required", f"reason: {' '.join(reason.split())}"]
+    if blocker is not None:
+        operation_id, status = blocker
+        lines.extend((f"blocking_operation: {operation_id}", f"blocking_status: {status}"))
+    store.write_private(_automatic_hold(target, decision_id), "\n".join(lines) + "\n")
     store.fsync_dir(_directory(target, decision_id))
+
+
+def _record_automatic_hold(
+    target: Path, decision_id: str, reason: str, *, blocker: tuple[str, str] | None = None
+) -> str:
+    """Persist the hold and keep the reason that made it when the write fails."""
+    try:
+        _hold_automatic(target, decision_id, reason=reason, blocker=blocker)
+    except (JournalConflict, store.StoreError, OSError, ValueError) as exc:
+        return f"{reason}; automatic hold not recorded: {exc}"
+    return reason
+
+
+_HOLD_MARKER_MAX_BYTES = 4096
+_HOLD_FIELD_MAX_CHARS = 200
+
+
+def _hold_field(value: str) -> str:
+    """One marker field as a single printable line of bounded length, since the marker is untrusted input."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())[:_HOLD_FIELD_MAX_CHARS]
+
+
+def _automatic_hold_reason(target: Path, decision_id: str) -> str:
+    """Read the recorded blocker so a later run still names it.
+
+    The marker is read like other private journal files: no symlinks, regular files only, a size
+    cap, and a non-blocking open so a FIFO cannot stall the run. Any failure only drops the detail;
+    the decision is already held by the time this runs.
+    """
+    try:
+        body = store.read_private(_automatic_hold(target, decision_id), max_bytes=_HOLD_MARKER_MAX_BYTES)
+    except (JournalConflict, store.StoreError, OSError, ValueError):
+        return ""
+    if body is None:
+        return ""
+    fields: dict[str, str] = {}
+    for line in body.splitlines():
+        key, separator, value = line.partition(": ")
+        if separator:
+            fields[key] = _hold_field(value)
+    parts = [fields["reason"]] if fields.get("reason") else []
+    if fields.get("blocking_operation"):
+        parts.append(f"blocked by {fields['blocking_operation']} ({fields.get('blocking_status') or 'unknown'})")
+    return "; ".join(parts)
+
+
+def _blocking_projection(diagnostic: str, operations: Sequence[kernel.OperationSummary]) -> tuple[str, str] | None:
+    """Name the unfinished operation the kernel refused to overlap."""
+    for operation in operations:
+        if operation.operation_id in diagnostic:
+            return operation.operation_id, operation.status
+    return None
+
+
+def _release_automatic_holds(target: Path, resolved: Sequence[dict[str, Any]]) -> None:
+    """Clear a hold only after named recovery committed or abandoned the decision.
+
+    An undo decision commits with phase ``undone``, so that counts as committed here.
+
+    Automatic resolution never reaches this function, so a run that fails closed
+    cannot release its own hold. A decision that is still prepared, quarantined,
+    unreadable, or covered by an unfinished kernel operation keeps the marker.
+    """
+    finished = {"committed", "abandoned", "undone"}
+    outstanding: set[str] | None = None
+    seen: set[str] = set()
+    for item in resolved:
+        decision_id = item.get("decision_id")
+        if not isinstance(decision_id, str) or item.get("phase") not in finished or decision_id in seen:
+            continue
+        seen.add(decision_id)
+        try:
+            marker = _automatic_hold(target, decision_id)
+            if not marker.exists():
+                continue
+            if _payload(target, decision_id).get("phase") not in finished:
+                continue
+            if outstanding is None:
+                outstanding = {operation.operation_id for operation in kernel.unfinished_operations(target)}
+            if any(
+                re.fullmatch(rf"care-{re.escape(decision_id)}-(prepare|finish|repair)", operation_id)
+                for operation_id in outstanding
+            ):
+                continue
+            marker.unlink(missing_ok=True)
+            store.fsync_dir(_directory(target, decision_id))
+        except (JournalConflict, store.StoreError, OSError, ValueError):
+            # A marker that cannot be read or removed is an operator problem, not
+            # a reason to report a recovery that did not happen. Keep it in place.
+            continue
 
 
 def _quarantine_decision(target: Path, decision_id: str) -> None:
