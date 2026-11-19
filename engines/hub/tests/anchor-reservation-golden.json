@@ -53,6 +53,24 @@
   "text": "---\nclaim_anchor_ids: [\"c-333333\", \"c-111111\"]\n---\nClaim.\n"
  },
  {
+  "expected": "---\nclaim_anchor_ids: [\"c-111111\", \"c-222222\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111",
+   "c-222222"
+  ],
+  "name": "existing-list-duplicate",
+  "text": "---\nclaim_anchor_ids: [\"c-111111\", \"c-111111\"]\n---\nClaim.\n"
+ },
+ {
+  "expected": "---\nclaim_anchor_ids: [\"c-111111\", \"c-222222\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111",
+   "c-222222"
+  ],
+  "name": "existing-list-marker",
+  "text": "---\nclaim_anchor_ids: [\"c-111111\"] # hidden-marker\n---\nClaim.\n"
+ },
+ {
   "expected": "---\ntitle: T\n\nclaim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n",
   "ids": [
    "c-111111"

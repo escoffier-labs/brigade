@@ -213,6 +213,10 @@ fn shared_span_table_and_whitespace_suffixes() {
 // These helpers run on the fixture scope, where a retrieval report authorizes the apply.
 // ranking_gate_tests covers real scopes, where the ranking projection does.
 async fn anchor_ready(token: &str) -> (Hub, Json) {
+    anchor_ready_text(token, &format!("{OLD}\n\nClaim.\n")).await
+}
+
+async fn anchor_ready_text(token: &str, text: &str) -> (Hub, Json) {
     if token != AGENT_TOKEN {
         return anchor_ready_origin(token, None).await;
     }
@@ -221,7 +225,7 @@ async fn anchor_ready(token: &str) -> (Hub, Json) {
     grant(&h, FIXTURE_SCOPE, &["read", "reflect"]).await;
     let grant = h.call(ADMIN_TOKEN, json!({"action":"grant","principal":"node-1","scope":FIXTURE_SCOPE,"rights":["read","reflect"],"client_event_id":h.id()})).await;
     assert_eq!(grant.status, 200);
-    let put = h.call(ADMIN_TOKEN, json!({"action":"import","scope":FIXTURE_SCOPE,"card_id":"a","text":format!("{OLD}\n\nClaim.\n"),"client_event_id":h.id()})).await;
+    let put = h.call(ADMIN_TOKEN, json!({"action":"import","scope":FIXTURE_SCOPE,"card_id":"a","text":text,"client_event_id":h.id()})).await;
     assert_eq!(put.status, 201);
     for (i, id) in attestation_tests::REFS.iter().enumerate() {
         assert_eq!(
@@ -437,6 +441,33 @@ async fn anchor_proof_refuses_reservations_the_transform_did_not_add() {
             .any(|c| c["code"] == "tier_requires_review"),
         "{report:?}"
     );
+}
+
+#[tokio::test]
+async fn a_non_canonical_reservation_line_holds_automatic_anchoring() {
+    // Unsorted, compactly spaced and duplicated existing values are not the
+    // writer's form. Tier 0 may not rewrite them, so the proposal stays for
+    // review instead of applying.
+    let text = "---\nclaim_anchor_ids: [\"c-222222\",\"c-111111\",\"c-111111\"]\n---\nUse the focused gate. ^c-abcdef\n\nClaim.\n";
+    let (h, id) = anchor_ready_text(AGENT_TOKEN, text).await;
+    let report = attestation_tests::report(&h, &id).await;
+    assert_eq!(
+        report.body["structural_anchor_proof"],
+        json!(false),
+        "{report:?}"
+    );
+    assert!(
+        report.body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "tier_requires_review"),
+        "{report:?}"
+    );
+    let automatic = h
+        .call(ADMIN_TOKEN, attestation_tests::auto_request(&h, &id).await)
+        .await;
+    assert_ne!(automatic.body["state"], "applied", "{automatic:?}");
 }
 
 async fn forged_origin_stays_review_only(token: &str, origin: Option<&str>, action: &str) {

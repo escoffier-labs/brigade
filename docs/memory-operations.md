@@ -1151,10 +1151,11 @@ records retain `retrieval_eval_unbound`.
 Real scopes have no report to bind. There the gate admits only Tier 0
 proposals made entirely of `append_evidence` and `anchor_blocks`, and only when
 each target's ranking digest is unchanged by the apply. Search indexes the card
-without its `evidence:` and `claim_anchor_ids:` front-matter lines, without
-blank front-matter lines and without ` ^c-xxxxxx` anchor suffixes, so evidence
-refs, anchor reservations and those blanks are stored and shown but never
-searchable. Index format `3` and scorer `lineage-source-v7` introduced the
+without its `evidence:` front-matter line, without a `claim_anchor_ids:` line
+that holds nothing but anchor ids, without blank front-matter lines and without
+` ^c-xxxxxx` anchor suffixes, so evidence refs, anchor reservations and those
+blanks are stored and shown but never searchable. Any other value on a
+`claim_anchor_ids:` line, such as a comment, is still searched. Index format `3` and scorer `lineage-source-v7` introduced the
 reservation and blank-line exclusions; format `2` and `lineage-source-v4`
 introduced the evidence and suffix ones. The hub rebuilds its index on the next
 start, and an older retrieval evaluation record holds with

@@ -105,10 +105,26 @@ pub fn without_key(text: &str, key: &str) -> String {
     }
     format!("---\n{}\n---\n{body}", kept.join("\n"))
 }
+/// The most ids the anchoring transform reserves for one card.
+const MAX_ANCHORS: usize = 4096;
+/// A `claim_anchor_ids` line holding only ids the writer mints: the exact key,
+/// one space, a bounded JSON list of anchor ids and nothing after it. Any
+/// other value, such as a comment or a non-id string, stays searchable.
+fn anchor_id_line(line: &str) -> bool {
+    let Some(value) = line.strip_prefix("claim_anchor_ids: ") else {
+        return false;
+    };
+    let Ok(ids) = serde_json::from_str::<Vec<String>>(value) else {
+        return false;
+    };
+    ids.len() <= MAX_ANCHORS && ids.iter().all(|id| proposal_blocks::anchor(id))
+}
 /// The card without the front-matter lines [`set`] would treat as any of
 /// `keys`, and without blank front-matter lines. Search reads it, because the
 /// writer inserts a field at the closing fence, after a trailing blank line,
 /// and the blank must not change the text a card reads before and after that.
+/// A `claim_anchor_ids` line is dropped only while it holds nothing but ids,
+/// so a comment someone adds to it is still searched and digest-relevant.
 /// Nothing is dropped when the writer's closing fence and the search parser's
 /// differ.
 pub fn without_keys(text: &str, keys: &[&str]) -> String {
@@ -120,7 +136,14 @@ pub fn without_keys(text: &str, keys: &[&str]) -> String {
     }
     let kept: Vec<&str> = meta
         .into_iter()
-        .filter(|line| !line.trim().is_empty() && !keys.iter().any(|key| is_key(line, key)))
+        .filter(|line| {
+            if line.trim().is_empty() {
+                return false;
+            }
+            !keys.iter().any(|key| {
+                is_key(line, key) && (*key != "claim_anchor_ids" || anchor_id_line(line))
+            })
+        })
         .collect();
     if kept.is_empty() {
         return body.to_string();
@@ -226,6 +249,31 @@ pub fn reserve_anchors(text: &str, ids: &BTreeSet<String>) -> Result<String, &'s
         "\n"
     };
     Ok(updated.replace('\n', ending) + &text[offset..])
+}
+/// The exact `claim_anchor_ids` line, or `None` when the field is absent. A
+/// line whose stripped key names the field but whose exact key does not, or
+/// more than one such line, is refused: the writer would replace a line the
+/// exact-key reader never sees.
+pub fn anchor_reservation_line(text: &str) -> Result<Option<String>, &'static str> {
+    let (meta, _) = front(text)?;
+    let mut found = Vec::new();
+    for line in meta {
+        let Some((key, _)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() == "claim_anchor_ids" {
+            found.push((key, line));
+        }
+    }
+    match found.as_slice() {
+        [] => Ok(None),
+        [(key, line)] if *key == "claim_anchor_ids" => Ok(Some((*line).to_string())),
+        _ => Err("ambiguous claim anchor reservations"),
+    }
+}
+/// The exact `claim_anchor_ids` line [`reserve_anchors`] writes for `ids`.
+pub fn canonical_anchor_reservation(ids: &BTreeSet<String>) -> String {
+    format!("claim_anchor_ids: {}", anchor_list(ids))
 }
 /// Every front-matter line the writer would not treat as `key`, blank lines
 /// included, so a structural proof can bind the metadata bytes it did not write.

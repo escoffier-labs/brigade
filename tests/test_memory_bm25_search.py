@@ -374,6 +374,14 @@ def test_a_blank_metadata_line_reads_the_same_before_and_after_an_evidence_rewri
     assert memory_bm25.ranking_text(before) == memory_bm25.ranking_text(after)
 
 
+def test_a_comment_after_the_reservation_list_stays_searchable():
+    text = '---\nclaim_anchor_ids: ["c-abcdef"] # hidden-marker\n---\nClaim.\n'
+    ranked = memory_bm25.ranking_text(text)
+    assert "hidden-marker" in ranked
+    assert "claim_anchor_ids" in ranked
+    assert "hidden" in memory_bm25.tokenize(ranked)
+
+
 def test_a_blank_metadata_line_reads_the_same_before_and_after_a_reservation():
     before = "---\ntitle: T\n\n---\nClaim.\n"
     # The writer appends the reservation at the closing fence, after the blank.

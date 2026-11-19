@@ -58,6 +58,18 @@ CASES = [
         "ids": ["c-111111", "c-222222", "c-333333"],
     },
     {
+        # The writer normalizes duplicates; Tier 0 refuses that rewrite.
+        "name": "existing-list-duplicate",
+        "text": '---\nclaim_anchor_ids: ["c-111111", "c-111111"]\n---\nClaim.\n',
+        "ids": ["c-111111", "c-222222"],
+    },
+    {
+        # A comment after the list is not the writer's form either.
+        "name": "existing-list-marker",
+        "text": '---\nclaim_anchor_ids: ["c-111111"] # hidden-marker\n---\nClaim.\n',
+        "ids": ["c-111111", "c-222222"],
+    },
+    {
         "name": "trailing-blank-line",
         "text": "---\ntitle: T\n\n---\nClaim.\n",
         "ids": ["c-111111"],

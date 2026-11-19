@@ -14,6 +14,7 @@ so near-identical cards still tie and callers can break ties by path.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import Counter
@@ -55,12 +56,43 @@ def _front_matter_body(text: str) -> str | None:
     return None
 
 
+_ANCHOR_ID = re.compile(r"c-[0-9a-f]{6}\Z")
+# The most ids the anchoring transform reserves for one card.
+ANCHOR_ID_LIMIT = 4096
+_ANCHOR_FIELD = "claim_anchor_ids: "
+
+
+def _anchor_id_line(line: str) -> bool:
+    """A reservation line holding only ids the writer mints, nothing after them."""
+    if not line.startswith(_ANCHOR_FIELD):
+        return False
+    try:
+        ids = json.loads(line[len(_ANCHOR_FIELD) :])
+    except ValueError:
+        return False
+    return (
+        isinstance(ids, list)
+        and len(ids) <= ANCHOR_ID_LIMIT
+        and all(isinstance(ident, str) and _ANCHOR_ID.fullmatch(ident) for ident in ids)
+    )
+
+
+def _hidden_line(line: str, keys: Collection[str]) -> bool:
+    """Whether search leaves `line` out: a blank line or a field with nothing to read."""
+    key = line.partition(":")[0]
+    if ":" not in line or key not in keys:
+        return False
+    return key != "claim_anchor_ids" or _anchor_id_line(line)
+
+
 def _without_keys(text: str, keys: Collection[str]) -> str:
     """Drop the front-matter lines the hub writer treats as one of ``keys``, and blank lines.
 
     The lines come from the writer's own parse, so a blank line or a final newline in
     the metadata reads the same before and after the writer rewrites it: the writer
-    inserts a field at the closing fence, after any trailing blank line. Nothing is
+    inserts a field at the closing fence, after any trailing blank line. A
+    ``claim_anchor_ids`` line is dropped only while it holds nothing but anchor ids, so
+    a comment someone adds to it is still searched and digest-relevant. Nothing is
     dropped when the writer's closing fence and the search parser's differ.
     """
     if not text.startswith("---\n"):
@@ -71,7 +103,7 @@ def _without_keys(text: str, keys: Collection[str]) -> str:
     if _front_matter_body(text) != body:
         return text
     lines = _writer_lines(meta)
-    kept = [line for line in lines if line.strip() and not (":" in line and line.partition(":")[0] in keys)]
+    kept = [line for line in lines if line.strip() and not _hidden_line(line, keys)]
     # A front matter left with no lines goes too, so a card that gains its first reserved field reads the same.
     return "---\n" + "\n".join(kept) + "\n---\n" + body if kept else body
 

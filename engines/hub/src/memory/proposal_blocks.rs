@@ -193,6 +193,30 @@ pub fn proven_delta(before: &str, after: &str) -> bool {
     {
         return false;
     }
+    // The stored line must already be exactly the writer's canonical form, and
+    // the new line must be that form for the existing ids plus the added ones.
+    // An automatic apply therefore never sorts, re-spaces or dedupes a value
+    // someone wrote by hand; that card stays for review.
+    let (Ok(before_line), Ok(after_line)) = (
+        super::proposal_metadata::anchor_reservation_line(before),
+        super::proposal_metadata::anchor_reservation_line(after),
+    ) else {
+        return false;
+    };
+    if let Some(line) = before_line.as_deref() {
+        let canonical = super::proposal_metadata::canonical_anchor_reservation(&before_reserved);
+        if line != canonical.as_str() {
+            return false;
+        }
+    }
+    let expected = before_reserved
+        .union(&added)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let canonical = super::proposal_metadata::canonical_anchor_reservation(&expected);
+    if after_line.as_deref() != Some(canonical.as_str()) {
+        return false;
+    }
     // No other metadata line and no other claim byte changes.
     matches!(
         (
@@ -364,6 +388,24 @@ mod tests {
             before,
             &after.replace("- Second. ^c-abcdef", "- Second.")
         ));
+    }
+    #[test]
+    fn a_non_canonical_reservation_line_is_never_normalized_by_the_proof() {
+        // Unsorted, compactly spaced and duplicated values are not the writer's
+        // canonical form, so the transform may not touch them automatically.
+        let before =
+            "---\nclaim_anchor_ids: [\"c-222222\",\"c-111111\",\"c-111111\"]\n---\nClaim.\n";
+        let after = anchor_blocks(before, "a").unwrap();
+        assert_ne!(after, before);
+        assert!(!proven_delta(before, &after), "{after}");
+        // The same values in canonical form keep every existing byte and append.
+        let canonical = "---\nclaim_anchor_ids: [\"c-111111\", \"c-222222\"]\n---\nClaim.\n";
+        let after = anchor_blocks(canonical, "a").unwrap();
+        assert!(proven_delta(canonical, &after), "{after}");
+        assert!(
+            after.contains("claim_anchor_ids: [\"c-111111\", \"c-222222\", \"c-"),
+            "{after}"
+        );
     }
     #[test]
     fn an_indented_reservation_line_is_refused_rather_than_rewritten() {

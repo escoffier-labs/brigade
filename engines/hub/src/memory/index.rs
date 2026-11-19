@@ -1496,6 +1496,13 @@ mod projection_tests {
             same.text = text.into();
             assert_eq!(ranking_digest(&same, true), digest, "{what}");
         }
+        // Anything after the list is not the writer's form, so search reads the
+        // line and a change to it moves the digest.
+        let marked = "---\nclaim_anchor_ids: [\"c-abcdef\"] # hidden-marker\n---\nneedle\n";
+        assert!(text::ranking_text(marked).contains("hidden-marker"));
+        let mut same = before.clone();
+        same.text = marked.into();
+        assert_ne!(ranking_digest(&same, true), digest, "trailing marker");
         let mut same = before.clone();
         same.revision += 1;
         same.content_hash = "different".into();
