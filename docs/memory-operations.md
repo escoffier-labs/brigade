@@ -1151,14 +1151,17 @@ records retain `retrieval_eval_unbound`.
 Real scopes have no report to bind. There the gate admits only Tier 0
 proposals made entirely of `append_evidence` and `anchor_blocks`, and only when
 each target's ranking digest is unchanged by the apply. Search indexes the card
-without its `evidence:` front-matter line and without ` ^c-xxxxxx` anchor
-suffixes, so evidence refs and anchor ids are stored and shown but never
-searchable. Index format `2` and scorer `lineage-source-v4` introduced this.
-The hub rebuilds its index on the next start, and an older retrieval
-evaluation record holds with `retrieval_eval_index_format_mismatch` or
-`retrieval_eval_scorer_mismatch` until a new run is recorded. The local card
-search ranks the same text. Hybrid scopes, mixed op lists, stale base
-revisions and any apply that would flip a card's `automated` value hold with
+without its `evidence:` and `claim_anchor_ids:` front-matter lines, without
+blank front-matter lines and without ` ^c-xxxxxx` anchor suffixes, so evidence
+refs, anchor reservations and those blanks are stored and shown but never
+searchable. Index format `3` and scorer `lineage-source-v7` introduced the
+reservation and blank-line exclusions; format `2` and `lineage-source-v4`
+introduced the evidence and suffix ones. The hub rebuilds its index on the next
+start, and an older retrieval evaluation record holds with
+`retrieval_eval_index_format_mismatch` or `retrieval_eval_scorer_mismatch`
+until a new run is recorded. The local card search ranks the same text. Hybrid
+scopes, mixed op lists, stale base revisions and any apply that would flip a
+card's `automated` value hold with
 `retrieval_eval_projection_changed` or `retrieval_eval_target_drifted`. A trusted card that declares lineage links, or
 that another live card in its scope names, is Tier 2 and stays a pending
 proposal held with `lineage_requires_review` for a reviewer to decide. The scan

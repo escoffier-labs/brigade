@@ -1,3 +1,3 @@
 - Reserve hub-created claim anchor ids in the card's `claim_anchor_ids` metadata, matching the local proposal path, so a later `remove_block` cannot free an id for reuse.
 - Extend the hub's automatic anchoring proof to admit only that reservation change beside the added suffixes, refusing any other metadata edit or an id the transform did not add.
-- Keep `claim_anchor_ids` out of the ranking text both the local and hub search paths read, so anchoring cannot move a ranking digest.
+- Keep `claim_anchor_ids` and blank front-matter lines out of the ranking text both the local and hub search paths read, so anchoring cannot move a ranking digest. Index format is now `3` and the scorer `lineage-source-v7`, so stored retrieval evaluation records hold with `retrieval_eval_index_format_mismatch` or `retrieval_eval_scorer_mismatch` until a new run is recorded.

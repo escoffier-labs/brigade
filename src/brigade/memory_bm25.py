@@ -56,10 +56,11 @@ def _front_matter_body(text: str) -> str | None:
 
 
 def _without_keys(text: str, keys: Collection[str]) -> str:
-    """Drop the front-matter lines the hub writer treats as one of ``keys``.
+    """Drop the front-matter lines the hub writer treats as one of ``keys``, and blank lines.
 
     The lines come from the writer's own parse, so a blank line or a final newline in
-    the metadata reads the same before and after the writer rewrites it. Nothing is
+    the metadata reads the same before and after the writer rewrites it: the writer
+    inserts a field at the closing fence, after any trailing blank line. Nothing is
     dropped when the writer's closing fence and the search parser's differ.
     """
     if not text.startswith("---\n"):
@@ -67,10 +68,10 @@ def _without_keys(text: str, keys: Collection[str]) -> str:
     meta, sep, body = text[4:].partition("\n---\n")
     if not sep:
         return text
-    lines = _writer_lines(meta)
-    kept = [line for line in lines if not (":" in line and line.partition(":")[0] in keys)]
-    if len(kept) == len(lines) or _front_matter_body(text) != body:
+    if _front_matter_body(text) != body:
         return text
+    lines = _writer_lines(meta)
+    kept = [line for line in lines if line.strip() and not (":" in line and line.partition(":")[0] in keys)]
     # A front matter left with no lines goes too, so a card that gains its first reserved field reads the same.
     return "---\n" + "\n".join(kept) + "\n---\n" + body if kept else body
 

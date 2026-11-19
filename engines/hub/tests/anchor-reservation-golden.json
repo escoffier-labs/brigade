@@ -1,0 +1,106 @@
+[
+ {
+  "expected": "---\nclaim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111"
+  ],
+  "name": "no-front-matter",
+  "text": "Claim.\n"
+ },
+ {
+  "expected": "---\nclaim_anchor_ids: [\"c-111111\"]\n---\nClaim.\r\n",
+  "ids": [
+   "c-111111"
+  ],
+  "name": "no-front-matter-crlf-body",
+  "text": "Claim.\r\n"
+ },
+ {
+  "expected": "---\nclaim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111"
+  ],
+  "name": "empty-list",
+  "text": "---\nclaim_anchor_ids: []\n---\nClaim.\n"
+ },
+ {
+  "expected": "---\ntitle: T\nclaim_anchor_ids: [\"c-111111\", \"c-222222\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111",
+   "c-222222"
+  ],
+  "name": "existing-list",
+  "text": "---\ntitle: T\nclaim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n"
+ },
+ {
+  "expected": "---\nclaim_anchor_ids: [\"c-111111\", \"c-222222\", \"c-333333\"]\ntitle: T\n---\nClaim.\n",
+  "ids": [
+   "c-111111",
+   "c-222222",
+   "c-333333"
+  ],
+  "name": "existing-list-compact",
+  "text": "---\nclaim_anchor_ids: [\"c-111111\",\"c-222222\"]\ntitle: T\n---\nClaim.\n"
+ },
+ {
+  "expected": "---\nclaim_anchor_ids: [\"c-111111\", \"c-222222\", \"c-333333\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111",
+   "c-222222",
+   "c-333333"
+  ],
+  "name": "existing-list-unsorted",
+  "text": "---\nclaim_anchor_ids: [\"c-333333\", \"c-111111\"]\n---\nClaim.\n"
+ },
+ {
+  "expected": "---\ntitle: T\n\nclaim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111"
+  ],
+  "name": "trailing-blank-line",
+  "text": "---\ntitle: T\n\n---\nClaim.\n"
+ },
+ {
+  "expected": "---\ntitle: T\n\n\nclaim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111"
+  ],
+  "name": "trailing-blank-lines",
+  "text": "---\ntitle: T\n\n\n---\nClaim.\n"
+ },
+ {
+  "expected": "---\r\ntitle: T\r\nclaim_anchor_ids: [\"c-111111\"]\r\n---\r\nClaim.\r\n",
+  "ids": [
+   "c-111111"
+  ],
+  "name": "crlf",
+  "text": "---\r\ntitle: T\r\n---\r\nClaim.\r\n"
+ },
+ {
+  "expected": "---\r\nclaim_anchor_ids: [\"c-111111\", \"c-222222\"]\r\n---\r\nClaim.\r\n",
+  "ids": [
+   "c-111111",
+   "c-222222"
+  ],
+  "name": "crlf-existing-list",
+  "text": "---\r\nclaim_anchor_ids: [\"c-111111\"]\r\n---\r\nClaim.\r\n"
+ },
+ {
+  "expected": null,
+  "ids": [
+   "c-111111",
+   "c-222222"
+  ],
+  "name": "leading-space-key",
+  "python": "---\nclaim_anchor_ids: [\"c-111111\", \"c-222222\"]\n---\nClaim.\n",
+  "text": "---\n claim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n"
+ },
+ {
+  "expected": "---\ntitle: T\nevidence: []\nclaim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n",
+  "ids": [
+   "c-111111"
+  ],
+  "name": "other-field-kept",
+  "text": "---\ntitle: T\nevidence: []\n---\nClaim.\n"
+ }
+]

@@ -105,6 +105,28 @@ pub fn without_key(text: &str, key: &str) -> String {
     }
     format!("---\n{}\n---\n{body}", kept.join("\n"))
 }
+/// The card without the front-matter lines [`set`] would treat as any of
+/// `keys`, and without blank front-matter lines. Search reads it, because the
+/// writer inserts a field at the closing fence, after a trailing blank line,
+/// and the blank must not change the text a card reads before and after that.
+/// Nothing is dropped when the writer's closing fence and the search parser's
+/// differ.
+pub fn without_keys(text: &str, keys: &[&str]) -> String {
+    let Ok((meta, body)) = front(text) else {
+        return text.to_string();
+    };
+    if text::front_matter_body(text) != Some(body) {
+        return text.to_string();
+    }
+    let kept: Vec<&str> = meta
+        .into_iter()
+        .filter(|line| !line.trim().is_empty() && !keys.iter().any(|key| is_key(line, key)))
+        .collect();
+    if kept.is_empty() {
+        return body.to_string();
+    }
+    format!("---\n{}\n---\n{body}", kept.join("\n"))
+}
 /// The non-blank front-matter lines the writer's parser reads, except any line
 /// [`set`] would treat as `key`. Empty when the card has no front matter.
 pub fn lines_without_key<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
@@ -146,8 +168,13 @@ fn anchor_list(ids: &BTreeSet<String>) -> String {
     format!("[{}]", quoted.join(", "))
 }
 /// Record claim anchor ids exactly as the local proposal path writes them. The
-/// field keeps its place when present and is inserted before the closing fence
+/// field keeps its place when present and is inserted at the closing fence
 /// otherwise; a card without front matter gains one. Every other byte stays.
+///
+/// An indented `claim_anchor_ids` line is refused rather than rewritten: the
+/// local writer treats it as the field by its stripped key, while this reader
+/// and the structural proof use the exact key, so rewriting it could drop
+/// reservations the reader never saw.
 pub fn reserve_anchors(text: &str, ids: &BTreeSet<String>) -> Result<String, &'static str> {
     if ids.iter().any(|id| !proposal_blocks::anchor(id)) {
         return Err("invalid claim anchor reservation");
@@ -168,27 +195,26 @@ pub fn reserve_anchors(text: &str, ids: &BTreeSet<String>) -> Result<String, &'s
         .ok_or("unsupported card front matter")?;
     let field = format!("claim_anchor_ids: {}", anchor_list(ids));
     let mut replaced = 0;
-    for line in &mut lines[1..closing] {
-        if line
-            .split_once(':')
-            .is_some_and(|(key, _)| key.trim() == "claim_anchor_ids")
-        {
+    for line in lines.iter_mut().take(closing).skip(1) {
+        let (exact, indented) = match line.split_once(':') {
+            Some((key, _)) => (key == "claim_anchor_ids", key.trim() == "claim_anchor_ids"),
+            None => (false, false),
+        };
+        if exact {
             *line = field.clone();
             replaced += 1;
+        } else if indented {
+            return Err("ambiguous claim anchor reservations");
         }
     }
     if replaced > 1 {
         return Err("ambiguous claim anchor reservations");
     }
     if replaced == 0 {
-        // Append after the last field, never after a trailing blank line. A
-        // blank left before the fence is part of the fence separator, so
-        // keeping it there keeps the searched text identical to before.
-        let insert = (1..closing)
-            .rev()
-            .find(|index| !lines[*index].trim().is_empty())
-            .map_or(1, |index| index + 1);
-        lines.insert(insert, field);
+        // Insert at the closing fence exactly as `_upsert_frontmatter_fields`
+        // does, after any trailing blank line, so both writers produce the
+        // same bytes for the same card.
+        lines.insert(closing, field);
     }
     let mut updated = lines.join("\n");
     if !updated.ends_with('\n') {
@@ -321,6 +347,35 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// `memory_proposals._update_metadata` is the oracle for the reservation
+    /// bytes, written by the generator beside the fixture.
+    #[test]
+    fn reservations_match_the_local_proposal_writer() {
+        let cases: Json =
+            serde_json::from_str(include_str!("../../tests/anchor-reservation-golden.json"))
+                .unwrap();
+        for case in cases.as_array().unwrap() {
+            let ids: BTreeSet<String> = case["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| id.as_str().unwrap().to_string())
+                .collect();
+            let written = reserve_anchors(case["text"].as_str().unwrap(), &ids);
+            if case["expected"].is_null() {
+                // An indented field is an upsert target for the writer but not
+                // the field for the exact-key reader, so the hub refuses it.
+                assert!(written.is_err(), "{}", case["name"]);
+            } else {
+                assert_eq!(
+                    written.unwrap(),
+                    case["expected"].as_str().unwrap(),
+                    "{}",
+                    case["name"]
+                );
+            }
+        }
+    }
     #[test]
     fn duplicate_comparison_strips_only_the_addressable_anchor() {
         assert_eq!(

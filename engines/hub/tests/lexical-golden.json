@@ -1170,7 +1170,7 @@
   },
   {
    "card_id": "evidence-blank-middle-line",
-   "ranking_text": "---\n\ntitle: T\n---\nbody\n",
+   "ranking_text": "---\ntitle: T\n---\nbody\n",
    "text": "---\nevidence: [\"a/b/c\"]\n\ntitle: T\n---\nbody\n"
   },
   {

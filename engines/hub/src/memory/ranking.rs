@@ -3,7 +3,10 @@ use super::{index::Snapshot, text};
 use serde_json::{Value as Json, json};
 use std::collections::{HashMap, HashSet};
 
-pub const SCORER_VERSION: &str = "bm25-1.2-0.75-rrf60-lineage-source-v6";
+/// Scorer identity recorded beside eval records. "v7" leaves the reserved
+/// `claim_anchor_ids` line out of the ranked text, so an older record no longer
+/// binds.
+pub const SCORER_VERSION: &str = "bm25-1.2-0.75-rrf60-lineage-source-v7";
 
 #[derive(Clone, Copy, Debug)]
 pub struct Weights {

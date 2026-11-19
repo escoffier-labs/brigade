@@ -337,7 +337,10 @@ def test_search_log_append_fails_open_while_another_writer_holds_the_lock(tmp_pa
         ("Claim. ^c-ABCDEF\n", "Claim. ^c-ABCDEF\n"),
         # The writer rewrites metadata with Rust `str::lines`, which drops a blank last line.
         ('---\ntitle: T\nevidence: ["a/b/c"]\n\n---\nbody\n', "---\ntitle: T\n---\nbody\n"),
-        ('---\nevidence: ["a/b/c"]\n\ntitle: T\n---\nbody\n', "---\n\ntitle: T\n---\nbody\n"),
+        ('---\nevidence: ["a/b/c"]\n\ntitle: T\n---\nbody\n', "---\ntitle: T\n---\nbody\n"),
+        # Blank front-matter lines are never searched, so a field the writer
+        # appends after one reads the same before and after.
+        ("---\ntitle: T\n\n---\nbody\n", "---\ntitle: T\n---\nbody\n"),
         # A fence the search parser closes earlier than the writer does leaves the card as stored.
         (
             '---\ntitle: T\n---  \nevidence: ["a/b/c"]\n---\nClaim.\n',
@@ -368,4 +371,11 @@ def test_a_blank_metadata_line_reads_the_same_before_and_after_an_evidence_rewri
     before = '---\ntitle: T\nevidence: ["a/b/c"]\n\n---\nbody ^c-abcdef\n'
     # `set` rewrites the metadata without the blank line and puts the field last.
     after = '---\ntitle: T\nevidence: ["a/b/c","d/e/f"]\n---\nbody ^c-abcdef\n'
+    assert memory_bm25.ranking_text(before) == memory_bm25.ranking_text(after)
+
+
+def test_a_blank_metadata_line_reads_the_same_before_and_after_a_reservation():
+    before = "---\ntitle: T\n\n---\nClaim.\n"
+    # The writer appends the reservation at the closing fence, after the blank.
+    after = '---\ntitle: T\n\nclaim_anchor_ids: ["c-abcdef"]\n---\nClaim. ^c-abcdef\n'
     assert memory_bm25.ranking_text(before) == memory_bm25.ranking_text(after)

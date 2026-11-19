@@ -316,6 +316,13 @@ from the repository root. `tests/memory.py` checks that they are current and
 runs gate R0 (same ids, order and scores as `bm25`) on
 `evals/memory-retrieval`.
 
+`tests/anchor-reservation-golden.json` records the bytes the local proposal
+writer produces when it reserves claim-anchor ids, and the hub's anchoring
+transform must match it exactly, including trailing blank lines and CRLF.
+Regenerate it with
+`PYTHONPATH=src python engines/hub/tests/anchor_reservation_golden.py --write`;
+`tests/memory.py` checks it is current too.
+
 Front-matter lists go through a copy of the subset of `ast.literal_eval` that
 cards use, including base-prefixed integers, lone surrogate escapes (shown as
 U+FFFD), trailing `#` comments and CPython's limit of 200 nested brackets.

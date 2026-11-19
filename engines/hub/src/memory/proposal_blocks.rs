@@ -366,6 +366,14 @@ mod tests {
         ));
     }
     #[test]
+    fn an_indented_reservation_line_is_refused_rather_than_rewritten() {
+        let before = "---\n claim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n";
+        // The writer's stripped key and the reader's exact key disagree, so the
+        // transform refuses instead of rewriting a line it never read.
+        let ids = BTreeSet::from(["c-111111".to_string(), "c-222222".to_string()]);
+        assert!(crate::memory::proposal_metadata::reserve_anchors(before, &ids).is_err());
+    }
+    #[test]
     fn opaque_markdown_and_duplicate_ids_never_resolve_by_position() {
         for body in [
             "```\nClaim. ^c-abcdef\n```\n",

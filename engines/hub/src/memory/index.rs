@@ -53,7 +53,10 @@ pub const TOP: usize = 200;
 ///
 /// "2": the `evidence` front-matter line and anchor suffixes left the indexed
 /// text. A hub restart rebuilds the index, and older eval records stop binding.
-pub const FORMAT_VERSION: &str = "2";
+///
+/// "3": the `claim_anchor_ids` line and blank front-matter lines left it too,
+/// so a card the hub anchors reads the same to search before and after.
+pub const FORMAT_VERSION: &str = "3";
 /// Delta documents below this never start a rebuild, so a small index is not
 /// rebuilt on every write.
 pub const REBUILD_FLOOR: usize = 256;

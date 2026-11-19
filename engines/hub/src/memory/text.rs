@@ -749,14 +749,16 @@ pub fn fields(text: &str, card_id: &str) -> Fields {
     }
 }
 /// `memory_bm25.ranking_text`: the card as search sees it. The `evidence` and
-/// `claim_anchor_ids` front-matter lines and the ` ^c-xxxxxx` anchor suffixes
-/// are stored and shown but never searched, so anchoring a card cannot move
-/// any ranking. The evidence line goes first, because a reference holding `<`
-/// would otherwise make the whole card opaque to the anchor parser.
+/// `claim_anchor_ids` front-matter lines, blank front-matter lines and the
+/// ` ^c-xxxxxx` anchor suffixes are stored and shown but never searched, so
+/// anchoring a card cannot move any ranking. The evidence line goes with the
+/// first pass over the metadata, because a reference holding `<` would
+/// otherwise make the whole card opaque to the anchor parser.
 pub fn ranking_text(text: &str) -> String {
-    let text = super::proposal_metadata::without_key(text, "evidence");
-    let text = super::proposal_metadata::without_key(&text, "claim_anchor_ids");
-    super::proposal_blocks::strip_anchors(&text)
+    super::proposal_blocks::strip_anchors(&super::proposal_metadata::without_keys(
+        text,
+        &["evidence", "claim_anchor_ids"],
+    ))
 }
 /// `memory_bm25.card_text`: the single BM25 field.
 pub fn card_text(fields: &Fields, body: &str) -> String {
