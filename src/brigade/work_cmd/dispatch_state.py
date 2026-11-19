@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
-from .. import localio, runguard, worker_failure
+from .. import localio, runguard
 from ..inbox_lock import InboxLockTimeout, held_file_lock_descriptor
 
 TERMINAL = frozenset({"completed", "failed", "canceled", "orphaned", "lost_race", "unknown"})
@@ -115,6 +115,16 @@ def dispatch_lock(target: Path) -> Iterator[None]:
     except InboxLockTimeout as exc:
         holder = _dispatch_lock_holder(path)
         raise ValueError(f"dispatch.lock is held; last recorded owner pid {holder}") from exc
+
+
+def holds_dispatch_lock() -> bool:
+    """Report whether this context holds the dispatch lease.
+
+    Derived dispatch state, such as the exclusion index, is written only by the
+    lease holder so a dry-run plan or `dispatch status` never mutates the
+    workspace.
+    """
+    return _EVENT_HEADS.get() is not None
 
 
 def _write_dispatch_lock_bytes(fd: int, content: bytes) -> None:
@@ -326,49 +336,26 @@ def _resets(target: Path) -> dict[str, str]:
 
 
 def failure_counts(target: Path) -> dict[str, int]:
-    resets = _resets(target)
-    counts: dict[str, int] = {}
-    for _, row in intents(target):
-        task_id = row["task_id"]
-        if row["created_at"] <= resets.get(task_id, ""):
-            continue
-        if row["state"] == "completed":
-            counts[task_id] = 0
-        elif row["state"] == "failed":
-            terminal = row.get("terminal") or {}
-            if (
-                terminal.get("infrastructure") is not True
-                and terminal.get("failure_kind") not in worker_failure.RUN_POLICY_TERMINAL_FAILURE_KINDS
-            ):
-                counts[task_id] = counts.get(task_id, 0) + 1
-    return counts
+    """Return per-task failure counts folded from the intent receipts.
+
+    The fold is advanced from the persisted exclusion index, so a watch tick
+    reads only receipts it has not seen instead of the whole history.
+    """
+    from . import dispatch_index
+
+    return dispatch_index.failure_counts(target)
 
 
 def exclusions(target: Path) -> dict[str, str]:
-    from . import claiming
-    from .ledger import locking
+    """Return tasks excluded from planning, from the index and live ledger.
 
-    result = {task_id: "circuit-breaker" for task_id, count in failure_counts(target).items() if count >= 3}
-    tasks = {task["id"]: task for task in locking._read_task_ledger(target)["tasks"]}
-    resets = _resets(target)
-    for _, row in intents(target):
-        task_id = row["task_id"]
-        if row["state"] in ACTIVE or row["state"] == "unknown":
-            result[task_id] = "active-intent"
-        elif row["state"] == "completed" and row["created_at"] > resets.get(task_id, ""):
-            task = tasks.get(task_id, {})
-            claim = claiming.claim_record(task)
-            # Claiming increments the planned revision once. Older receipts
-            # predate the explicit claimed revision field.
-            revision = row.get("claimed_item_revision", row["task_item_revision"] + 1)
-            if (
-                task.get("status") == "in_progress"
-                and claim is not None
-                and claim["claim_id"] == row["claim_id"]
-                and task.get("item_revision") == revision
-            ):
-                result[task_id] = "completed-unlanded"
-    return result
+    Claiming increments the planned revision once. Older receipts predate the
+    explicit claimed revision field, so the completed arm falls back to
+    ``task_item_revision + 1``.
+    """
+    from . import dispatch_index
+
+    return dispatch_index.exclusions(target)
 
 
 def status(*, target: Path, dispatch_id: str | None = None, json_output: bool = False) -> int:
