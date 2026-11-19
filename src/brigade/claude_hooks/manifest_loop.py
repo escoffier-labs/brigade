@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from .. import localio, verify_manifest
 
-_GIT_TIMEOUT_SECONDS = 10.0
+# One budget for every git call in a probe. The hook body runs under a 12 s envelope and two hook
+# timeouts latch the work-loop hook off for the session, so this stays well below it.
+_GIT_TIMEOUT_SECONDS = 2.0
 _PORCELAIN_PREFIX_WIDTH = 3  # "XY " before each path
 
 
@@ -27,6 +30,9 @@ _PORCELAIN_PREFIX_WIDTH = 3  # "XY " before each path
 class CoveredManifest:
     manifest_id: str
     subject_path: str
+    # Target-relative path of the manifest file. ``--manifest <id>`` errors when the id is ambiguous,
+    # a path always resolves.
+    source: str
 
 
 def _normalize(path: str) -> str:
@@ -37,29 +43,55 @@ def _normalize(path: str) -> str:
     return normalized.lstrip("/")
 
 
-def changed_paths(target: Path) -> list[str] | None:
-    """Repo-relative paths that differ from HEAD, plus untracked files, in one git call.
-
-    Returns ``None`` on any git failure so callers can fail open.
-    """
+def _git_output(target: Path, args: list[str], deadline: float) -> str | None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
     try:
         result = subprocess.run(
-            ["git", "-C", str(target), "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"],
+            ["git", "-C", str(target), *args],
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
+            # Paths are bytes on POSIX. Keep undecodable names instead of failing the whole probe.
+            encoding="utf-8",
+            errors="surrogateescape",
+            timeout=remaining,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if result.returncode != 0:
+    return result.stdout if result.returncode == 0 else None
+
+
+def changed_paths(target: Path) -> list[str] | None:
+    """Target-relative paths that differ from HEAD, plus untracked files.
+
+    ``git status`` reports paths relative to the repository root even with ``-C <subdir>``, so
+    paths outside ``target`` are dropped and the ``target`` prefix is stripped. Returns ``None``
+    on any git failure so callers can fail open.
+    """
+    deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+    prefix = _git_output(target, ["rev-parse", "--show-prefix"], deadline)
+    status = _git_output(
+        target, ["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames", "--", "."], deadline
+    )
+    if prefix is None or status is None:
         return None
+    prefix = _normalize(prefix.strip())
+    if prefix:
+        prefix = prefix.rstrip("/") + "/"
     paths: list[str] = []
-    for entry in result.stdout.split("\0"):
-        if len(entry) > _PORCELAIN_PREFIX_WIDTH:
-            paths.append(_normalize(entry[_PORCELAIN_PREFIX_WIDTH:]))
+    for entry in status.split("\0"):
+        if len(entry) <= _PORCELAIN_PREFIX_WIDTH:
+            continue
+        path = _normalize(entry[_PORCELAIN_PREFIX_WIDTH:])
+        if prefix:
+            if not path.startswith(prefix):
+                continue
+            path = path[len(prefix) :]
+        paths.append(path)
     return paths
 
 
@@ -67,7 +99,8 @@ def covered_manifests(target: Path) -> list[CoveredManifest]:
     """Tracked manifests whose exact ``subject_path`` changed in ``target``'s working tree.
 
     Scope globs do not count: only a change to the subject the manifest scores
-    asks for its verify. Returns ``[]`` on any error.
+    asks for its verify. A deleted subject cannot be scored, so it does not count
+    either. Returns ``[]`` on any error.
     """
     try:
         target = target.expanduser().resolve()
@@ -78,18 +111,19 @@ def covered_manifests(target: Path) -> list[CoveredManifest]:
         covered: list[CoveredManifest] = []
         for manifest in verify_manifest.manifests_matching_paths(target, paths):
             subject = _normalize(manifest.subject_path or "")
-            if subject and subject in changed:
-                covered.append(CoveredManifest(manifest.manifest_id, subject))
+            if not subject or subject not in changed or not (target / subject).is_file():
+                continue
+            source = verify_manifest.manifest_source_path(target, manifest) or manifest.manifest_id
+            covered.append(CoveredManifest(manifest.manifest_id, subject, source))
         return covered
     except Exception:  # noqa: BLE001 - advisory probe; fail open to the unchanged hook behavior
         return []
 
 
-def verify_command(target: Path, manifest_id: str) -> str:
+def verify_command(target: Path, source: str) -> str:
     """The manifest verify, without the session-env prefix the runtime adds."""
     return (
-        f"brigade work verify run --target {shlex.quote(str(target))} "
-        f"--manifest {shlex.quote(manifest_id)} --capture auto"
+        f"brigade work verify run --target {shlex.quote(str(target))} --manifest {shlex.quote(source)} --capture auto"
     )
 
 
@@ -113,21 +147,27 @@ def _receipt_target_is(receipt: dict[str, Any], target: Path) -> bool:
         return False
 
 
-def unverified_manifests(target: Path, since: object) -> list[CoveredManifest]:
-    """Covered manifests whose subject was written since ``since`` with no later completed receipt.
+def unverified_manifests(target: Path, since: object, written_paths: Iterable[str]) -> list[CoveredManifest]:
+    """Covered manifests whose subject this session wrote since ``since`` with no later completed receipt.
+
+    ``written_paths`` are the target-relative files this session wrote itself. A subject
+    that is only dirty, because another session, a formatter or a checkout touched it,
+    is not this session's to verify.
 
     The receipt must carry the manifest's id (``verify_manifest_id``), be
     ``completed`` like the generic Stop gate requires, and have started at or
-    after the subject's last write. ``since`` is the session start, so a subject
-    that was already dirty before the session is not this session's to verify.
+    after the subject's last write. ``since`` is the session start.
     """
     started = localio.parse_iso_datetime(since)
-    if started is None:
+    written_by_session = {_normalize(path) for path in written_paths}
+    if started is None or not written_by_session:
         return []
     try:
         target = target.expanduser().resolve()
         gaps: list[CoveredManifest] = []
         for covered in covered_manifests(target):
+            if covered.subject_path not in written_by_session:
+                continue
             try:
                 written = (target / covered.subject_path).stat().st_mtime
             except OSError:

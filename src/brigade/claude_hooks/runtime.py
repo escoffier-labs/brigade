@@ -1930,7 +1930,22 @@ def _manifest_replacements(
 ) -> list[str]:
     """One manifest verify per covered manifest. The manifest, not the agent, decides the scored subject."""
     prefix = _verify_env_prefix(session_fingerprint, hook_target)
-    return [f"{prefix}{manifest_loop.verify_command(target, item.manifest_id)}" for item in covered]
+    return [f"{prefix}{manifest_loop.verify_command(target, item.source)}" for item in covered]
+
+
+def _session_written_paths(state: dict[str, Any]) -> list[str]:
+    """Target-relative files this session wrote with a file tool.
+
+    Reuses the pre-write dependency checks, which already record the path of each
+    Edit, Write or NotebookEdit. Bash writes carry no path, so a subject changed only
+    by a shell command is not attributed to this session and its manifest gate stays
+    open (fail open).
+    """
+    return [
+        check["file_path"]
+        for check in dependencies.write_checks(state)
+        if check.get("tool_name") in _WRITE_TOOLS and isinstance(check.get("file_path"), str)
+    ]
 
 
 def _manifest_deny_hint(
@@ -2398,6 +2413,9 @@ def _handle_event(
         capture_artifact_id = state.get("exercised_artifact_id")
         if not isinstance(capture_artifact_id, str):
             capture_artifact_id = None
+        # The replacement runs the verifier with cwd=target, so it names the
+        # verifier's checkout, not a worktree a later segment writes to.
+        verify_target = effective_hook_target(payload, pin=pin, attribute_writes=False) or target
         if _has_unsupported_verifier_structure(str(command)):
             from .. import outcome_attribution
 
@@ -2408,9 +2426,6 @@ def _handle_event(
                 f"from the verifier, then run that verifier with `brigade work verify run --capture {capture_id}`."
             )
         else:
-            # The replacement runs the verifier with cwd=target, so it names the
-            # verifier's checkout, not a worktree a later segment writes to.
-            verify_target = effective_hook_target(payload, pin=pin, attribute_writes=False) or target
             replacement = _verify_replacement(
                 verify_target,
                 _first_verifier_command(str(command)),
@@ -2422,13 +2437,13 @@ def _handle_event(
                 "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
                 f"Use: {replacement}"
             )
-            manifest_hint = _manifest_deny_hint(
-                verify_target,
-                str(state["session_fingerprint"]),
-                hook_target=target if verify_target != target else None,
-            )
-            if manifest_hint:
-                reason = f"{reason}\n{manifest_hint}"
+        manifest_hint = _manifest_deny_hint(
+            verify_target,
+            str(state["session_fingerprint"]),
+            hook_target=target if verify_target != target else None,
+        )
+        if manifest_hint:
+            reason = f"{reason}\n{manifest_hint}"
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -2563,7 +2578,15 @@ def _handle_event(
                 blocking_failures.append(f"{stop_target}: run `{replacement}`")
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
                 handoff_target = stop_target
-            gaps = manifest_loop.unverified_manifests(stop_target, stop_state.get("started_at"))
+            # Gate only subjects this session wrote. The generic gate can pass because a concurrent
+            # writer drifted the tree after this session's capture (#959), and that tree is not
+            # this session's to gate either.
+            written_paths = _session_written_paths(stop_state)
+            gaps = (
+                manifest_loop.unverified_manifests(stop_target, stop_state.get("started_at"), written_paths)
+                if written_paths and not _shared_tree_block_is_foreign(stop_target, session_id, stop_state)
+                else []
+            )
             manifest_failures.extend(
                 f"{stop_target}: {gap.subject_path} changed and manifest `{gap.manifest_id}` has no completed "
                 f"receipt since the write, run `{command}`"
