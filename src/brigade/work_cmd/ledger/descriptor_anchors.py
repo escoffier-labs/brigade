@@ -599,7 +599,11 @@ def _rewrite_persisted_import_proofs(target: Path, items: list[dict[str, Any]], 
                     _replace_import_proof_bytes(parent, name, previous)
             except OSError:
                 pass
-        authority_store._dirfd_fsync(parent)
+        try:
+            authority_store._dirfd_fsync(parent)
+        except OSError:
+            # A durability failure must not skip the authority restore below.
+            pass
         try:
             # Rewriting preserves each inode, so the retained snapshot binds the
             # restored bytes again instead of needing a fresh record.
@@ -671,7 +675,11 @@ def _write_persisted_import_proofs(target: Path, items: list[dict[str, Any]], *,
                 authority_store._dirfd_unlink(parent, name)
             except FileNotFoundError:
                 pass
-        authority_store._dirfd_fsync(parent)
+        try:
+            authority_store._dirfd_fsync(parent)
+        except OSError:
+            # A durability failure must not skip the authority restore below.
+            pass
         try:
             _restore_external_file_authorities(
                 target,

@@ -1,2 +1,3 @@
 - Retry a failed metadata redaction when identical generic JSONL input is re-ingested, refreshing the quarantined row in place when the scan now succeeds and keeping the quarantine when it still fails.
-- Keep one quarantined row per failed input, preserve normal duplicate skipping for successfully redacted rows, and re-issue the persisted import proof for a refreshed row.
+- Bind the retry to an HMAC digest of the exact pre-redaction metadata recorded at quarantine time, require a clean stored injection verdict, and refuse rows written before the binding existed.
+- Reissue the persisted import proof for a refreshed row, and require that proof at promotion so an interrupted rewrite cannot promote a stale body.

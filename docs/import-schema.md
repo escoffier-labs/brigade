@@ -329,6 +329,16 @@ Work-import `--source` is normalized with `strip().lower()` and fails closed to 
 
 The optional envelope `redaction` object stores `schema`, `schema_version`, `policy_version`, `origin`, `status` (`clean` / `redacted` / `error`), `count`, and `detectors`. It never stores removed values, excerpts, or original bytes. `hashes.content` is the digest of the persisted (already redacted) text. Scanner failure, timeout, or unavailability records `status=error`, persists `[ingestion-redaction-failed]`, and cannot be treated as clean. A missing redaction record on a legacy row is not a clean verdict. New policy versions apply to future writes only; provenance backfill does not rewrite existing text.
 
+### Metadata redaction recovery (#1886)
+
+A generic JSONL row whose metadata or acceptance scan fails persists the failure placeholder, a `field_redaction` verdict of `error`, and a quarantined envelope. Re-ingesting the identical line retries that scan.
+
+The retry runs only for a pending row whose persisted proof still matches the stored bytes, whose stored envelope injection verdict is an explicit `clean` scan, and whose incoming metadata digest equals the `field_redaction_binding` written at quarantine time. The binding is an HMAC-SHA-256 over the canonical pre-redaction metadata with a per-target random salt stored at `.brigade/work/imports/redaction-retry.salt` (mode 0600, created on first use). No raw metadata value is stored in the binding.
+
+When the scan now succeeds, the row is rebuilt in place with the same id, status, and creation time, its non-placeholder values must match the stored row exactly, and its persisted proof is reissued. When the scan still fails, or the binding, injection verdict, provenance envelope, or any non-placeholder value differs, the row is not retried, the quarantine stays, and the record is skipped as a duplicate. Rows written before the binding existed carry no digest and are never retried.
+
+Promotion of a generic-ingest row requires its persisted proof, so a crash between the inbox write and the proof rewrite cannot promote a row whose proof still describes the quarantined body. Such a row must be re-ingested to recover.
+
 ### Inter-seat messages
 
 Planner, worker, and synthesis send/receive boundaries stamp

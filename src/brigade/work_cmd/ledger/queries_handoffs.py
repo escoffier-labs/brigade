@@ -25,7 +25,7 @@ from ..inbox_lock import verify_canonical_write_locks
 from ... import component_paths, evidence_redaction, provenance, runguard, trust_gate
 from ...untrusted import scan_handoff_injection_heuristics
 
-from . import inbox_provenance, tasks_plans, import_model, locking
+from . import inbox_provenance, tasks_plans, descriptor_anchors, import_model, locking
 
 
 def _metadata(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -353,10 +353,23 @@ def _find_import(target: Path, import_id: str) -> tuple[dict[str, Any] | None, l
     return None, imports
 
 
-def _import_trust_blocker(item: Mapping[str, Any] | None) -> str | None:
+def _import_trust_blocker(item: Mapping[str, Any] | None, target: Path | None = None) -> str | None:
     """Refuse promotion unless the current bytes still match a complete envelope."""
 
-    return trust_gate.promotion_blocker(item)
+    blocker = trust_gate.promotion_blocker(item)
+    if blocker or item is None:
+        return blocker
+    metadata = _metadata(item)
+    if not (inbox_provenance._IMPORT_REDACTION_BINDING_KEY in metadata or "field_redaction" in metadata):
+        return None
+    # A generic-ingest row carries the field verdict and always has a persisted
+    # proof. Requiring it here closes the crash window between the inbox write
+    # and the proof rewrite: a stale proof can never ride into a task.
+    if not isinstance(item, dict) or target is None:
+        return "import proof does not match the stored row"
+    if not descriptor_anchors._has_persisted_import_proof(item, target=target):
+        return "import proof does not match the stored row"
+    return None
 
 
 def _mark_import_promoted(
@@ -365,7 +378,7 @@ def _mark_import_promoted(
     *,
     ledger: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    blocker = _import_trust_blocker(item)
+    blocker = _import_trust_blocker(item, target)
     if blocker:
         raise locking.TaskLedgerError(blocker, reason=locking.REASON_TRUST_POLICY)
     text = str(item.get("text") or "").strip()
@@ -836,7 +849,7 @@ def _import_handoff_plan_payload(target: Path, item: dict[str, Any]) -> dict[str
         blockers.append("raw private chat fields are not allowed: " + ", ".join(private_fields))
     if not _handoff_is_document_target(target_document):
         blockers.append(f"handoff target document is invalid: {target_document}")
-    trust_blocker = _import_trust_blocker(item)
+    trust_blocker = _import_trust_blocker(item, target)
     if trust_blocker:
         blockers.append(trust_blocker)
     return {

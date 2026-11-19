@@ -177,6 +177,8 @@ def _make_import(
     acceptance: list[str] | None = None,
     template: str | None = None,
     provenance_source: str | None = None,
+    redaction_salt_source: Callable[[], bytes] | None = None,
+    item_id: str | None = None,
 ) -> dict[str, Any]:
     now = helpers._now()
     created = now.isoformat()
@@ -187,9 +189,9 @@ def _make_import(
     origin, _modality = inbox_provenance._import_origin_modality(provenance_authority, kind=kind)
     persist_text, redaction_record, redaction_failed = evidence_redaction.apply_and_record(text, origin=origin)
     field_redaction = _import_field_redaction(provenance_authority, origin)
-    item_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(persist_text)}-{uuid4().hex[:6]}"
+    resolved_id = item_id or f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(persist_text)}-{uuid4().hex[:6]}"
     item: dict[str, Any] = {
-        "id": item_id,
+        "id": resolved_id,
         "kind": kind,
         "source": source_text,
         "text": persist_text,
@@ -208,20 +210,25 @@ def _make_import(
     # Preserve producer metadata (scanner/session/capture/repo hints). A
     # validated inbound envelope may reuse safe identity fields; trust/digest
     # are always recomputed. Inbound provenance is never authority.
-    stamped_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-    inbound_provenance = stamped_metadata.pop("provenance", None)
-    stamped_metadata = inbox_provenance._sanitize_import_identity_metadata(stamped_metadata)
+    stamped_metadata, inbound_provenance = inbox_provenance._prepare_import_metadata(metadata)
+    # The digest covers exactly the pre-redaction metadata the field scan sees,
+    # so a later retry can prove it is rebuilding from the same bytes.
+    binding_payload = dict(stamped_metadata) if field_redaction is not None else None
     if field_redaction is not None:
         stamped_metadata = field_redaction.redact_mapping(
             stamped_metadata,
             exempt_keys=_IMPORT_REDACTION_EXEMPT_METADATA_KEYS,
-            reserved_keys=frozenset({"field_redaction"}),
+            reserved_keys=inbox_provenance._IMPORT_REDACTION_RESERVED_METADATA_KEYS,
         )
         redaction_failed = redaction_failed or field_redaction.failed
+        if field_redaction.failed and binding_payload is not None and redaction_salt_source is not None:
+            binding = inbox_provenance._import_redaction_binding(binding_payload, salt=redaction_salt_source())
+            if binding is not None:
+                stamped_metadata[inbox_provenance._IMPORT_REDACTION_BINDING_KEY] = binding
     stamped_metadata["provenance"] = inbox_provenance._stamp_import_provenance(
         text=persist_text,
         source=provenance_authority,
-        item_id=item_id,
+        item_id=resolved_id,
         metadata=stamped_metadata,
         ingested_at=created,
         inbound_provenance=inbound_provenance,
