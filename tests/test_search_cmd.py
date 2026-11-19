@@ -110,7 +110,8 @@ def test_search_names_code_search_api_mcp_as_maintained_owner(monkeypatch, tmp_p
 def test_search_status_with_only_the_canonical_executable_names_it(monkeypatch, tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    exe = bindir / search_cmd.CODE_GRAPH_TOOL
+    # Windows PATH lookup only finds PATHEXT names, so the stand-in carries .exe there. It is never executed.
+    exe = bindir / (f"{search_cmd.CODE_GRAPH_TOOL}.exe" if os.name == "nt" else search_cmd.CODE_GRAPH_TOOL)
     exe.write_text("#!/bin/sh\nexit 0\n")
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
@@ -121,8 +122,10 @@ def test_search_status_with_only_the_canonical_executable_names_it(monkeypatch, 
     payload = search_cmd.status_payload(tmp_path)
 
     row = payload["tools"][search_cmd.CODE_GRAPH_TOOL]
-    assert row["installed"] is True and row["binary"] == str(exe)
+    resolved = row["binary"]
+    # shutil.which on Windows may return the PATHEXT spelling (".EXE"), so compare case-normalized paths.
+    assert row["installed"] is True and os.path.normcase(resolved) == os.path.normcase(str(exe))
     assert payload["health"] == "unwired"
-    assert f"run `{exe} sync`" in payload["summary"]
+    assert f"run `{resolved} sync`" in payload["summary"]
     assert f"`{search_cmd.LEGACY_CODE_GRAPH_TOOL} sync`" not in payload["summary"]
-    assert f"{exe} sync" in payload["next_commands"]
+    assert f"{resolved} sync" in payload["next_commands"]

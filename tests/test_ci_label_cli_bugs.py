@@ -1,7 +1,14 @@
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
 
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="drives an ubuntu-latest workflow bash step with a POSIX-only minimal environment",
+)
 def test_workflow_detects_fingerprint_and_labels_cli_bugs():
     workflow_path = Path(".github/workflows/label-cli-bugs.yml")
     workflow_yaml = workflow_path.read_text()
