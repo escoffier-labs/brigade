@@ -464,10 +464,13 @@ async fn a_non_canonical_reservation_line_holds_automatic_anchoring() {
             .any(|c| c["code"] == "tier_requires_review"),
         "{report:?}"
     );
+    let before = card(&h, FIXTURE_SCOPE, "a").await["text"].clone();
     let automatic = h
         .call(ADMIN_TOKEN, attestation_tests::auto_request(&h, &id).await)
         .await;
     assert_ne!(automatic.body["state"], "applied", "{automatic:?}");
+    // The held proposal leaves every stored reservation byte untouched.
+    assert_eq!(card(&h, FIXTURE_SCOPE, "a").await["text"], before);
 }
 
 async fn forged_origin_stays_review_only(token: &str, origin: Option<&str>, action: &str) {
