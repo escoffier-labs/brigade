@@ -1990,18 +1990,35 @@ that, `status` carries a `memory_policy` summary:
 ```json
 {"memory_policy": {"auto_apply": true,
                    "tier0_op_classes": ["merge_exact_duplicates"],
-                   "reflect_principals_nonempty": true}}
+                   "reserved_scopes": ["repo:acme/api"]}}
 ```
 
 The hub adds it only for a caller that holds the `reflect` right on at least
-one scope. Other callers get no `memory_policy` key. It never carries the
-`reflect_principals` list or any credential data, and it changes no authority,
-gate or decision. When `auto_apply` is true, `reflect_principals_nonempty` is
-true, and `reflect_principal` is false for the run, `memory reflect run` skips
-every submission whose ops are all in `tier0_op_classes` and reports it as
-`skipped_reasons: {"reserved_automatic": N}` (N counts ops). A submission with
-any unreserved op, a listed caller, automatic apply off, or a hub that sends no
-summary behaves as before.
+one scope. Other callers get no `memory_policy` key. The `reflect` right is
+granted per scope, so the reservation is too. `reserved_scopes` lists the
+scopes where the caller holds `reflect` and at least one principal listed in
+`memory.reflect_principals` holds it as well, using the same grant rules as the
+hub's own checks (an exact grant, `repo:*` for repository scopes, `*` for
+repository scopes and `fleet`). A scope where only unlisted principals reflect
+is not in the list, so a proposal-only job there is the only proposer and still
+opens its merges for review. This status field carries no principal names and
+no credential data, and it changes no authority, gate or decision. Review
+holders can still read the full `policy_limits` through preflight.
+
+When `auto_apply` is true, `reflect_principal` is false for the run, every op in
+a submission is in `tier0_op_classes` and every op's scope is in
+`reserved_scopes`, `memory reflect run` skips a submission that has no history
+and reports it as `skipped_reasons: {"reserved_automatic": N}` (N counts ops).
+A submission with any other op, a listed caller, automatic apply off, a scope
+outside `reserved_scopes` or a hub that sends no summary behaves as before. A
+submission the run already opened or recorded keeps its retry and withdrawal
+path, so an open proposal from before an upgrade or a policy change is not
+orphaned.
+
+The summary reflects the fleet policy only. It does not read the persistent
+auto-apply switch or any per-proposal hold, and that is deliberate. A skipped
+job leaves the merge to the listed principal's job, which still proposes it for
+review while the switch is off, so nothing is lost by skipping.
 
 The installed timer sets only `PATH`. Configure `[memory_hub]` in the user's
 `fleet.toml` for scheduled jobs unless you import the environment pair into the

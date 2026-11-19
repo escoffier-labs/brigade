@@ -164,23 +164,40 @@ pub fn listed(policy_document: &Json, principal: &str) -> bool {
 }
 
 /// The caller-safe policy summary on the `status` reply: whether automatic
-/// apply is on, which op classes are reserved to listed principals, and
-/// whether any principal is listed. A reflect client reads it to leave a
-/// reserved class to a principal that can apply it. The caller gates it on
-/// the `reflect` right, and it never carries the `reflect_principals` list
-/// itself. It changes no authority or gate.
-pub fn policy_summary(policy_document: &Json) -> Json {
+/// apply is on, which op classes are reserved to listed principals, and the
+/// scopes where the caller holds `reflect` and a listed principal does too,
+/// so that principal's job can apply a reserved class there. `holders` maps
+/// each of the caller's reflect scopes to the principals holding `reflect`
+/// on it. A reflect client reads the summary to leave a reserved class to a
+/// principal that can apply it. The caller gates it on the `reflect` right.
+/// It carries no principal name and changes no authority or gate.
+pub fn policy_summary(policy_document: &Json, holders: &Json) -> Json {
     let memory = &policy_document["memory"];
     let classes: Vec<&str> = memory["tier0_op_classes"]
         .as_array()
         .map(|items| items.iter().filter_map(Json::as_str).collect())
         .unwrap_or_default();
+    let reserved: Vec<&str> = holders
+        .as_object()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .filter(|(_, names)| {
+                    names.as_array().is_some_and(|names| {
+                        names
+                            .iter()
+                            .filter_map(Json::as_str)
+                            .any(|n| listed(policy_document, n))
+                    })
+                })
+                .map(|(scope, _)| scope.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
     json!({
         "auto_apply": memory["auto_apply"] == true,
         "tier0_op_classes": classes,
-        "reflect_principals_nonempty": memory["reflect_principals"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()),
+        "reserved_scopes": reserved,
     })
 }
 

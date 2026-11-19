@@ -188,6 +188,78 @@ pub fn has_right<T: ReadTx + ?Sized>(
     }
     Ok(granted(&grant_rows(tx, principal)?, scope, right))
 }
+/// For a credential that holds `reflect` on some scope, the scopes where it
+/// holds the right, each with every principal that also holds `reflect` there.
+/// `None` for a credential with no reflect grant. The caller reads the policy
+/// and keeps only the scopes a listed principal holds, so these names never
+/// leave the hub. Scopes are the ones with cards plus every exact scope a
+/// reflect grant names. A wildcard grant covers the scopes that have cards.
+/// Each answer uses the `has_right` rules, so wildcards and the private
+/// `principal:` scope behave the same here.
+pub fn reflect_scope_holders<T: ReadTx + ?Sized>(
+    tx: &T,
+    credential: &Credential,
+) -> rusqlite::Result<Option<std::collections::BTreeMap<String, Vec<String>>>> {
+    if !has_right(tx, credential, None, "reflect")? {
+        return Ok(None);
+    }
+    let mut holders: Vec<(Credential, Grants)> = Vec::new();
+    let mut names = BTreeSet::new();
+    for row in tx.query("SELECT DISTINCT principal FROM memory_grants", &[])? {
+        names.insert(text(&row[0]).to_string());
+    }
+    names.insert(credential.principal().to_string());
+    for name in names {
+        let grants: Grants = grant_rows(tx, &name)?
+            .into_iter()
+            .filter(|(_, rights)| rights.contains("reflect"))
+            .collect();
+        let who = if name == ADMIN {
+            Credential::Admin
+        } else {
+            Credential::Principal {
+                id: name,
+                digest: String::new(),
+            }
+        };
+        if who == Credential::Admin || !grants.is_empty() {
+            holders.push((who, grants));
+        }
+    }
+    let mut scopes: BTreeSet<String> = tx
+        .query("SELECT DISTINCT scope FROM memory_cards", &[])?
+        .iter()
+        .map(|r| text(&r[0]).to_string())
+        .collect();
+    for (_, grants) in &holders {
+        scopes.extend(
+            grants
+                .iter()
+                .map(|(pattern, _)| pattern.clone())
+                .filter(|pattern| !pattern.contains('*')),
+        );
+    }
+    let holds = |who: &Credential, grants: &Grants, scope: &str| {
+        *who == Credential::Admin
+            || without_grants(who, scope, "reflect")
+                .unwrap_or_else(|| granted(grants, scope, "reflect"))
+    };
+    let caller_grants: Grants = grant_rows(tx, credential.principal())?;
+    let mut out = std::collections::BTreeMap::new();
+    for scope in scopes {
+        if !holds(credential, &caller_grants, &scope) {
+            continue;
+        }
+        let names = holders
+            .iter()
+            .filter(|(who, grants)| holds(who, grants, &scope))
+            .map(|(who, _)| who.principal().to_string())
+            .collect();
+        out.insert(scope, names);
+    }
+    Ok(Some(out))
+}
+
 /// The answer for a scope when the grant rows cannot change it.
 fn without_grants(credential: &Credential, scope: &str, right: &str) -> Option<bool> {
     if let Some(owner) = scope.strip_prefix("principal:") {

@@ -1951,10 +1951,11 @@ impl Store {
                     let rows = Conn(c).query("SELECT count(*) FROM memory_proposals WHERE principal=?1 AND state IN ('pending','held')", &[Value::Text(credential.principal().into())])?;
                     reply.body["proposal_quota"] = json!({"pending": num(&rows[0][0]).unwrap_or(0), "pending_per_principal": pending_limit});
                     // Grants live in this file, the policy in the hub file, so
-                    // this step only records the right and the hub step reads
-                    // the policy. The marker never leaves `read`.
-                    reply.body["reflect_holder"] =
-                        json!(auth::has_right(&Conn(c), &credential, None, "reflect")?);
+                    // this step records who holds `reflect` where and the hub
+                    // step reads the policy. The marker never leaves `read`.
+                    if let Some(holders) = auth::reflect_scope_holders(&Conn(c), &credential)? {
+                        reply.body["reflect_scope_holders"] = json!(holders);
+                    }
                 }
                 Ok(reply)
             })
@@ -1978,10 +1979,10 @@ impl Store {
                             // `reflect` right on some scope. Every other
                             // caller gets no `memory_policy` field at all.
                             if let Some(body) = reply.body.as_object_mut() {
-                                if body.remove("reflect_holder") == Some(json!(true)) {
+                                if let Some(holders) = body.remove("reflect_scope_holders") {
                                     body.insert(
                                         "memory_policy".into(),
-                                        verifier::policy_summary(&authority.policy_document),
+                                        verifier::policy_summary(&authority.policy_document, &holders),
                                     );
                                 }
                             }
