@@ -117,6 +117,16 @@ def dispatch_lock(target: Path) -> Iterator[None]:
         raise ValueError(f"dispatch.lock is held; last recorded owner pid {holder}") from exc
 
 
+def holds_dispatch_lock() -> bool:
+    """Report whether this context holds the dispatch lease.
+
+    Derived dispatch state, such as the exclusion index, is written only by the
+    lease holder so a dry-run plan or `dispatch status` never mutates the
+    workspace.
+    """
+    return _EVENT_HEADS.get() is not None
+
+
 def _write_dispatch_lock_bytes(fd: int, content: bytes) -> None:
     """Write all bytes or propagate the underlying failure."""
     offset = 0

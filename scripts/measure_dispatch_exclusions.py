@@ -183,27 +183,30 @@ def main() -> int:
             full_times.append(time.perf_counter() - started)
             full_reads = max(full_reads, reads)
 
-        dispatch_index.state_path(target).unlink(missing_ok=True)
-        started = time.perf_counter()
-        _, cold_reads = _instrumented("_read_record", dispatch_index, indexed)
-        cold_time = time.perf_counter() - started
-
-        warm_times: list[float] = []
-        warm_reads = 0
-        for _ in range(args.trials):
+        # The index is written only by the dispatcher that holds the lease, so
+        # hold it the way `--watch` does for the indexed cells.
+        with dispatch_state.dispatch_lock(target):
+            dispatch_index.state_path(target).unlink(missing_ok=True)
             started = time.perf_counter()
-            _, reads = _instrumented("_read_record", dispatch_index, indexed)
-            warm_times.append(time.perf_counter() - started)
-            warm_reads = max(warm_reads, reads)
+            _, cold_reads = _instrumented("_read_record", dispatch_index, indexed)
+            cold_time = time.perf_counter() - started
 
-        tick_times: list[float] = []
-        tick_reads = 0
-        for step in range(args.trials):
-            _inject_extra(target, args.records + step)
-            started = time.perf_counter()
-            _, reads = _instrumented("_read_record", dispatch_index, indexed)
-            tick_times.append(time.perf_counter() - started)
-            tick_reads = max(tick_reads, reads)
+            warm_times: list[float] = []
+            warm_reads = 0
+            for _ in range(args.trials):
+                started = time.perf_counter()
+                _, reads = _instrumented("_read_record", dispatch_index, indexed)
+                warm_times.append(time.perf_counter() - started)
+                warm_reads = max(warm_reads, reads)
+
+            tick_times: list[float] = []
+            tick_reads = 0
+            for step in range(args.trials):
+                _inject_extra(target, args.records + step)
+                started = time.perf_counter()
+                _, reads = _instrumented("_read_record", dispatch_index, indexed)
+                tick_times.append(time.perf_counter() - started)
+                tick_reads = max(tick_reads, reads)
 
         receipts = len(dispatch_state.intents(target))
         rows = [
@@ -212,8 +215,11 @@ def main() -> int:
             ("warm (no change)", warm_reads, statistics.median(warm_times)),
             ("tick (+1 receipt)", tick_reads, statistics.median(tick_times)),
         ]
+        index_bytes = dispatch_index.state_path(target).stat().st_size
         print(f"receipts injected: {receipts}")
         print(f"trials: {args.trials} (median for repeated cells)")
+        print(f"index size: {index_bytes} bytes ({index_bytes / receipts:.0f} bytes per receipt)")
+        print(f"identity stats per call: {receipts} (one os.scandir stat per receipt)")
         print()
         print("| cell | receipts read | ms per planning call |")
         print("| --- | ---: | ---: |")
@@ -222,7 +228,11 @@ def main() -> int:
         print()
         print(
             json.dumps(
-                {"records": receipts, "cells": [{"cell": row[0], "reads": row[1], "seconds": row[2]} for row in rows]}
+                {
+                    "records": receipts,
+                    "index_bytes": index_bytes,
+                    "cells": [{"cell": row[0], "reads": row[1], "seconds": row[2]} for row in rows],
+                }
             )
         )
     return 0

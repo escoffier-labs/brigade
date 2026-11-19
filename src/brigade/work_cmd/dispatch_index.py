@@ -37,7 +37,14 @@ Invalidation:
 
 ``exclusions`` additionally re-evaluates the completed-but-unlanded arm against
 the live task ledger on every call, so a ledger change (a release or a landed
-task) never needs a history rescan.
+task) never needs a history rescan. Every completed receipt is kept, not just the
+newest: a later completion with a different claim must not hide an earlier one
+whose claim the ledger still holds.
+
+Only the dispatcher that holds the dispatch lease writes the index. A dry-run
+plan or ``dispatch status`` reads an existing index and otherwise computes in
+memory. A write that cannot land (read-only directory, full disk) warns and
+still returns the computed fold.
 """
 
 from __future__ import annotations
@@ -45,7 +52,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass, replace
+import warnings
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -91,8 +99,9 @@ class _TaskState:
     # cleared the count.
     count: int | None = None
     active: tuple[str, str] | None = None
-    # (created_at, intent_id, claim_id, item_revision) of the last completion.
-    completed: tuple[str, str, str, int] | None = None
+    # Every completed receipt that can still match the live ledger, as
+    # (created_at, intent_id, claim_id, item_revision), oldest first.
+    completed: list[tuple[str, str, str, int]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -162,6 +171,18 @@ def _identities(target: Path) -> dict[str, _Identity]:
     return result
 
 
+def _remember_completed(state: _TaskState, entry: tuple[str, str, str, int]) -> None:
+    """Keep one completed receipt per (claim id, item revision), newest wins.
+
+    The full scan evaluates every completed receipt against the live ledger, so a
+    later completion with a different claim cannot replace an earlier one whose
+    claim the ledger still holds. Two receipts with the same claim and revision
+    make the same decision, so the newest key can stand for both.
+    """
+    state.completed = [item for item in state.completed if (item[2], item[3]) != (entry[2], entry[3])]
+    state.completed.append(entry)
+
+
 def _fold_onto(state: _TaskState, rows: Iterable[dict[str, Any]], resets: dict[str, str]) -> _TaskState:
     """Apply the pre-index fold rules for the given rows, in order."""
     for row in rows:
@@ -172,7 +193,7 @@ def _fold_onto(state: _TaskState, rows: Iterable[dict[str, Any]], resets: dict[s
             if state_name == "completed":
                 state.count = 0
                 revision = row.get("claimed_item_revision", row["task_item_revision"] + 1)
-                state.completed = (created_at, row["intent_id"], row["claim_id"], revision)
+                _remember_completed(state, (created_at, row["intent_id"], row["claim_id"], revision))
             elif state_name == "failed":
                 terminal = row.get("terminal") or {}
                 if (
@@ -216,19 +237,24 @@ def _decode_task(value: Any) -> _TaskState | None:
         isinstance(active, list) and len(active) == 2 and all(isinstance(item, str) for item in active)
     ):
         return None
-    if completed is not None and not (
-        isinstance(completed, list)
-        and len(completed) == 4
-        and isinstance(completed[0], str)
-        and isinstance(completed[1], str)
-        and isinstance(completed[2], str)
-        and type(completed[3]) is int
-    ):
+    if not isinstance(completed, list):
         return None
+    entries: list[tuple[str, str, str, int]] = []
+    for entry in completed:
+        if not (
+            isinstance(entry, list)
+            and len(entry) == 4
+            and isinstance(entry[0], str)
+            and isinstance(entry[1], str)
+            and isinstance(entry[2], str)
+            and type(entry[3]) is int
+        ):
+            return None
+        entries.append((entry[0], entry[1], entry[2], entry[3]))
     return _TaskState(
         count=count,
         active=(active[0], active[1]) if active is not None else None,
-        completed=(completed[0], completed[1], completed[2], completed[3]) if completed is not None else None,
+        completed=entries,
     )
 
 
@@ -461,7 +487,7 @@ def _render(index: _Index) -> bytes:
             task_id: {
                 "count": state.count,
                 "active": list(state.active) if state.active is not None else None,
-                "completed": list(state.completed) if state.completed is not None else None,
+                "completed": [list(entry) for entry in state.completed],
             }
             for task_id, state in index.tasks.items()
         },
@@ -469,18 +495,35 @@ def _render(index: _Index) -> bytes:
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _persist(target: Path, index: _Index) -> None:
+    """Publish the index, warning instead of failing when the write cannot land.
+
+    A read-only dispatch directory, a full disk, or something occupying the index
+    path must not turn planning into an error: the computed fold is already in
+    hand and the next call simply rebuilds.
+    """
+    try:
+        _write(target, index)
+    except OSError as exc:
+        warnings.warn(f"dispatch exclusion index not written: {exc}", stacklevel=3)
+
+
 def _snapshot(target: Path) -> tuple[_Index, dict[str, str]]:
     resets = dispatch_state._resets(target)
     resets_digest = localio.canonical_json_digest(resets)
     current = _identities(target)
+    # Only the dispatcher that holds the lease writes the index. Dry-run plans and
+    # `dispatch status` read it when it is already there and otherwise compute in
+    # memory, so a read-only caller never mutates dispatch state.
+    persist = dispatch_state.holds_dispatch_lock()
     index, dirty = _load(target, current, resets, resets_digest)
     if index is None:
         index = _rebuild(target, current, resets, resets_digest)
-        if index.records or state_path(target).exists():
-            _write(target, index)
+        if persist and (index.records or state_path(target).exists()):
+            _persist(target, index)
         return index, resets
-    if dirty and index.records:
-        _write(target, index)
+    if dirty and persist and index.records:
+        _persist(target, index)
     return index, resets
 
 
@@ -509,20 +552,24 @@ def _evaluate(target: Path, index: _Index, resets: dict[str, str]) -> dict[str, 
         best: tuple[str, str] = ("", "")
         if state.active is not None and state.active > best:
             best, reason = state.active, "active-intent"
-        completed = state.completed
-        if completed is not None:
-            created_at, intent_id, claim_id, revision = completed
-            if created_at > resets.get(task_id, ""):
-                task = tasks.get(task_id, {})
-                claim = claiming.claim_record(task)
+        if state.completed:
+            task = tasks.get(task_id, {})
+            claim = claiming.claim_record(task)
+            reset = resets.get(task_id, "")
+            completed_at: tuple[str, str] | None = None
+            for created_at, intent_id, claim_id, revision in state.completed:
+                if created_at <= reset:
+                    continue
                 if (
                     task.get("status") == "in_progress"
                     and claim is not None
                     and claim["claim_id"] == claim_id
                     and task.get("item_revision") == revision
                 ):
-                    if (created_at, intent_id) > best:
-                        reason = "completed-unlanded"
+                    if completed_at is None or (created_at, intent_id) > completed_at:
+                        completed_at = (created_at, intent_id)
+            if completed_at is not None and completed_at > best:
+                reason = "completed-unlanded"
         if reason is not None:
             result[task_id] = reason
     return result
