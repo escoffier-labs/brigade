@@ -152,7 +152,7 @@ def _check_outcome_loop(ctx: DoctorContext) -> List[CheckResult]:
                     WARN,
                     _OUTCOME_LOOP_DORMANT_NAME,
                     "wired but no verify run ever captured; "
-                    'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+                    'run `brigade work verify run --target . --command "<test>" --capture auto`',
                 )
             )
         elif name == "outcome_loop_half_fed":
@@ -196,7 +196,7 @@ def _outcome_ledger_stale_finding(
             WARN,
             _OUTCOME_LOOP_STALE_NAME,
             f"unparseable latest outcome ledger timestamp {ts_raw!r}; "
-            'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+            'run `brigade work verify run --target . --command "<test>" --capture auto`',
         )
     if latest_dt.tzinfo is None:
         latest_dt = latest_dt.replace(tzinfo=timezone.utc)
@@ -207,7 +207,7 @@ def _outcome_ledger_stale_finding(
         WARN,
         _OUTCOME_LOOP_STALE_NAME,
         f"outcome ledger empty for {age_days} days (threshold {stale_days}); "
-        'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+        'run `brigade work verify run --target . --command "<test>" --capture auto`',
     )
 
 

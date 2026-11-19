@@ -404,7 +404,7 @@ def test_operator_checkup_graph_missing_delta_requests_new_verification(monkeypa
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 1
-    assert payload["next_command"] == ("brigade work verify run --target . --command '<check>' --capture brigade-work")
+    assert payload["next_command"] == ("brigade work verify run --target . --command '<check>' --capture auto")
 
 
 def test_operator_checkup_graph_stale_delta_requests_new_verification(monkeypatch, tmp_path, capsys):
@@ -421,7 +421,7 @@ def test_operator_checkup_graph_stale_delta_requests_new_verification(monkeypatc
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 1
-    assert payload["next_command"] == ("brigade work verify run --target . --command '<check>' --capture brigade-work")
+    assert payload["next_command"] == ("brigade work verify run --target . --command '<check>' --capture auto")
 
 
 def test_operator_checkup_ledger_reports_pending_work_receipt_imports(monkeypatch, tmp_path, capsys):

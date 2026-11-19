@@ -296,7 +296,7 @@ def finding_from_check(
     commands = extract_commands(clean_detail)
     if name.startswith("outcome loop:") and not commands:
         commands = [
-            'brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>',
+            'brigade work verify run --target . --command "<test>" --capture auto',
         ]
     if (
         name == "claude work loop"

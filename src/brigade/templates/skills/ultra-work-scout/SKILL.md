@@ -30,7 +30,7 @@ Only add more scouts when the work naturally splits into independent repos or su
 5. Run verification through Brigade:
 
 ```bash
-brigade work verify run --target . --command "<test command>" --capture ultra-work-scout
+brigade work verify run --target . --command "<test command>" --capture auto
 ```
 
 If `--capture` is not available in the installed Brigade version, run:

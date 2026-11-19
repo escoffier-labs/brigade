@@ -22,6 +22,6 @@ Use this repo-shareable rule when work starts from a local task, scanner import,
 - `brigade work next`
 - `brigade work task plan <task-id>`
 - `brigade work run`
-- `brigade work verify run`
+- `brigade work verify run --target . --command "<check>" --capture auto`
 - `brigade work closeout latest`
 - `brigade work acceptance`
