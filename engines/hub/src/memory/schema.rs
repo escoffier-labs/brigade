@@ -2,7 +2,7 @@
 //! Later slices add the index, vector, proposal and evidence tables as new versions.
 use rusqlite::{Connection, OptionalExtension};
 
-pub const USER_VERSION: i64 = 15;
+pub const USER_VERSION: i64 = 16;
 /// "BRM1": refuses to treat an unrelated SQLite file as the memory store.
 pub const APPLICATION_ID: i64 = 0x4252_4D31;
 pub const NORMALIZER_VERSION: &str = "1";
@@ -203,6 +203,9 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
         let created = (|| {
             c.execute_batch(&ddl())?;
             super::hardening::migrate(c)?;
+            // The v16 covering indexes need `retained_bytes`, which
+            // `hardening::migrate` adds, so they follow it here.
+            c.execute_batch(super::hardening::QUOTA_INDEXES)?;
             let meta = [
                 ("log_epoch", super::ids::mint(now_ms)),
                 ("normalizer_version", NORMALIZER_VERSION.into()),
@@ -294,6 +297,11 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
             15,
         )
         .map_err(err)?;
+    }
+    // Version 16: covering indexes for the rollback quota probes. Additive and
+    // idempotent; existing proposals and bodies are untouched.
+    if version < 16 {
+        step(c, super::hardening::QUOTA_INDEXES, 16).map_err(err)?;
     }
     for table in TABLES {
         let present: Option<i64> = c

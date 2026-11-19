@@ -604,7 +604,7 @@ fn version_thirteen_upgrade_adds_immutable_admission_store() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 15);
+    assert_eq!(version, schema::USER_VERSION);
     db.execute(
         "INSERT INTO memory_verify_evals VALUES(1,'agent:test','{}')",
         [],
@@ -823,7 +823,7 @@ fn version_thirteen_and_fourteen_upgrade_preserve_tables_and_rows() {
         assert_eq!(
             db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            15
+            schema::USER_VERSION
         );
         for table in schema::TABLES {
             assert!(

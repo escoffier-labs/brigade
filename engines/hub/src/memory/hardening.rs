@@ -94,6 +94,24 @@ CREATE TRIGGER memory_proposals_no_delete BEFORE DELETE ON memory_proposals BEGI
 ALTER TABLE memory_retrieval_evals ADD COLUMN dense_identity TEXT;
 CREATE TRIGGER memory_vectors_changed AFTER UPDATE ON memory_vectors BEGIN INSERT INTO memory_vector_log(embedder_id,content_hash,present) VALUES(new.embedder_id,new.content_hash,1); END;
 ";
+/// v16: covering indexes for the usage probes in `quota_excluding` and
+/// `settle`. A probe reads only `state` and `retained_bytes` per proposal, so
+/// the index keeps the walk off the proposal body. The queries name their
+/// index with `INDEXED BY`: without statistics SQLite keeps the WITHOUT ROWID
+/// primary-key probe and reads every body, which is what made a large
+/// automatic-apply window miss the writer deadline (issue #2621).
+pub const QUOTA_INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS memory_proposals_scope_quota ON memory_proposals(proposal_id, state, retained_bytes);
+CREATE INDEX IF NOT EXISTS memory_proposals_principal_quota ON memory_proposals(principal, state, retained_bytes);
+";
+/// The exact principal usage probe in `quota_excluding`.
+pub(super) const PRINCIPAL_USAGE: &str = "SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0),COALESCE(SUM(proposal_id=?2 AND state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN proposal_id=?3 THEN retained_bytes ELSE 0 END),0) FROM memory_proposals INDEXED BY memory_proposals_principal_quota WHERE principal=?1";
+/// The exact scope usage probe in `quota_excluding`.
+pub(super) const SCOPE_USAGE: &str = "SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0),COALESCE(SUM(p.proposal_id=?2 AND p.state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN p.proposal_id=?3 THEN p.retained_bytes ELSE 0 END),0) FROM memory_proposals p INDEXED BY memory_proposals_scope_quota JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1";
+/// The strict principal total in `settle`.
+pub(super) const SETTLE_PRINCIPAL_USAGE: &str = "SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0) FROM memory_proposals INDEXED BY memory_proposals_principal_quota WHERE principal=?1";
+/// The strict scope total in `settle`.
+pub(super) const SETTLE_SCOPE_USAGE: &str = "SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0) FROM memory_proposals p INDEXED BY memory_proposals_scope_quota JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1";
 
 pub fn digest(body: &Json) -> String {
     let cards: Vec<_> = proposals::cards(body).iter().map(|c| json!({"scope":c["scope"],"card_id":c["card_id"],"base_revision":c["base_revision"]})).collect();
@@ -223,7 +241,14 @@ fn quota_excluding(
         within(total_pending, pending_after, pending_limit)
             && within(total_bytes, bytes_after, bytes_limit)
     };
-    let usage=tx.query("SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0),COALESCE(SUM(proposal_id=?2 AND state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN proposal_id=?3 THEN retained_bytes ELSE 0 END),0) FROM memory_proposals WHERE principal=?1", &[ops::t(proposals::string(body,"proposer")),ops::t(count_excluded),ops::t(bytes_excluded)])?;
+    let usage = tx.query(
+        PRINCIPAL_USAGE,
+        &[
+            ops::t(proposals::string(body, "proposer")),
+            ops::t(count_excluded),
+            ops::t(bytes_excluded),
+        ],
+    )?;
     if !allowed(
         &usage[0],
         limits.pending_per_principal,
@@ -240,7 +265,14 @@ fn quota_excluding(
         .map(|c| proposals::string(c, "scope"))
         .collect();
     for scope in scopes {
-        let usage=tx.query("SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0),COALESCE(SUM(p.proposal_id=?2 AND p.state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN p.proposal_id=?3 THEN p.retained_bytes ELSE 0 END),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1", &[ops::t(scope),ops::t(count_excluded),ops::t(bytes_excluded)])?;
+        let usage = tx.query(
+            SCOPE_USAGE,
+            &[
+                ops::t(scope),
+                ops::t(count_excluded),
+                ops::t(bytes_excluded),
+            ],
+        )?;
         if !allowed(&usage[0], limits.pending_per_scope, limits.bytes_per_scope) {
             return Ok(Some(ops::error(
                 429,
@@ -258,7 +290,7 @@ fn quota_excluding(
 /// same savepoint so a refusal rolls the inverse back.
 pub fn settle(tx: &dyn WriteTx, body: &Json, limits: &Limits) -> rusqlite::Result<Option<Reply>> {
     let usage = tx.query(
-        "SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0) FROM memory_proposals WHERE principal=?1",
+        SETTLE_PRINCIPAL_USAGE,
         &[ops::t(proposals::string(body, "proposer"))],
     )?;
     if number(&usage[0][0]) > limits.pending_per_principal
@@ -275,10 +307,7 @@ pub fn settle(tx: &dyn WriteTx, body: &Json, limits: &Limits) -> rusqlite::Resul
         .map(|c| proposals::string(c, "scope"))
         .collect();
     for scope in scopes {
-        let usage = tx.query(
-            "SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1",
-            &[ops::t(scope)],
-        )?;
+        let usage = tx.query(SETTLE_SCOPE_USAGE, &[ops::t(scope)])?;
         if number(&usage[0][0]) > limits.pending_per_scope
             || number(&usage[0][1]) > limits.bytes_per_scope
         {

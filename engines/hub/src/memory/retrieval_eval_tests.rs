@@ -1894,7 +1894,7 @@ fn retrieval_history_migration_13_and_legacy_14_to_15() {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            15
+            schema::USER_VERSION
         );
         assert_eq!(schema::log_epoch(&db).unwrap(), epoch);
         let trigger: String = db

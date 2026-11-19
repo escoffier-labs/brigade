@@ -1,7 +1,7 @@
 use super::retrieval_eval::FIXTURE_SCOPE;
 use super::{proposal_tests::*, tests::*, *};
 
-async fn applied() -> (Hub, Json, String) {
+pub(super) async fn applied() -> (Hub, Json, String) {
     let (h, id) = attestation_tests::ready().await;
     let before = card(&h, FIXTURE_SCOPE, "a").await["text"]
         .as_str()
