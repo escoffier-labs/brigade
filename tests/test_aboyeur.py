@@ -3889,7 +3889,7 @@ def test_write_sidecar_revision_fsyncs_revision_directory_before_projection_writ
 
     aboyeur.write_sidecar_revision(output_dir, "worker-results.json", {"ok": True})
 
-    if aboyeur._supports_directory_fsync():
+    if os.name == "posix":
         assert events == [
             "fsync:run-directory",
             "fsync:revisions-directory",
