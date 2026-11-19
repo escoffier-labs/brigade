@@ -324,6 +324,65 @@ def test_missing_corpus_writes_no_go_without_model_calls(verify_hub):
     assert fake.calls == []
 
 
+def _malformed_corpus(target, _monkeypatch):
+    corpus(target, [None])
+
+
+def _duplicate_id_across_corpus_and_feedback(target, _monkeypatch):
+    corpus(target)
+    path = target / gate.FEEDBACK
+    path.write_bytes(io.json_bytes({"cases": [case()], "counts": {}}))
+    # The gate reads retained feedback as a private state file, as retain_case writes it.
+    path.chmod(0o600)
+
+
+def _expired_deadline(target, monkeypatch):
+    corpus(target)
+    real = gate.evaluation.evaluate
+    ticks = iter((0.0, 10.0**9)).__next__
+    monkeypatch.setattr(gate.evaluation, "evaluate", lambda cases, **kwargs: real(cases, clock=ticks, **kwargs))
+
+
+@pytest.mark.parametrize(
+    ("case_code", "broken"),
+    [
+        ("verify_eval_case_invalid", _malformed_corpus),
+        ("verify_eval_duplicate_id", _duplicate_id_across_corpus_and_feedback),
+        ("verify_eval_timeout", _expired_deadline),
+    ],
+)
+def test_gate_records_the_eval_code_and_stays_no_go(verify_hub, capsys, monkeypatch, case_code, broken):
+    from brigade import cli
+    from brigade import memory_verify_cmd as cmd
+
+    target, hub, fake, _ = verify_hub
+    broken(target, monkeypatch)
+    monkeypatch.setattr(gate, "evaluator", lambda *args: cmd._hub(target)[1])
+    setattr(hub, "do_verify_eval.record", lambda body: (201, {"verify_evaluation": body["record"]}))
+    assert cli.main(["memory", "verify", "gate", "--target", str(target), "--json"]) == 0
+    value = json.loads(capsys.readouterr().out)
+    assert value["status"] == "completed"
+    assert value["report"]["code"] == case_code
+    assert all(row["decision"] == "no-go" for row in value["classes"].values())
+    assert json.loads((target / gate.RECORD).read_bytes())["report"]["code"] == case_code
+    assert fake.calls == []
+
+
+def test_gate_records_unavailable_for_an_unlisted_failure_code(verify_hub, monkeypatch):
+    target, _, fake, _ = verify_hub
+    pair = fake.ready(target, None, None)
+    corpus(target)
+
+    def unclassified(*_args, **_kwargs):
+        raise ValueError("corpus exploded at /private/corpus.json with useful but free-form text")
+
+    monkeypatch.setattr(gate.evaluation, "read_corpus", unclassified)
+    record = gate.run(target, pair=pair, binding="a" * 64, now_ms=1000)
+    assert record["report"]["code"] == "verify_eval_unavailable"
+    assert all(row["decision"] == "no-go" for row in record["classes"].values())
+    assert fake.calls == []
+
+
 def test_eval_cli_is_offline_and_reports_operation_metrics(verify_hub, capsys):
     from brigade import cli
 
