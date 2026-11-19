@@ -846,7 +846,7 @@ def _validate_completed_ledger_bytes(raw: bytes, path: Path) -> str | None:
             raise OutcomeLedgerError(_ledger_corrupt_message(line_no, "empty", path, detail="empty ledger line"))
         try:
             row = json.loads(line)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
             raise OutcomeLedgerError(
                 _ledger_corrupt_message(line_no, "is not valid JSON", path, detail=str(exc))
             ) from exc
@@ -1030,7 +1030,7 @@ def _recover_interrupted_append(path: Path) -> None:
                 return
             try:
                 payload = json.loads(tail.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
                 payload = None
             if isinstance(payload, dict) and _recoverable_trailing_record(payload, data[:truncate_to], path):
                 action = "finalize"

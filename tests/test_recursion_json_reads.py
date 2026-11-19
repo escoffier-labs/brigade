@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import causal_receipt, dogfood_cmd, evidence_cmd, outcome_cmd, scorecard
+from brigade import causal_receipt, dogfood_cmd, evidence_cmd, outcome, outcome_cmd, scorecard
 from brigade.work_cmd import verification
 
 DEEP_JSON = "[" * 200000
@@ -73,3 +73,28 @@ def test_evidence_last_run_is_none_for_deep_json(tmp_path: Path) -> None:
     path.write_text(DEEP_JSON)
 
     assert evidence_cmd._read_last_run(tmp_path, "src") is None
+
+
+def _ledger_with_one_row(tmp_path: Path) -> Path:
+    row = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [row])
+    return tmp_path / "memory" / "outcome" / "records.jsonl"
+
+
+def test_ledger_validation_reports_a_deep_row_as_corrupt(tmp_path: Path) -> None:
+    path = _ledger_with_one_row(tmp_path)
+    raw = path.read_bytes() + DEEP_JSON.encode() + b"\n"
+
+    with pytest.raises(outcome_cmd.OutcomeLedgerError, match="is not valid JSON"):
+        outcome_cmd._validate_completed_ledger_bytes(raw, path)
+
+
+def test_interrupted_append_recovery_drops_a_deep_trailing_line(tmp_path: Path) -> None:
+    path = _ledger_with_one_row(tmp_path)
+    completed = path.read_bytes()
+    with path.open("ab") as handle:
+        handle.write(DEEP_JSON.encode())
+
+    outcome_cmd._recover_interrupted_append(path)
+
+    assert path.read_bytes() == completed

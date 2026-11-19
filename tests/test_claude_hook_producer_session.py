@@ -971,6 +971,14 @@ def test_a_malformed_foreign_state_file_fails_closed(hook_target: Path, monkeypa
     assert reason == "concurrent_session_ownership"
 
 
+def test_a_foreign_state_file_nested_past_the_parser_limit_fails_closed(hook_target: Path, monkeypatch) -> None:
+    """Every reader on the verify path, not only the strict one, must treat it as malformed."""
+    reason = _own_a_subject_with_a_foreign_state_file(
+        hook_target, monkeypatch, lambda sessions: (sessions / "foreign.json").write_text("[" * 200_000)
+    )
+    assert reason == "concurrent_session_ownership"
+
+
 def test_a_non_object_foreign_state_file_fails_closed(hook_target: Path, monkeypatch) -> None:
     reason = _own_a_subject_with_a_foreign_state_file(
         hook_target, monkeypatch, lambda sessions: (sessions / "foreign.json").write_text("[]")
