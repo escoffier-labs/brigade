@@ -468,3 +468,76 @@ async fn admission_reserves_four_pending_slots_for_anchor_repairs() {
     let status = h.call(ADMIN_TOKEN, json!({"action": "status"})).await;
     assert_eq!(status.body["proposal_quota"]["pending"], 6);
 }
+
+fn anchor_op(card: &str, revision: i64) -> Json {
+    json!({"type":"anchor_blocks","scope":"fleet","card_id":card,"base_revision":revision})
+}
+/// Opens `n` pending non-anchor proposals on distinct cards in `fleet`.
+async fn pending_repairs(h: &Hub, n: usize) {
+    for i in 0..n {
+        let card = format!("repair-{i}");
+        let put = h.put(ADMIN_TOKEN, "fleet", &card, None, OLD).await;
+        let opened = submit(h, ADMIN_TOKEN, vec![op("fleet", &card, rev(&put))]).await;
+        assert_eq!(opened.status, 201, "{opened:?}");
+    }
+}
+/// Opens `n` pending anchor-only proposals on distinct unanchored cards.
+async fn pending_anchors(h: &Hub, first: usize, n: usize) {
+    for i in first..first + n {
+        let card = format!("anchor-{i}");
+        let put = h.put(ADMIN_TOKEN, "fleet", &card, None, "Claim.\n").await;
+        let opened = submit(h, ADMIN_TOKEN, vec![anchor_op(&card, rev(&put))]).await;
+        assert_eq!(opened.status, 201, "{opened:?}");
+    }
+}
+/// Issue #2638: the reserve protects the last four pending slots no matter
+/// which proposals already hold the rest, so repairs can still be admitted.
+#[tokio::test]
+async fn anchors_stop_at_four_slots_left_of_the_principal_limit() {
+    let h = Hub::with(clean(), None);
+    pending_repairs(&h, 24).await;
+    pending_anchors(&h, 0, 4).await;
+    // 28 of 32 pending leaves exactly the four reserved slots.
+    let over = h
+        .put(ADMIN_TOKEN, "fleet", "anchor-4", None, "Claim.\n")
+        .await;
+    let refused = submit(&h, ADMIN_TOKEN, vec![anchor_op("anchor-4", rev(&over))]).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_anchor_quota_reserve")
+    );
+    // A repair proposal still uses one of the reserved slots.
+    let repair = h.put(ADMIN_TOKEN, "fleet", "repair-24", None, OLD).await;
+    let admitted = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![op("fleet", "repair-24", rev(&repair))],
+    )
+    .await;
+    assert_eq!(admitted.status, 201, "{admitted:?}");
+    let status = h.call(ADMIN_TOKEN, json!({"action": "status"})).await;
+    assert_eq!(status.body["proposal_quota"]["pending"], 29);
+}
+/// Issue #2638: a backlog of non-anchor proposals does not hand its last four
+/// pending slots to racing reflectors.
+#[tokio::test]
+async fn anchors_cannot_spend_slots_a_non_anchor_backlog_left_for_repairs() {
+    let h = Hub::with(clean(), None);
+    pending_repairs(&h, 28).await;
+    let put = h
+        .put(ADMIN_TOKEN, "fleet", "anchor-late", None, "Claim.\n")
+        .await;
+    let refused = submit(&h, ADMIN_TOKEN, vec![anchor_op("anchor-late", rev(&put))]).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (429, "memory_anchor_quota_reserve")
+    );
+    let repair = h.put(ADMIN_TOKEN, "fleet", "repair-late", None, OLD).await;
+    let admitted = submit(
+        &h,
+        ADMIN_TOKEN,
+        vec![op("fleet", "repair-late", rev(&repair))],
+    )
+    .await;
+    assert_eq!(admitted.status, 201, "{admitted:?}");
+}
