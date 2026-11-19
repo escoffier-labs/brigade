@@ -231,10 +231,13 @@ def resolve_auto_capture(target: Path, environ: Mapping[str, str] | None = None)
         return ids, True
     fallback = outcome_cmd.DEFAULT_CAPTURE_ARTIFACT_ID
     environ = os.environ if environ is None else environ
+    # Only a Claude Code session (not a ``brigade run`` worker, a Codex repo or a plain shell) has a
+    # hook-printed verify command to rerun.
+    in_claude_session = bool(environ.get("CLAUDECODE")) and not environ.get(receipt_schema.BRIGADE_RUN_ID_ENV)
     hint = (
-        ""
-        if session_fingerprint_from_env(environ)
-        else "; no single Claude session identity was found, so rerun the verify command the hook printed"
+        "; no single Claude session identity was found, so rerun the verify command the hook printed"
+        if in_claude_session and not session_fingerprint_from_env(environ)
+        else ""
     )
     print(
         f"outcome capture: auto found no skill read in this session; capturing against {fallback} (caller typed){hint}",

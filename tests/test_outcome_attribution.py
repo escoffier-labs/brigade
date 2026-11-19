@@ -307,11 +307,16 @@ def test_fallback_note_names_the_rerun_only_when_no_identity_exists(tmp_path):
     _install_skill(tmp_path, "brigade-work")
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
+        outcome_attribution.resolve_auto_capture(tmp_path, {"CLAUDECODE": "1"})
+        outcome_attribution.resolve_auto_capture(tmp_path, {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": NATIVE_ID})
+        # A plain shell or a brigade run worker has no hook-printed command to rerun.
         outcome_attribution.resolve_auto_capture(tmp_path, {})
-        outcome_attribution.resolve_auto_capture(tmp_path, {"CLAUDE_CODE_SESSION_ID": NATIVE_ID})
-    first, second = err.getvalue().splitlines()
+        outcome_attribution.resolve_auto_capture(tmp_path, {"CLAUDECODE": "1", "BRIGADE_RUN_ID": "run-1"})
+    first, second, shell, worker = err.getvalue().splitlines()
     assert "rerun the verify command the hook printed" in first
     assert "rerun" not in second
+    assert "rerun" not in shell
+    assert "rerun" not in worker
 
 
 def test_resolver_requires_the_state_session_id_to_match_its_fingerprint(tmp_path):
