@@ -191,6 +191,29 @@ pub fn exact<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> 
     Ok(proposals::stale_reason(tx, body)?.is_none())
 }
 
+/// Marker written when a reviewer rejects the watch review referral for a trip.
+/// The key is the original proposal id, so the veto survives body compaction.
+pub fn veto_key(rollback_of: &str) -> String {
+    format!("compensation_veto:{rollback_of}")
+}
+
+/// A reviewer's rejection of a watch review referral is recorded as a marker in
+/// the same transaction as the decision. The hub reads it in the transaction
+/// that would apply an inverse, so no client retry can apply a vetoed trip.
+/// Rejections recorded before this marker existed do not veto, which matches the
+/// behavior of hubs that predate it.
+pub fn reviewer_veto<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
+    let Some(id) = body["rollback_of"].as_str() else {
+        return Ok(false);
+    };
+    Ok(!tx
+        .query(
+            "SELECT 1 FROM memory_meta WHERE key=?1",
+            &[t(&veto_key(id))],
+        )?
+        .is_empty())
+}
+
 pub fn actor(body: &Json, who: &Credential, a: &Authority) -> bool {
     string(body, "proposer") == who.principal()
         && a.policy_document["memory"]["curation_owner"] == "hub"
@@ -612,6 +635,7 @@ pub fn watch(
                 | "pinned_content_changed"
                 | "pinned_block_changed"
                 | "compensation_not_exact"
+                | "compensation_vetoed"
         );
         if outcome != "failed" || permanent {
             let journal_result = if permanent { "stale" } else { outcome };
