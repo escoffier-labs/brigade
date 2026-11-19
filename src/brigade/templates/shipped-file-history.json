@@ -87,6 +87,10 @@
       {
         "sha256": "8850f5220d05e6c04120868003b7259301cfa3fe559e943196508a1233a47626",
         "tag": null
+      },
+      {
+        "sha256": "6f6bf7034ccc39d4a3042a84f5edeb4263874b98b79cc8b84692397545fefbf4",
+        "tag": null
       }
     ],
     "skill:note": [
@@ -99,6 +103,10 @@
       {
         "sha256": "dcac8b8a66195a861cb62d563b8f18a5b868b9d070d288e75f53d026d81445b5",
         "tag": "v0.16.0"
+      },
+      {
+        "sha256": "f826fb1a8fb4085f62b4db2f003169d0ecaf30e17a95919291d95627fe138e44",
+        "tag": null
       }
     ]
   }

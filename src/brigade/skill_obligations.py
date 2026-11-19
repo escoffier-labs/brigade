@@ -431,7 +431,7 @@ def _finding(
     fingerprint = hashlib.sha256(seed.encode()).hexdigest()[:16]
     finding_id = hashlib.sha256(f"skill-obligation-{seed}".encode()).hexdigest()[:12]
     suggested = {
-        KIND_CHECK: 'brigade work verify run --target . --command "<proving command>"',
+        KIND_CHECK: 'brigade work verify run --target . --command "<proving command>" --capture auto',
         KIND_REVIEW: "brigade work review run --target .",
         KIND_HANDOFF: "brigade handoff receipt record --target .",
     }.get(obligation.kind)

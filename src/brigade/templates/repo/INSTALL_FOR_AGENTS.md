@@ -20,8 +20,8 @@ Do not edit `rules/*.md` or `.learnings/*.md` directly unless the user explicitl
 Brigade is dormant until real work flows through it: installed-and-unused, its outcome ledger never fills and `brigade outcome rank` says "ranking: none". Do not leave it that way. Invoke the `brigade-work` skill and follow it every session:
 
 - `brigade work brief --target .` at the start, to see pending work before deciding what to do.
-- When a test or check result should count, run it through Brigade: `brigade work verify run --target . --command "<your test>"` (not raw).
-- Right after, `brigade outcome capture <skill-or-card-id> --run-id latest` against whatever skill or card did the work. Failures are signal too.
+- When a test or check result should count, run it through Brigade: `brigade work verify run --target . --command "<your test>" --capture auto` (not raw).
+- `--capture auto` records the outcome against the skills this session read. A typed `brigade outcome capture <skill-or-card-id> --run-id latest` after the fact is recorded as `caller_typed` and can only veto. Failures are signal too.
 - Memory Handoff only if durable (above), else `Nothing durable: <reason>`.
 
 Make sure the built-in skills are actually loaded in your harness. `brigade init` wires `brigade-work` and `ultra-work-scout` into selected harnesses, including Codex at `.codex/skills/`. This is the difference between Brigade installed and Brigade used.

@@ -25,7 +25,7 @@ In a memory/operator workspace, `brigade daily status --target .` is the lighter
 ### 2. Verify THROUGH Brigade Stack, not raw
 When you would run tests or a check to confirm a change, run it through Brigade Stack so it records the exit code:
 ```bash
-brigade work verify run --target . --command "<your test command>"   # e.g. "pytest -q", "npm test", "go test ./..."
+brigade work verify run --target . --command "<your test command>" --capture auto   # e.g. "pytest -q", "npm test", "go test ./..."
 ```
 This writes an audit receipt under `.brigade/work/verify-runs/<run-id>/` with the real status. Running tests raw produces no Brigade receipt. Neither a raw test result nor an ad hoc receipt scores an artifact.
 
@@ -34,6 +34,8 @@ To do steps 2 and 3 in one command (so the capture is never forgotten), pass `--
 brigade work verify run --target . --command "<test command>" --capture auto
 ```
 `auto` rows are marked `session_observed`. That attribution is caller-side and forgeable, so it can only lower a rank or hold a promotion, never raise or promote. If no skill was read (a Codex repo, a plain shell) it records against `brigade-work` as `caller_typed` and prints one note, so the loop never records nothing.
+
+A typed id (`--capture <skill-id>`) is still accepted but is recorded as `caller_typed` and can only veto. For a skill it can hold or roll back a promotion but never promote one, because promotion needs a scoreable manifest trial.
 
 For scoreable evidence, use an existing registered verifier manifest tracked under `verify/manifests/`:
 ```bash
@@ -59,7 +61,7 @@ Prefer `--capture auto` on the verify run; reach for a typed id only when you ar
 Do not invent a skill name you are not running just to have something to capture against.
 
 ### 4. Export receipts so the next run can reuse them (optional stations)
-When brigade-code-graph and brigade-evidence are installed, close the receipts-to-context loop so the next run sees measured evidence, not only a handoff. `brigade work verify run --capture <skill>` auto-exports and imports pending receipts after capture (fail-open when `brigade-evidence` is absent). For backlog catch-up or fleet repos, run manually:
+When brigade-code-graph and brigade-evidence are installed, close the receipts-to-context loop so the next run sees measured evidence, not only a handoff. `brigade work verify run --capture auto` auto-exports and imports pending receipts after capture (fail-open when `brigade-evidence` is absent). For backlog catch-up or fleet repos, run manually:
 ```bash
 brigade receipts export miseledger --target . --new-only --import   # fail-open if brigade-evidence is absent
 # next brigade run attaches a capped evidence brief from brigade-evidence automatically

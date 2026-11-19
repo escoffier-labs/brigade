@@ -41,8 +41,8 @@ Do not wait to be reminded. Do not edit canonical memory directly unless this is
 This repo is Brigade-wired, so real work flows THROUGH Brigade and its outcome ledger and learning ratchet fill instead of sitting empty. Invoke the `brigade-work` skill and follow it:
 
 - **Start:** `brigade work brief --target .` (or `brigade daily status --target .`) to see pending work before deciding what to do.
-- **Verify through Brigade, not raw:** when a test or check result should count, run `brigade work verify run --target . --command "<your test>"` instead of running it bare. This writes a receipt with the real exit code.
-- **Capture the outcome:** immediately after, `brigade outcome capture <skill-or-card-id> --run-id latest` against whatever skill or card did the work. A failure is signal too.
+- **Verify through Brigade, not raw:** when a test or check result should count, run `brigade work verify run --target . --command "<your test>" --capture auto` instead of running it bare. This writes a receipt with the real exit code.
+- **Capture the outcome:** `--capture auto` records it. A typed `brigade outcome capture <id> --run-id latest` is `caller_typed` and can only veto. A failure is signal too.
 - **Finish:** Memory Handoff only if durable (above).
 
 Running tests raw produces no signal. If `brigade outcome rank --target .` ever says "ranking: none", the loop is not being fed - this is the difference between Brigade installed and Brigade used.
