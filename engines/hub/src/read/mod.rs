@@ -42,13 +42,13 @@ fn hub_threads_for(available: usize) -> usize {
 pub const MEMORY_THREADS: usize = 2;
 pub const HUB_QUEUE: usize = 1024;
 pub const MEMORY_QUEUE: usize = 256;
-/// Admission looks up a credential on every request. Handler reads cannot
-/// starve it while it has its own small pool.
-pub const LOOKUP_THREADS: usize = 2;
-pub const LOOKUP_QUEUE: usize = 64;
 
 /// The reader pools a hub process opens on its database: handler reads, and the
 /// credential lookups admission runs on every request before a route reads.
+///
+/// The lookup pool is sized like the handler pool. On main both shared one pool
+/// of `hub_threads()` readers and a `HUB_QUEUE` queue, so a smaller lookup pool
+/// would make a flood of bearer values a smaller choke point than main had.
 pub struct HubPools {
     pub readers: ReaderPool,
     pub lookups: ReaderPool,
@@ -57,7 +57,7 @@ impl HubPools {
     pub fn open(path: &Path) -> Result<Self, String> {
         Ok(Self {
             readers: ReaderPool::open(path, hub_threads(), HUB_QUEUE)?,
-            lookups: ReaderPool::open(path, LOOKUP_THREADS, LOOKUP_QUEUE)?,
+            lookups: ReaderPool::open(path, hub_threads(), HUB_QUEUE)?,
         })
     }
     /// The same split without the schema check, for tests with a bare file.
@@ -65,7 +65,7 @@ impl HubPools {
     fn open_unchecked(path: &Path) -> Result<Self, String> {
         Ok(Self {
             readers: ReaderPool::open_unchecked(path, hub_threads(), HUB_QUEUE, READ_LIMIT)?,
-            lookups: ReaderPool::open_unchecked(path, LOOKUP_THREADS, LOOKUP_QUEUE, READ_LIMIT)?,
+            lookups: ReaderPool::open_unchecked(path, hub_threads(), HUB_QUEUE, READ_LIMIT)?,
         })
     }
 }

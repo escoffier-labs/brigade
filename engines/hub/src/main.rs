@@ -561,8 +561,9 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     log.credential_kind = if admin_authorized(&app, &req) {
         "admin"
     } else if f == "health" || bearer_token(&req).is_some() {
-        // A presented token with no completed lookup is `unchecked`:
-        // `anonymous` means the request presented no bearer token at all.
+        // A token was presented but no lookup has completed for it yet:
+        // `unchecked`. The lookup below overwrites this with `anonymous` when
+        // it completes without a live row.
         "unchecked"
     } else {
         // handle_inner names the credential from the single lookup it admits on.

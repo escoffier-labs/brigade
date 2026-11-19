@@ -15,6 +15,10 @@ use std::sync::{
 const ADMIN: &str = "pool-admin-token-0123456789";
 const NODE_TOKEN: &str = "pool-node-token-0123456789";
 const PRINCIPAL_TOKEN: &str = "pool-principal-token-0123456789";
+const REVOKED_NODE_TOKEN: &str = "pool-revoked-node-token-0123456789";
+const REVOKED_PRINCIPAL_TOKEN: &str = "pool-revoked-principal-token-0123456789";
+const DUAL_TOKEN: &str = "pool-dual-token-0123456789";
+const UNKNOWN_TOKEN: &str = "pool-unknown-token-0123456789";
 const NODE_ID: &str = "pool-node-1";
 const PRINCIPAL_ID: &str = "principal:pool-1";
 
@@ -60,7 +64,9 @@ impl Fixture {
             arbiter,
         }
     }
-    /// A hub database with one live node and one live message principal.
+    /// A hub database with one live node, one live message principal, one
+    /// revoked node, one revoked principal, and one digest present in both
+    /// tables.
     fn app(&self) -> App {
         let mut app = App::new(
             format!("http://{}:1", Ipv4Addr::LOCALHOST),
@@ -99,6 +105,35 @@ fn hub_db(dir: &Path) -> PathBuf {
         .execute(
             "INSERT INTO fleet_message_principals (principal_id,name,label,token_hash,created_at,revoked_at,enrollment_id) VALUES (?1,?1,'test',?2,'2026-01-01T00:00:00Z',NULL,NULL)",
             [PRINCIPAL_ID, principal.as_str()],
+        )
+        .unwrap();
+    let revoked_node = registration::digest(REVOKED_NODE_TOKEN);
+    connection
+        .execute(
+            "INSERT INTO nodes (node_id,token_sha256,label,created_at,revoked_at) VALUES ('pool-node-2',?1,NULL,'2026-01-01T00:00:00Z','2026-01-02T00:00:00Z')",
+            [revoked_node.as_str()],
+        )
+        .unwrap();
+    let revoked_principal = registration::digest(REVOKED_PRINCIPAL_TOKEN);
+    connection
+        .execute(
+            "INSERT INTO fleet_message_principals (principal_id,name,label,token_hash,created_at,revoked_at,enrollment_id) VALUES ('principal:pool-2','principal:pool-2','test',?1,'2026-01-01T00:00:00Z','2026-01-02T00:00:00Z',NULL)",
+            [revoked_principal.as_str()],
+        )
+        .unwrap();
+    // The same digest in both tables: the node row must name it, as on main,
+    // and the principal row must not add a privilege.
+    let dual = registration::digest(DUAL_TOKEN);
+    connection
+        .execute(
+            "INSERT INTO nodes (node_id,token_sha256,label,created_at,revoked_at) VALUES ('pool-dual-node',?1,NULL,'2026-01-01T00:00:00Z',NULL)",
+            [dual.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO fleet_message_principals (principal_id,name,label,token_hash,created_at,revoked_at,enrollment_id) VALUES ('principal:pool-dual','principal:pool-dual','test',?1,'2026-01-01T00:00:00Z',NULL,NULL)",
+            [dual.as_str()],
         )
         .unwrap();
     path
@@ -310,47 +345,270 @@ async fn native_memory_auth_never_waits_on_a_held_handler_pool() {
     }
 }
 
-/// The request-log label: `anonymous` only when no bearer token was presented,
-/// `unchecked` when one was but no lookup named it, and the named kind when a
-/// lookup finished.
+/// The lookup pool is sized like the handler pool, so a flood of bearer values
+/// is not a smaller choke point than it was when both shared one pool: a burst
+/// larger than the old 64-job queue is accepted and answered rather than
+/// refused, and a valid node token queued behind it still authenticates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_lookup_burst_past_the_old_queue_depth_still_answers() {
+    let fixture = Fixture::new("lookup-burst");
+    let lookups = fixture.lookups.clone();
+    let probe = lookups.queue_probe();
+    let lookup = admission::Lookup::new(lookups.clone(), ADMIN);
+    // Hold every lookup reader. The pool is at most `hub_threads()` wide, so
+    // that many gated jobs leave every reader busy and any rest in the queue.
+    let started = Arc::new(AtomicUsize::new(0));
+    let mut gates = Vec::new();
+    let mut holds = Vec::new();
+    for _ in 0..brigade_hub::read::hub_threads() {
+        let (gate, released) = std_mpsc::channel::<()>();
+        let marked = started.clone();
+        let pool = lookups.clone();
+        holds.push(tokio::spawn(async move {
+            let _ = pool
+                .submit(move |_| {
+                    marked.fetch_add(1, Ordering::SeqCst);
+                    let _ = released.recv();
+                    Ok(())
+                })
+                .await;
+        }));
+        gates.push(gate);
+    }
+    let hold_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while started.load(Ordering::SeqCst) + probe() != brigade_hub::read::hub_threads() {
+        assert!(
+            std::time::Instant::now() < hold_deadline,
+            "every lookup reader is busy"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let base = probe();
+    // More than the old queue of 64 behind its two readers.
+    const BURST: usize = 100;
+    let mut burst = Vec::new();
+    for i in 0..BURST {
+        let lookup = lookup.clone();
+        burst.push(tokio::spawn(async move {
+            let token = format!("Bearer unknown-{i}");
+            lookup.credential(Some(&token)).await
+        }));
+    }
+    let queued_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while probe() < base + BURST {
+        assert!(
+            std::time::Instant::now() < queued_deadline,
+            "a burst of {BURST} bearer values is queued, not refused"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Submitted behind the whole burst: it must still answer as a node.
+    let node = {
+        let lookup = lookup.clone();
+        tokio::spawn(async move { lookup.credential(Some(&bearer(NODE_TOKEN))).await })
+    };
+    for gate in gates {
+        let _ = gate.send(());
+    }
+    for hold in holds {
+        let _ = hold.await;
+    }
+    for (i, task) in burst.into_iter().enumerate() {
+        let found = task.await.unwrap().expect("a queued lookup is answered");
+        assert_eq!(
+            (found.kind, found.key),
+            ("anonymous", None),
+            "unknown token {i}"
+        );
+    }
+    let found = node
+        .await
+        .unwrap()
+        .expect("the node token behind the burst authenticates");
+    assert_eq!(found.kind, "node");
+    assert!(found.key.is_some());
+}
+
+/// The request-log label rule: `node`, `principal` or `admin` when a lookup
+/// named the credential, `anonymous` when no token was presented or the
+/// lookup completed with no live row, and `unchecked` when a token was
+/// presented but no lookup completed for it. Asserted with the HTTP outcome.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_request_log_names_or_marks_every_credential() {
     let fixture = Fixture::new("labels");
-    let app = fixture.app();
-    let cold = |authorization: Option<String>, uri: &str| {
+    let mut app = fixture.app();
+    app.registration = Some(registration::Registration {
+        readers: fixture.readers.clone(),
+        lookups: fixture.lookups.clone(),
+        writer: fixture.writer.clone(),
+        admin: fixture.admin(),
+        clock: None,
+        memory: None,
+    });
+    let request = |authorization: Option<String>, uri: &str| {
         let mut request = Request::builder().method("GET").uri(uri);
         if let Some(value) = authorization {
             request = request.header("authorization", value);
         }
         request.body(Body::empty()).unwrap()
     };
+    struct Case {
+        name: &'static str,
+        family: &'static str,
+        token: Option<&'static str>,
+        uri: &'static str,
+        status: u16,
+        label: &'static str,
+    }
+    let cases = [
+        // `GET /nodes` asks for a node token, so a live node is refused (403)
+        // and a live principal is unauthorized (401) after its label is set.
+        Case {
+            name: "no token",
+            family: "registration",
+            token: None,
+            uri: "/nodes",
+            status: 401,
+            label: "anonymous",
+        },
+        Case {
+            name: "valid node token",
+            family: "registration",
+            token: Some(NODE_TOKEN),
+            uri: "/nodes",
+            status: 403,
+            label: "node",
+        },
+        Case {
+            name: "valid principal token",
+            family: "registration",
+            token: Some(PRINCIPAL_TOKEN),
+            uri: "/nodes",
+            status: 401,
+            label: "principal",
+        },
+        // The lookup completed and found no live row: `anonymous`, as main
+        // logged an unknown or revoked token.
+        Case {
+            name: "unknown token",
+            family: "registration",
+            token: Some(UNKNOWN_TOKEN),
+            uri: "/nodes",
+            status: 401,
+            label: "anonymous",
+        },
+        Case {
+            name: "revoked node token",
+            family: "registration",
+            token: Some(REVOKED_NODE_TOKEN),
+            uri: "/nodes",
+            status: 401,
+            label: "anonymous",
+        },
+        Case {
+            name: "revoked principal token",
+            family: "registration",
+            token: Some(REVOKED_PRINCIPAL_TOKEN),
+            uri: "/nodes",
+            status: 401,
+            label: "anonymous",
+        },
+        // The digest is in both tables: the node row names it and gets only a
+        // node's privilege (403 here), never the principal's or the admin's.
+        Case {
+            name: "digest in nodes and principals",
+            family: "registration",
+            token: Some(DUAL_TOKEN),
+            uri: "/nodes",
+            status: 403,
+            label: "node",
+        },
+        Case {
+            name: "admin token",
+            family: "registration",
+            token: Some(ADMIN),
+            uri: "/nodes",
+            status: 200,
+            label: "admin",
+        },
+        // `/health` and `/ready` both belong to the health family. Main never
+        // waited on a reader for their label, so they stay `unchecked` with
+        // and without a token.
+        Case {
+            name: "health without token",
+            family: "health",
+            token: None,
+            uri: "/health",
+            status: 200,
+            label: "unchecked",
+        },
+        Case {
+            name: "health with token",
+            family: "health",
+            token: Some(NODE_TOKEN),
+            uri: "/health",
+            status: 200,
+            label: "unchecked",
+        },
+        Case {
+            name: "ready without token",
+            family: "health",
+            token: None,
+            uri: "/ready",
+            status: 503,
+            label: "unchecked",
+        },
+        Case {
+            name: "ready with token",
+            family: "health",
+            token: Some(NODE_TOKEN),
+            uri: "/ready",
+            status: 503,
+            label: "unchecked",
+        },
+        // Rejected before the lookup, with a valid token presented.
+        Case {
+            name: "early rejection",
+            family: "cold",
+            token: Some(NODE_TOKEN),
+            uri: "/fake?token=x",
+            status: 401,
+            label: "unchecked",
+        },
+    ];
     let mut wrong = Vec::new();
-    fn check(wrong: &mut Vec<String>, name: &str, expected: &str, app: &App) {
-        let seen = logged(app, "cold");
-        if seen.as_deref() != Some(expected) {
-            wrong.push(format!("{name}: expected {expected}, logged {seen:?}"));
+    for case in cases {
+        let (status, value) = answer(&app, request(case.token.map(bearer), case.uri)).await;
+        if status != case.status {
+            wrong.push(format!(
+                "{}: expected {case_status}, got {status} {value}",
+                case.name,
+                case_status = case.status
+            ));
+        }
+        let seen = logged(&app, case.family);
+        if seen.as_deref() != Some(case.label) {
+            wrong.push(format!(
+                "{}: expected {}, logged {seen:?}",
+                case.name, case.label
+            ));
         }
     }
-    // No token.
-    let _ = answer(&app, cold(None, "/fake")).await;
-    check(&mut wrong, "no token", "anonymous", &app);
-    // A node token and a principal token.
-    let _ = answer(&app, cold(Some(bearer(NODE_TOKEN)), "/fake")).await;
-    check(&mut wrong, "node token", "node", &app);
-    let _ = answer(&app, cold(Some(bearer(PRINCIPAL_TOKEN)), "/fake")).await;
-    check(&mut wrong, "principal token", "principal", &app);
-    // Rejected before the lookup, with a token presented.
-    let _ = answer(&app, cold(Some(bearer(NODE_TOKEN)), "/fake?token=x")).await;
-    check(&mut wrong, "early rejection", "unchecked", &app);
     // The lookup itself times out: hold every lookup reader past its deadline.
-    let held = hold_every(&fixture.lookups, brigade_hub::read::LOOKUP_THREADS);
-    let (status, value) = answer(&app, cold(Some(bearer(NODE_TOKEN)), "/fake")).await;
+    // It completed for no request, so the label stays `unchecked`.
+    let held = hold_every(&fixture.lookups, brigade_hub::read::hub_threads());
+    let (status, value) = answer(&app, request(Some(bearer(NODE_TOKEN)), "/nodes")).await;
     held.release().await;
     if value["reason"] != "credential-lookup" || status != 503 {
         wrong.push(format!(
             "lookup timeout: expected 503 credential-lookup, got {status} {value}"
         ));
     }
-    check(&mut wrong, "lookup timeout", "unchecked", &app);
+    let seen = logged(&app, "registration");
+    if seen.as_deref() != Some("unchecked") {
+        wrong.push(format!(
+            "lookup timeout: expected unchecked, logged {seen:?}"
+        ));
+    }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }

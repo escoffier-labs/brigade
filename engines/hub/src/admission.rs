@@ -22,6 +22,9 @@ fn hex(bytes: &[u8]) -> String {
 /// log.
 pub struct Credential {
     /// `anonymous`, `unchecked`, `admin`, `node` or `principal`.
+    ///
+    /// `anonymous` is no presented token, or a completed lookup that found no
+    /// live row. `unchecked` is a presented token no lookup completed for.
     pub kind: &'static str,
     /// The admission key: the token's digest, when the token was found.
     pub key: Option<String>,
@@ -94,10 +97,11 @@ impl Lookup {
             .map_err(|_| ())?
             .map_err(|_| ())?;
         Ok(match found {
-            // A presented token that matched nothing is not `anonymous`: the
-            // request did present one, no lookup named it.
+            // The lookup completed and found no live row: `anonymous`, as main
+            // logged an unknown or revoked token. A presented token is only
+            // `unchecked` when no lookup completed for it at all.
             None => Credential {
-                kind: "unchecked",
+                kind: "anonymous",
                 key: None,
             },
             Some(row) => Credential {
@@ -411,8 +415,8 @@ mod tests {
             Arc::new(
                 ReaderPool::open_unchecked(
                     &path,
-                    brigade_hub::read::LOOKUP_THREADS,
-                    brigade_hub::read::LOOKUP_QUEUE,
+                    brigade_hub::read::hub_threads(),
+                    brigade_hub::read::HUB_QUEUE,
                     Duration::from_secs(2),
                 )
                 .unwrap(),
