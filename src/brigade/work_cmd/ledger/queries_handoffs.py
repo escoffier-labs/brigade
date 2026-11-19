@@ -360,15 +360,15 @@ def _import_trust_blocker(item: Mapping[str, Any] | None, target: Path | None = 
     if blocker or item is None:
         return blocker
     metadata = _metadata(item)
-    if not (inbox_provenance._IMPORT_REDACTION_BINDING_KEY in metadata or "field_redaction" in metadata):
+    if inbox_provenance._IMPORT_REDACTION_RETRY_KEY not in metadata:
         return None
-    # A generic-ingest row carries the field verdict and always has a persisted
-    # proof. Requiring it here closes the crash window between the inbox write
-    # and the proof rewrite: a stale proof can never ride into a task.
+    # Only a row the retry path actually refreshed carries this marker. Its
+    # reissued proof must still match the stored bytes; a crash between the
+    # inbox write and the proof rewrite then cannot promote a stale body.
     if not isinstance(item, dict) or target is None:
-        return "import proof does not match the stored row"
+        return "import proof does not match the retried row; re-ingest the original JSONL record to refresh it"
     if not descriptor_anchors._has_persisted_import_proof(item, target=target):
-        return "import proof does not match the stored row"
+        return "import proof does not match the retried row; re-ingest the original JSONL record to refresh it"
     return None
 
 

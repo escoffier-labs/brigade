@@ -1085,6 +1085,165 @@ def test_work_import_ingest_redaction_retry_promote_requires_matching_proof(tmp_
     assert not (tmp_path / ".brigade" / "work" / "tasks.json").exists()
 
 
+def test_work_import_add_learning_loop_promotes_without_proof(tmp_path, capsys):
+    """#1886 round 3: an added learning-loop row still promotes exactly as on main."""
+    _init_git_repo(tmp_path)
+    assert work_cmd.import_add(target=tmp_path, text="Review the widget rollout", source="learning-loop") == 0
+    out = capsys.readouterr().out
+    import_id = next(line.split(": ", 1)[1] for line in out.splitlines() if line.startswith("import: "))
+    stored = work_cmd.ledger._read_imports(tmp_path)[0]
+    assert stored["metadata"]["field_redaction"]["status"] == "clean"
+    assert "field_redaction_retry" not in stored["metadata"]
+    assert not work_cmd.ledger._has_persisted_import_proof(stored, target=tmp_path)
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=import_id) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert task["text"] == "Review the widget rollout"
+
+
+def test_work_import_promote_all_keeps_add_rows_and_refuses_stale_retried_row(tmp_path, capsys, monkeypatch):
+    """#1886 round 3: promote --all skips only the retried row whose proof is stale."""
+    _init_git_repo(tmp_path)
+    for text in ("Review the widget rollout", "Review the gadget rollout"):
+        assert work_cmd.import_add(target=tmp_path, text=text, source="learning-loop") == 0
+    capsys.readouterr()
+
+    failing = {"active": True}
+    quarantined = _quarantine_metadata_redaction_row(tmp_path, capsys, monkeypatch, failing=failing)
+    from brigade.work_cmd.ledger import descriptor_anchors
+
+    failing["active"] = False
+    monkeypatch.setattr(descriptor_anchors, "_rewrite_persisted_import_proofs", lambda *_a, **_k: None)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review the rollout notes",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure entry", "team": "platform"},
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["retried"] == 1
+    stored = {item["id"]: item for item in work_cmd.ledger._read_imports(tmp_path)}
+    retried_row = stored[quarantined["id"]]
+    assert "field_redaction_retry" in retried_row["metadata"]
+    assert not work_cmd.ledger._has_persisted_import_proof(retried_row, target=tmp_path)
+
+    assert work_cmd.import_promote(target=tmp_path, all_matching=True) == 2
+    captured = capsys.readouterr()
+    assert "promoted: 2" in captured.out
+    assert "failed: 1" in captured.out
+    assert quarantined["id"] in captured.err
+    assert "import proof" in captured.err
+    assert "re-ingest" in captured.err
+    tasks = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"]
+    assert {task["text"] for task in tasks} == {"Review the widget rollout", "Review the gadget rollout"}
+    stored_after = {item["id"]: item for item in work_cmd.ledger._read_imports(tmp_path)}
+    assert stored_after[quarantined["id"]]["status"] == "pending"
+
+
+def test_work_import_ingest_dry_run_never_creates_the_retry_salt(tmp_path, capsys, monkeypatch):
+    """#1886 round 3: a dry run computes no binding and creates no state file."""
+    from brigade import evidence_redaction
+
+    real_apply = evidence_redaction.apply_and_record
+
+    def failing_apply(text, *, origin, scanner=None):
+        if "force-scan-failure" in text:
+            return evidence_redaction.FAILED_PLACEHOLDER, evidence_redaction._error_verdict(origin).record(), True
+        return real_apply(text, origin=origin, scanner=scanner)
+
+    monkeypatch.setattr(evidence_redaction, "apply_and_record", failing_apply)
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review the rollout notes",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure entry"},
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, dry_run=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    imports_dir = tmp_path / ".brigade" / "work" / "imports"
+    assert not (imports_dir / "redaction-retry.salt").exists()
+    assert not work_cmd.helpers._imports_path(tmp_path).exists()
+
+
+def test_work_import_ingest_recovers_from_empty_salt_left_by_crash(tmp_path, capsys, monkeypatch):
+    """#1886 round 3: a zero-length salt with no bindings is replaced on the next quarantine."""
+    from brigade import evidence_redaction
+
+    real_apply = evidence_redaction.apply_and_record
+    failing = {"active": True}
+
+    def flaky_apply(text, *, origin, scanner=None):
+        if failing["active"] and "force-scan-failure" in text:
+            return evidence_redaction.FAILED_PLACEHOLDER, evidence_redaction._error_verdict(origin).record(), True
+        return real_apply(text, origin=origin, scanner=scanner)
+
+    monkeypatch.setattr(evidence_redaction, "apply_and_record", flaky_apply)
+    _init_git_repo(tmp_path)
+    salt_path = tmp_path / ".brigade" / "work" / "imports" / "redaction-retry.salt"
+    salt_path.parent.mkdir(parents=True)
+    salt_path.write_bytes(b"")
+    salt_path.chmod(0o600)
+
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review the rollout notes",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure entry"},
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    quarantined = json.loads(capsys.readouterr().out)["imports"][0]
+    assert quarantined["metadata"]["field_redaction"]["status"] == "error"
+    salt = salt_path.read_text().strip()
+    assert len(salt) == 64
+    int(salt, 16)
+
+    failing["active"] = False
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["retried"] == 1
+    assert work_cmd.import_promote(target=tmp_path, import_id=quarantined["id"]) == 0
+
+
+def test_work_import_ingest_fails_closed_on_corrupt_salt_with_existing_binding(tmp_path, capsys, monkeypatch):
+    """#1886 round 3: a corrupt salt that bindings depend on is a clear error."""
+    failing = {"active": True}
+    _quarantine_metadata_redaction_row(tmp_path, capsys, monkeypatch, failing=failing)
+    salt_path = tmp_path / ".brigade" / "work" / "imports" / "redaction-retry.salt"
+    salt_path.write_bytes(b"")
+    salt_path.chmod(0o600)
+
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review a different rollout",
+                "kind": "task",
+                "metadata": {"owner": "force-scan-failure other"},
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(OSError, match="redaction retry salt is corrupt"):
+        work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True)
+
+
 def test_work_import_ingest_redaction_retry_reports_dry_run(tmp_path, capsys, monkeypatch):
     """#1886 round 2: a dry run reports the retry without changing the row."""
     failing = {"active": True}

@@ -1105,12 +1105,16 @@ def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
 # Only the ingest-owned fields change when a failed field redaction is retried.
 # The binding itself is compared through the digest above, not as metadata.
 _IMPORT_REDACTION_RETRY_IGNORED_METADATA_KEYS: frozenset[str] = frozenset(
-    {"provenance", "field_redaction", "field_redaction_binding"}
+    {"provenance", "field_redaction", "field_redaction_binding", "field_redaction_retry"}
 )
-# Caller metadata may not occupy the ingest-owned verdict or binding keys.
-_IMPORT_REDACTION_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"field_redaction", "field_redaction_binding"})
+# Caller metadata may not occupy the ingest-owned verdict, binding, or retry keys.
+_IMPORT_REDACTION_RESERVED_METADATA_KEYS: frozenset[str] = frozenset(
+    {"field_redaction", "field_redaction_binding", "field_redaction_retry"}
+)
 _IMPORT_REDACTION_BINDING_KEY = "field_redaction_binding"
 _IMPORT_REDACTION_BINDING_SCHEMA = "work-import-redaction-binding.v1"
+_IMPORT_REDACTION_RETRY_KEY = "field_redaction_retry"
+_IMPORT_REDACTION_RETRY_SCHEMA = "work-import-redaction-retry.v1"
 _IMPORT_REDACTION_SALT_NAME = "redaction-retry.salt"
 _IMPORT_REDACTION_SALT_BYTES = 32
 
@@ -1155,44 +1159,54 @@ def _read_import_redaction_salt_at(parent: int) -> bytes | None:
             raise OSError("redaction retry salt is not a single-link regular file")
         if os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o077:
             raise OSError("redaction retry salt must not be group or world readable")
-        raw = os.read(descriptor, 256)
+        if metadata.st_size != _IMPORT_REDACTION_SALT_BYTES * 2:
+            raise OSError("redaction retry salt is corrupt")
+        raw = os.read(descriptor, _IMPORT_REDACTION_SALT_BYTES * 2)
     finally:
         os.close(descriptor)
     try:
         text = raw.decode("ascii").strip()
     except UnicodeDecodeError:
-        raise OSError("redaction retry salt is not ASCII") from None
+        raise OSError("redaction retry salt is corrupt") from None
     if len(text) != _IMPORT_REDACTION_SALT_BYTES * 2:
-        raise OSError("redaction retry salt has an unexpected length")
+        raise OSError("redaction retry salt is corrupt")
     try:
         return bytes.fromhex(text)
     except ValueError:
-        raise OSError("redaction retry salt is not hexadecimal") from None
+        raise OSError("redaction retry salt is corrupt") from None
 
 
-def _import_redaction_salt(target: Path, *, create: bool) -> bytes | None:
-    """Return the per-target retry salt, optionally creating it through the inbox parent."""
+def _inbox_has_redaction_binding_at(parent: int, name: str) -> bool:
+    """Return whether any stored row depends on the retry salt."""
     try:
-        parent, _name = _open_import_inbox_parent(target, create=create)
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return False
     except OSError:
-        return None
+        return True
     try:
-        existing = _read_import_redaction_salt_at(parent)
-        if existing is not None or not create:
-            return existing
-        salt = secrets.token_bytes(_IMPORT_REDACTION_SALT_BYTES)
-        try:
-            descriptor = authority_store._dirfd_open_file(
-                parent,
-                _IMPORT_REDACTION_SALT_NAME,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-            )
-        except FileExistsError:
-            existing = _read_import_redaction_salt_at(parent)
-            if existing is None:
-                raise OSError("redaction retry salt appeared without readable content") from None
-            return existing
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 64 * 1024):
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    return _IMPORT_REDACTION_BINDING_KEY.encode("utf-8") in b"".join(chunks)
+
+
+def _publish_import_redaction_salt_at(parent: int, salt: bytes) -> None:
+    """Write the salt through a temporary file and publish it without replacing one."""
+    temporary = f".{_IMPORT_REDACTION_SALT_NAME}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    try:
+        descriptor = authority_store._dirfd_open_file(
+            parent,
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
         try:
             with os.fdopen(os.dup(descriptor), "w", encoding="ascii") as handle:
                 handle.write(salt.hex())
@@ -1200,8 +1214,51 @@ def _import_redaction_salt(target: Path, *, create: bool) -> bytes | None:
                 os.fsync(handle.fileno())
         finally:
             os.close(descriptor)
+        try:
+            authority_store._dirfd_replace_new(parent, temporary, _IMPORT_REDACTION_SALT_NAME)
+        except FileExistsError:
+            pass
         authority_store._dirfd_fsync(parent)
-        return salt
+    finally:
+        try:
+            authority_store._dirfd_unlink(parent, temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _import_redaction_salt(target: Path, *, create: bool) -> bytes | None:
+    """Return the per-target retry salt, optionally creating it through the inbox parent."""
+    try:
+        parent, name = _open_import_inbox_parent(target, create=create)
+    except OSError:
+        return None
+    try:
+        try:
+            existing = _read_import_redaction_salt_at(parent)
+        except OSError:
+            if not create:
+                return None
+            if _inbox_has_redaction_binding_at(parent, name):
+                raise OSError(
+                    "redaction retry salt is corrupt and stored bindings depend on it; "
+                    "restore the salt file or dismiss the affected quarantined imports"
+                ) from None
+            try:
+                authority_store._dirfd_unlink(parent, _IMPORT_REDACTION_SALT_NAME)
+            except FileNotFoundError:
+                pass
+            existing = None
+        if existing is not None or not create:
+            return existing
+        salt = secrets.token_bytes(_IMPORT_REDACTION_SALT_BYTES)
+        _publish_import_redaction_salt_at(parent, salt)
+        try:
+            published = _read_import_redaction_salt_at(parent)
+        except OSError:
+            published = None
+        if published is None:
+            raise OSError("redaction retry salt could not be published")
+        return published
     finally:
         os.close(parent)
 
@@ -1413,6 +1470,11 @@ def _retry_quarantined_field_redaction(
         return None
     if not _redaction_retry_preserves_content(existing_item, recovered):
         return None
+    recovered_metadata = _metadata(recovered)
+    recovered_metadata[_IMPORT_REDACTION_RETRY_KEY] = {
+        "schema": _IMPORT_REDACTION_RETRY_SCHEMA,
+        "retried_at": str(recovered.get("updated_at") or recovered.get("created_at") or ""),
+    }
     return recovered
 
 
@@ -1651,7 +1713,7 @@ def _append_import_records_locked(
                 acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
                 template=record.get("template") if isinstance(record.get("template"), str) else None,
                 provenance_source=_resolve_import_provenance_source(record, provenance_source),
-                redaction_salt_source=lambda: _require_import_redaction_salt(target),
+                redaction_salt_source=None if dry_run else (lambda: _require_import_redaction_salt(target)),
             )
         except _ImportProvenanceError:
             if not contain_provenance_errors:
