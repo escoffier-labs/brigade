@@ -288,6 +288,60 @@ def test_reflect_propose_retains_run_candidate_and_uses_existing_decisions(tmp_p
     assert memory_reflect.run_payload(target=tmp_path)["candidates"] == []
 
 
+@pytest.mark.parametrize(
+    "owner,harnesses,inbox",
+    [
+        # An owner outside the writer set (OpenClaw owns memory) routes to the first configured writer.
+        ("openclaw", ["openclaw", "codex"], ".codex/memory-handoffs"),
+        # A handoff-only host whose owner is itself a writer harness keeps the notification in its own inbox.
+        ("claude", ["claude", "codex"], ".claude/memory-handoffs"),
+    ],
+    ids=["external-owner", "handoff-only-writer-owner"],
+)
+def test_reflect_propose_under_external_or_handoff_only_owner_writes_handoff_and_never_applies(
+    tmp_path, capsys, owner, harnesses, inbox
+):
+    from brigade import config
+    from brigade.selection import Selection
+    from tests.test_memory_reflect import snapshot
+
+    path = setup(tmp_path)
+    config.write_config(
+        tmp_path,
+        config.Config(version=1, selection=Selection(depth="repo", owner=owner, harnesses=harnesses, includes=[])),
+    )
+    log(tmp_path, path, (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"))
+    assert cli.main(["memory", "reflect", "run", "--target", str(tmp_path), "--json"]) == 0
+    candidate = json.loads(capsys.readouterr().out)["candidates"][0]
+    before = snapshot(tmp_path)
+    assert before
+    code = cli.main(
+        [
+            "memory",
+            "reflect",
+            "propose",
+            candidate["candidate_id"],
+            "--reason",
+            "Inspect new support.",
+            "--target",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+    proposal = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert proposal["handoff_path"] == f"{inbox}/{proposal['id']}.md"
+    handoff = tmp_path / proposal["handoff_path"]
+    text = handoff.read_text(encoding="utf-8")
+    assert "## Memory proposal notification" in text
+    assert proposal["proposal_path"] in text
+    assert proposal["digest"] in text
+    assert (tmp_path / proposal["proposal_path"]).is_file()
+    # Emitting the proposal and its handoff leaves every card untouched until a reviewed apply.
+    assert snapshot(tmp_path) == before
+    assert "last_consolidated" not in path.read_text()
+
+
 def test_consolidation_preview_does_not_use_a_later_machine_reinforcement(tmp_path):
     from brigade.memory_proposal_v2_reflect import propose_payload
 

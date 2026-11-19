@@ -224,6 +224,37 @@ def test_local_gate_failure_records_hold_without_changing_cards(tmp_path, capsys
     assert json.loads(saved.read_text()) == report["automatic"]
 
 
+@pytest.mark.parametrize(
+    "owner,harnesses",
+    [("openclaw", ["openclaw", "codex"]), ("claude", ["claude", "codex"])],
+    ids=["external-owner", "handoff-only-writer-owner"],
+)
+def test_scheduled_apply_under_configured_owner_never_applies_locally(tmp_path, capsys, owner, harnesses):
+    """An opted-in scheduled run emits candidates and a pending hold, never a card change.
+
+    Hub-side coverage for the same promise: `test_external_owner_gate_refusal_falls_back` and
+    `test_authority_hold_never_changes_cards[owner_not_hub]` above.
+    """
+    from brigade import config
+    from brigade.selection import Selection
+    from tests.test_memory_reflect import card, command, evidence, log, snapshot
+
+    path = card(tmp_path, "cache")
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/support.json"), "outcome", "2026-10-20T12:00:00Z"))
+    config.write_config(
+        tmp_path,
+        config.Config(version=1, selection=Selection(depth="repo", owner=owner, harnesses=harnesses, includes=[])),
+    )
+    policy.set_enabled(tmp_path, True)
+    before = snapshot(tmp_path)
+    code, report = command(tmp_path, capsys, "run", "--scheduled", "--apply")
+    assert code == 0
+    assert report["candidates"]
+    assert [item["state"] for item in report["automatic"]] == ["pending"] * len(report["candidates"])
+    assert all(item["reason"] == "local_authority_unbound" for item in report["automatic"])
+    assert snapshot(tmp_path) == before
+
+
 @pytest.mark.parametrize("reason", ["owner_not_hub", "auto_apply_killed", "retrieval_eval_unbound"])
 def test_authority_hold_never_changes_cards(setup, capsys, reason):
     target, hub, _ = setup
