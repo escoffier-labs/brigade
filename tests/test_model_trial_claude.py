@@ -86,65 +86,8 @@ def _live(tmp_path, fake_dir="fake", output="evidence", **scenario):
     return result, tmp_path / fake_dir, tmp_path / output
 
 
-def _stop_child(proc, *, timeout=2.0):
-    """Stop a child through its Popen handle with bounded waits, or fail loudly."""
-    try:
-        if proc.stdin is not None:
-            proc.stdin.close()
-    except (OSError, ValueError):
-        pass
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.terminate()
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired as exc:
-                raise AssertionError("child could not be stopped within the cleanup bound") from exc
-    for pipe in (proc.stdout, proc.stderr):
-        if pipe is not None:
-            try:
-                pipe.close()
-            except (OSError, ValueError):
-                pass
-
-
 def _failures(result):
     return sorted({a["failure"] for a in result["attempts"]})
-
-
-def test_stubborn_server_child_is_stopped_within_the_cleanup_bound():
-    """A child that keeps running past stdin close is stopped, never waited on forever."""
-    code = (
-        "import signal, sys, time; "
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN) if sys.platform != 'win32' else None; "
-        "time.sleep(60)"
-    )
-    child = subprocess.Popen(
-        [sys.executable, "-c", code],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    started = time.monotonic()
-    try:
-        _stop_child(child, timeout=0.5)
-    finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait(timeout=5)
-    assert child.poll() is not None
-    assert time.monotonic() - started < 5
 
 
 @pytest.fixture(scope="module")

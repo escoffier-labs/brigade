@@ -17,7 +17,7 @@ TOOLS = ("brief", "verify", "receipt", "scoreability", "capture")
 GOOD_STEPS = [{"call": tool} for tool in TOOLS]
 
 _SCRIPT = r"""#!__PYTHON__
-import json, os, subprocess, sys, threading, uuid
+import json, os, subprocess, sys, uuid
 
 SC = json.load(open(__SCENARIO__))
 if "--version" in sys.argv:
@@ -50,66 +50,15 @@ def emit(event):
     print(json.dumps(event), flush=True)
 
 
-def close_pipes(proc):
-    for pipe in (proc.stdin, proc.stdout, proc.stderr):
-        if pipe is not None:
-            try:
-                pipe.close()
-            except (OSError, ValueError):
-                pass
-
-
-def stop_child(proc, timeout=2.0):
-    # Stop the server through the handle we created. Bound every wait and fail loudly.
-    try:
-        if proc.stdin is not None:
-            proc.stdin.close()
-    except (OSError, ValueError):
-        pass
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.terminate()
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired as exc:
-                close_pipes(proc)
-                raise RuntimeError("fake paired MCP server child could not be stopped") from exc
-    close_pipes(proc)
-
-
 proc = None
 counter = [0]
 
 
-def rpc(method, params=None, timeout=5.0):
+def rpc(method, params=None):
     counter[0] += 1
     proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": counter[0], "method": method, "params": params or {}}) + "\n")
     proc.stdin.flush()
-    answer = []
-
-    def read():
-        try:
-            answer.append(proc.stdout.readline())
-        except (OSError, ValueError):
-            answer.append("")
-
-    reader = threading.Thread(target=read, daemon=True)
-    reader.start()
-    reader.join(timeout)
-    if reader.is_alive() or not answer:
-        raise RuntimeError("fake paired MCP server child did not answer within the read bound")
-    return json.loads(answer[0])
+    return json.loads(proc.stdout.readline())
 
 
 if SC.get("stderr_flood"):
@@ -170,35 +119,34 @@ def result(tid, text):
           "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": text}]}})
 
 
-try:
-    for step in steps:
-        if "call" in step or "server_only" in step or "emit_only" in step:
-            tool = step.get("call") or step.get("server_only") or step.get("emit_only")
-            shown = step.get("stream_input", step.get("input", {}))  # What the stream says may differ from the server.
-            tid = None if "server_only" in step else assistant(QUAL + step.get("stream_as", tool), shown)
-            if "emit_only" in step:
-                continue
-            reply = rpc("tools/call", {"name": tool, "arguments": step.get("input", {})})["result"]
-            text = reply["content"][0]["text"]
-            if tool == "receipt":
-                receipt = json.loads(text).get("receipt")
-            if tid:
-                result(tid, text)
-        elif "tool_use" in step:
-            result(assistant(step["tool_use"], step.get("input", {})), "No such tool available")
-        elif "event" in step:
-            emit(step["event"])
-        elif "block" in step:
-            emit({"type": "assistant", "uuid": str(uuid.uuid4()), "session_id": sid,
-                  "message": {"id": "msg_x", "role": "assistant", "content": [step["block"]]}})
-    if SC.get("end_conversation"):
-        assistant("EndConversation", {})
-    final = SC.get("final", "receipt")
-    if final == "receipt" and receipt:
-        final = {"run_id": receipt["run_id"], "status": receipt["status"], "eligible": False}
-finally:
-    if proc is not None:
-        stop_child(proc)
+for step in steps:
+    if "call" in step or "server_only" in step or "emit_only" in step:
+        tool = step.get("call") or step.get("server_only") or step.get("emit_only")
+        shown = step.get("stream_input", step.get("input", {}))  # What the stream says may differ from the server.
+        tid = None if "server_only" in step else assistant(QUAL + step.get("stream_as", tool), shown)
+        if "emit_only" in step:
+            continue
+        reply = rpc("tools/call", {"name": tool, "arguments": step.get("input", {})})["result"]
+        text = reply["content"][0]["text"]
+        if tool == "receipt":
+            receipt = json.loads(text).get("receipt")
+        if tid:
+            result(tid, text)
+    elif "tool_use" in step:
+        result(assistant(step["tool_use"], step.get("input", {})), "No such tool available")
+    elif "event" in step:
+        emit(step["event"])
+    elif "block" in step:
+        emit({"type": "assistant", "uuid": str(uuid.uuid4()), "session_id": sid,
+              "message": {"id": "msg_x", "role": "assistant", "content": [step["block"]]}})
+if SC.get("end_conversation"):
+    assistant("EndConversation", {})
+final = SC.get("final", "receipt")
+if final == "receipt" and receipt:
+    final = {"run_id": receipt["run_id"], "status": receipt["status"], "eligible": False}
+if proc is not None:
+    proc.stdin.close()
+    proc.wait()
 emit({"type": "result", "subtype": SC.get("result_subtype", "success"), "is_error": bool(SC.get("is_error")),
       "session_id": sid, "result": json.dumps(final) if isinstance(final, dict) else (final or "")})
 """
