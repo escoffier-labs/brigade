@@ -282,3 +282,105 @@ async fn unlisted_grant_principals_are_not_queried_one_by_one() {
     );
     assert!(many <= 4, "{many} statements");
 }
+
+#[tokio::test]
+async fn a_listed_admin_reserves_the_callers_scopes_for_a_non_admin_caller() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    grant_to(&h, "agent:dot", B, &["read"]).await;
+    set_policy(
+        &h,
+        json!({"memory": {"auto_apply": true,
+               "tier0_op_classes": ["merge_exact_duplicates"],
+               "reflect_principals": ["hub:admin"]}}),
+    );
+    // The apply gate accepts the admin credential for every scope, so the
+    // scopes the caller reflects on are reserved, and only those.
+    let r = status(&h, AGENT_TOKEN).await;
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(
+        r.body["memory_policy"]["reserved_scopes"],
+        json!([A]),
+        "{r:?}"
+    );
+    assert_no_leak(&r);
+}
+
+fn caps_run(
+    h: &Hub,
+    listed: &[&str],
+    caps: auth::ReservedCaps,
+) -> Option<std::collections::BTreeSet<String>> {
+    let memory = Connection::open(h.memory()).unwrap();
+    let credential = Credential::Principal {
+        id: "agent:dot".into(),
+        digest: String::new(),
+    };
+    let listed: Vec<String> = listed.iter().map(|s| s.to_string()).collect();
+    auth::reserved_reflect_scopes_capped(&worker::Tx(&memory), &credential, &listed, caps).unwrap()
+}
+fn caps(listed_grants: usize, caller_grants: usize, card_scopes: usize) -> auth::ReservedCaps {
+    auth::ReservedCaps {
+        listed_grants,
+        caller_grants,
+        card_scopes,
+    }
+}
+
+#[tokio::test]
+async fn at_the_caps_the_reserved_scopes_are_computed_and_past_them_empty() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "node-1", A, &["read", "reflect"]).await;
+    grant_to(&h, "node-1", B, &["read", "reflect"]).await;
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    grant_to(&h, "agent:dot", B, &["read", "reflect"]).await;
+    let both: std::collections::BTreeSet<String> = [A.to_string(), B.to_string()].into();
+    // Exactly at each cap: unchanged.
+    assert_eq!(caps_run(&h, &["node-1"], caps(2, 2, 10)), Some(both));
+    // One over the listed principals' grant cap, the caller's, then each alone.
+    for over in [caps(1, 2, 10), caps(2, 1, 10)] {
+        assert_eq!(
+            caps_run(&h, &["node-1"], over),
+            Some(Default::default()),
+            "{over:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_grant_scoped_to_other_rights_does_not_count_against_the_caps() {
+    let h = Hub::with(clean(), None);
+    for n in 0..5 {
+        grant_to(&h, "agent:dot", &format!("repo:acme/read-{n}"), &["read"]).await;
+    }
+    grant_to(&h, "node-1", A, &["read", "reflect"]).await;
+    grant_to(&h, "agent:dot", A, &["read", "reflect"]).await;
+    assert_eq!(
+        caps_run(&h, &["node-1"], caps(1, 1, 10)),
+        Some([A.to_string()].into())
+    );
+}
+
+#[tokio::test]
+async fn too_many_card_scopes_with_wildcards_on_both_sides_reserve_nothing() {
+    let h = Hub::with(clean(), None);
+    grant_to(&h, "node-1", "repo:*", &["read", "reflect"]).await;
+    grant_to(&h, "agent:dot", "repo:*", &["read", "reflect"]).await;
+    let memory = Connection::open(h.memory()).unwrap();
+    let scopes = |n: usize| -> Vec<String> { (0..n).map(|i| format!("repo:acme/c{i}")).collect() };
+    for scope in scopes(3) {
+        memory
+            .execute(
+                "INSERT OR IGNORE INTO memory_blobs VALUES('h',x'00',1,'test')",
+                [],
+            )
+            .unwrap();
+        memory.execute("INSERT INTO memory_cards VALUES(?1,?1,1,'h','live','reviewed','hub:admin','admin','','','[]','test','test')", [scope.as_str()]).unwrap();
+    }
+    let three: std::collections::BTreeSet<String> = scopes(3).into_iter().collect();
+    assert_eq!(caps_run(&h, &["node-1"], caps(10, 10, 3)), Some(three));
+    assert_eq!(
+        caps_run(&h, &["node-1"], caps(10, 10, 2)),
+        Some(Default::default())
+    );
+}

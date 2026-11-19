@@ -186,13 +186,79 @@ pub fn has_right<T: ReadTx + ?Sized>(
     }
     Ok(granted(&grant_rows(tx, principal)?, scope, right))
 }
+/// Row caps for the reserved-scope computation. A status call must not scan
+/// without bound, so each input is read with `LIMIT cap + 1`. Past any cap the
+/// computation reserves nothing: an empty set means an unlisted job proposes as
+/// it did before reserved scopes existed, the safe direction.
+#[derive(Clone, Copy, Debug)]
+pub struct ReservedCaps {
+    /// Reflect grant rows across all listed principals.
+    pub listed_grants: usize,
+    /// Reflect grant rows of the caller.
+    pub caller_grants: usize,
+    /// Distinct card scopes read when wildcards sit on both sides.
+    pub card_scopes: usize,
+}
+/// A few thousand rows is far past any real fleet's grants and card scopes.
+pub const RESERVED_CAPS: ReservedCaps = ReservedCaps {
+    listed_grants: 2000,
+    caller_grants: 2000,
+    card_scopes: 5000,
+};
+
+/// A principal's reflect grant patterns, answerable by set lookup. `covers`
+/// mirrors the free function: an exact pattern, `repo:*` for repository
+/// scopes, `*` for repository scopes and `fleet`.
+#[derive(Default)]
+struct ReflectPatterns {
+    exact: std::collections::HashSet<String>,
+    repo_star: bool,
+    star: bool,
+    wide: bool,
+}
+impl ReflectPatterns {
+    fn add(&mut self, pattern: String) {
+        self.wide |= pattern.contains('*');
+        self.repo_star |= pattern == "repo:*";
+        self.star |= pattern == "*";
+        self.exact.insert(pattern);
+    }
+    fn covers(&self, scope: &str) -> bool {
+        self.exact.contains(scope)
+            || (self.repo_star && scope.starts_with("repo:"))
+            || (self.star && (scope == "fleet" || scope.starts_with("repo:")))
+    }
+}
+
+/// `SELECT ... FROM memory_grants` rows holding reflect, one more than `cap`.
+/// `None` when the cap is exceeded.
+fn reflect_grant_rows<T: ReadTx + ?Sized>(
+    tx: &T,
+    filter: &str,
+    mut params: Vec<Value>,
+    cap: usize,
+) -> rusqlite::Result<Option<Vec<Vec<Value>>>> {
+    params.push(Value::Integer(cap as i64 + 1));
+    let n = params.len();
+    let rows = tx.query(
+        &format!(
+            "SELECT principal,scope,rights FROM memory_grants WHERE {filter} \
+             AND ','||rights||',' LIKE '%,reflect,%' LIMIT ?{n}"
+        ),
+        &params,
+    )?;
+    Ok((rows.len() <= cap).then_some(rows))
+}
+
 /// For a credential that holds `reflect` on some scope, the scopes where it
 /// holds the right and a listed principal holds it too. `None` for a
 /// credential with no reflect grant. `listed` is the live, listed principals
-/// (the caller adds itself when the policy lists it), already filtered by the
-/// caller against the policy and the hub's credential liveness, so a revoked
-/// or credential-less principal never reserves a scope. Only those principals'
-/// grants are read: a constant number of queries however many grants exist.
+/// (the caller adds itself when the policy lists it, and `hub:admin` is in it
+/// whenever the policy lists it), already filtered by the caller against the
+/// policy and the hub's credential liveness, so a revoked or credential-less
+/// principal never reserves a scope. Only those principals' reflect grants are
+/// read: a constant number of queries however many grants exist, each bounded
+/// by `RESERVED_CAPS`; past a cap the answer is the empty set.
 /// Scopes are the ones with cards plus every exact scope a reflect grant
 /// names, and a wildcard grant covers the scopes that have cards. The card
 /// scopes are read only when a wildcard (or the admin) sits on both sides.
@@ -203,94 +269,103 @@ pub fn reserved_reflect_scopes<T: ReadTx + ?Sized>(
     credential: &Credential,
     listed: &[String],
 ) -> rusqlite::Result<Option<BTreeSet<String>>> {
-    if !has_right(tx, credential, None, "reflect")? {
+    reserved_reflect_scopes_capped(tx, credential, listed, RESERVED_CAPS)
+}
+
+pub fn reserved_reflect_scopes_capped<T: ReadTx + ?Sized>(
+    tx: &T,
+    credential: &Credential,
+    listed: &[String],
+    caps: ReservedCaps,
+) -> rusqlite::Result<Option<BTreeSet<String>>> {
+    let caller_admin = *credential == Credential::Admin;
+    let mut caller = ReflectPatterns::default();
+    // Node defaults carry read and write only, so reflect needs a grant row.
+    match reflect_grant_rows(
+        tx,
+        "principal=?1",
+        vec![Value::Text(credential.principal().into())],
+        caps.caller_grants,
+    )? {
+        Some(rows) => rows
+            .iter()
+            .for_each(|r| caller.add(text(&r[1]).to_string())),
+        // More reflect grants than the cap: it holds the right, reserve nothing.
+        None => return Ok(Some(BTreeSet::new())),
+    }
+    if !caller_admin && caller.exact.is_empty() {
         return Ok(None);
     }
     let admin_listed = listed.iter().any(|name| name == ADMIN);
     let names: Vec<&String> = listed.iter().filter(|name| *name != ADMIN).collect();
-    let mut holder_grants: std::collections::BTreeMap<String, Grants> =
+    let mut holder_patterns: std::collections::BTreeMap<String, ReflectPatterns> =
         std::collections::BTreeMap::new();
     if !names.is_empty() {
         let marks = vec!["?"; names.len()].join(",");
         let params: Vec<Value> = names.iter().map(|n| Value::Text((*n).clone())).collect();
-        for row in tx.query(
-            &format!(
-                "SELECT principal,scope,rights FROM memory_grants WHERE principal IN ({marks})"
-            ),
-            &params,
-        )? {
-            let rights = rights_set(&row[2]);
-            if rights.contains("reflect") {
-                holder_grants
-                    .entry(text(&row[0]).to_string())
-                    .or_default()
-                    .push((text(&row[1]).to_string(), rights));
-            }
+        let Some(rows) = reflect_grant_rows(
+            tx,
+            &format!("principal IN ({marks})"),
+            params,
+            caps.listed_grants,
+        )?
+        else {
+            return Ok(Some(BTreeSet::new()));
+        };
+        for row in &rows {
+            holder_patterns
+                .entry(text(&row[0]).to_string())
+                .or_default()
+                .add(text(&row[1]).to_string());
         }
     }
-    let caller_grants = grant_rows(tx, credential.principal())?;
-    let caller_admin = *credential == Credential::Admin;
-    let patterns = |grants: &Grants| -> Vec<String> {
-        grants
-            .iter()
-            .filter(|(_, rights)| rights.contains("reflect"))
-            .map(|(pattern, _)| pattern.clone())
-            .collect()
-    };
-    let exact = |pattern: &String| !pattern.contains('*');
-    let mut scopes: BTreeSet<String> = BTreeSet::new();
-    let mut caller_wide = caller_admin;
-    for pattern in patterns(&caller_grants) {
-        if exact(&pattern) {
-            scopes.insert(pattern);
-        } else {
-            caller_wide = true;
-        }
-    }
-    let mut holder_wide = admin_listed;
-    for grants in holder_grants.values() {
-        for pattern in patterns(grants) {
-            if exact(&pattern) {
-                scopes.insert(pattern);
-            } else {
-                holder_wide = true;
-            }
-        }
-    }
-    if caller_wide && holder_wide {
-        scopes.extend(
-            tx.query("SELECT DISTINCT scope FROM memory_cards", &[])?
-                .iter()
-                .map(|r| text(&r[0]).to_string()),
-        );
-    }
-    let holds = |who: &Credential, grants: &Grants, scope: &str| {
-        *who == Credential::Admin
-            || without_grants(who, scope, "reflect")
-                .unwrap_or_else(|| granted(grants, scope, "reflect"))
-    };
-    let holders: Vec<(Credential, &Grants)> = holder_grants
+    let mut scopes: BTreeSet<String> = caller
+        .exact
         .iter()
-        .map(|(name, grants)| {
+        .filter(|p| !p.contains('*'))
+        .cloned()
+        .collect();
+    for patterns in holder_patterns.values() {
+        scopes.extend(patterns.exact.iter().filter(|p| !p.contains('*')).cloned());
+    }
+    let holder_wide = admin_listed || holder_patterns.values().any(|p| p.wide);
+    if (caller_admin || caller.wide) && holder_wide {
+        let rows = tx.query(
+            "SELECT DISTINCT scope FROM memory_cards LIMIT ?1",
+            &[Value::Integer(caps.card_scopes as i64 + 1)],
+        )?;
+        if rows.len() > caps.card_scopes {
+            return Ok(Some(BTreeSet::new()));
+        }
+        scopes.extend(rows.iter().map(|r| text(&r[0]).to_string()));
+    }
+    let holds = |who: &Credential, patterns: &ReflectPatterns, scope: &str| {
+        *who == Credential::Admin
+            || without_grants(who, scope, "reflect").unwrap_or_else(|| patterns.covers(scope))
+    };
+    let holders: Vec<(Credential, &ReflectPatterns)> = holder_patterns
+        .iter()
+        .map(|(name, patterns)| {
             (
                 Credential::Principal {
                     id: name.clone(),
                     digest: String::new(),
                 },
-                grants,
+                patterns,
             )
         })
         .collect();
-    let no_grants = Grants::new();
+    // The admin credential holds every right on every scope, with no grant row.
+    let no_patterns = ReflectPatterns::default();
     Ok(Some(
         scopes
             .into_iter()
-            .filter(|scope| holds(credential, &caller_grants, scope))
+            .filter(|scope| holds(credential, &caller, scope))
             .filter(|scope| {
-                (admin_listed && holds(&Credential::Admin, &no_grants, scope))
+                (admin_listed && holds(&Credential::Admin, &no_patterns, scope))
                     || holders
                         .iter()
-                        .any(|(who, grants)| holds(who, grants, scope))
+                        .any(|(who, patterns)| holds(who, patterns, scope))
             })
             .collect(),
     ))

@@ -2002,7 +2002,11 @@ hub's own checks (an exact grant, `repo:*` for repository scopes, `*` for
 repository scopes and `fleet`). A listed principal counts only while it has at
 least one live, unrevoked hub credential, the same test the hub applies when it
 checks `proposer_credential` at apply. A revoked or credential-less listed
-principal does not reserve a scope, even if its `reflect` grant remains. A scope
+principal does not reserve a scope, even if its `reflect` grant remains. A
+listed `hub:admin` counts for every caller, because the apply gate always
+accepts the admin credential. The computation reads a bounded number of grant
+and card-scope rows, and an over-cap computation reserves nothing, so the list
+comes back empty. A scope
 where only unlisted principals reflect, or where no listed principal can
 authenticate, is not in the list, so a proposal-only job there is the only
 proposer and still opens its merges for review. This status field carries no principal names and

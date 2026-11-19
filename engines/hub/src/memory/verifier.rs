@@ -169,7 +169,9 @@ pub fn listed(policy_document: &Json, principal: &str) -> bool {
 /// against), plus the caller when it is listed, because an authenticated
 /// caller's credential is live. A listed principal with no live credential
 /// cannot authenticate or satisfy `proposer_credential`, so it must not
-/// reserve a scope. Reads only the listed principals' credential rows.
+/// reserve a scope. `hub:admin` counts for every caller whenever the policy
+/// lists it: the apply gate always accepts the admin credential, whoever asks.
+/// Reads only the listed principals' credential rows.
 pub fn live_listed<T: ReadTx + ?Sized>(
     hub: &T,
     policy_document: &Json,
@@ -189,6 +191,7 @@ pub fn live_listed<T: ReadTx + ?Sized>(
     others.sort();
     others.dedup();
     let caller_listed = others.iter().any(|name| name == caller);
+    let admin_listed = others.iter().any(|name| name == super::ADMIN);
     others.retain(|name| name != caller && name != super::ADMIN);
     let mut live: Vec<String> = super::ops::live_credentials(hub, admin, Some(&others))?
         .into_iter()
@@ -196,6 +199,9 @@ pub fn live_listed<T: ReadTx + ?Sized>(
         .collect();
     if caller_listed {
         live.push(caller.to_string());
+    }
+    if admin_listed {
+        live.push(super::ADMIN.to_string());
     }
     live.sort();
     live.dedup();
