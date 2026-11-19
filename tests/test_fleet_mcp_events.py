@@ -869,7 +869,9 @@ def test_refresh_does_not_reset_a_receiver_failure_streak(stations, receiver, hu
         send(stations[0], NODE_B)
         tick(db)
         if index < 2:
-            subscribe(stations[1], receiver.url)
+            assert "result" in subscribe(stations[1], receiver.url)
+            assert len(receiver.challenges) == 1, "a same-secret refresh is not verified again"
+            assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(index + 1,)]
     assert rows(db, "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(0,)]
 
 
@@ -891,8 +893,8 @@ def test_successful_delivery_resets_a_receiver_failure_streak(stations, receiver
         send(stations[0], NODE_B)
         tick(db)
         if index == 0:
-            subscribe(stations[1], receiver.url)
-    assert rows(db, "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(1,)]
+            assert "result" in subscribe(stations[1], receiver.url)
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(2,)]
 
 
 def test_verified_secret_rotation_resets_a_nonzero_failure_streak(stations, receiver, hub, monkeypatch) -> None:
@@ -912,8 +914,9 @@ def test_verified_secret_rotation_resets_a_nonzero_failure_streak(stations, rece
         send(stations[0], NODE_B)
         tick(db)
         if index == 0:
-            subscribe(stations[1], receiver.url, secret=OTHER_SECRET)
-    assert rows(db, "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(1,)]
+            assert "result" in subscribe(stations[1], receiver.url, secret=OTHER_SECRET)
+    assert len(receiver.challenges) == 2, "a same-secret refresh inside the rotation window is not verified again"
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(2,)]
 
 
 def test_connection_time_policy_rejection_is_permanent(stations, receiver, hub) -> None:
