@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
 from brigade import search_cmd
 
 
@@ -107,6 +109,10 @@ def test_search_names_code_search_api_mcp_as_maintained_owner(monkeypatch, tmp_p
     assert "github.com/escoffier-labs/code-search-mcp" not in str(payload)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="fixture is an extensionless shebang executable; Windows PATH lookup needs a PATHEXT name such as .exe",
+)
 def test_search_status_with_only_the_canonical_executable_names_it(monkeypatch, tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()

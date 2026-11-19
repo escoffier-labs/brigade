@@ -1,0 +1,1 @@
+- The Windows nightly baseline no longer allowlists 19 test files that now pass every night, so a regression in them fails the nightly again.
