@@ -1921,53 +1921,6 @@ def _verify_env_prefix(session_fingerprint: str, hook_target: Path | None) -> st
     return f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} {state_at}"
 
 
-def _manifest_replacements(
-    target: Path,
-    covered: list[manifest_loop.CoveredManifest],
-    session_fingerprint: str,
-    *,
-    hook_target: Path | None = None,
-) -> list[str]:
-    """One manifest verify per covered manifest. The manifest, not the agent, decides the scored subject."""
-    prefix = _verify_env_prefix(session_fingerprint, hook_target)
-    return [f"{prefix}{manifest_loop.verify_command(target, item.source)}" for item in covered]
-
-
-def _session_written_paths(state: dict[str, Any]) -> list[str]:
-    """Target-relative files this session wrote with a file tool.
-
-    Reuses the pre-write dependency checks, which already record the path of each
-    Edit, Write or NotebookEdit. Bash writes carry no path, so a subject changed only
-    by a shell command is not attributed to this session and its manifest gate stays
-    open (fail open).
-    """
-    return [
-        check["file_path"]
-        for check in dependencies.write_checks(state)
-        if check.get("tool_name") in _WRITE_TOOLS and isinstance(check.get("file_path"), str)
-    ]
-
-
-def _manifest_deny_hint(
-    target: Path,
-    session_fingerprint: str,
-    *,
-    hook_target: Path | None = None,
-) -> str:
-    """Extra deny text naming the manifest verify for a changed manifest subject, or ``""``."""
-    covered = manifest_loop.covered_manifests(target)
-    if not covered:
-        return ""
-    lines = [
-        "This change touches the subject of a tracked verify manifest. Keep your own check, and also run the "
-        "manifest verify, the scoreable one (the manifest picks what it scores):"
-    ]
-    commands = _manifest_replacements(target, covered, session_fingerprint, hook_target=hook_target)
-    for item, command in zip(covered, commands, strict=True):
-        lines.append(f"- {item.subject_path}: {command}")
-    return "\n".join(lines)
-
-
 def _new_state(target: Path, session_id: str, repo_fp: str | None, *, task_epoch: str | None = None) -> dict[str, Any]:
     state: dict[str, Any] = {
         "session_id": session_id,
@@ -2437,13 +2390,9 @@ def _handle_event(
                 "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
                 f"Use: {replacement}"
             )
-        manifest_hint = _manifest_deny_hint(
-            verify_target,
-            str(state["session_fingerprint"]),
-            hook_target=target if verify_target != target else None,
-        )
-        if manifest_hint:
-            reason = f"{reason}\n{manifest_hint}"
+        hook_at = target if verify_target != target else None
+        prefix = _verify_env_prefix(str(state["session_fingerprint"]), hook_at)
+        reason += manifest_loop.deny_hint(verify_target, prefix)
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -2578,33 +2527,14 @@ def _handle_event(
                 blocking_failures.append(f"{stop_target}: run `{replacement}`")
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
                 handoff_target = stop_target
-            # Gate only subjects this session wrote. The generic gate can pass because a concurrent
-            # writer drifted the tree after this session's capture (#959), and that tree is not
-            # this session's to gate either.
-            written_paths = _session_written_paths(stop_state)
-            gaps = (
-                manifest_loop.unverified_manifests(stop_target, stop_state.get("started_at"), written_paths)
-                if written_paths and not _shared_tree_block_is_foreign(stop_target, session_id, stop_state)
-                else []
-            )
-            manifest_failures.extend(
-                f"{stop_target}: {gap.subject_path} changed and manifest `{gap.manifest_id}` has no completed "
-                f"receipt since the write, run `{command}`"
-                for gap, command in zip(gaps, _manifest_replacements(stop_target, gaps, fingerprint), strict=True)
+            manifest_failures += manifest_loop.stop_failures(
+                stop_target,
+                stop_state,
+                _verify_env_prefix(fingerprint, None),
+                is_foreign=functools.partial(_shared_tree_block_is_foreign, stop_target, session_id, stop_state),
             )
         if blocking_failures or manifest_failures:
-            parts: list[str] = []
-            if blocking_failures:
-                parts.append(
-                    "Recent write work in Brigade-wired repos has no verification receipt for this session.\n- "
-                    + "\n- ".join(blocking_failures)
-                )
-            if manifest_failures:
-                parts.append(
-                    "A tracked verify manifest covers a file changed this session and has not been run since.\n- "
-                    + "\n- ".join(manifest_failures)
-                )
-            return {"decision": "block", "reason": "\n".join(parts)}
+            return {"decision": "block", "reason": manifest_loop.block_reason(blocking_failures, manifest_failures)}
         if closed_without_handoff:
             handoff_target = None
         if shared_tree_notes:

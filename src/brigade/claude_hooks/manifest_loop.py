@@ -16,7 +16,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from .. import localio, verify_manifest
 
@@ -189,3 +189,73 @@ def _has_completed_receipt_since(target: Path, manifest_id: str, written: float)
         if receipt_started is not None and receipt_started.timestamp() >= written:
             return True
     return False
+
+
+_WRITE_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
+RECEIPT_HEADER = "Recent write work in Brigade-wired repos has no verification receipt for this session."
+STOP_HEADER = "A tracked verify manifest covers a file changed this session and has not been run since."
+
+
+def _commands(target: Path, covered: list[CoveredManifest], prefix: str) -> list[str]:
+    """One manifest verify per covered manifest. The manifest, not the agent, decides the scored subject."""
+    return [f"{prefix}{verify_command(target, item.source)}" for item in covered]
+
+
+def deny_hint(target: Path, prefix: str) -> str:
+    """Extra deny text, starting with a newline, naming the manifest verify for a changed subject, or ``""``.
+
+    ``prefix`` is the session-env prefix the runtime puts in front of every verify replacement.
+    """
+    covered = covered_manifests(target)
+    if not covered:
+        return ""
+    lines = [
+        "",
+        "This change touches the subject of a tracked verify manifest. Keep your own check, and also run the "
+        "manifest verify, the scoreable one (the manifest picks what it scores):",
+    ]
+    for item, command in zip(covered, _commands(target, covered, prefix), strict=True):
+        lines.append(f"- {item.subject_path}: {command}")
+    return "\n".join(lines)
+
+
+def session_written_paths(state: dict[str, Any]) -> list[str]:
+    """Target-relative files this session wrote with a file tool.
+
+    Reuses the pre-write dependency checks, which already record the path of each
+    Edit, Write or NotebookEdit. Bash writes carry no path, so a subject changed only
+    by a shell command is not attributed to this session and its manifest gate stays
+    open (fail open).
+    """
+    from . import dependencies
+
+    return [
+        check["file_path"]
+        for check in dependencies.write_checks(state)
+        if check.get("tool_name") in _WRITE_TOOLS and isinstance(check.get("file_path"), str)
+    ]
+
+
+def stop_failures(target: Path, state: dict[str, Any], prefix: str, *, is_foreign: Callable[[], bool]) -> list[str]:
+    """Stop-gate lines for subjects this session wrote whose manifest has not run since.
+
+    Gate only subjects this session wrote. The generic gate can pass because a concurrent
+    writer drifted the tree after this session's capture (#959), and that tree is not this
+    session's to gate either, so ``is_foreign`` skips the gate. It is called only when the
+    session wrote something, because it is not free.
+    """
+    written = session_written_paths(state)
+    if not written or is_foreign():
+        return []
+    gaps = unverified_manifests(target, state.get("started_at"), written)
+    return [
+        f"{target}: {gap.subject_path} changed and manifest `{gap.manifest_id}` has no completed "
+        f"receipt since the write, run `{command}`"
+        for gap, command in zip(gaps, _commands(target, gaps, prefix), strict=True)
+    ]
+
+
+def block_reason(receipt_failures: list[str], manifest_failures: list[str]) -> str:
+    """The Stop block text: the generic receipt gate first, then the manifest gate."""
+    sections = ((RECEIPT_HEADER, receipt_failures), (STOP_HEADER, manifest_failures))
+    return "\n".join("\n- ".join([header, *items]) for header, items in sections if items)
