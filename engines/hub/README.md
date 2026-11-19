@@ -91,10 +91,15 @@ HTTPS front. Global connection limits still apply. A non-loopback bind keeps
 the per-source cap even for loopback peers.
 
 Before reading a body, Rust validates bearer digests against active node and
-message-principal rows through the shared query-only reader pool. Admin digest
-comparison uses constant-time equality. Revocation takes effect on the next
-lookup. Lookup and pool queue wait together have a two-second deadline.
-Lookup failure returns 503 `credential-lookup` with `Retry-After: 1`.
+message-principal rows on a dedicated query-only credential pool, never on the
+handler pool. Every native route repeats that check on the same credential pool
+before it reads: `claims`, `heartbeat`, `messages`, `registration`, and the
+memory route's `Store::authenticate`. Admin digest comparison uses constant-time
+equality. Revocation takes effect on the next lookup. A credential read's two
+seconds count from when it was queued, as a handler read's do; a memory read
+counts its two seconds from when a reader starts, so a search that queued for
+most of its limit still gets a full run window. Lookup failure returns 503
+`credential-lookup` with `Retry-After: 1`.
 
 Requests have separate credential, browser and anonymous budgets. Validated
 credentials admit 64 requests each and hold at most four of the 16 credential
@@ -160,8 +165,16 @@ is recorded when the wait fails too. With every family proxied, the front starts
 no writer, because the Python upstream commits every write, so these six stay
 `NaN` with a help line that says so. A native `registration`, `heartbeat`,
 `claims` or `messages` family starts that writer, and the six read it. Reader
-queue depth sums the jobs waiting in the front's reader pools, and CPU queue
-depth reads the CPU pool. Both are 0 when idle,
+queue depth sums the jobs waiting in the handler and memory reader pools, as it
+did before the credential pool split; it does not include credential lookups.
+The reader counters, `brigade_hub_reader_jobs_total`,
+`brigade_hub_reader_queue_wait_seconds_total`,
+`brigade_hub_reader_run_seconds_total` and
+`brigade_hub_reader_timeouts_total{reason=...}`, carry a `pool` label of
+`handler`, `lookup` or `memory`. A timeout names its cause: `aged-in-queue`,
+`run-deadline`, `caller-gone`, or `queue-full` for a full queue that turned the
+job away before a reader saw it. A pool this process did not open reads `NaN`.
+CPU queue depth reads the CPU pool. Both are 0 when idle,
 and `NaN` only where no pool is attached. Each is a single unlabeled sample with no
 `# TYPE` line, as S9 published it. Checkpoint metrics use S4b's samples when this
 front owns maintenance, including busy results, failures, WAL frames,
