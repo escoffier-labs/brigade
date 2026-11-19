@@ -472,6 +472,29 @@ def _check_replica_files(target: Path, *, scope: str | None, dry_run: bool) -> N
                 )
 
 
+def _reserved_classes(client: hubc.MemoryHubClient) -> frozenset[str]:
+    """Op classes the hub reserves for automatic apply by a principal this run is not.
+
+    The status reply carries `memory_policy` only for a caller with the reflect right. Anything
+    short of a clear signal returns nothing, so an older hub, a policy with automatic apply off,
+    an empty principal list or a listed caller all keep today's behaviour.
+    """
+    try:
+        body = client.call("status")
+    except (hubc.HubUnavailable, hubc.HubRefusal):
+        return frozenset()
+    policy = body.get("memory_policy")
+    if (
+        not isinstance(policy, dict)
+        or policy.get("auto_apply") is not True
+        or policy.get("reflect_principals_nonempty") is not True
+        or body.get("reflect_principal") is not False
+    ):
+        return frozenset()
+    classes = policy.get("tier0_op_classes")
+    return frozenset(c for c in classes if isinstance(c, str)) if isinstance(classes, list) else frozenset()
+
+
 def _reflect(
     target: Path,
     settings: hubc.HubSettings,
@@ -579,6 +602,21 @@ def _reflect(
     budget = near.Budget()
     link_stats = {"links": 0, "broken": 0, "repairs": 0}
     link_index = links.Index(heads)
+    reserved = _reserved_classes(client)
+
+    def leave_reserved(submissions: list[list[dict[str, Any]]]) -> list[list[dict[str, Any]]]:
+        """Drop a submission only the listed reflect principal can apply, so it never lands unappliable.
+
+        The hub holds a proposal automatic unless every op is in a reserved class, so a mixed one stays.
+        """
+        kept = []
+        for ops in submissions:
+            if reserved and all(op["type"] in reserved for op in ops):
+                skipped["reserved_automatic"] = skipped.get("reserved_automatic", 0) + len(ops)
+            else:
+                kept.append(ops)
+        return kept
+
     for name in reflected:
         scoped = [head for head in heads if head["scope"] == name]
         scope_ops, scope_skips = _ops(scoped)
@@ -591,6 +629,7 @@ def _reflect(
         relinked.extend(link_ops)
         for reason, count in (*scope_skips.items(), *near_skips.items(), *link_skips.items()):
             skipped[reason] = skipped.get(reason, 0) + count
+    exact, similar, relinked = leave_reserved(exact), leave_reserved(similar), leave_reserved(relinked)
     binding = io.sha256(
         io.json_bytes([client.identity, report["principal"], report["log_epoch"], list(configured_scopes)])
     )
@@ -690,7 +729,7 @@ def _reflect(
     if first == LINK_LANE:
         lanes.reverse()
     alternating = [item for group in itertools.zip_longest(*lanes) for item in group if item is not None]
-    pending_anchors = unremembered(anchors.ops([head for head in heads if head["scope"] in reflected]))
+    pending_anchors = unremembered(leave_reserved(anchors.ops([head for head in heads if head["scope"] in reflected])))
     remaining = unremembered(exact) + alternating + pending_anchors[: anchors.MAX_PROPOSALS]
     # Retry budget is separate so held proposals cannot consume new-work slots.
     # Retries reuse an opened proposal and never submit, so they run first and a

@@ -163,6 +163,27 @@ pub fn listed(policy_document: &Json, principal: &str) -> bool {
         .is_some_and(|items| items.iter().any(|v| v.as_str() == Some(principal)))
 }
 
+/// The caller-safe policy summary on the `status` reply: whether automatic
+/// apply is on, which op classes are reserved to listed principals, and
+/// whether any principal is listed. A reflect client reads it to leave a
+/// reserved class to a principal that can apply it. The caller gates it on
+/// the `reflect` right, and it never carries the `reflect_principals` list
+/// itself. It changes no authority or gate.
+pub fn policy_summary(policy_document: &Json) -> Json {
+    let memory = &policy_document["memory"];
+    let classes: Vec<&str> = memory["tier0_op_classes"]
+        .as_array()
+        .map(|items| items.iter().filter_map(Json::as_str).collect())
+        .unwrap_or_default();
+    json!({
+        "auto_apply": memory["auto_apply"] == true,
+        "tier0_op_classes": classes,
+        "reflect_principals_nonempty": memory["reflect_principals"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+    })
+}
+
 /// The admin `verifier` action. Sets or clears the flag on the principal
 /// record and on every copy the principal holds, binds a copy for each live
 /// hub credential that has none, and logs one `grant.change` event, all in

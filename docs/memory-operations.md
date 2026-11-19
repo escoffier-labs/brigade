@@ -1980,6 +1980,29 @@ manager and enable the timer using the commands printed by install. For a
 manual dry run, set the same environment pair in the invoking shell. A successful
 manual non-dry run resumes a paused job.
 
+A proposal-only reflect job (a principal that is not in `memory.reflect_principals`)
+can share a scope with the principal that applies automatically. The hub binds
+an automatic apply to the proposer and dedupes proposals by digest, so a
+proposal the hub job opens first for a reserved class (for example
+`merge_exact_duplicates`) could never apply and would sit pending. To avoid
+that, `status` carries a `memory_policy` summary:
+
+```json
+{"memory_policy": {"auto_apply": true,
+                   "tier0_op_classes": ["merge_exact_duplicates"],
+                   "reflect_principals_nonempty": true}}
+```
+
+The hub adds it only for a caller that holds the `reflect` right on at least
+one scope. Other callers get no `memory_policy` key. It never carries the
+`reflect_principals` list or any credential data, and it changes no authority,
+gate or decision. When `auto_apply` is true, `reflect_principals_nonempty` is
+true, and `reflect_principal` is false for the run, `memory reflect run` skips
+every submission whose ops are all in `tier0_op_classes` and reports it as
+`skipped_reasons: {"reserved_automatic": N}` (N counts ops). A submission with
+any unreserved op, a listed caller, automatic apply off, or a hub that sends no
+summary behaves as before.
+
 The installed timer sets only `PATH`. Configure `[memory_hub]` in the user's
 `fleet.toml` for scheduled jobs unless you import the environment pair into the
 user service manager. A custom `BRIGADE_HOME` must also be available there if
@@ -2402,6 +2425,8 @@ The hub enforces three rules for a flagged principal:
 3. `status` reports the caller's own `verifier` flag and its
    `reflect_principal` membership as booleans, and `capabilities` lists
    `verifier_floor`.
+   A caller with the `reflect` right on some scope also gets `memory_policy`
+   (see the [dedicated reflect folder](#dedicated-reflect-folder)).
 
 Python never opens the memory file. Inside each flag change's transaction,
 while it holds the hub lock and before it commits, the memory writer replaces

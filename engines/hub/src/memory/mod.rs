@@ -82,6 +82,8 @@ mod lexical_tests;
 #[cfg(test)]
 mod manifest_binding_tests;
 #[cfg(test)]
+mod policy_summary_tests;
+#[cfg(test)]
 mod powercut;
 #[cfg(test)]
 mod preflight_tests;
@@ -1948,6 +1950,11 @@ impl Store {
                 if action == "status" && reply.status == 200 {
                     let rows = Conn(c).query("SELECT count(*) FROM memory_proposals WHERE principal=?1 AND state IN ('pending','held')", &[Value::Text(credential.principal().into())])?;
                     reply.body["proposal_quota"] = json!({"pending": num(&rows[0][0]).unwrap_or(0), "pending_per_principal": pending_limit});
+                    // Grants live in this file, the policy in the hub file, so
+                    // this step only records the right and the hub step reads
+                    // the policy. The marker never leaves `read`.
+                    reply.body["reflect_holder"] =
+                        json!(auth::has_right(&Conn(c), &credential, None, "reflect")?);
                 }
                 Ok(reply)
             })
@@ -1967,6 +1974,17 @@ impl Store {
                         .await
                     {
                         Ok((authority, announced)) => {
+                            // The reader step marked a caller that holds the
+                            // `reflect` right on some scope. Every other
+                            // caller gets no `memory_policy` field at all.
+                            if let Some(body) = reply.body.as_object_mut() {
+                                if body.remove("reflect_holder") == Some(json!(true)) {
+                                    body.insert(
+                                        "memory_policy".into(),
+                                        verifier::policy_summary(&authority.policy_document),
+                                    );
+                                }
+                            }
                             // Policy writes that list a reflect principal are
                             // refused until these two match (D4).
                             let state = &mut reply.body["verifier_generation"];
