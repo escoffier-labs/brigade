@@ -191,18 +191,25 @@ pub fn exact<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> 
     Ok(proposals::stale_reason(tx, body)?.is_none())
 }
 
-/// A human decision rejecting a rollback proposal records `reject`, while every
-/// automatic attempt records `failed`. The hub reads that decision in the same
-/// transaction that would apply an inverse, so a rejected referral vetoes every
-/// automatic inverse of the same trip regardless of which client retries it.
+/// Marker written when a reviewer rejects the watch review referral for a trip.
+/// The key is the original proposal id, so the veto survives body compaction.
+pub fn veto_key(rollback_of: &str) -> String {
+    format!("compensation_veto:{rollback_of}")
+}
+
+/// A reviewer's rejection of a watch review referral is recorded as a marker in
+/// the same transaction as the decision. The hub reads it in the transaction
+/// that would apply an inverse, so no client retry can apply a vetoed trip.
+/// Rejections recorded before this marker existed do not veto, which matches the
+/// behavior of hubs that predate it.
 pub fn reviewer_veto<T: ReadTx + ?Sized>(tx: &T, body: &Json) -> rusqlite::Result<bool> {
     let Some(id) = body["rollback_of"].as_str() else {
         return Ok(false);
     };
     Ok(!tx
         .query(
-            "SELECT 1 FROM memory_proposals WHERE compacted=0 AND state='rejected' AND json_extract(body,'$.decision')='reject' AND json_extract(body,'$.rollback_of')=?1 LIMIT 1",
-            &[t(id)],
+            "SELECT 1 FROM memory_meta WHERE key=?1",
+            &[t(&veto_key(id))],
         )?
         .is_empty())
 }

@@ -1089,6 +1089,9 @@ pub(super) fn compensate(
                 break;
             }
         }
+        // The referral discount only stands when this savepoint closes the
+        // referral. Any other outcome must still fit the strict pending totals.
+        let discounted = matched_referral.is_some();
         // Only a failed automatic attempt for this exact freshly attested trip
         // can be retried. Review referrals never enter this path. Include
         // rejected round-4 scan attempts without reviving reviewed rejections.
@@ -1219,6 +1222,11 @@ pub(super) fn compensate(
                 return Ok(r);
             }
             event(tx, p, "proposal.decide", &body)?;
+        }
+        if discounted && body["state"] != "applied" {
+            if let Some(r) = super::hardening::settle(tx, &body, &authority.proposal_limits)? {
+                return Ok(r);
+            }
         }
         let mut response = reply(&body, 201);
         redact_auto_reply(tx, &p.credential, &body, &mut response.body)?;
@@ -1434,6 +1442,20 @@ pub fn run(
         body["policy_digest"] = body["decision_policy_digest"].clone();
     }
     if cmd.request["decision"] == "reject" {
+        // A reviewer rejecting the watch review referral vetoes the automatic
+        // inverse for the same trip. Only that referral writes the marker; a
+        // rejected manual rollback proposal does not.
+        if body["watch_trip"]["review_required"] == true {
+            if let Some(original) = body["rollback_of"].as_str() {
+                tx.execute(
+                    "INSERT INTO memory_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    &[
+                        t(&super::compensation::veto_key(original)),
+                        t(string(&body, "proposal_id")),
+                    ],
+                )?;
+            }
+        }
         body["state"] = json!("rejected");
         body["reason"] = if string(&body, "proposer") == p.credential.principal()
             && body["ops"].as_array().is_some_and(|ops| {

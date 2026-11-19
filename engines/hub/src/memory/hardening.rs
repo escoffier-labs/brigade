@@ -172,7 +172,7 @@ pub(super) fn admit_excluding(
         reply.body["tier"] = json!(number(&row[1]));
         return Ok(Some(reply));
     }
-    quota_excluding(tx, body, limits, referral.unwrap_or(""))
+    quota_excluding(tx, body, limits, referral.unwrap_or(""), "")
 }
 /// A dimension passes when its usage stays within the limit or does not grow.
 /// Admission always grows pending count and bytes, so it stays strict, while a
@@ -193,16 +193,18 @@ pub fn quota(
     } else {
         ""
     };
-    quota_excluding(tx, body, limits, own)
+    quota_excluding(tx, body, limits, own, own)
 }
-/// `excluded` names one stored row left out of both totals: the row this body
-/// replaces, or the review referral an exact compensation closes in the same
-/// savepoint when it applies.
+/// `count_excluded` names one stored row left out of the pending count, and
+/// `bytes_excluded` one left out of the byte total. A replaced row is both. A
+/// review referral an exact compensation closes in the same savepoint is only
+/// its pending slot: it keeps its bytes until it is closed or compacted.
 fn quota_excluding(
     tx: &dyn WriteTx,
     body: &Json,
     limits: &Limits,
-    excluded: &str,
+    count_excluded: &str,
+    bytes_excluded: &str,
 ) -> rusqlite::Result<Option<Reply>> {
     let pending = i64::from(matches!(
         proposals::string(body, "state"),
@@ -221,7 +223,7 @@ fn quota_excluding(
         within(total_pending, pending_after, pending_limit)
             && within(total_bytes, bytes_after, bytes_limit)
     };
-    let usage=tx.query("SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0),COALESCE(SUM(proposal_id=?2 AND state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN proposal_id=?2 THEN retained_bytes ELSE 0 END),0) FROM memory_proposals WHERE principal=?1", &[ops::t(proposals::string(body,"proposer")),ops::t(excluded)])?;
+    let usage=tx.query("SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0),COALESCE(SUM(proposal_id=?2 AND state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN proposal_id=?3 THEN retained_bytes ELSE 0 END),0) FROM memory_proposals WHERE principal=?1", &[ops::t(proposals::string(body,"proposer")),ops::t(count_excluded),ops::t(bytes_excluded)])?;
     if !allowed(
         &usage[0],
         limits.pending_per_principal,
@@ -238,8 +240,48 @@ fn quota_excluding(
         .map(|c| proposals::string(c, "scope"))
         .collect();
     for scope in scopes {
-        let usage=tx.query("SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0),COALESCE(SUM(p.proposal_id=?2 AND p.state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN p.proposal_id=?2 THEN p.retained_bytes ELSE 0 END),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1", &[ops::t(scope),ops::t(excluded)])?;
+        let usage=tx.query("SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0),COALESCE(SUM(p.proposal_id=?2 AND p.state IN ('pending','held')),0),COALESCE(SUM(CASE WHEN p.proposal_id=?3 THEN p.retained_bytes ELSE 0 END),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1", &[ops::t(scope),ops::t(count_excluded),ops::t(bytes_excluded)])?;
         if !allowed(&usage[0], limits.pending_per_scope, limits.bytes_per_scope) {
+            return Ok(Some(ops::error(
+                429,
+                "memory_proposal_scope_quota",
+                "scope proposal storage quota reached",
+            )));
+        }
+    }
+    Ok(None)
+}
+/// Strict totals for a write that used an admission discount. Unlike `quota`,
+/// nothing is replaced or excluded and the "does not grow" allowance does not
+/// apply, so an inverse that did not close its referral cannot leave the
+/// principal or any scope over its pending limit. The caller runs it inside the
+/// same savepoint so a refusal rolls the inverse back.
+pub fn settle(tx: &dyn WriteTx, body: &Json, limits: &Limits) -> rusqlite::Result<Option<Reply>> {
+    let usage = tx.query(
+        "SELECT COALESCE(SUM(state IN ('pending','held')),0),COALESCE(SUM(retained_bytes),0) FROM memory_proposals WHERE principal=?1",
+        &[ops::t(proposals::string(body, "proposer"))],
+    )?;
+    if number(&usage[0][0]) > limits.pending_per_principal
+        || number(&usage[0][1]) > limits.bytes_per_principal
+    {
+        return Ok(Some(ops::error(
+            429,
+            "memory_proposal_principal_quota",
+            "principal proposal storage quota reached",
+        )));
+    }
+    let scopes: std::collections::BTreeSet<_> = proposals::cards(body)
+        .iter()
+        .map(|c| proposals::string(c, "scope"))
+        .collect();
+    for scope in scopes {
+        let usage = tx.query(
+            "SELECT COALESCE(SUM(p.state IN ('pending','held')),0),COALESCE(SUM(p.retained_bytes),0) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1",
+            &[ops::t(scope)],
+        )?;
+        if number(&usage[0][0]) > limits.pending_per_scope
+            || number(&usage[0][1]) > limits.bytes_per_scope
+        {
             return Ok(Some(ops::error(
                 429,
                 "memory_proposal_scope_quota",
