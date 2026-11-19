@@ -475,7 +475,7 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
         record(found[1], [card_id, found[0].relative_to(found[1]).as_posix()])
     context = ledger_path(found[1], session_id).relative_to(found[1]).as_posix()
 
-    from ..memory_retrieval_eval.live import interactive_session, record_use
+    from ..memory_retrieval_eval.live import interactive_session, record_use, same_hub_target
 
     if interactive_session(payload):
         from ..memory_hub_sync import publication_card_id
@@ -485,7 +485,9 @@ def observe_read(target: Path, payload: dict[str, Any]) -> bool:
             rel = found[0].relative_to(found[1]).as_posix()
             published = publication_card_id(opened_text, rel, card_id)
             record_use(target, published, opened_text, payload=payload)
-            if found[1] != target:
+            # Two roots that resolve to one hub and token would only store the
+            # same use row twice, at up to the full timeout each time.
+            if found[1] != target and not same_hub_target(target, found[1]):
                 record_use(found[1], published, opened_text, payload=payload)
 
     def observed(ledger: dict[str, Any]) -> None:

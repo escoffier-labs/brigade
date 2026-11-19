@@ -1100,3 +1100,46 @@ def test_private_eval_use_joins_the_wired_search_target(wired, monkeypatch):
     payload.pop("session_kind")
     assert hub_recall.observe_read(target, payload)
     assert observed == []
+
+
+def test_one_read_records_use_once_when_both_targets_share_a_hub(wired, monkeypatch, tmp_path):
+    """The wired target and the memory root are one hub here: one use call, not two."""
+    from brigade.memory_retrieval_eval import live
+    from brigade.memory_hub_sync import publication_card_id
+
+    target, memory = wired
+    _hub_mode(target, monkeypatch, tmp_path, "http://127.0.0.1:9")
+    _hub_mode(memory, monkeypatch, tmp_path, "http://127.0.0.1:9")
+    card = memory / "memory/cards/comet.md"
+    card.write_text("---\ntopic: architecture/decisions\n---\nbody\n")
+    calls = []
+    monkeypatch.setattr(live, "record_use", lambda *a, **kw: calls.append((a, kw)))
+    payload = {"session_id": "same-session", "session_kind": "interactive", "tool_input": {"file_path": str(card)}}
+    assert hub_recall.observe_read(target, payload)
+    expected = publication_card_id(card.read_text(), "memory/cards/comet.md", "architecture/decisions")
+    assert [call[0][0] for call in calls] == [target]
+    assert calls[0][0][1] == expected
+
+
+def test_one_read_records_use_for_both_targets_when_their_hubs_differ(wired, monkeypatch):
+    """Two different hubs still see the same read: the second call is not skipped."""
+    from brigade import memory_hub_client
+    from brigade.memory_retrieval_eval import live
+
+    target, memory = wired
+    card = memory / "memory/cards/comet.md"
+    card.write_text("---\ntopic: architecture/decisions\n---\nbody\n")
+    settings = {
+        target.resolve(): memory_hub_client.HubSettings(
+            mode="read", scope="fleet", hub_url="http://one.invalid", token="one"
+        ),
+        memory.resolve(): memory_hub_client.HubSettings(
+            mode="read", scope="fleet", hub_url="http://two.invalid", token="two"
+        ),
+    }
+    monkeypatch.setattr(memory_hub_client, "load_settings", lambda path: settings[path.resolve()])
+    calls = []
+    monkeypatch.setattr(live, "record_use", lambda *a, **kw: calls.append((a, kw)))
+    payload = {"session_id": "same-session", "session_kind": "interactive", "tool_input": {"file_path": str(card)}}
+    assert hub_recall.observe_read(target, payload)
+    assert [call[0][0] for call in calls] == [target, memory]

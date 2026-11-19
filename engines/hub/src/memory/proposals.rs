@@ -899,6 +899,8 @@ fn apply_cards(
     }
     // History has its own sequence and can change after the read snapshot.
     // Recompute real-scope authorization and vetoes under the writer lock.
+    // Verifier and compensation applies run their own gates at this boundary,
+    // as on main, so their exclusion here is deliberate.
     if automatic
         && !verify_automatic
         && !compensation
