@@ -734,8 +734,10 @@ raised value as `policy_adjusted` (`configured` and `applied`), which
 the transitions. Changing these values cannot enable automatic archiving.
 
 The lifecycle stage keeps two stop conditions apart. `blocked` means the stage
-did nothing, for example when installed care schedules or local read coverage
-cannot be read. `archive_blocked` means only archiving stopped, such as when no
+stopped, for example when installed care schedules or local read coverage
+cannot be read. It normally stops before any card. If local read coverage
+fails partway through a pass, transitions already committed stay listed.
+`archive_blocked` means only archiving stopped, such as when no
 hub reports read coverage, while stale transitions still commit. Per-card
 failures do not stop the pass: the unreadable card is listed in `skipped` with
 a `card unreadable` reason, and transitions committed before and after it keep

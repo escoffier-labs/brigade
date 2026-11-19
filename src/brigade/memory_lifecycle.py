@@ -674,6 +674,9 @@ def run(target: Path, *, today: date, dry_run: bool = False) -> dict[str, Any]:
                                     metadata=metadata,
                                 )
                         except journal.kernel.ProjectionError as exc:
+                            # A prepared phase may already have changed the card, so this
+                            # cannot pass as a clean run either.
+                            payload["error"] = True
                             payload["skipped"].append({"path": rel, "reason": str(exc)})
                             break
                         if state == "archived":

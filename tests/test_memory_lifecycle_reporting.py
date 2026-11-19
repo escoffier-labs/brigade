@@ -35,6 +35,30 @@ def observed_run(root, *, today, **kwargs):
     return life.run(root, today=today, **kwargs)
 
 
+def test_projection_failure_on_one_card_fails_the_stage(tmp_path, monkeypatch):
+    """A ProjectionError while committing one card keeps siblings running and still fails the stage."""
+    monkeypatch.setattr(reads, "record", lambda *args, **kwargs: True)
+    monkeypatch.setattr(life, "_references", lambda *args: {})
+    monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
+    for name in ("a", "b", "c"):
+        card(tmp_path, name=name)
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+    commit = journal.commit_phased
+
+    def broken(target, **kwargs):
+        if (kwargs.get("metadata") or {}).get("card_path") == "memory/cards/b.md":
+            raise journal.kernel.ProjectionError("projection journal missing or invalid")
+        return commit(target, **kwargs)
+
+    monkeypatch.setattr(journal, "commit_phased", broken)
+    result = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
+    stage = result["stages"]["lifecycle"]
+    assert [row["card_path"] for row in stage["transitions"]] == ["memory/cards/a.md", "memory/cards/c.md"]
+    assert any(row["path"] == "memory/cards/b.md" for row in stage["skipped"]), stage
+    assert stage["error"] is True
+    assert result["failed_stages"] == ["lifecycle"]
+
+
 def test_one_bad_card_keeps_committed_transitions_and_later_cards(tmp_path, monkeypatch):
     """A card that cannot commit is skipped, siblings still run, and the stage fails."""
     monkeypatch.setattr(reads, "record", lambda *args, **kwargs: True)
