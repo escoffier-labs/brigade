@@ -309,21 +309,27 @@ def test_suggested_command_is_withheld_for_a_dangerous_next_text(tmp_path, capsy
 
 
 def test_suggested_command_quotes_an_ordinary_sentence(tmp_path, capsys):
+    from brigade import shell_quote
+
     _dogfood_next(tmp_path, "review the auth module")
 
     out = _brief(tmp_path, capsys)
 
     assert "next: review the auth module" in out
-    assert "suggested_command: brigade work run 'review the auth module'" in out
+    quoted = shell_quote.quote_argument("review the auth module")
+    assert f"suggested_command: brigade work run {quoted}" in out
 
 
 def test_suggested_command_quotes_an_apostrophe_safely(tmp_path, capsys):
+    from brigade import shell_quote
+
     _dogfood_next(tmp_path, "it's ok")
 
     out = _brief(tmp_path, capsys)
 
     assert "next: it's ok" in out
-    assert "suggested_command: brigade work run 'it'\"'\"'s ok'" in out
+    quoted = shell_quote.quote_argument("it's ok")
+    assert f"suggested_command: brigade work run {quoted}" in out
 
 
 def test_suggested_command_stays_runnable_for_a_plain_task_text(tmp_path, capsys):
@@ -700,3 +706,46 @@ def test_render_leaves_stdout_untouched_and_keeps_two_renders_apart(tmp_path, ca
     assert sys.stdout is original
     assert seen and all(item is original for item in seen)
     assert out.count("work brief: ") == 2
+
+
+def test_windows_rendering_keeps_a_backslash_path_unquoted(tmp_path, capsys, monkeypatch):
+    from brigade import security_cmd, shell_quote
+
+    # A directory name with backslashes: on POSIX that is one legal name, and it makes
+    # the resolved target carry a Windows-shaped path without leaving this host.
+    target = tmp_path / "D:\\a\\_temp\\repo"
+    target.mkdir()
+    resolved = target.resolve()
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        lambda _target: _payload_fake(
+            suppression_cache={
+                "status": "stale",
+                "detail": "suppressions changed",
+                "next_command": (f"brigade security scan --target {resolved} --output-dir {resolved / '.brigade'}"),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        briefing,
+        "_resolve_next_task",
+        lambda _target: {
+            "task": "review the auth module",
+            "source": "latest_dogfood_run",
+            "dogfood": {},
+            "ledger_task": None,
+            "task_id": None,
+        },
+    )
+
+    capsys.readouterr()
+    assert work_cmd.brief(target=target) == 0
+    out = capsys.readouterr().out
+
+    line = _line(out, "security_suppressions_next_command: ")
+    assert "withheld" not in line
+    assert f"--target {resolved}" in line
+    assert f"--output-dir {resolved / '.brigade'}" in line
+    assert 'suggested_command: brigade work run "review the auth module"' in out

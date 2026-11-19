@@ -155,6 +155,16 @@ def is_plain(raw: object) -> bool:
     return not any(_unsafe(char) for char in str(raw if raw is not None else ""))
 
 
+def _has_dangerous(raw: object) -> bool:
+    """True when the value holds a character that can break a line or hide text.
+
+    A command argument is shell quoted, so a backslash is literal there and only the
+    dangerous set matters. In display text a backslash is escaped so an escape cannot
+    be faked, which is why `is_plain` is stricter.
+    """
+    return any(_dangerous(char) for char in str(raw if raw is not None else ""))
+
+
 def record_command_text(command: object) -> str:
     """A command string read from a record, or `WITHHELD` when it holds a metacharacter."""
     rendered = "" if command is None else str(command)
@@ -167,16 +177,16 @@ def command_text(command: object, *untrusted: object) -> str:
     """A command Brigade composed, with each untrusted argument shell quoted.
 
     The command is withheld when an argument holds a character that can break a line
-    or hide text. A space, a quote or a shell metacharacter is fine: the argument is
-    quoted for this platform's shell, where none of them is interpreted. An argument
-    the producer already quoted is left as it is.
+    or hide text. A space, a quote, a backslash or a shell metacharacter is fine: the
+    argument is quoted for this platform's shell, where none of them is interpreted.
+    An argument the producer already quoted is left as it is.
     """
     rendered = "" if command is None else str(command)
     for raw in untrusted:
         token = str(raw if raw is not None else "")
         if not token:
             continue
-        if not is_plain(token):
+        if _has_dangerous(token):
             return WITHHELD
         quoted = quote_argument(token)
         if quoted == token or quoted in rendered:
