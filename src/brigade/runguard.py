@@ -270,7 +270,7 @@ def _lock_is_stale(path: Path) -> bool:
     _lock_path_is_directory(path)
     recorded_pids: list[int] = []
     try:
-        recorded_pids.append(int(nt_process.read_text_sharing_delete(path / "pid").strip()))
+        recorded_pids.append(int((path / "pid").read_text().strip()))
     except (FileNotFoundError, NotADirectoryError, ValueError):
         pass
     except OSError as exc:
@@ -307,7 +307,7 @@ def read_lock_owner(path: Path | str | None) -> dict[str, object] | None:
 
 def _read_lock_owner(path: Path) -> dict[str, object] | None:
     try:
-        payload = json.loads(nt_process.read_text_sharing_delete(path / "owner.json"))
+        payload = json.loads((path / "owner.json").read_text())
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
