@@ -1196,7 +1196,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
         print(
             f"cloud_stale: {cloud.get('stale_count')} ready beyond "
             f"{cloud.get('stale_ready_hours', '?')}h "
-            f"(run `{cloud.get('suggested_command', 'brigade run cloud status --json')}`)"
+            f"(run `{brief_values.record_command_text(cloud.get('suggested_command', 'brigade run cloud status --json'))}`)"
         )
         for row in cloud.get("stale_entries") or []:
             if not isinstance(row, dict):
@@ -1324,7 +1324,10 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
                 f"acceptance={scanner_candidate.get('acceptance_count')}] "
                 f"{brief_values.text(scanner_candidate.get('text', ''))}"
             )
-            print(f"scanner_next_command: brigade work import plan {brief_values.name(scanner_candidate.get('id'))}")
+            print(
+                "scanner_next_command: "
+                f"{brief_values.command_text('brigade work import plan ' + str(scanner_candidate.get('id')), scanner_candidate.get('id'))}"
+            )
     handoff_candidate = payload.get("handoff_candidate")
     pending_tasks = payload.get("pending_tasks") if isinstance(payload.get("pending_tasks"), list) else []
     if isinstance(handoff_candidate, dict) and not pending_tasks:
@@ -1333,7 +1336,8 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
         print(f"handoff_next_kind: {brief_values.name(handoff_candidate.get('kind'))}")
         print(f"handoff_next_target: {brief_values.name(handoff_candidate.get('target_document'))}")
         print(
-            f"handoff_next_command: brigade work import plan-handoff {brief_values.name(handoff_candidate.get('id'))}"
+            "handoff_next_command: "
+            f"{brief_values.command_text('brigade work import plan-handoff ' + str(handoff_candidate.get('id')), handoff_candidate.get('id'))}"
         )
 
     inbox_hygiene = payload.get("inbox_hygiene") if isinstance(payload.get("inbox_hygiene"), dict) else {}
@@ -1387,7 +1391,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
                 f"[{brief_values.name(latest_sweep.get('status'))}]"
             )
         if scanner_sweeps.get("suggested_command"):
-            print(f"scanner_sweep_command: {scanner_sweeps.get('suggested_command')}")
+            print(f"scanner_sweep_command: {brief_values.record_command_text(scanner_sweeps.get('suggested_command'))}")
         raw_review = scanner_sweeps.get("review")
         review: dict[str, Any] = raw_review if isinstance(raw_review, dict) else {}
         top_pending = review.get("top_pending_import") if isinstance(review.get("top_pending_import"), dict) else None
@@ -1398,7 +1402,10 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
                 f"{brief_values.name(top_pending.get('source'))} "
                 f"{brief_values.text(top_pending.get('text', ''))}"
             )
-            print(f"scanner_sweep_review: brigade work sweep-review {brief_values.name(latest_sweep.get('sweep_id'))}")
+            print(
+                "scanner_sweep_review: "
+                f"{brief_values.command_text('brigade work sweep-review ' + str(latest_sweep.get('sweep_id')), latest_sweep.get('sweep_id'))}"
+            )
 
     raw_chat_surfaces = payload.get("chat_surfaces")
     chat_surfaces: dict[str, Any] = raw_chat_surfaces if isinstance(raw_chat_surfaces, dict) else {}
@@ -1429,7 +1436,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
                 "memory_care_fix_plan: "
                 f"planned={autofix_plan.get('plan_count')} "
                 f"blocked={autofix_plan.get('blocked_count')} "
-                f"command={autofix_plan.get('suggested_next_command')}"
+                f"command={brief_values.record_command_text(autofix_plan.get('suggested_next_command'))}"
             )
 
     raw_scheduled_care = payload.get("scheduled_care")
@@ -1702,10 +1709,19 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
             if top_report.get("suggested_next_command"):
                 raw_latest = operator_report.get("latest")
                 latest: dict[str, Any] = raw_latest if isinstance(raw_latest, dict) else {}
-                report_id = latest.get("report_id")
-                command = brief_values.command_text(
-                    top_report.get("suggested_next_command"), report_id, top_report.get("report_id")
-                )
+                raw_diff = operator_report.get("latest_diff")
+                diff: dict[str, Any] = raw_diff if isinstance(raw_diff, dict) else {}
+                declared = top_report.get("command_args")
+                report_args = [
+                    latest.get("report_id"),
+                    diff.get("diff_id"),
+                    diff.get("base_report_id"),
+                    diff.get("compare_report_id"),
+                    top_report.get("report_id"),
+                ]
+                if isinstance(declared, list):
+                    report_args.extend(declared)
+                command = brief_values.command_text(top_report.get("suggested_next_command"), *report_args)
                 print(f"operator_report_command: {command}")
 
     operator_actions = payload.get("operator_actions") if isinstance(payload.get("operator_actions"), dict) else {}
@@ -1759,7 +1775,10 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
             print(
                 f"review_top_finding: {brief_values.name(finding_id)} {brief_values.text(top_review.get('text', ''))}"
             )
-            print(f"review_top_command: brigade work review finding-show {brief_values.name(finding_id)}")
+            print(
+                "review_top_command: "
+                f"{brief_values.command_text('brigade work review finding-show ' + str(finding_id), finding_id)}"
+            )
 
     handoff_issues = payload.get("handoff_issues")
     if isinstance(handoff_issues, dict) and handoff_issues.get("count"):
@@ -1799,7 +1818,10 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
                     f"handoff_draft_next: {brief_values.name(first.get('id'))} "
                     f"{brief_values.name(first.get('status'))} {brief_values.name(first.get('path'))}"
                 )
-                print(f"handoff_draft_next_command: brigade handoff show {brief_values.name(first.get('id'))}")
+                print(
+                    "handoff_draft_next_command: "
+                    f"{brief_values.command_text('brigade handoff show ' + str(first.get('id')), first.get('id'))}"
+                )
 
     recent = payload.get("recent_sessions")
     if isinstance(recent, list) and recent:

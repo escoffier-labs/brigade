@@ -484,6 +484,8 @@ def report_health(
                 "name": "operator_report_unclosed",
                 "detail": f"{latest.get('report_id')} has not been closed out",
                 "suggested_next_command": f"brigade center report review {latest.get('report_id')}",
+                # The ids the command embeds, so a reader can check each one as data.
+                "command_args": [latest.get("report_id")],
             }
         )
     created = _parse_time(latest.get("created_at") or latest.get("generated_at"))
@@ -517,6 +519,7 @@ def report_health(
                     "name": "operator_report_missing_receipt",
                     "detail": f"missing receipt reference: {_path_label(target, ref)}",
                     "suggested_next_command": f"brigade center report show {latest.get('report_id')}",
+                    "command_args": [latest.get("report_id")],
                 }
             )
             break
@@ -544,6 +547,7 @@ def report_health(
                     "name": "operator_report_diff_missing",
                     "detail": f"{base_report.get('report_id')} -> {compare_report.get('report_id')} has no local diff receipt",
                     "suggested_next_command": f"brigade center report diff {base_report.get('report_id')} {compare_report.get('report_id')} --record",
+                    "command_args": [base_report.get("report_id"), compare_report.get("report_id")],
                 }
             )
         elif latest_diff.get("base_report_id") != base_report.get("report_id") or latest_diff.get(
@@ -555,6 +559,7 @@ def report_health(
                     "name": "operator_report_diff_stale",
                     "detail": f"latest diff does not cover {base_report.get('report_id')} -> {compare_report.get('report_id')}",
                     "suggested_next_command": f"brigade center report diff {base_report.get('report_id')} {compare_report.get('report_id')} --record",
+                    "command_args": [base_report.get("report_id"), compare_report.get("report_id")],
                 }
             )
         elif (
@@ -567,6 +572,7 @@ def report_health(
                     "name": "operator_report_diff_has_issues",
                     "detail": f"{latest_diff.get('diff_id')} has new blockers or stale references",
                     "suggested_next_command": f"brigade center report diff {latest_diff.get('base_report_id')} {latest_diff.get('compare_report_id')}",
+                    "command_args": [latest_diff.get("base_report_id"), latest_diff.get("compare_report_id")],
                 }
             )
     return {

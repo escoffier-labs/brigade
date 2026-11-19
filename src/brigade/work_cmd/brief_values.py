@@ -34,7 +34,7 @@ from typing import Any
 
 from ..memory_care_instructions import TRUNCATED, VALUE_MAX, _SAFE_CHARS, _escape as _escape_char
 from ..memory_care_instructions import code  # noqa: F401
-from ..shell_quote import quote_argument
+from ..shell_quote import is_safe_argument, quote_argument
 
 __all__ = [
     "TRUNCATED",
@@ -67,6 +67,22 @@ _GIT_STATUS_CODE = re.compile(r"[ MADRCU?!]{2}")
 # separators (Zl, Zp).
 _DANGEROUS_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
+# Unicode Default_Ignorable_Code_Point characters that are not Cf: the combining
+# grapheme joiner, the Hangul fillers, the Khmer and Mongolian selectors, the Hangul
+# filler, the variation selectors, the musical control characters and the variation
+# selectors supplement. They are invisible, so they can hide text.
+_IGNORABLE_RANGES = (
+    (0x034F, 0x034F),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFFA0, 0xFFA0),
+    (0x1D173, 0x1D17A),
+    (0xE0100, 0xE01EF),
+)
+
 # A record-supplied command string may hold these: plain characters, spaces and the
 # quoting Brigade's own templates use. Anything else withholds it, including a shell
 # metacharacter, a Windows expansion (`%`, `^`), a backslash and a control character.
@@ -74,7 +90,10 @@ _RECORD_COMMAND_CHARS = _SAFE_CHARS | frozenset(" ,=+:@'\"")
 
 
 def _dangerous(char: str) -> bool:
-    return unicodedata.category(char) in _DANGEROUS_CATEGORIES
+    if unicodedata.category(char) in _DANGEROUS_CATEGORIES:
+        return True
+    point = ord(char)
+    return any(low <= point <= high for low, high in _IGNORABLE_RANGES)
 
 
 def _unsafe(char: str) -> bool:
@@ -177,16 +196,17 @@ def command_text(command: object, *untrusted: object) -> str:
     """A command Brigade composed, with each untrusted argument shell quoted.
 
     The command is withheld when an argument holds a character that can break a line
-    or hide text. A space, a quote, a backslash or a shell metacharacter is fine: the
-    argument is quoted for this platform's shell, where none of them is interpreted.
-    An argument the producer already quoted is left as it is.
+    or hide text, when this platform cannot quote the argument safely (a cmd or
+    PowerShell metacharacter on Windows), or when the argument starts with `-` and
+    would be read as an option. Otherwise the argument is quoted for this platform's
+    shell, where a space, a quote or a shell metacharacter is inert. An argument the
+    producer already quoted is left as it is.
     """
     rendered = "" if command is None else str(command)
-    for raw in untrusted:
-        token = str(raw if raw is not None else "")
-        if not token:
-            continue
-        if _has_dangerous(token):
+    tokens = [str(raw if raw is not None else "") for raw in untrusted]
+    tokens = [token for token in tokens if token]
+    for token in sorted(tokens, key=len, reverse=True):
+        if _has_dangerous(token) or not is_safe_argument(token) or token.startswith("-"):
             return WITHHELD
         quoted = quote_argument(token)
         if quoted == token or quoted in rendered:

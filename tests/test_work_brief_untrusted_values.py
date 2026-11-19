@@ -749,3 +749,314 @@ def test_windows_rendering_keeps_a_backslash_path_unquoted(tmp_path, capsys, mon
     assert f"--target {resolved}" in line
     assert f"--output-dir {resolved / '.brigade'}" in line
     assert 'suggested_command: brigade work run "review the auth module"' in out
+
+
+WINDOWS_METACHARACTERS = [
+    "ok&whoami",
+    "$(whoami)",
+    "a|b",
+    "a>b",
+    "a^b",
+    "50%",
+    "a`b",
+    "a;b",
+    "a,b",
+    "a!b",
+    "a'b",
+    'a"b',
+]
+
+
+def test_command_text_withholds_a_windows_metacharacter(monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    for text in WINDOWS_METACHARACTERS:
+        assert brief_values.command_text(f"brigade work run {text}", text) == brief_values.WITHHELD
+        assert shell_quote.is_safe_argument(text) is False
+
+
+def test_command_text_quotes_a_posix_metacharacter(monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
+    assert brief_values.command_text("brigade work run ok&whoami", "ok&whoami") == ("brigade work run 'ok&whoami'")
+    assert brief_values.command_text("brigade work run $(whoami)", "$(whoami)") == ("brigade work run '$(whoami)'")
+
+
+def test_windows_quotes_a_plain_sentence_and_withholds_anything_else(monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    assert shell_quote.is_safe_argument("review the auth module") is True
+    assert shell_quote.is_safe_argument("it's ok") is False
+    assert brief_values.command_text("brigade work run review the auth module", "review the auth module") == (
+        'brigade work run "review the auth module"'
+    )
+
+
+def test_suggested_command_withholds_an_ampersand_task_on_windows(tmp_path, capsys, monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    _dogfood_next(tmp_path, "ok&whoami")
+
+    out = _brief(tmp_path, capsys)
+
+    assert "suggested_command: withheld (unsafe characters; see --json)" in out
+    assert "brigade work run ok&whoami" not in out
+
+
+def test_suggested_command_quotes_an_ampersand_task_on_posix(tmp_path, capsys, monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
+    _dogfood_next(tmp_path, "ok&whoami")
+
+    out = _brief(tmp_path, capsys)
+
+    assert "suggested_command: brigade work run 'ok&whoami'" in out
+    assert "brigade work run ok&whoami" not in out
+
+
+def test_suggested_command_withholds_an_option_like_task(tmp_path, capsys):
+    _dogfood_next(tmp_path, "--queue-next")
+
+    out = _brief(tmp_path, capsys)
+
+    assert "suggested_command: withheld (unsafe characters; see --json)" in out
+    assert "brigade work run --queue-next" not in out
+
+
+def test_brief_encodes_a_branch_with_a_grapheme_joiner(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_git_snapshot",
+        lambda target: {"available": True, "repo": str(target), "branch": "fix\u034fname", "dirty_files": []},
+    )
+
+    out = _brief(tmp_path, capsys)
+
+    assert "\u034f" not in out
+    assert "branch: fix\\u034fname" in out
+
+
+COMMAND_LINE_PREFIXES = (
+    "suggested_command: ",
+    "scanner_next_command: ",
+    "handoff_next_command: ",
+    "scanner_sweep_review: ",
+    "review_top_command: ",
+    "handoff_draft_next_command: ",
+    "scanner_sweep_command: ",
+    "memory_care_fix_plan: ",
+    "operator_report_command: ",
+    "operator_action_command: ",
+    "research_handoff_command: ",
+    "security_suppressions_next_command: ",
+)
+
+
+def _hostile_command_sections(monkeypatch, hostile):
+    """Give every command-bearing section an ampersand value and return the fakes' names."""
+    from brigade import center_cmd, cloud_tracker, handoff_cmd, memory_cmd, research_cmd, run_reap
+    from brigade.work_cmd import ledger as ledger_mod
+    from brigade.work_cmd import reviews as reviews_cmd
+    from brigade.work_cmd import scanners as scanners_cmd
+
+    monkeypatch.setattr(
+        ledger_mod,
+        "_scanner_candidate",
+        lambda imports: {
+            "id": hostile,
+            "kind": "task",
+            "source": "scan",
+            "type": "task",
+            "priority": "normal",
+            "acceptance_count": 1,
+            "text": "hostile",
+        },
+    )
+    monkeypatch.setattr(
+        ledger_mod,
+        "_handoff_candidate",
+        lambda imports: {
+            "id": hostile,
+            "kind": "task",
+            "source": "handoff",
+            "type": "task",
+            "priority": "normal",
+            "acceptance_count": 1,
+            "text": "hostile",
+            "target_document": "docs/x.md",
+        },
+    )
+    monkeypatch.setattr(
+        scanners_cmd,
+        "_scanner_health",
+        lambda target: {
+            "config_path": "/tmp/scanners.toml",
+            "checks": [{"status": "warn", "name": "scanner_config", "detail": "configured"}],
+            "next_run": None,
+            "latest_run": None,
+            "due": [],
+        },
+    )
+    monkeypatch.setattr(
+        scanners_cmd,
+        "_scanner_sweep_health",
+        lambda target: {
+            "sweeps_root": "/tmp/sweeps",
+            "checks": [],
+            "latest": {"sweep_id": hostile, "status": "warn"},
+            "due_count": 0,
+            "suggested_command": f"brigade work sweep {hostile}",
+            "review": {"top_pending_import": {"id": hostile, "source": "scan", "text": "hostile"}},
+        },
+    )
+    monkeypatch.setattr(
+        reviews_cmd,
+        "_review_health",
+        lambda target: {
+            "config_path": "/tmp/reviews.toml",
+            "checks": [],
+            "latest_run": None,
+            "latest_success": None,
+            "latest_unclosed_run": None,
+            "pending_finding_count": 1,
+            "unresolved_finding_count": 0,
+            "top_pending_finding": {"id": hostile, "text": "hostile finding"},
+            "top_unresolved_finding": None,
+        },
+    )
+    monkeypatch.setattr(
+        handoff_cmd,
+        "draft_queue_payload",
+        lambda target: {
+            "counts": {"total": 1, "pending": 1, "reviewed": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [{"id": hostile, "status": "pending", "path": "docs/x.md"}],
+        },
+    )
+    monkeypatch.setattr(
+        memory_cmd,
+        "health",
+        lambda target: {
+            "config_path": "/tmp/memory.toml",
+            "scan_path": "/tmp/scan.json",
+            "queue_path": "/tmp/queue.json",
+            "valid": True,
+            "issue_count": 0,
+            "top_issue": None,
+            "autofix_plan": {
+                "plan_count": 1,
+                "blocked_count": 0,
+                "suggested_next_command": f"brigade memory care plan-fixes {hostile}",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        cloud_tracker,
+        "stale_entries_for_brief",
+        lambda target: {
+            "stale_count": 1,
+            "stale_ready_hours": 24,
+            "suggested_command": f"brigade run cloud status {hostile}",
+            "stale_entries": [{"label": "lane", "provider": "codex", "task_id": hostile, "branch": "main"}],
+        },
+    )
+    monkeypatch.setattr(
+        run_reap,
+        "list_orphaned_runs",
+        lambda target: [
+            {
+                "run_id": hostile,
+                "last_observed_status": "running",
+                "uncommitted_change_count": 1,
+                "suggested_command": f"brigade runs show {hostile}",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        research_cmd,
+        "health",
+        lambda target: {
+            "run_count": 1,
+            "issue_count": 1,
+            "top_issue": {
+                "run_id": hostile,
+                "status": "warn",
+                "suggested_next_command": f"brigade research show {hostile}",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        center_cmd,
+        "report_health",
+        lambda target: {
+            "issue_count": 1,
+            "top_issue": {
+                "status": "warn",
+                "name": "operator_report_diff_missing",
+                "detail": "diff missing",
+                "suggested_next_command": f"brigade center report diff {hostile} new --record",
+                "command_args": [hostile, "new"],
+            },
+            "latest": {"report_id": "new", "created_at": "2026-11-19T00:00:00+00:00"},
+            "latest_diff": None,
+        },
+    )
+    monkeypatch.setattr(
+        center_cmd,
+        "actions_health",
+        lambda target: {
+            "actions_path": "/tmp/actions.json",
+            "action_count": 1,
+            "open_count": 1,
+            "counts": {"open": 1},
+            "top_action": {
+                "action_id": "action-1",
+                "source_group": "review",
+                "safe_summary": "review the queue",
+                "suggested_command": f"brigade center actions dismiss {hostile}",
+            },
+            "issue_count": 0,
+            "top_issue": None,
+        },
+    )
+
+
+def test_every_printed_command_is_inert_on_posix(tmp_path, capsys, monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: False)
+    _init_git_repo(tmp_path)
+    hostile = "x&whoami"
+    _hostile_command_sections(monkeypatch, hostile)
+
+    out = _brief(tmp_path, capsys)
+
+    lines = [line for line in out.splitlines() if line.startswith(COMMAND_LINE_PREFIXES)]
+    assert len(lines) >= 10
+    for line in lines:
+        if "&whoami" in line:
+            assert "'x&whoami'" in line, line
+
+
+def test_every_printed_command_withholds_on_windows(tmp_path, capsys, monkeypatch):
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    _init_git_repo(tmp_path)
+    hostile = "x&whoami"
+    _hostile_command_sections(monkeypatch, hostile)
+
+    out = _brief(tmp_path, capsys)
+
+    lines = [line for line in out.splitlines() if line.startswith(COMMAND_LINE_PREFIXES)]
+    assert len(lines) >= 10
+    for line in lines:
+        assert "&whoami" not in line, line
