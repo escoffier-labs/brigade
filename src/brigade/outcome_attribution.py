@@ -20,6 +20,11 @@ VETO, never promote:
   (``observed_hurt_sessions``);
 * scorecards stay receipt-only and never read these rows.
 
+Session identity comes from the hook-printed ``BRIGADE_CLAUDE_SESSION``, else the
+ambient ``BRIGADE_AGENT_SESSION``, else Claude Code's own ``CLAUDE_CODE_SESSION_ID``
+(so a verify typed directly in a hook-enabled session still resolves). Two ambient
+values that disagree name no session.
+
 When ``auto`` resolves no observed skill (Codex repos, plain shells) the run
 falls back to the previous default, ``brigade-work``, recorded as
 ``caller_typed``, so the loop never silently records nothing.
@@ -53,6 +58,8 @@ SESSION_TARGET_ENV = "BRIGADE_CLAUDE_SESSION_TARGET"
 """Set when the verifier's checkout differs from the checkout holding the session state."""
 AGENT_SESSION_ENV = "BRIGADE_AGENT_SESSION"
 """Ambient: exported to every shell of a session, so subagents and workers inherit it."""
+NATIVE_SESSION_ENV = "CLAUDE_CODE_SESSION_ID"
+"""Claude Code's own session id for every Bash child. It equals the hook payload ``session_id``."""
 MAX_STATE_BYTES = 1_048_576
 MAX_STATES_SCANNED = 512
 _FINGERPRINT = re.compile(r"[0-9a-f]{16}")
@@ -66,8 +73,13 @@ def normalize_attribution_source(value: object) -> str:
 def session_fingerprint_from_env(environ: Mapping[str, str]) -> str | None:
     """The session this process may read. The explicit hook value wins, alone.
 
-    ``BRIGADE_AGENT_SESSION`` is ambient: a ``brigade run`` worker inherits the
-    parent's value, so it only counts outside a worker (no ``BRIGADE_RUN_ID``).
+    ``BRIGADE_AGENT_SESSION`` and ``CLAUDE_CODE_SESSION_ID`` are ambient: a
+    ``brigade run`` worker inherits the parent's values, so they only count
+    outside a worker (no ``BRIGADE_RUN_ID``). A verify typed directly in a Claude
+    session has no hook-printed value, so the ambient pair supplies the identity.
+    Claude Code's id is hashed the way the hook fingerprints ``session_id``. When
+    both ambient values are present and disagree, no single session can be
+    named, so there is no identity and the caller falls back.
     """
     explicit = environ.get(CLAUDE_SESSION_ENV, "")
     if explicit:
@@ -75,7 +87,12 @@ def session_fingerprint_from_env(environ: Mapping[str, str]) -> str | None:
     if environ.get(receipt_schema.BRIGADE_RUN_ID_ENV, ""):
         return None
     ambient = environ.get(AGENT_SESSION_ENV, "")
-    return ambient if _FINGERPRINT.fullmatch(ambient) else None
+    ambient = ambient if _FINGERPRINT.fullmatch(ambient) else ""
+    native_id = environ.get(NATIVE_SESSION_ENV, "")
+    native = localio.stable_hash({"claude_session_id": native_id}) if native_id and len(native_id) <= 4096 else ""
+    if ambient and native and ambient != native:
+        return None
+    return ambient or native or None
 
 
 def _skill_id_from_read_path(item: str) -> str | None:
@@ -213,8 +230,17 @@ def resolve_auto_capture(target: Path, environ: Mapping[str, str] | None = None)
     if ids:
         return ids, True
     fallback = outcome_cmd.DEFAULT_CAPTURE_ARTIFACT_ID
+    environ = os.environ if environ is None else environ
+    # Only a Claude Code session (not a ``brigade run`` worker, a Codex repo or a plain shell) has a
+    # hook-printed verify command to rerun.
+    in_claude_session = bool(environ.get("CLAUDECODE")) and not environ.get(receipt_schema.BRIGADE_RUN_ID_ENV)
+    hint = (
+        "; no single Claude session identity was found, so rerun the verify command the hook printed"
+        if in_claude_session and not session_fingerprint_from_env(environ)
+        else ""
+    )
     print(
-        f"outcome capture: auto found no skill read in this session; capturing against {fallback} (caller typed)",
+        f"outcome capture: auto found no skill read in this session; capturing against {fallback} (caller typed){hint}",
         file=sys.stderr,
     )
     return [fallback], False

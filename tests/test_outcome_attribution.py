@@ -226,6 +226,99 @@ def test_run_worker_does_not_read_the_parents_inherited_session(tmp_path):
     assert outcome_attribution.resolve_observed_skill_ids(tmp_path, {**inherited, **_env()}, {"alpha"}) == ["alpha"]
 
 
+NATIVE_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def _native_fingerprint(session_id: str = NATIVE_ID) -> str:
+    from brigade import localio
+
+    return localio.stable_hash({"claude_session_id": session_id})
+
+
+def _write_native_state(
+    target: Path, read_files: list[str], session_id: str = NATIVE_ID, name: str = "n-1.json"
+) -> None:
+    sessions = target / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    state = {"session_fingerprint": _native_fingerprint(session_id), "session_id": session_id, "read_files": read_files}
+    (sessions / name).write_text(json.dumps(state))
+
+
+def test_typed_verify_resolves_the_session_from_claude_code_session_id(tmp_path):
+    _write_native_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
+    env = {"CLAUDE_CODE_SESSION_ID": NATIVE_ID}
+    assert outcome_attribution.session_fingerprint_from_env(env) == _native_fingerprint()
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, env, {"alpha"}) == ["alpha"]
+
+
+def test_native_session_id_only_reads_its_own_state(tmp_path):
+    _write_native_state(tmp_path, [".claude/skills/alpha/SKILL.md"], session_id="other-session", name="o.json")
+    _write_native_state(tmp_path, [".claude/skills/beta/SKILL.md"])
+    env = {"CLAUDE_CODE_SESSION_ID": NATIVE_ID}
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, env, {"alpha", "beta"}) == ["beta"]
+
+
+def test_native_session_id_without_matching_state_names_nothing(tmp_path):
+    _write_native_state(tmp_path, [".claude/skills/alpha/SKILL.md"], session_id="other-session")
+    assert (
+        outcome_attribution.resolve_observed_skill_ids(tmp_path, {"CLAUDE_CODE_SESSION_ID": NATIVE_ID}, {"alpha"}) == []
+    )
+
+
+def test_disagreeing_ambient_identities_name_no_session(tmp_path):
+    _write_native_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
+    env = {"CLAUDE_CODE_SESSION_ID": NATIVE_ID, "BRIGADE_AGENT_SESSION": "aaaaaaaaaaaaaaaa"}
+    assert outcome_attribution.session_fingerprint_from_env(env) is None
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, env, {"alpha"}) == []
+    agreeing = {"CLAUDE_CODE_SESSION_ID": NATIVE_ID, "BRIGADE_AGENT_SESSION": _native_fingerprint()}
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, agreeing, {"alpha"}) == ["alpha"]
+
+
+def test_explicit_hook_session_beats_the_native_session_id(tmp_path):
+    env = {"CLAUDE_CODE_SESSION_ID": NATIVE_ID, "BRIGADE_CLAUDE_SESSION": FINGERPRINT}
+    assert outcome_attribution.session_fingerprint_from_env(env) == FINGERPRINT
+
+
+def test_run_worker_ignores_the_inherited_native_session_id(tmp_path):
+    _write_native_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
+    env = {"CLAUDE_CODE_SESSION_ID": NATIVE_ID, "BRIGADE_RUN_ID": "run-1"}
+    assert outcome_attribution.session_fingerprint_from_env(env) is None
+    assert outcome_attribution.resolve_observed_skill_ids(tmp_path, env, {"alpha"}) == []
+
+
+def test_oversized_native_session_id_is_ignored():
+    assert outcome_attribution.session_fingerprint_from_env({"CLAUDE_CODE_SESSION_ID": "x" * 5000}) is None
+
+
+def test_typed_verify_records_an_observed_row_from_the_native_session(tmp_path, monkeypatch, capsys):
+    _install_skill(tmp_path, "alpha")
+    _write_native_state(tmp_path, [".claude/skills/alpha/SKILL.md"])
+    for key in ("BRIGADE_CLAUDE_SESSION", "BRIGADE_AGENT_SESSION", "BRIGADE_RUN_ID"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", NATIVE_ID)
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert verification.verify_run(target=tmp_path, commands=["true"], capture="auto", reuse=False) == 0
+    capsys.readouterr()
+    [row] = outcome_cmd.load_records(tmp_path)
+    assert (row.artifact_id, row.attribution_source) == ("alpha", outcome_attribution.SESSION_OBSERVED)
+
+
+def test_fallback_note_names_the_rerun_only_when_no_identity_exists(tmp_path):
+    _install_skill(tmp_path, "brigade-work")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        outcome_attribution.resolve_auto_capture(tmp_path, {"CLAUDECODE": "1"})
+        outcome_attribution.resolve_auto_capture(tmp_path, {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": NATIVE_ID})
+        # A plain shell or a brigade run worker has no hook-printed command to rerun.
+        outcome_attribution.resolve_auto_capture(tmp_path, {})
+        outcome_attribution.resolve_auto_capture(tmp_path, {"CLAUDECODE": "1", "BRIGADE_RUN_ID": "run-1"})
+    first, second, shell, worker = err.getvalue().splitlines()
+    assert "rerun the verify command the hook printed" in first
+    assert "rerun" not in second
+    assert "rerun" not in shell
+    assert "rerun" not in worker
+
+
 def test_resolver_requires_the_state_session_id_to_match_its_fingerprint(tmp_path):
     from brigade import localio
 
@@ -304,7 +397,7 @@ def test_capture_auto_without_observed_skill_falls_back_to_caller_typed_default(
 
 def test_capture_auto_in_a_plain_shell_still_records(tmp_path, monkeypatch, capsys):
     _install_skill(tmp_path, "brigade-work")
-    for key in ("BRIGADE_CLAUDE_SESSION", "BRIGADE_AGENT_SESSION", "BRIGADE_RUN_ID"):
+    for key in ("BRIGADE_CLAUDE_SESSION", "BRIGADE_AGENT_SESSION", "BRIGADE_RUN_ID", "CLAUDE_CODE_SESSION_ID"):
         monkeypatch.delenv(key, raising=False)
     with contextlib.redirect_stderr(io.StringIO()):
         assert verification.verify_run(target=tmp_path, commands=["true"], capture="auto", reuse=False) == 0

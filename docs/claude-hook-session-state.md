@@ -88,9 +88,12 @@ only when it is a repo-relative `.<harness>/skills/<id>/SKILL.md` or
 case-insensitively and come back in the registry or harness spelling.
 
 The session identity is `BRIGADE_CLAUDE_SESSION` when set (the hook-built verify
-command sets it for exactly this session) and then only that value. The ambient
-`BRIGADE_AGENT_SESSION` is used only outside a `brigade run` worker (no
-`BRIGADE_RUN_ID`), because a worker inherits the parent's value. The state must
+command sets it for exactly this session) and then only that value. Otherwise the
+ambient `BRIGADE_AGENT_SESSION`, then Claude Code's own `CLAUDE_CODE_SESSION_ID`
+(hashed the way the hook hashes the payload `session_id`), are used, and only
+outside a `brigade run` worker (no `BRIGADE_RUN_ID`), because a worker inherits the
+parent's values. When both ambient values are set and disagree, no session is
+named and capture falls back to `brigade-work` as caller typed. The state must
 match `session_fingerprint`, and when it names its `session_id` the hash of that
 id must equal the fingerprint.
 
