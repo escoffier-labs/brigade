@@ -379,3 +379,25 @@ def test_explicit_flush_bisects_without_a_budget(monkeypatch):
     monkeypatch.setattr(hub, "post", slow_post)
     assert _flush(hub, monkeypatch) == 7
     assert [r["sequence"] for r in _dead_letters(path)] == [4]
+
+
+def test_whole_batch_transport_failure_keeps_unproven_rejections_queued(monkeypatch):
+    """A failed batch POST must not dead-letter rejections no delivery proved (#1846)."""
+    monkeypatch.setattr(fleet_client, "FLUSH_BATCH_SIZE", 3)
+    events = [_event(seq, poison=seq <= 3) for seq in range(1, 7)]
+    path = _spool(events)
+    # Batch [1,2,3] is rejected and bisected into held rejections (calls 1-5).
+    # The next whole-batch POST for [4,5,6] fails in transit (call 6).
+    hub = FakeHub(fail_on_call=6)
+    assert _flush(hub, monkeypatch) == 0
+    assert hub.stored == []
+    assert _sequences(path) == list(range(1, 7))
+    assert _dead_letters(path) == []
+
+
+def test_whole_batch_budget_must_allow_a_mixed_run(monkeypatch):
+    """A budget below two would treat the first rejected event as a hub fault (#1846)."""
+    path = _spool([_event(1, poison=True), _event(2)])
+    with pytest.raises(ValueError):
+        _flush(FakeHub(), monkeypatch, whole_batch_budget=1)
+    assert _sequences(path) == [1, 2]

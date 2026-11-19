@@ -193,6 +193,8 @@ def flush_locked(
     accepted event in this flush, that declares a hub fault. Those events and
     the rest of the spool stay queued.
     """
+    if whole_batch_budget < 2:
+        raise ValueError("whole_batch_budget must be at least 2")
     from . import fleet_client as client
 
     events = client._read_spool(path, dir_fd=dir_fd)
@@ -230,6 +232,7 @@ def flush_locked(
             post(batch)
         except client._PoisonResponse as exc:
             if preserve_poison:
+                outcome.stopped = True
                 break
             if bisect_budget is not None and deadline is None:
                 deadline = _monotonic() + bisect_budget
@@ -248,6 +251,9 @@ def flush_locked(
             index += len(batch)
             continue
         except Exception:
+            # A transport failure proves nothing about held rejections, so
+            # they must stay queued like any other stop.
+            outcome.stopped = True
             break
         outcome.delivered += len(batch)
         if not outcome.proven:
