@@ -112,12 +112,17 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # spaces need a following separator or filename extension so prose
         # after the path is not consumed. Forward slashes and raw or escaped
         # backslashes can be mixed independently at each component boundary.
+        # As in root-path, the opening quote lives inside the quoted branch and
+        # the unquoted branch has no quote lookbehind: a path that opens with
+        # one quote and closes with another falls back to the unquoted branch
+        # instead of losing the match entirely.
         pattern=(
-            r"(?<![\w.-])(?:(?<=(?P<windows_quote>[\"'`]))|(?<![\"'`]))"
+            r"(?<![\w.-])(?:"
+            r"(?<=(?P<windows_quote>[\"'`]))"
             r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
-            r"(?(windows_quote)"
             r"[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\r\n<>:|?*])*?(?=(?P=windows_quote))"
             r"|"
+            r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
             r"(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*(?:\\{1,2}|/))*"
             r"(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
             r"(?![\w-]|\.[\w-])|[A-Za-z0-9._@+-]+)"

@@ -1,0 +1,2 @@
+- A Windows home path that opens with one quote and closes with another is now found and redacted by the content guard in both the Python and native backends, matching the `root-path` fallback (#2200).
+- The memory scan ruleset ID changes with this rule, so update the client and the memory hub together, then run `brigade memory rescan --until-done`. Until the rescan, receipt-gated hub reads (push and connector recall, `card push:true`) return nothing for previously scanned cards (#2200).

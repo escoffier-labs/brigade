@@ -890,7 +890,12 @@ def test_mixed_single_line_leaks_and_escaped_windows_path(report_env, tmp_path, 
     _, target = report_env
     output = tmp_path / "chosen.txt"
     path = "C:" + "\\\\" + "Users" + "\\\\" + "example-user" + "\\\\" + "file.txt"
-    output.write_text("C:\\Users\\example-user\\private file.txt Authorization: Bearer " + "z" * 35 + " " + path)
+    output.write_text(
+        "C:\\Users\\example-user\\private file.txt Authorization: Bearer "  # content-guard: allow windows-home-path
+        + "z" * 35
+        + " "
+        + path
+    )
     assert invoke(target, "--dry-run", "--json", "--include-output", str(output)) == 0
     out = result(capsys)
     assert "example-user" not in out["preview_markdown"]

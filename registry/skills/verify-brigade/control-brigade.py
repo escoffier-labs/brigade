@@ -101,9 +101,9 @@ GUARD_PARITY_FIXTURE_LINES = (
     "no -" + _GP_HOST + " or " + _GP_HOST + ".example",
     # windows-home-path: matched quotes, (?P=windows_quote) bounds a spaced path
     'open "' + _GP_WIN + '\\Example User\\My Docs\\a b.txt" now',
-    # windows-home-path: unquoted branch of the (?(windows_quote)...) conditional
+    # windows-home-path: unquoted branch fallback
     "open " + _GP_WIN + "\\example-user\\notes.txt now",
-    # windows-home-path: mismatched quotes (observed: no finding, see feature doc)
+    # windows-home-path: mismatched quotes fall back to the unquoted branch
     'open "' + _GP_WIN + "\\Example User\\a b.txt' now",
     # windows-home-path: word character before the drive letter
     "no X" + _GP_WIN + "\\example-user",
@@ -134,6 +134,7 @@ GUARD_PARITY_POLICY = {
 # (line, column, start, end, rule_id, action). `start`/`end` are 0-based
 # offsets into the fixture with `end` exclusive; `line`/`column` are 1-based.
 # The drive also checks each reported `match` equals fixture[start:end].
+# Line 14 was added after the #2200 fix; every other row still matches main.
 GUARD_PARITY_GOLDEN_FINDINGS = (
     (2, 6, 49, 61, "example-phone-555", "redact"),
     (4, 10, 110, 119, "localhost-bare", "redact"),
@@ -143,6 +144,7 @@ GUARD_PARITY_GOLDEN_FINDINGS = (
     (10, 7, 307, 321, "private-hostname", "redact"),
     (12, 7, 382, 419, "windows-home-path", "redact"),
     (13, 6, 430, 461, "windows-home-path", "redact"),
+    (14, 7, 472, 501, "windows-home-path", "redact"),
     (16, 7, 539, 561, "root-path", "redact"),
     (17, 6, 572, 595, "root-path", "redact"),
     (18, 7, 606, 614, "root-path", "redact"),
@@ -150,7 +152,7 @@ GUARD_PARITY_GOLDEN_FINDINGS = (
 
 # Golden redact output, pasted from `brigade guard redact` on main b18e6f51d.
 # Lines the guard leaves alone reuse the fixture fragments so this file stays
-# clean under content-guard.
+# clean under content-guard. Line 14 was updated after the #2200 fix.
 GUARD_PARITY_GOLDEN_REDACTED = (
     "\n".join(
         (
@@ -167,7 +169,7 @@ GUARD_PARITY_GOLDEN_REDACTED = (
             "no -" + _GP_HOST + " or " + _GP_HOST + ".example",
             'open "<PRIVATE_HOME_PATH>" now',
             "open <PRIVATE_HOME_PATH> now",
-            'open "' + _GP_WIN + "\\Example User\\a b.txt' now",
+            "open \"<PRIVATE_HOME_PATH>' now",
             "no X" + _GP_WIN + "\\example-user",
             "edit '[redacted-root-path]' now",
             "edit [redacted-root-path] now",

@@ -275,6 +275,17 @@ class MissingLeakShapeTests(unittest.TestCase):
                             f"Config at {quote}<PRIVATE_HOME_PATH>{quote}, then continue.",
                         )
 
+    def test_windows_home_path_with_mismatched_quotes_is_redacted(self) -> None:
+        # Regression for #2200: when the opening and closing quotes differ, the
+        # quoted branch cannot close. Like root-path, the rule must fall back to
+        # its unquoted branch and redact the path instead of dropping the finding.
+        win_root = "C:" + "\\" + "Users"
+        path = win_root + "\\" + "Example User" + "\\a b.txt"
+        text = 'open "' + path + "' now"
+        result = scan_text(text, policy=Policy(rules={"windows-home-path": "redact"}))
+        self.assertEqual([finding.rule_id for finding in result.findings], ["windows-home-path"])
+        self.assertEqual(result.redacted_text, "open \"<PRIVATE_HOME_PATH>' now")
+
     def test_unquoted_windows_spaced_paths_preserve_surrounding_text(self) -> None:
         public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
         for separators in product(("\\", "\\\\", "/"), repeat=4):
