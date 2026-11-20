@@ -710,6 +710,29 @@ def _private_root(saved: str | None, target: Path) -> Path:
     return root
 
 
+def _resume_without_workspace(entry: dict[str, Any]) -> bool:
+    """A landing that already pushed can resume after its private workspace is gone.
+
+    Only a path that does not exist at all counts as gone. An existing path is
+    left to ``_private_root``, which still refuses an unsafe workspace.
+    """
+    saved = entry.get("landing_workspace")
+    if (
+        not isinstance(saved, str)
+        or not saved
+        or entry.get("landing_state") != "branch-pushed"
+        or not entry.get("landing_commit")
+    ):
+        return False
+    try:
+        Path(saved).lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dict[str, str]:
     """Apply one pinned attempt in isolation, then publish its verified commit for review."""
     if os.name != "posix":
@@ -747,11 +770,14 @@ def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dic
                 raise LandError("github-origin-required")
             repo = match[1]
             canonical = f"https://github.com/{repo}.git"
-            root = _private_root(entry.get("landing_workspace"), target)
+            # A landing whose private runtime workspace expired keeps its commit on the
+            # remote, so a fresh workspace is allocated exactly as a first land does.
+            resumed = _resume_without_workspace(entry)
+            root = _private_root(None if resumed else entry.get("landing_workspace"), target)
             try:
                 _update(target, entry, landing_workspace=str(root))
                 git = _LandingGit(target, root)
-                result = _land_locked(target, entry, issue, closes, git, root, repo, canonical)
+                result = _land_locked(target, entry, issue, closes, git, root, repo, canonical, resumed=resumed)
             except BaseException:
                 # Keep a prepared commit for a retry without borrowing the caller's object store.
                 if not entry.get("landing_commit"):
@@ -777,6 +803,8 @@ def _land_locked(
     root: Path,
     repo: str,
     canonical: str,
+    *,
+    resumed: bool = False,
 ) -> dict[str, str]:
     branch = entry.get("landing_branch") or f"codex/issue-{issue}-{uuid4().hex[:12]}"
     if not re.fullmatch(r"codex/issue-[1-9][0-9]*-[a-f0-9]{12}", branch):
@@ -797,6 +825,27 @@ def _land_locked(
     if commit:
         if remote_sha and remote_sha != commit:
             raise LandError("landing-ref-mismatch")
+        if resumed and not remote_sha:
+            # The workspace that held the only copy of the commit is gone, so a
+            # missing remote branch leaves nothing to resume from.
+            raise LandError("landing-ref-missing")
+        if not local and remote_sha:
+            # A cleared runtime workspace keeps the commit only on the remote. The
+            # remote tip already equals the recorded commit, so fetching it here
+            # cannot publish different content.
+            git.git(
+                ["fetch", "--no-tags", canonical, f"refs/heads/{branch}:refs/heads/{branch}"],
+                git.repository,
+                "fetch-failed",
+            )
+            fetched = git.git(
+                ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                git.repository,
+                "ref-inspection-failed",
+            ).strip()
+            if fetched != commit:
+                raise LandError("landing-ref-mismatch")
+            local = fetched
         if not local and not remote_sha:
             _update(target, entry, landing_commit=None, landing_state=None)
             commit = None

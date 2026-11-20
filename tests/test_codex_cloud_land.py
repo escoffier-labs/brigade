@@ -79,7 +79,7 @@ def landing(tmp_path, monkeypatch):
     set_home(monkeypatch, home)
     original = proc.run
     calls = []
-    state = {"status": "[READY] example", "failure": None, "path": "file.txt", "text_scans": []}
+    state = {"status": "[READY] example", "failure": None, "path": "file.txt", "text_scans": [], "remote": remote}
 
     def probe_transport(argv, kwargs):
         # Replace HTTPS at the transport boundary, after real Git resolves its config.
@@ -176,8 +176,9 @@ def landing(tmp_path, monkeypatch):
         if argv[:4] == ["git", "config", "--get", "remote.origin.url"]:
             return proc.Result(0, "https://github.com/example/repo.git\n", "")
         if argv[:2] == ["git", "fetch"] and "https://github.com/example/repo.git" in argv:
+            refspec = argv[argv.index("https://github.com/example/repo.git") + 1]
             return original(
-                ["git", "-c", "protocol.file.allow=always", "fetch", "--no-tags", str(remote), "refs/heads/main"],
+                ["git", "-c", "protocol.file.allow=always", "fetch", "--no-tags", str(remote), refspec],
                 **kwargs,
             )
         if argv[:2] == ["git", "apply"] and "--index" in argv:
@@ -1977,3 +1978,106 @@ def test_real_vale_agrees_with_validator(tmp_path, text):
             resolved = (directory / location).resolve()
             roots = allowed if key == "Paths" else allowed[:1]
             assert any(resolved.is_relative_to(root) for root in roots), (key, location)
+
+
+def _expire_private_workspace(caller, state):
+    """Publish once, then lose the private runtime workspace the way a reboot does."""
+    state["failure"] = "pr"
+    with pytest.raises(codex_cloud_land.LandError, match="^pr-create-failed$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    workspace = Path(entry["landing_workspace"])
+    # The fixture remote has to hold the branch the push reported, as GitHub would.
+    git(
+        workspace / "repository",
+        "-c",
+        "protocol.file.allow=always",
+        "push",
+        str(state["remote"]),
+        f"{entry['landing_commit']}:refs/heads/{entry['landing_branch']}",
+    )
+    shutil.rmtree(workspace)
+    state["failure"] = None
+    return entry
+
+
+def test_r4_expired_workspace_resumes_pr_creation(landing):
+    caller, state, calls = landing
+    entry = _expire_private_workspace(caller, state)
+    calls.clear()
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result == {
+        "task_id": "task_example",
+        "branch": entry["landing_branch"],
+        "pr_url": "https://github.com/example/repo/pull/123",
+    }
+    final = cloud_tracker.load_registry(caller)["entries"][0]
+    assert final["landing_state"] == "pr-created"
+    assert final["landing_commit"] == entry["landing_commit"]
+    assert final["landing_tree"] == entry["landing_tree"]
+    assert final["landing_workspace"] is None
+    assert not any(argv[:3] == ["codex", "cloud", "diff"] for argv, _ in calls)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert sum(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls) == 1
+    assert git(caller, "branch", "--list", "codex/*") == ""
+
+
+def test_r4_expired_workspace_reuses_existing_pr(landing):
+    caller, state, calls = landing
+    entry = _expire_private_workspace(caller, state)
+    state["published"] = "https://github.com/example/repo/pull/321"
+    calls.clear()
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"] == "https://github.com/example/repo/pull/321"
+    assert cloud_tracker.load_registry(caller)["entries"][0]["landing_commit"] == entry["landing_commit"]
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+
+
+@pytest.mark.parametrize("moved", [True, False])
+def test_r4_expired_workspace_refuses_changed_remote_ref(landing, moved):
+    caller, state, calls = landing
+    entry = _expire_private_workspace(caller, state)
+    state["remote_sha"] = "b" * 40 if moved else ""
+    calls.clear()
+    with pytest.raises(
+        codex_cloud_land.LandError, match="^landing-ref-mismatch$" if moved else "^landing-ref-missing$"
+    ):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] in (["git", "fetch"], ["git", "push"]) for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+    kept = cloud_tracker.load_registry(caller)["entries"][0]
+    assert kept["landing_state"] == "branch-pushed"
+    assert kept["landing_commit"] == entry["landing_commit"]
+
+
+def test_r4_existing_unsafe_workspace_is_still_refused(landing):
+    caller, state, calls = landing
+    state["failure"] = "pr"
+    with pytest.raises(codex_cloud_land.LandError, match="^pr-create-failed$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    workspace = Path(entry["landing_workspace"])
+    workspace.chmod(0o755)
+    state["failure"] = None
+    calls.clear()
+    with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert workspace.is_dir()
+    assert not any(argv[:2] in (["git", "fetch"], ["git", "push"]) for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+
+
+def test_r4_expired_workspace_without_pushed_commit_is_refused(landing):
+    caller, state, calls = landing
+    state["failure"] = "push"
+    with pytest.raises(codex_cloud_land.LandError, match="^push-failed"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    assert entry["landing_state"] == "prepared"
+    shutil.rmtree(Path(entry["landing_workspace"]))
+    state["failure"] = None
+    calls.clear()
+    with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
