@@ -170,10 +170,10 @@ class _Proof:
     integration: run_tasks.TaskIntegration | None
 
 
-def _git(args: list[str], *, cwd: Path, timeout: float = _GIT_TIMEOUT):
+def _git(args: list[str], *, cwd: Path, timeout: float = _GIT_TIMEOUT, stdin: bytes | None = None):
     """Run one Git command through the hardened runner, or refuse closed."""
     try:
-        return run_batch_workspace.git(args, cwd=cwd, timeout=timeout)
+        return run_batch_workspace.git(args, cwd=cwd, timeout=timeout, stdin=stdin)
     except OSError as exc:
         raise DisposeError(GIT_FAILED, "git could not be started") from exc
 
@@ -521,7 +521,29 @@ def _delete_branch(workspace: Path, plan: _Plan) -> None:
     if _ref(workspace, ref) is None:
         # Already deleted by an earlier run of this command.
         return
-    result = _git(["update-ref", "-d", ref, plan.candidate_commit], cwd=workspace)
+    integration = plan.integration
+    if integration is None:
+        raise DisposeError(
+            NOT_RETAINED, f"task {plan.task_id} has no integration to keep its work", task_id=plan.task_id
+        )
+    # One atomic transaction: the integration ref that holds this task's work
+    # must still be at its recorded commit when the task branch goes. The
+    # integration commit is a squash, so it does not keep the candidate by
+    # ancestry, and a separate check would leave a window to lose both.
+    transaction = (
+        f"verify {run_batch_integrate.ref_name(integration.integration_id)} {integration.integration_commit}\n"
+        f"delete {ref} {plan.candidate_commit}\n"
+    ).encode("ascii")
+    result = _git(["update-ref", "--stdin"], cwd=workspace, stdin=transaction)
+    if (
+        result.code != 0
+        and _ref(workspace, run_batch_integrate.ref_name(integration.integration_id)) != integration.integration_commit
+    ):
+        raise DisposeError(
+            NOT_RETAINED,
+            f"task {plan.task_id} integration ref moved; the branch was kept",
+            task_id=plan.task_id,
+        )
     current = _ref(workspace, ref)
     if current is None:
         # The delete succeeded, or Git removed the ref and then reported a
@@ -626,7 +648,15 @@ def _retry_branch_delete(run_dir: Path, workspace: Path, state: run_tasks.TaskRe
         raise DisposeError(
             NOT_RETAINED, f"task {task_id} integration commit is not reachable from {ref}", task_id=task_id
         )
-    plan = _plan(checkout, task_id, MODE_INTEGRATED, entry.candidate_commit, entry.integration_commit, BRANCH_DELETED)
+    plan = _plan(
+        checkout,
+        task_id,
+        MODE_INTEGRATED,
+        entry.candidate_commit,
+        entry.integration_commit,
+        BRANCH_DELETED,
+        integration=entry,
+    )
     _delete_branch(workspace, plan)
     return BRANCH_DELETED
 

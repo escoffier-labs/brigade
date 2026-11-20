@@ -203,6 +203,31 @@ def test_branch_moved_after_removal_still_records_the_disposal_and_refuses_the_d
     assert len(facts(site, "task.disposed")) == 1
 
 
+def test_integration_ref_moved_after_the_plan_keeps_the_task_branch(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    rc, integrated = integrate(site, capsys, "a")
+    assert rc == 0, integrated
+    candidate = branch_tip(site)
+    integration_id = facts(site, "task.integrated")[0].payload["integration_id"]
+    integration_ref = run_batch_integrate.ref_name(integration_id)
+
+    real_remove = dispose_module._remove
+
+    def remove_then_move_integration(workspace_path, plan, *, discard):
+        real_remove(workspace_path, plan, discard=discard)
+        # A concurrent writer moves the integration ref after the plan proved it.
+        _git(workspace_path, "update-ref", integration_ref, site.base_sha)
+
+    monkeypatch.setattr(dispose_module, "_remove", remove_then_move_integration)
+    rc, payload = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    assert rc == 2
+    assert task_row(payload, "a")["refusal"]["code"] == "not-retained"
+    # The verify-and-delete transaction refused as a whole: the task branch,
+    # the only remaining ref to the candidate, is kept.
+    assert branch_tip(site) == candidate
+    assert facts(site, "task.disposed")[0].payload["branch_kept"] == "kept"
+
+
 def test_delete_branch_uses_the_integration_entry_whose_ref_is_intact(site, capsys, monkeypatch):
     run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
     rc, first = integrate(site, capsys, "a")

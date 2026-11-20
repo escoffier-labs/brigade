@@ -107,6 +107,7 @@ def git(
     timeout: float = _GIT_TIMEOUT,
     stdout_file: Any = None,
     extra_env: Mapping[str, str] | None = None,
+    stdin: bytes | None = None,
 ) -> proc.Result:
     """Run one Git command against a checkout through the hardened environment.
 
@@ -126,7 +127,7 @@ def git(
     argv = ["git", *_GIT_SAFE_FLAGS, *args]
     if stdout_file is not None:
         return proc.run_to_file(argv, stdout_file, cwd=cwd, timeout=timeout, env=env)
-    return proc.run(argv, cwd=cwd, timeout=timeout, env=env)
+    return proc.run(argv, cwd=cwd, timeout=timeout, env=env, stdin=stdin)
 
 
 def git_stream(
