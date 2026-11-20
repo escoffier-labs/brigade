@@ -15,7 +15,7 @@ from tests.test_run_batch_integrate import (
     snapshot,
     write_files,
 )
-from tests.test_run_batch_worktrees import Site, _files, _git, invoke
+from tests.test_run_batch_worktrees import Site, _git, invoke
 from tests.test_run_batch_worktrees import site as worktree_site  # noqa: F401  (fixture for getfixturevalue)
 
 from brigade import agents, cli, run_batch_artifacts, run_batch_integrate, run_events, run_lifecycle
@@ -134,6 +134,116 @@ def test_delete_branch_after_integrate_deletes_only_the_task_branch(site, capsys
     assert facts(site, "task.disposed")[0].payload["branch_kept"] == "deleted"
 
 
+def test_branch_delete_failure_after_removal_records_the_disposal_and_can_be_retried(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    rc, integrated = integrate(site, capsys, "a")
+    assert rc == 0, integrated
+    checkout = site.path_for("a")
+    candidate = integrated["candidate_commits"][0]["candidate_commit"]
+
+    real_delete = dispose_module._delete_branch
+    refused: list[str] = []
+
+    def fail_once(workspace_path, plan):
+        if not refused:
+            refused.append(plan.task_id)
+            raise dispose_module.DisposeError("git-failed", "simulated branch delete failure", task_id=plan.task_id)
+        return real_delete(workspace_path, plan)
+
+    monkeypatch.setattr(dispose_module, "_delete_branch", fail_once)
+    rc, payload = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    # The removal already happened, so the disposal is recorded and only the
+    # requested branch delete is reported as refused.
+    assert rc == 2
+    assert task_row(payload, "a")["refusal"]["code"] == "git-failed"
+    assert not checkout.exists()
+    assert facts(site, "task.disposed")[0].payload["branch_kept"] == "kept"
+    assert branch_tip(site) == candidate
+    assert ref_or_none(site.repo, integrated["ref"]) == integrated["integration_commit"]
+
+    # A re-run retries only the branch delete, with the same proof and CAS.
+    rc, payload = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    assert rc == 0, payload
+    assert task_row(payload, "a")["status"] == "already-disposed"
+    assert task_row(payload, "a")["branch_kept"] == "deleted"
+    assert branch_tip(site) is None
+    assert ref_or_none(site.repo, integrated["ref"]) == integrated["integration_commit"]
+    assert len(facts(site, "task.disposed")) == 1
+
+
+def test_branch_moved_after_removal_still_records_the_disposal_and_refuses_the_delete(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    rc, integrated = integrate(site, capsys, "a")
+    assert rc == 0, integrated
+    checkout = site.path_for("a")
+
+    real_remove = dispose_module._remove
+
+    def remove_then_move(workspace_path, plan, *, discard):
+        real_remove(workspace_path, plan, discard=discard)
+        # A concurrent writer moves the branch after the plan proved it stable.
+        _git(workspace_path, "update-ref", f"refs/heads/{plan.branch}", site.base_sha)
+
+    monkeypatch.setattr(dispose_module, "_remove", remove_then_move)
+    rc, payload = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    assert rc == 2
+    assert task_row(payload, "a")["refusal"]["code"] == "branch-moved"
+    assert not checkout.exists()
+    # The compare-and-swap refused the delete, so the branch and its new tip stay.
+    assert facts(site, "task.disposed")[0].payload["branch_kept"] == "kept"
+    assert branch_tip(site) == site.base_sha
+
+    # The recorded disposal keeps the state readable; the moved branch is never
+    # deleted by a later run either.
+    monkeypatch.setattr(dispose_module, "_remove", real_remove)
+    rc, payload = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    assert rc == 2
+    assert task_row(payload, "a")["refusal"]["code"] == "branch-moved"
+    assert branch_tip(site) == site.base_sha
+    assert len(facts(site, "task.disposed")) == 1
+
+
+def test_delete_branch_uses_the_integration_entry_whose_ref_is_intact(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
+    rc, first = integrate(site, capsys, "a")
+    assert rc == 0, first
+    rc, second = integrate(site, capsys, "a", "b")
+    assert rc == 0, second
+    # The newest integration record lost its ref; the older one still holds the
+    # work, so that is the copy the branch delete must prove against.
+    _git(site.repo, "update-ref", "-d", second["ref"])
+    candidate = second["candidate_commits"][0]["candidate_commit"]
+
+    rc, payload = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    assert rc == 0, payload
+    assert task_row(payload, "a")["mode"] == "integrated"
+    assert task_row(payload, "a")["branch_kept"] == "deleted"
+    assert branch_tip(site) is None
+    assert ref_or_none(site.repo, first["ref"]) == first["integration_commit"]
+    assert _git(site.repo, "cat-file", "-t", candidate) == "commit"
+
+
+@posix_only
+def test_already_disposed_releases_a_lease_left_by_a_crash(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    lease = lease_dir(site)
+    rc, first = dispose(site, capsys, "a", confirm=True)
+    assert rc == 0, first
+    assert not lease.exists()
+    journal = run_lifecycle._journal_path(site.run_dir())
+    before = journal.read_bytes()
+
+    # The crash window: the fact is durable, the lease is empty and still there.
+    lease.mkdir()
+    assert lease.is_dir()
+    rc, payload = dispose(site, capsys, "a", confirm=True)
+    assert rc == 0, payload
+    assert task_row(payload, "a")["status"] == "already-disposed"
+    assert not lease.exists()
+    assert journal.read_bytes() == before
+    assert len(facts(site, "task.disposed")) == 1
+
+
 def test_retained_task_disposes_and_keeps_its_branch(site, capsys, monkeypatch):
     run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
     candidate = branch_tip(site)
@@ -230,6 +340,57 @@ def test_dry_run_without_confirm_changes_nothing(site, capsys, monkeypatch):
     assert facts(site, "task.disposed") == []
 
 
+def test_dry_run_predicts_the_removal_git_would_refuse(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    checkout = site.path_for("a")
+    # Uncommitted work is not on the branch, so the retained copy does not have it.
+    (checkout / "uncommitted.txt").write_text("only copy\n")
+
+    rc, payload = dispose(site, capsys, "a")
+    assert rc == 2
+    assert task_row(payload, "a")["refusal"]["code"] == "remove-refused"
+    assert (checkout / "uncommitted.txt").is_file()
+
+    rc, payload = dispose(site, capsys, "a", confirm=True)
+    assert rc == 2
+    assert task_row(payload, "a")["refusal"]["code"] == "remove-refused"
+    assert (checkout / "uncommitted.txt").is_file()
+    assert facts(site, "task.disposed") == []
+
+    # The explicit decision still disposes of it.
+    rc, payload = dispose(site, capsys, "a", confirm=True, discard=["a"])
+    assert rc == 0, payload
+    assert not checkout.exists()
+
+
+def test_dry_run_does_not_claim_a_stale_workspace_lock(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    lock = runguard.lock_path(site.repo)
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text("999999999\n")
+    (lock / "owner.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run_lock.v1",
+                "owner_token": "stale",
+                "pid": 999999999,
+                "run_dir": str(site.run_dir()),
+                "acquired_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+    )
+    before = (lock / "owner.json").read_bytes()
+    assert runguard.run_lock_state(site.repo, site.run_dir()) == "stale"
+
+    rc, payload = dispose(site, capsys, "a")
+    assert rc == 0, payload
+    assert task_row(payload, "a")["status"] == "planned"
+    # A dry run reads the lock state; it never claims, replaces or removes it.
+    assert runguard.run_lock_state(site.repo, site.run_dir()) == "stale"
+    assert (lock / "owner.json").read_bytes() == before
+    assert sorted(entry.name for entry in lock.iterdir()) == ["owner.json", "pid"]
+
+
 @posix_only
 def test_live_task_lock_refuses_task_busy(site, capsys, monkeypatch):
     run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
@@ -293,8 +454,11 @@ def test_missing_integration_ref_falls_back_to_the_retained_proof_or_refuses(sit
     assert task_row(payload, "b")["mode"] == "retained"
     assert not site.path_for("b").exists()
     # Neither the branch nor the work is gone for the refused task.
-    assert branch_tip(site, "a") == integrated["candidate_commits"][0]["candidate_commit"]
-    assert _files(site.path_for("a"))["alpha.txt"] == b"alpha\n"
+    candidate = integrated["candidate_commits"][0]["candidate_commit"]
+    assert branch_tip(site, "a") == candidate
+    # Read the committed content, not the checked-out bytes: Git on Windows
+    # checks the same blob out with CRLF, and `_git` decodes as text and strips.
+    assert _git(site.repo, "show", f"{candidate}:alpha.txt") == "alpha"
 
 
 def _crash_before_collection(monkeypatch, changes: dict[str, dict[str, str]]) -> None:
@@ -432,3 +596,107 @@ def test_dispose_and_collect_reject_a_bad_discard_name(site, capsys, monkeypatch
     assert rc == 2
     assert payload["refusal"]["code"] == "unknown-task"
     assert site.path_for("a").is_dir()
+
+
+def test_collect_on_a_collected_no_changes_task_writes_nothing(site, capsys, monkeypatch):
+    monkeypatch.setattr(agents, "run_agent", write_files({"a": {}}))
+    rc, result, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0, err
+    assert result["tasks"]["a"]["artifact"]["delivery"] == "no-changes"
+    journal = run_lifecycle._journal_path(site.run_dir())
+    before = journal.read_bytes()
+
+    # The batch already collected this delivery; its observation names the
+    # receipt, so the matching sidecar is the record and a re-run adds nothing.
+    rc, payload = collect(site, capsys, "a")
+    assert rc == 0, payload
+    assert payload["status"] == "already-collected"
+    assert payload["delivery"] == "no-changes"
+    assert payload["candidate_commit"] is None
+    assert facts(site, "task.artifact-collected") == []
+    assert journal.read_bytes() == before
+
+
+def test_collect_refuses_a_failed_collection_and_can_be_retried(site, capsys, monkeypatch):
+    real_write = run_batch_artifacts.write_sidecar
+    _crash_after_collection(monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    rc, _result, _err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0
+    monkeypatch.setattr(run_batch_artifacts, "write_sidecar", real_write)
+    journal = run_lifecycle._journal_path(site.run_dir())
+    before = journal.read_bytes()
+
+    def fail_collection(*args, **kwargs):
+        raise workspace.WorkspaceError(workspace.WORKSPACE_UNAVAILABLE, "status-unreadable")
+
+    real_collect = run_batch_artifacts._collect
+    monkeypatch.setattr(run_batch_artifacts, "_collect", fail_collection)
+    rc, payload = collect(site, capsys, "a")
+    assert rc == 2
+    assert payload["refusal"]["code"] == "collection-failed"
+    assert "status-unreadable" in payload["refusal"]["detail"]
+    # Nothing was recorded, so the same command can be retried.
+    assert not sidecar_path(site).exists()
+    assert facts(site, "task.artifact-collected") == []
+    assert journal.read_bytes() == before
+
+    monkeypatch.setattr(run_batch_artifacts, "_collect", real_collect)
+    rc, payload = collect(site, capsys, "a")
+    assert rc == 0, payload
+    assert payload["status"] == "collected"
+    assert payload["candidate_commit"] == branch_tip(site)
+    assert len(facts(site, "task.artifact-collected")) == 1
+
+
+def test_sidecar_candidate_that_is_not_the_branch_tip_refuses_integrate_and_dispose(site, capsys, monkeypatch):
+    real_write = run_batch_artifacts.write_sidecar
+    _crash_after_collection(monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    rc, _result, _err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 0
+    monkeypatch.setattr(run_batch_artifacts, "write_sidecar", real_write)
+    task = run_tasks.read_tasks(site.run_dir())[0]
+    assert task.handle.attempt_id is not None
+    assert branch_tip(site) != site.base_sha
+
+    # A sidecar whose bytes are exactly what the journal records, but whose
+    # candidate is not the task branch tip: the digest agrees, the commit does not.
+    record = {
+        "schema": run_batch_artifacts.SCHEMA,
+        "task_id": "a",
+        "attempt_id": task.handle.attempt_id,
+        "execution": "completed",
+        "delivery": "retained",
+        "reason": None,
+        "base_sha": site.base_sha,
+        "branch": workspace.branch_name(site.run_dir().name, "a"),
+        "candidate_commit": site.base_sha,
+        "patch_ref": None,
+        "patch_sha256": None,
+        "patch_bytes": None,
+        "changed_paths": 0,
+        "ignored_left": 0,
+    }
+    _, digest = run_batch_artifacts.write_sidecar(site.run_dir(), record)
+    with runguard.run_lock(site.repo, run_dir=site.run_dir()):
+        dispose_module._append(
+            site.run_dir(),
+            site.repo,
+            "task.artifact-collected",
+            {
+                "task_id": "a",
+                "attempt_id": task.handle.attempt_id,
+                "artifact_digest": digest,
+                "candidate_commit": site.base_sha,
+                "delivery": "retained",
+            },
+        )
+
+    rc, payload = integrate(site, capsys, "a")
+    assert rc == 2
+    assert payload["refusal"]["code"] == "candidate-moved"
+
+    rc, payload = dispose(site, capsys, "a", confirm=True)
+    assert rc == 2
+    assert task_row(payload, "a")["refusal"]["code"] == "branch-moved"
+    assert site.path_for("a").is_dir()
+    assert facts(site, "task.disposed") == []

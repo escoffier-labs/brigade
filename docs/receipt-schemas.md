@@ -104,7 +104,12 @@ payload is `{task_id, mode, branch_kept}`, where `mode` is the retained-copy
 proof that allowed the removal (`integrated`, `retained` or `no-changes`) or
 `discarded` for a caller's explicit disposal decision, and `branch_kept` is
 `kept` or `deleted`. Both verdicts are tokens rather than booleans, because the
-canonical payload contract refuses booleans.
+canonical payload contract refuses booleans. The fact is written as soon as
+`git worktree remove` succeeded, before the optional branch delete: a failed
+delete leaves `branch_kept: "kept"` recorded and is reported as its own refusal,
+and a later `--delete-branch` run retries only that delete without appending a
+second fact. `branch_kept` therefore describes the branch at disposal time, not
+the eventual outcome.
 
 `task.artifact-collected` is the reference-only record of an artifact collection
 performed after the terminal observation. Its payload is
@@ -112,7 +117,10 @@ performed after the terminal observation. Its payload is
 attempt identity, the sanitized artifact sidecar's SHA-256, the candidate
 revision (`null` when the delivery has none) and the closed delivery state. It
 never rewrites the observation, and integration and disposal read a commit
-artifact from either source.
+artifact from either source. `attempt_id` is a derived identity and redaction
+remaps it exactly as it remaps the identical field on `task.launch-claimed`. It
+is never written for a `collection-failed` delivery: a failed collection records
+nothing so it can be retried.
 
 ## `brigade.run_event.v1`: `schema_version: 2`
 

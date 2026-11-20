@@ -280,11 +280,16 @@ def prepare_requests(
                 # Reference-only integration fact: commit revisions map through
                 # as structural values and no derived identity is recomputed.
                 pass
-            elif event.event_type in {"task.disposed", "task.artifact-collected"}:
-                # Reference-only custody facts: digests and closed verdicts map
-                # through, state is unchanged, and no derived identity is
-                # recomputed.
+            elif event.event_type == "task.disposed":
+                # Reference-only custody verdict: the mode and branch state are
+                # closed structural tokens and state is unchanged.
                 pass
+            elif event.event_type == "task.artifact-collected":
+                # A recovered collection names the attempt it belongs to, so its
+                # derived attempt identity is remapped exactly as
+                # ``task.launch-claimed`` does. The digests and delivery map
+                # through; the fold refuses a stale attempt.
+                payload["attempt_id"] = attempts[(task_id, old["attempt_id"])]
             elif event.event_type == "task.observed":
                 current = states[task_id]
                 observation = tasks.TaskObservation(

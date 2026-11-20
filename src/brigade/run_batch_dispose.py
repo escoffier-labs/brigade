@@ -23,11 +23,17 @@ must never lose the only copy of work.
 * Removal goes through ``git worktree remove`` without ``--force``. A checkout
   Git refuses to remove is left exactly as it is; Brigade never deletes a
   worktree directory itself, and ``--discard`` is the only path that forces it.
-* The ``task.disposed`` fact is appended while the task lock is still held. A
-  crash between removal and that fact is repaired by running the command again:
-  the checkout is gone and the binding is present, so the missing fact and the
+* The ``task.disposed`` fact is appended as soon as the removal succeeded and
+  while the task lock is still held, before the optional branch delete runs. A
+  failed branch delete therefore leaves a recorded disposal and reports its own
+  refusal, and a later ``--delete-branch`` run retries only that delete. A crash
+  between removal and the fact is repaired by running the command again: the
+  checkout is gone and the binding is present, so the missing fact and the
   stranded reservation lease are recorded and released instead of failing
   forever.
+* A dry run takes no lock, reads the lock state without mutating it, and reports
+  the refusals a read-only check can see, including a checkout Git will refuse
+  to remove because it holds uncommitted changes.
 
 ``runs tasks collect`` runs the artifact collection a crash between worker exit
 and collection skipped. It revalidates the same binding and receipt evidence,
@@ -95,11 +101,12 @@ BRANCH_MOVED = "branch-moved"
 IGNORED_FILES = "ignored-files"
 REMOVE_REFUSED = "remove-refused"
 ARTIFACT_MISMATCH = "artifact-mismatch"
+COLLECTION_FAILED = "collection-failed"
 GIT_FAILED = "git-failed"
 ERROR_CODES = frozenset(
     "no-task-journal journal-unreadable unknown-run unknown-task duplicate-task target-busy task-busy "
     "not-terminal not-attempted no-receipt workspace-invalid workspace-unavailable not-retained "
-    "branch-moved ignored-files remove-refused artifact-mismatch git-failed".split()
+    "branch-moved ignored-files remove-refused artifact-mismatch collection-failed git-failed".split()
 )
 
 _GIT_TIMEOUT = 60.0
@@ -145,6 +152,22 @@ class _Plan:
     candidate_commit: str | None
     integration_commit: str | None
     branch_kept: str
+    integration: run_tasks.TaskIntegration | None
+
+
+@dataclass(frozen=True)
+class _Proof:
+    """The retained-copy proof for one task, and the integration entry it used.
+
+    The entry is returned rather than re-derived from ``integrations[-1]``: a
+    newer integration may already have lost its ref, while an older one still
+    holds the work this proof just found.
+    """
+
+    mode: str
+    candidate_commit: str | None
+    integration_commit: str | None
+    integration: run_tasks.TaskIntegration | None
 
 
 def _git(args: list[str], *, cwd: Path, timeout: float = _GIT_TIMEOUT):
@@ -335,14 +358,20 @@ def _no_changes_record(run_dir: Path, state: run_tasks.TaskResult, checkout: _Ch
     return document if receipt_digest == state.artifact_digest else None
 
 
-def _proof(
-    run_dir: Path, workspace: Path, state: run_tasks.TaskResult, checkout: _Checkout
-) -> tuple[str, str | None, str | None]:
-    """The retained-copy proof for one task, or a ``not-retained`` refusal."""
-    task_id = state.handle.spec.task_id
+def _intact_integration(workspace: Path, state: run_tasks.TaskResult) -> run_tasks.TaskIntegration | None:
+    """The newest integration entry whose ref still holds its recorded commit."""
     for entry in reversed(state.integrations):
         if _ref(workspace, run_batch_integrate.ref_name(entry.integration_id)) == entry.integration_commit:
-            return MODE_INTEGRATED, entry.candidate_commit, entry.integration_commit
+            return entry
+    return None
+
+
+def _proof(run_dir: Path, workspace: Path, state: run_tasks.TaskResult, checkout: _Checkout) -> _Proof:
+    """The retained-copy proof for one task, or a ``not-retained`` refusal."""
+    task_id = state.handle.spec.task_id
+    entry = _intact_integration(workspace, state)
+    if entry is not None:
+        return _Proof(MODE_INTEGRATED, entry.candidate_commit, entry.integration_commit, entry)
     record = _artifact_record(run_dir, state)
     if record is None:
         record = _no_changes_record(run_dir, state, checkout)
@@ -351,9 +380,9 @@ def _proof(
         if delivery == run_batch_artifacts.DELIVERY_RETAINED and (
             isinstance(candidate, str) and _SHA_RE.fullmatch(candidate) is not None
         ):
-            return MODE_RETAINED, candidate, None
+            return _Proof(MODE_RETAINED, candidate, None, None)
         if delivery == run_batch_artifacts.DELIVERY_NO_CHANGES:
-            return MODE_NO_CHANGES, None, None
+            return _Proof(MODE_NO_CHANGES, None, None, None)
     raise DisposeError(
         NOT_RETAINED,
         f"task {task_id} has no retained copy: no live integration ref, no matching retained "
@@ -392,6 +421,7 @@ def _plan(
     candidate: str | None,
     integration_commit: str | None,
     branch_kept: str,
+    integration: run_tasks.TaskIntegration | None = None,
 ) -> _Plan:
     return _Plan(
         task_id=task_id,
@@ -402,6 +432,7 @@ def _plan(
         candidate_commit=candidate,
         integration_commit=integration_commit,
         branch_kept=branch_kept,
+        integration=integration,
     )
 
 
@@ -426,7 +457,8 @@ def _plan_task(
         # The caller's explicit disposal decision: no proof, no cleanup check,
         # and Git's own --force is allowed below.
         return _plan(checkout, task_id, MODE_DISCARDED, None, None, BRANCH_KEPT)
-    mode, candidate, integration_commit = _proof(run_dir, workspace, state, checkout)
+    proof = _proof(run_dir, workspace, state, checkout)
+    mode, candidate, integration_commit = proof.mode, proof.candidate_commit, proof.integration_commit
     _check_branch(workspace, checkout, mode=mode, candidate=candidate, delete_branch=delete_branch, task_id=task_id)
     if mode == MODE_NO_CHANGES and any(not line.startswith("!!") for line in portrait):
         # Nothing was collected because nothing changed, so anything here now
@@ -439,13 +471,24 @@ def _plan_task(
             "use --discard to dispose of them anyway",
             task_id=task_id,
         )
+    if any(not line.startswith("!!") for line in portrait):
+        # A retained or integrated copy is the branch, never the working tree.
+        # Anything uncommitted here arrived after collection, and Git itself
+        # refuses to remove a dirty checkout without --force.
+        raise DisposeError(
+            REMOVE_REFUSED,
+            f"task {task_id} checkout still holds uncommitted changes, which exist nowhere else; "
+            "commit them, or use --discard to lose them",
+            task_id=task_id,
+        )
     branch_kept = BRANCH_KEPT
     if delete_branch and mode == MODE_INTEGRATED:
-        assert integration_commit is not None
-        # The integration commit must still be reachable from its ref: that ref,
-        # not the task branch, is then the copy that holds the work. The
-        # integration record proves the commit was built from this candidate.
-        ref = run_batch_integrate.ref_name(state.integrations[-1].integration_id)
+        assert integration_commit is not None and proof.integration is not None
+        # The integration commit must still be reachable from the ref of the
+        # entry this proof matched: that ref, not the task branch, is then the
+        # copy that holds the work. The integration record proves the commit
+        # was built from this candidate.
+        ref = run_batch_integrate.ref_name(proof.integration.integration_id)
         if _git(["merge-base", "--is-ancestor", integration_commit, ref], cwd=workspace).code != 0:
             raise DisposeError(
                 NOT_RETAINED,
@@ -453,7 +496,7 @@ def _plan_task(
                 task_id=task_id,
             )
         branch_kept = BRANCH_DELETED
-    return _plan(checkout, task_id, mode, candidate, integration_commit, branch_kept)
+    return _plan(checkout, task_id, mode, candidate, integration_commit, branch_kept, proof.integration)
 
 
 def _remove(workspace: Path, plan: _Plan, *, discard: bool) -> None:
@@ -559,6 +602,35 @@ def _row(
     }
 
 
+def _retry_branch_delete(run_dir: Path, workspace: Path, state: run_tasks.TaskResult) -> str:
+    """Delete the branch of an already-disposed integrated task, or refuse.
+
+    Only the optional branch delete is retried: the disposal is already recorded,
+    so this repeats exactly the compare-and-swap on the candidate and the
+    reachability proof the first run would have made, and nothing else.
+    """
+    task_id = state.handle.spec.task_id
+    checkout = _checkout(state, run_dir, workspace)
+    if _ref(workspace, f"refs/heads/{checkout.branch}") is None:
+        # The earlier run deleted it, or a crash left it deleted.
+        return BRANCH_DELETED
+    entry = _intact_integration(workspace, state)
+    if entry is None:
+        raise DisposeError(
+            NOT_RETAINED,
+            f"task {task_id} has no integration ref that still holds its recorded commit; keeping the branch",
+            task_id=task_id,
+        )
+    ref = run_batch_integrate.ref_name(entry.integration_id)
+    if _git(["merge-base", "--is-ancestor", entry.integration_commit, ref], cwd=workspace).code != 0:
+        raise DisposeError(
+            NOT_RETAINED, f"task {task_id} integration commit is not reachable from {ref}", task_id=task_id
+        )
+    plan = _plan(checkout, task_id, MODE_INTEGRATED, entry.candidate_commit, entry.integration_commit, BRANCH_DELETED)
+    _delete_branch(workspace, plan)
+    return BRANCH_DELETED
+
+
 def _dispose_one(
     run_dir: Path,
     workspace: Path,
@@ -571,28 +643,79 @@ def _dispose_one(
 ) -> dict[str, Any]:
     """Plan, and when confirmed perform, one task's disposal."""
     task_id = state.handle.spec.task_id
+    path = run_batch_workspace.expected_path(workspace, run_dir.name, task_id)
     if state.disposal is not None:
-        return _row(task_id, STATUS_ALREADY, mode=state.disposal.mode, branch_kept=state.disposal.branch_kept)
+        if not confirm:
+            return _row(task_id, STATUS_ALREADY, mode=state.disposal.mode, branch_kept=state.disposal.branch_kept)
+        # A crash between the fact and the lease release leaves an empty
+        # reservation behind. Take the task lock so no live worker owns it, then
+        # release the lease and retry only the optional branch delete.
+        refusal: DisposeError | None = None
+        branch_kept = state.disposal.branch_kept
+        with _run_lock(path, run_dir, code=TASK_BUSY, detail=f"another caller holds task {task_id}'s run lock"):
+            if delete_branch and state.disposal.mode == MODE_INTEGRATED:
+                try:
+                    branch_kept = _retry_branch_delete(run_dir, workspace, state)
+                except DisposeError as exc:
+                    refusal = exc
+        _release_lease(path)
+        if refusal is not None:
+            # The disposal stands; only the requested branch delete was refused.
+            return _row(
+                task_id,
+                STATUS_REFUSED,
+                mode=state.disposal.mode,
+                branch_kept=state.disposal.branch_kept,
+                refusal=refusal,
+            )
+        return _row(task_id, STATUS_ALREADY, mode=state.disposal.mode, branch_kept=branch_kept)
     if not confirm:
         plan = _plan_task(run_dir, workspace, state, base_sha, discard=discard, delete_branch=delete_branch)
         return _row(task_id, STATUS_PLANNED, mode=plan.mode, branch_kept=plan.branch_kept)
-    path = run_batch_workspace.expected_path(workspace, run_dir.name, task_id)
+    branch_kept = BRANCH_KEPT
+    branch_error: DisposeError | None = None
     with _run_lock(path, run_dir, code=TASK_BUSY, detail=f"another caller holds task {task_id}'s run lock"):
         plan = _plan_task(run_dir, workspace, state, base_sha, discard=discard, delete_branch=delete_branch)
         if plan.binding is not None:
             _remove(workspace, plan, discard=discard)
+        # Removal is irreversible, so the disposal is recorded as soon as it
+        # succeeded: a failed branch delete below must not leave the checkout
+        # gone with no recorded reason and no way to re-run.
         if plan.branch_kept == BRANCH_DELETED:
-            _delete_branch(workspace, plan)
+            try:
+                _delete_branch(workspace, plan)
+            except DisposeError as exc:
+                branch_error = exc
+            else:
+                branch_kept = BRANCH_DELETED
         _append(
             run_dir,
             workspace,
             "task.disposed",
-            {"task_id": task_id, "mode": plan.mode, "branch_kept": plan.branch_kept},
+            {"task_id": task_id, "mode": plan.mode, "branch_kept": branch_kept},
         )
     # Released after the lock, so the lease directory is empty by the time it is
     # removed. A crash before this line leaves it for the next run to release.
     _release_lease(path)
-    return _row(task_id, STATUS_DISPOSED, mode=plan.mode, branch_kept=plan.branch_kept)
+    if branch_error is not None:
+        # The disposal stands; only the requested branch delete is refused.
+        raise branch_error
+    return _row(task_id, STATUS_DISPOSED, mode=plan.mode, branch_kept=branch_kept)
+
+
+def _refuse_busy_workspace(workspace: Path, run_dir: Path) -> None:
+    """A dry run reads the workspace lock state without taking or changing it.
+
+    Only a state whose owner is gone and which this exact run could claim is
+    planned against; a live, foreign or unreadable lock refuses with the same
+    code ``--confirm`` would report, and none of them is mutated here.
+    """
+    state = runguard.run_lock_state(workspace, run_dir)
+    if state in {"live", "foreign", "invalid"}:
+        raise DisposeError(
+            TARGET_BUSY,
+            f"this workspace's run lock is {state}; a dry run does not take it",
+        )
 
 
 def dispose(
@@ -633,7 +756,13 @@ def dispose(
         "tasks": [],
         "refusal": None,
     }
-    with _run_lock(workspace, run_dir, code=TARGET_BUSY, detail="another caller holds this workspace's run lock"):
+    with contextlib.ExitStack() as stack:
+        if confirm:
+            stack.enter_context(
+                _run_lock(workspace, run_dir, code=TARGET_BUSY, detail="another caller holds this workspace's run lock")
+            )
+        else:
+            _refuse_busy_workspace(workspace, run_dir)
         base_sha = _base_sha(run_dir)
         states = _states(run_dir)
         for task_id in ordered:
@@ -746,6 +875,18 @@ def _collect_one(
             ),
             "artifact_digest": digest,
         }
+    if state.result_id is not None:
+        # A no-changes delivery has no candidate, so its observation names the
+        # worker receipt and never the sidecar. A matching sidecar is still the
+        # batch's own completed collection, not one this command should repeat.
+        unchanged = _no_changes_record(run_dir, state, checkout)
+        if unchanged is not None:
+            return {
+                "status": STATUS_ALREADY_COLLECTED,
+                "delivery": unchanged["delivery"],
+                "candidate_commit": None,
+                "artifact_digest": _artifact_sidecar(run_dir, task_id)[1],
+            }
     execution, status = (
         (run_batch_artifacts.EXECUTION_COMPLETED, "completed")
         if document is not None and document.get("ok") is True
@@ -756,6 +897,13 @@ def _collect_one(
     artifact = run_batch_artifacts.collect(
         checkout.binding, workspace, run_dir, execution=execution, attempt_id=attempt_id
     )
+    if artifact.get("delivery") == run_batch_artifacts.DELIVERY_COLLECTION_FAILED:
+        # A failed collection is not an artifact: record nothing, so the same
+        # command can be retried once the checkout is readable again.
+        reason = artifact.get("reason") or "unknown"
+        raise DisposeError(
+            COLLECTION_FAILED, f"task {task_id} collection failed: {reason}; nothing was recorded", task_id=task_id
+        )
     try:
         _, sidecar_digest = run_batch_artifacts.write_sidecar(run_dir, artifact)
         run_journal._fsync_directory(run_dir)

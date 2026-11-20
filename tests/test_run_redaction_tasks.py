@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import asdict
 
 import pytest
 
-from brigade import aboyeur, run_checkpoint, run_events, run_journal, run_redaction, run_tasks as tasks, runguard
+from brigade import aboyeur, run_checkpoint, run_events, run_journal, run_redaction, run_task_journal
+from brigade import run_tasks as tasks, runguard
 
 
 # Inspect OS capabilities independently: a broken production guard must fail
@@ -53,6 +55,18 @@ def closed_tasks(tmp_path, monkeypatch, request):
                 request_id=f"private-request-{i}",
                 spec=tasks.TaskSpec(task_id, f"private-seat-{i}", str(i + 1) * 64),
             )
+            if getattr(request, "param", None) == "custody":
+                tasks.record_workspace_binding(
+                    run_dir,
+                    workspace=workspace,
+                    task_id=task_id,
+                    binding=tasks.TaskWorkspaceBinding(
+                        base_sha=str(9 - i) * 40,
+                        branch_digest=str(i + 4) * 64,
+                        path_digest=str(i + 5) * 64,
+                        dev_ino_digest=str(i + 6) * 64,
+                    ),
+                )
             handle = tasks.prepare_attempt(run_dir, workspace=workspace, task_id=task_id)
             if getattr(request, "param", None) == "claim":
                 current = tasks.read_tasks(run_dir)[i]
@@ -99,6 +113,37 @@ def closed_tasks(tmp_path, monkeypatch, request):
                 handle=handle,
                 observation=tasks.TaskObservation("completed", containment="active"),
             )
+            if getattr(request, "param", None) == "custody":
+                with run_task_journal.transaction(run_dir, workspace=workspace, writing=True):
+                    run_task_journal.append(
+                        run_dir,
+                        workspace=workspace,
+                        event_type="task.integrated",
+                        payload={
+                            "task_id": task_id,
+                            "integration_id": hashlib.sha256(task_id.encode()).hexdigest()[:16],
+                            "candidate_commit": str(i + 1) * 40,
+                            "integration_commit": str(i + 2) * 40,
+                        },
+                    )
+                    run_task_journal.append(
+                        run_dir,
+                        workspace=workspace,
+                        event_type="task.disposed",
+                        payload={"task_id": task_id, "mode": "integrated", "branch_kept": "kept"},
+                    )
+                    run_task_journal.append(
+                        run_dir,
+                        workspace=workspace,
+                        event_type="task.artifact-collected",
+                        payload={
+                            "task_id": task_id,
+                            "attempt_id": handle.attempt_id,
+                            "artifact_digest": str(i + 7) * 64,
+                            "candidate_commit": str(i + 1) * 40,
+                            "delivery": "retained",
+                        },
+                    )
         aboyeur._write_json(run_dir / "run.json", {**snapshot, "status": "ok"})
     assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
     assert json.loads((run_dir / "run.json").read_bytes())["status"] == "ok"
@@ -695,3 +740,48 @@ def test_claim_redaction_refuses_corruption_without_publication(closed_tasks):
     test_task_redaction_refuses_semantic_corruption_without_publication(
         closed_tasks, "task.launch-claimed", "attempt_id"
     )
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("closed_tasks", ["custody"], indirect=True)
+def test_custody_fact_redaction_remaps_every_derived_reference_and_still_folds(closed_tasks):
+    run_dir = closed_tasks
+    journal = run_dir / "events/lifecycle.jsonl"
+    before = run_journal.read_journal_bounded(journal).events
+    original = {result.handle.spec.task_id: result for result in tasks.read_tasks(run_dir)}["private-task-0"]
+    assert original.collected is not None and original.integrations and original.disposal is not None
+    old_values = {
+        original.handle.spec.task_id,
+        original.handle.request_id,
+        original.handle.spec.spec_digest,
+        original.handle.attempt_id,
+        original.result_id,
+    }
+    accepted = next(
+        event
+        for event in before
+        if event.event_type == "task.accepted" and event.payload["task_id"] == "private-task-0"
+    )
+
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=accepted.sequence,
+        sequence_end=accepted.sequence,
+        reason="credential-exposure",
+        operator_confirmed=True,
+    )
+
+    # The redacted journal folds cleanly: a stale attempt id on
+    # ``task.artifact-collected`` would refuse the whole history here.
+    redacted = tasks.read_tasks(run_dir)
+    renamed = next(result for result in redacted if result.handle.spec.task_id != "private-task-0")
+    assert renamed.handle.attempt_id != original.handle.attempt_id
+    assert renamed.collected is not None and renamed.collected.attempt_id == renamed.handle.attempt_id
+    assert renamed.integrations == original.integrations
+    assert renamed.disposal == original.disposal
+    # Structural integration revisions are public and survive unchanged.
+    assert renamed.integrations[0].candidate_commit == original.integrations[0].candidate_commit
+    committed = journal.read_bytes()
+    for value in old_values:
+        assert value is not None
+        assert value.encode() not in committed
