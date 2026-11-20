@@ -149,15 +149,21 @@ def _warn_antigravity_plan_mode_unsupported(executable: str) -> None:
 _ANTIGRAVITY_NO_OUTPUT_MARKER = "jetski: no output produced"
 
 
-def _antigravity_no_output_detail(stdout: str) -> str | None:
-    """Return agy's own text when a headless run exited 0 without doing the work.
+def _antigravity_no_output_detail(stdout: str, stderr: str = "") -> str | None:
+    """Return agy's own reason when a headless run exited 0 without doing the work.
 
-    agy auto-denies a tool permission it cannot prompt for, prints
-    ``jetski: no output produced`` plus a note naming the denied permission, and
-    still exits 0. The caller turns that into a failed run so the seat is not
-    recorded as a success with an empty report.
+    agy auto-denies a tool permission it cannot prompt for and still exits 0.
+    agy 1.5.12 leaves stdout empty and writes one stderr line that starts with
+    ``jetski: no output produced`` and names the denied permission. The caller
+    turns that into a failed run carrying the reason. A stdout report that only
+    quotes the marker later on is real output and is left alone.
     """
-    lines = [line for line in stdout.splitlines() if line.strip()]
-    if not lines or lines[0].strip() != _ANTIGRAVITY_NO_OUTPUT_MARKER:
+    out_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if out_lines and not out_lines[0].startswith(_ANTIGRAVITY_NO_OUTPUT_MARKER):
         return None
-    return " ".join(" ".join(lines).split())
+    for stream in (stderr, stdout):
+        lines = [line.strip() for line in stream.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            if line.startswith(_ANTIGRAVITY_NO_OUTPUT_MARKER):
+                return " ".join(" ".join(lines[index:]).split())
+    return None

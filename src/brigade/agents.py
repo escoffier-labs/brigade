@@ -1732,7 +1732,9 @@ def run_agent(
             session_id=grok_session_id,
             request_id=grok_request_id,
         )
-    antigravity_no_output = _antigravity_no_output_detail(result.stdout) if cli_ref == "antigravity" else None
+    antigravity_no_output = (
+        _antigravity_no_output_detail(result.stdout, result.stderr) if cli_ref == "antigravity" else None
+    )
     if antigravity_no_output is not None:
         return AgentResult(
             text="",

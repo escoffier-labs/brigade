@@ -1690,9 +1690,9 @@ def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
     assert result.exit_code == 0
 
 
-def _run_antigravity_with_stdout(monkeypatch, stdout, *, read_only=True, cwd=None):
+def _run_antigravity_with_stdout(monkeypatch, stdout, *, read_only=True, cwd=None, stderr=""):
     _stub_agent_executable(monkeypatch)
-    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, stdout, ""))
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, stdout, stderr))
     return agents.run_agent("antigravity", "hi", read_only=read_only, cwd=cwd)
 
 
@@ -1712,6 +1712,30 @@ def test_run_agent_antigravity_exit_zero_no_output_marker_is_a_failed_run(monkey
         assert result.failure_phase == "output-validation"
         assert "permission to read_file /etc/hosts was denied" in result.detail
         assert result.text == ""
+
+
+def test_run_agent_antigravity_real_denial_on_stderr_is_a_failed_run(monkeypatch, tmp_path):
+    # Captured from agy 1.5.12: stdout is empty and the marker plus the reason
+    # arrive as one stderr line.
+    stderr = (
+        'jetski: no output produced \u2014 a tool required the "read_file" permission that headless '
+        "mode cannot prompt for, so it was auto-denied.\n"
+        "Shell cwd was reset to /somewhere\n"
+    )
+    result = _run_antigravity_with_stdout(monkeypatch, "", cwd=tmp_path, stderr=stderr)
+
+    assert result.ok is False
+    assert result.exit_code == 0
+    assert result.failure_kind == "permission-denied"
+    assert result.failure_phase == "output-validation"
+    assert '"read_file" permission' in result.detail
+
+
+def test_run_agent_antigravity_plain_empty_output_keeps_generic_failure(monkeypatch, tmp_path):
+    result = _run_antigravity_with_stdout(monkeypatch, "", cwd=tmp_path, stderr="unrelated noise\n")
+
+    assert result.ok is False
+    assert result.failure_kind != "permission-denied"
 
 
 def test_run_agent_antigravity_marker_after_blank_lines_still_fails(monkeypatch, tmp_path):
