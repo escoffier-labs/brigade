@@ -69,20 +69,13 @@ pub fn mint_at(now_ms: i64, tail: u128) -> String {
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
-/// 32 unpredictable bytes. The OS source is preferred. Elsewhere the standard
+/// 32 random bytes from the OS source. If it does not answer, the standard
 /// library's OS-seeded hasher keys are mixed with a counter and the clock.
 /// Ids need uniqueness, not secrecy; no secret is derived from these bytes.
 fn random_bytes() -> [u8; 32] {
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        let mut raw = [0u8; 32];
-        if std::fs::File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut raw))
-            .is_ok()
-        {
-            return raw;
-        }
+    let mut raw = [0u8; 32];
+    if crate::platform::random_bytes(&mut raw).is_ok() {
+        return raw;
     }
     use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();

@@ -972,18 +972,18 @@ fn message_template() -> PathBuf {
     path
 }
 fn message(caller: &str, key: &str, raw: serde_json::Value) -> Box<dyn super::Command> {
-    use crate::messages::{Policy, Seeds, Write, wake};
+    use crate::messages::{FixedSeeds, Policy, Write, wake};
     Box::new(Write {
         caller: caller.into(),
         key: key.into(),
         raw: raw.as_object().unwrap().clone(),
         policy: Policy::default(),
         clock: None,
-        seeds: Seeds {
+        seeds: Box::new(FixedSeeds {
             client_id: "0".repeat(32),
             event: "1".repeat(32),
             question: ["2".repeat(32), "3".repeat(32)],
-        },
+        }),
         events: false,
         operator: String::new(),
         wake: std::sync::Arc::new(wake::Wake::new(wake::Limits::for_connections(16))),

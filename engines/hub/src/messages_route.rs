@@ -58,18 +58,6 @@ fn key(parts: &Parts) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(digest)
 }
-fn random_hex() -> Option<String> {
-    use std::io::Read;
-    let mut raw = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
-        .ok()?;
-    Some(raw.iter().fold(String::with_capacity(32), |mut out, b| {
-        use std::fmt::Write;
-        let _ = write!(out, "{b:02x}");
-        out
-    }))
-}
 /// Actions the Python upstream keeps answering in native mode.
 fn proxied(action: &str) -> bool {
     matches!(action, "who" | "claims" | "keys_publish") || action.starts_with("events_")
@@ -246,21 +234,14 @@ impl Messages {
         raw: Map<String, Json>,
         size: usize,
     ) -> Option<Response<Body>> {
-        let seeds = match (random_hex(), random_hex(), random_hex(), random_hex()) {
-            (Some(a), Some(b), Some(c), Some(d)) => messages::Seeds {
-                client_id: a,
-                event: b,
-                question: [c, d],
-            },
-            _ => return Some(crate::busy("messages-unavailable")),
-        };
         let command = messages::Write {
             caller,
             key,
             raw,
             policy: self.policy.clone(),
             clock: self.clock.clone(),
-            seeds,
+            // Ids are drawn by the write itself, where it needs one.
+            seeds: Box::new(messages::OsSeeds),
             events: self.events,
             operator: std::env::var("BRIGADE_FLEET_OPERATOR_RECIPIENT").unwrap_or_default(),
             wake: self.wake.clone(),

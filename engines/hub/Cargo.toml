@@ -40,4 +40,10 @@ tokio = { version = "1", features = ["test-util"] }
 libc = "=0.2.191"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
+# `Win32_Security_Cryptography` is `BCryptGenRandom`, the OS random source in
+# `platform.rs`. Both features compile from the same crate version, so this
+# adds no package and no lockfile entry.
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+] }

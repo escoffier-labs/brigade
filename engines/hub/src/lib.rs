@@ -3,6 +3,8 @@ pub mod maintenance;
 pub mod memory;
 pub mod memory_audit;
 pub mod memory_verifier_generation;
+/// One OS random source for registration tokens, memory ids and message ids.
+pub mod platform;
 pub mod read;
 pub mod schema;
 pub mod writer;

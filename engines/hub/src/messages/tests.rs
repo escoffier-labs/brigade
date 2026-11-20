@@ -354,3 +354,104 @@ fn a_list_keeps_only_the_fields_it_reads() {
     };
     assert!(ListFields::new(raw).raw().is_empty());
 }
+
+/// An in-memory store with the rows an `ack` and a `question_status` read.
+fn write_store() -> Memory {
+    let tx = Memory(rusqlite::Connection::open_in_memory().unwrap());
+    tx.0.execute_batch(
+        "CREATE TABLE nodes(node_id TEXT PRIMARY KEY, token_sha256 TEXT UNIQUE, label TEXT, created_at TEXT, revoked_at TEXT);
+         CREATE TABLE fleet_message_principals(principal_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT);
+         CREATE TABLE fleet_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT, priority TEXT NOT NULL, client_id TEXT NOT NULL, payload_hash TEXT NOT NULL, reply_to INTEGER REFERENCES fleet_messages(id), is_reply INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, received_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT, sender_label TEXT, thread TEXT, kind TEXT, envelope TEXT, content_state TEXT, envelope_bytes INTEGER, sealed_reply_to INTEGER);
+         CREATE TABLE fleet_message_sends(id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, client_id TEXT NOT NULL, received_at TEXT NOT NULL);
+         CREATE TABLE fleet_questions(question_id TEXT PRIMARY KEY, caller TEXT NOT NULL, generation TEXT NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, operator TEXT NOT NULL, question TEXT NOT NULL, message_id INTEGER NOT NULL, created_at TEXT NOT NULL, deadline TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answer_id INTEGER, source TEXT, answered_by TEXT, answered_at TEXT, late_answer_message_id INTEGER, late_answered_at TEXT, operator_reply_after_desktop_message_id INTEGER, operator_reply_after_desktop_at TEXT, UNIQUE(caller,generation,request_id));",
+    )
+    .unwrap();
+    tx.0.execute(
+        "INSERT INTO nodes(node_id,token_sha256,label,created_at,revoked_at) VALUES('node-a','digest','a','2026-01-01T00:00:00+00:00',NULL)",
+        [],
+    )
+    .unwrap();
+    tx.0.execute(
+        "INSERT INTO fleet_questions(question_id,caller,generation,request_id,payload_hash,operator,question,message_id,created_at,deadline,status) \
+         VALUES('0123456789abcdef0123456789abcdef','node-a','digest','q1','hash','agent:ops','Ship it?',1,'2099-01-01T00:00:00+00:00','2099-01-01T00:00:00+00:00','pending')",
+        [],
+    )
+    .unwrap();
+    tx
+}
+
+/// A write with the process's random source replaced.
+fn write_with(raw: Json, seeds: Box<dyn Seeds>) -> Write {
+    Write {
+        caller: "node-a".into(),
+        key: "digest".into(),
+        raw: raw.as_object().unwrap().clone(),
+        policy: Policy::default(),
+        clock: None,
+        seeds,
+        events: false,
+        operator: String::new(),
+        wake: Arc::new(wake::Wake::new(wake::Limits::for_connections(16))),
+        notified: Default::default(),
+    }
+}
+
+/// The reply a write settles on, whether it committed or rolled its command back.
+fn settled(command: &Write, tx: &dyn WriteTx) -> Json {
+    match command.apply(tx) {
+        Ok(answer) => answer,
+        Err(ApplyError::Refused(answer)) => answer,
+        Err(other) => panic!("unexpected apply failure: {other:?}"),
+    }
+}
+
+/// A source that never answers, as a hub does with no `/dev/urandom` and no
+/// `BCryptGenRandom`.
+struct Unavailable;
+impl Seeds for Unavailable {
+    fn client_id(&self) -> Result<String, Fail> {
+        Err(random_unavailable())
+    }
+    fn event(&self) -> Result<String, Fail> {
+        Err(random_unavailable())
+    }
+    fn question(&self) -> Result<[String; 2], Fail> {
+        Err(random_unavailable())
+    }
+}
+
+#[test]
+fn ack_and_question_status_mint_no_id_and_never_ask_the_source() {
+    let tx = write_store();
+    let ack = settled(
+        &write_with(json!({"action": "ack", "id": 999}), Box::new(Unavailable)),
+        &tx,
+    );
+    assert_eq!(ack["status"], 404, "{ack}");
+    assert_eq!(ack["body"], "{\"error\": \"message not found\"}");
+    let status = settled(
+        &write_with(
+            json!({"action": "question_status", "question_id": "0123456789abcdef0123456789abcdef"}),
+            Box::new(Unavailable),
+        ),
+        &tx,
+    );
+    assert_eq!(status["status"], 200, "{status}");
+    assert!(
+        status["body"]
+            .as_str()
+            .unwrap()
+            .contains("0123456789abcdef0123456789abcdef"),
+        "{status}"
+    );
+    // The same source does refuse a write that must mint an id, so the two
+    // answers above are laziness and not a source nobody consults.
+    let send = settled(
+        &write_with(
+            json!({"action": "send", "to": "node-b", "subject": "s", "body": "b"}),
+            Box::new(Unavailable),
+        ),
+        &tx,
+    );
+    assert_eq!(send["status"], 503, "{send}");
+}
