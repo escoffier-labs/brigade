@@ -219,7 +219,8 @@ def build_gitignore_block(selection: Selection) -> str:
             ".opencode/superpowers/",
             ".agents/commands/",
             ".agents/superpowers/",
-            ".agents/skills/",
+            # Not .agents/skills/: other harnesses read it and teams commit
+            # skills there, so ignoring it would hide them (#2810 review).
             ".pi/commands/",
             ".pi/superpowers/",
             ".cursor/rules/",

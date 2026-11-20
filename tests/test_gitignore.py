@@ -289,7 +289,6 @@ def test_gitignore_block_includes_generated_tool_projection_roots():
         ".opencode/superpowers/",
         ".agents/commands/",
         ".agents/superpowers/",
-        ".agents/skills/",
         ".pi/commands/",
         ".pi/superpowers/",
         ".cursor/rules/",

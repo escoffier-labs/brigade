@@ -144,8 +144,10 @@ def test_prune_without_legacy_dir_is_a_noop(tmp_path):
 
 def test_gitignore_block_ignores_agents_projections_but_not_hooks():
     block = install_mod.build_gitignore_block(_sel("antigravity"))
-    for pattern in (".agents/commands/", ".agents/superpowers/", ".agents/skills/"):
+    for pattern in (".agents/commands/", ".agents/superpowers/"):
         assert pattern in block
+    # .agents/skills/ is a shared cross-harness root that teams commit to.
+    assert ".agents/skills/" not in block
     assert ".agents/hooks.json" not in block
     assert ".agents/\n" not in block
     assert ".antigravity/commands/" not in block

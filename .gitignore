@@ -200,7 +200,6 @@ memory/handoff-inbox/
 .opencode/superpowers/
 .agents/commands/
 .agents/superpowers/
-.agents/skills/
 .pi/commands/
 .pi/superpowers/
 .cursor/rules/
