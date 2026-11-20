@@ -75,7 +75,14 @@ class Result:
 
 
 def run(argv: list[str], *, timeout: float = 120, check: bool = False) -> subprocess.CompletedProcess[str]:
-    done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        # A wedged docker exec must fail one row with a reason, not abort the
+        # whole check with a traceback. 124 is the shell's timeout status.
+        reason = f"timed out after {timeout}s: {' '.join(argv)}"
+        stderr = (exc.stderr or "") + "\n" + reason if isinstance(exc.stderr, str) else reason
+        done = subprocess.CompletedProcess(argv, 124, exc.stdout if isinstance(exc.stdout, str) else "", stderr)
     if check and done.returncode != 0:
         raise RuntimeError(f"{' '.join(argv)} exited {done.returncode}: {done.stderr.strip()[:400]}")
     return done
@@ -1430,17 +1437,57 @@ def check_memory(args: argparse.Namespace, result: Result) -> None:
     result.ok(report.get("memory_file") is True, "fleet-hub-memory.db sits beside fleet-hub.db on the state volume")
 
 
-MEMORY_FILE_PRESENT = 'import os; print(os.path.isfile("/var/lib/brigade/fleet-hub-memory.db"))'
+MEMORY_FILE_PROBE = (
+    'import json, os; p = "/var/lib/brigade/fleet-hub-memory.db"; '
+    "s = os.stat(p) if os.path.isfile(p) else None; "
+    'print(json.dumps({"present": s is not None, "mtime": s.st_mtime if s is not None else None}))'
+)
+MEMORY_STATUS_NAME = "last-run.json"
+
+
+def memory_file_info() -> dict[str, Any]:
+    """Presence and mtime of the memory file on the shared state volume.
+
+    The backup service mounts the same volume as the hub, so it can answer
+    while the hub is stopped or restarting. `present` is None when neither
+    container answered, with `reason` saying why.
+    """
+    for service in ("hub", "backup"):
+        cid = container_id(service)
+        if not cid:
+            continue
+        done = run(["docker", "exec", cid, "python", "-c", MEMORY_FILE_PROBE])
+        if done.returncode != 0:
+            reason = done.stderr.strip() or f"exit {done.returncode}"
+            return {"present": None, "mtime": None, "reason": f"{service} exec: {reason[:200]}"}
+        try:
+            report = json.loads(done.stdout.strip().splitlines()[-1])
+            mtime = report.get("mtime")
+            return {
+                "present": bool(report["present"]),
+                "mtime": float(mtime) if mtime is not None else None,
+                "reason": None,
+            }
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"present": None, "mtime": None, "reason": f"{service} returned an unreadable probe"}
+    return {"present": None, "mtime": None, "reason": "neither the hub nor the backup container is running"}
 
 
 def memory_file_present() -> bool | None:
-    """Whether fleet-hub-memory.db is on the hub's state volume; None when the hub is not running to ask."""
-    hub = container_id("hub")
-    if not hub:
+    return memory_file_info()["present"]
+
+
+def memory_backup_status(folder: Path) -> dict[str, Any] | None:
+    """The backup job's last memory-call result, or None when unreadable."""
+    try:
+        report = json.loads((folder / MEMORY_STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
-    done = run(["docker", "exec", hub, "python", "-c", MEMORY_FILE_PRESENT])
-    answer = done.stdout.strip()
-    return {"True": True, "False": False}.get(answer) if done.returncode == 0 else None
+    if not isinstance(report, dict):
+        return None
+    if not isinstance(report.get("time"), (int, float)) or not isinstance(report.get("ok"), bool):
+        return None
+    return {"time": float(report["time"]), "ok": report["ok"], "stamp": report.get("stamp")}
 
 
 def verify_copy(copy: Path) -> dict[str, Any]:
@@ -1471,8 +1518,10 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
     The job copies fleet-hub.db into the backup directory and, in a separate
     call, fleet-hub-memory.db into its `memory` subdirectory, so the hub
     file's copies are checked on their own. No memory copies fail the check
-    only while the memory file exists on the state volume: then the memory
-    call has failed on every run. An absent memory file fails nothing here.
+    only after a memory backup run has followed the memory file appearing:
+    the job records each run's result in `memory/last-run.json`, and until one
+    is newer than the file, no copy is only PENDING. An absent memory file
+    fails nothing here.
     """
     folder = Path(args.backup_dir or env_file().get("BRIGADE_BACKUP_DIR", "")).expanduser()
     info = folder.stat()
@@ -1490,19 +1539,34 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
         )
     memory_copies = completed_copies(folder / "memory")
     if not memory_copies:
-        present = memory_file_present()
-        if present is None:
-            result.add(
-                "PENDING", "memory copies", "none, and the hub is not running to say whether the memory file exists"
-            )
-        elif present:
-            result.add(
-                "FAIL",
-                "memory copies",
-                "none, but fleet-hub-memory.db exists on the state volume: the memory call fails on every run",
-            )
-        else:
+        probe = memory_file_info()
+        if probe["present"] is None:
+            result.add("PENDING", "memory copies", f"none, and no container could answer: {probe['reason']}")
+        elif not probe["present"]:
             result.add("INFO", "memory copies", "none: the memory file is absent from the state volume")
+        else:
+            status = memory_backup_status(folder / "memory")
+            mtime = probe["mtime"]
+            if status is None or mtime is None or status["time"] <= mtime:
+                result.add(
+                    "PENDING",
+                    "memory copies",
+                    "none, and no memory backup run has happened since the memory file appeared; "
+                    f"file mtime {mtime}, last run {status}",
+                )
+            elif not status["ok"]:
+                result.add(
+                    "FAIL",
+                    "memory copies",
+                    f"none, and the memory call failed at {status['time']} after the memory file appeared: "
+                    f"stamp {status['stamp']}",
+                )
+            else:
+                result.add(
+                    "FAIL",
+                    "memory copies",
+                    f"none, though the memory call last succeeded at {status['time']} with stamp {status['stamp']}",
+                )
     for copy in memory_copies[-args.last :]:
         files = verify_copy(copy)
         result.ok(

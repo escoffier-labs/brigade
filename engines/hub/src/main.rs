@@ -102,8 +102,9 @@ fn stop_signals(how: libc::c_int) -> std::io::Result<()> {
 /// Runs in the managed upstream between fork and exec. It gets an empty signal
 /// mask whatever thread spawned it, its own process group so a signal to this
 /// process's group (Ctrl-C on a terminal, `kill -TERM -<pgid>`) reaches only
-/// `brigade-hub`, which then stops it once with SIGTERM, and SIGTERM if
-/// `parent` dies first, since a group signal no longer reaches it.
+/// `brigade-hub`, which then stops it once with SIGTERM, and SIGTERM when the
+/// thread that spawned it exits (the main thread here), since a group signal
+/// no longer reaches it.
 fn upstream_child(parent: libc::pid_t) -> std::io::Result<()> {
     // SAFETY: every call here is async-signal-safe and touches only locals.
     unsafe {

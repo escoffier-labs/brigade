@@ -1,0 +1,3 @@
+- The S31 `backups` check now reports PENDING instead of FAIL while the memory file has appeared but no memory backup run has followed it; `hub/backup.py` records each memory call's time, success and stamp in `memory/last-run.json` (#2296).
+- The memory-file probe falls back to the `backup` container when the hub is stopped, and a wedged `docker exec` now fails one row with a reason instead of aborting the check with a traceback (#2296).
+- Document `KillMode=mixed` for systemd units that run `brigade-hub` directly, the `PR_SET_PDEATHSIG` thread semantics, and why redirecting stderr is the smaller fix for the `stty tostop` case (#2296).
