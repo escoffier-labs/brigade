@@ -8,43 +8,25 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import re
-from typing import Literal, cast
+from typing import cast
+
+from . import native_child_observations as core
+from .native_child_observations import (
+    CONTAINMENT,
+    STATUS,
+    TERMINAL,
+    Containment,
+    Family,
+    observation_diagnostic,
+    valid_reference,
+)
 
 
-Family = Literal["refused", "awaiting", "active", "terminal-candidate"]
-Containment = Literal["unknown", "active", "quiescent"]
-_CONTAINMENT = ("unknown", "active", "quiescent")
-_TERMINAL = ("completed", "failed", "cancelled", "interrupted")
-_STATUS = ("queued", "running", "waiting", *_TERMINAL)
 _WORK_STATE = ("working", "waiting_for_children", "result_available")
-# Same bounded provider-reference alphabet as the existing task journal, with
-# no dependency on its persistence or event implementation.
-_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:%~+/@=-]*", re.ASCII)
-_REASONS = {
-    "refused": ("origin-mismatch", "task-mismatch", "remote-mismatch"),
-    "awaiting": (
-        "origin-unknown",
-        "acceptance-uncertain",
-        "snapshot-unavailable",
-        "malformed-snapshot",
-        "missing-evidence",
-        "pending-work",
-        "wait-timeout",
-        "work-state-inconsistent",
-        "terminal-status-mismatch",
-        "terminal-run-missing",
-        "result-transfer-missing",
-        "result-transfer-mismatch",
-        "containment-unconfirmed",
-    ),
-    "active": ("native-active",),
-    "terminal-candidate": ("terminal-evidence-complete",),
-}
-
-
-def _valid_reference(value: object) -> bool:
-    return type(value) is str and 0 < len(value) <= 512 and _REFERENCE.fullmatch(value) is not None
+_CONTAINMENT = CONTAINMENT
+_TERMINAL = TERMINAL
+_STATUS = STATUS
+_valid_reference = valid_reference
 
 
 @dataclass(frozen=True)
@@ -68,31 +50,13 @@ class NativeTaskReference:
 
 
 @dataclass(frozen=True)
-class NativeObservation:
-    family: Family
-    reason: str
-    reference: NativeTaskReference
-    status: str | None
-    terminal_run_id: str | None
-    result_transfer_id: str | None
-    containment: Containment
+class NativeObservation(core.NativeObservation):
+    """The core observation, with this adapter's reference type enforced."""
 
     def __post_init__(self) -> None:
-        if (
-            type(self.family) is not str
-            or self.family not in _REASONS
-            or type(self.reason) is not str
-            or self.reason not in _REASONS[self.family]
-            or type(self.reference) is not NativeTaskReference
-            or (self.status is not None and (type(self.status) is not str or self.status not in _STATUS))
-            or any(
-                value is not None and not _valid_reference(value)
-                for value in (self.terminal_run_id, self.result_transfer_id)
-            )
-            or type(self.containment) is not str
-            or self.containment not in _CONTAINMENT
-        ):
+        if type(self.reference) is not NativeTaskReference:
             raise ValueError("invalid native observation")
+        super().__post_init__()
 
 
 def _well_formed(snapshot: Mapping[str, object]) -> bool:
@@ -229,6 +193,11 @@ def classify_native_snapshot(
     return result("terminal-candidate", "terminal-evidence-complete", status, terminal_run, transfer)
 
 
-def observation_diagnostic(result: NativeObservation) -> dict[str, object]:
-    """Expose only fixed classification tokens, never supplied native values."""
-    return {"family": result.family, "reason": result.reason}
+__all__ = [
+    "Containment",
+    "Family",
+    "NativeObservation",
+    "NativeTaskReference",
+    "classify_native_snapshot",
+    "observation_diagnostic",
+]

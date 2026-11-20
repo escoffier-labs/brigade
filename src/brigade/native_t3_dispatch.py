@@ -19,43 +19,43 @@ never authenticated acceptance.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import stat
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
 from urllib.parse import quote, unquote
 
-from . import fleet_t3_transport, run_budget, run_events, run_journal, run_lifecycle, run_tasks, runguard
+from . import fleet_t3_transport, run_events, run_journal, run_tasks
+from . import native_child_claim as claim_core
+from . import native_child_journal as journal_core
 from . import native_t3_admission as admission
 from . import native_t3_capacity as capacity
 from . import native_t3_observations as observations
-from . import native_t3_structural as structural
 from . import run_task_journal as journal
 from . import native_t3_enrollment as enrollment
 from .fleet_t3_transport import SourceRevisionError
+from .native_child_host import NativeChildError
 from .native_t3_contract import INHERIT_MODE, NativeIntent, NativeIntentTemplate, NativeTarget
+from .native_t3_host import HOST
 
 SCHEMA = "brigade.t3_claim.v1"
 CORRELATION_SCHEMA = "brigade.t3_correlation.v1"
-CLAIM_EVENT = "task.native-claimed"
+CLAIM_EVENT = journal_core.CLAIM_EVENT
 CORRELATION_EVENT = "task.native-correlated"
-HELD_EVENT = "task.native-held"
-HOLD_RESOLVED_EVENT = "task.native-hold-resolved"
+HELD_EVENT = journal_core.HELD_EVENT
+HOLD_RESOLVED_EVENT = journal_core.HOLD_RESOLVED_EVENT
 PARENT_REPORTED = "parent-reported"
 OPERATOR_ASSERTED = "operator-asserted"
-ABANDONED = "abandoned-unknown"
-ACCEPT_CONFLICT = "accept-conflict"
-HELD_RUN_STATUS = "held"
-_MAX_DIAGNOSTIC = 240
+ABANDONED = journal_core.ABANDONED
+ACCEPT_CONFLICT = journal_core.ACCEPT_CONFLICT
+HELD_RUN_STATUS = journal_core.HELD_RUN_STATUS
+_MAX_DIAGNOSTIC = journal_core.MAX_DIAGNOSTIC
 _MAX_NATIVE_BYTES = 1_048_576
 _INTENT_DOMAIN = "brigade.native-t3.intent.v1"
-_KEY_DOMAIN = "brigade.native-t3.idempotency.v1"
 _HANDLE_DOMAIN = "brigade.native-t3.handle.v1"
 _EVIDENCE_DOMAIN = "brigade.native-t3.evidence.v1"
 _STATUS_MAP = {
@@ -96,30 +96,6 @@ _RESULT_REQUIRED = frozenset(
     latestTerminalStatus latestTerminalSummary latestTerminalResultContextTransferId providerInstanceId model
     summary resultContextTransferId hasPendingQuestion pendingApproval waitTimedOut""".split()
 )
-
-
-class DispatchError(RuntimeError):
-    """A bounded governed-verb refusal published before any output."""
-
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(message)
-
-
-def _bound(message: str) -> str:
-    text = " ".join(str(message).split())
-    return text if len(text) <= _MAX_DIAGNOSTIC else text[: _MAX_DIAGNOSTIC - 1] + "."
-
-
-def _refuse(code: str, message: str) -> DispatchError:
-    return DispatchError(code, _bound(message))
-
-
-def _digest(material: Mapping[str, Any], domain: str) -> str:
-    encoded = json.dumps(
-        {"domain": domain, **material}, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 # encodeURIComponent leaves exactly these ASCII punctuation characters alone.
@@ -175,30 +151,6 @@ def _is_t3_task_node(value: object, request_key: str) -> bool:
 
 
 @dataclass(frozen=True)
-class ClaimBinding:
-    """The durable claim intent for one task attempt, without task text."""
-
-    task_id: str
-    attempt_id: str
-    dispatch_attempt: int
-    parent_thread: str
-    template_digest: str
-    intent_digest: str
-
-    def __post_init__(self) -> None:
-        if (
-            not journal.task_id(self.task_id)
-            or not journal.digest(self.attempt_id)
-            or type(self.dispatch_attempt) is not int
-            or self.dispatch_attempt < 1
-            or not journal.provider_reference(self.parent_thread)
-            or not journal.digest(self.template_digest)
-            or not journal.digest(self.intent_digest)
-        ):
-            raise ValueError("invalid native claim binding")
-
-
-@dataclass(frozen=True)
 class NativeResult:
     """The validated ``delegate_task`` result projection, without raw payload."""
 
@@ -232,6 +184,11 @@ class _Verified:
     retained: enrollment.DelegationInput
     template: NativeIntentTemplate
 
+    @property
+    def target(self) -> NativeTarget:
+        """The retained target the host admits for this task."""
+        return self.retained.target
+
 
 class _Correlation(NamedTuple):
     mode: str
@@ -241,44 +198,95 @@ class _Correlation(NamedTuple):
     provider_task_id: str | None = None
 
 
-def _run_dir(workspace: Path, run_id: str) -> Path:
-    if not journal.token(run_id):
-        raise _refuse("invalid-run", "the run identity is not valid")
-    try:
-        runs = runguard.lock_path(workspace).parent / "runs"
-    except (OSError, ValueError):
-        raise _refuse("run-missing", "no run matches that identity") from None
-    run_dir = runs / run_id
-    if not run_dir.is_dir():
-        raise _refuse("run-missing", "no run matches that identity")
-    return run_dir
+# The journal, barrier, hold and claim machinery is host neutral and lives in
+# ``native_child_journal`` and ``native_child_claim``. These names keep the
+# surface this module has always exported. The two that tests replace
+# (``_append`` and ``_record_dispatch_requested``) are real functions, so the
+# core receives the replaced step at call time.
+DispatchError = NativeChildError
+ClaimBinding = journal_core.ClaimBinding
+_bound = journal_core.bound
+_refuse = journal_core.refuse
+_digest = journal_core.digest
+_run_dir = journal_core.run_dir
+_read = journal_core.read_events
+_barrier = journal_core.barrier
+_latest = journal_core.latest
+_claim_binding = journal_core.claim_binding
+_held = journal_core.held
+_batch_ref = journal_core.batch_ref
+_context = journal_core.context
+_coordinator = journal_core.coordinator
+_task_version = journal_core.task_version
 
 
 def _run_meta(workspace: Path, run_dir: Path) -> dict[str, Any]:
-    try:
-        meta = json.loads(run_journal.bound_read_bytes(run_dir / "run.json"))
-    except FileNotFoundError:
-        raise _refuse("run-missing", "no run matches that identity") from None
-    except (OSError, ValueError, UnicodeDecodeError):
-        raise _refuse("run-state", "the run receipt is not readable") from None
-    if not isinstance(meta, dict) or meta.get("kind") != enrollment.RUN_KIND:
-        raise _refuse("not-native-run", "the run is not a governed native T3 run")
-    if meta.get("lock_workspace") != str(workspace):
-        raise _refuse("run-state", "the run belongs to a different workspace")
-    status = meta.get("status")
-    if status == HELD_RUN_STATUS:
-        raise _refuse("run-held", "the run is explicitly held and accepts no native transition")
-    if status != enrollment.AWAITING_NATIVE_PARENT:
-        raise _refuse("run-state", "the run state does not permit this native transition")
-    return meta
+    return journal_core.run_meta(HOST, workspace, run_dir)
 
 
-def _read(run_dir: Path) -> list[run_journal.RunEvent]:
-    try:
-        with journal.transaction(run_dir) as (_dir, events):
-            return list(events)
-    except journal.TaskJournalError as exc:
-        raise _refuse("journal-refused", f"the task journal refused the read ({exc})") from None
+def _key(kind: str, *identity: object) -> str:
+    return journal_core.idempotency_key(HOST, kind, *identity)
+
+
+def _append(
+    workspace: Path, run_dir: Path, event_type: str, payload: Mapping[str, Any], *, key: str
+) -> run_journal.RunEvent:
+    return journal_core.append_fact(workspace, run_dir, event_type, payload, key=key)
+
+
+def _record_held(workspace: Path, run_dir: Path, task_id: str, attempt_id: str, reason: str, evidence: str) -> None:
+    journal_core.record_held(HOST, workspace, run_dir, task_id, attempt_id, reason, evidence, append=_append)
+
+
+def _record_dispatch_requested(run_dir: Path, workspace: Path, seat: str, attempt: int) -> int:
+    """The durable requested fact after the launch claim. A crash here holds the run."""
+    return journal_core.record_dispatch_requested(run_dir, workspace, seat, attempt)
+
+
+def _close_lost_request(
+    workspace: Path, run_dir: Path, events: Sequence[run_journal.RunEvent], verified: _Verified
+) -> None:
+    journal_core.close_lost_request(
+        workspace, run_dir, events, verified.result, record_requested=_record_dispatch_requested
+    )
+
+
+def _claim_record(
+    *,
+    workspace: Path,
+    run_dir: Path,
+    verified: _Verified,
+    parent_thread: str,
+    attempt: int,
+    batch_ref: str,
+    admission_evidence: admission.Admission,
+    out: dict[str, Any],
+) -> int | None:
+    """Prepare, bind, claim, then record the requested fact, in that order."""
+
+    def build_intent(handle: run_tasks.TaskHandle) -> tuple[NativeIntent, str]:
+        intent = _intent(verified, handle, attempt, batch_ref)
+        return intent, _intent_digest(intent)
+
+    return claim_core.record_claim(
+        HOST,
+        workspace=workspace,
+        run_dir=run_dir,
+        task_id=verified.result.handle.spec.task_id,
+        attempt=attempt,
+        build_intent=build_intent,
+        claim_payload=lambda intent_digest: {
+            "parent_thread": parent_thread,
+            "template_digest": verified.template.template_digest,
+            "intent_digest": intent_digest,
+            "admission": admission_evidence.code,
+            "roster_digest": admission_evidence.roster_digest,
+            "policy_digest": admission_evidence.policy_digest,
+        },
+        append=_append,
+        record_requested=_record_dispatch_requested,
+        out=out,
+    )
 
 
 def _head(workspace: Path) -> str:
@@ -332,69 +340,6 @@ def _verified(workspace: Path, run_dir: Path, only: str | None = None) -> dict[s
     return verified
 
 
-def _barrier(events: Sequence[run_journal.RunEvent]) -> None:
-    """Refuse all new claims while any durable claim is unresolved.
-
-    Two states block the run. A launch claim without its dispatch request was
-    authorized but never recorded. A claim binding without a launch claim died
-    between the two facts and never consumed launch permission. Neither state
-    may let a sibling reuse the dispatch identity.
-    """
-    requested = {
-        (event.payload["seat"], event.payload["attempt"])
-        for event in events
-        if event.event_type == "run.dispatch.requested"
-    }
-    launched = {
-        (event.payload["task_id"], event.payload["attempt_id"])
-        for event in events
-        if event.event_type == "task.launch-claimed"
-    }
-    abandoned = {
-        event.payload["task_id"]
-        for event in events
-        if event.event_type == HELD_EVENT and event.payload.get("reason") == ABANDONED
-    }
-    for event in events:
-        if event.event_type == "task.launch-claimed":
-            if (event.payload["seat"], event.payload["dispatch_attempt"]) not in requested:
-                raise _refuse(
-                    "run-barrier",
-                    "a durable launch claim has no matching dispatch request, so the run holds every new claim",
-                )
-        elif event.event_type == CLAIM_EVENT:
-            identity = (event.payload["task_id"], event.payload["attempt_id"])
-            if identity not in launched and identity[0] not in abandoned:
-                raise _refuse(
-                    "run-barrier",
-                    "a retained claim binding has no launch claim, so the run holds every new claim",
-                )
-
-
-def _latest(events: Sequence[run_journal.RunEvent], event_type: str, task_id: str) -> Mapping[str, Any] | None:
-    for event in reversed(events):
-        if event.event_type == event_type and event.payload.get("task_id") == task_id:
-            return event.payload
-    return None
-
-
-def _claim_binding(events: Sequence[run_journal.RunEvent], task_id: str) -> ClaimBinding | None:
-    payload = _latest(events, CLAIM_EVENT, task_id)
-    if payload is None:
-        return None
-    try:
-        return ClaimBinding(
-            task_id=payload["task_id"],
-            attempt_id=payload["attempt_id"],
-            dispatch_attempt=payload["dispatch_attempt"],
-            parent_thread=payload["parent_thread"],
-            template_digest=payload["template_digest"],
-            intent_digest=payload["intent_digest"],
-        )
-    except (KeyError, ValueError):
-        raise _refuse("journal-refused", "the claim binding is not usable") from None
-
-
 def _correlation(events: Sequence[run_journal.RunEvent], task_id: str) -> _Correlation | None:
     payload = _latest(events, CORRELATION_EVENT, task_id)
     if payload is None:
@@ -408,42 +353,6 @@ def _correlation(events: Sequence[run_journal.RunEvent], task_id: str) -> _Corre
     ):
         raise _refuse("journal-refused", "the correlation record is not usable")
     return _Correlation(str(mode), str(handle), provider_task_id)
-
-
-def _held(events: Sequence[run_journal.RunEvent], task_id: str) -> str | None:
-    """Return the active hold reason, folding durable resolutions in order.
-
-    A resolved accept-conflict hold stays resolved. An abandoned attempt has no
-    resolution event and stays held forever.
-    """
-    for event in reversed(events):
-        if event.event_type not in {HELD_EVENT, HOLD_RESOLVED_EVENT}:
-            continue
-        payload = event.payload
-        if payload.get("task_id") != task_id:
-            continue
-        reason = payload.get("reason")
-        if reason not in {ACCEPT_CONFLICT, ABANDONED}:
-            raise _refuse("journal-refused", "the task hold record is not usable")
-        if event.event_type == HOLD_RESOLVED_EVENT:
-            if reason != ACCEPT_CONFLICT:
-                raise _refuse("journal-refused", "the task hold resolution is not usable")
-            return None
-        return str(reason)
-    return None
-
-
-def _batch_ref(events: Sequence[run_journal.RunEvent], run_id: str, task_id: str) -> str:
-    for event in events:
-        if event.event_type == "task.batch-accepted" and any(
-            row.get("task_id") == task_id for row in event.payload["members"]
-        ):
-            return journal.batch_reference(
-                run_id=run_id,
-                request_id=event.payload["request_id"],
-                membership_digest=event.payload["membership_digest"],
-            )
-    raise _refuse("not-batch", "the task has no retained batch binding")
 
 
 def _intent(verified: _Verified, handle: run_tasks.TaskHandle, attempt: int, batch_ref: str) -> NativeIntent:
@@ -481,152 +390,6 @@ def _intent_digest(intent: NativeIntent) -> str:
         },
         _INTENT_DOMAIN,
     )
-
-
-def _key(kind: str, *identity: object) -> str:
-    """Derive a fixed-length idempotency key from an identity tuple.
-
-    Task ids reach 128 characters and may not be embedded beside a 64-hex
-    digest inside the 128-character key bound. The digest of the whole
-    identity keeps the key both bounded and collision-safe.
-    """
-    digest = hashlib.sha256(
-        run_events.canonical_bytes({"domain": _KEY_DOMAIN, "kind": kind, "identity": list(identity)})
-    ).hexdigest()
-    return f"native-{kind}:{digest}"
-
-
-def _append(
-    workspace: Path, run_dir: Path, event_type: str, payload: Mapping[str, Any], *, key: str
-) -> run_journal.RunEvent:
-    try:
-        return run_lifecycle.record_lifecycle_event(
-            run_dir, event_type=event_type, payload=payload, idempotency_key=key, workspace=workspace
-        )
-    except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError, ValueError):
-        raise _refuse("journal-refused", "the run journal refused the native fact") from None
-
-
-def _record_held(workspace: Path, run_dir: Path, task_id: str, attempt_id: str, reason: str, evidence: str) -> None:
-    if not journal.digest(evidence):
-        raise _refuse("journal-refused", "the hold evidence is not usable")
-    _append(
-        workspace,
-        run_dir,
-        HELD_EVENT,
-        {"task_id": task_id, "attempt_id": attempt_id, "reason": reason, "evidence_digest": evidence},
-        key=_key("held", task_id, attempt_id, reason, evidence),
-    )
-
-
-def _record_dispatch_requested(run_dir: Path, workspace: Path, seat: str, attempt: int) -> int:
-    """The durable requested fact after the launch claim. A crash here holds the run."""
-    try:
-        event = run_lifecycle.record_dispatch_fact(
-            run_dir, workspace=workspace, event_type="run.dispatch.requested", seat=seat, attempt=attempt
-        )
-    except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError):
-        raise _refuse("journal-refused", "the dispatch request was not recorded") from None
-    if event is None or event.payload.get("attempt") != attempt:
-        raise _refuse("dispatch-binding", "the dispatch request did not keep the claimed attempt")
-    return attempt
-
-
-def _coordinator(workspace: Path, run_dir: Path, meta: Mapping[str, Any]) -> run_budget.BudgetCoordinator:
-    """Build one per-invocation coordinator from the durable run state."""
-    try:
-        declaration = run_budget.parse_declaration(meta.get("run_budget"))
-    except run_budget.BudgetCompatibilityError as exc:
-        raise _refuse("budget-incompatible", exc.diagnostic) from None
-    coordinator = run_budget.BudgetCoordinator(
-        declaration=declaration,
-        append_event=lambda event_type, payload, key: run_lifecycle.record_lifecycle_event(
-            run_dir, event_type=event_type, payload=dict(payload), idempotency_key=key, workspace=workspace
-        ),
-    )
-    started = meta.get("started_at")
-    try:
-        coordinator.set_started_at(
-            datetime.fromisoformat(started.replace("Z", "+00:00")) if isinstance(started, str) else None
-        )
-    except ValueError:
-        coordinator.set_started_at(None)
-    try:
-        report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
-    except (OSError, run_journal.RunJournalError):
-        raise _refuse("journal-refused", "the run journal is not readable") from None
-    if report.partial_tail is not None or report.chain_errors:
-        raise _refuse("journal-refused", "the run journal chain is not usable")
-    coordinator.reload(report.events)
-    return coordinator
-
-
-def _task_version(run_dir: Path, task_id: str) -> str:
-    try:
-        version = next(item.version for item in run_tasks.read_tasks(run_dir) if item.handle.spec.task_id == task_id)
-    except StopIteration:
-        raise _refuse("not-enrolled", "the task has no native enrollment record") from None
-    except run_tasks.TaskJournalError as exc:
-        raise _refuse("journal-refused", f"the task journal refused the read ({exc})") from None
-    if version is None:
-        raise _refuse("journal-refused", "the task has no durable version")
-    return version
-
-
-def _claim_record(
-    *,
-    workspace: Path,
-    run_dir: Path,
-    verified: _Verified,
-    parent_thread: str,
-    attempt: int,
-    batch_ref: str,
-    admission_evidence: admission.Admission,
-    out: dict[str, Any],
-) -> int | None:
-    """Prepare, bind, claim, then record the requested fact, in that order."""
-    task_id = verified.result.handle.spec.task_id
-    try:
-        handle = run_tasks.prepare_attempt(run_dir, workspace=workspace, task_id=task_id, native_governed=True)
-    except run_tasks.TaskJournalError as exc:
-        raise _refuse("claim-refused", f"the attempt was not prepared ({exc})") from None
-    if handle.attempt_id is None:
-        raise _refuse("claim-refused", "the prepared attempt has no identity")
-    intent = _intent(verified, handle, attempt, batch_ref)
-    digest = _intent_digest(intent)
-    _append(
-        workspace,
-        run_dir,
-        CLAIM_EVENT,
-        {
-            "task_id": task_id,
-            "attempt_id": handle.attempt_id,
-            "dispatch_attempt": attempt,
-            "parent_thread": parent_thread,
-            "template_digest": verified.template.template_digest,
-            "intent_digest": digest,
-            "admission": admission_evidence.code,
-            "roster_digest": admission_evidence.roster_digest,
-            "policy_digest": admission_evidence.policy_digest,
-        },
-        key=_key("claimed", task_id, handle.attempt_id),
-    )
-    try:
-        decision = run_tasks.claim_task_launch(
-            run_dir,
-            workspace=workspace,
-            handle=handle,
-            expected_version=_task_version(run_dir, task_id),
-            seat=handle.spec.seat,
-            dispatch_attempt=attempt,
-            native_governed=True,
-        )
-    except run_tasks.TaskJournalError as exc:
-        raise _refuse("claim-refused", f"the launch claim was refused ({exc})") from None
-    if decision.outcome != "granted":
-        raise _refuse("claim-refused", f"the launch claim was {decision.outcome}")
-    out.update({"handle": handle, "intent": intent})
-    return _record_dispatch_requested(run_dir, workspace, handle.spec.seat, attempt)
 
 
 def _native_options(raw: object) -> tuple[tuple[str, str | bool], ...]:
@@ -976,13 +739,6 @@ def _correlate(
     }
 
 
-def _context(workspace: Path, run_id: str, task_id: str) -> Path:
-    """Resolve the run directory. Run state is re-read inside the run lock."""
-    if not journal.task_id(task_id):
-        raise _refuse("invalid-identity", "the task identity is not valid")
-    return _run_dir(workspace, run_id)
-
-
 def delegate_target_arguments(target: NativeTarget) -> dict[str, Any]:
     """The target-derived ``delegate_task`` fields, without attempt-scoped values.
 
@@ -1029,97 +785,53 @@ def claim(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) -> 
         raise _refuse("invalid-identity", "the parent thread identity is not valid")
     run_dir = _context(workspace, run_id, task_id)
     # The Hub read is network I/O, so it stays outside the capacity lock and
-    # never stretches the bounded wait. The roster is re-read inside the locks
-    # because an edit while waiting must not be evaluated stale.
+    # never stretches the bounded wait.
     hub = admission.read_hub_authority(workspace)
-    try:
-        lock = capacity.capacity_lock(workspace)
-        with lock:
-            # Occupancy is read and trusted before the run lock. The capacity
-            # lock serializes every claim that can add a unit, so this snapshot
-            # stays valid through the existing claim path. Other verbs can only
-            # free a unit, which keeps this snapshot conservative.
-            occupancy = capacity.governed_occupancy(workspace)
-            if not occupancy.authoritative:
-                raise _refuse("capacity-unknown", "live governed native capacity cannot be verified")
-            with enrollment.owned_run(workspace, run_dir):
-                try:
-                    roster = admission.load_roster(workspace)
-                except enrollment.EnrollmentError as exc:
-                    raise _refuse(exc.code, _bound(str(exc))) from None
-                meta = _run_meta(workspace, run_dir)
-                events = _read(run_dir)
-                _barrier(events)
-                verified = _verified(workspace, run_dir)
-                current = verified.get(task_id)
-                if current is None:
-                    raise _refuse("not-enrolled", "the task has no native enrollment record")
-                held = _held(events, task_id)
-                if held is not None:
-                    raise _refuse("task-held", f"the task is held ({held})")
-                if current.result.launch_claim is not None:
-                    raise _refuse("already-claimed", "the task already consumed its launch claim")
-                seat = current.result.handle.spec.seat
-                decision = capacity.assess(roster, seat, occupancy)
-                if not decision.granted:
-                    raise _refuse("capacity-denied", "no governed native capacity remains for this claim")
-                evidence = admission.evaluate(roster, seat, current.retained.target, hub=hub)
-                if evidence.reason in admission.STRUCTURAL_REASONS:
-                    # A target T3 structurally cannot run is decided by the
-                    # closed classifier, never by message text. Every policy,
-                    # capacity or authority refusal keeps its own code below.
-                    raise _refuse(structural.UNSUPPORTED, f"seat admission refused this claim ({evidence.reason})")
-                if evidence.code == admission.UNAVAILABLE:
-                    raise _refuse(
-                        "admission-unavailable", f"seat admission authority is unavailable ({evidence.reason})"
-                    )
-                if not evidence.admitted:
-                    raise _refuse("admission-denied", f"seat admission refused this claim ({evidence.reason})")
-                batch_ref = _batch_ref(events, run_dir.name, task_id)
-                coordinator = _coordinator(workspace, run_dir, meta)
-                out: dict[str, Any] = {}
-                try:
-                    attempt = coordinator.reserve_and_record_dispatch(
-                        seat=seat,
-                        allocate_attempt=lambda: run_lifecycle.allocate_next_dispatch_attempt(run_dir, seat),
-                        record_requested=lambda candidate: _claim_record(
-                            workspace=workspace,
-                            run_dir=run_dir,
-                            verified=current,
-                            parent_thread=parent_thread,
-                            attempt=candidate,
-                            batch_ref=batch_ref,
-                            admission_evidence=evidence,
-                            out=out,
-                        ),
-                        reclaim_pending=False,
-                    )
-                except run_budget.BudgetPolicyError as exc:
-                    code = "capacity-denied" if not exc.exhausted else "budget-exhausted"
-                    raise _refuse(code, f"the run budget refused a dispatch unit ({exc.dimension})") from None
-                except run_budget.BudgetError as exc:
-                    raise _refuse("budget-refused", exc.diagnostic) from None
-                except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError, OSError):
-                    raise _refuse("journal-refused", "the dispatch transaction was refused") from None
-                if type(attempt) is not int or "intent" not in out:
-                    raise _refuse("claim-refused", "the dispatch transaction did not complete")
-                intent, handle = out["intent"], out["handle"]
-                target = current.retained.target
-                return {
-                    "schema": SCHEMA,
-                    "run_id": run_dir.name,
-                    "task_id": task_id,
-                    "seat": handle.spec.seat,
-                    "attempt_id": handle.attempt_id,
-                    "dispatch_attempt": attempt,
-                    "state": "claimed",
-                    "clientRequestId": intent.native_client_request_key,
-                    "delegate_task": _delegate_arguments(
-                        current.retained.text, target, intent.native_client_request_key
-                    ),
-                }
-    except capacity.CapacityError as exc:
-        raise _refuse(exc.code, _bound(str(exc))) from None
+
+    def record(
+        current: _Verified, candidate: int, batch_ref: str, evidence: admission.Admission, recorded: dict[str, Any]
+    ) -> int | None:
+        recorded["verified"] = current
+        return _claim_record(
+            workspace=workspace,
+            run_dir=run_dir,
+            verified=current,
+            parent_thread=parent_thread,
+            attempt=candidate,
+            batch_ref=batch_ref,
+            admission_evidence=evidence,
+            out=recorded,
+        )
+
+    # Every step is looked up here, at call time, so a replaced step applies.
+    ops = claim_core.ClaimOps(
+        capacity_lock=capacity.capacity_lock,
+        governed_occupancy=capacity.governed_occupancy,
+        assess=capacity.assess,
+        owned_run=enrollment.owned_run,
+        load_roster=admission.load_roster,
+        run_meta=_run_meta,
+        read_events=_read,
+        verify=_verified,
+        evaluate=lambda roster, seat, target, authority: admission.evaluate(roster, seat, target, hub=authority),
+        batch_ref=_batch_ref,
+        coordinator=_coordinator,
+        record_claim=record,
+    )
+    grant = claim_core.run_claim(HOST, ops, workspace=workspace, run_dir=run_dir, task_id=task_id, hub=hub)
+    current = grant.recorded["verified"]
+    intent, handle = grant.recorded["intent"], grant.recorded["handle"]
+    return {
+        "schema": SCHEMA,
+        "run_id": run_dir.name,
+        "task_id": task_id,
+        "seat": handle.spec.seat,
+        "attempt_id": handle.attempt_id,
+        "dispatch_attempt": grant.attempt,
+        "state": "claimed",
+        "clientRequestId": intent.native_client_request_key,
+        "delegate_task": _delegate_arguments(current.retained.text, current.target, intent.native_client_request_key),
+    }
 
 
 def _durable_claim(
@@ -1142,11 +854,7 @@ def _durable_claim(
         raise _refuse("no-claim", "the task has no durable governed claim")
     if current.result.launch_claim is None and require_launch:
         raise _refuse("no-claim", "the task has no durable launch claim")
-    requested = {
-        (event.payload["seat"], event.payload["attempt"])
-        for event in events
-        if event.event_type == "run.dispatch.requested"
-    }
+    requested = journal_core.requested_attempts(events)
     if require_requested and current.result.launch_claim is not None:
         binding_key = (current.result.launch_claim.seat, current.result.launch_claim.dispatch_attempt)
         if binding_key not in requested:
@@ -1183,26 +891,6 @@ def accepted(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, 
             binding=binding,
             mode=PARENT_REPORTED,
         )
-
-
-def _close_lost_request(
-    workspace: Path, run_dir: Path, events: Sequence[run_journal.RunEvent], verified: _Verified
-) -> None:
-    """Record a missing dispatch request so an abandoned lost reply frees the barrier.
-
-    The claim already consumed launch permission, so the unit stays charged and
-    the task stays held and non-relaunchable.
-    """
-    claim = verified.result.launch_claim
-    if claim is None:
-        return
-    requested = {
-        (event.payload["seat"], event.payload["attempt"])
-        for event in events
-        if event.event_type == "run.dispatch.requested"
-    }
-    if (claim.seat, claim.dispatch_attempt) not in requested:
-        _record_dispatch_requested(run_dir, workspace, claim.seat, claim.dispatch_attempt)
 
 
 def hold_resolve(

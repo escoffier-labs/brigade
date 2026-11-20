@@ -11,11 +11,11 @@ The classifier is pure over its input. It grants nothing and writes nothing.
 
 from __future__ import annotations
 
+from .native_child_admission import DRIVER_UNSUPPORTED
 from .native_t3_contract import INHERIT_MODE, INTERACTION_MODES, RUNTIME_MODES, NativeTarget
 
 UNSUPPORTED = "t3-unsupported"
 
-DRIVER_UNSUPPORTED = "driver-unsupported"
 TARGET_REMOTE_UNSUPPORTED = "target-remote-unsupported"
 TARGET_MODE_INVALID = "target-mode-invalid"
 

@@ -5,7 +5,9 @@ These verbs complete the loop a T3 parent session drives around its own
 calls T3. ``observe`` records a supplied status projection only after an
 existing correlation matches its full handle digest. ``cancel`` records a
 digests-only request and prints the native arguments. ``ack`` consumes one
-exact terminal result. ``finalize`` is explicit and never automatic.
+exact terminal result. ``finalize`` is explicit and never automatic. ``ack``,
+``finalize`` and ``status`` are host neutral and live in
+``native_child_lifecycle``. This module binds them to the T3 host.
 
 Task text and raw native payloads never enter a report, a refusal, a journal
 payload or a command-line argument.
@@ -19,20 +21,22 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import run_journal, run_lifecycle, run_tasks
+from . import native_child_journal as journal_core
+from . import native_child_lifecycle as lifecycle_core
 from . import native_t3_dispatch as dispatch
 from . import native_t3_enrollment as enrollment
 from . import run_task_journal as journal
+from .native_t3_host import HOST
 
 OBSERVE_SCHEMA = "brigade.t3_observe.v1"
 CANCEL_SCHEMA = "brigade.t3_cancel.v1"
-ACK_SCHEMA = "brigade.t3_ack.v1"
-FINALIZE_SCHEMA = "brigade.t3_finalize.v1"
-STATUS_SCHEMA = "brigade.t3_status.v1"
-CANCEL_EVENT = "task.native-cancel-requested"
+ACK_SCHEMA = HOST.ack_schema
+FINALIZE_SCHEMA = HOST.finalize_schema
+STATUS_SCHEMA = HOST.status_schema
+CANCEL_EVENT = HOST.cancel_event
 CANCEL_DOMAIN = "brigade.t3.cancel-key.v1"
 CANCEL_PREFIX = "brigade-t3-cancel:"
-SEAT_DOMAIN = "brigade.t3.seat.v1"
+SEAT_DOMAIN = HOST.seat_digest_domain
 HOLD_RESOLVED = "hold-resolved"
 
 
@@ -57,36 +61,35 @@ def cancel_key(run_id: str, task_id: str, attempt_id: str, handle_digest: str) -
 
 
 def _read_meta(workspace: Path, run_dir: Path) -> dict[str, Any]:
-    """Read the run receipt without the awaiting-parent restriction.
-
-    ``status`` and an idempotent ``ack`` stay readable after finalization, so
-    they never route through the strict transition gate in ``native_t3_dispatch``.
-    """
-    try:
-        meta = json.loads(run_journal.bound_read_bytes(run_dir / "run.json"))
-    except FileNotFoundError:
-        raise dispatch._refuse("run-missing", "no run matches that identity") from None
-    except (OSError, ValueError, UnicodeDecodeError, run_journal.RunJournalError):
-        raise dispatch._refuse("run-state", "the run receipt is not readable") from None
-    if not isinstance(meta, dict) or meta.get("kind") != enrollment.RUN_KIND:
-        raise dispatch._refuse("not-native-run", "the run is not a governed native T3 run")
-    if meta.get("lock_workspace") != str(workspace):
-        raise dispatch._refuse("run-state", "the run belongs to a different workspace")
-    return meta
+    """Read the run receipt without the awaiting-parent restriction."""
+    return journal_core.read_meta(HOST, workspace, run_dir)
 
 
-def _tasks(run_dir: Path) -> tuple[run_tasks.TaskResult, ...]:
-    try:
-        return run_tasks.read_tasks(run_dir)
-    except run_tasks.TaskJournalError as exc:
-        raise dispatch._refuse("journal-refused", f"the task journal refused the read ({exc})") from None
+def ack(*, workspace: Path, run_id: str, task_id: str, result_id: str) -> dict[str, Any]:
+    """Acknowledge exactly one retained terminal result, idempotently."""
+    return lifecycle_core.ack(
+        HOST,
+        workspace=workspace,
+        run_id=run_id,
+        task_id=task_id,
+        result_id=result_id,
+        owned_run=enrollment.owned_run,
+    )
 
 
-def _task(results: tuple[run_tasks.TaskResult, ...], task_id: str) -> run_tasks.TaskResult:
-    for result in results:
-        if result.handle.spec.task_id == task_id:
-            return result
-    raise dispatch._refuse("not-enrolled", "the task has no native enrollment record")
+def finalize(*, workspace: Path, run_id: str) -> dict[str, Any]:
+    """Close the run explicitly: completed only when every task is acked."""
+    return lifecycle_core.finalize(HOST, workspace=workspace, run_id=run_id, owned_run=enrollment.owned_run)
+
+
+def status(*, workspace: Path, run_id: str) -> dict[str, Any]:
+    """Read-only fixed tokens for every task, without native details."""
+    return lifecycle_core.status(
+        HOST,
+        workspace=workspace,
+        run_id=run_id,
+        correlated=lambda events, task_id: dispatch._correlation(events, task_id) is not None,
+    )
 
 
 def observe(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, payload: object) -> dict[str, Any]:
@@ -147,7 +150,7 @@ def cancel(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) ->
         held = dispatch._held(events, task_id)
         if held is not None:
             raise dispatch._refuse("task-held", f"the task is held ({held})")
-        task = _task(_tasks(run_dir), task_id)
+        task = journal_core.find_task(journal_core.read_tasks(run_dir), task_id)
         if task.result_id is not None or task.status in journal.TERMINAL:
             raise dispatch._refuse("task-terminal", "the task is already terminal and cannot be cancelled")
         prior = dispatch._correlation(events, task_id)
@@ -181,133 +184,6 @@ def cancel(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) ->
             "task_cancel": {"taskId": provider_task_id, "clientRequestId": client_request_id},
             "replayed": replay,
         }
-
-
-def ack(*, workspace: Path, run_id: str, task_id: str, result_id: str) -> dict[str, Any]:
-    """Acknowledge exactly one retained terminal result, idempotently."""
-    workspace = workspace.expanduser().resolve()
-    if not journal.digest(result_id):
-        raise dispatch._refuse("invalid-identity", "the result identity is not valid")
-    run_dir = dispatch._context(workspace, run_id, task_id)
-    with enrollment.owned_run(workspace, run_dir):
-        _read_meta(workspace, run_dir)
-        events = dispatch._read(run_dir)
-        held = dispatch._held(events, task_id)
-        if held is not None:
-            raise dispatch._refuse("task-held", f"the task is held ({held})")
-        task = _task(_tasks(run_dir), task_id)
-        if task.result_id is None:
-            raise dispatch._refuse("task-nonterminal", "the task has no terminal result to acknowledge")
-        if task.result_id != result_id:
-            raise dispatch._refuse("result-mismatch", "the result identity does not match the retained result")
-        try:
-            updated = run_tasks.acknowledge_result(run_dir, workspace=workspace, task_id=task_id, result_id=result_id)
-        except run_tasks.TaskJournalError as exc:
-            raise dispatch._refuse("ack-refused", f"the acknowledgement was refused ({exc})") from None
-        return {
-            "schema": ACK_SCHEMA,
-            "run_id": run_dir.name,
-            "task_id": task_id,
-            "result_id": result_id,
-            "acknowledged": updated.acknowledged,
-            "replayed": task.acknowledged,
-        }
-
-
-def finalize(*, workspace: Path, run_id: str) -> dict[str, Any]:
-    """Close the run explicitly: completed only when every task is acked.
-
-    An abandoned-unknown task refuses finalization. Releasing live-work
-    capacity cannot be separated from the terminal run status here, and an
-    abandoned task must never imply quiescence or refund its dispatch unit.
-    """
-    workspace = workspace.expanduser().resolve()
-    run_dir = dispatch._run_dir(workspace, run_id)
-    with enrollment.owned_run(workspace, run_dir):
-        dispatch._run_meta(workspace, run_dir)
-        events = dispatch._read(run_dir)
-        results = _tasks(run_dir)
-        if not results:
-            raise dispatch._refuse("finalize-refused", "the run has no enrolled tasks")
-        abandoned = [
-            result.handle.spec.task_id
-            for result in results
-            if dispatch._held(events, result.handle.spec.task_id) == dispatch.ABANDONED
-        ]
-        if abandoned:
-            raise dispatch._refuse(
-                "finalize-abandoned",
-                "an abandoned task keeps live-work capacity, so the run cannot be finalized",
-            )
-        held = [
-            result.handle.spec.task_id
-            for result in results
-            if dispatch._held(events, result.handle.spec.task_id) is not None
-        ]
-        if held:
-            raise dispatch._refuse(
-                "finalize-held",
-                "an unresolved task hold prevents finalization until an operator resolves it",
-            )
-        completed = all(
-            result.status == "completed" and result.result_id is not None and result.acknowledged for result in results
-        )
-        decision = "completed" if completed else "failed"
-        try:
-            from . import aboyeur, localio
-
-            aboyeur.update_run_receipt(
-                run_dir,
-                status=decision,
-                finished_at=localio.utc_now_iso(),
-                native_finalize={
-                    "schema": FINALIZE_SCHEMA,
-                    "decision": decision,
-                    "tasks": len(results),
-                    "acknowledged": sum(1 for result in results if result.acknowledged),
-                },
-            )
-        except (OSError, ValueError, run_journal.RunJournalError, run_lifecycle.LifecycleJournalError) as exc:
-            raise dispatch._refuse("journal-refused", f"the run receipt refused finalization ({exc})") from None
-        return {
-            "schema": FINALIZE_SCHEMA,
-            "run_id": run_dir.name,
-            "status": decision,
-            "tasks": len(results),
-            "acknowledged": sum(1 for result in results if result.acknowledged),
-            "terminals": sum(1 for result in results if result.result_id is not None),
-        }
-
-
-def status(*, workspace: Path, run_id: str) -> dict[str, Any]:
-    """Read-only fixed tokens for every task, without native details."""
-    workspace = workspace.expanduser().resolve()
-    run_dir = dispatch._run_dir(workspace, run_id)
-    meta = _read_meta(workspace, run_dir)
-    events = dispatch._read(run_dir)
-    rows = []
-    for result in sorted(_tasks(run_dir), key=lambda item: item.handle.spec.task_id):
-        task_id = result.handle.spec.task_id
-        binding = dispatch._claim_binding(events, task_id)
-        rows.append(
-            {
-                "task_id": task_id,
-                "state": result.status,
-                "held_reason": dispatch._held(events, task_id),
-                "correlated": dispatch._correlation(events, task_id) is not None,
-                "terminal": result.result_id is not None,
-                "acked": result.acknowledged,
-                "cancel_requested": dispatch._latest(events, CANCEL_EVENT, task_id) is not None,
-                "attempt": binding.dispatch_attempt if binding is not None else None,
-                "seat_digest": dispatch._digest({"seat": result.handle.spec.seat}, SEAT_DOMAIN),
-            }
-        )
-    return {
-        "schema": STATUS_SCHEMA,
-        "run_id": run_dir.name,
-        "status": meta.get("status"),
-        "tasks": rows,
-    }
 
 
 def _describe(report: Mapping[str, Any]) -> str:
