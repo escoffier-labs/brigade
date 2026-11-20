@@ -36,6 +36,11 @@ STATES = frozenset(
 TERMINAL = frozenset({"completed", "failed", "interrupted", "cancelled"})
 CONTAINMENT = frozenset({"unknown", "active", "quiescent"})
 ARTIFACT_KINDS = frozenset({"commit", "patch", "receipt", "unavailable"})
+# Closed disposal vocabulary: the retained-copy proof that justified removing a
+# task worktree, and whether its task branch survived. Values are tokens, never
+# booleans, because the canonical payload contract refuses booleans.
+DISPOSAL_MODES = frozenset({"integrated", "retained", "no-changes", "discarded"})
+BRANCH_STATES = frozenset({"kept", "deleted"})
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*", re.ASCII)
 _PROVIDER_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:%~+/@=-]*", re.ASCII)
 # A pinned base revision is already public; it is the only non-digest string a
@@ -176,6 +181,35 @@ def _validate_integration_payload(payload: Mapping[str, Any]) -> None:
         raise run_events.CanonicalizationError("invalid task integration revision")
 
 
+def _validate_disposal_payload(payload: Mapping[str, Any]) -> None:
+    """Closed disposal shape: one identity, one mode and one branch verdict."""
+    if not task_id(payload["task_id"]):
+        raise run_events.CanonicalizationError("invalid task disposal identity")
+    if payload["mode"] not in DISPOSAL_MODES:
+        raise run_events.CanonicalizationError("invalid task disposal mode")
+    if payload["branch_kept"] not in BRANCH_STATES:
+        raise run_events.CanonicalizationError("invalid task disposal branch state")
+
+
+def _validate_collected_payload(payload: Mapping[str, Any]) -> None:
+    """Closed recovered-collection shape: one sidecar digest and its delivery.
+
+    The candidate revision and the delivery are the same closed values the
+    artifact sidecar already holds, so this fact can stand in for the
+    observation when a collection finished after the worker's receipt.
+    """
+    from brigade import run_batch_artifacts
+
+    if not task_id(payload["task_id"]):
+        raise run_events.CanonicalizationError("invalid task artifact collection identity")
+    if not digest(payload["attempt_id"]) or not digest(payload["artifact_digest"]):
+        raise run_events.CanonicalizationError("invalid task artifact collection reference")
+    if payload["candidate_commit"] is not None and not base_sha(payload["candidate_commit"]):
+        raise run_events.CanonicalizationError("invalid task artifact collection revision")
+    if payload["delivery"] not in run_batch_artifacts.DELIVERY_STATES:
+        raise run_events.CanonicalizationError("invalid task artifact collection delivery")
+
+
 def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
     """Validate exact closed task shapes, also used by envelope readers."""
     fields = TASK_FIELDS[event_type]
@@ -192,6 +226,12 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
         return
     if event_type == "task.integrated":
         _validate_integration_payload(payload)
+        return
+    if event_type == "task.disposed":
+        _validate_disposal_payload(payload)
+        return
+    if event_type == "task.artifact-collected":
+        _validate_collected_payload(payload)
         return
     optional = (
         {"provider_task_id", "original_run_id", "provider_result_id", "result_id", "artifact_kind", "artifact_digest"}

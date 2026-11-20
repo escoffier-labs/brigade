@@ -80,11 +80,13 @@ the stripping guard. Archive builds refuse cassette bodies.
 
 ## `brigade.run_event.v1`: `schema_version: 3`
 
-Schema version 3 carries two event types, `task.workspace-bound` and
-`task.integrated`. Only journals from a batch that isolated a task with
-`isolation: "worktree"`, or explicitly integrated a selected task result, reach
-version 3; every other event is still written with the version 2 envelope above,
-so an older binary refuses those journals and keeps reading all others.
+Schema version 3 carries four event types: `task.workspace-bound`,
+`task.integrated`, `task.disposed` and `task.artifact-collected`. Only journals
+from a batch that isolated a task with `isolation: "worktree"`, explicitly
+integrated a selected task result, disposed of a worktree or recovered an
+interrupted collection reach version 3; every other event is still written with
+the version 2 envelope below, so an older binary refuses those journals and
+keeps reading all others.
 
 `task.workspace-bound` is the digest-only record of one per-task batch worktree.
 Its payload is `{task_id, base_sha, branch_digest, path_digest, dev_ino_digest}`:
@@ -96,6 +98,29 @@ selected task result. Its payload is
 `{task_id, integration_id, candidate_commit, integration_commit}`: a closed
 16-hex integration identity and the two 40-hex commit revisions. No branch
 name, path, or diff text is stored, and the fact never changes execution state.
+
+`task.disposed` is the reference-only record of one removed task worktree. Its
+payload is `{task_id, mode, branch_kept}`, where `mode` is the retained-copy
+proof that allowed the removal (`integrated`, `retained` or `no-changes`) or
+`discarded` for a caller's explicit disposal decision, and `branch_kept` is
+`kept` or `deleted`. Both verdicts are tokens rather than booleans, because the
+canonical payload contract refuses booleans. The fact is written as soon as
+`git worktree remove` succeeded, before the optional branch delete: a failed
+delete leaves `branch_kept: "kept"` recorded and is reported as its own refusal,
+and a later `--delete-branch` run retries only that delete without appending a
+second fact. `branch_kept` therefore describes the branch at disposal time, not
+the eventual outcome.
+
+`task.artifact-collected` is the reference-only record of an artifact collection
+performed after the terminal observation. Its payload is
+`{task_id, attempt_id, artifact_digest, candidate_commit, delivery}`: the
+attempt identity, the sanitized artifact sidecar's SHA-256, the candidate
+revision (`null` when the delivery has none) and the closed delivery state. It
+never rewrites the observation, and integration and disposal read a commit
+artifact from either source. `attempt_id` is a derived identity and redaction
+remaps it exactly as it remaps the identical field on `task.launch-claimed`. It
+is never written for a `collection-failed` delivery: a failed collection records
+nothing so it can be retried.
 
 ## `brigade.run_event.v1`: `schema_version: 2`
 

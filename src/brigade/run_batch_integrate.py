@@ -301,6 +301,30 @@ def _check_git(workspace: Path) -> None:
         )
 
 
+def _artifact_digest(state: run_tasks.TaskResult) -> str | None:
+    """The sidecar digest this task's journal records for its retained commit.
+
+    A commit artifact can be named by the terminal observation, which is how a
+    normal collection records it, or by a later ``task.artifact-collected``
+    fact, which is how a recovered collection records one. The latest record
+    wins; if both exist they must name the same sidecar bytes.
+    """
+    digests: list[str] = []
+    if state.artifact_kind == "commit" and state.artifact_digest is not None:
+        digests.append(state.artifact_digest)
+    if state.collected is not None:
+        digests.append(state.collected.artifact_digest)
+    if not digests:
+        return None
+    if len(set(digests)) > 1:
+        raise IntegrationError(
+            ARTIFACT_MISMATCH,
+            f"task {state.handle.spec.task_id} records two different artifacts",
+            task_ids=[state.handle.spec.task_id],
+        )
+    return digests[-1]
+
+
 def _artifact_candidate(
     run_dir: Path,
     run_id: str,
@@ -311,7 +335,10 @@ def _artifact_candidate(
     task_id = state.handle.spec.task_id
     if state.status not in run_task_journal.TERMINAL or state.result_id is None:
         raise IntegrationError(TASK_NOT_TERMINAL, f"task {task_id} is not terminal", task_ids=[task_id])
-    if state.handle.attempt_id is None or state.artifact_kind != "commit":
+    if state.handle.attempt_id is None:
+        raise IntegrationError(ARTIFACT_MISMATCH, f"task {task_id} has no commit artifact", task_ids=[task_id])
+    artifact_digest = _artifact_digest(state)
+    if artifact_digest is None:
         raise IntegrationError(ARTIFACT_MISMATCH, f"task {task_id} has no commit artifact", task_ids=[task_id])
     name = run_batch_artifacts.sidecar_name(task_id)
     path = run_dir / name
@@ -320,7 +347,7 @@ def _artifact_candidate(
         raise IntegrationError(
             ARTIFACT_MISMATCH, f"task {task_id} artifact is missing or unreadable", task_ids=[task_id]
         )
-    if hashlib.sha256(raw).hexdigest() != state.artifact_digest:
+    if hashlib.sha256(raw).hexdigest() != artifact_digest:
         raise IntegrationError(
             ARTIFACT_MISMATCH, f"task {task_id} artifact does not match its digest", task_ids=[task_id]
         )
@@ -343,6 +370,10 @@ def _artifact_candidate(
     candidate = document.get("candidate_commit")
     if not isinstance(candidate, str) or _SHA_RE.fullmatch(candidate) is None:
         raise IntegrationError(NO_CANDIDATE, f"task {task_id} retained no candidate commit", task_ids=[task_id])
+    if state.collected is not None and state.collected.candidate_commit != candidate:
+        raise IntegrationError(
+            ARTIFACT_MISMATCH, f"task {task_id} recovered artifact names another candidate", task_ids=[task_id]
+        )
     return candidate
 
 

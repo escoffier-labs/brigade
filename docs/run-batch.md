@@ -200,7 +200,10 @@ Known limits:
   (`isolation-remote-unsupported`).
 - Repository-configured clean or process filters can still run during `git add`
   when collection commits a worker's leftovers, consistent with workers being
-  cooperative rather than adversarial.
+  cooperative rather than adversarial. Clean filters configured in a task
+  worktree can also run during `git status` and `git worktree remove`, so
+  disposal reads a checkout's state with the same trust it extends to the
+  worker.
 
 ## Task artifacts
 
@@ -266,7 +269,8 @@ records `patch-oversize` as its reason. A diff that times out is recorded the
 same way with reason `patch-timeout`. Either way the candidate commit on the
 task branch is still the retained copy. Nothing in this path removes a
 checkout, a branch or a commit. Applying a candidate to a base is the explicit
-[integration](#integration) step; disposing of the checkouts is later work.
+[integration](#integration) step, and removing the checkouts is the explicit
+[disposal](#disposal) step.
 
 Collecting the same attempt again — a crash after the patch was written but
 before the observation, or a repeated observe — reuses the sidecar already on
@@ -430,6 +434,184 @@ JSON output uses `brigade.runs_tasks_integrate.v1`, with `run_id`,
 `base_sha`, `integration_id`, `ref`, `integration_commit`, `task_ids`,
 `candidate_commits`, and `refusal` (`null` on success). Human refusals print
 `error: <code>: <detail>` to stderr and exit 2.
+
+
+## Disposal
+
+Removing a per-task worktree is the last explicit step, never a side effect:
+
+```bash
+brigade runs tasks dispose <run> <task_id>... [--confirm] [--discard <task_id>]... [--delete-branch] [--json]
+```
+
+Without `--confirm` it prints what it would do and changes nothing at all: no
+lock, no fact, no removal. With `--confirm` it works through the named tasks in
+order, and one refused task never stops the next.
+
+The security rule is one sentence: **deleting a worktree must never lose the
+only copy of work.** Every check below is a refusal that leaves the task
+exactly as it was.
+
+1. **Locks.** With `--confirm`, the caller workspace's run lock is held for the
+   whole command (`target-busy`), and each task's own run lock is acquired and
+   held from its first check through removal and recording (`task-busy`). There
+   is no check-then-act gap. A dry run takes no lock: it reads the lock state and
+   refuses a live, foreign or unreadable one with the same code, without
+   changing it.
+2. **Identity.** The task must be terminal in the journal (`not-terminal`) and
+   carry a `task.workspace-bound` fact. The binding is rebuilt from the journal
+   — the path and branch are recomputed, never read back from a file — and must
+   match its recorded digests, device/inode, Git toplevel and common directory
+   (`workspace-invalid`).
+3. **A retained copy.** Exactly one of:
+   - *integrated*: a `task.integrated` fact whose ref
+     `refs/heads/brigade/integrate/<id>` still holds the recorded
+     `integration_commit`;
+   - *retained*: the artifact sidecar still hashes to the digest the journal
+     recorded, its delivery is `retained`, and the task branch tip is still its
+     candidate commit;
+   - *no-changes*: the sidecar delivery is `no-changes`, the receipt digest
+     matches the observation, and the checkout is unchanged.
+
+   Otherwise the task is refused with `not-retained` unless `--discard` names it.
+   In every non-discard case the task branch tip must still equal the recorded
+   candidate commit (or the pinned base for `no-changes`), or the task is
+   refused with `branch-moved`.
+4. **Ignored files.** `git status --porcelain --ignored --untracked-files=normal`
+   must show no `!!` entries. Ignored files are never collected, so removing the
+   checkout would delete the only copy; the refusal is `ignored-files` unless
+   `--discard` names the task.
+5. **Removal.** A retained or integrated checkout must show no other uncommitted
+   entry either, because that work is on no branch: the refusal is
+   `remove-refused`, and a dry run reports it too. Then `git worktree remove
+   <path>` runs through the hardened runner in the caller repository, **without
+   `--force`**. A checkout Git still refuses to remove is refused with
+   `remove-refused` and left untouched. Brigade never deletes a worktree
+   directory itself.
+6. **Recording.** As soon as the removal succeeded, and while the task lock is
+   still held, one closed `task.disposed` fact records the mode and whether the
+   branch survived. The fact is written *before* the optional branch delete, so a
+   failed delete can never leave the checkout gone with no recorded disposal.
+   Only after that is the reservation lease (`<cache root>/.run-locks/<name>`)
+   released; it is released on a branch-delete refusal too, because the disposal
+   is already final. Only an empty directory is removed, so a live lock, a
+   pending stale claim or a recovery gate keeps it.
+
+`--discard <task_id>` is the caller's explicit disposal decision. The task must
+also be named in the command. It is the only path that skips the retained-copy
+proof, tolerates ignored files, and lets Git force the removal. Recorded mode:
+`discarded`.
+
+`--delete-branch` deletes the task branch only for an *integrated* task, and only
+after proving the integration commit is still reachable from its integration
+ref. The delete is a compare-and-swap on the candidate
+(`git update-ref -d refs/heads/<branch> <candidate>`), so a moved branch is never
+deleted. The proof uses the integration record whose ref still holds its
+recorded commit, not simply the newest one: an older integration that still owns
+the work is the copy that counts. Every other task keeps its branch, and an
+integration ref is never deleted.
+
+A refused branch delete does not undo the removal. The `task.disposed` fact is
+already recorded with `branch_kept: "kept"`, and the command reports the refusal
+(`branch-moved` or `git-failed`) after it. Because the branch delete is a
+separate, idempotent step, running the same command with `--delete-branch`
+again retries only that delete, with the same compare-and-swap and reachability
+proof, and reports `already-disposed` with `branch_kept: "deleted"` on success.
+
+### Crash repair
+
+The fact is appended while the task lock is still held, so a crash between
+removal and the fact leaves the checkout gone and the binding present. Rerunning
+the same command repairs that state instead of failing forever: it sees the
+missing path, re-proves the retained copy from the journal, records the missing
+`task.disposed` fact with the proof it found, and releases the stranded lease.
+The same is true of `--delete-branch`: an already deleted branch is recognized
+once the integration ref still holds the recorded commit.
+
+Rerunning dispose on a task that already has a `task.disposed` fact reports
+`already-disposed` and writes no journal fact. With `--confirm` it also takes
+the task lock, releases the reservation lease a crash can leave behind, and,
+with `--delete-branch`, retries only the branch delete. A dry run does neither:
+it takes no lock at all and reads the lock state without changing it.
+
+### Refusal codes
+
+| Code | Refusal |
+| --- | --- |
+| `no-task-journal` | The run directory has no task journal |
+| `journal-unreadable` | The journal could not be read, or the fact could not be written |
+| `unknown-run` | The run directory is not a run, or has no readable batch request marker |
+| `unknown-task` | A named task is not accepted by this run, or `--discard` names one that is not |
+| `duplicate-task` | A task id is named more than once |
+| `target-busy` | Another caller holds the workspace run lock |
+| `task-busy` | Another caller holds the task's run lock |
+| `not-terminal` | The task has no terminal result |
+| `workspace-invalid` | The binding does not match, or the checkout is not the reserved one |
+| `workspace-unavailable` | The checkout or its Git state could not be read |
+| `not-retained` | No retained copy, or an unchanged checkout is not unchanged |
+| `branch-moved` | The task branch tip is not the recorded revision |
+| `ignored-files` | The checkout still holds ignored files, which are never collected |
+| `remove-refused` | Git refused to remove the checkout; nothing was changed |
+| `artifact-mismatch` | The journal records two conflicting artifact digests |
+| `git-failed` | A Git read or write failed |
+
+JSON output uses `brigade.runs_tasks_dispose.v1`, with `run_id`, `confirm`,
+`delete_branch`, `discard`, `refusal` (`null` unless the whole command was
+refused), and `tasks`: one row per named task with `task_id`, `status`
+(`disposed`, `already-disposed`, `planned`, `refused`), `mode`, `branch_kept`,
+and `refusal` (`{code, detail}`, or `null`). Human output prints one line per
+task and exits 2 when any task was refused.
+
+
+## Recovering an interrupted collection
+
+Collection runs inside the batch's own task lock. A crash between the worker
+exiting and that collection leaves a durable receipt and no artifact:
+
+```bash
+brigade runs tasks collect <run> <task_id>
+```
+
+It never launches anything, and it holds the same two locks. The task must have
+a recorded attempt (`not-attempted`) and a worktree binding, and the binding is
+revalidated exactly as disposal validates it. Then:
+
+- **No observation yet.** The durable receipt (`batch-result-*.json`) is the
+  execution fact. Collection runs with the same replay rules as the batch, and
+  the observation is appended exactly as the batch would have written it:
+  `completed` or `failed` from the receipt, `artifact_kind` `commit` with the
+  artifact sidecar digest when a candidate exists, otherwise `receipt` with the
+  receipt digest. Provider correlation references cannot be recovered from a
+  receipt and stay empty.
+- **A receipt-only observation.** Collection runs, and a closed
+  `task.artifact-collected` fact records the sidecar digest, the candidate and
+  the delivery. The existing observation is never rewritten. Integration and
+  disposal accept a commit artifact from the observation or from this fact, and
+  refuse with `artifact-mismatch` if the two ever disagree.
+- **A commit artifact already recorded.** The sidecar must still exist and hash
+  to the recorded digest, or the command refuses with `artifact-mismatch`.
+  Otherwise it reports `already-collected` and writes nothing.
+- **A no-changes delivery already collected.** Its observation names the worker
+  receipt, so the matching sidecar is the record of the batch's own collection.
+  The command reports `already-collected` and writes nothing.
+- **A failed collection.** A `collection-failed` delivery is not an artifact:
+  nothing is recorded, and the command refuses with `collection-failed` and the
+  closed reason, so it can be retried unchanged.
+
+| Code | Refusal |
+| --- | --- |
+| `no-task-journal`, `journal-unreadable`, `unknown-run`, `duplicate-task` | As for dispose |
+| `unknown-task` | The named task is not accepted by this run |
+| `target-busy`, `task-busy` | Another caller holds the workspace or task run lock |
+| `not-attempted` | No attempt was ever prepared, so there is nothing to collect |
+| `workspace-invalid` | No binding, the binding does not match, or the checkout is gone |
+| `no-receipt` | No durable worker receipt to build the observation from |
+| `artifact-mismatch` | A sidecar is missing, altered, or disagrees with its digest |
+| `collection-failed` | Collection itself failed; nothing was recorded and it can be retried |
+
+JSON output uses `brigade.runs_tasks_collect.v1`, with `run_id`, `task_id`,
+`status` (`collected`, `already-collected`), `delivery`, `candidate_commit`,
+`artifact_digest`, and `refusal` (`null` on success).
 
 
 ## Execution and retries

@@ -23,6 +23,12 @@ STRUCTURAL_FIELDS = frozenset(
         "integration_id",
         "candidate_commit",
         "integration_commit",
+        # Disposal and recovered-collection verdicts come from closed
+        # vocabularies, so redaction preserves them like the other structural
+        # values instead of renaming them.
+        "mode",
+        "branch_kept",
+        "delivery",
     }
 )
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
@@ -274,6 +280,16 @@ def prepare_requests(
                 # Reference-only integration fact: commit revisions map through
                 # as structural values and no derived identity is recomputed.
                 pass
+            elif event.event_type == "task.disposed":
+                # Reference-only custody verdict: the mode and branch state are
+                # closed structural tokens and state is unchanged.
+                pass
+            elif event.event_type == "task.artifact-collected":
+                # A recovered collection names the attempt it belongs to, so its
+                # derived attempt identity is remapped exactly as
+                # ``task.launch-claimed`` does. The digests and delivery map
+                # through; the fold refuses a stale attempt.
+                payload["attempt_id"] = attempts[(task_id, old["attempt_id"])]
             elif event.event_type == "task.observed":
                 current = states[task_id]
                 observation = tasks.TaskObservation(

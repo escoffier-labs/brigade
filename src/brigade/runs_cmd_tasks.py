@@ -1,8 +1,11 @@
-"""Read-only per-task status, results and waiting for Brigade runs.
+"""Per-task status, results, waiting and the explicit result actions.
 
 The durable facts live in the run journal and are read through
-``brigade.run_tasks.read_tasks``. This module adds no state: it never appends,
-cancels or reconciles anything, and a wait timeout records nothing.
+``brigade.run_tasks.read_tasks``. Status, results and waiting add no state: they
+never append, cancel or reconcile anything, and a wait timeout records nothing.
+The explicit actions are the exceptions, and each one lives in its own module:
+``integrate`` cuts a new local ref, ``dispose`` removes a worktree after a
+retained-copy proof, and ``collect`` recovers an interrupted collection.
 """
 
 from __future__ import annotations
@@ -416,6 +419,84 @@ def integrate_tasks(
     return 0
 
 
+def dispose_tasks(
+    run: str | Path,
+    task_ids: Sequence[str],
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    confirm: bool = False,
+    discard: Sequence[str] = (),
+    delete_branch: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Remove selected task worktrees, or report what a confirmed run would do."""
+    from . import run_batch_dispose
+
+    run_dir = _resolve(run, cwd=cwd, runs_dir=runs_dir)
+    if run_dir is None:
+        return 2
+    try:
+        payload = run_batch_dispose.dispose(
+            run_dir, task_ids, discard=discard, delete_branch=delete_branch, confirm=confirm
+        )
+    except run_batch_dispose.DisposeError as exc:
+        payload = run_batch_dispose.refusal_payload(exc, run_id=run_dir.name, confirm=confirm)
+        if json_output:
+            _emit(payload)
+        else:
+            print(run_batch_dispose.render(payload), file=sys.stderr)
+        return 2
+    if json_output:
+        _emit(payload)
+    else:
+        print(run_batch_dispose.render(payload))
+    refused = [row for row in payload["tasks"] if row["status"] == run_batch_dispose.STATUS_REFUSED]
+    if refused and not json_output:
+        for row in refused:
+            print(
+                f"task {row['task_id']}: {row['refusal']['code']} ({row['refusal']['detail']})",
+                file=sys.stderr,
+            )
+    return 2 if refused else 0
+
+
+def collect_task(
+    run: str | Path,
+    task_id: str,
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Recover one interrupted artifact collection, or report one closed refusal."""
+    from . import run_batch_dispose
+
+    run_dir = _resolve(run, cwd=cwd, runs_dir=runs_dir)
+    if run_dir is None:
+        return 2
+    try:
+        payload = run_batch_dispose.collect(run_dir, task_id)
+    except run_batch_dispose.DisposeError as exc:
+        if json_output:
+            _emit(
+                {
+                    "schema": run_batch_dispose.COLLECT_SCHEMA,
+                    "run_id": run_dir.name,
+                    "task_id": task_id,
+                    "refusal": {"code": exc.code, "detail": exc.detail},
+                }
+            )
+        else:
+            print(f"error: {exc.code}: {exc.detail}", file=sys.stderr)
+        return 2
+    if json_output:
+        _emit(payload)
+    else:
+        print(run_batch_dispose.render(payload))
+    return 0
+
+
 def dispatch(args, *, cwd: Path, runs_dir: Path | None) -> int:
     if args.tasks_command == "list":
         return list_tasks(args.run, cwd=cwd, runs_dir=runs_dir, json_output=args.json)
@@ -439,5 +520,18 @@ def dispatch(args, *, cwd: Path, runs_dir: Path | None) -> int:
             check=args.check,
             json_output=args.json,
         )
+    if args.tasks_command == "dispose":
+        return dispose_tasks(
+            args.run,
+            args.task_ids,
+            cwd=cwd,
+            runs_dir=runs_dir,
+            confirm=args.confirm,
+            discard=args.discard,
+            delete_branch=args.delete_branch,
+            json_output=args.json,
+        )
+    if args.tasks_command == "collect":
+        return collect_task(args.run, args.task_id, cwd=cwd, runs_dir=runs_dir, json_output=args.json)
     print(f"error: unknown runs tasks command: {args.tasks_command}", file=sys.stderr)
     return 2
