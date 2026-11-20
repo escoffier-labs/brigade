@@ -63,6 +63,41 @@ def _read_tool_entries(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return [dict(item) for item in values], []
 
 
+_AGENTS_PROJECTION_PREFIXES = (".agents/commands/", ".agents/superpowers/")
+
+
+def migrate_legacy_antigravity_paths(target: Path) -> list[str]:
+    """Rewrite a persisted catalog's pre-#2810 `.antigravity/` projection paths to `.agents/`.
+
+    Only an entry whose antigravity path still equals the old built-in default
+    for that tool id moves. An operator-customized path stays. A missing or
+    invalid catalog is left alone. Returns the migrated tool ids.
+    """
+    path = paths.config_path(target)
+    entries, errors = _read_tool_entries(path)
+    if errors or not entries:
+        return []
+    legacy_defaults: dict[str, tuple[str, str]] = {}
+    for tool in constants.DEFAULT_TOOLS:
+        default_projections = tool.get("projections")
+        current = str(default_projections.get("antigravity") or "") if isinstance(default_projections, dict) else ""
+        if current.startswith(_AGENTS_PROJECTION_PREFIXES):
+            legacy_defaults[str(tool["id"])] = (".antigravity/" + current.removeprefix(".agents/"), current)
+    migrated: list[str] = []
+    for entry in entries:
+        tool_id = str(entry.get("id") or "")
+        projections = entry.get("projections")
+        if tool_id not in legacy_defaults or not isinstance(projections, dict):
+            continue
+        old, new = legacy_defaults[tool_id]
+        if projections.get("antigravity") == old:
+            entry["projections"] = {**projections, "antigravity": new}
+            migrated.append(tool_id)
+    if migrated:
+        path.write_text(helpers._format_tool_entries(entries))
+    return migrated
+
+
 def _projection_scope(target: Path) -> set[str] | None:
     """Return the projection targets wired for this workspace, or None for all.
 

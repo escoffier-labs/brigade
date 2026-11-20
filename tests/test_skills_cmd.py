@@ -137,10 +137,10 @@ def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
     assert "# Security Review" in codex_text
     assert (tmp_path / ".claude" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".opencode" / "skills" / "security-review" / "SKILL.md").is_file()
-    assert (tmp_path / ".antigravity" / "skills" / "security-review" / "SKILL.md").is_file()
+    assert (tmp_path / ".agents" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".pi" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".cursor" / "skills" / "security-review" / "SKILL.md").is_file()
-    assert not (tmp_path / ".agents" / "skills" / "security-review" / "SKILL.md").exists()
+    assert not (tmp_path / ".antigravity" / "skills" / "security-review" / "SKILL.md").exists()
     assert (tmp_path / ".openclaw" / "skills" / "security-review" / "SKILL.md").is_file()
     # hermes installs into the user's Hermes store (where Hermes actually reads), not repo-local
     assert (Path(os.environ["HERMES_HOME"]) / "skills" / "brigade-imports" / "security-review" / "SKILL.md").is_file()

@@ -287,6 +287,9 @@ def test_gitignore_block_includes_generated_tool_projection_roots():
         ".codex/skills/",
         ".opencode/commands/",
         ".opencode/superpowers/",
+        ".agents/commands/",
+        ".agents/superpowers/",
+        # Legacy Antigravity paths stay ignored for one release (#2810).
         ".antigravity/commands/",
         ".antigravity/superpowers/",
         ".pi/commands/",

@@ -145,6 +145,11 @@ class SkillWirer:
         self._recorded = self._load_recorded()
         self._written: dict[str, dict[str, str]] = {}
 
+    @property
+    def recorded(self) -> dict[str, Any]:
+        """Hashes recorded for skills init wrote on earlier runs, keyed by workspace-relative path."""
+        return self._recorded
+
     def place(
         self,
         rel_parts: tuple[str, ...],

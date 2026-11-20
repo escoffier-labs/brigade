@@ -7,13 +7,17 @@ Persists the Selection to .brigade/config.json.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import dataclasses
+import stat
 import sys
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import List, Tuple
 
+from . import shipped_history
 from .config import Config, load_config, write_config
 from .skill_wiring import BLOCKED, SYMLINKED, SkillWirer
 from .selection import Selection, SurfaceInstallRefusal, SurfaceRecord, WRITER_INBOXES
@@ -34,6 +38,150 @@ LEGACY_GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
 LEGACY_GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
 DEFAULT_WIRED_SKILLS = ("brigade-work", "ultra-work-scout")
 SURFACE_EVIDENCE_REL_PATH = ".brigade/surface-evidence.json"
+
+
+# Antigravity projections lived under .antigravity/ until agy's documented
+# workspace roots (.agents/skills/ and friends) were adopted (#2810).
+_LEGACY_ANTIGRAVITY_PROJECTION_DIRS = ("commands", "superpowers", "skills")
+
+
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_plain(path: Path, *, directory: bool) -> bool:
+    """True for a real directory or regular file: not a symlink and not a Windows junction or other reparse point."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    if getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    return stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+
+
+def _plain_tree(base: Path) -> tuple[list[Path], list[Path]]:
+    """Regular files and real directories under ``base``, never descending through a link or junction."""
+    files: list[Path] = []
+    dirs: list[Path] = []
+    pending = [base]
+    while pending:
+        current = pending.pop()
+        dirs.append(current)
+        try:
+            children = sorted(current.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if _is_plain(child, directory=True):
+                pending.append(child)
+            elif _is_plain(child, directory=False):
+                files.append(child)
+    return sorted(files), dirs
+
+
+def _brigade_owned_legacy_skill(rel: str, skill_id: str, data: bytes, recorded: Mapping[str, object]) -> bool:
+    """A legacy SKILL.md is Brigade's only while it is a text Brigade wrote or shipped, unedited."""
+    digest = shipped_history.skill_digest(data)
+    record = recorded.get(rel)
+    recorded_sha = record.get("sha256") if isinstance(record, dict) else None
+    if recorded_sha in (hashlib.sha256(data).hexdigest(), digest):
+        return True
+    return digest in shipped_history.digests(shipped_history.skill_key(skill_id))
+
+
+def _managed_projection_metadata(path: Path) -> dict[str, object] | None:
+    """Projection marker metadata when ``path`` is a Brigade-managed tool projection, else None."""
+    from .tools_cmd.projections import _read_projection
+
+    return _read_projection(path)[0]
+
+
+def _brigade_owned_legacy_projection(path: Path) -> bool:
+    """A legacy tool projection is Brigade's only while its body still matches the recorded fingerprint."""
+    from .tools_cmd import helpers as tools_helpers
+    from .tools_cmd.projections import _read_projection
+
+    metadata, body = _read_projection(path)
+    if metadata is None:
+        return False
+    recorded = str(metadata.get("projection_fingerprint") or "")
+    return bool(recorded) and recorded == tools_helpers._text_hash(body or "")
+
+
+def _remove_emptied_parents(path: Path, base: Path) -> None:
+    """rmdir ``path.parent`` and upward through ``base``, stopping at the first directory that is not empty."""
+    current = path.parent
+    while True:
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        if current == base:
+            return
+        current = current.parent
+
+
+def prune_legacy_antigravity_projections(
+    target: Path,
+    recorded: Mapping[str, object] | None = None,
+    wired_skills: Collection[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Remove Brigade-owned Antigravity projections from the pre-#2810 .antigravity/ paths.
+
+    Owned means a managed tool projection whose body still matches its
+    recorded fingerprint, or a SKILL.md that is still byte-identical
+    (newline-folded) to a text Brigade wrote or shipped. Anything an operator
+    edited, any symlink or junction (and nothing below one), and any other file
+    stays. `.antigravity/memory-handoffs` is never touched.
+
+    A legacy file goes only after its replacement exists: a skill needs
+    ``("antigravity", <id>)`` in ``wired_skills`` (this run placed
+    `.agents/skills/<id>/SKILL.md`), and a tool projection needs the same-named
+    managed projection under `.agents/`. Only directories emptied by a removal
+    are removed. Returns the removed paths.
+    """
+    recorded = recorded or {}
+    wired_skills = wired_skills or ()
+    root = target / ".antigravity"
+    removed: list[str] = []
+    if not _is_plain(root, directory=True):
+        return removed
+    for name in _LEGACY_ANTIGRAVITY_PROJECTION_DIRS:
+        base = root / name
+        if not _is_plain(base, directory=True):
+            continue
+        files, _dirs = _plain_tree(base)
+        for path in files:
+            rel = path.relative_to(target).as_posix()
+            if name == "skills":
+                parts = path.relative_to(base).parts
+                if len(parts) != 2 or parts[1] != "SKILL.md":
+                    continue
+                if ("antigravity", parts[0]) not in wired_skills:
+                    continue
+                try:
+                    data = path.read_bytes()
+                except OSError:
+                    continue
+                owned = _brigade_owned_legacy_skill(rel, parts[0], data, recorded)
+            else:
+                replacement = target / ".agents" / path.relative_to(root)
+                owned = (
+                    _is_plain(replacement, directory=False)
+                    and _managed_projection_metadata(replacement) is not None
+                    and _brigade_owned_legacy_projection(path)
+                )
+            if not owned:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(rel)
+            _remove_emptied_parents(path, base)
+    for rel in removed:
+        print(f"brigade: removed legacy Antigravity projection: {rel}")
+    return removed
 
 
 def is_skill_md(dst: str) -> bool:
@@ -135,8 +283,13 @@ def build_gitignore_block(selection: Selection) -> str:
             ".codex/skills/",
             ".opencode/commands/",
             ".opencode/superpowers/",
+            ".agents/commands/",
+            ".agents/superpowers/",
+            "# Legacy Antigravity projection paths (pre-#2810): can go after the next release.",
             ".antigravity/commands/",
             ".antigravity/superpowers/",
+            # Not .agents/skills/: other harnesses read it and teams commit
+            # skills there, so ignoring it would hide them (#2810 review).
             ".pi/commands/",
             ".pi/superpowers/",
             ".cursor/rules/",
@@ -500,6 +653,22 @@ def install_selection(
                         wired_skills.append((h, skill_id))
     finally:
         wirer.finish()
+
+    # New projections are in place; retire the Brigade-owned ones at the old path.
+    # --no-wire writes no replacements, so it removes nothing either.
+    if wire_skills and "antigravity" in selection.harnesses:
+        try:
+            prune_legacy_antigravity_projections(target, wirer.recorded, set(wired_skills))
+        except OSError as exc:
+            print(f"warning: unable to prune legacy .antigravity projections: {exc}", file=sys.stderr)
+        # A catalog written before #2810 still maps antigravity to the old paths.
+        try:
+            from .tools_cmd.catalog_manage import migrate_legacy_antigravity_paths
+
+            for tool_id in migrate_legacy_antigravity_paths(target):
+                print(f"brigade: moved tools catalog antigravity projection for {tool_id} to .agents/")
+        except OSError as exc:
+            print(f"warning: unable to migrate legacy antigravity paths in the tools catalog: {exc}", file=sys.stderr)
 
     # Claude Code project hooks enforce the same work loop described by the
     # managed skill. The merge helper owns only Brigade handlers and preserves
