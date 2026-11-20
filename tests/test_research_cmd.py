@@ -426,7 +426,13 @@ def test_run_local_only_writes_artifacts(tmp_path: Path, monkeypatch):
         run_id="20260602-120000-x",
     )
     rec = registry.show_run(tmp_path, rid)
-    assert rec["status"] in {"completed", "done"}
+    assert rec["status"] in {"completed", "done"}, {
+        "failure_kind": rec.get("failure_kind"),
+        "failure_phase": rec.get("failure_phase"),
+        "error": rec.get("error"),
+        "detail": rec.get("detail"),
+        "blockers": rec.get("blockers"),
+    }
     d = registry.run_dir(tmp_path, rid)
     assert (d / "report.html").exists() and (d / "report.md").exists() and (d / "handoff.md").exists()
     assert "Plants use light" in (d / "report.md").read_text()
@@ -2660,7 +2666,13 @@ def test_local_only_with_local_source_skips_egress_providers(tmp_path: Path, mon
     )
     rec = registry.show_run(tmp_path, rid)
     assert constructed == []
-    assert rec["status"] == "completed"
+    assert rec["status"] == "completed", {
+        "failure_kind": rec.get("failure_kind"),
+        "failure_phase": rec.get("failure_phase"),
+        "error": rec.get("error"),
+        "detail": rec.get("detail"),
+        "blockers": rec.get("blockers"),
+    }
     routes = {route["id"]: route for route in rec["manifest"]["routes"]}
     assert routes["local"]["enabled"] is True
     assert routes["configured-cli"]["enabled"] is False
