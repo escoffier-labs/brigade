@@ -162,8 +162,18 @@ def _antigravity_no_output_detail(stdout: str, stderr: str = "") -> str | None:
     if any(not line.startswith(_ANTIGRAVITY_NO_OUTPUT_MARKER) for line in out_lines):
         return None
     for stream in (stderr, stdout):
-        lines = [line.strip() for line in stream.splitlines() if line.strip()]
-        for index, line in enumerate(lines):
+        for raw in stream.splitlines():
+            line = raw.strip()
             if line.startswith(_ANTIGRAVITY_NO_OUTPUT_MARKER):
-                return " ".join(" ".join(lines[index:]).split())
+                return " ".join(line.split())
     return None
+
+
+def _antigravity_no_output_kind(detail: str) -> str:
+    """Classify agy's no-output line by the reason it gives.
+
+    Only an auto-denied tool permission is ``permission-denied``. Any other
+    no-output reason stays the generic ``empty-output`` failure.
+    """
+    lowered = detail.lower()
+    return "permission-denied" if "permission" in lowered or "auto-denied" in lowered else "empty-output"

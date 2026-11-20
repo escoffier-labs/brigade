@@ -1696,8 +1696,8 @@ def test_run_agent_antigravity_exit_zero_no_output_marker_is_a_failed_run(monkey
     # #2814: agy auto-denies a tool permission headless, prints this marker plus
     # a note about the denial, and exits 0. That must not be recorded as success.
     stdout = (
-        "jetski: no output produced\n"
-        "Note: permission to read_file /etc/hosts was denied because it is outside the allowed workspace.\n"
+        "jetski: no output produced - permission to read_file /etc/hosts was denied because it is outside "
+        "the allowed workspace.\n"
     )
     for read_only in (True, False):
         result = _run_antigravity_with_stdout(monkeypatch, "", read_only=read_only, cwd=tmp_path, stderr=stdout)
@@ -1736,11 +1736,15 @@ def test_run_agent_antigravity_plain_empty_output_keeps_generic_failure(monkeypa
 
 def test_run_agent_antigravity_marker_after_blank_lines_still_fails(monkeypatch, tmp_path):
     result = _run_antigravity_with_stdout(
-        monkeypatch, "\n\n", cwd=tmp_path, stderr="\n\n  jetski: no output produced  \nread_file denied\n"
+        monkeypatch,
+        "\n\n",
+        cwd=tmp_path,
+        stderr="\n\n  jetski: no output produced, read_file permission auto-denied  \nlater noise\n",
     )
 
     assert result.ok is False
-    assert "read_file denied" in result.detail
+    assert "read_file permission auto-denied" in result.detail
+    assert "later noise" not in result.detail
 
 
 def test_run_agent_antigravity_normal_output_exit_zero_is_success(monkeypatch, tmp_path):
@@ -1774,6 +1778,17 @@ def test_run_agent_antigravity_real_stdout_with_stderr_marker_is_success(monkeyp
     )
 
     assert result.ok is True
+
+
+def test_run_agent_antigravity_marker_without_permission_reason_stays_empty_output(monkeypatch, tmp_path):
+    result = _run_antigravity_with_stdout(
+        monkeypatch, "", cwd=tmp_path, stderr="jetski: no output produced - the turn ended early\nlater noise\n"
+    )
+
+    assert result.ok is False
+    assert result.failure_kind == "empty-output"
+    assert "turn ended early" in result.detail
+    assert "later noise" not in result.detail
 
 
 def test_run_agent_antigravity_marker_then_real_stdout_is_success(monkeypatch, tmp_path):

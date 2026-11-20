@@ -29,6 +29,7 @@ from .antigravity_help import (  # noqa: F401  re-exported for callers and tests
     _antigravity_env_fingerprint,
     _antigravity_help_supports,
     _antigravity_no_output_detail,
+    _antigravity_no_output_kind,
     _antigravity_supports_print_timeout,
     _antigravity_help_lists_plan_mode,
     _antigravity_supports_mode,
@@ -1753,12 +1754,13 @@ def run_agent(
     if antigravity_no_output is not None:
         # permission-denied is INTERACTIVE_BLOCKED in worker_failure, which only
         # allows the preflight and dispatch phases.
+        no_output_kind = _antigravity_no_output_kind(antigravity_no_output)
         return AgentResult(
             text="",
             ok=False,
             detail=scrub_detail(antigravity_no_output)[:200],
-            failure_phase="dispatch",
-            failure_kind="permission-denied",
+            failure_phase="dispatch" if no_output_kind == "permission-denied" else None,
+            failure_kind=no_output_kind,
             stdout=safe_stdout,
             stderr=safe_stderr,
             exit_code=result.code,
