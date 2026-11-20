@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import handoff_cmd, ingest as ingest_mod
+from brigade import handoff_case_probe, handoff_cmd, ingest as ingest_mod
 from brigade.install import install_selection
 from brigade.selection import Selection
 from tests._handoff_origin_fixtures import trusted_handoff
@@ -2145,13 +2145,62 @@ def test_case_alias_probe_reads_the_directory_not_the_platform(tmp_path: Path):
     _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
     if (inbox / "Tracked.md").exists():
         # The filesystem itself aliases case, so the probe must say so.
-        assert ingest_mod._probe_case_aliases(inbox) is True
+        assert handoff_case_probe.probe_case_aliases(inbox) is True
     else:
         _write_handoff(inbox, "Tracked.md", _PLAIN_HANDOFF)
-        assert ingest_mod._probe_case_aliases(inbox) is False
+        assert handoff_case_probe.probe_case_aliases(inbox) is False
     empty = tmp_path / "empty"
     empty.mkdir()
-    assert ingest_mod._probe_case_aliases(empty) is None
+    assert handoff_case_probe.probe_case_aliases(empty) is None
+
+
+def test_probe_ignores_unicode_case_pairs_that_do_not_alias(tmp_path: Path, monkeypatch):
+    # NTFS, APFS and ext4 with casefold fold ASCII letters only: dotless i and
+    # I, sharp s and SS, and dotted I and i-with-dot stay distinct names there,
+    # so probing with them would misread an aliasing directory as sensitive.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    for name in ("\u0131.md", "stra\u00dfe.md", "\u0130.md"):
+        (inbox / name).write_text("x", encoding="utf-8")
+    stat = Path.stat
+    listed = {entry.name: stat(inbox / entry.name) for entry in os.scandir(inbox)}
+
+    def ascii_aliasing(path, *args, **kwargs):
+        if path.parent != inbox:
+            return stat(path, *args, **kwargs)
+        if path.name in listed:
+            return listed[path.name]
+        if path.name.isascii():
+            for name, entry_stat in listed.items():
+                if name.isascii() and name.lower() == path.name.lower():
+                    return entry_stat
+        raise FileNotFoundError(str(path))
+
+    monkeypatch.setattr(Path, "stat", ascii_aliasing)
+
+    assert handoff_case_probe.probe_case_aliases(inbox) is None
+
+
+def test_probe_treats_a_vanishing_sample_as_undecided(tmp_path: Path, monkeypatch):
+    # An entry unlinked mid-probe makes an absent swapped spelling meaningless.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    entry = _write_handoff(inbox, "alpha.md", _PLAIN_HANDOFF)
+    stat = Path.stat
+    vanished = False
+
+    def unlink_after_first_stat(path, *args, **kwargs):
+        nonlocal vanished
+        result = stat(path, *args, **kwargs)
+        if path == entry and not vanished:
+            vanished = True
+            path.unlink()
+        return result
+
+    monkeypatch.setattr(Path, "stat", unlink_after_first_stat)
+
+    assert handoff_case_probe.probe_case_aliases(inbox) is None
+    assert vanished
 
 
 @pytest.mark.parametrize("probe", [True, None], ids=["aliasing", "undecided"])
@@ -2161,13 +2210,16 @@ def test_casefold_name_guard_survives_aliasing_or_undecided_probe(tmp_path: Path
     handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
     if (inbox / "Tracked.md").exists():
         pytest.skip("stand-in requires a case-sensitive filesystem")
+    # The indexed spelling exists, so its identity is readable and only the
+    # probed case behavior can protect the other spelling.
+    indexed = _write_handoff(inbox, "Tracked.md", _PLAIN_HANDOFF)
     monkeypatch.setattr(ingest_mod, "_git_tracked_names", lambda directory: {"Tracked.md"})
-    monkeypatch.setattr(ingest_mod, "_probe_case_aliases", lambda directory: probe)
+    monkeypatch.setattr(handoff_case_probe, "probe_case_aliases", lambda directory: probe)
 
     handoffs, tracked = ingest_mod._list_handoffs(inbox)
 
     assert handoffs == []
-    assert tracked == [handoff]
+    assert tracked == [indexed, handoff]
     with pytest.raises(ingest_mod.TrackedHandoffError):
         ingest_mod._archive(handoff, inbox / "processed")
     assert handoff.is_file()

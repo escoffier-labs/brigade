@@ -26,7 +26,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, NamedTuple
 
-from . import dirfd, handoff_worktrees, instruction_overflow, ingest_near_duplicate
+from . import dirfd, handoff_case_probe, handoff_worktrees, instruction_overflow, ingest_near_duplicate
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -1775,46 +1775,6 @@ class _TrackedIndex(NamedTuple):
     case_aliases: bool | None
 
 
-# Bound the probe so a crowded inbox cannot turn it into a directory walk.
-_CASE_PROBE_LIMIT = 32
-
-
-def _probe_case_aliases(directory: Path) -> bool | None:
-    """Whether two spellings can name one file in `directory`.
-
-    Case sensitivity is a property of the mounted filesystem, not the
-    platform, so ask the directory itself: stat a case-swapped spelling of an
-    entry that exists. True means the spellings alias one file. False means
-    they are distinct names. None means the probe could not decide, and
-    callers then treat them as aliasing.
-    """
-    checked = 0
-    try:
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                if checked >= _CASE_PROBE_LIMIT:
-                    break
-                alternate = entry.name.swapcase()
-                if alternate == entry.name:
-                    continue
-                checked += 1
-                try:
-                    original = entry.stat()
-                except OSError:
-                    continue
-                try:
-                    alias = os.stat(directory / alternate)
-                except FileNotFoundError:
-                    # The swapped spelling is a name of its own.
-                    return False
-                except OSError:
-                    continue
-                return (alias.st_dev, alias.st_ino) == (original.st_dev, original.st_ino)
-    except OSError:
-        return None
-    return None
-
-
 def _git_tracked_files(directory: Path) -> _TrackedIndex | None:
     """Return indexed names, file identities and case behavior for `directory`.
 
@@ -1837,7 +1797,7 @@ def _git_tracked_files(directory: Path) -> _TrackedIndex | None:
             _warn_tracking_check_failed(directory, str(exc))
             return None
         identities.add((st.st_dev, st.st_ino))
-    case_aliases = _probe_case_aliases(directory) if names else None
+    case_aliases = handoff_case_probe.probe_case_aliases(directory) if names else None
     return _TrackedIndex(names, identities, unread, case_aliases)
 
 
