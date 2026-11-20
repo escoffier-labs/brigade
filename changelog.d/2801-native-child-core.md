@@ -1,0 +1,1 @@
+- Governed native delegation is now split into a host-neutral `native_child_*` core and a T3 adapter in the `native_t3_*` modules, so a second host can reuse admission, capacity, journal and custody code. `brigade t3` behaves exactly as before, and every persisted schema, digest domain, journal event name and the `t3-` run prefix is unchanged (#2801).
