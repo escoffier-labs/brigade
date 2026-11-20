@@ -191,6 +191,19 @@ impl Real {
             .as_i64()
             .unwrap()
     }
+    /// The last committed event sequence, which a `min_seq` search waits for.
+    /// `Hub::events` counts rows, and that no longer names the watermark once
+    /// `auto_authored` writes seq 900000: a search given the count would not
+    /// wait for the apply's replay and could read the previous snapshot.
+    fn waterline(&self) -> i64 {
+        self.db
+            .query_row(
+                "SELECT COALESCE(max(seq),0) FROM memory_events",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
     pub(super) async fn evidence(&self, id: &str, refs: &[&str]) -> Reply {
         let current = card(&self.h, "fleet", id).await;
         // Evidence is appended through the card's first anchored block.
@@ -687,7 +700,7 @@ async fn an_admitted_apply_leaves_every_search_path_unchanged() {
             out
         }
     };
-    let before = answers(r.h.events()).await;
+    let before = answers(r.waterline()).await;
     // The control: collapse hid the superseded card, so the answer has shape.
     let plain: Vec<_> = before[0].1.iter().map(|(id, _)| id.clone()).collect();
     assert!(plain.contains(&json!("new")) && plain.contains(&json!("other")));
@@ -720,7 +733,20 @@ async fn an_admitted_apply_leaves_every_search_path_unchanged() {
         stored["text"].as_str().unwrap().contains(" ^c-"),
         "{stored:?}"
     );
-    assert_eq!(answers(r.h.events()).await, before);
+    // The writer answers a batch before it publishes the replay, so a search
+    // that does not wait can read the previous snapshot and the push mask
+    // withholds the applied head. Wait for the index itself with a bound a
+    // loaded runner cannot outrun, as lexical_tests does.
+    let seq = r.waterline();
+    let snap =
+        r.h.store
+            .as_ref()
+            .unwrap()
+            .index()
+            .wait(seq, std::time::Duration::from_secs(60))
+            .await;
+    assert!(snap.indexed_seq >= seq && !snap.stale, "{snap:?}");
+    assert_eq!(answers(seq).await, before);
 }
 
 /// The literal scan stops after `LITERAL_BYTES`. An admitted append grows the

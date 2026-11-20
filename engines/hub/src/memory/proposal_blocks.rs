@@ -95,7 +95,18 @@ fn suffix(block: &str) -> Option<(usize, usize, &str)> {
     anchor(id).then_some((prefix.len(), trimmed.len(), id))
 }
 
-/// Add only suffix bytes. Reserve every anchor spelling, even in opaque text.
+fn id_counts(text: &str) -> std::collections::BTreeMap<String, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for (i, _) in text.match_indices('^') {
+        if let Some(id) = text.get(i + 1..i + 9).filter(|id| anchor(id)) {
+            *counts.entry(id.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Add only suffix bytes and the reservations for the ids this transform
+/// mints. Every anchor spelling stays reserved, even in opaque text.
 pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> {
     let mut used = BTreeSet::new();
     for (i, _) in text.match_indices('^') {
@@ -104,12 +115,11 @@ pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> 
         }
     }
     // Retired anchors in metadata remain reserved too.
-    for id in super::proposal_metadata::list(text, "claim_anchor_ids")? {
-        if !anchor(&id) {
-            return Err("invalid claim anchor reservation");
-        }
-        used.insert(id);
+    let mut reserved = super::proposal_metadata::list(text, "claim_anchor_ids")?;
+    if reserved.iter().any(|id| !anchor(id)) {
+        return Err("invalid claim anchor reservation");
     }
+    used.extend(reserved.iter().cloned());
     let mut result = text.to_string();
     let mut edits = Vec::new();
     let mut seen = BTreeSet::new();
@@ -134,12 +144,130 @@ pub fn anchor_blocks(text: &str, card_id: &str) -> Result<String, &'static str> 
         if used.len() > 4096 {
             return Err("claim anchor reservation limit exceeded");
         }
+        reserved.insert(id.clone());
         edits.push((start + block.trim_end_matches([' ', '\t']).len(), id));
+    }
+    if edits.is_empty() {
+        return Ok(text.to_string());
     }
     for (end, id) in edits.into_iter().rev() {
         result.insert_str(end, &format!(" ^{id}"));
     }
-    Ok(result)
+    super::proposal_metadata::reserve_anchors(&result, &reserved)
+}
+
+/// The only diff an anchor transform may make: an added ` ^<id>` suffix on a
+/// block that carried none, and exactly those ids added to the card's
+/// `claim_anchor_ids` list. Every other claim byte and metadata line stays
+/// before's. Fail closed on any ambiguity.
+pub fn proven_delta(before: &str, after: &str) -> bool {
+    // One line ending across each front matter, fences included. A card that
+    // mixes them, or holds a lone carriage return, would have that byte
+    // rewritten, so it stays for review.
+    let (Ok(before_front), Ok(after_front)) = (
+        super::proposal_metadata::front_bytes(before),
+        super::proposal_metadata::front_bytes(after),
+    ) else {
+        return false;
+    };
+    for (header, _) in [before_front, after_front].into_iter().flatten() {
+        if !super::proposal_metadata::uniform_front_endings(header) {
+            return false;
+        }
+    }
+    let (Ok(before_line), Ok(after_line)) = (
+        super::proposal_metadata::anchor_reservation_line(before),
+        super::proposal_metadata::anchor_reservation_line(after),
+    ) else {
+        return false;
+    };
+    let reserved = |line: &Option<String>| match line.as_deref() {
+        Some(line) => super::proposal_metadata::reservation_ids(line),
+        None => Ok(BTreeSet::new()),
+    };
+    let (Ok(before_reserved), Ok(after_reserved)) = (reserved(&before_line), reserved(&after_line))
+    else {
+        return false;
+    };
+    let (before_counts, after_counts) = (id_counts(before), id_counts(after));
+    // No prior spelling loses an occurrence.
+    if before_counts
+        .iter()
+        .any(|(id, count)| after_counts.get(id) != Some(count))
+    {
+        return false;
+    }
+    let added: BTreeSet<String> = after_counts
+        .keys()
+        .filter(|id| !before_counts.contains_key(*id))
+        .cloned()
+        .collect();
+    if added.is_empty() || added.iter().any(|id| after_counts.get(id) != Some(&1)) {
+        return false;
+    }
+    // The reservation list gains exactly the ids the transform added.
+    if !before_reserved.is_subset(&after_reserved)
+        || after_reserved
+            .difference(&before_reserved)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != added
+    {
+        return false;
+    }
+    // The stored line must already be exactly the writer's canonical form, and
+    // the new line must be that form for the existing ids plus the added ones.
+    // An automatic apply therefore never sorts, re-spaces or dedupes a value
+    // someone wrote by hand; that card stays for review.
+    if let Some(line) = before_line.as_deref() {
+        let canonical = super::proposal_metadata::canonical_anchor_reservation(&before_reserved);
+        if line != canonical.as_str() {
+            return false;
+        }
+    }
+    let expected = before_reserved
+        .union(&added)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let canonical = super::proposal_metadata::canonical_anchor_reservation(&expected);
+    if after_line.as_deref() != Some(canonical.as_str()) {
+        return false;
+    }
+    // Every front-matter byte outside the reservation line is before's, fences
+    // included. A card that gains its first front matter must gain exactly the
+    // empty block the writer emits.
+    let (Ok((before_kept, before_present)), Ok((after_kept, after_present))) = (
+        super::proposal_metadata::header_without_reservation(
+            before_front.map_or("", |(header, _)| header),
+        ),
+        super::proposal_metadata::header_without_reservation(
+            after_front.map_or("", |(header, _)| header),
+        ),
+    ) else {
+        return false;
+    };
+    if before_present != before_line.is_some()
+        || after_present != after_line.is_some()
+        || !after_present
+    {
+        return false;
+    }
+    let same_front = match before_front {
+        Some(_) => before_kept == after_kept,
+        None => after_kept == "---\n---\n",
+    };
+    if !same_front {
+        return false;
+    }
+    // No claim byte outside the added suffixes changes.
+    let body = |text: &str| -> Result<String, &'static str> {
+        let body = match super::proposal_metadata::front_bytes(text)? {
+            Some((_, body)) => body,
+            None => text,
+        };
+        Ok(strip_anchors(body))
+    };
+    matches!((body(before), body(after)), (Ok(kept), Ok(written)) if kept == written)
 }
 
 pub fn pin(text: &str, id: &str, hash: &str) -> Result<Json, &'static str> {
@@ -273,6 +401,74 @@ pub(super) fn span_texts(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn anchor_proof_admits_only_added_suffixes_and_their_reservations() {
+        let before = "---\ntitle: Notes\nevidence: []\n---\nFirst claim.\n\n- Second. ^c-abcdef\n";
+        let after = anchor_blocks(before, "a").unwrap();
+        assert!(proven_delta(before, &after), "{after}");
+        assert_eq!(anchor_blocks(&after, "a").unwrap(), after);
+        // Another metadata field may not move.
+        assert!(!proven_delta(
+            before,
+            &after.replace("title: Notes", "title: Other")
+        ));
+        assert!(!proven_delta(
+            before,
+            &after.replace("evidence: []", "evidence: [\"ns/a/b\"]")
+        ));
+        // A reserved id that no suffix added is refused.
+        let extra = after.replacen("]\n---\n", ", \"c-000000\"]\n---\n", 1);
+        assert_ne!(extra, after);
+        assert!(!proven_delta(before, &extra));
+        // Dropping a claim anchor while keeping its reservation is refused.
+        assert!(!proven_delta(
+            before,
+            &after.replace("- Second. ^c-abcdef", "- Second.")
+        ));
+    }
+    #[test]
+    fn a_non_canonical_reservation_line_is_never_normalized_by_the_proof() {
+        // Unsorted, compactly spaced and duplicated values are not the writer's
+        // canonical form, so the transform may not touch them automatically.
+        let before =
+            "---\nclaim_anchor_ids: [\"c-222222\",\"c-111111\",\"c-111111\"]\n---\nClaim.\n";
+        let after = anchor_blocks(before, "a").unwrap();
+        assert_ne!(after, before);
+        assert!(!proven_delta(before, &after), "{after}");
+        // The same values in canonical form keep every existing byte and append.
+        let canonical = "---\nclaim_anchor_ids: [\"c-111111\", \"c-222222\"]\n---\nClaim.\n";
+        let after = anchor_blocks(canonical, "a").unwrap();
+        assert!(proven_delta(canonical, &after), "{after}");
+        assert!(
+            after.contains("claim_anchor_ids: [\"c-111111\", \"c-222222\", \"c-"),
+            "{after}"
+        );
+    }
+    #[test]
+    fn a_mixed_line_ending_front_matter_is_never_normalized_by_the_proof() {
+        // `lines()` hides the CR before `title`, so the transform would rewrite
+        // that ending as LF and the old proof still matched.
+        let mixed = "---\nclaim_anchor_ids: [\"c-111111\"]\r\ntitle: T\n---\nClaim.\n";
+        let after = anchor_blocks(mixed, "a").unwrap();
+        assert_ne!(after, mixed);
+        assert!(!proven_delta(mixed, &after), "{after}");
+        // One ending across the front matter, fences included, still anchors.
+        let crlf = "---\r\ntitle: T\r\n---\r\nClaim.\r\n";
+        let after = anchor_blocks(crlf, "a").unwrap();
+        assert!(after.contains("claim_anchor_ids: [\"c-"));
+        assert!(!after.replace("\r\n", "").contains('\n'), "{after}");
+        assert!(proven_delta(crlf, &after), "{after}");
+        let lf = "---\ntitle: T\n---\nClaim.\n";
+        assert!(proven_delta(lf, &anchor_blocks(lf, "a").unwrap()));
+    }
+    #[test]
+    fn an_indented_reservation_line_is_refused_rather_than_rewritten() {
+        let before = "---\n claim_anchor_ids: [\"c-111111\"]\n---\nClaim.\n";
+        // The writer's stripped key and the reader's exact key disagree, so the
+        // transform refuses instead of rewriting a line it never read.
+        let ids = BTreeSet::from(["c-111111".to_string(), "c-222222".to_string()]);
+        assert!(crate::memory::proposal_metadata::reserve_anchors(before, &ids).is_err());
+    }
     #[test]
     fn opaque_markdown_and_duplicate_ids_never_resolve_by_position() {
         for body in [

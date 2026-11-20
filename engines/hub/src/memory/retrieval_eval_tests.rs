@@ -126,6 +126,18 @@ async fn retrieval_eval_bindings_fail_closed_and_are_rechecked_after_preparation
             json!("other"),
             "retrieval_eval_scorer_mismatch",
         ),
+        // A record written before the claim-anchor reservation bump names the
+        // versions that ranked the field, so it holds until a new run lands.
+        (
+            "index_format",
+            json!("2"),
+            "retrieval_eval_index_format_mismatch",
+        ),
+        (
+            "scorer_version",
+            json!("bm25-1.2-0.75-rrf60-lineage-source-v6"),
+            "retrieval_eval_scorer_mismatch",
+        ),
         (
             "policy_revision",
             json!(2),

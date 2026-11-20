@@ -324,6 +324,11 @@ def test_search_log_append_fails_open_while_another_writer_holds_the_lock(tmp_pa
     [
         ("Claim. ^c-abcdef\n", "Claim.\n"),
         ('---\ntitle: T\nevidence: ["ns/a/b"]\n---\nOne. ^c-abcdef\n', "---\ntitle: T\n---\nOne.\n"),
+        (
+            '---\ntitle: T\nclaim_anchor_ids: ["c-abcdef"]\n---\nOne. ^c-abcdef\n',
+            "---\ntitle: T\n---\nOne.\n",
+        ),
+        ('---\nclaim_anchor_ids: ["c-abcdef"]\n---\nClaim.\n', "Claim.\n"),
         # A front matter left empty goes too, so a card's first evidence line changes nothing.
         ('---\nevidence: ["ns/a/<"]\n---\nClaim. ^c-abcdef\n', "Claim.\n"),
         ("x < y ^c-abcdef\n", "x < y ^c-abcdef\n"),
@@ -332,7 +337,10 @@ def test_search_log_append_fails_open_while_another_writer_holds_the_lock(tmp_pa
         ("Claim. ^c-ABCDEF\n", "Claim. ^c-ABCDEF\n"),
         # The writer rewrites metadata with Rust `str::lines`, which drops a blank last line.
         ('---\ntitle: T\nevidence: ["a/b/c"]\n\n---\nbody\n', "---\ntitle: T\n---\nbody\n"),
-        ('---\nevidence: ["a/b/c"]\n\ntitle: T\n---\nbody\n', "---\n\ntitle: T\n---\nbody\n"),
+        ('---\nevidence: ["a/b/c"]\n\ntitle: T\n---\nbody\n', "---\ntitle: T\n---\nbody\n"),
+        # Blank front-matter lines are never searched, so a field the writer
+        # appends after one reads the same before and after.
+        ("---\ntitle: T\n\n---\nbody\n", "---\ntitle: T\n---\nbody\n"),
         # A fence the search parser closes earlier than the writer does leaves the card as stored.
         (
             '---\ntitle: T\n---  \nevidence: ["a/b/c"]\n---\nClaim.\n',
@@ -346,7 +354,10 @@ def test_ranking_text(text, expected):
 
 def test_adding_evidence_or_anchors_does_not_change_search():
     plain = "---\ntitle: Alpha\n---\nShared claim.\n"
-    marked = '---\ntitle: Alpha\nevidence: ["ns/keyword-keyword/shared"]\n---\nShared claim. ^c-abcdef\n'
+    marked = (
+        '---\ntitle: Alpha\nevidence: ["ns/keyword-keyword/shared"]\n'
+        'claim_anchor_ids: ["c-abcdef"]\n---\nShared claim. ^c-abcdef\n'
+    )
     other = "---\ntitle: Beta\n---\nKeyword here.\n"
     for query in ("shared", "keyword", "abcdef", "^c-abcdef", "ns/keyword", "/", "^"):
         answers = []
@@ -360,4 +371,19 @@ def test_a_blank_metadata_line_reads_the_same_before_and_after_an_evidence_rewri
     before = '---\ntitle: T\nevidence: ["a/b/c"]\n\n---\nbody ^c-abcdef\n'
     # `set` rewrites the metadata without the blank line and puts the field last.
     after = '---\ntitle: T\nevidence: ["a/b/c","d/e/f"]\n---\nbody ^c-abcdef\n'
+    assert memory_bm25.ranking_text(before) == memory_bm25.ranking_text(after)
+
+
+def test_a_comment_after_the_reservation_list_stays_searchable():
+    text = '---\nclaim_anchor_ids: ["c-abcdef"] # hidden-marker\n---\nClaim.\n'
+    ranked = memory_bm25.ranking_text(text)
+    assert "hidden-marker" in ranked
+    assert "claim_anchor_ids" in ranked
+    assert "hidden" in memory_bm25.tokenize(ranked)
+
+
+def test_a_blank_metadata_line_reads_the_same_before_and_after_a_reservation():
+    before = "---\ntitle: T\n\n---\nClaim.\n"
+    # The writer appends the reservation at the closing fence, after the blank.
+    after = '---\ntitle: T\n\nclaim_anchor_ids: ["c-abcdef"]\n---\nClaim. ^c-abcdef\n'
     assert memory_bm25.ranking_text(before) == memory_bm25.ranking_text(after)

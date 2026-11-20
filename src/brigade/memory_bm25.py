@@ -5,14 +5,16 @@ and no persistent index: a full build over about 1,900 cards takes a fraction
 of a second, which is cheaper than keeping a derived file in sync.
 
 Each card is one field: title, tags, summary, and the card text, joined. The
-card text leaves out the ``evidence`` front-matter line and anchor suffixes,
-which are stored and shown but never searched (``ranking_text``).
+card text leaves out the ``evidence`` and ``claim_anchor_ids`` front-matter
+lines and anchor suffixes, which are stored and shown but never searched
+(``ranking_text``).
 Query terms are deduplicated. Scores are rounded to ``SCORE_DIGITS`` decimals
 so near-identical cards still tie and callers can break ties by path.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import Counter
@@ -54,11 +56,43 @@ def _front_matter_body(text: str) -> str | None:
     return None
 
 
-def _without_evidence(text: str) -> str:
-    """Drop the front-matter lines the hub writer treats as the ``evidence`` field.
+_ANCHOR_ID = re.compile(r"c-[0-9a-f]{6}\Z")
+# The most ids the anchoring transform reserves for one card.
+ANCHOR_ID_LIMIT = 4096
+_ANCHOR_FIELD = "claim_anchor_ids: "
+
+
+def _anchor_id_line(line: str) -> bool:
+    """A reservation line holding only ids the writer mints, nothing after them."""
+    if not line.startswith(_ANCHOR_FIELD):
+        return False
+    try:
+        ids = json.loads(line[len(_ANCHOR_FIELD) :])
+    except ValueError:
+        return False
+    return (
+        isinstance(ids, list)
+        and len(ids) <= ANCHOR_ID_LIMIT
+        and all(isinstance(ident, str) and _ANCHOR_ID.fullmatch(ident) for ident in ids)
+    )
+
+
+def _hidden_line(line: str, keys: Collection[str]) -> bool:
+    """Whether search leaves `line` out: a blank line or a field with nothing to read."""
+    key = line.partition(":")[0]
+    if ":" not in line or key not in keys:
+        return False
+    return key != "claim_anchor_ids" or _anchor_id_line(line)
+
+
+def _without_keys(text: str, keys: Collection[str]) -> str:
+    """Drop the front-matter lines the hub writer treats as one of ``keys``, and blank lines.
 
     The lines come from the writer's own parse, so a blank line or a final newline in
-    the metadata reads the same before and after the writer rewrites it. Nothing is
+    the metadata reads the same before and after the writer rewrites it: the writer
+    inserts a field at the closing fence, after any trailing blank line. A
+    ``claim_anchor_ids`` line is dropped only while it holds nothing but anchor ids, so
+    a comment someone adds to it is still searched and digest-relevant. Nothing is
     dropped when the writer's closing fence and the search parser's differ.
     """
     if not text.startswith("---\n"):
@@ -66,21 +100,23 @@ def _without_evidence(text: str) -> str:
     meta, sep, body = text[4:].partition("\n---\n")
     if not sep:
         return text
-    lines = _writer_lines(meta)
-    kept = [line for line in lines if not (":" in line and line.partition(":")[0] == "evidence")]
-    if len(kept) == len(lines) or _front_matter_body(text) != body:
+    if _front_matter_body(text) != body:
         return text
-    # A front matter left with no lines goes too, so a card that gains its first evidence field reads the same.
+    lines = _writer_lines(meta)
+    kept = [line for line in lines if line.strip() and not _hidden_line(line, keys)]
+    # A front matter left with no lines goes too, so a card that gains its first reserved field reads the same.
     return "---\n" + "\n".join(kept) + "\n---\n" + body if kept else body
 
 
 def ranking_text(text: str) -> str:
     """The card as search sees it, the mirror of the hub's ``text::ranking_text``.
 
-    The evidence line goes first, because a reference holding ``<`` would
-    otherwise make the whole card opaque to the anchor span parser.
+    Evidence citations and claim-anchor reservations are stored and shown but
+    never searched, so anchoring a card cannot move any ranking. The evidence
+    line goes first, because a reference holding ``<`` would otherwise make the
+    whole card opaque to the anchor span parser.
     """
-    text = _without_evidence(text)
+    text = _without_keys(text, ("evidence", "claim_anchor_ids"))
     data = text.encode("utf-8")
     for start, end in sorted(hub_spans(text), reverse=True):
         block = data[start:end].decode("utf-8")

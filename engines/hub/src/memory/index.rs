@@ -53,7 +53,10 @@ pub const TOP: usize = 200;
 ///
 /// "2": the `evidence` front-matter line and anchor suffixes left the indexed
 /// text. A hub restart rebuilds the index, and older eval records stop binding.
-pub const FORMAT_VERSION: &str = "2";
+///
+/// "3": the `claim_anchor_ids` line and blank front-matter lines left it too,
+/// so a card the hub anchors reads the same to search before and after.
+pub const FORMAT_VERSION: &str = "3";
 /// Delta documents below this never start a rebuild, so a small index is not
 /// rebuilt on every write.
 pub const REBUILD_FLOOR: usize = 256;
@@ -1484,11 +1487,22 @@ mod projection_tests {
         for (what, text) in [
             ("anchor suffix", "needle ^c-abcdef\n"),
             ("evidence line", "---\nevidence: [\"a/b/c\"]\n---\nneedle\n"),
+            (
+                "anchor reservations",
+                "---\nclaim_anchor_ids: [\"c-abcdef\"]\n---\nneedle\n",
+            ),
         ] {
             let mut same = before.clone();
             same.text = text.into();
             assert_eq!(ranking_digest(&same, true), digest, "{what}");
         }
+        // Anything after the list is not the writer's form, so search reads the
+        // line and a change to it moves the digest.
+        let marked = "---\nclaim_anchor_ids: [\"c-abcdef\"] # hidden-marker\n---\nneedle\n";
+        assert!(text::ranking_text(marked).contains("hidden-marker"));
+        let mut same = before.clone();
+        same.text = marked.into();
+        assert_ne!(ranking_digest(&same, true), digest, "trailing marker");
         let mut same = before.clone();
         same.revision += 1;
         same.content_hash = "different".into();

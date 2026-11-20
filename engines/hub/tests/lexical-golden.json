@@ -1170,7 +1170,7 @@
   },
   {
    "card_id": "evidence-blank-middle-line",
-   "ranking_text": "---\n\ntitle: T\n---\nbody\n",
+   "ranking_text": "---\ntitle: T\n---\nbody\n",
    "text": "---\nevidence: [\"a/b/c\"]\n\ntitle: T\n---\nbody\n"
   },
   {
@@ -1182,6 +1182,16 @@
    "card_id": "fence-earlier-than-writers",
    "ranking_text": "---\ntitle: T\n---  \nevidence: [\"a/b/c\"]\n---\nClaim.\n",
    "text": "---\ntitle: T\n---  \nevidence: [\"a/b/c\"]\n---\nClaim.\n"
+  },
+  {
+   "card_id": "claim-anchor-ids",
+   "ranking_text": "---\ntitle: T\n---\nClaim.\n",
+   "text": "---\ntitle: T\nclaim_anchor_ids: [\"c-abcdef\"]\n---\nClaim. ^c-abcdef\n"
+  },
+  {
+   "card_id": "only-claim-anchor-ids",
+   "ranking_text": "Claim.\n",
+   "text": "---\nclaim_anchor_ids: [\"c-abcdef\"]\n---\nClaim.\n"
   }
  ],
  "round": [
