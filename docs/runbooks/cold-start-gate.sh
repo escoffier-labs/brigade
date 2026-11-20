@@ -55,8 +55,9 @@ refuse() {
   fi
 }
 
-# quickstart, as documented in docs/first-10-minutes.md
-expect "status: ok" brigade operator quickstart --target . --harnesses codex,claude
+# quickstart, as documented in docs/first-10-minutes.md. --no-care: the sandbox is
+# deleted on exit and this gate must never write a real scheduler entry on the caller's host.
+expect "status: ok" brigade operator quickstart --target . --harnesses codex,claude --no-care
 expect "ready: yes" brigade operator doctor --target . --profile local-operator
 
 # handoff draft and lint (the flow docs/first-10-minutes.md walks through)

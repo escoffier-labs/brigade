@@ -31,7 +31,17 @@ brigade memory care init --target .
 brigade daily init --target .
 ```
 
-If the host has no scheduler (a container, CI, a machine with no systemd user session), `brigade init` still exits 0, prints one warning that names `brigade care install --target <target>`, and `brigade init --json` reports the care step as `failed` with the reason. Run the named command once a scheduler exists. A repeat `brigade init` is safe: an already-installed schedule reports `installed` and no timer is restarted. `brigade init --dry-run` lists the extras and care steps without running them.
+The care step reports one of these statuses in `brigade init --json` (`care.status`), and `brigade operator quickstart` reports the same words on its `care-schedule` step:
+
+| Status | Meaning | What to run |
+| --- | --- | --- |
+| `installed` | Units written and every timer started. | Nothing. |
+| `installed` with `not_started` | Units written, but systemd could not start the timers. This happens on a host that has a systemd unit directory and no reachable user manager (a container, CI). Init still exits 0 and warns with the `systemctl --user` commands to run. | Those commands from a session that has a user manager, or `brigade care status --target <target>` to check. |
+| `unsupported` | Windows. `brigade care install` does not write the Windows scheduler in this release, so nothing was scheduled. Extras still turn on. | Nothing to run yet. |
+| `skipped` | `--no-care`. Neither extras nor the schedule were touched. | `brigade extras on`, then `brigade care install --target <target>`. |
+| `failed` | A real install error, such as an unwritable unit directory or an unsupported platform. Init still exits 0 and warns once. | The command named in the warning, once the cause is fixed. |
+
+A repeat `brigade init` is safe: an already-installed schedule reports `installed` and no timer is restarted. `brigade init --dry-run` lists the extras and care steps without running them.
 
 Replace `WORKSPACE` with the absolute path to your Brigade-wired repo or operator workspace. Every `brigade` command below assumes `cd` into that directory first, so `--target .` resolves correctly. In crontab lines, quote the path (`cd "WORKSPACE"`) so spaces and shell metacharacters do not break the job.
 

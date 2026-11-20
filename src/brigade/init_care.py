@@ -18,6 +18,7 @@ from typing import Any
 
 # Status values for the care step; the same words appear in `brigade init --json`.
 INSTALLED = "installed"
+UNSUPPORTED = "unsupported"
 SKIPPED = "skipped"
 FAILED = "failed"
 DRY_RUN = "dry-run"
@@ -52,12 +53,12 @@ def _enable_extras() -> dict[str, Any]:
     """`brigade extras on`, without rewriting a marker that already exists."""
     from . import extras
 
-    marker = extras.marker_path()
-    if marker.is_file():
-        return {"status": "already-enabled", "path": str(marker)}
     try:
+        marker = extras.marker_path()
+        if marker.is_file():
+            return {"status": "already-enabled", "path": str(marker)}
         path = extras.enable()
-    except OSError as exc:
+    except Exception as exc:  # fail open: OSError, or ValueError from a malformed XDG_CONFIG_HOME
         return {"status": FAILED, "reason": str(exc), "command": "brigade extras on"}
     return {"status": "enabled", "path": str(path)}
 
@@ -77,6 +78,15 @@ def _install_care(target: Path) -> dict[str, Any]:
     command = care_command(target)
     out, err = io.StringIO(), io.StringIO()
     try:
+        backend = care_cmd._resolve_backend(care_cmd.DEFAULT_BACKEND)
+        if backend == care_cmd.SCHTASKS_BACKEND:
+            # care install only prints Task Scheduler commands on Windows in this release,
+            # so report that nothing was scheduled instead of suggesting a command that cannot help.
+            return {
+                "status": UNSUPPORTED,
+                "backend": backend,
+                "reason": "care install does not write the Windows scheduler in this release",
+            }
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = care_cmd.install(target=target, json_output=True)
     except Exception as exc:  # fail open: a scheduler problem must never fail init
@@ -97,6 +107,7 @@ def _install_care(target: Path) -> dict[str, Any]:
         "status": INSTALLED,
         "backend": payload.get("backend"),
         "entries": len(payload.get("entries") or []),
+        "target": str(target),
         "command": command,
     }
     not_started = list(enable.get("start_failed") or [])
@@ -107,11 +118,48 @@ def _install_care(target: Path) -> dict[str, Any]:
 
 
 def run(target: Path) -> dict[str, Any]:
-    """Turn on extras, then install the care schedule. Never raises."""
-    target = target.expanduser().resolve()
-    # Extras first: the scheduled runbook entries are extras-gated.
-    extras_result = _enable_extras()
-    return {"extras": extras_result, "care": _install_care(target)}
+    """Turn on extras, then install the care schedule.
+
+    Never raises an ``Exception``: any failure becomes a ``failed`` status so init still exits 0.
+    ``KeyboardInterrupt`` and ``SystemExit`` are not caught and propagate.
+    """
+    command = care_command(target)
+    try:
+        target = target.expanduser().resolve()
+        command = care_command(target)
+        # Extras first: the scheduled runbook entries are extras-gated.
+        extras_result = _enable_extras()
+        care_result = _install_care(target)
+    except Exception as exc:  # fail open: a scheduling problem must never fail init
+        reason = f"{type(exc).__name__}: {exc}"
+        return {
+            "extras": {"status": FAILED, "reason": reason, "command": "brigade extras on"},
+            "care": {"status": FAILED, "reason": reason, "command": command},
+        }
+    return {"extras": extras_result, "care": care_result}
+
+
+def step_note(result: dict[str, Any]) -> str | None:
+    """One line a caller that prints its own step list shows for a care step that needs attention."""
+    care = result["care"]
+    if care["status"] == UNSUPPORTED:
+        return "care schedule: not supported on Windows yet, nothing was scheduled"
+    if care["status"] == INSTALLED and care.get("not_started"):
+        return f"{len(care['not_started'])} care timers were written but not started, run `brigade care status`"
+    if care["status"] == FAILED:
+        return f"care schedule not installed ({care.get('reason') or 'unknown error'})"
+    return None
+
+
+def follow_ups(result: dict[str, Any]) -> list[str]:
+    """Commands to run later for the steps that did not complete."""
+    extras_result, care = result["extras"], result["care"]
+    commands = []
+    if extras_result["status"] in {SKIPPED, FAILED}:
+        commands.append(extras_result["command"])
+    if care["status"] in {SKIPPED, FAILED}:
+        commands.append(care["command"])
+    return commands
 
 
 def report(result: dict[str, Any], *, stdout, stderr) -> None:
@@ -127,7 +175,8 @@ def report(result: dict[str, Any], *, stdout, stderr) -> None:
         return
     if extras_result["status"] == SKIPPED:
         print(
-            f"brigade: care schedule skipped ({extras_result['reason']}); install it later with `{care['command']}`",
+            f"brigade: care schedule skipped ({extras_result['reason']}). Turn on extras later with "
+            f"`{extras_result['command']}` and install the schedule with `{care['command']}`",
             file=stdout,
         )
         return
@@ -140,15 +189,26 @@ def report(result: dict[str, Any], *, stdout, stderr) -> None:
         )
     else:
         print(f"brigade: extras {extras_result['status'].replace('-', ' ')}", file=stdout)
-    if care["status"] == INSTALLED:
-        print(f"brigade: care schedule installed ({care['backend']}, {care['entries']} entries)", file=stdout)
-        if care.get("not_started"):
+    if care["status"] == UNSUPPORTED:
+        print("brigade: care schedule: not supported on Windows yet, nothing was scheduled", file=stdout)
+    elif care["status"] == INSTALLED:
+        not_started = care.get("not_started") or []
+        if not_started:
             print(
-                "warning: care timers were written but systemd could not start them; run:",
+                f"brigade: care schedule written ({care['backend']}, {care['entries']} entries), "
+                f"{len(not_started)} timers not started",
+                file=stdout,
+            )
+            print(
+                "warning: care timers were written but systemd could not start them "
+                "(no reachable systemd user manager?), start them from a session that has one:",
                 file=stderr,
             )
             for command in care.get("next_commands") or []:
                 print(f"  {command}", file=stderr)
+            print(f"  or check the state with `brigade care status --target {care['target']}`", file=stderr)
+        else:
+            print(f"brigade: care schedule installed ({care['backend']}, {care['entries']} entries)", file=stdout)
     else:
         print(
             f"warning: care schedule not installed ({care.get('reason') or 'unknown error'}); "

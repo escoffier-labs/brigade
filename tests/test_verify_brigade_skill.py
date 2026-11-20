@@ -384,6 +384,32 @@ def test_failed_brigade_init_leaves_no_target(tmp_path):
     assert removed["skipped"] == [{"path": str(target), "reason": "already gone"}]
 
 
+def test_throwaway_targets_skip_care_and_cleanup_uninstalls_it_first(tmp_path):
+    """new-target passes --no-care, and cleanup runs `care uninstall` before removing the directory."""
+    root = tmp_path / "state"
+    log = tmp_path / "calls.log"
+    fake = tmp_path / "fake_brigade.py"
+    fake.write_text(f"import sys\nopen({str(log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\nprint('{{}}')\n")
+    fake_brigade = shlex.join([sys.executable, str(fake)])
+
+    code, created = control("new-target", root=root, brigade=fake_brigade)
+    assert code == 0, created
+    target = Path(created["target"])
+    assert target.is_dir()
+
+    code, removed = control("cleanup", root=root, brigade=fake_brigade)
+    assert code == 0, removed
+    assert not target.exists()
+
+    calls = log.read_text().splitlines()
+    assert any(call.startswith("init ") and call.endswith("--no-care") for call in calls), calls
+    uninstall = [i for i, call in enumerate(calls) if call == f"care uninstall --target {target}"]
+    assert uninstall, calls
+    assert uninstall[0] > max(i for i, call in enumerate(calls) if call.startswith("init ")), (
+        "uninstall runs at cleanup"
+    )
+
+
 def test_init_dry_run_writes_nothing(tmp_path):
     root = tmp_path / "state"
     target = root / "targets" / "dry-run"
@@ -394,6 +420,7 @@ def test_init_dry_run_writes_nothing(tmp_path):
     assert payload["ok"] is True
     assert payload["dry_run"] is True
     assert payload["would_run"], "a dry run must show the command it skipped"
+    assert "--no-care" in payload["would_run"], "a throwaway target must never get a real schedule"
     assert list(target.iterdir()) == [], "a dry run must not write into the target"
 
 
@@ -405,6 +432,7 @@ def test_new_target_dry_run_creates_nothing(tmp_path):
     assert payload["ok"] is True
     assert payload["dry_run"] is True
     assert payload["would_run"], "a dry run must show the commands it skipped"
+    assert "--no-care" in payload["would_run"][1], "a throwaway target must never get a real schedule"
     assert list((root / "targets").iterdir()) == [], "a dry run must not create a target"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {}
     assert state.get("created_targets", []) == [], "a dry run must not record a target"

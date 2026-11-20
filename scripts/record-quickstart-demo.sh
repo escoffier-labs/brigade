@@ -23,7 +23,7 @@ trap 'rm -rf "$demo"' EXIT
 git init -q -b main "$demo/my-repo"
 
 version_out="$("$BRIGADE" --version)"
-quickstart_out="$(cd "$demo/my-repo" && HOME="$demo/home" "$BRIGADE" operator quickstart --target . --harnesses codex 2>&1)"
+quickstart_out="$(cd "$demo/my-repo" && HOME="$demo/home" "$BRIGADE" operator quickstart --target . --harnesses codex --no-care 2>&1)"
 doctor_out="$(cd "$demo/my-repo" && HOME="$demo/home" "$BRIGADE" operator doctor --target . --profile local-operator 2>&1)"
 
 python3 - "$CAST" <<PYEOF
@@ -55,7 +55,7 @@ def emit_output(text):
 
 type_command("brigade --version")
 emit_output(version_out)
-type_command("brigade operator quickstart --target my-repo --harnesses codex")
+type_command("brigade operator quickstart --target my-repo --harnesses codex --no-care")
 emit_output(quickstart_out)
 type_command("brigade operator doctor --target my-repo --profile local-operator")
 emit_output(doctor_out)

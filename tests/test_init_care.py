@@ -4,6 +4,9 @@ The suite never reaches a real scheduler: conftest points HOME and
 XDG_CONFIG_HOME at per-test temp dirs and replaces ``care_enable.run_systemctl``
 (the ``systemctl_calls`` fixture), so the in-process care install writes unit
 files under the temp config dir and records each systemctl call.
+
+The backend is injected, not detected: ``_backend`` pins ``auto`` to systemd so the
+same assertions hold on Linux, macOS and Windows. The Windows tests pin schtasks.
 """
 
 from __future__ import annotations
@@ -17,12 +20,19 @@ import pytest
 from brigade import care_cmd, care_enable, cli, extras, init_care
 
 
+@pytest.fixture(autouse=True)
+def _backend(monkeypatch):
+    """Resolve ``auto`` to systemd on every host so these tests never depend on the OS."""
+    real = care_cmd._resolve_backend
+    monkeypatch.setattr(care_cmd, "_resolve_backend", lambda backend: "systemd" if backend == "auto" else real(backend))
+
+
 def _init(target: Path, *extra: str, depth: str = "repo") -> int:
     return cli.main(["init", "--target", str(target), "--depth", depth, "--harnesses", "claude", *extra])
 
 
 def _unit_dir() -> Path:
-    return extras.marker_path().parent.parent / "systemd" / "user"
+    return care_cmd._systemd_user_dir()
 
 
 def _timers(target: Path) -> list[Path]:
@@ -57,8 +67,9 @@ def test_no_care_skips_extras_and_schedule(tmp_path, systemctl_calls, capsys):
     assert not extras.marker_path().exists()
     assert not _unit_dir().exists()
     assert systemctl_calls == []
-    assert f"brigade care install --target {target.resolve()}" in out
     assert "care schedule skipped (--no-care)" in out
+    assert "`brigade extras on`" in out
+    assert f"`brigade care install --target {target.resolve()}`" in out
 
 
 def test_dry_run_reports_the_plan_and_writes_nothing(tmp_path, systemctl_calls, capsys):
@@ -190,3 +201,212 @@ def test_failed_init_json_reports_the_care_step_as_not_run(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["exit_code"] == 5
     assert payload["care"]["status"] == "not-run"
+
+
+def test_unsupported_windows_scheduler_reports_it_and_still_turns_on_extras(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ws"
+    monkeypatch.setattr(care_cmd, "_resolve_backend", lambda backend: care_cmd.SCHTASKS_BACKEND)
+
+    def never(**kwargs):
+        raise AssertionError("care install must not run where it cannot schedule")
+
+    monkeypatch.setattr(care_cmd, "install", never)
+
+    assert _init(target) == 0
+
+    captured = capsys.readouterr()
+    assert extras.marker_path().is_file()
+    assert "brigade: care schedule: not supported on Windows yet, nothing was scheduled" in captured.out
+    assert "brigade: extras enabled" in captured.out
+    assert "brigade care install" not in captured.out + captured.err
+    assert "warning:" not in captured.err
+
+
+def test_unsupported_windows_scheduler_status_in_json(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ws"
+    monkeypatch.setattr(care_cmd, "_resolve_backend", lambda backend: care_cmd.SCHTASKS_BACKEND)
+
+    assert _init(target, "--json") == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["exit_code"] == 0
+    assert payload["extras"]["status"] == "enabled"
+    assert payload["care"]["status"] == "unsupported"
+    assert payload["care"]["backend"] == "schtasks"
+    assert "command" not in payload["care"], "no command can help, so none is suggested"
+
+
+def test_unstarted_timers_are_reported_as_installed_with_a_not_started_list(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ws"
+    monkeypatch.setattr(care_enable, "run_systemctl", lambda args: (False, "Failed to connect to bus"))
+
+    assert _init(target, "--json") == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["care"]["status"] == "installed"
+    assert payload["care"]["not_started"], "the timers that did not start are listed"
+    assert any(command.startswith("systemctl --user") for command in payload["care"]["next_commands"])
+    assert _timers(target), "the unit files were still written"
+
+
+def test_unstarted_timers_do_not_read_as_a_clean_install_in_prose(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ws"
+    monkeypatch.setattr(care_enable, "run_systemctl", lambda args: (False, "Failed to connect to bus"))
+
+    assert _init(target) == 0
+
+    captured = capsys.readouterr()
+    out = captured.out
+    assert "care schedule written (systemd, 6 entries), 6 timers not started" in out
+    assert "care schedule installed" not in out
+    err = captured.err
+    assert "systemctl --user daemon-reload" in err
+    assert f"brigade care status --target {target.resolve()}" in err
+
+
+def test_a_malformed_config_home_never_fails_init(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ws"
+
+    def malformed(*args, **kwargs):
+        raise ValueError("embedded null byte")
+
+    monkeypatch.setattr(extras, "enable", malformed)
+
+    assert _init(target, "--json") == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["exit_code"] == 0
+    assert payload["extras"]["status"] == "failed"
+    assert "embedded null byte" in payload["extras"]["reason"]
+
+
+def test_any_exception_in_the_step_becomes_a_failed_status(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ws"
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("marker path exploded")
+
+    monkeypatch.setattr(extras, "marker_path", boom)
+    monkeypatch.setattr(init_care, "_install_care", boom)
+
+    assert _init(target, "--json") == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["care"]["status"] == "failed"
+    assert "marker path exploded" in payload["care"]["reason"]
+    assert payload["extras"]["status"] == "failed"
+    assert (target / ".brigade/config.json").is_file()
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_interrupts_still_propagate_out_of_the_step(tmp_path, monkeypatch, interrupt):
+    def stop(*args, **kwargs):
+        raise interrupt()
+
+    monkeypatch.setattr(extras, "enable", stop)
+
+    with pytest.raises(interrupt):
+        init_care.run(tmp_path)
+
+
+def _quickstart(target: Path, *extra: str) -> int:
+    return cli.main(["operator", "quickstart", "--target", str(target), "--harnesses", "codex", "--json", *extra])
+
+
+def _care_step(payload: dict) -> dict:
+    return next(step for step in payload["steps"] if step["id"] == "care-schedule")
+
+
+def test_quickstart_installs_care_after_a_successful_install(tmp_path, systemctl_calls, capsys):
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    assert _quickstart(target) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    step = _care_step(payload)
+    assert step["status"] == "installed"
+    assert step["care"]["backend"] == "systemd"
+    assert extras.marker_path().is_file()
+    assert _timers(target)
+    assert systemctl_calls[0] == ["daemon-reload"]
+
+
+def test_quickstart_no_care_skips_both_steps_and_names_the_commands(tmp_path, systemctl_calls, capsys):
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    assert _quickstart(target, "--no-care") == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert _care_step(payload)["status"] == "skipped"
+    assert not extras.marker_path().exists()
+    assert not _unit_dir().exists()
+    assert systemctl_calls == []
+    assert "brigade extras on" in payload["next_commands"]
+    assert f"brigade care install --target {target.resolve()}" in payload["next_commands"]
+
+
+def test_quickstart_dry_run_plans_the_care_step_and_writes_nothing(tmp_path, systemctl_calls, capsys):
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    assert _quickstart(target, "--dry-run") == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert _care_step(payload)["status"] == "planned"
+    assert not extras.marker_path().exists()
+    assert not _unit_dir().exists()
+    assert systemctl_calls == []
+
+
+def test_quickstart_fails_open_when_care_cannot_install(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    def explode(**kwargs):
+        raise RuntimeError("no scheduler here")
+
+    monkeypatch.setattr(care_cmd, "install", explode)
+
+    assert _quickstart(target) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    step = _care_step(payload)
+    assert step["status"] == "failed"
+    assert "no scheduler here" in step["care"]["reason"]
+    assert f"brigade care install --target {target.resolve()}" in payload["next_commands"]
+    assert (target / ".brigade/config.json").is_file()
+
+
+def test_quickstart_reports_unsupported_on_windows(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ws"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_resolve_backend", lambda backend: care_cmd.SCHTASKS_BACKEND)
+
+    assert _quickstart(target) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    step = _care_step(payload)
+    assert step["status"] == "unsupported"
+    assert "nothing was scheduled" in step["note"]
+    assert not any("brigade care install" in command for command in payload["next_commands"])
+
+
+def test_quickstart_skips_the_care_step_when_the_install_fails(tmp_path, monkeypatch, capsys):
+    from brigade.operator_cmd import lifecycle
+
+    target = tmp_path / "ws"
+    target.mkdir()
+
+    def never(*args, **kwargs):
+        raise AssertionError("care step must not run after a failed install")
+
+    monkeypatch.setattr(lifecycle, "install_selection", lambda **kwargs: 5)
+    monkeypatch.setattr(init_care, "run", never)
+
+    assert _quickstart(target) != 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert all(step["id"] != "care-schedule" for step in payload["steps"])

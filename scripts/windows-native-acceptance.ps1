@@ -1472,7 +1472,7 @@ def call_greet():
 "@ | Set-Content -Path $samplePath -Encoding UTF8
 
         Write-Step "operator quickstart"
-        & brigade operator quickstart --target $workRepo --harnesses codex --json
+        & brigade operator quickstart --target $workRepo --harnesses codex --no-care --json
         if ($LASTEXITCODE -ne 0) { throw "operator quickstart failed" }
 
         Write-Step "operator doctor"

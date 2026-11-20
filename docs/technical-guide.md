@@ -1206,7 +1206,7 @@ brigade operator status --profile internal-dogfood --target .
 brigade daily status --target .
 ```
 
-`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, scaffolds the MCP catalog and dogfood/work-loop config, projects harness files, verifies handoff writer inboxes for selected harnesses, and prints the next commands. Workspace, `--full`, and pack-based quickstarts also import built-in portable tools and skills. It is local-only: no daemons, hooks, publishing, pushing, tagging, or remote mutation. For a failed quickstart, use `brigade bug report --summary "What happened and what you expected" --dry-run` to prepare and review a redacted report.
+`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, scaffolds the MCP catalog and dogfood/work-loop config, projects harness files, turns on extras and installs the care schedule (the same step `brigade init` runs, skipped with `--no-care`, and a host with no scheduler only warns), verifies handoff writer inboxes for selected harnesses, and prints the next commands. Workspace, `--full`, and pack-based quickstarts also import built-in portable tools and skills. It is local-only: no publishing, pushing, tagging, or remote mutation. The only host change beyond the target is the care schedule's user-level timers, and `--no-care` skips them. For a failed quickstart, use `brigade bug report --summary "What happened and what you expected" --dry-run` to prepare and review a redacted report.
 
 Task ledger commands:
 

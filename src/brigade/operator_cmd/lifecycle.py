@@ -422,6 +422,7 @@ def quickstart(
     dry_run: bool = False,
     force: bool = False,
     full: bool = False,
+    care: bool = True,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -518,6 +519,8 @@ def quickstart(
 
     steps.append(_quickstart_mcp_onramp(target, dry_run=dry_run, force=force))
     steps.append(_quickstart_dogfood(target, dry_run=dry_run, force=force))
+    care_step = _quickstart_care(target, enabled=care, dry_run=dry_run)
+    steps.append(care_step)
 
     if dry_run:
         for harness in selected_harnesses:
@@ -562,6 +565,8 @@ def quickstart(
     if dry_run:
         ok = install_rc == 0 and init_rc == 0 and portable_rc == 0
     next_commands = _quickstart_next_commands(selected_harnesses, dry_run=dry_run)
+    if not dry_run:
+        next_commands = list(dict.fromkeys([*next_commands, *care_step.get("follow_ups", [])]))
     if not dry_run and not ok:
         recoveries = [
             step.get("recovery_command")
@@ -589,6 +594,37 @@ def quickstart(
         return 0 if ok else 1
     _print_quickstart(payload)
     return 0 if ok else 1
+
+
+def _quickstart_care(target: Path, *, enabled: bool, dry_run: bool) -> dict[str, Any]:
+    """Turn on extras and install the care schedule, the same step `brigade init` runs.
+
+    Fails open: a host with no scheduler leaves quickstart ok, with the step's status
+    and one note naming what to run later. The caller reaches this only after the install succeeded.
+    """
+    from .. import init_care
+
+    if not enabled:
+        result = init_care.skipped(target, "--no-care")
+    elif dry_run:
+        result = init_care.plan(target)
+    else:
+        result = init_care.run(target)
+    care = result["care"]
+    step: dict[str, Any] = {
+        "id": "care-schedule",
+        "status": "planned" if care["status"] == init_care.DRY_RUN else care["status"],
+        "return_code": 0,
+        "extras": result["extras"],
+        "care": care,
+    }
+    note = init_care.step_note(result)
+    if note:
+        step["note"] = note
+    follow_ups = init_care.follow_ups(result)
+    if follow_ups:
+        step["follow_ups"] = follow_ups
+    return step
 
 
 def _quickstart_mcp_onramp(target: Path, *, dry_run: bool, force: bool) -> dict[str, Any]:
@@ -765,6 +801,8 @@ def _print_quickstart(payload: dict[str, Any]) -> None:
             else ""
         )
         print(f"[{step.get('status')}] {step.get('id')}{advisory}")
+        if step.get("note"):
+            print(f"  {step['note']}")
         if payload.get("dry_run"):
             for line in _planned_write_lines(step):
                 print(f"  {line}")
