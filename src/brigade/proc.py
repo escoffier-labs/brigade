@@ -41,6 +41,11 @@ _UNSUPPORTED_WINDOWS_SUFFIXES: dict[str, str] = {
 _WINDOWS_BATCH_SUFFIXES = frozenset({".cmd", ".bat"})
 _WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 _TIMED_OUT_DRAIN_SECONDS = 0.5
+# Bound for a supervised run's descendants to finish after the direct child
+# exits before the owned group is reaped (``group_drain_seconds`` in run()).
+# A caller that publishes the run's files must not read them while a descendant
+# is still writing (#2286).
+GROUP_DRAIN_SECONDS = 5.0
 # Forced nonzero exit for a terminated post-exit process group: the direct
 # child's zero must never stand once its output pipes were cut off mid-stream.
 _INCOMPLETE_GROUP_EXIT_CODE = 125
@@ -494,6 +499,29 @@ def _wait_for_processes(processes: tuple[subprocess.Popen[bytes], ...], timeout:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
+        time.sleep(min(0.01, remaining))
+
+
+def _process_group_exit(process: subprocess.Popen[bytes], timeout: float) -> bool | None:
+    """Wait bounded for the launched child's group to empty.
+
+    ``True`` means members outlived ``timeout``, ``False`` means the group is
+    empty, and ``None`` means this platform cannot probe it (Windows owns a job
+    object instead), so the group's fate is unconfirmed rather than absent.
+    """
+    if os.name != "posix":
+        return None
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while True:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            pass  # EPERM: members exist that this caller may not signal
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
         time.sleep(min(0.01, remaining))
 
 
@@ -1118,6 +1146,7 @@ def _collect_process_output(
     process_registry: ProcessRegistry | None,
     child_job: _WindowsChildJob | None = None,
     supervise_group: bool = False,
+    group_drain_seconds: float = 0.0,
     started_threads: list[threading.Thread] | None = None,
 ) -> Result:
     collector = _BoundedCollector()
@@ -1164,6 +1193,7 @@ def _collect_process_output(
 
     timed_out = False
     incomplete_group = False
+    group_unreaped = False
     descendants_reaped = False
     cleanup_error: str | None = None
 
@@ -1209,9 +1239,19 @@ def _collect_process_output(
         # Supervised runs (scanner launches): once the direct child is gone,
         # reap the owned group even when every capture pipe closed cleanly, so
         # an escaped descendant cannot outlive the run while holding workspace
-        # locks. The direct child's exit status stands.
-        bounded_stop()
-        descendants_reaped = True
+        # locks. The direct child's exit status stands. A run that asked for a
+        # group drain first waits for descendants still finishing the run's own
+        # output: killing them mid-write published a half-written import file
+        # that later failed its identity checks (#2286).
+        drained = _process_group_exit(process, group_drain_seconds) if group_drain_seconds > 0 else True
+        if drained is not False:
+            bounded_stop()
+            descendants_reaped = True
+            if group_drain_seconds > 0 and drained is True:
+                # A group that outlived both the drain and its termination is
+                # not provably gone, so its run must fail closed.
+                group_unreaped = _process_group_exit(process, _TIMED_OUT_DRAIN_SECONDS) is True
+                incomplete_group = group_unreaped
 
     if timed_out or collector.stream_limit_exceeded or incomplete_group:
         bounded_stop()
@@ -1267,7 +1307,9 @@ def _collect_process_output(
         extras.append(f"timeout after {timeout}s")
     if incomplete_group:
         extras.append(
-            "process group kept the output pipes open after child exit; output incomplete and group terminated"
+            "process group still running after child exit; output incomplete and group terminated"
+            if group_unreaped
+            else "process group kept the output pipes open after child exit; output incomplete and group terminated"
         )
     if cleanup_error is not None:
         extras.append(f"process group cleanup failed ({cleanup_error}); output may be incomplete")
@@ -1422,6 +1464,7 @@ def run(
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
     supervise_group: bool = False,
+    group_drain_seconds: float = 0.0,
 ) -> Result:
     return _launch_and_collect(
         args,
@@ -1432,6 +1475,7 @@ def run(
         stdin=stdin,
         process_registry=process_registry,
         supervise_group=supervise_group,
+        group_drain_seconds=group_drain_seconds,
     )
 
 
@@ -1716,6 +1760,7 @@ def _launch_and_collect(
     stdin: bytes | None = None,
     process_registry: ProcessRegistry | None = None,
     supervise_group: bool = False,
+    group_drain_seconds: float = 0.0,
     pass_fds: tuple[int, ...] = (),
 ) -> Result:
     _check_launch_allowed(process_registry)
@@ -1773,6 +1818,7 @@ def _launch_and_collect(
             process_registry=process_registry,
             child_job=child_job,
             supervise_group=supervise_group,
+            group_drain_seconds=group_drain_seconds,
             started_threads=started_threads,
         )
     except BaseException:

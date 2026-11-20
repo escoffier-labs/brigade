@@ -5008,6 +5008,145 @@ def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
 
 
 @requires_scanner_descriptors
+def test_scanner_waits_for_descendant_that_finishes_the_import_after_the_parent_exits(tmp_path):
+    """#2286: a descendant that finishes the import file after the direct child
+    exits must run to completion before the file is validated and ingested.
+
+    The descendant writes an empty import file, announces itself, waits for the
+    parent to be gone, then finishes the record. Reading before the whole group
+    is gone sees the empty file, so the run either ingests nothing or reports a
+    read error that names the wrong cause.
+    """
+    from brigade.work_cmd import scanners as scanners_mod
+
+    started = tmp_path / "descendant-started"
+    descendant = tmp_path / "descendant.py"
+    descendant.write_text(
+        "import hashlib, json, os, sys\n"
+        "from pathlib import Path\n"
+        "started = Path(sys.argv[1])\n"
+        "import_path = Path.cwd() / '.brigade' / 'scanner-imports.jsonl'\n"
+        "import_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "parent = os.getppid()\n"
+        "import_path.write_text('')\n"
+        "started.write_text('1')\n"
+        "while os.getppid() == parent:\n"
+        "    pass\n"
+        "digest = b''\n"
+        "blob = b'x' * (4 << 20)\n"
+        "for _ in range(8):\n"
+        "    digest = hashlib.sha256(digest + blob).digest()\n"
+        "record = {'kind': 'task', 'source': 'late-import',\n"
+        "          'text': 'descendant finished the import file',\n"
+        "          'metadata': {'digest': digest.hex()}}\n"
+        "import_path.write_text(json.dumps(record) + '\\n')\n"
+    )
+    script = tmp_path / "late_import.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "started = Path(sys.argv[1])\n"
+        "subprocess.Popen(\n"
+        f"    [sys.executable, {str(descendant)!r}, {str(started)!r}],\n"
+        "    stdin=subprocess.DEVNULL,\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "for _ in range(6000):\n"
+        "    if started.exists():\n"
+        "        break\n"
+        "    time.sleep(0.005)\n"
+        "print('scanner parent done', flush=True)\n"
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "late-import"
+source = "late-import"
+command = "{sys.executable} {script} {started}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    payload, rc = scanners_mod._scanners_run_payload(
+        target=tmp_path,
+        scanner_id="late-import",
+        force=True,
+        ingest_output=True,
+    )
+    run = payload["runs"][0]
+
+    assert run["status"] == "completed", payload
+    assert run["exit_code"] == 0
+    assert not payload.get("ingest_errors"), payload
+    assert rc == 0, payload
+    assert run["ingest_output"]["created"] == 1, run
+    imports = work_cmd.ledger._read_imports(tmp_path)
+    assert [item["text"] for item in imports] == ["descendant finished the import file"]
+
+
+@requires_scanner_descriptors
+def test_scanner_run_names_descendants_instead_of_an_import_read_error(tmp_path, monkeypatch):
+    """#2286: a group that cannot be confirmed gone is named, not blamed on the
+    import file, and its run never reports the file as the failed cause."""
+    from brigade import proc as proc_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    script = tmp_path / "writer.py"
+    script.write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "path = Path.cwd() / '.brigade' / 'scanner-imports.jsonl'\n"
+        "path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record = {'kind': 'task', 'source': 'stuck-group', 'text': 'stuck group import'}\n"
+        "path.write_text(json.dumps(record) + '\\n')\n"
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "stuck-group"
+source = "stuck-group"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+    monkeypatch.setattr(proc_mod, "_process_group_exit", lambda _process, _timeout: True)
+
+    payload, rc = scanners_mod._scanners_run_payload(
+        target=tmp_path,
+        scanner_id="stuck-group",
+        force=True,
+        ingest_output=True,
+    )
+    run = payload["runs"][0]
+
+    assert rc == 1, payload
+    assert run["status"] == "failed", run
+    assert run["incomplete_process_group"] is True
+    error = str(run.get("error"))
+    assert "scanner descendants still running" in error, error
+    assert "import file not found" not in error, error
+    assert "cannot read import file" not in error, error
+    assert "ingest_output" not in run
+
+
+@requires_scanner_descriptors
 def test_ingestion_lock_timeout_marks_run_failed_and_returns_nonzero(tmp_path, monkeypatch):
     """Round 6 (M1): a writer-lock timeout during ingestion must fail the run
     and the command's exit code, not report rc 0 with every import rejected."""
