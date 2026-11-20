@@ -37,8 +37,10 @@ pub fn random_bytes(out: &mut [u8]) -> io::Result<()> {
             BCRYPT_USE_SYSTEM_PREFERRED_RNG,
         )
     };
-    // NTSTATUS: zero is success and a negative value is an error.
-    if status < 0 {
+    // NTSTATUS: only zero is success. Every non-zero value fails closed,
+    // including a positive informational one such as STATUS_PENDING, so `out`
+    // is never returned partly or wholly unwritten.
+    if status != 0 {
         return Err(io::Error::other(format!(
             "BCryptGenRandom failed with NTSTATUS {status:#010x}"
         )));

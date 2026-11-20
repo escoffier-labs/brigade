@@ -410,13 +410,13 @@ fn settled(command: &Write, tx: &dyn WriteTx) -> Json {
 struct Unavailable;
 impl Seeds for Unavailable {
     fn client_id(&self) -> Result<String, Fail> {
-        Err(random_unavailable())
+        Err(Fail::unavailable())
     }
     fn event(&self) -> Result<String, Fail> {
-        Err(random_unavailable())
+        Err(Fail::unavailable())
     }
     fn question(&self) -> Result<[String; 2], Fail> {
-        Err(random_unavailable())
+        Err(Fail::unavailable())
     }
 }
 
@@ -445,7 +445,10 @@ fn ack_and_question_status_mint_no_id_and_never_ask_the_source() {
         "{status}"
     );
     // The same source does refuse a write that must mint an id, so the two
-    // answers above are laziness and not a source nobody consults.
+    // answers above are laziness and not a source nobody consults. The answer
+    // is the route's, which keeps main's `busy` reply: 503 with
+    // `retry-after: 1` (asserted with the body bytes in
+    // `messages_route::tests::an_unavailable_random_source_answers_exactly_as_busy_did`).
     let send = settled(
         &write_with(
             json!({"action": "send", "to": "node-b", "subject": "s", "body": "b"}),
@@ -453,5 +456,5 @@ fn ack_and_question_status_mint_no_id_and_never_ask_the_source() {
         ),
         &tx,
     );
-    assert_eq!(send["status"], 503, "{send}");
+    assert_eq!(send, unavailable_answer());
 }

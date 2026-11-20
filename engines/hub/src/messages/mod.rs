@@ -75,6 +75,9 @@ pub enum Fail {
     Inactive(String),
     Auth(String),
     Reply(Reply),
+    /// The OS random source could not supply an id. Main answered this from
+    /// the route with `busy`, so the route keeps that exact answer.
+    Unavailable,
     /// Leave the request to the Python upstream. Nothing was written.
     Python,
     Sql(rusqlite::Error),
@@ -110,6 +113,11 @@ impl Fail {
             code,
             recipient: recipient.map(Into::into),
         }
+    }
+    /// The OS random source could not supply an id: a 503 `messages-unavailable`
+    /// with `retry-after: 1`, built by the route as main's `busy` built it.
+    pub fn unavailable() -> Self {
+        Self::Unavailable
     }
     fn auth(message: &str) -> Self {
         Self::Auth(message.into())
@@ -161,7 +169,9 @@ impl Fail {
                 object(&[error(&message), ("code", quote("message_sender_inactive"))]),
             ),
             Self::Reply(reply) => reply,
-            Self::Python | Self::Sql(_) => return None,
+            // The route answers these itself: `busy` for the random source,
+            // the upstream for Python, and the writer for SQLite.
+            Self::Unavailable | Self::Python | Self::Sql(_) => return None,
         })
     }
 }
@@ -1129,23 +1139,12 @@ impl Seeds for OsSeeds {
 /// 16 bytes from [`crate::platform`] as 32 lowercase hex characters.
 fn hex16() -> Result<String, Fail> {
     let mut raw = [0u8; 16];
-    crate::platform::random_bytes(&mut raw).map_err(|_| random_unavailable())?;
+    crate::platform::random_bytes(&mut raw).map_err(|_| Fail::unavailable())?;
     Ok(raw.iter().fold(String::with_capacity(32), |mut out, b| {
         use std::fmt::Write;
         let _ = write!(out, "{b:02x}");
         out
     }))
-}
-/// The answer for a write that needs a random id the OS cannot supply: the
-/// same 503 the route answers with `messages-unavailable`. Nothing was written.
-pub fn random_unavailable() -> Fail {
-    Fail::Reply((
-        503,
-        object(&[
-            ("error", quote("hub busy")),
-            ("reason", quote("messages-unavailable")),
-        ]),
-    ))
 }
 /// Seed material a test fixes, so a replay or a cut schedule sees the same ids.
 #[cfg(test)]
@@ -1184,6 +1183,12 @@ pub struct Write {
 pub fn python_answer() -> Json {
     json!({"python": true})
 }
+/// `{"unavailable": true}` tells the route the OS random source could not be
+/// read, so it answers as main's route did: 503, the `messages-unavailable`
+/// body and `retry-after: 1`. Nothing was written.
+pub fn unavailable_answer() -> Json {
+    json!({"unavailable": true})
+}
 pub fn pack((status, body): Reply) -> Json {
     json!({"status": status, "body": body})
 }
@@ -1209,6 +1214,7 @@ impl Command for Write {
                 Ok(pack(reply))
             }
             Err(Fail::Python) => Err(ApplyError::Refused(python_answer())),
+            Err(Fail::Unavailable) => Err(ApplyError::Refused(unavailable_answer())),
             Err(Fail::Sql(e)) => Err(e.into()),
             Err(fail) => Err(ApplyError::Refused(pack(fail.reply().unwrap()))),
         }
