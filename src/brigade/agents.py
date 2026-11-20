@@ -28,6 +28,7 @@ from .antigravity_help import (  # noqa: F401  re-exported for callers and tests
     _ANTIGRAVITY_PLAN_MODE_WARNED,
     _antigravity_env_fingerprint,
     _antigravity_help_supports,
+    _antigravity_no_output_detail,
     _antigravity_supports_print_timeout,
     _antigravity_help_lists_plan_mode,
     _antigravity_supports_mode,
@@ -263,12 +264,14 @@ def _antigravity_argv(
     ):
         seconds = max(60, int(timeout_seconds) - 30)
         timeout_flags = ["--print-timeout", f"{seconds}s"]
+    effective_cwd = cwd if cwd is not None else Path.cwd().resolve()
     if read_only or sandbox == "read-only":
         # --sandbox restricts the terminal only; file edit tools stay available.
         # Plan mode is what stops writes, so add it whenever agy advertises it.
+        # Headless agy auto-denies reads outside its allowed dirs, so a
+        # read-only seat needs --add-dir for the checkout it was pointed at.
         mode_flags = ["--mode", "plan"] if mode_supported else []
-        return ["agy", "--sandbox", *mode_flags, *timeout_flags, "--print", prompt]
-    effective_cwd = cwd if cwd is not None else Path.cwd().resolve()
+        return ["agy", "--add-dir", str(effective_cwd), "--sandbox", *mode_flags, *timeout_flags, "--print", prompt]
     argv = ["agy", "--add-dir", str(effective_cwd)]
     argv.extend(["--dangerously-skip-permissions", *timeout_flags, "--print", prompt])
     return argv
@@ -1728,6 +1731,20 @@ def run_agent(
             stop_reason=grok_stop_reason,
             session_id=grok_session_id,
             request_id=grok_request_id,
+        )
+    antigravity_no_output = _antigravity_no_output_detail(result.stdout) if cli_ref == "antigravity" else None
+    if antigravity_no_output is not None:
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=scrub_detail(antigravity_no_output)[:200],
+            failure_phase="output-validation",
+            failure_kind="permission-denied",
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            requested_model=model,
+            reasoning=reasoning,
         )
     if not text:
         detail = "empty output"

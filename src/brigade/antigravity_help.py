@@ -144,3 +144,20 @@ def _warn_antigravity_plan_mode_unsupported(executable: str) -> None:
         "Upgrade agy to enforce read-only.",
         file=sys.stderr,
     )
+
+
+_ANTIGRAVITY_NO_OUTPUT_MARKER = "jetski: no output produced"
+
+
+def _antigravity_no_output_detail(stdout: str) -> str | None:
+    """Return agy's own text when a headless run exited 0 without doing the work.
+
+    agy auto-denies a tool permission it cannot prompt for, prints
+    ``jetski: no output produced`` plus a note naming the denied permission, and
+    still exits 0. The caller turns that into a failed run so the seat is not
+    recorded as a success with an empty report.
+    """
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines or lines[0].strip() != _ANTIGRAVITY_NO_OUTPUT_MARKER:
+        return None
+    return " ".join(" ".join(lines).split())

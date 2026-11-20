@@ -101,7 +101,14 @@ def test_build_argv_for_read_only_codex():
         "hi",
     ]
     assert agents.build_argv("opencode", "hi", read_only=True) == ["opencode", "run", "hi"]
-    assert agents.build_argv("antigravity", "hi", read_only=True) == ["agy", "--sandbox", "--print", "hi"]
+    assert agents.build_argv("antigravity", "hi", read_only=True) == [
+        "agy",
+        "--add-dir",
+        str(Path.cwd().resolve()),
+        "--sandbox",
+        "--print",
+        "hi",
+    ]
     assert agents.build_argv("pi", "hi", read_only=True) == ["pi", "--tools", "read,grep,find,ls", "-p", "hi"]
     assert agents.build_argv("cursor", "hi", read_only=True) == [
         "cursor-agent",
@@ -447,19 +454,29 @@ def test_build_argv_antigravity_writable_uses_current_cwd_when_cwd_omitted(tmp_p
 def test_build_argv_antigravity_read_only_keeps_sandbox_without_write_flags(tmp_path):
     assert agents.build_argv("antigravity", "hi", read_only=True, cwd=tmp_path) == [
         "agy",
+        "--add-dir",
+        str(tmp_path),
         "--sandbox",
         "--print",
         "hi",
     ]
     argv = agents.build_argv("antigravity", "hi", sandbox="read-only", cwd=tmp_path)
-    assert argv == ["agy", "--sandbox", "--print", "hi"]
-    assert "--add-dir" not in argv
+    assert argv == ["agy", "--add-dir", str(tmp_path), "--sandbox", "--print", "hi"]
     assert "--dangerously-skip-permissions" not in argv
+
+
+def test_build_argv_antigravity_read_only_add_dir_uses_current_cwd_when_cwd_omitted(tmp_path, monkeypatch):
+    # #2814: headless agy auto-denies reads outside its allowed dirs, so the
+    # read-only argv passes --add-dir exactly like the write argv does.
+    monkeypatch.chdir(tmp_path)
+
+    argv = agents.build_argv("antigravity", "hi", read_only=True)
+    assert argv == ["agy", "--add-dir", str(tmp_path.resolve()), "--sandbox", "--print", "hi"]
 
 
 def test_build_argv_antigravity_read_only_adds_plan_mode_when_supported(tmp_path):
     argv = agents.build_argv("antigravity", "hi", read_only=True, cwd=tmp_path, antigravity_mode_supported=True)
-    assert argv == ["agy", "--sandbox", "--mode", "plan", "--print", "hi"]
+    assert argv == ["agy", "--add-dir", str(tmp_path), "--sandbox", "--mode", "plan", "--print", "hi"]
     sandboxed = agents.build_argv(
         "antigravity", "hi", sandbox="read-only", cwd=tmp_path, antigravity_mode_supported=True
     )
@@ -478,6 +495,8 @@ def test_build_argv_antigravity_read_only_adds_plan_mode_when_supported(tmp_path
         "agy",
         "--model",
         "gemini-4-hydrogen-low",
+        "--add-dir",
+        str(Path.cwd().resolve()),
         "--sandbox",
         "--mode",
         "plan",
@@ -499,7 +518,7 @@ def test_build_argv_antigravity_read_only_keeps_legacy_argv_when_mode_unsupporte
         argv = agents.build_argv(
             "antigravity", "hi", read_only=True, cwd=tmp_path, antigravity_mode_supported=supported
         )
-        assert argv == ["agy", "--sandbox", "--print", "hi"]
+        assert argv == ["agy", "--add-dir", str(tmp_path), "--sandbox", "--print", "hi"]
 
 
 def test_antigravity_supports_mode_probe_detects_flag_and_plan_value(monkeypatch):
@@ -575,19 +594,19 @@ def _run_antigravity_read_only(monkeypatch, tmp_path, help_text):
 def test_run_agent_antigravity_read_only_probes_resolved_seat_and_adds_plan_mode(monkeypatch, tmp_path):
     res, launched = _run_antigravity_read_only(monkeypatch, tmp_path, "--mode <mode> accept-edits, auto, plan")
     assert res.ok is True
-    assert launched == [["/seat/bin/agy", "--sandbox", "--mode", "plan", "--print", "hi"]]
+    assert launched == [["/seat/bin/agy", "--add-dir", str(tmp_path), "--sandbox", "--mode", "plan", "--print", "hi"]]
 
 
 def test_run_agent_antigravity_read_only_keeps_legacy_argv_on_old_agy(monkeypatch, tmp_path):
     res, launched = _run_antigravity_read_only(monkeypatch, tmp_path, "--model <id>\n--sandbox")
     assert res.ok is True
-    assert launched == [["/seat/bin/agy", "--sandbox", "--print", "hi"]]
+    assert launched == [["/seat/bin/agy", "--add-dir", str(tmp_path), "--sandbox", "--print", "hi"]]
 
 
 def test_run_agent_antigravity_read_only_warns_once_when_plan_mode_unsupported(monkeypatch, tmp_path, capsys):
     res, launched = _run_antigravity_read_only(monkeypatch, tmp_path, "--model <id>\n--sandbox")
     assert res.ok is True
-    assert launched == [["/seat/bin/agy", "--sandbox", "--print", "hi"]]
+    assert launched == [["/seat/bin/agy", "--add-dir", str(tmp_path), "--sandbox", "--print", "hi"]]
     err = capsys.readouterr().err
     assert err.count("read-only by prompt only") == 1
     assert "Upgrade agy" in err
@@ -647,6 +666,8 @@ def test_build_argv_antigravity_with_timeout_seconds_and_help_probe_adds_print_t
     read_only_argv = agents.build_argv("antigravity", "hi", read_only=True, timeout_seconds=900)
     assert read_only_argv == [
         "agy",
+        "--add-dir",
+        str(Path.cwd().resolve()),
         "--sandbox",
         "--print-timeout",
         "870s",
@@ -692,10 +713,11 @@ def test_build_argv_antigravity_timeout_floor(monkeypatch):
     monkeypatch.setattr(agents, "_antigravity_supports_print_timeout", lambda *args, **kwargs: True)
 
     argv_60 = agents.build_argv("antigravity", "hi", read_only=True, timeout_seconds=60)
-    assert argv_60 == ["agy", "--sandbox", "--print-timeout", "60s", "--print", "hi"]
+    cwd = str(Path.cwd().resolve())
+    assert argv_60 == ["agy", "--add-dir", cwd, "--sandbox", "--print-timeout", "60s", "--print", "hi"]
 
     argv_30 = agents.build_argv("antigravity", "hi", read_only=True, timeout_seconds=30)
-    assert argv_30 == ["agy", "--sandbox", "--print-timeout", "60s", "--print", "hi"]
+    assert argv_30 == ["agy", "--add-dir", cwd, "--sandbox", "--print-timeout", "60s", "--print", "hi"]
 
 
 def test_antigravity_supports_print_timeout_probe(monkeypatch):
@@ -1666,6 +1688,64 @@ def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
     assert result.ok is False
     assert result.detail == f"{cli_ref} exited 0 without output; check trust, permissions, and model availability"
     assert result.exit_code == 0
+
+
+def _run_antigravity_with_stdout(monkeypatch, stdout, *, read_only=True, cwd=None):
+    _stub_agent_executable(monkeypatch)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, stdout, ""))
+    return agents.run_agent("antigravity", "hi", read_only=read_only, cwd=cwd)
+
+
+def test_run_agent_antigravity_exit_zero_no_output_marker_is_a_failed_run(monkeypatch, tmp_path):
+    # #2814: agy auto-denies a tool permission headless, prints this marker plus
+    # a note about the denial, and exits 0. That must not be recorded as success.
+    stdout = (
+        "jetski: no output produced\n"
+        "Note: permission to read_file /etc/hosts was denied because it is outside the allowed workspace.\n"
+    )
+    for read_only in (True, False):
+        result = _run_antigravity_with_stdout(monkeypatch, stdout, read_only=read_only, cwd=tmp_path)
+
+        assert result.ok is False
+        assert result.exit_code == 0
+        assert result.failure_kind == "permission-denied"
+        assert result.failure_phase == "output-validation"
+        assert "permission to read_file /etc/hosts was denied" in result.detail
+        assert result.text == ""
+
+
+def test_run_agent_antigravity_marker_after_blank_lines_still_fails(monkeypatch, tmp_path):
+    result = _run_antigravity_with_stdout(
+        monkeypatch, "\n\n  jetski: no output produced  \nread_file denied\n", cwd=tmp_path
+    )
+
+    assert result.ok is False
+    assert "read_file denied" in result.detail
+
+
+def test_run_agent_antigravity_normal_output_exit_zero_is_success(monkeypatch, tmp_path):
+    result = _run_antigravity_with_stdout(monkeypatch, "The review found no issues.\n", cwd=tmp_path)
+
+    assert result.ok is True
+    assert result.text == "The review found no issues."
+
+
+def test_run_agent_antigravity_marker_later_in_output_is_not_a_failure(monkeypatch, tmp_path):
+    # Only a first non-empty line match means the run produced nothing; a real
+    # report that quotes the marker is still a success.
+    stdout = "Summary of the bug.\nThe log line `jetski: no output produced` is the symptom.\n"
+    result = _run_antigravity_with_stdout(monkeypatch, stdout, cwd=tmp_path)
+
+    assert result.ok is True
+
+
+def test_run_agent_non_antigravity_seat_ignores_the_agy_marker(monkeypatch):
+    _stub_agent_executable(monkeypatch)
+    monkeypatch.setattr(
+        agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "jetski: no output produced\nnote\n", "")
+    )
+
+    assert agents.run_agent("opencode", "hi").ok is True
 
 
 def _grok_json_output(

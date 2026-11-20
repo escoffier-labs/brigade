@@ -1,0 +1,1 @@
+- A headless `agy` run that exits 0 after printing `jetski: no output produced` (agy's auto-denied tool permission) is now recorded as a failed `permission-denied` run carrying agy's own note, and read-only Antigravity runs pass `--add-dir <cwd>` like write runs so the seat can read its checkout (#2814).
