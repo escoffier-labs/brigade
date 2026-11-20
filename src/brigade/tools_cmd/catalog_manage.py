@@ -63,7 +63,7 @@ def _read_tool_entries(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return [dict(item) for item in values], []
 
 
-_LEGACY_ANTIGRAVITY_PROJECTION_PREFIXES = (".agents/commands/", ".agents/superpowers/")
+_AGENTS_PROJECTION_PREFIXES = (".agents/commands/", ".agents/superpowers/")
 
 
 def migrate_legacy_antigravity_paths(target: Path) -> list[str]:
@@ -81,7 +81,7 @@ def migrate_legacy_antigravity_paths(target: Path) -> list[str]:
     for tool in constants.DEFAULT_TOOLS:
         default_projections = tool.get("projections")
         current = str(default_projections.get("antigravity") or "") if isinstance(default_projections, dict) else ""
-        if current.startswith(_LEGACY_ANTIGRAVITY_PROJECTION_PREFIXES):
+        if current.startswith(_AGENTS_PROJECTION_PREFIXES):
             legacy_defaults[str(tool["id"])] = (".antigravity/" + current.removeprefix(".agents/"), current)
     migrated: list[str] = []
     for entry in entries:
