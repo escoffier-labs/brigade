@@ -176,9 +176,11 @@ logout or reboot, a `branch-pushed` landing allocates a fresh workspace and
 resumes PR creation only while `git ls-remote` still shows the recorded commit
 on the landing branch. A moved ref refuses with `landing-ref-mismatch` and a
 missing one with `landing-ref-missing`, while an existing workspace that fails
-the safety check still refuses with `unsafe-git-config`. Registry updates
-compare the entry id and revision under a short lock, while a task-specific
-lock prevents concurrent landings.
+the safety check still refuses with `unsafe-git-config`. A `branch-pushed`
+landing is never rebuilt or pushed again, so a missing remote branch names the
+restore-or-adopt recovery instead of publishing the branch a second time.
+Registry updates compare the entry id and revision under a short lock, while a
+task-specific lock prevents concurrent landings.
 
 Named refusals include `task-not-ready`, `protected-policy-path`, `credential-path`,
 `unsafe-git-config`, `apply-conflict`, `guard-failed` and `pr-body-lint-failed`. A `push-failed` refusal

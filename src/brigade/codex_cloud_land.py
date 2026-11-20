@@ -27,6 +27,20 @@ class LandError(ValueError):
     """A safe named refusal, without provider output or diff content."""
 
 
+# A pushed landing whose branch is gone is never rebuilt: publishing again could
+# move the branch to different content, so the operator chooses the recovery.
+_LANDING_REF_MISSING = (
+    "landing-ref-missing: the remote landing branch is gone; restore it, or open the PR for "
+    "the recorded commit and register it with "
+    "`brigade run cloud adopt --provider codex-cloud --task-id <task> --pr <url>`"
+)
+_LANDING_COMMIT_MISSING = (
+    "landing-ref-missing: the registry records a pushed landing without its commit; restore "
+    "the remote landing branch or register the existing PR with "
+    "`brigade run cloud adopt --provider codex-cloud --task-id <task> --pr <url>`"
+)
+
+
 _CREDENTIALS = {
     "git": {"GH_TOKEN", "GITHUB_TOKEN"},
     "gh": {"GH_TOKEN", "GITHUB_TOKEN"},
@@ -711,18 +725,18 @@ def _private_root(saved: str | None, target: Path) -> Path:
 
 
 def _resume_without_workspace(entry: dict[str, Any]) -> bool:
-    """A landing that already pushed can resume after its private workspace is gone.
+    """A landing that already pushed can resume without its private workspace.
 
     Only a path that does not exist at all counts as gone. An existing path is
     left to ``_private_root``, which still refuses an unsafe workspace.
     """
+    if entry.get("landing_state") != "branch-pushed" or not entry.get("landing_commit"):
+        return False
     saved = entry.get("landing_workspace")
-    if (
-        not isinstance(saved, str)
-        or not saved
-        or entry.get("landing_state") != "branch-pushed"
-        or not entry.get("landing_commit")
-    ):
+    if not saved:
+        # A pushed landing with no recorded workspace is resumed the same way.
+        return True
+    if not isinstance(saved, str):
         return False
     try:
         Path(saved).lstat()
@@ -775,12 +789,16 @@ def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dic
             resumed = _resume_without_workspace(entry)
             root = _private_root(None if resumed else entry.get("landing_workspace"), target)
             try:
-                _update(target, entry, landing_workspace=str(root))
+                # A resumed workspace is recorded only once it holds the recorded commit,
+                # so a failed resume never leaves an empty workspace behind for a retry.
+                if not resumed:
+                    _update(target, entry, landing_workspace=str(root))
                 git = _LandingGit(target, root)
                 result = _land_locked(target, entry, issue, closes, git, root, repo, canonical, resumed=resumed)
             except BaseException:
-                # Keep a prepared commit for a retry without borrowing the caller's object store.
-                if not entry.get("landing_commit"):
+                # Keep a private workspace only when the registry points at it and a
+                # retry can resume from its recorded commit.
+                if not entry.get("landing_commit") or entry.get("landing_workspace") != str(root):
                     shutil.rmtree(root)
                     try:
                         _update(target, entry, landing_workspace=None)
@@ -811,6 +829,9 @@ def _land_locked(
         raise LandError("invalid-landing-branch")
     _update(target, entry, landing_branch=branch)
     commit = entry.get("landing_commit")
+    pushed = entry.get("landing_state") == "branch-pushed"
+    if pushed and not commit:
+        raise LandError(_LANDING_COMMIT_MISSING)
     checkout = _reconcile_checkouts(git, root, branch, commit)
     remote = git.git(
         ["ls-remote", "--refs", canonical, f"refs/heads/{branch}"], git.repository, "ref-inspection-failed"
@@ -825,27 +846,24 @@ def _land_locked(
     if commit:
         if remote_sha and remote_sha != commit:
             raise LandError("landing-ref-mismatch")
-        if resumed and not remote_sha:
-            # The workspace that held the only copy of the commit is gone, so a
-            # missing remote branch leaves nothing to resume from.
-            raise LandError("landing-ref-missing")
+        if not remote_sha and pushed:
+            # A pushed landing survives only on the remote. Rebuilding it would
+            # publish different content under the same branch name.
+            raise LandError(_LANDING_REF_MISSING)
         if not local and remote_sha:
-            # A cleared runtime workspace keeps the commit only on the remote. The
-            # remote tip already equals the recorded commit, so fetching it here
-            # cannot publish different content.
-            git.git(
-                ["fetch", "--no-tags", canonical, f"refs/heads/{branch}:refs/heads/{branch}"],
-                git.repository,
-                "fetch-failed",
-            )
-            fetched = git.git(
-                ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-                git.repository,
-                "ref-inspection-failed",
-            ).strip()
+            # A cleared runtime workspace keeps the commit only on the remote. Fetch
+            # into FETCH_HEAD first: the branch ref is created only after the fetched
+            # commit is verified, so a mismatch leaves no wrong ref behind for the
+            # next retry.
+            git.git(["fetch", "--no-tags", canonical, f"refs/heads/{branch}"], git.repository, "fetch-failed")
+            fetched = git.git(["rev-parse", "FETCH_HEAD"], git.repository, "inspect-failed").strip()
             if fetched != commit:
                 raise LandError("landing-ref-mismatch")
-            local = fetched
+            git.git(["update-ref", f"refs/heads/{branch}", commit], git.repository, "ref-inspection-failed")
+            local = commit
+        if resumed:
+            # The fresh workspace is durable only once it holds the recorded commit.
+            _update(target, entry, landing_workspace=str(root))
         if not local and not remote_sha:
             _update(target, entry, landing_commit=None, landing_state=None)
             commit = None

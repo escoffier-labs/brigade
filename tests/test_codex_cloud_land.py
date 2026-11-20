@@ -79,7 +79,16 @@ def landing(tmp_path, monkeypatch):
     set_home(monkeypatch, home)
     original = proc.run
     calls = []
-    state = {"status": "[READY] example", "failure": None, "path": "file.txt", "text_scans": [], "remote": remote}
+    state = {
+        "status": "[READY] example",
+        "failure": None,
+        "path": "file.txt",
+        "text_scans": [],
+        "remote": remote,
+        "runtime": runtime,
+        "pushes": [],
+        "pr_creates": [],
+    }
 
     def probe_transport(argv, kwargs):
         # Replace HTTPS at the transport boundary, after real Git resolves its config.
@@ -148,6 +157,7 @@ def landing(tmp_path, monkeypatch):
         if argv[0] in {"brigade", "vale"}:
             return proc.Result(int(state["failure"] == argv[0]), "", "")
         if argv[:2] == ["git", "push"]:
+            state["pushes"].append(list(argv))
             if state.get("probe_rewrite"):
                 result = probe_transport(actual_argv, kwargs)
                 if result is not None:
@@ -188,6 +198,7 @@ def landing(tmp_path, monkeypatch):
         if argv[:3] == ["gh", "pr", "list"]:
             return proc.Result(0, json.dumps([{"url": state["published"]}] if state.get("published") else []), "")
         if argv[:3] == ["gh", "pr", "create"]:
+            state["pr_creates"].append(list(argv))
             body = Path(argv[argv.index("--body-file") + 1]).read_text()
             assert "task_example" in body and "#2473" in body
             state["body"] = body
@@ -2040,9 +2051,7 @@ def test_r4_expired_workspace_refuses_changed_remote_ref(landing, moved):
     entry = _expire_private_workspace(caller, state)
     state["remote_sha"] = "b" * 40 if moved else ""
     calls.clear()
-    with pytest.raises(
-        codex_cloud_land.LandError, match="^landing-ref-mismatch$" if moved else "^landing-ref-missing$"
-    ):
+    with pytest.raises(codex_cloud_land.LandError, match="^landing-ref-mismatch$" if moved else "^landing-ref-missing"):
         codex_cloud_land.land(caller, "task_example", 2473)
     assert not any(argv[:2] in (["git", "fetch"], ["git", "push"]) for argv, _ in calls)
     assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
@@ -2081,3 +2090,89 @@ def test_r4_expired_workspace_without_pushed_commit_is_refused(landing):
     with pytest.raises(codex_cloud_land.LandError, match="^unsafe-git-config$"):
         codex_cloud_land.land(caller, "task_example", 2473)
     assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+
+
+def test_r4_second_retry_after_missing_ref_never_republishes(landing):
+    caller, state, _ = landing
+    entry = _expire_private_workspace(caller, state)
+    state["remote_sha"] = ""
+    reasons = []
+    for _ in range(2):
+        try:
+            codex_cloud_land.land(caller, "task_example", 2473)
+        except codex_cloud_land.LandError as exc:
+            reasons.append(str(exc))
+        else:
+            reasons.append("published")
+    assert len(state["pushes"]) == 1, state["pushes"]
+    assert len(state["pr_creates"]) == 1, state["pr_creates"]
+    assert all(reason.startswith("landing-ref-missing") for reason in reasons), reasons
+    kept = cloud_tracker.load_registry(caller)["entries"][0]
+    assert kept["landing_state"] == "branch-pushed"
+    assert kept["landing_commit"] == entry["landing_commit"]
+    assert kept["landing_workspace"] is None
+    assert list(Path(state["runtime"]).iterdir()) == []
+
+
+def test_r4_fetched_commit_mismatch_leaves_no_ref_and_later_recovers(landing):
+    caller, state, calls = landing
+    entry = _expire_private_workspace(caller, state)
+    remote = Path(state["remote"])
+    # Move the fixture remote branch after the recorded push, as a racing push would.
+    git(
+        caller,
+        "-c",
+        "protocol.file.allow=always",
+        "push",
+        "--force",
+        str(remote),
+        f"HEAD:refs/heads/{entry['landing_branch']}",
+    )
+    calls.clear()
+    with pytest.raises(codex_cloud_land.LandError, match="^landing-ref-mismatch$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "update-ref"] for argv, _ in calls)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+    git(remote, "update-ref", f"refs/heads/{entry['landing_branch']}", entry["landing_commit"])
+    calls.clear()
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"].endswith("/123")
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert sum(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls) == 1
+
+
+def test_r4_pushed_entry_without_commit_never_reprepares(landing):
+    caller, state, calls = landing
+    state["failure"] = "pr"
+    with pytest.raises(codex_cloud_land.LandError, match="^pr-create-failed$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    with cloud_tracker.registry_lock(caller):
+        registry = cloud_tracker.load_registry(caller)
+        registry["entries"][0]["landing_commit"] = None
+        cloud_tracker.save_registry(caller, registry)
+    state["failure"] = None
+    state["remote_sha"] = ""
+    calls.clear()
+    with pytest.raises(codex_cloud_land.LandError, match="^landing-ref-missing"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:3] == ["codex", "cloud", "diff"] for argv, _ in calls)
+    assert len(state["pushes"]) == 1
+
+
+def test_r4_resume_without_workspace_ignores_unreadable_and_dangling_paths(tmp_path):
+    saved = tmp_path / "base" / "brigade-cloud-land-example"
+    entry = {"landing_workspace": str(saved), "landing_state": "branch-pushed", "landing_commit": "a" * 40}
+    assert codex_cloud_land._resume_without_workspace(entry) is True
+    saved.parent.mkdir()
+    saved.symlink_to(tmp_path / "gone")
+    assert codex_cloud_land._resume_without_workspace(entry) is False
+    saved.unlink()
+    saved.mkdir()
+    saved.parent.chmod(0o000)
+    try:
+        assert codex_cloud_land._resume_without_workspace(entry) is False
+    finally:
+        saved.parent.chmod(0o700)
+    assert codex_cloud_land._resume_without_workspace(entry) is False
+    assert codex_cloud_land._resume_without_workspace({**entry, "landing_state": "prepared"}) is False
