@@ -144,3 +144,38 @@ def _warn_antigravity_plan_mode_unsupported(executable: str) -> None:
         "Upgrade agy to enforce read-only.",
         file=sys.stderr,
     )
+
+
+_ANTIGRAVITY_NO_OUTPUT_MARKER = "jetski: no output produced"
+
+
+def _antigravity_no_output_detail(stdout: str, stderr: str = "") -> str | None:
+    """Return agy's own reason when a headless run exited 0 without doing the work.
+
+    agy auto-denies a tool permission it cannot prompt for and still exits 0.
+    agy 1.5.12 leaves stdout empty and writes one stderr line that starts with
+    ``jetski: no output produced`` and names the denied permission. The caller
+    turns that into a failed run carrying the reason. Any other stdout line is
+    real output, so the run is left alone.
+    """
+    out_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if any(not line.startswith(_ANTIGRAVITY_NO_OUTPUT_MARKER) for line in out_lines):
+        return None
+    for stream in (stderr, stdout):
+        for raw in stream.splitlines():
+            line = raw.strip()
+            if line.startswith(_ANTIGRAVITY_NO_OUTPUT_MARKER):
+                return " ".join(line.split())
+    return None
+
+
+def _antigravity_no_output_kind(detail: str) -> str:
+    """Classify agy's no-output line by the reason it gives.
+
+    Only an auto-denied tool permission is ``permission-denied``. Any other
+    no-output reason stays the generic ``empty-output`` failure.
+    The wording was checked against agy 1.5.12. Recheck it when agy changes
+    its no-output message.
+    """
+    lowered = detail.lower()
+    return "permission-denied" if "permission" in lowered or "auto-denied" in lowered else "empty-output"

@@ -1,0 +1,1 @@
+- A headless `agy` run that exits 0 after `jetski: no output produced` (agy auto-denied a tool permission) is now a failed `permission-denied` run that carries agy's reason, in place of a bare "empty output" failure. Read-only Antigravity runs on agy builds with plan mode also pass `--add-dir <cwd>` so the seat can read its checkout (#2814).
