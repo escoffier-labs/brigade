@@ -2143,6 +2143,7 @@ def _scanner_run_one(
                 env=child_env,
                 cwd=cwd,
                 supervise_group=True,
+                group_drain_seconds=proc_mod.GROUP_DRAIN_SECONDS,
             )
         stdout = result.stdout
         stderr = result.stderr
@@ -2159,10 +2160,7 @@ def _scanner_run_one(
         elif timed_out:
             error = f"scanner timed out after {scanner.get('timeout')} seconds"
         elif result.incomplete_process_group:
-            error = (
-                "scanner process group kept the output pipes open after child exit; "
-                "output incomplete and group terminated"
-            )
+            error = scanner_errors.group_incomplete_error()
         receipt.update(
             {
                 "status": "completed"

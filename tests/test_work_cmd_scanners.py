@@ -4922,7 +4922,8 @@ def test_busy_writer_lock_deadline_bounds_launcher_stamping_and_releases_run_loc
 @requires_scanner_descriptors
 def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
     """Round 6 (H1): a descendant that closed the capture pipes and holds the
-    writer lock must not outlive a scanner run whose direct child exited 0."""
+    writer lock must not outlive a scanner run whose direct child exited 0, and
+    a descendant killed at the #2286 drain cutoff fails the run closed."""
     import subprocess
     import time as time_mod
 
@@ -4964,8 +4965,12 @@ def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
     payload, rc = scanners_mod._scanners_run_payload(target=tmp_path, scanner_id="lock-descendant", force=True)
     receipt = payload["runs"][0]
 
-    assert rc == 0, receipt
-    assert receipt["status"] == "completed", receipt
+    # #2286 review: a descendant that had to be killed at the drain cutoff was
+    # writing mid-work, so its run fails closed instead of publishing a result.
+    assert rc == 1, receipt
+    assert receipt["status"] == "failed", receipt
+    assert receipt.get("incomplete_process_group") is True, receipt
+    assert "scanner descendants still running" in str(receipt.get("error")), receipt
     assert receipt.get("descendants_reaped") is True, receipt
 
     published = wait_for_text(descendant_pid_path, timeout=5)
@@ -5005,6 +5010,282 @@ def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
     subprocess.run([sys.executable, str(probe)], timeout=30, check=True)
     assert outside_acquired.exists()
     assert time_mod.monotonic() - started < 15, "outside writer could not acquire the writer lock promptly"
+
+
+@requires_scanner_descriptors
+def test_scanner_waits_for_descendant_that_finishes_the_import_after_the_parent_exits(tmp_path):
+    """#2286: a descendant that finishes the import file after the direct child
+    exits must run to completion before the file is validated and ingested.
+
+    The descendant writes an empty import file, announces itself, waits for the
+    parent to be gone, then finishes the record. Reading before the whole group
+    is gone sees the empty file, so the run either ingests nothing or reports a
+    read error that names the wrong cause.
+    """
+    from brigade.work_cmd import scanners as scanners_mod
+
+    started = tmp_path / "descendant-started"
+    descendant = tmp_path / "descendant.py"
+    descendant.write_text(
+        "import hashlib, json, os, sys\n"
+        "from pathlib import Path\n"
+        "started = Path(sys.argv[1])\n"
+        "import_path = Path.cwd() / '.brigade' / 'scanner-imports.jsonl'\n"
+        "import_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "parent = os.getppid()\n"
+        "import_path.write_text('')\n"
+        "started.write_text('1')\n"
+        "while os.getppid() == parent:\n"
+        "    pass\n"
+        "digest = b''\n"
+        "blob = b'x' * (4 << 20)\n"
+        "for _ in range(8):\n"
+        "    digest = hashlib.sha256(digest + blob).digest()\n"
+        "record = {'kind': 'task', 'source': 'late-import',\n"
+        "          'text': 'descendant finished the import file',\n"
+        "          'metadata': {'digest': digest.hex()}}\n"
+        "import_path.write_text(json.dumps(record) + '\\n')\n"
+    )
+    script = tmp_path / "late_import.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "started = Path(sys.argv[1])\n"
+        "subprocess.Popen(\n"
+        f"    [sys.executable, {str(descendant)!r}, {str(started)!r}],\n"
+        "    stdin=subprocess.DEVNULL,\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "for _ in range(6000):\n"
+        "    if started.exists():\n"
+        "        break\n"
+        "    time.sleep(0.005)\n"
+        "print('scanner parent done', flush=True)\n"
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "late-import"
+source = "late-import"
+command = "{sys.executable} {script} {started}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    payload, rc = scanners_mod._scanners_run_payload(
+        target=tmp_path,
+        scanner_id="late-import",
+        force=True,
+        ingest_output=True,
+    )
+    run = payload["runs"][0]
+
+    assert run["status"] == "completed", payload
+    assert run["exit_code"] == 0
+    assert not payload.get("ingest_errors"), payload
+    assert rc == 0, payload
+    assert run["ingest_output"]["created"] == 1, run
+    imports = work_cmd.ledger._read_imports(tmp_path)
+    assert [item["text"] for item in imports] == ["descendant finished the import file"]
+
+
+@requires_scanner_descriptors
+def test_scanner_run_refuses_the_import_when_descendants_outlive_the_drain(tmp_path, monkeypatch):
+    """#2286: a descendant still running at the drain cutoff is killed mid-work,
+    so the run is group-incomplete and its import file is never read."""
+    from brigade import proc as proc_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(proc_mod, "GROUP_DRAIN_SECONDS", 0.5)
+    started = tmp_path / "descendant-started"
+    descendant = tmp_path / "stuck_descendant.py"
+    descendant.write_text(
+        "import signal, sys\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "import_path = Path.cwd() / '.brigade' / 'scanner-imports.jsonl'\n"
+        "import_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "import_path.write_text('')\n"
+        "Path(sys.argv[1]).write_text('1')\n"
+        "while True:\n"
+        "    pass\n"
+    )
+    script = tmp_path / "stuck_import.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "started = Path(sys.argv[1])\n"
+        "subprocess.Popen(\n"
+        f"    [sys.executable, {str(descendant)!r}, {str(started)!r}],\n"
+        "    stdin=subprocess.DEVNULL,\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "for _ in range(6000):\n"
+        "    if started.exists():\n"
+        "        break\n"
+        "    time.sleep(0.005)\n"
+        "print('scanner parent done', flush=True)\n"
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "stuck-group"
+source = "stuck-group"
+command = "{sys.executable} {script} {started}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    payload, rc = scanners_mod._scanners_run_payload(
+        target=tmp_path,
+        scanner_id="stuck-group",
+        force=True,
+        ingest_output=True,
+    )
+    run = payload["runs"][0]
+
+    assert rc == 1, payload
+    assert run["status"] == "failed", run
+    assert run["incomplete_process_group"] is True
+    error = str(run.get("error"))
+    assert "scanner descendants still running" in error, error
+    assert "import file not found" not in error, error
+    assert "cannot read import file" not in error, error
+    assert "ingest_output" not in run
+    assert work_cmd.ledger._read_imports(tmp_path) == []
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/proc/self/stat").is_file(),
+    reason="requires a /proc zombie probe",
+)
+@requires_scanner_descriptors
+def test_scanner_drain_keeps_the_scanner_leader_unreaped_until_the_group_is_gone(tmp_path, monkeypatch):
+    """#2286: the draining leader keeps its pid and process group id reserved.
+
+    A reaped leader frees its group id for reuse while the drain still probes
+    and signals it. The launcher must observe the exit without reaping
+    (``waitid`` with ``WNOWAIT``) and reap only after the group is gone.
+    """
+    import threading
+    import time as time_mod
+
+    from brigade import proc as proc_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    monkeypatch.setattr(proc_mod, "GROUP_DRAIN_SECONDS", 5.0)
+    release = tmp_path / "release-descendant"
+    leader_pid_path = tmp_path / "leader.pid"
+    child_started = tmp_path / "descendant-started"
+    descendant = tmp_path / "waiting_descendant.py"
+    descendant.write_text(
+        "import json, sys, time\n"
+        "from pathlib import Path\n"
+        "release = Path(sys.argv[1])\n"
+        "Path(sys.argv[2]).write_text('1')\n"
+        "for _ in range(12000):\n"
+        "    if release.exists():\n"
+        "        break\n"
+        "    time.sleep(0.005)\n"
+        "import_path = Path.cwd() / '.brigade' / 'scanner-imports.jsonl'\n"
+        "record = {'kind': 'task', 'source': 'drain-check', 'text': 'drained import'}\n"
+        "import_path.write_text(json.dumps(record) + '\\n')\n"
+    )
+    script = tmp_path / "drain_leader.py"
+    script.write_text(
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "leader_pid = Path(sys.argv[1])\n"
+        "child_started = Path(sys.argv[2])\n"
+        "subprocess.Popen(\n"
+        f"    [sys.executable, {str(descendant)!r}, {str(release)!r}, {str(child_started)!r}],\n"
+        "    stdin=subprocess.DEVNULL,\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "for _ in range(6000):\n"
+        "    if child_started.exists():\n"
+        "        break\n"
+        "    time.sleep(0.005)\n"
+        "leader_pid.write_text(str(os.getpid()))\n"
+        "print('scanner parent done', flush=True)\n"
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "drain-check"
+source = "drain-check"
+command = "{sys.executable} {script} {leader_pid_path} {child_started}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 60
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+    outcome: dict[str, object] = {}
+
+    def run_scanner() -> None:
+        outcome["payload"], outcome["rc"] = scanners_mod._scanners_run_payload(
+            target=tmp_path,
+            scanner_id="drain-check",
+            force=True,
+            ingest_output=True,
+        )
+
+    thread = threading.Thread(target=run_scanner)
+    thread.start()
+    leader_state = "unknown"
+    try:
+        published = wait_for_text(leader_pid_path, timeout=20)
+        assert published is not None, "scanner leader did not publish its pid"
+        leader_pid = int(published)
+        deadline = time_mod.monotonic() + 20
+        while time_mod.monotonic() < deadline:
+            try:
+                leader_state = Path(f"/proc/{leader_pid}/stat").read_text().split()[2]
+            except (FileNotFoundError, ProcessLookupError):
+                leader_state = "gone"
+                break
+            if leader_state == "Z":
+                break
+            time_mod.sleep(0.01)
+        assert leader_state == "Z", f"scanner leader was not held as an unreaped zombie (state={leader_state})"
+        assert thread.is_alive(), "the scanner run finished while its descendant was still running"
+    finally:
+        release.write_text("1")
+        thread.join(timeout=60)
+
+    assert not thread.is_alive()
+    payload = outcome["payload"]
+    run = payload["runs"][0]
+    assert run["status"] == "completed", run
+    assert outcome["rc"] == 0, payload
+    assert run["ingest_output"]["created"] == 1, run
+    imports = work_cmd.ledger._read_imports(tmp_path)
+    assert [item["text"] for item in imports] == ["drained import"]
 
 
 @requires_scanner_descriptors
