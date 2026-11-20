@@ -152,17 +152,39 @@ def _rewrite(path: Path, row: dict, state: str, terminal: dict | None = None, **
     return updated
 
 
-def _rewrite_in_place(path: Path, row: dict, state: str) -> None:
+def _store_bytes(row: dict, *, newline: bytes = b"\n") -> bytes:
+    """The bytes the receipt store writes for a row, in a chosen newline."""
+    return (json.dumps(row, indent=2, sort_keys=True) + "\n").encode("utf-8").replace(b"\n", newline)
+
+
+def _write_receipt_bytes(path: Path, row: dict, *, newline: bytes = b"\n") -> None:
+    """Rewrite a receipt in binary with the store's serializer, keeping its mtime."""
+    before = path.stat()
+    data = _store_bytes(row, newline=newline)
+    path.write_bytes(data)
+    assert path.read_bytes() == data
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+def _rewrite_in_place(path: Path, row: dict, state: str, *, newline: bytes = b"\n") -> None:
     """Rewrite a receipt keeping its inode, byte length, and mtime.
 
     This is what a recycled inode plus a coarse filesystem timestamp look like to
     a reader that trusts those three values: the bytes changed and nothing else
-    did.
+    did. The replacement comes from the store's own serializer and is written in
+    binary, so the size precondition holds against the file's actual bytes
+    instead of depending on the platform's text-mode newline translation.
     """
     before = path.stat()
-    path.write_text(json.dumps({**row, "state": state}, indent=2, sort_keys=True) + "\n")
+    original = path.read_bytes()
+    replacement = _store_bytes({**row, "state": state}, newline=newline)
+    assert replacement != original
+    assert len(replacement) == len(original)
+    path.write_bytes(replacement)
+    assert path.read_bytes() == replacement
     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
     after = path.stat()
+    assert after.st_size == len(original)
     assert after.st_size == before.st_size
     assert after.st_mtime_ns == before.st_mtime_ns
     assert after.st_ino == before.st_ino
@@ -437,27 +459,32 @@ def test_index_refolds_a_rewritten_receipt(target):
     assert store.exclusions(target) == {"task-0": "circuit-breaker"}
 
 
-def test_index_verifies_a_receipt_that_hides_its_active_state(target):
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+def test_index_verifies_a_receipt_that_hides_its_active_state(target, newline):
     # A finished receipt becomes an active state with the same byte length, the
     # same mtime, and the same inode. Trusting that identity alone leaves the task
-    # dispatchable while a worker already holds it.
+    # dispatchable while a worker already holds it. The crlf case runs the same
+    # rewrite under the newline convention a Windows text-mode writer produces.
     path, row = _receipt(target, task_id="task-0", stamp=_stamp(0), state="completed", attempt=1)
+    _write_receipt_bytes(path, row, newline=newline)
     _assert_matches_full_scan(target)
     assert store.exclusions(target) == {}
 
-    _rewrite_in_place(path, row, "launching")
+    _rewrite_in_place(path, row, "launching", newline=newline)
 
     assert _reference_exclusions(target) == {"task-0": "active-intent"}
     _assert_matches_full_scan(target)
 
 
-def test_index_verifies_a_receipt_that_hides_its_completion(target):
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+def test_index_verifies_a_receipt_that_hides_its_completion(target, newline):
     # The same rewrite the other way: a stale view keeps a finished task excluded.
     path, row = _receipt(target, task_id="task-0", stamp=_stamp(0), state="launching", attempt=1)
+    _write_receipt_bytes(path, row, newline=newline)
     _assert_matches_full_scan(target)
     assert store.exclusions(target) == {"task-0": "active-intent"}
 
-    _rewrite_in_place(path, row, "completed")
+    _rewrite_in_place(path, row, "completed", newline=newline)
 
     assert _reference_exclusions(target) == {}
     _assert_matches_full_scan(target)
