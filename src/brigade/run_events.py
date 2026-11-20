@@ -32,10 +32,12 @@ from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION, R
 SCHEMA = RUN_EVENT_SCHEMA
 SCHEMA_VERSION = RUN_EVENT_SCHEMA_VERSION
 LEGACY_SCHEMA_VERSION = 1
-# Schema version 3 introduces ``task.workspace-bound`` and ``task.integrated``
-# and nothing else. It is reserved for journals that record per-task batch
-# worktrees and explicit integrations, so an older binary refuses only those
-# journals instead of every journal written after this change.
+# Schema version 3 introduces the per-task worktree facts and nothing else:
+# ``task.workspace-bound``, ``task.integrated``, ``task.disposed`` and
+# ``task.artifact-collected``. It is reserved for journals that record per-task
+# batch worktrees, explicit integrations and their disposal, so an older binary
+# refuses only those journals instead of every journal written after this
+# change.
 WORKSPACE_SCHEMA_VERSION = RUN_EVENT_WORKSPACE_SCHEMA_VERSION
 SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION})
 
@@ -201,9 +203,9 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     ),
 }
 # Durable assignment facts use closed reference-only shapes, without changing
-# existing envelope bounds. ``task.workspace-bound`` and ``task.integrated`` are
-# the facts written under the version 3 envelope; the rest stay readable at
-# version 2.
+# existing envelope bounds. The version 3 facts below record per-task worktree
+# custody, integration, disposal and recovered artifact collection; the rest
+# stay readable at version 2.
 _TASK_EVENT_TYPES = frozenset(
     {
         "task.accepted",
@@ -215,6 +217,8 @@ _TASK_EVENT_TYPES = frozenset(
         "task.native-enrolled",
         "task.workspace-bound",
         "task.integrated",
+        "task.disposed",
+        "task.artifact-collected",
     }
 )
 EVENT_TYPES.update(
@@ -273,6 +277,15 @@ EVENT_TYPES.update(
         # One explicit integration of a selected task result. Only the closed
         # integration identity and the two commit revisions enter the journal.
         "task.integrated": frozenset({"task_id", "integration_id", "candidate_commit", "integration_commit"}),
+        # One explicit disposal of a task worktree, with the closed mode that
+        # justified it and whether its branch survived.
+        "task.disposed": frozenset({"task_id", "mode", "branch_kept"}),
+        # One recovered artifact collection: the sidecar digest, the candidate
+        # (or null) and the delivery the collection recorded, so a commit
+        # artifact can be read from either the observation or this fact.
+        "task.artifact-collected": frozenset(
+            {"task_id", "attempt_id", "artifact_digest", "candidate_commit", "delivery"}
+        ),
         "task.launch-claimed": frozenset({"task_id", "attempt_id", "seat", "dispatch_attempt"}),
         "task.observed": frozenset(
             {
@@ -309,7 +322,9 @@ _NATIVE_T3_EVENT_TYPES = frozenset(
 )
 # The only event types written under schema version 3. A v3 envelope must carry
 # one of these, and every other event type keeps the v2 envelope.
-_SCHEMA_V3_EVENT_TYPES = frozenset({"task.workspace-bound", "task.integrated"})
+_SCHEMA_V3_EVENT_TYPES = frozenset(
+    {"task.workspace-bound", "task.integrated", "task.disposed", "task.artifact-collected"}
+)
 _SCHEMA_V2_EVENT_TYPES = (
     frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
 ) - _SCHEMA_V3_EVENT_TYPES
@@ -492,9 +507,9 @@ def make_event_id(*, run_id: str, sequence: int, event_digest: str) -> str:
 def schema_version_for_event(event_type: str) -> int:
     """The envelope version that introduced ``event_type``.
 
-    Only ``task.workspace-bound`` and ``task.integrated`` advance a journal to
-    version 3; every other event type keeps the version 2 envelope so older
-    binaries still read runs that never isolated or integrated a task.
+    Only the version 3 task facts advance a journal to version 3; every other
+    event type keeps the version 2 envelope so older binaries still read runs
+    that never isolated, integrated or disposed a task.
     """
     return WORKSPACE_SCHEMA_VERSION if event_type in _SCHEMA_V3_EVENT_TYPES else SCHEMA_VERSION
 

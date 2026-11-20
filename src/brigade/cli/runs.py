@@ -584,6 +584,71 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_tasks_integrate.add_argument(
         "--json", action="store_true", help="Emit the brigade.runs_tasks_integrate.v1 JSON contract."
     )
+    p_tasks_dispose = tasks_sub.add_parser(
+        "dispose",
+        help=(
+            "Remove selected task worktrees only after proving a retained copy exists. "
+            "Without --confirm nothing is changed."
+        ),
+    )
+    p_tasks_dispose.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_dispose.add_argument("task_ids", nargs="+", metavar="task_id", help="Task ids to dispose of, in order.")
+    p_tasks_dispose.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Actually remove the worktrees and record each disposal. Without it this is a dry run.",
+    )
+    p_tasks_dispose.add_argument(
+        "--discard",
+        action="append",
+        default=[],
+        metavar="task_id",
+        help=(
+            "Explicitly discard this task's worktree even without a retained copy or with ignored "
+            "files. Repeatable; the named task must also be named in the command."
+        ),
+    )
+    p_tasks_dispose.add_argument(
+        "--delete-branch",
+        action="store_true",
+        help="Also delete the task branch, but only for an integrated task whose work the integration ref holds.",
+    )
+    p_tasks_dispose.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_tasks_dispose.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_tasks_dispose.add_argument(
+        "--json", action="store_true", help="Emit the brigade.runs_tasks_dispose.v1 JSON contract."
+    )
+    p_tasks_collect = tasks_sub.add_parser(
+        "collect",
+        help="Recover artifact collection for one terminal task whose worker exited before it was collected.",
+    )
+    p_tasks_collect.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_collect.add_argument("task_id", help="Task id whose collection was interrupted.")
+    p_tasks_collect.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_tasks_collect.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_tasks_collect.add_argument(
+        "--json", action="store_true", help="Emit the brigade.runs_tasks_collect.v1 JSON contract."
+    )
     p_runs.set_defaults(func=dispatch)
 
 

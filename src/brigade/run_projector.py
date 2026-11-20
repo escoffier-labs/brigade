@@ -193,6 +193,11 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "task.workspace-bound",
         # An integration records a selected result's new commit, never state.
         "task.integrated",
+        # A disposal records that a checkout is gone, and a recovered
+        # collection records an artifact it would have observed. Neither
+        # changes the aggregate run status.
+        "task.disposed",
+        "task.artifact-collected",
         # Governed native T3 claim, correlation and hold facts change task
         # custody, not the aggregate run status.
         "task.native-claimed",

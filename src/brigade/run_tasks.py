@@ -147,6 +147,50 @@ class TaskIntegration:
 
 
 @dataclass(frozen=True)
+class TaskDisposal:
+    """One recorded disposal of this task's worktree.
+
+    The mode names the retained-copy proof that allowed the removal, or
+    ``discarded`` when the caller decided to dispose of the checkout without
+    one. The branch verdict is a token, never a boolean, because the canonical
+    payload contract refuses booleans.
+    """
+
+    mode: str
+    branch_kept: str
+
+    def __post_init__(self) -> None:
+        if self.mode not in journal.DISPOSAL_MODES:
+            raise TaskJournalError("invalid task disposal mode")
+        if self.branch_kept not in journal.BRANCH_STATES:
+            raise TaskJournalError("invalid task disposal branch state")
+
+
+@dataclass(frozen=True)
+class TaskCollectedArtifact:
+    """One recovered artifact collection recorded after the terminal observation.
+
+    A worker's receipt observation says only that the worker returned. When
+    collection was interrupted, this fact carries the sidecar digest, the
+    candidate revision and the delivery a later ``runs tasks collect`` wrote,
+    so integration and disposal can read a commit artifact from either source.
+    """
+
+    attempt_id: str
+    artifact_digest: str
+    candidate_commit: str | None
+    delivery: str
+
+    def __post_init__(self) -> None:
+        if not journal.digest(self.attempt_id) or not journal.digest(self.artifact_digest):
+            raise TaskJournalError("invalid task artifact collection reference")
+        if self.candidate_commit is not None and not journal.base_sha(self.candidate_commit):
+            raise TaskJournalError("invalid task artifact collection revision")
+        if not journal.token(self.delivery):
+            raise TaskJournalError("invalid task artifact collection delivery")
+
+
+@dataclass(frozen=True)
 class TaskResult:
     handle: TaskHandle
     status: str
@@ -163,6 +207,8 @@ class TaskResult:
     enrollment: TaskEnrollment | None = None
     workspace: TaskWorkspaceBinding | None = None
     integrations: tuple[TaskIntegration, ...] = ()
+    disposal: TaskDisposal | None = None
+    collected: TaskCollectedArtifact | None = None
 
     @property
     def native_enrolled(self) -> bool:
@@ -423,6 +469,29 @@ def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHisto
                 raise TaskJournalError("task integration requires a terminal task result")
             if integrated not in current.integrations:
                 results[task_id] = replace(current, integrations=(*current.integrations, integrated))
+        elif event.event_type == "task.disposed":
+            # Disposal records that a worktree is gone and why that was safe. It
+            # consumes a terminal result and never changes its status.
+            disposed = TaskDisposal(p["mode"], p["branch_kept"])
+            if current.status not in journal.TERMINAL or current.result_id is None:
+                raise TaskJournalError("task disposal requires a terminal task result")
+            if current.disposal is not None and current.disposal != disposed:
+                raise TaskJournalError("task disposal conflicts with recorded disposal")
+            results[task_id] = replace(current, disposal=disposed)
+        elif event.event_type == "task.artifact-collected":
+            # A recovered collection is a late, closed record of an artifact the
+            # interrupted collection would have observed. It never rewrites the
+            # observation and never changes the terminal status.
+            collected = TaskCollectedArtifact(
+                p["attempt_id"], p["artifact_digest"], p["candidate_commit"], p["delivery"]
+            )
+            if current.status not in journal.TERMINAL or current.result_id is None:
+                raise TaskJournalError("task artifact collection requires a terminal task result")
+            if collected.attempt_id != current.handle.attempt_id:
+                raise TaskJournalError("task artifact collection attempt mismatch")
+            if current.collected is not None and current.collected != collected:
+                raise TaskJournalError("task artifact collection conflicts with recorded collection")
+            results[task_id] = replace(current, collected=collected)
         prior_types[task_id] = event.event_type
         results[task_id] = replace(results[task_id], version=event.event_digest)
     return _TaskHistory(results, batches)

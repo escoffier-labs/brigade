@@ -23,6 +23,12 @@ STRUCTURAL_FIELDS = frozenset(
         "integration_id",
         "candidate_commit",
         "integration_commit",
+        # Disposal and recovered-collection verdicts come from closed
+        # vocabularies, so redaction preserves them like the other structural
+        # values instead of renaming them.
+        "mode",
+        "branch_kept",
+        "delivery",
     }
 )
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
@@ -273,6 +279,11 @@ def prepare_requests(
             elif event.event_type == "task.integrated":
                 # Reference-only integration fact: commit revisions map through
                 # as structural values and no derived identity is recomputed.
+                pass
+            elif event.event_type in {"task.disposed", "task.artifact-collected"}:
+                # Reference-only custody facts: digests and closed verdicts map
+                # through, state is unchanged, and no derived identity is
+                # recomputed.
                 pass
             elif event.event_type == "task.observed":
                 current = states[task_id]
