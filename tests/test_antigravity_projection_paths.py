@@ -57,6 +57,14 @@ def _managed_projection(body: str) -> str:
     return f"<!-- {MARKER} {metadata} -->\n{body}"
 
 
+def _seed_replacements(tmp_path: Path) -> None:
+    """Managed `.agents/` projections, as `brigade tools apply` writes them."""
+    for rel in ("commands/simplify.md", "superpowers/superpowers.md"):
+        path = tmp_path / ".agents" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_managed_projection("body\n"), encoding="utf-8")
+
+
 def _seed_legacy(tmp_path: Path) -> dict[str, Path]:
     legacy = tmp_path / ".antigravity"
     files = {
@@ -80,6 +88,7 @@ def _seed_legacy(tmp_path: Path) -> dict[str, Path]:
 
 def test_init_prunes_only_brigade_owned_legacy_projections(tmp_path, capsys):
     files = _seed_legacy(tmp_path)
+    _seed_replacements(tmp_path)
     handoffs = tmp_path / ".antigravity" / "memory-handoffs"
     handoffs.mkdir(parents=True, exist_ok=True)
     keep = handoffs / "note.md"
@@ -104,6 +113,7 @@ def test_init_prunes_only_brigade_owned_legacy_projections(tmp_path, capsys):
 def test_reconfigure_adding_antigravity_prunes_legacy_projections(tmp_path):
     assert install_selection(tmp_path, _sel("claude")) == 0
     files = _seed_legacy(tmp_path)
+    _seed_replacements(tmp_path)
 
     assert reconfigure(tmp_path, new_selection=_sel("claude", "antigravity"), prune=False) == 0
 
@@ -120,11 +130,12 @@ def test_prune_skips_legacy_skill_recorded_in_wired_json_only_when_unedited(tmp_
     skill.write_bytes(b"# recorded text\n")
     rel = ".antigravity/skills/custom/SKILL.md"
     recorded = {rel: {"sha256": hashlib.sha256(b"# recorded text\n").hexdigest()}}
-    assert prune_legacy_antigravity_projections(tmp_path, recorded) == [rel]
+    wired = {("antigravity", "custom")}
+    assert prune_legacy_antigravity_projections(tmp_path, recorded, wired) == [rel]
 
     skill.parent.mkdir(parents=True)
     skill.write_bytes(b"# recorded text, then edited\n")
-    assert prune_legacy_antigravity_projections(tmp_path, recorded) == []
+    assert prune_legacy_antigravity_projections(tmp_path, recorded, wired) == []
     assert skill.is_file()
 
 
@@ -158,8 +169,12 @@ def test_gitignore_block_ignores_agents_projections_but_not_hooks():
     assert ".agents/skills/" not in block
     assert ".agents/hooks.json" not in block
     assert ".agents/\n" not in block
-    assert ".antigravity/commands/" not in block
-    assert ".antigravity/superpowers/" not in block
+    # Legacy paths stay ignored for one release, after the new lines.
+    for pattern in (".antigravity/commands/", ".antigravity/superpowers/"):
+        assert pattern in block
+        assert block.index(pattern) > block.index(".agents/superpowers/")
+    assert "legacy" in block.lower()
+    assert ".antigravity/skills/" not in block
 
 
 def test_wired_json_records_new_agents_path(tmp_path):
@@ -170,6 +185,7 @@ def test_wired_json_records_new_agents_path(tmp_path):
 
 
 def test_prune_keeps_an_edited_managed_projection(tmp_path):
+    _seed_replacements(tmp_path)
     command = tmp_path / ".antigravity" / "commands" / "simplify.md"
     command.parent.mkdir(parents=True)
     # Header kept, body edited: the recorded fingerprint no longer matches.
@@ -179,6 +195,8 @@ def test_prune_keeps_an_edited_managed_projection(tmp_path):
 
 
 def test_prune_keeps_a_marker_lookalike_without_fingerprint(tmp_path):
+    (tmp_path / ".agents" / "commands").mkdir(parents=True)
+    (tmp_path / ".agents" / "commands" / "notes.md").write_text(_managed_projection("body\n"), encoding="utf-8")
     command = tmp_path / ".antigravity" / "commands" / "notes.md"
     command.parent.mkdir(parents=True)
     command.write_text(f"<!-- {MARKER} {{}} -->\nmy notes mention the marker\n", encoding="utf-8")
@@ -196,6 +214,9 @@ def test_prune_does_not_descend_into_a_reparse_point(tmp_path, monkeypatch):
     junction = commands / "linked"
     junction.mkdir()
     (junction / "simplify.md").write_text(_managed_projection("body\n"), encoding="utf-8")
+    replacement = tmp_path / ".agents" / "commands" / "linked" / "simplify.md"
+    replacement.parent.mkdir(parents=True)
+    replacement.write_text(_managed_projection("body\n"), encoding="utf-8")
     real_is_plain = install_mod._is_plain
 
     # Stand in for a Windows junction: a directory that reports the reparse-point attribute.
@@ -228,3 +249,190 @@ def test_no_wire_install_prunes_nothing(tmp_path):
     assert install_selection(tmp_path, _sel("antigravity"), wire_skills=False) == 0
     for path in files.values():
         assert path.is_file(), path
+
+
+def test_prune_keeps_legacy_skill_unless_its_replacement_was_placed(tmp_path):
+    skill = tmp_path / ".antigravity" / "skills" / "brigade-work" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(_bundled("brigade-work"))
+    rel = ".antigravity/skills/brigade-work/SKILL.md"
+
+    # No placement this run (blocked, symlinked, or not wired): keep the legacy copy.
+    assert prune_legacy_antigravity_projections(tmp_path) == []
+    assert prune_legacy_antigravity_projections(tmp_path, wired_skills=set()) == []
+    assert prune_legacy_antigravity_projections(tmp_path, wired_skills={("claude", "brigade-work")}) == []
+    assert skill.is_file()
+
+    assert prune_legacy_antigravity_projections(tmp_path, wired_skills={("antigravity", "brigade-work")}) == [rel]
+    assert not skill.exists()
+
+
+def test_init_keeps_legacy_skill_when_agents_placement_is_blocked(tmp_path):
+    skill = tmp_path / ".antigravity" / "skills" / "brigade-work" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(_bundled("brigade-work"))
+    # A symlinked destination directory makes the .agents placement SYMLINKED, not written.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / ".agents" / "skills").mkdir(parents=True)
+    (tmp_path / ".agents" / "skills" / "brigade-work").symlink_to(elsewhere, target_is_directory=True)
+
+    assert install_selection(tmp_path, _sel("antigravity")) == 0
+
+    assert skill.is_file()
+    assert not (elsewhere / "SKILL.md").exists()
+    # The skill whose placement succeeded is still migrated.
+    assert (tmp_path / ".agents" / "skills" / "ultra-work-scout" / "SKILL.md").is_file()
+
+
+def test_prune_keeps_legacy_tool_projection_without_a_managed_replacement(tmp_path):
+    legacy = tmp_path / ".antigravity"
+    (legacy / "commands").mkdir(parents=True)
+    (legacy / "superpowers").mkdir()
+    missing = legacy / "commands" / "simplify.md"
+    unmanaged = legacy / "commands" / "frontend.md"
+    managed = legacy / "superpowers" / "superpowers.md"
+    for path in (missing, unmanaged, managed):
+        path.write_text(_managed_projection("body\n"), encoding="utf-8")
+    # frontend.md has a replacement the operator took over: no marker, so not managed.
+    replacement = tmp_path / ".agents" / "commands" / "frontend.md"
+    replacement.parent.mkdir(parents=True)
+    replacement.write_text("# operator wrote this\n", encoding="utf-8")
+    new_managed = tmp_path / ".agents" / "superpowers" / "superpowers.md"
+    new_managed.parent.mkdir(parents=True)
+    new_managed.write_text(_managed_projection("body\n"), encoding="utf-8")
+
+    assert prune_legacy_antigravity_projections(tmp_path) == [".antigravity/superpowers/superpowers.md"]
+    assert missing.is_file()
+    assert unmanaged.is_file()
+    assert not managed.exists()
+    assert replacement.read_text(encoding="utf-8") == "# operator wrote this\n"
+
+
+def test_prune_removes_only_directories_its_removals_emptied(tmp_path):
+    _seed_replacements(tmp_path)
+    nested_new = tmp_path / ".agents" / "commands" / "pack" / "deep" / "tool.md"
+    nested_new.parent.mkdir(parents=True)
+    nested_new.write_text(_managed_projection("body\n"), encoding="utf-8")
+    legacy = tmp_path / ".antigravity"
+    nested_old = legacy / "commands" / "pack" / "deep" / "tool.md"
+    nested_old.parent.mkdir(parents=True)
+    nested_old.write_text(_managed_projection("body\n"), encoding="utf-8")
+    (legacy / "commands" / "simplify.md").write_text(_managed_projection("body\n"), encoding="utf-8")
+    # Pre-existing empty user directories, none of them parents of a removed file.
+    user_empty = legacy / "commands" / "my-empty-dir"
+    user_empty.mkdir()
+    sibling_empty = legacy / "commands" / "pack" / "also-empty"
+    sibling_empty.mkdir()
+    superpowers_empty = legacy / "superpowers"
+    superpowers_empty.mkdir()
+    skills_empty = legacy / "skills" / "kept-empty"
+    skills_empty.mkdir(parents=True)
+
+    removed = prune_legacy_antigravity_projections(tmp_path)
+
+    assert sorted(removed) == [
+        ".antigravity/commands/pack/deep/tool.md",
+        ".antigravity/commands/simplify.md",
+    ]
+    assert not (legacy / "commands" / "pack" / "deep").exists()
+    assert user_empty.is_dir()
+    assert sibling_empty.is_dir()
+    # "pack" still holds the sibling, so the walk stopped there.
+    assert (legacy / "commands" / "pack").is_dir()
+    assert superpowers_empty.is_dir()
+    assert skills_empty.is_dir()
+    assert (legacy / "commands").is_dir()
+
+
+def test_prune_removes_a_directory_chain_up_to_and_including_the_base(tmp_path):
+    new = tmp_path / ".agents" / "commands" / "only" / "tool.md"
+    new.parent.mkdir(parents=True)
+    new.write_text(_managed_projection("body\n"), encoding="utf-8")
+    old = tmp_path / ".antigravity" / "commands" / "only" / "tool.md"
+    old.parent.mkdir(parents=True)
+    old.write_text(_managed_projection("body\n"), encoding="utf-8")
+
+    assert prune_legacy_antigravity_projections(tmp_path) == [".antigravity/commands/only/tool.md"]
+    assert not (tmp_path / ".antigravity" / "commands").exists()
+    assert (tmp_path / ".antigravity").is_dir()
+
+
+def _legacy_catalog(tmp_path: Path, *, customize: str | None = None) -> Path:
+    """Write a tools catalog as a pre-#2810 install did: antigravity on the old `.antigravity/` paths."""
+    from brigade.tools_cmd import paths as tools_paths
+
+    tools = []
+    for tool in constants.DEFAULT_TOOLS:
+        entry = {**tool, "projections": dict(tool["projections"])}
+        current = entry["projections"].get("antigravity")
+        if current:
+            entry["projections"]["antigravity"] = current.replace(".agents/", ".antigravity/", 1)
+        if customize and entry["id"] == customize:
+            entry["projections"]["antigravity"] = ".antigravity/commands/my-custom-name.md"
+        tools.append(entry)
+    path = tools_paths.config_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tools_helpers._format_tool_entries(tools), encoding="utf-8")
+    return path
+
+
+def _catalog_antigravity_paths(path: Path) -> dict[str, str]:
+    import tomllib
+
+    tools = tomllib.loads(path.read_text(encoding="utf-8"))["tool"]
+    return {t["id"]: t["projections"]["antigravity"] for t in tools if "antigravity" in t.get("projections", {})}
+
+
+def test_install_migrates_legacy_antigravity_paths_in_the_tools_catalog(tmp_path, capsys):
+    path = _legacy_catalog(tmp_path, customize="simplify")
+    before = _catalog_antigravity_paths(path)
+    assert before and all(v.startswith(".antigravity/") for v in before.values())
+
+    assert install_selection(tmp_path, _sel("antigravity")) == 0
+
+    after = _catalog_antigravity_paths(path)
+    defaults = {
+        t["id"]: t["projections"]["antigravity"] for t in constants.DEFAULT_TOOLS if "antigravity" in t["projections"]
+    }
+    for tool_id, rel in after.items():
+        if tool_id == "simplify":
+            # Operator-customized: untouched.
+            assert rel == ".antigravity/commands/my-custom-name.md"
+        else:
+            assert rel == defaults[tool_id]
+            assert rel.startswith(".agents/")
+    assert "moved tools catalog antigravity projection" in capsys.readouterr().out
+
+
+def test_catalog_migration_is_idempotent_and_leaves_other_harness_paths_alone(tmp_path):
+    from brigade.tools_cmd.catalog_manage import migrate_legacy_antigravity_paths
+
+    path = _legacy_catalog(tmp_path)
+    claude_before = path.read_text(encoding="utf-8").count(".claude/commands/")
+
+    migrated = migrate_legacy_antigravity_paths(tmp_path)
+    assert migrated
+    assert migrate_legacy_antigravity_paths(tmp_path) == []
+    text = path.read_text(encoding="utf-8")
+    assert text.count(".claude/commands/") == claude_before
+    assert ".antigravity/" not in text
+
+
+def test_catalog_migration_ignores_a_missing_or_invalid_catalog(tmp_path):
+    from brigade.tools_cmd import paths as tools_paths
+    from brigade.tools_cmd.catalog_manage import migrate_legacy_antigravity_paths
+
+    assert migrate_legacy_antigravity_paths(tmp_path) == []
+    path = tools_paths.config_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not = [valid toml\n", encoding="utf-8")
+    assert migrate_legacy_antigravity_paths(tmp_path) == []
+    assert path.read_text(encoding="utf-8") == "not = [valid toml\n"
+
+
+def test_no_wire_install_leaves_the_tools_catalog_alone(tmp_path):
+    path = _legacy_catalog(tmp_path)
+    before = path.read_text(encoding="utf-8")
+    assert install_selection(tmp_path, _sel("antigravity"), wire_skills=False) == 0
+    assert path.read_text(encoding="utf-8") == before

@@ -12,6 +12,7 @@ import inspect
 import json
 import os
 import re
+import sys
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -688,6 +689,7 @@ _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED: OrderedDict[tuple[str, str], bool] = Order
 _ANTIGRAVITY_MODE_FLAG_RE = re.compile(r"(?<![\w-])--mode(?![\w-])")
 _ANTIGRAVITY_MODE_PLAN_RE = re.compile(r"(?<![\w-])plan(?![\w-])")
 _ANTIGRAVITY_MODE_SUPPORTED: OrderedDict[tuple[str, str], bool] = OrderedDict()
+_ANTIGRAVITY_PLAN_MODE_WARNED: set[str] = set()
 
 
 def _antigravity_env_fingerprint(env: dict[str, str] | None) -> str:
@@ -710,6 +712,8 @@ def _antigravity_help_supports(
 ) -> bool:
     """Run ``<executable> --help`` once per (executable, env fingerprint) and cache ``check(help)``.
 
+    Only a successful probe is cached; a non-zero exit or timeout returns False uncached.
+
     The cache is bounded to ``_ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT`` entries
     and stores only the executable string and a SHA-256 hex digest of the
     environment; it never retains env keys or values.
@@ -724,9 +728,11 @@ def _antigravity_help_supports(
         process_registry=process_registry,
     )
     if result.code != 0:
-        supported = False
-    else:
-        supported = check("\n".join((result.stdout, result.stderr)))
+        # A failed or timed-out probe says nothing about the build: answer False
+        # for this call but do not cache it, so a transient failure cannot pin a
+        # capable agy to the degraded argv for the rest of the process.
+        return False
+    supported = check("\n".join((result.stdout, result.stderr)))
     if len(cache) >= _ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT:
         cache.popitem(last=False)
     cache[cache_key] = supported
@@ -780,13 +786,30 @@ def _antigravity_supports_mode(
     )
 
 
-def _clear_antigravity_print_timeout_cache() -> None:
+def _clear_antigravity_help_caches() -> None:
     _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED.clear()
     _ANTIGRAVITY_MODE_SUPPORTED.clear()
+    _ANTIGRAVITY_PLAN_MODE_WARNED.clear()
 
 
-_antigravity_supports_print_timeout.cache_clear = _clear_antigravity_print_timeout_cache  # type: ignore[attr-defined]
-_antigravity_supports_mode.cache_clear = _clear_antigravity_print_timeout_cache  # type: ignore[attr-defined]
+# Old name kept so existing callers and tests keep working.
+_clear_antigravity_print_timeout_cache = _clear_antigravity_help_caches
+
+_antigravity_supports_print_timeout.cache_clear = _clear_antigravity_help_caches  # type: ignore[attr-defined]
+_antigravity_supports_mode.cache_clear = _clear_antigravity_help_caches  # type: ignore[attr-defined]
+
+
+def _warn_antigravity_plan_mode_unsupported(executable: str) -> None:
+    """Say once per executable that a read-only agy seat is read-only by prompt alone on this build."""
+    if executable in _ANTIGRAVITY_PLAN_MODE_WARNED:
+        return
+    _ANTIGRAVITY_PLAN_MODE_WARNED.add(executable)
+    print(
+        "warning: this agy build does not list `--mode plan`, so the read-only Antigravity seat "
+        "is read-only by prompt only (--sandbox restricts the terminal, not file edits). "
+        "Upgrade agy to enforce read-only.",
+        file=sys.stderr,
+    )
 
 
 def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
@@ -909,6 +932,10 @@ def _with_reasoning(cli_ref: str, argv: List[str], reasoning: str) -> List[str]:
 # gemini-4-hydrogen-low). A bare gemini-<version>-<family> id is not resolvable
 # and requires --effort, so any family name without an effort suffix gets the
 # default one. Already-suffixed ids and non-Gemini ids pass through unchanged.
+# Hyphenated families (for example `flash-lite`) also pass through unchanged on
+# purpose: the family pattern is a single word, so `gemini-3.8-flash-lite` is
+# taken as already specific. seat_health shares _antigravity_model_pin, so this
+# rule applies to its model checks as well.
 _ANTIGRAVITY_GEMINI_BASE_RE = re.compile(r"^gemini-\d+(?:\.\d+)?-(?!(?:low|medium|high|xhigh|max)$)[a-z][a-z0-9]*$")
 _ANTIGRAVITY_DEFAULT_EFFORT = "low"
 
@@ -1492,6 +1519,8 @@ def run_agent(
                 env=child_env,
                 process_registry=process_registry,
             )
+            if not antigravity_mode_supported:
+                _warn_antigravity_plan_mode_unsupported(executable.path)
         argv = build_argv(
             cli_ref,
             prompt,

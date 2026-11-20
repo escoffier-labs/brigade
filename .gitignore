@@ -200,6 +200,9 @@ memory/handoff-inbox/
 .opencode/superpowers/
 .agents/commands/
 .agents/superpowers/
+# Legacy Antigravity projection paths (pre-#2810); drop after the next release.
+.antigravity/commands/
+.antigravity/superpowers/
 .pi/commands/
 .pi/superpowers/
 .cursor/rules/

@@ -584,6 +584,51 @@ def test_run_agent_antigravity_read_only_keeps_legacy_argv_on_old_agy(monkeypatc
     assert launched == [["/seat/bin/agy", "--sandbox", "--print", "hi"]]
 
 
+def test_run_agent_antigravity_read_only_warns_once_when_plan_mode_unsupported(monkeypatch, tmp_path, capsys):
+    res, launched = _run_antigravity_read_only(monkeypatch, tmp_path, "--model <id>\n--sandbox")
+    assert res.ok is True
+    assert launched == [["/seat/bin/agy", "--sandbox", "--print", "hi"]]
+    err = capsys.readouterr().err
+    assert err.count("read-only by prompt only") == 1
+    assert "Upgrade agy" in err
+
+
+def test_run_agent_antigravity_read_only_does_not_warn_when_plan_mode_supported(monkeypatch, tmp_path, capsys):
+    _run_antigravity_read_only(monkeypatch, tmp_path, "--mode <mode> accept-edits, auto, plan")
+    assert "read-only by prompt only" not in capsys.readouterr().err
+
+
+def test_antigravity_help_probe_failure_is_not_cached(monkeypatch):
+    agents._clear_antigravity_help_caches()
+    results = iter(
+        [
+            agents.proc.Result(124, "", "timed out"),
+            agents.proc.Result(0, "  --mode <mode>   Permission mode: auto, plan\n  --print-timeout <d>\n", ""),
+        ]
+    )
+    calls = []
+
+    def stub_run(argv, **kwargs):
+        calls.append(argv)
+        return next(results)
+
+    monkeypatch.setattr(agents.proc, "run", stub_run)
+    env = {"PATH": "/bin"}
+    assert agents._antigravity_supports_mode("/flaky/agy", env=env) is False
+    assert not agents._ANTIGRAVITY_MODE_SUPPORTED
+    # The next call re-probes and now sees the real answer, then caches it.
+    assert agents._antigravity_supports_mode("/flaky/agy", env=env) is True
+    assert agents._antigravity_supports_mode("/flaky/agy", env=env) is True
+    assert len(calls) == 2
+    agents._clear_antigravity_help_caches()
+
+
+def test_clear_antigravity_help_caches_keeps_old_name_alias():
+    assert agents._clear_antigravity_print_timeout_cache is agents._clear_antigravity_help_caches
+    assert agents._antigravity_supports_mode.cache_clear is agents._clear_antigravity_help_caches
+    assert agents._antigravity_supports_print_timeout.cache_clear is agents._clear_antigravity_help_caches
+
+
 def test_build_argv_antigravity_with_timeout_seconds_and_help_probe_adds_print_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(agents, "_antigravity_supports_print_timeout", lambda *args, **kwargs: True)
 

@@ -200,6 +200,8 @@ def test_antigravity_maps_gemini_api_id_to_low_effort_slug():
         ("gemini-4-neon-medium", "gemini-4-neon-medium"),
         ("gemini-4-neon-xhigh", "gemini-4-neon-xhigh"),
         ("gemini-4-neon-max", "gemini-4-neon-max"),
+        # Hyphenated families pass through unchanged on purpose.
+        ("gemini-3.8-flash-lite", "gemini-3.8-flash-lite"),
         ("gpt-5", "gpt-5"),
         ("claude-opus-5-5", "claude-opus-5-5"),
         ("Gemini 3.8 Flash (Low)", "Gemini 3.8 Flash (Low)"),
