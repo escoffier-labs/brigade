@@ -749,6 +749,17 @@ def _antigravity_supports_print_timeout(
     )
 
 
+def _antigravity_help_lists_plan_mode(text: str) -> bool:
+    """True when a help line that names ``--mode`` also lists ``plan`` as a value.
+
+    Matching the two separately would accept a build whose --mode lacks plan
+    but whose help mentions "plan" elsewhere, and that argv would then fail.
+    """
+    return any(
+        _ANTIGRAVITY_MODE_FLAG_RE.search(line) and _ANTIGRAVITY_MODE_PLAN_RE.search(line) for line in text.splitlines()
+    )
+
+
 def _antigravity_supports_mode(
     executable: str = "agy",
     *,
@@ -762,7 +773,7 @@ def _antigravity_supports_mode(
     """
     return _antigravity_help_supports(
         _ANTIGRAVITY_MODE_SUPPORTED,
-        lambda text: bool(_ANTIGRAVITY_MODE_FLAG_RE.search(text) and _ANTIGRAVITY_MODE_PLAN_RE.search(text)),
+        _antigravity_help_lists_plan_mode,
         executable,
         env,
         process_registry,

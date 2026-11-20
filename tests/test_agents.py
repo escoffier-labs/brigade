@@ -517,12 +517,17 @@ def test_antigravity_supports_mode_probe_detects_flag_and_plan_value(monkeypatch
             return agents.proc.Result(0, "  --model <id>   Model to use\n  --sandbox\n", "")
         if argv[0] == "/nomodeplan/agy":
             return agents.proc.Result(0, "  --mode <mode>   Permission mode: auto\n", "")
+        if argv[0] == "/planelsewhere/agy":
+            return agents.proc.Result(
+                0, "  --mode <mode>   Permission mode: auto\n  --dry-run   Show the plan only\n", ""
+            )
         return agents.proc.Result(2, "", "boom")
 
     monkeypatch.setattr(agents.proc, "run", stub_run)
     assert agents._antigravity_supports_mode("/new/agy", env={"PATH": "/bin"}) is True
     assert agents._antigravity_supports_mode("/old/agy", env={"PATH": "/bin"}) is False
     assert agents._antigravity_supports_mode("/nomodeplan/agy", env={"PATH": "/bin"}) is False
+    assert agents._antigravity_supports_mode("/planelsewhere/agy", env={"PATH": "/bin"}) is False
     assert agents._antigravity_supports_mode("/broken/agy", env={"PATH": "/bin"}) is False
     # Cached per (executable, env fingerprint): no second help call.
     assert agents._antigravity_supports_mode("/new/agy", env={"PATH": "/bin"}) is True
@@ -530,11 +535,12 @@ def test_antigravity_supports_mode_probe_detects_flag_and_plan_value(monkeypatch
         ["/new/agy", "--help"],
         ["/old/agy", "--help"],
         ["/nomodeplan/agy", "--help"],
+        ["/planelsewhere/agy", "--help"],
         ["/broken/agy", "--help"],
     ]
     # A different environment is a different cache entry.
     assert agents._antigravity_supports_mode("/new/agy", env={"PATH": "/other"}) is True
-    assert len(calls) == 5
+    assert len(calls) == 6
     # The cache holds no environment values.
     assert "/other" not in repr(agents._ANTIGRAVITY_MODE_SUPPORTED)
     agents._clear_antigravity_print_timeout_cache()

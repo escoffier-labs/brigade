@@ -45,13 +45,38 @@ SURFACE_EVIDENCE_REL_PATH = ".brigade/surface-evidence.json"
 _LEGACY_ANTIGRAVITY_PROJECTION_DIRS = ("commands", "superpowers", "skills")
 
 
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
 def _is_plain(path: Path, *, directory: bool) -> bool:
-    """True for a real (non-link) directory or regular file."""
+    """True for a real directory or regular file: not a symlink and not a Windows junction or other reparse point."""
     try:
-        mode = path.lstat().st_mode
+        info = path.lstat()
     except OSError:
         return False
-    return stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)
+    if getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    return stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+
+
+def _plain_tree(base: Path) -> tuple[list[Path], list[Path]]:
+    """Regular files and real directories under ``base``, never descending through a link or junction."""
+    files: list[Path] = []
+    dirs: list[Path] = []
+    pending = [base]
+    while pending:
+        current = pending.pop()
+        dirs.append(current)
+        try:
+            children = sorted(current.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if _is_plain(child, directory=True):
+                pending.append(child)
+            elif _is_plain(child, directory=False):
+                files.append(child)
+    return sorted(files), dirs
 
 
 def _brigade_owned_legacy_skill(rel: str, skill_id: str, data: bytes, recorded: dict[str, object]) -> bool:
@@ -64,16 +89,27 @@ def _brigade_owned_legacy_skill(rel: str, skill_id: str, data: bytes, recorded: 
     return digest in shipped_history.digests(shipped_history.skill_key(skill_id))
 
 
+def _brigade_owned_legacy_projection(path: Path) -> bool:
+    """A legacy tool projection is Brigade's only while its body still matches the recorded fingerprint."""
+    from .tools_cmd import helpers as tools_helpers
+    from .tools_cmd.projections import _read_projection
+
+    metadata, body = _read_projection(path)
+    if metadata is None:
+        return False
+    recorded = str(metadata.get("projection_fingerprint") or "")
+    return bool(recorded) and recorded == tools_helpers._text_hash(body or "")
+
+
 def prune_legacy_antigravity_projections(target: Path, recorded: dict[str, object] | None = None) -> list[str]:
     """Remove Brigade-owned Antigravity projections from the pre-#2810 .antigravity/ paths.
 
-    Owned means a tool projection carrying the managed marker, or a SKILL.md
-    that is still byte-identical (newline-folded) to a text Brigade wrote or
-    shipped. Anything an operator edited, any link, and any other file stays.
-    `.antigravity/memory-handoffs` is never touched. Returns the removed paths.
+    Owned means a managed tool projection whose body still matches its
+    recorded fingerprint, or a SKILL.md that is still byte-identical
+    (newline-folded) to a text Brigade wrote or shipped. Anything an operator
+    edited, any symlink or junction (and nothing below one), and any other file
+    stays. `.antigravity/memory-handoffs` is never touched. Returns the removed paths.
     """
-    from .tools_cmd.constants import PROJECTION_MARKER
-
     recorded = recorded or {}
     root = target / ".antigravity"
     removed: list[str] = []
@@ -83,25 +119,20 @@ def prune_legacy_antigravity_projections(target: Path, recorded: dict[str, objec
         base = root / name
         if not _is_plain(base, directory=True):
             continue
-        for path in sorted(base.rglob("*")):
-            if not _is_plain(path, directory=False) or any(
-                parent.is_symlink() for parent in path.parents if base in (parent, *parent.parents)
-            ):
-                continue
+        files, dirs = _plain_tree(base)
+        for path in files:
             rel = path.relative_to(target).as_posix()
-            try:
-                data = path.read_bytes()
-            except OSError:
-                continue
             if name == "skills":
                 parts = path.relative_to(base).parts
-                owned = (
-                    len(parts) == 2
-                    and parts[1] == "SKILL.md"
-                    and _brigade_owned_legacy_skill(rel, parts[0], data, recorded)
-                )
+                if len(parts) != 2 or parts[1] != "SKILL.md":
+                    continue
+                try:
+                    data = path.read_bytes()
+                except OSError:
+                    continue
+                owned = _brigade_owned_legacy_skill(rel, parts[0], data, recorded)
             else:
-                owned = PROJECTION_MARKER.encode() in data[:512]
+                owned = _brigade_owned_legacy_projection(path)
             if not owned:
                 continue
             try:
@@ -110,7 +141,7 @@ def prune_legacy_antigravity_projections(target: Path, recorded: dict[str, objec
                 continue
             removed.append(rel)
         # Drop only the directories this emptied; os.rmdir refuses a non-empty one.
-        for directory in sorted((d for d in (*base.rglob("*"), base) if _is_plain(d, directory=True)), reverse=True):
+        for directory in sorted(dirs, key=lambda d: len(d.parts), reverse=True):
             with contextlib.suppress(OSError):
                 directory.rmdir()
     for rel in removed:
@@ -586,7 +617,8 @@ def install_selection(
         wirer.finish()
 
     # New projections are in place; retire the Brigade-owned ones at the old path.
-    if "antigravity" in selection.harnesses:
+    # --no-wire writes no replacements, so it removes nothing either.
+    if wire_skills and "antigravity" in selection.harnesses:
         try:
             prune_legacy_antigravity_projections(target, wirer._recorded)
         except OSError as exc:

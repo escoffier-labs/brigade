@@ -12,6 +12,7 @@ from brigade.selection import Selection
 from brigade.skills_cmd import HARNESS_ADAPTERS
 from brigade.templates import template_root
 from brigade.tools_cmd import constants
+from brigade.tools_cmd import helpers as tools_helpers
 
 MARKER = constants.PROJECTION_MARKER
 
@@ -49,6 +50,13 @@ def test_init_wires_default_skills_under_agents_not_antigravity(tmp_path):
     assert (tmp_path / ".antigravity" / "memory-handoffs" / "TEMPLATE.md").is_file()
 
 
+def _managed_projection(body: str) -> str:
+    metadata = json.dumps(
+        {"projection_fingerprint": tools_helpers._text_hash(body)}, sort_keys=True, separators=(",", ":")
+    )
+    return f"<!-- {MARKER} {metadata} -->\n{body}"
+
+
 def _seed_legacy(tmp_path: Path) -> dict[str, Path]:
     legacy = tmp_path / ".antigravity"
     files = {
@@ -64,9 +72,9 @@ def _seed_legacy(tmp_path: Path) -> dict[str, Path]:
     files["pristine_skill"].write_bytes(_bundled("brigade-work"))
     files["edited_skill"].write_bytes(b"# operator edited this\n")
     files["user_skill"].write_bytes(b"# not a brigade skill\n")
-    files["owned_command"].write_text(f"<!-- {MARKER} {{}} -->\nbody\n", encoding="utf-8")
+    files["owned_command"].write_text(_managed_projection("body\n"), encoding="utf-8")
     files["user_command"].write_text("# my own command\n", encoding="utf-8")
-    files["owned_superpowers"].write_text(f"<!-- {MARKER} {{}} -->\nbody\n", encoding="utf-8")
+    files["owned_superpowers"].write_text(_managed_projection("body\n"), encoding="utf-8")
     return files
 
 
@@ -159,3 +167,64 @@ def test_wired_json_records_new_agents_path(tmp_path):
     wired = json.loads((tmp_path / ".brigade" / "skills" / "wired.json").read_text())["skills"]
     assert ".agents/skills/brigade-work/SKILL.md" in wired
     assert not any(key.startswith(".antigravity/") for key in wired)
+
+
+def test_prune_keeps_an_edited_managed_projection(tmp_path):
+    command = tmp_path / ".antigravity" / "commands" / "simplify.md"
+    command.parent.mkdir(parents=True)
+    # Header kept, body edited: the recorded fingerprint no longer matches.
+    command.write_text(_managed_projection("body\n").replace("body", "operator edit"), encoding="utf-8")
+    assert prune_legacy_antigravity_projections(tmp_path) == []
+    assert command.is_file()
+
+
+def test_prune_keeps_a_marker_lookalike_without_fingerprint(tmp_path):
+    command = tmp_path / ".antigravity" / "commands" / "notes.md"
+    command.parent.mkdir(parents=True)
+    command.write_text(f"<!-- {MARKER} {{}} -->\nmy notes mention the marker\n", encoding="utf-8")
+    assert prune_legacy_antigravity_projections(tmp_path) == []
+    assert command.is_file()
+
+
+def test_prune_does_not_descend_into_a_reparse_point(tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "simplify.md"
+    victim.write_text(_managed_projection("body\n"), encoding="utf-8")
+    commands = tmp_path / ".antigravity" / "commands"
+    commands.mkdir(parents=True)
+    junction = commands / "linked"
+    junction.mkdir()
+    (junction / "simplify.md").write_text(_managed_projection("body\n"), encoding="utf-8")
+    real_is_plain = install_mod._is_plain
+
+    # Stand in for a Windows junction: a directory that reports the reparse-point attribute.
+    def fake_is_plain(path, *, directory):
+        if path == junction:
+            return False
+        return real_is_plain(path, directory=directory)
+
+    monkeypatch.setattr(install_mod, "_is_plain", fake_is_plain)
+    assert prune_legacy_antigravity_projections(tmp_path) == []
+    assert (junction / "simplify.md").is_file()
+    assert victim.is_file()
+
+
+def test_is_plain_rejects_reparse_point_attribute(tmp_path, monkeypatch):
+    target = tmp_path / "d"
+    target.mkdir()
+    real = target.lstat()
+
+    class Info:
+        st_mode = real.st_mode
+        st_file_attributes = install_mod._FILE_ATTRIBUTE_REPARSE_POINT
+
+    monkeypatch.setattr(Path, "lstat", lambda self: Info() if self == target else real)
+    assert install_mod._is_plain(target, directory=True) is False
+
+
+def test_no_wire_install_prunes_nothing(tmp_path):
+    files = _seed_legacy(tmp_path)
+    assert install_selection(tmp_path, _sel("antigravity"), wire_skills=False) == 0
+    for path in files.values():
+        assert path.is_file(), path
