@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
+from .proc_group import drain_supported, observe_leader_exit, wait_for_group
+
 _STREAM_ENCODING = "utf-8"
 MAX_CAPTURE_BYTES = 1_048_576
 # Child output is drained beyond the retained capture cap. This limits the
@@ -42,9 +44,7 @@ _WINDOWS_BATCH_SUFFIXES = frozenset({".cmd", ".bat"})
 _WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 _TIMED_OUT_DRAIN_SECONDS = 0.5
 # Bound for a supervised run's descendants to finish after the direct child
-# exits before the owned group is reaped (``group_drain_seconds`` in run()).
-# A caller that publishes the run's files must not read them while a descendant
-# is still writing (#2286).
+# exits before the owned group is reaped (see group_drain_seconds in run()).
 GROUP_DRAIN_SECONDS = 5.0
 # Forced nonzero exit for a terminated post-exit process group: the direct
 # child's zero must never stand once its output pipes were cut off mid-stream.
@@ -499,29 +499,6 @@ def _wait_for_processes(processes: tuple[subprocess.Popen[bytes], ...], timeout:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
-        time.sleep(min(0.01, remaining))
-
-
-def _process_group_exit(process: subprocess.Popen[bytes], timeout: float) -> bool | None:
-    """Wait bounded for the launched child's group to empty.
-
-    ``True`` means members outlived ``timeout``, ``False`` means the group is
-    empty, and ``None`` means this platform cannot probe it (Windows owns a job
-    object instead), so the group's fate is unconfirmed rather than absent.
-    """
-    if os.name != "posix":
-        return None
-    deadline = time.monotonic() + max(timeout, 0.0)
-    while True:
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            return False
-        except OSError:
-            pass  # EPERM: members exist that this caller may not signal
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return True
         time.sleep(min(0.01, remaining))
 
 
@@ -1062,11 +1039,11 @@ def _readers_alive(threads: list[threading.Thread]) -> bool:
 
 
 def _collection_complete(
-    process: subprocess.Popen[bytes],
+    leader_gone: Callable[[], bool],
     threads: list[threading.Thread],
     collector: _BoundedCollector,
 ) -> bool:
-    return collector.stream_limit_exceeded or (process.poll() is not None and not _readers_alive(threads))
+    return collector.stream_limit_exceeded or (leader_gone() and not _readers_alive(threads))
 
 
 def _join_started_threads_after_exception(threads: list[threading.Thread], timeout: float) -> None:
@@ -1150,6 +1127,13 @@ def _collect_process_output(
     started_threads: list[threading.Thread] | None = None,
 ) -> Result:
     collector = _BoundedCollector()
+    # Drain mode keeps the leader's pid and group id reserved until the whole
+    # group is gone, so a recycled id can never be probed or signalled (#2286).
+    drain_seconds = group_drain_seconds if drain_supported() else 0.0
+    leader_exited = threading.Event() if drain_seconds > 0 else None
+
+    def leader_gone() -> bool:
+        return leader_exited.is_set() if leader_exited is not None else process.poll() is not None
 
     def read_stream(stream: Any, name: str) -> None:
         try:
@@ -1183,7 +1167,11 @@ def _collect_process_output(
 
     def watch_process() -> None:
         try:
-            process.wait()
+            if leader_exited is None:
+                process.wait()
+            else:
+                observe_leader_exit(process)
+                leader_exited.set()
         finally:
             collector.wake.set()
 
@@ -1193,7 +1181,6 @@ def _collect_process_output(
 
     timed_out = False
     incomplete_group = False
-    group_unreaped = False
     descendants_reaped = False
     cleanup_error: str | None = None
 
@@ -1210,14 +1197,14 @@ def _collect_process_output(
     deadline = time.monotonic() + max(timeout, 0.0)
     exited_at: float | None = None
     while True:
-        if _collection_complete(process, threads, collector):
+        if _collection_complete(leader_gone, threads, collector):
             break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
             break
         wait_for = remaining
-        if process.poll() is not None:
+        if leader_gone():
             if exited_at is None:
                 exited_at = time.monotonic()
             # The direct child is gone but a descendant still holds an
@@ -1231,29 +1218,24 @@ def _collect_process_output(
         # Clear-check-wait: avoid missing a wake that arrives between the
         # completeness check above and the blocking wait below.
         collector.wake.clear()
-        if _collection_complete(process, threads, collector):
+        if _collection_complete(leader_gone, threads, collector):
             break
         collector.wake.wait(timeout=wait_for)
 
-    if supervise_group and not timed_out and not incomplete_group and process.poll() is not None:
+    if supervise_group and not timed_out and not incomplete_group and leader_gone():
         # Supervised runs (scanner launches): once the direct child is gone,
         # reap the owned group even when every capture pipe closed cleanly, so
-        # an escaped descendant cannot outlive the run while holding workspace
-        # locks. The direct child's exit status stands. A run that asked for a
-        # group drain first waits for descendants still finishing the run's own
-        # output: killing them mid-write published a half-written import file
-        # that later failed its identity checks (#2286).
-        drained = _process_group_exit(process, group_drain_seconds) if group_drain_seconds > 0 else True
+        # an escaped descendant cannot outlive the run holding workspace locks.
+        # A draining run lets descendants finish the run's own output, bounded
+        # by the remaining timeout; survivors were killed mid-work and fail it.
+        drain_budget = min(drain_seconds, max(deadline - time.monotonic(), 0.0))
+        drained = wait_for_group(process, drain_budget) if drain_seconds > 0 else True
         if drained is not False:
             bounded_stop()
             descendants_reaped = True
-            if group_drain_seconds > 0 and drained is True:
-                # A group that outlived both the drain and its termination is
-                # not provably gone, so its run must fail closed.
-                group_unreaped = _process_group_exit(process, _TIMED_OUT_DRAIN_SECONDS) is True
-                incomplete_group = group_unreaped
+        incomplete_group = drained is True and drain_seconds > 0
 
-    if timed_out or collector.stream_limit_exceeded or incomplete_group:
+    if (timed_out or collector.stream_limit_exceeded or incomplete_group) and not descendants_reaped:
         bounded_stop()
 
     _join_readers(threads, _TIMED_OUT_DRAIN_SECONDS)
@@ -1306,11 +1288,7 @@ def _collect_process_output(
     if timed_out:
         extras.append(f"timeout after {timeout}s")
     if incomplete_group:
-        extras.append(
-            "process group still running after child exit; output incomplete and group terminated"
-            if group_unreaped
-            else "process group kept the output pipes open after child exit; output incomplete and group terminated"
-        )
+        extras.append("process group did not finish cleanly after child exit; output incomplete and group terminated")
     if cleanup_error is not None:
         extras.append(f"process group cleanup failed ({cleanup_error}); output may be incomplete")
     if extras:
