@@ -270,8 +270,21 @@ def _antigravity_argv(
         # Plan mode is what stops writes, so add it whenever agy advertises it.
         # Headless agy auto-denies reads outside its allowed dirs, so a
         # read-only seat needs --add-dir for the checkout it was pointed at.
-        mode_flags = ["--mode", "plan"] if mode_supported else []
-        return ["agy", "--add-dir", str(effective_cwd), "--sandbox", *mode_flags, *timeout_flags, "--print", prompt]
+        # Only grant it when plan mode blocks writes. On older agy the seat is
+        # read-only by prompt only and gets no extra directory access.
+        if mode_supported:
+            return [
+                "agy",
+                "--add-dir",
+                str(effective_cwd),
+                "--sandbox",
+                "--mode",
+                "plan",
+                *timeout_flags,
+                "--print",
+                prompt,
+            ]
+        return ["agy", "--sandbox", *timeout_flags, "--print", prompt]
     argv = ["agy", "--add-dir", str(effective_cwd)]
     argv.extend(["--dangerously-skip-permissions", *timeout_flags, "--print", prompt])
     return argv
@@ -1733,14 +1746,18 @@ def run_agent(
             request_id=grok_request_id,
         )
     antigravity_no_output = (
-        _antigravity_no_output_detail(result.stdout, result.stderr) if cli_ref == "antigravity" else None
+        _antigravity_no_output_detail(result.stdout, result.stderr)
+        if cli_ref == "antigravity" and _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr) is None
+        else None
     )
     if antigravity_no_output is not None:
+        # permission-denied is INTERACTIVE_BLOCKED in worker_failure, which only
+        # allows the preflight and dispatch phases.
         return AgentResult(
             text="",
             ok=False,
             detail=scrub_detail(antigravity_no_output)[:200],
-            failure_phase="output-validation",
+            failure_phase="dispatch",
             failure_kind="permission-denied",
             stdout=safe_stdout,
             stderr=safe_stderr,

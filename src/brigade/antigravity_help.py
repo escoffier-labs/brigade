@@ -155,11 +155,11 @@ def _antigravity_no_output_detail(stdout: str, stderr: str = "") -> str | None:
     agy auto-denies a tool permission it cannot prompt for and still exits 0.
     agy 1.5.12 leaves stdout empty and writes one stderr line that starts with
     ``jetski: no output produced`` and names the denied permission. The caller
-    turns that into a failed run carrying the reason. A stdout report that only
-    quotes the marker later on is real output and is left alone.
+    turns that into a failed run carrying the reason. Any other stdout line is
+    real output, so the run is left alone.
     """
     out_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    if out_lines and not out_lines[0].startswith(_ANTIGRAVITY_NO_OUTPUT_MARKER):
+    if any(not line.startswith(_ANTIGRAVITY_NO_OUTPUT_MARKER) for line in out_lines):
         return None
     for stream in (stderr, stdout):
         lines = [line.strip() for line in stream.splitlines() if line.strip()]
