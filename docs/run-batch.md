@@ -345,9 +345,10 @@ branch, pushes it, or publishes it. Inspect it with `git log <ref>` and take it
 yourself with `git merge <ref>`; the human output names both commands.
 
 `--check` runs every precondition and every quarantined merge, then stops: it
-writes no ref, no record and no journal fact. The command holds the caller
-workspace's run lock for its whole duration in either mode, so a live batch
-refuses it with `target-busy`.
+writes no ref, no record and no journal fact. The merges it runs still leave
+unreachable objects in the object store, which a normal `git gc` removes. The
+command holds the caller workspace's run lock for its whole duration in either
+mode, so a live batch refuses it with `target-busy`.
 
 Preconditions are checked before anything is written. Every named task must be
 terminal, unique, and accepted by the run. Its artifact sidecar must exist, be a
@@ -364,32 +365,42 @@ that base.
 A repository can define a merge driver in its config, and a tracked
 `.gitattributes` can name one. A worker can write either, so every merge runs in
 a temporary bare repository created under the batch run directory, with its own
-empty config and the caller's objects reachable only through
-`objects/info/alternates`. With no driver definition to resolve, any attribute
-naming one falls back to Git's builtin text merge, and with no hook path no hook
-can run. `merge-tree --write-tree --name-only -z` (Git 2.38 or newer) merges each
+empty config. With no driver definition to resolve, any attribute naming one
+falls back to Git's builtin text merge, and with no hook path no hook can run.
+`merge-tree --write-tree --name-only -z` (Git 2.38 or newer) merges each
 candidate into the running tree in order; a conflict in any step refuses the
 whole integration and names the tasks merged so far and at most 50 conflicted
-paths. Nothing is partially integrated.
+paths, decoded leniently, so a path that is not valid UTF-8 still reports as a
+conflict. Nothing is partially integrated.
 
-Only the final commit and its new objects travel back, through a local
-`git fetch` from the quarantine repository run under the hardened runner, so the
-fetching side has no receive hooks and the quarantine side has none either. The
+Merges read and write the caller repository's object store directly through
+`GIT_OBJECT_DIRECTORY`, so the final commit is already in place when the merge
+finishes. Object transfer from quarantine uses no Git transport at all: no
+remote, no URL, and no transport or credential helper is resolved, so
+`url.*.insteadOf` rewrites, `core.sshCommand` and `core.fsmonitor` in the
+caller's config cannot run, and hooks stay pinned to the null device. The
 caller's branch is then created with an absent-ref compare-and-swap
 (`git update-ref <ref> <commit> <zero>`), so an existing ref is never moved or
-replaced. The quarantine directory is removed afterwards; it holds only objects
-Brigade just wrote.
+replaced. The quarantine directory is removed afterwards; unreachable objects
+from a refused or superseded integration stay in the object store and are
+cleaned up by a normal `git gc`.
+
+Every commit Brigade writes here is stamped with the pinned base commit's
+timestamp rather than the current time, so the same selection over the same base
+always produces the same commit. That is what makes a crash repairable.
 
 ### Recording and recovery
 
 The run directory gets one exclusive
-`batch-integration-<integration_id>.json` record before the journal is touched,
-then one `task.integrated` fact per task, in order. Rerunning the same command
-is the repair path: when the record and ref already exist and match, they are
-verified, any missing facts are appended in order, and an already complete
-integration reports `already-integrated` and writes nothing. A record that does
-not match the selection, or a ref that holds another commit, refuses instead of
-rewriting anything.
+`batch-integration-<integration_id>.json` record, written *before* the ref is
+created, then the ref, then one `task.integrated` fact per task, in order.
+Rerunning the same command is the repair path for either crash window: a record
+whose ref is missing creates the ref, a ref that already holds the expected
+deterministic commit is recognized as this integration's own ref and gets its
+record and facts, and an already complete integration reports
+`already-integrated` and writes nothing. A record that does not match the
+selection, or a ref that later holds another commit, refuses with
+`ref-conflict` instead of rewriting anything.
 
 ### Refusal codes
 
@@ -410,9 +421,9 @@ rewriting anything.
 | `git-too-old` | Git is older than 2.38, so it has no `merge-tree --write-tree` |
 | `conflict` | A merge conflicts; the refusal names the tasks and paths |
 | `ref-exists` | The result ref already exists and no record authorizes it |
-| `ref-conflict` | A recorded ref now holds another commit |
+| `ref-conflict` | A recorded or expected ref now holds another commit |
 | `record-conflict` | An existing integration record does not match this selection |
-| `git-failed` | A Git read, write or copy failed |
+| `git-failed` | A Git read or write, or the quarantine cleanup, failed |
 
 JSON output uses `brigade.runs_tasks_integrate.v1`, with `run_id`,
 `request_id`, `check`, `status` (`created`, `checked`, `already-integrated`),

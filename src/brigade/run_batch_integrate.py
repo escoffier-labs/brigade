@@ -9,11 +9,17 @@ touches the caller's branch, index or working tree.
 The merge is quarantined. Repository config and a tracked ``.gitattributes`` can
 name a custom merge driver, and a worker can write either. Every merge therefore
 runs in a temporary bare repository under the batch run directory, with its own
-empty config and the caller repository's objects reachable only through an
-``objects/info/alternates`` entry, so any attribute naming a custom driver falls
-back to Git's builtin text merge. The final commit and its new objects are
-copied back into the caller repository by a local ``git fetch``; nothing in this
-path can run a hook or a driver.
+empty config, so any attribute naming a custom driver falls back to Git's
+builtin text merge. The quarantine reads and writes the caller repository's
+object store directly through ``GIT_OBJECT_DIRECTORY``, so the final commit and
+its new trees are already in place when the merge finishes. Nothing is
+transferred: no ``git fetch``, no URL, no remote and no transport helper, so no
+``url.*.insteadOf`` rewrite or ``core.sshCommand`` in the caller config can run,
+and nothing in this path can run a hook or a driver.
+
+Every commit this module writes is stamped with the pinned base commit's
+timestamp, so the same selection always produces the same commit. That is what
+makes a crash between the ref and the record repairable instead of permanent.
 
 The result is recorded before it is published to the journal: one exclusive
 ``brigade.batch_integration.v1`` sidecar, then one ``task.integrated`` fact per
@@ -103,6 +109,7 @@ ERROR_CODES = frozenset(
 # ``merge-tree --write-tree`` raises the floor to 2.38.
 MINIMUM_GIT = (2, 38)
 MAX_CONFLICT_PATHS = 50
+MAX_PATH_CHARS = 160
 _MAX_READ_BYTES = 1024 * 1024
 _GIT_TIMEOUT = 60.0
 _ZERO_SHA = "0" * 40
@@ -144,6 +151,7 @@ class Plan:
     base_sha: str
     task_ids: tuple[str, ...]
     candidate_commits: tuple[str, ...]
+    commit_date: str
 
     @property
     def integration_id(self) -> str:
@@ -178,10 +186,16 @@ def record_name(identity: str) -> str:
     return f"{RECORD_PREFIX}{identity}.json"
 
 
-def _git(args: list[str], *, cwd: Path, timeout: float = _GIT_TIMEOUT):
+def _git(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: float = _GIT_TIMEOUT,
+    extra_env: dict[str, str] | None = None,
+):
     """Run one Git command through the hardened runner, refusing a closed failure."""
     try:
-        return run_batch_workspace.git(args, cwd=cwd, timeout=timeout)
+        return run_batch_workspace.git(args, cwd=cwd, timeout=timeout, extra_env=extra_env)
     except OSError as exc:
         raise IntegrationError(GIT_FAILED, "git could not be started") from exc
 
@@ -233,10 +247,21 @@ def _ordered(task_ids: Sequence[str]) -> tuple[str, ...]:
 
 
 def _request(run_dir: Path) -> dict[str, str]:
-    """The batch request's pinned base and request identity, from its marker."""
-    request = localio.read_json_dict(run_dir / "batch-request.json")
-    if request is None:
+    """The batch request's pinned base and request identity, from its marker.
+
+    Read exactly like a task sidecar: one bounded regular file whose final
+    component is never a symlink, so a marker cannot be repointed at something
+    unbounded or at another file.
+    """
+    raw = _bounded_bytes(run_dir / "batch-request.json")
+    if raw is None:
         raise IntegrationError(UNKNOWN_RUN, "run directory has no readable batch request marker")
+    try:
+        request = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise IntegrationError(UNKNOWN_RUN, "batch request marker is not valid JSON") from exc
+    if not isinstance(request, dict):
+        raise IntegrationError(UNKNOWN_RUN, "batch request marker is not a request")
     request_id = request.get("request_id")
     base_sha = request.get("base_sha")
     if not run_task_journal.token(request_id):
@@ -355,11 +380,27 @@ def _plan(run_dir: Path, workspace: Path, request: dict[str, str], task_ids: tup
         base_sha=request["base_sha"],
         task_ids=task_ids,
         candidate_commits=tuple(candidates),
+        commit_date=_commit_date(workspace, request["base_sha"]),
     )
 
 
+def _commit_date(workspace: Path, base_sha: str) -> str:
+    """The pinned base commit's timestamp, the fixed stamp of every commit here.
+
+    Git stamps a commit with the current time by default, so two runs over the
+    same inputs would produce two different commits and a crash between the ref
+    and the record could never be repaired. The pinned base is immutable, so its
+    timestamp makes the result a function of the selection alone.
+    """
+    result = _git(["show", "-s", "--format=%ct", base_sha], cwd=workspace)
+    seconds = result.stdout.strip()
+    if result.code != 0 or not seconds.isdigit():
+        raise IntegrationError(GIT_FAILED, "pinned base timestamp could not be read")
+    return f"{seconds} +0000"
+
+
 def _objects_dir(workspace: Path) -> Path:
-    """The caller repository's shared object directory, the quarantine's only read path."""
+    """The caller repository's shared object directory, the quarantine's object store."""
     common = _git_line(["rev-parse", "--git-common-dir"], cwd=workspace)
     path = Path(common)
     if not path.is_absolute():
@@ -380,8 +421,9 @@ def _quarantine(run_dir: Path, plan: Plan) -> Iterator[Path]:
 
     Its configuration is written by Brigade and holds nothing else, so no merge
     driver, hook path, filter or attribute helper can be named by the caller
-    repository or a tracked ``.gitattributes``. Objects are read through an
-    alternates entry and written here; only the final commit travels back.
+    repository or a tracked ``.gitattributes``. Merges read and write the
+    caller's object store through ``GIT_OBJECT_DIRECTORY``, so nothing is
+    transferred back over any Git transport afterwards.
     """
     path = Path(tempfile.mkdtemp(dir=str(run_dir), prefix=f"{QUARANTINE_PREFIX}{plan.integration_id}-"))
     try:
@@ -389,20 +431,47 @@ def _quarantine(run_dir: Path, plan: Plan) -> Iterator[Path]:
         if init.code != 0:
             raise IntegrationError(GIT_FAILED, "quarantine repository could not be created")
         (path / "config").write_text(QUARANTINE_CONFIG, encoding="utf-8")
-        info = path / "objects" / "info"
-        info.mkdir(parents=True, exist_ok=True)
-        (info / "alternates").write_text(f"{_objects_dir(plan.workspace)}\n", encoding="utf-8")
         yield path
-    finally:
+    except BaseException:
+        # A cleanup failure must never replace the refusal that caused it.
         shutil.rmtree(path, ignore_errors=True)
-        run_journal._fsync_directory(run_dir)
+        with contextlib.suppress(OSError, run_journal.RunJournalError):
+            run_journal._fsync_directory(run_dir)
+        raise
+    else:
+        shutil.rmtree(path, ignore_errors=True)
+        try:
+            run_journal._fsync_directory(run_dir)
+        except (OSError, run_journal.RunJournalError) as exc:
+            raise IntegrationError(GIT_FAILED, "quarantine removal could not be recorded") from exc
 
 
-def _merge(quarantine: Path, current: str, candidate: str, task_ids: Sequence[str]) -> str:
+def _quarantine_env(plan: Plan) -> dict[str, str]:
+    """The quarantine's object store and the fixed stamp for every commit it makes.
+
+    Both are layered on after the hardened environment, which drops an ambient
+    ``GIT_OBJECT_DIRECTORY`` and any commit dates the caller exported.
+    """
+    return {
+        "GIT_OBJECT_DIRECTORY": str(_objects_dir(plan.workspace)),
+        "GIT_AUTHOR_DATE": plan.commit_date,
+        "GIT_COMMITTER_DATE": plan.commit_date,
+    }
+
+
+def _merge(
+    quarantine: Path,
+    current: str,
+    candidate: str,
+    task_ids: Sequence[str],
+    extra_env: dict[str, str],
+) -> str:
     """Merge one candidate into the running tree and return the new tree.
 
     Output is parsed bounded: the first NUL-separated field is the tree, the
     rest are conflicted paths, and at most ``MAX_CONFLICT_PATHS`` are reported.
+    A conflict is reported before the output is trusted, because a path that is
+    not valid UTF-8 is still a conflict and must not read as a Git failure.
     """
     result = _git(
         [
@@ -417,13 +486,11 @@ def _merge(quarantine: Path, current: str, candidate: str, task_ids: Sequence[st
             candidate,
         ],
         cwd=quarantine,
+        extra_env=extra_env,
     )
-    if result.decode_failed:
-        raise IntegrationError(GIT_FAILED, "merge output could not be read")
     fields = [field for field in result.stdout.split("\0") if field]
-    tree = fields[0] if fields else ""
-    paths = fields[1 : MAX_CONFLICT_PATHS + 1]
-    if result.code == 1 or paths:
+    if result.code == 1:
+        paths = [field[:MAX_PATH_CHARS] for field in fields[1 : MAX_CONFLICT_PATHS + 1]]
         shown = ", ".join(paths) if paths else "unknown paths"
         raise IntegrationError(
             CONFLICT,
@@ -431,73 +498,77 @@ def _merge(quarantine: Path, current: str, candidate: str, task_ids: Sequence[st
             task_ids=list(task_ids),
             paths=paths,
         )
+    if result.decode_failed:
+        raise IntegrationError(GIT_FAILED, "merge output could not be read")
     if result.code != 0:
         raise IntegrationError(GIT_FAILED, "merge-tree failed")
+    tree = fields[0] if fields else ""
     if _SHA_RE.fullmatch(tree) is None:
         raise IntegrationError(GIT_FAILED, "merge-tree returned no tree")
     return tree
 
 
-def _commit(quarantine: Path, tree: str, parent: str, message: str) -> str:
-    """A synthetic commit with the fixed Brigade identity and no hooks."""
-    result = _git(["commit-tree", tree, "-p", parent, "-m", message], cwd=quarantine)
+def _commit(quarantine: Path, tree: str, parent: str, message: str, extra_env: dict[str, str]) -> str:
+    """A synthetic commit with the fixed Brigade identity, dates and no hooks."""
+    result = _git(["commit-tree", tree, "-p", parent, "-m", message], cwd=quarantine, extra_env=extra_env)
     commit = result.stdout.strip()
     if result.code != 0 or _SHA_RE.fullmatch(commit) is None:
         raise IntegrationError(GIT_FAILED, "commit-tree failed")
     return commit
 
 
-def _merge_all(plan: Plan, quarantine: Path) -> str:
+def _merge_all(plan: Plan, quarantine: Path, extra_env: dict[str, str]) -> str:
     """Merge every candidate in the caller's order; the last tree is the result."""
     current = plan.base_sha
     tree = ""
     for index, (task_id, candidate) in enumerate(zip(plan.task_ids, plan.candidate_commits, strict=True)):
-        tree = _merge(quarantine, current, candidate, plan.task_ids[: index + 1])
-        current = _commit(quarantine, tree, current, f"brigade: integrate batch task {task_id}")
+        tree = _merge(quarantine, current, candidate, plan.task_ids[: index + 1], extra_env)
+        current = _commit(quarantine, tree, current, f"brigade: integrate batch task {task_id}", extra_env)
     return tree
 
 
-def _fetch_into_caller(plan: Plan, quarantine: Path, commit: str) -> None:
-    """Copy the final commit and its new objects into the caller repository.
+def _require_present(plan: Plan, commit: str) -> None:
+    """The merged commit must already be in the caller repository's object store.
 
-    A local ``git fetch`` is used with the hardened environment. Fetch transfers
-    objects only: it runs no receive-side hook, and the hardened runner pins
-    ``core.hooksPath`` to the null device, so the caller's hooks cannot run
-    either. Nothing is written to the caller's working tree, index or HEAD.
+    Quarantined merges write there directly, so there is no transfer step at
+    all: no URL is resolved and no transport helper, credential helper or
+    ``url.*.insteadOf`` rewrite from the caller's config is consulted.
     """
-    staged = _git(["update-ref", f"{REF_PREFIX}{plan.integration_id}", commit], cwd=quarantine)
-    if staged.code != 0:
-        raise IntegrationError(GIT_FAILED, "quarantine ref could not be written")
-    fetched = _git(
-        [
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--no-recurse-submodules",
-            str(quarantine),
-            plan.ref,
-        ],
-        cwd=plan.workspace,
-    )
-    if fetched.code != 0:
-        raise IntegrationError(GIT_FAILED, "integration commit could not be copied into the caller repository")
     present = _git(["cat-file", "-e", f"{commit}^{{commit}}"], cwd=plan.workspace)
     if present.code != 0:
-        raise IntegrationError(GIT_FAILED, "integration commit is missing after the copy")
+        raise IntegrationError(GIT_FAILED, "integration commit is missing from the object store")
 
 
-def _create_ref(plan: Plan, quarantine: Path, tree: str) -> str:
-    """Create the result branch with an absent-ref compare-and-swap."""
+def _final_commit(plan: Plan, quarantine: Path, tree: str, extra_env: dict[str, str]) -> str:
+    """The integration commit, parented on the pinned base."""
     message = f"brigade: integrate batch {plan.request_id} tasks {' '.join(plan.task_ids)}"
-    commit = _commit(quarantine, tree, plan.base_sha, message)
-    _fetch_into_caller(plan, quarantine, commit)
+    return _commit(quarantine, tree, plan.base_sha, message, extra_env)
+
+
+def _ref_commit(plan: Plan) -> str | None:
+    """The commit the result ref holds now, or ``None`` when it is absent."""
+    current = _git(["rev-parse", "--verify", "--quiet", plan.ref], cwd=plan.workspace)
+    return current.stdout.strip() if current.code == 0 else None
+
+
+def _create_ref(plan: Plan, commit: str) -> None:
+    """Create the result branch with an absent-ref compare-and-swap.
+
+    Integration commits are deterministic, so a ref that already holds this
+    exact commit is this selection's own ref: either a previous run created it
+    and crashed before recording, or a concurrent identical run won the race.
+    Both continue into verification and repair. Any other commit owns the name
+    and is refused.
+    """
     cas = _git(["update-ref", plan.ref, commit, _ZERO_SHA], cwd=plan.workspace)
-    if cas.code != 0:
-        existing = _git(["rev-parse", "--verify", "--quiet", plan.ref], cwd=plan.workspace)
-        if existing.code == 0:
-            raise IntegrationError(REF_EXISTS, f"{plan.ref} already exists at {existing.stdout.strip()}")
-        raise IntegrationError(GIT_FAILED, "integration ref could not be created")
-    return commit
+    if cas.code == 0:
+        return
+    current = _ref_commit(plan)
+    if current == commit:
+        return
+    if current is not None:
+        raise IntegrationError(REF_CONFLICT, f"{plan.ref} already exists at another commit")
+    raise IntegrationError(GIT_FAILED, "integration ref could not be created")
 
 
 def _record(plan: Plan, commit: str) -> dict[str, Any]:
@@ -598,16 +669,15 @@ def _append_facts(plan: Plan, commit: str) -> list[str]:
 
 def _verify_ref(plan: Plan, commit: str) -> None:
     """The recorded ref must still hold the recorded commit, or be created with CAS."""
-    current = _git(["rev-parse", "--verify", "--quiet", plan.ref], cwd=plan.workspace)
-    if current.code == 0:
-        if current.stdout.strip() != commit:
+    current = _ref_commit(plan)
+    if current is not None:
+        if current != commit:
             raise IntegrationError(REF_CONFLICT, f"{plan.ref} already exists at another commit")
         return
     cas = _git(["update-ref", plan.ref, commit, _ZERO_SHA], cwd=plan.workspace)
     if cas.code == 0:
         return
-    raced = _git(["rev-parse", "--verify", "--quiet", plan.ref], cwd=plan.workspace)
-    if raced.code == 0:
+    if _ref_commit(plan) is not None:
         raise IntegrationError(REF_CONFLICT, f"{plan.ref} already exists at another commit")
     raise IntegrationError(GIT_FAILED, "integration ref could not be restored")
 
@@ -633,8 +703,32 @@ def _payload(plan: Plan, *, commit: str | None, status: str, check: bool) -> dic
 
 
 def _ref_holds(plan: Plan, commit: str) -> bool:
-    current = _git(["rev-parse", "--verify", "--quiet", plan.ref], cwd=plan.workspace)
-    return current.code == 0 and current.stdout.strip() == commit
+    return _ref_commit(plan) == commit
+
+
+def _write_record(plan: Plan, commit: str) -> None:
+    """Record the integration before the ref is created.
+
+    Writing the record first means a crash between the two leaves a recorded
+    integration whose ref is still missing, which the record path repairs. The
+    other order would leave a ref with no record, which only the deterministic
+    commit and the compare-and-swap reconciliation can recognize.
+    """
+    try:
+        localio.write_json_exclusive(plan.run_dir / record_name(plan.integration_id), _record(plan, commit))
+    except FileExistsError:
+        # A concurrent caller wrote the same record first.
+        existing = _read_record(plan)
+        if existing is None or _verify_record(plan, existing) != commit:
+            raise IntegrationError(
+                RECORD_CONFLICT, f"integration record for {plan.integration_id} does not match"
+            ) from None
+    except OSError as exc:
+        raise IntegrationError(GIT_FAILED, "integration record could not be written") from exc
+    try:
+        run_journal._fsync_directory(plan.run_dir)
+    except (OSError, run_journal.RunJournalError) as exc:
+        raise IntegrationError(GIT_FAILED, "integration record could not be recorded") from exc
 
 
 def _integrate(plan: Plan, *, check: bool) -> dict[str, Any]:
@@ -650,22 +744,19 @@ def _integrate(plan: Plan, *, check: bool) -> dict[str, Any]:
         appended = _append_facts(plan, commit)
         return _payload(plan, commit=commit, status=STATUS_CREATED if appended else STATUS_ALREADY, check=False)
     with _quarantine(plan.run_dir, plan) as quarantine:
-        tree = _merge_all(plan, quarantine)
+        extra_env = _quarantine_env(plan)
+        tree = _merge_all(plan, quarantine, extra_env)
         if check:
             return _payload(plan, commit=None, status=STATUS_CHECKED, check=True)
-        commit = _create_ref(plan, quarantine, tree)
-    try:
-        localio.write_json_exclusive(plan.run_dir / record_name(plan.integration_id), _record(plan, commit))
-    except FileExistsError:
-        # A concurrent caller wrote the same record between the ref and now.
-        existing = _read_record(plan)
-        if existing is None or _verify_record(plan, existing) != commit:
-            raise IntegrationError(
-                RECORD_CONFLICT, f"integration record for {plan.integration_id} does not match"
-            ) from None
-    except OSError as exc:
-        raise IntegrationError(GIT_FAILED, "integration record could not be written") from exc
-    run_journal._fsync_directory(plan.run_dir)
+        commit = _final_commit(plan, quarantine, tree, extra_env)
+        _require_present(plan, commit)
+    existing = _ref_commit(plan)
+    if existing is not None and existing != commit:
+        # Read before the record so a foreign ref leaves no record behind.
+        raise IntegrationError(REF_EXISTS, f"{plan.ref} already exists at {existing}")
+    _write_record(plan, commit)
+    if existing is None:
+        _create_ref(plan, commit)
     _append_facts(plan, commit)
     return _payload(plan, commit=commit, status=STATUS_CREATED, check=False)
 

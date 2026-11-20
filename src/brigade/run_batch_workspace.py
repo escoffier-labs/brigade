@@ -32,7 +32,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from . import proc, runguard, worktree_lease
 
@@ -106,17 +106,27 @@ def git(
     cwd: Path,
     timeout: float = _GIT_TIMEOUT,
     stdout_file: Any = None,
+    extra_env: Mapping[str, str] | None = None,
 ) -> proc.Result:
     """Run one Git command against a checkout through the hardened environment.
 
     Every Git probe or write on a task worktree goes through this runner, never
     a plain ``git``. ``stdout_file`` streams an unbounded result (a binary
     patch) to an already-open file instead of the bounded pipe capture.
+
+    ``extra_env`` is layered on after the hardened environment, for the few
+    values Brigade itself has to pin: the object store a quarantined merge
+    reads and writes, and the commit dates that make its result deterministic.
+    It is not a way to restore the ambient variables the hardened environment
+    drops, and no caller may use it to select a different repository.
     """
+    env = _git_env()
+    if extra_env:
+        env.update(extra_env)
     argv = ["git", *_GIT_SAFE_FLAGS, *args]
     if stdout_file is not None:
-        return proc.run_to_file(argv, stdout_file, cwd=cwd, timeout=timeout, env=_git_env())
-    return proc.run(argv, cwd=cwd, timeout=timeout, env=_git_env())
+        return proc.run_to_file(argv, stdout_file, cwd=cwd, timeout=timeout, env=env)
+    return proc.run(argv, cwd=cwd, timeout=timeout, env=env)
 
 
 def git_stream(

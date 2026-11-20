@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -68,6 +69,19 @@ def refs(repo: Path) -> set[str]:
     return set(_git(repo, "for-each-ref", "--format=%(refname)").splitlines())
 
 
+def ref_or_none(repo: Path, name: str) -> str | None:
+    """The commit a ref holds, or ``None`` when the ref does not exist."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", name],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **_GIT_ENV},
+    )
+    return result.stdout.strip() or None
+
+
 def snapshot(site: Site) -> dict[str, object]:
     """Everything the command must leave byte-identical, after a status warm-up."""
     status = _git(site.repo, "status", "--porcelain")
@@ -117,6 +131,11 @@ def test_two_non_conflicting_tasks_integrate_into_one_commit_on_a_new_ref(site, 
     assert _git(site.repo, "show", f"{commit}:README.md") == "base"
     assert _git(site.repo, "log", "-1", "--format=%s", commit) == "brigade: integrate batch req tasks a b"
     assert _git(site.repo, "log", "-1", "--format=%an <%ae>", commit) == "Brigade <brigade@localhost>"
+    # The stamp comes from the pinned base, never from the clock, so this exact
+    # selection always recomputes this exact commit.
+    assert _git(site.repo, "log", "-1", "--format=%ct", commit) == _git(
+        site.repo, "log", "-1", "--format=%ct", site.base_sha
+    )
 
     # The caller's branch, HEAD, index and working tree are byte-identical.
     assert refs(site.repo) - refs_before == {ref}
@@ -331,6 +350,132 @@ def test_a_crash_after_the_ref_and_record_is_repaired_by_rerunning(site, capsys,
     assert not list(run_dir.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
 
 
+def explode_quarantine_cleanup(monkeypatch) -> None:
+    """Make only the quarantine cleanup's directory fsync fail."""
+    real_rmtree = shutil.rmtree
+    real_fsync = run_journal._fsync_directory
+    state = {"cleanup": False}
+
+    def rmtree(path, **kwargs):
+        state["cleanup"] = True
+        return real_rmtree(path, **kwargs)
+
+    def fsync(path):
+        if state["cleanup"]:
+            raise run_journal.RunJournalError("simulated directory fsync failure")
+        return real_fsync(path)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    monkeypatch.setattr(run_journal, "_fsync_directory", fsync)
+
+
+def test_a_symlinked_batch_request_marker_is_refused_not_followed(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
+    marker = site.run_dir() / "batch-request.json"
+    elsewhere = site.home / "elsewhere.json"
+    elsewhere.write_text(marker.read_text())
+    marker.unlink()
+    marker.symlink_to(elsewhere)
+
+    rc, payload = integrate(site, capsys, "a", "b")
+    assert rc == 2
+    # The marker is read like a sidecar: a symlink is not followed.
+    assert payload["refusal"]["code"] == "unknown-run"
+
+
+def test_a_failing_cleanup_fsync_never_masks_the_primary_refusal(site, capsys, monkeypatch):
+    run_batch(
+        site,
+        capsys,
+        monkeypatch,
+        {"a": {"README.md": "alpha\n"}, "b": {"README.md": "beta\n"}},
+    )
+    explode_quarantine_cleanup(monkeypatch)
+
+    rc, payload = integrate(site, capsys, "a", "b")
+    assert rc == 2
+    # The conflict is the answer; the cleanup failure is not allowed to replace it.
+    assert payload["refusal"]["code"] == "conflict"
+
+
+def test_a_failing_cleanup_fsync_with_nothing_else_in_flight_refuses_git_failed(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
+    refs_before = refs(site.repo)
+    explode_quarantine_cleanup(monkeypatch)
+
+    rc, payload = integrate(site, capsys, "a", "b", check=True)
+    assert rc == 2
+    assert payload["refusal"]["code"] == "git-failed"
+    assert refs(site.repo) == refs_before
+    assert not list(site.run_dir().glob("batch-integration-*"))
+    assert not list(site.run_dir().glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
+
+
+def test_a_record_without_a_ref_is_completed_by_rerunning(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
+    identity = identity_for(site, "a", "b")
+    ref = INTEGRATE.ref_name(identity)
+    real_create = INTEGRATE._create_ref
+
+    def crash(plan, commit):
+        raise INTEGRATE.IntegrationError(INTEGRATE.GIT_FAILED, "simulated crash before the ref")
+
+    monkeypatch.setattr(INTEGRATE, "_create_ref", crash)
+    rc, first = integrate(site, capsys, "a", "b")
+    assert rc == 2
+    assert first["refusal"]["code"] == "git-failed"
+    # The record exists first; the ref and the facts are the missing suffix.
+    record = json.loads(record_path(site, identity).read_text())
+    assert record["status"] == "created"
+    assert record["ref"] == ref
+    assert ref_or_none(site.repo, ref) is None
+    assert [e for e in events(site) if e.event_type == "task.integrated"] == []
+
+    monkeypatch.setattr(INTEGRATE, "_create_ref", real_create)
+    rc, second = integrate(site, capsys, "a", "b")
+    assert rc == 0, second
+    assert second["integration_commit"] == record["integration_commit"]
+    assert ref_or_none(site.repo, ref) == record["integration_commit"]
+    facts = [e for e in events(site) if e.event_type == "task.integrated"]
+    assert [fact.payload["task_id"] for fact in facts] == ["a", "b"]
+
+
+def test_a_ref_without_a_record_is_recognized_as_this_integration_and_repaired(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
+    run_dir = site.run_dir()
+    identity = identity_for(site, "a", "b")
+    ref = INTEGRATE.ref_name(identity)
+    real_write = INTEGRATE._write_record
+    real_append = INTEGRATE._append_facts
+
+    def crash_before_record(plan, commit):
+        # The order a run that crashed between the ref and the record leaves behind.
+        INTEGRATE._create_ref(plan, commit)
+        raise INTEGRATE.IntegrationError(INTEGRATE.GIT_FAILED, "simulated crash before the record")
+
+    monkeypatch.setattr(INTEGRATE, "_write_record", crash_before_record)
+    monkeypatch.setattr(INTEGRATE, "_append_facts", lambda plan, commit: pytest.fail("facts before the record"))
+    rc, first = integrate(site, capsys, "a", "b")
+    assert rc == 2
+    assert first["refusal"]["code"] == "git-failed"
+    assert not record_path(site, identity).exists()
+    ref_commit = ref_or_none(site.repo, ref)
+    assert ref_commit is not None
+    assert [e for e in events(site) if e.event_type == "task.integrated"] == []
+
+    monkeypatch.setattr(INTEGRATE, "_write_record", real_write)
+    monkeypatch.setattr(INTEGRATE, "_append_facts", real_append)
+    rc, second = integrate(site, capsys, "a", "b")
+    assert rc == 0, second
+    # The same inputs recompute the same commit, so the ref is this integration's.
+    assert second["integration_commit"] == ref_commit
+    assert ref_or_none(site.repo, ref) == ref_commit
+    assert json.loads(record_path(site, identity).read_text())["integration_commit"] == ref_commit
+    facts = [e for e in events(site) if e.event_type == "task.integrated"]
+    assert [fact.payload["task_id"] for fact in facts] == ["a", "b"]
+    assert not list(run_dir.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
+
+
 def test_rerunning_after_success_reports_already_integrated_and_writes_nothing(site, capsys, monkeypatch):
     run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
     rc, payload = integrate(site, capsys, "a", "b")
@@ -422,6 +567,97 @@ def test_no_hook_runs_and_nothing_is_pushed_or_fetched_from_a_remote(site, capsy
         env={**os.environ, **_GIT_ENV},
     )
     assert pushed.returncode != 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a non-UTF-8 file name needs a POSIX filesystem")
+def test_a_conflict_on_a_non_utf8_path_is_reported_as_a_conflict(site, capsys, monkeypatch):
+    name = b"caf\xe9.txt"
+
+    def model(agent, prompt, **kwargs):
+        for task_id, text in (("a", "alpha\n"), ("b", "beta\n")):
+            if f"Batch task_id: {task_id}" in prompt:
+                with open(os.path.join(os.fsencode(kwargs["cwd"]), name), "wb") as handle:
+                    handle.write(text.encode("ascii"))
+                return agents.AgentResult(text="done", ok=True)
+        return agents.AgentResult(text="unrelated", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, result, err = invoke(
+        site,
+        capsys,
+        [site.task("a", isolation="worktree"), site.task("b", isolation="worktree")],
+    )
+    assert rc == 0, err
+    assert all(task["artifact"]["delivery"] == "retained" for task in result["tasks"].values())
+
+    rc, payload = integrate(site, capsys, "a", "b")
+    assert rc == 2
+    refusal = payload["refusal"]
+    # A path the child cannot decode is still a conflict, never a Git failure.
+    assert refusal["code"] == "conflict"
+    assert refusal["task_ids"] == ["a", "b"]
+    assert len(refusal["paths"]) == 1
+    assert refusal["paths"][0].startswith("caf")
+    assert refusal["paths"][0].endswith(".txt")
+    assert "\ufffd" in refusal["paths"][0]
+    assert not list(site.run_dir().glob("batch-integration-*"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the ext:: and ssh shims need a POSIX shell")
+def test_the_caller_git_config_cannot_run_a_transport_rewrite_or_a_hook(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
+    run_dir = site.run_dir()
+    ssh_ran = site.home / "ssh-ran"
+    ssh_shim = site.home / "ssh-shim.sh"
+    ssh_shim.write_text(f"#!/bin/sh\ntouch '{ssh_ran}'\nexit 1\n")
+    ssh_shim.chmod(0o755)
+    fsmonitor = site.home / "fsmonitor.sh"
+    fsmonitor.write_text(f"#!/bin/sh\ntouch '{site.home}/fsmonitor-ran'\n")
+    fsmonitor.chmod(0o755)
+    hook_dir = site.home / "hook-dir"
+    hook_dir.mkdir()
+    hook = hook_dir / "reference-transaction"
+    hook.write_text(f"#!/bin/sh\ntouch '{site.home}/hook-ran'\n")
+    hook.chmod(0o755)
+    include = site.home / "hostile.include"
+    include.write_text(f"[core]\n\thooksPath = {hook_dir}\n")
+
+    # The liveness rule proves this class of rewrite runs a program at all.
+    live_marker = site.home / "live"
+    # The rules that would hijack the quarantine path during an object transfer.
+    config = site.repo / ".git" / "config"
+    config.write_text(
+        config.read_text()
+        + f'[url "ext::touch {site.home}/"]\n\tinsteadOf = {site.home}/\n'
+        + f'[url "ssh://invalid.example/"]\n\tinsteadOf = {run_dir}/\n'
+        + '[protocol "ext"]\n\tallow = always\n'
+        + f"[core]\n\tsshCommand = {ssh_shim}\n\tfsmonitor = {fsmonitor}\n"
+        + f'[includeIf "gitdir:{site.repo}/"]\n\tpath = {include}\n'
+    )
+
+    live = subprocess.run(
+        ["git", "ls-remote", str(live_marker)],
+        cwd=site.repo,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **_GIT_ENV},
+    )
+    assert live.returncode != 0
+    # The rewrite ran a real program, so the assertions below are about a live config.
+    assert live_marker.exists()
+
+    rc, payload = integrate(site, capsys, "a", "b")
+    assert rc == 0, payload
+    # No transport ran, so no rewrite, ssh command, fsmonitor or hook fired.
+    assert not ssh_ran.exists()
+    assert not (site.home / "fsmonitor-ran").exists()
+    assert not (site.home / "hook-ran").exists()
+    assert payload["ref"] is not None
+    assert ref_or_none(site.repo, payload["ref"]) == payload["integration_commit"]
+    assert _git(site.repo, "rev-parse", "HEAD") == site.base_sha
+    assert _git(site.repo, "show", f"{payload['integration_commit']}:alpha.txt") == "alpha"
+    assert _git(site.repo, "show", f"{payload['integration_commit']}:beta.txt") == "beta"
 
 
 def test_human_output_names_the_ref_and_leaves_merging_to_the_caller(site, capsys, monkeypatch):
