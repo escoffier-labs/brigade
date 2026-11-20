@@ -1229,11 +1229,12 @@ def _collect_process_output(
         # A draining run lets descendants finish the run's own output, bounded
         # by the remaining timeout; survivors were killed mid-work and fail it.
         drain_budget = min(drain_seconds, max(deadline - time.monotonic(), 0.0))
-        drained = wait_for_group(process, drain_budget) if drain_seconds > 0 else True
-        if drained is not False:
+        survivors = wait_for_group(process, drain_budget) if drain_seconds > 0 else True
+        if survivors:
             bounded_stop()
-            descendants_reaped = True
-        incomplete_group = drained is True and drain_seconds > 0
+        # Either the group was observed empty or it was just stopped.
+        descendants_reaped = True
+        incomplete_group = survivors and drain_seconds > 0
 
     if (timed_out or collector.stream_limit_exceeded or incomplete_group) and not descendants_reaped:
         bounded_stop()

@@ -33,10 +33,12 @@ def observe_leader_exit(process: subprocess.Popen[bytes]) -> None:
 
 
 def group_has_live_members(pgid: int) -> bool:
-    """Whether any non-zombie process belongs to ``pgid``.
+    """Whether any non-zombie process belongs to ``pgid``'s group or session.
 
-    A zombie cannot write, so a drained but deliberately unreaped leader does
-    not count as a live member.
+    The leader starts a new session, so its pid is both the group and the
+    session id. A descendant that moves to its own group with ``setpgid`` keeps
+    that session id and still counts. A zombie cannot write, so a drained but
+    deliberately unreaped leader does not count as a live member.
     """
     try:
         entries = os.listdir("/proc")
@@ -47,11 +49,12 @@ def group_has_live_members(pgid: int) -> bool:
         if not entry.isdigit():
             continue
         try:
-            rest = Path(f"/proc/{entry}/stat").read_bytes().partition(b")")[2]
+            rest = Path(f"/proc/{entry}/stat").read_bytes().rpartition(b")")[2]
         except OSError:
             continue
+        # The process name may contain ")", so the split above uses the last one.
         fields = rest.split()
-        if len(fields) > 2 and fields[2] == target and fields[0] != b"Z":
+        if len(fields) > 3 and target in (fields[2], fields[3]) and fields[0] != b"Z":
             return True
     return False
 
