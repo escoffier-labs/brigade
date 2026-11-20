@@ -10,8 +10,21 @@ from brigade import run_checkpoint, run_events, run_journal, run_task_journal, r
 
 # Closed classifications describe state, not private correlation references.
 # ``base_sha`` is a public Git revision, and a workspace binding's payload must
-# keep it a 40-hex revision through redaction.
-STRUCTURAL_FIELDS = frozenset({"status", "containment", "artifact_kind", "dispatch_attempt", "base_sha"})
+# keep it a 40-hex revision through redaction. An integration record is the same
+# kind of closed public value: its identity and the two commit revisions are
+# structural, so redaction preserves them rather than renaming them.
+STRUCTURAL_FIELDS = frozenset(
+    {
+        "status",
+        "containment",
+        "artifact_kind",
+        "dispatch_attempt",
+        "base_sha",
+        "integration_id",
+        "candidate_commit",
+        "integration_commit",
+    }
+)
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
 _DERIVED_FIELDS = frozenset({"spec_digest", "attempt_id", "result_id"})
 
@@ -256,6 +269,10 @@ def prepare_requests(
             elif event.event_type == "task.workspace-bound":
                 # Reference-only custody fact: digests map through, state is
                 # unchanged, and no derived identity is recomputed.
+                pass
+            elif event.event_type == "task.integrated":
+                # Reference-only integration fact: commit revisions map through
+                # as structural values and no derived identity is recomputed.
                 pass
             elif event.event_type == "task.observed":
                 current = states[task_id]

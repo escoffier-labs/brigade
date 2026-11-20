@@ -385,6 +385,37 @@ def wait_tasks(
         sleep(delay)
 
 
+def integrate_tasks(
+    run: str | Path,
+    task_ids: Sequence[str],
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    check: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Integrate selected task candidates, or report one closed refusal."""
+    from . import run_batch_integrate
+
+    run_dir = _resolve(run, cwd=cwd, runs_dir=runs_dir)
+    if run_dir is None:
+        return 2
+    try:
+        payload = run_batch_integrate.integrate(run_dir, task_ids, check=check)
+    except run_batch_integrate.IntegrationError as exc:
+        payload = run_batch_integrate.refusal_payload(exc, run_id=run_dir.name, check=check)
+        if json_output:
+            _emit(payload)
+        else:
+            print(run_batch_integrate.render(payload), file=sys.stderr)
+        return 2
+    if json_output:
+        _emit(payload)
+    else:
+        print(run_batch_integrate.render(payload))
+    return 0
+
+
 def dispatch(args, *, cwd: Path, runs_dir: Path | None) -> int:
     if args.tasks_command == "list":
         return list_tasks(args.run, cwd=cwd, runs_dir=runs_dir, json_output=args.json)
@@ -397,6 +428,15 @@ def dispatch(args, *, cwd: Path, runs_dir: Path | None) -> int:
             cwd=cwd,
             runs_dir=runs_dir,
             timeout=args.timeout,
+            json_output=args.json,
+        )
+    if args.tasks_command == "integrate":
+        return integrate_tasks(
+            args.run,
+            args.task_ids,
+            cwd=cwd,
+            runs_dir=runs_dir,
+            check=args.check,
             json_output=args.json,
         )
     print(f"error: unknown runs tasks command: {args.tasks_command}", file=sys.stderr)

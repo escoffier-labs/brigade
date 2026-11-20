@@ -265,8 +265,8 @@ never written to disk in full: the partial file is removed and the sidecar
 records `patch-oversize` as its reason. A diff that times out is recorded the
 same way with reason `patch-timeout`. Either way the candidate commit on the
 task branch is still the retained copy. Nothing in this path removes a
-checkout, a branch or a commit. Applying a candidate to a base and disposing of
-the checkouts are later work.
+checkout, a branch or a commit. Applying a candidate to a base is the explicit
+[integration](#integration) step; disposing of the checkouts is later work.
 
 Collecting the same attempt again — a crash after the patch was written but
 before the observation, or a repeated observe — reuses the sidecar already on
@@ -321,6 +321,115 @@ and digests.
 | `request-conflict` | Request ID already reserved with a different fingerprint |
 | `request-unknown` | Request reservation has no readable fingerprint, the marker is missing while the journal shows a possible launch, or an accepted request has lost or cannot read its journal |
 | `request-busy` | Another caller holds this request’s dispatch lock |
+
+
+## Integration
+
+A retained candidate is a result, not an applied change. Integration is a
+separate, explicit command:
+
+```bash
+brigade runs tasks integrate <run> <task_id>... [--check] [--json]
+```
+
+It merges the named tasks' retained candidate commits, in the order given, into
+one new commit and creates the branch `brigade/integrate/<integration_id>`. The
+identity is the first 16 hex digits of a SHA-256 over the run ID, the ordered
+task IDs and the pinned base, so the same selection always names the same ref
+and a different order names a different one. The record keeps that order, and
+so does every `task.integrated` fact.
+
+Nothing else happens. The caller's branch, `HEAD`, index and working tree are
+never touched or checked out, and Brigade never merges the new ref into another
+branch, pushes it, or publishes it. Inspect it with `git log <ref>` and take it
+yourself with `git merge <ref>`; the human output names both commands.
+
+`--check` runs every precondition and every quarantined merge, then stops: it
+writes no ref, no record and no journal fact. The merges it runs still leave
+unreachable objects in the object store, which a normal `git gc` removes. The
+command holds the caller workspace's run lock for its whole duration in either
+mode, so a live batch refuses it with `target-busy`.
+
+Preconditions are checked before anything is written. Every named task must be
+terminal, unique, and accepted by the run. Its artifact sidecar must exist, be a
+regular bounded file that is not a symlink, hash to the `task.observed`
+`artifact_digest` with `artifact_kind` `commit`, and record `retained` delivery
+with a candidate commit. The sidecar's branch must be the recomputed
+`brigade/batch/...` branch, and its `base_sha` must be the run's pinned base. The
+task branch tip in the caller repository must still equal the candidate, the
+candidate must descend from the pinned base, and every selected task must share
+that base.
+
+### Quarantined merge
+
+A repository can define a merge driver in its config, and a tracked
+`.gitattributes` can name one. A worker can write either, so every merge runs in
+a temporary bare repository created under the batch run directory, with its own
+empty config. With no driver definition to resolve, any attribute naming one
+falls back to Git's builtin text merge, and with no hook path no hook can run.
+`merge-tree --write-tree --name-only -z` (Git 2.38 or newer) merges each
+candidate into the running tree in order; a conflict in any step refuses the
+whole integration and names the tasks merged so far and at most 50 conflicted
+paths, decoded leniently, so a path that is not valid UTF-8 still reports as a
+conflict. Nothing is partially integrated.
+
+Merges read and write the caller repository's object store directly through
+`GIT_OBJECT_DIRECTORY`, so the final commit is already in place when the merge
+finishes. Object transfer from quarantine uses no Git transport at all: no
+remote, no URL, and no transport or credential helper is resolved, so
+`url.*.insteadOf` rewrites, `core.sshCommand` and `core.fsmonitor` in the
+caller's config cannot run, and hooks stay pinned to the null device. The
+caller's branch is then created with an absent-ref compare-and-swap
+(`git update-ref <ref> <commit> <zero>`), so an existing ref is never moved or
+replaced. The quarantine directory is removed afterwards; unreachable objects
+from a refused or superseded integration stay in the object store and are
+cleaned up by a normal `git gc`.
+
+Every commit Brigade writes here is stamped with the pinned base commit's
+timestamp rather than the current time, so the same selection over the same base
+always produces the same commit. That is what makes a crash repairable.
+
+### Recording and recovery
+
+The run directory gets one exclusive
+`batch-integration-<integration_id>.json` record, written *before* the ref is
+created, then the ref, then one `task.integrated` fact per task, in order.
+Rerunning the same command is the repair path for either crash window: a record
+whose ref is missing creates the ref, a ref that already holds the expected
+deterministic commit is recognized as this integration's own ref and gets its
+record and facts, and an already complete integration reports
+`already-integrated` and writes nothing. A record that does not match the
+selection, or a ref that later holds another commit, refuses with
+`ref-conflict` instead of rewriting anything.
+
+### Refusal codes
+
+| Code | Refusal |
+| --- | --- |
+| `no-task-journal` | The run directory has no task journal |
+| `journal-unreadable` | The journal, or the fact append, could not be read or written |
+| `unknown-run` | No readable batch request marker, or no pinned base revision |
+| `unknown-task` | A named task is not accepted by this run |
+| `duplicate-task` | A task id is named more than once |
+| `task-not-terminal` | A named task has no terminal result |
+| `artifact-mismatch` | The artifact sidecar is missing, unreadable, altered, or names another task, branch or kind |
+| `no-candidate` | The artifact delivery is not `retained`, or it holds no candidate commit |
+| `candidate-moved` | The task branch tip no longer equals the recorded candidate |
+| `base-diverged` | The candidate does not descend from the pinned base |
+| `base-mismatch` | A selected task was collected against another base |
+| `target-busy` | Another caller holds the workspace run lock |
+| `git-too-old` | Git is older than 2.38, so it has no `merge-tree --write-tree` |
+| `conflict` | A merge conflicts; the refusal names the tasks and paths |
+| `ref-exists` | The result ref already exists and no record authorizes it |
+| `ref-conflict` | A recorded or expected ref now holds another commit |
+| `record-conflict` | An existing integration record does not match this selection |
+| `git-failed` | A Git read or write, or the quarantine cleanup, failed |
+
+JSON output uses `brigade.runs_tasks_integrate.v1`, with `run_id`,
+`request_id`, `check`, `status` (`created`, `checked`, `already-integrated`),
+`base_sha`, `integration_id`, `ref`, `integration_commit`, `task_ids`,
+`candidate_commits`, and `refusal` (`null` on success). Human refusals print
+`error: <code>: <detail>` to stderr and exit 2.
 
 
 ## Execution and retries

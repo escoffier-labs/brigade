@@ -80,14 +80,22 @@ the stripping guard. Archive builds refuse cassette bodies.
 
 ## `brigade.run_event.v1`: `schema_version: 3`
 
-Schema version 3 carries one event type, `task.workspace-bound`, the
-digest-only record of one per-task batch worktree. Only journals from a batch
-that isolated a task with `isolation: "worktree"` reach version 3; every other
-event is still written with the version 2 envelope above, so an older binary
-refuses those journals and keeps reading all others. The payload is
-`{task_id, base_sha, branch_digest, path_digest, dev_ino_digest}`: the pinned
-40-hex base plus SHA-256 digests. No checkout path, branch name, or
+Schema version 3 carries two event types, `task.workspace-bound` and
+`task.integrated`. Only journals from a batch that isolated a task with
+`isolation: "worktree"`, or explicitly integrated a selected task result, reach
+version 3; every other event is still written with the version 2 envelope above,
+so an older binary refuses those journals and keeps reading all others.
+
+`task.workspace-bound` is the digest-only record of one per-task batch worktree.
+Its payload is `{task_id, base_sha, branch_digest, path_digest, dev_ino_digest}`:
+the pinned 40-hex base plus SHA-256 digests. No checkout path, branch name, or
 device/inode value is stored as text.
+
+`task.integrated` is the reference-only record of one explicit integration of a
+selected task result. Its payload is
+`{task_id, integration_id, candidate_commit, integration_commit}`: a closed
+16-hex integration identity and the two 40-hex commit revisions. No branch
+name, path, or diff text is stored, and the fact never changes execution state.
 
 ## `brigade.run_event.v1`: `schema_version: 2`
 
@@ -134,6 +142,33 @@ No absolute path, file content, or diff text appears in this file. The patch it
 names is local-only and never exported: it can carry the contents of untracked
 files a worker created. Collection is described in
 [explicit task batches](run-batch.md#task-artifacts).
+
+---
+
+## `brigade.batch_integration.v1`
+
+**Path:** `.brigade/runs/batch-<sha256 of request id>/batch-integration-<integration id>.json`
+
+The record of one explicit integration of selected batch task candidates
+(#2050). It is written exclusively, before any journal fact, and is the
+authority a rerun verifies against.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | Always `brigade.batch_integration.v1` |
+| `status` | string | `created` |
+| `integration_id` | string | 16 lowercase hex characters, derived from the run ID, the ordered task IDs and the pinned base |
+| `run_id` | string | The batch run directory name |
+| `request_id` | string | The batch request identity |
+| `base_sha` | string | The pinned 40-hex base revision every candidate descends from |
+| `task_ids` | array of string | The selection, in merge and recording order |
+| `candidate_commits` | array of object | `{task_id, candidate_commit}` rows in the same order |
+| `integration_commit` | string | The 40-hex squash commit, parented on `base_sha` |
+| `ref` | string | `refs/heads/brigade/integrate/<integration id>` |
+
+The ref is a new branch in the caller repository; nothing is checked out,
+merged, pushed or published. Integration is described in
+[explicit task batches](run-batch.md#integration).
 
 ---
 
