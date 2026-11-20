@@ -196,6 +196,32 @@ fn logged(app: &App, family: &str) -> Option<String> {
     request_lines::credential_kind(Arc::as_ptr(&app.telemetry) as usize, family)
 }
 
+/// The read-only audit records the hundreds of `PRAGMA table_xinfo` and
+/// `index_xinfo` statements a schema snapshot prepares as writes. A checked
+/// pool verifies its schema when it opens, so the first job on each reader,
+/// which is what a request reaches during the audit window, must not repeat
+/// that snapshot. The lookup pool doubled the set of readers doing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_checked_pool_checks_its_schema_at_open_not_on_its_first_job() {
+    let fixture = Fixture::new("schema-cookie");
+    // Every reader handles one job while all of them are held: those are the
+    // first jobs a reader ever runs.
+    let held = hold_every(&fixture.readers, brigade_hub::read::hub_threads());
+    let lookups = hold_every(&fixture.lookups, brigade_hub::read::hub_threads());
+    held.release().await;
+    lookups.release().await;
+    assert_eq!(
+        fixture.readers.schema_checks(),
+        0,
+        "a first handler job re-checked the schema"
+    );
+    assert_eq!(
+        fixture.lookups.schema_checks(),
+        0,
+        "a first lookup job re-checked the schema"
+    );
+}
+
 /// The review's second read: each native route authenticates again, and on the
 /// handler pool that read is the one that answered `credential-lookup`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

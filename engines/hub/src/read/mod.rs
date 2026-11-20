@@ -6,7 +6,10 @@ pub use cpu::CpuPool;
 use rusqlite::{Connection, OpenFlags};
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -77,6 +80,7 @@ pub struct ReaderPool {
     deadline: Deadline,
     checked: bool,
     stats: Arc<ReaderStats>,
+    checks: Arc<AtomicU64>,
 }
 impl ReaderPool {
     pub fn open(path: &Path, threads: usize, capacity: usize) -> Result<Self, String> {
@@ -126,19 +130,28 @@ impl ReaderPool {
                 .map_err(|e| e.to_string())?;
             c.busy_timeout(Duration::ZERO).map_err(|e| e.to_string())?;
             c.set_prepared_statement_cache_capacity(64);
-            if checked {
+            // A checked connection verifies its schema here, at open, and hands
+            // its reader the verified pair. The first job then costs a
+            // `schema_version` read instead of a second full snapshot: the
+            // snapshot is hundreds of `PRAGMA table_xinfo`/`index_xinfo`
+            // statements, and the read-only audit records each of those it
+            // prepares as a write. A job re-checks only a schema that changed.
+            let cookie = if checked {
                 schema::check(&c)?;
-            }
-            connections.push(c);
+                Some(schema::cookie(&c).map_err(|e| e.to_string())?)
+            } else {
+                None
+            };
+            connections.push((c, cookie));
         }
         let (sender, receiver) = mpsc::channel::<Job>(capacity);
         let receiver = Arc::new(Mutex::new(receiver));
         let workers = connections
             .into_iter()
-            .map(|mut c| {
+            .map(|(mut c, cookie)| {
                 let receiver = receiver.clone();
                 std::thread::spawn(move || {
-                    let mut cookie = None;
+                    let mut cookie = cookie;
                     loop {
                         let job = receiver.lock().unwrap().blocking_recv();
                         match job {
@@ -156,6 +169,7 @@ impl ReaderPool {
             deadline,
             checked,
             stats: Arc::default(),
+            checks: Arc::default(),
         })
     }
     /// For `Telemetry::attach_readers`.
@@ -169,6 +183,11 @@ impl ReaderPool {
     pub fn stats(&self) -> Arc<ReaderStats> {
         self.stats.clone()
     }
+    /// Schema snapshots this pool's jobs ran. A checked pool verifies its
+    /// schema at open, so this counts only a schema that changed under it.
+    pub fn schema_checks(&self) -> u64 {
+        self.checks.load(Ordering::Relaxed)
+    }
     pub async fn submit<T: Send + 'static>(
         &self,
         query: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
@@ -181,6 +200,7 @@ impl ReaderPool {
         let checked = self.checked;
         let stats = self.stats.clone();
         let counted = stats.clone();
+        let checks = self.checks.clone();
         let job = Box::new(move |c: &mut Connection, cookie: &mut Option<(i64, i64)>| {
             // The caller waits at most `limit` for a reader, so a job that
             // starts after that has nobody left to answer.
@@ -215,11 +235,9 @@ impl ReaderPool {
             let result = (|| {
                 let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
                 if checked {
-                    let next = (
-                        tx.pragma_query_value(None, "schema_version", |r| r.get(0))?,
-                        tx.pragma_query_value(None, "user_version", |r| r.get(0))?,
-                    );
+                    let next = schema::cookie(&tx)?;
                     if *cookie != Some(next) {
+                        checks.fetch_add(1, Ordering::Relaxed);
                         schema::check(&tx).map_err(|_| rusqlite::Error::InvalidQuery)?;
                         *cookie = Some(next);
                         tx.flush_prepared_statement_cache();
