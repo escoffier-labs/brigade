@@ -26,6 +26,20 @@ from brigade.roster import Agent, Roster
 from brigade.run_budget import BudgetCoordinator, BudgetPolicyError, RunBudgetDeclaration
 
 
+def _toml_string(value: str) -> str:
+    """Render a value as a TOML string with Windows backslashes kept literal.
+
+    TOML basic strings read a backslash as an escape, so a path such as
+    ``C:\\Python312\\python.exe`` cannot be written that way. Prefer a literal
+    (single-quoted) string, which has no escapes. Fall back to a basic string
+    with escaped characters when the value cannot be a literal string.
+    """
+    if "'" not in value and "\n" not in value and "\r" not in value:
+        return f"'{value}'"
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+    return f'"{escaped}"'
+
+
 class StubLlm:
     def __init__(self, seat: str = "researcher", phase: str = "research") -> None:
         self.seat = seat
@@ -446,7 +460,7 @@ def test_run_persists_research_manifest(tmp_path: Path, monkeypatch):
         "[[source]]\n"
         'id = "local-cli"\n'
         'type = "cli"\n'
-        f'command = ["{sys.executable}", "-c", "print(\'cli plants\')"]\n'
+        f'command = [{_toml_string(sys.executable)}, "-c", "print(\'cli plants\')"]\n'
     )
     patch_stub_lanes(monkeypatch)
 
@@ -467,6 +481,24 @@ def test_run_persists_research_manifest(tmp_path: Path, monkeypatch):
     assert manifest["web_enabled"] is False
     assert manifest["cli_sources"] == [{"id": "local-cli", "type": "cli"}]
     assert manifest["source_adapters"][0]["command"] == Path(sys.executable).name
+
+
+def test_research_config_with_windows_style_path_in_toml(tmp_path: Path) -> None:
+    """A Windows-style path in research.toml must round-trip through tomllib.
+
+    Source-adapter command arrays carry the interpreter path. Written as a TOML basic
+    (double-quoted) string, a backslash starts an escape and loading fails. A TOML literal
+    (single-quoted) string keeps it verbatim. This runs on every platform with a synthetic
+    Windows path so the regression is caught off Windows too.
+    """
+    windows_python = r"C:\Python312\python.exe"
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "research.toml").write_text(
+        f'[[source]]\nid = "windows-cli"\ntype = "cli"\ncommand = [{_toml_string(windows_python)}, "-c", "ok"]\n'
+    )
+    adapters = rconfig.load(tmp_path).source_adapters()
+    assert adapters[0]["command"] == [windows_python, "-c", "ok"]
 
 
 def test_resume_reuses_manifest_sources_web_provider_and_caps(tmp_path: Path, monkeypatch):
@@ -507,7 +539,7 @@ def test_run_with_cli_source_adapter_records_cli_finding(tmp_path: Path, monkeyp
         "[[source]]\n"
         'id = "research-cli"\n'
         'type = "cli"\n'
-        f'command = ["{sys.executable}", "-c", "print(\'photosynthesis cli source says plants use light\')"]\n'
+        f'command = [{_toml_string(sys.executable)}, "-c", "print(\'photosynthesis cli source says plants use light\')"]\n'
     )
     patch_stub_lanes(monkeypatch)
 
@@ -531,7 +563,7 @@ def test_sources_payload_reports_configured_cli_source(tmp_path: Path):
         "[[source]]\n"
         'id = "research-cli"\n'
         'type = "cli"\n'
-        f'command = ["{sys.executable}", "-c", "print(\'ok\')", "{{query}}"]\n'
+        f'command = [{_toml_string(sys.executable)}, "-c", "print(\'ok\')", "{{query}}"]\n'
     )
 
     payload = research_cmd.sources_payload(target=tmp_path)
@@ -546,7 +578,7 @@ def test_sources_payload_reports_pageforge_status(tmp_path: Path):
     (tmp_path / ".brigade" / "research.toml").write_text(
         "[search]\n"
         'research_search_provider = "pageforge"\n'
-        f'pageforge_command = ["{sys.executable}", "-c", "print(\'ok\')"]\n'
+        f'pageforge_command = [{_toml_string(sys.executable)}, "-c", "print(\'ok\')"]\n'
         'pageforge_db_path = "/tmp/pageforge.db"\n'
     )
 
@@ -564,7 +596,7 @@ def test_antigravity_source_adapter_is_cli_lane(tmp_path: Path):
         "[[source]]\n"
         'id = "antigravity"\n'
         'type = "antigravity"\n'
-        f'command = ["{sys.executable}", "-c", "print(\'agy research\')", "{{query}}"]\n'
+        f'command = [{_toml_string(sys.executable)}, "-c", "print(\'agy research\')", "{{query}}"]\n'
     )
 
     payload = research_cmd.sources_payload(target=tmp_path)
@@ -723,7 +755,7 @@ def test_sources_payload_typeless_adapter_does_not_misalign_routes(tmp_path: Pat
         "[[source]]\n"
         'id = "research-cli"\n'
         'type = "cli"\n'
-        f'command = ["{sys.executable}", "-c", "print(\'ok\')", "{{query}}"]\n'
+        f'command = [{_toml_string(sys.executable)}, "-c", "print(\'ok\')", "{{query}}"]\n'
     )
 
     payload = research_cmd.sources_payload(target=tmp_path)
@@ -2566,7 +2598,7 @@ def test_local_only_rejects_web_and_cli_even_when_requested(tmp_path: Path, monk
         "[[source]]\n"
         'id = "egress-cli"\n'
         'type = "cli"\n'
-        f'command = ["{sys.executable}", "-c", "print(\'should-not-run\')"]\n',
+        f'command = [{_toml_string(sys.executable)}, "-c", "print(\'should-not-run\')"]\n',
         encoding="utf-8",
     )
 

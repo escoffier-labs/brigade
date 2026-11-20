@@ -1,5 +1,6 @@
 """Live paired adapter, driven by a fake `claude` that emits recorded-style stream-json."""
 
+import errno
 import hashlib
 import json
 import os
@@ -61,6 +62,28 @@ def execute_live(*args, **kwargs):
     return _execute_live(*args, launcher=LAUNCH, **kwargs)
 
 
+def _remove_temp_root(root, *, remove=None, attempts=5, pause=0.05):
+    """Remove a temp root, retrying briefly when a child is still flushing a write.
+
+    The fake MCP server can release its state-dir handles a moment after the CLI exits,
+    and on Windows a stopped process keeps them a little longer. Retry a bounded number
+    of times on ENOTEMPTY and PermissionError, then give up rather than waiting forever.
+    ``remove`` is a seam so a test can inject the late write deterministically.
+    """
+    remove = remove if remove is not None else shutil.rmtree
+    for attempt in range(1, attempts + 1):
+        try:
+            remove(root)
+            return
+        except PermissionError:
+            if attempt == attempts:
+                raise
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY or attempt == attempts:
+                raise
+        time.sleep(pause * attempt)
+
+
 @pytest.fixture(scope="module", autouse=True)
 def clean_temp_root():
     """Arm cwds are made under the temp dir, and the adapter refuses ancestors holding CLAUDE.md or AGENTS.md."""
@@ -77,7 +100,7 @@ def clean_temp_root():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(tempfile, "tempdir", str(root))
         yield root
-    shutil.rmtree(root, ignore_errors=True)
+    _remove_temp_root(root)
 
 
 def _live(tmp_path, fake_dir="fake", output="evidence", **scenario):
@@ -1004,6 +1027,30 @@ def test_the_version_probe_is_bounded_and_kills_a_flood(tmp_path):
     with bind_executable(str(exe), LAUNCH) as bound:
         with pytest.raises(ValueError, match="too large"):
             model_trial_claude._probe_version(bound, ENVIRON)
+
+
+def test_temp_root_removal_retries_a_late_child_write(tmp_path, monkeypatch):
+    """A child flushing a trace as cleanup starts must not leave the temp root behind."""
+    root = tmp_path / "root"
+    (root / "work").mkdir(parents=True)
+    real_rmtree = shutil.rmtree
+    calls = []
+
+    def late_write(path, **kwargs):
+        calls.append(path)
+        if len(calls) == 1:
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+        real_rmtree(path, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", late_write)
+    # A single removal cannot tolerate the late write; the temp root survives it.
+    with pytest.raises(OSError) as exc:
+        shutil.rmtree(root)
+    assert exc.value.errno == errno.ENOTEMPTY
+    # The bounded retry tolerates the same late write and finishes the removal.
+    _remove_temp_root(root, pause=0.0)
+    assert not root.exists()
+    assert len(calls) == 2
 
 
 def test_remove_work_dir_retries_only_on_windows_and_only_a_few_times(tmp_path, monkeypatch):
