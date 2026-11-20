@@ -40,6 +40,7 @@ hub:
   - 'src/brigade/cli/fleet*.py'
   - 'registry/skills/verify-brigade/**'
   - 'src/brigade/memory_bm25.py'
+  - 'src/brigade/memory_claim_blocks.py'
   - 'src/brigade/memory_cmd.py'
   - 'src/brigade/memory_hub_*.py'
   - 'src/brigade/memory_retrieval_eval/**'

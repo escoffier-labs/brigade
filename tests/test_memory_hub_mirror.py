@@ -425,12 +425,14 @@ def test_legacy_heads_refetched_in_place_under_pull_lock(setup, monkeypatch):
     assert (out / next(p.name for p in out.glob("alpha-*.md"))).exists()
 
 
-def test_refetch_skips_heads_that_already_have_scan_state(setup):
+def test_refetch_skips_heads_that_already_have_complete_metadata(setup):
     calls: list[dict] = []
     *_, replica = setup
-    card(replica, "alpha")
+    # `alpha` carries every field the refresh reads, including an explicit
+    # `auto_authored: false`; only the pre-metadata head is refetched.
+    card(replica, "alpha", auto_authored=False)
     legacy(replica, "beta")
-    target, settings, client, out, _ = with_transport(setup, hub_transport(replica, calls))
+    target, settings, client, out, _ = with_transport(setup, hub_transport(replica, calls, auto_authored=False))
     mirror.mirror(target, client, settings, out)
     assert [call["card_id"] for call in calls] == ["beta"]
 

@@ -401,6 +401,25 @@ pub(super) fn span_texts(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The Python reflection path and this classifier read one golden, so a
+    /// card the hub cannot address is never proposed or counted as covered.
+    #[test]
+    fn block_classification_matches_the_shared_golden() {
+        let cases: Json = serde_json::from_str(include_str!(
+            "../../tests/anchor-classification-golden.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            let text = case["text"].as_str().unwrap();
+            let expected: Vec<&str> = case["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|block| block.as_str().unwrap())
+                .collect();
+            assert_eq!(span_texts(text), expected, "{}", case["name"]);
+        }
+    }
     #[test]
     fn anchor_proof_admits_only_added_suffixes_and_their_reservations() {
         let before = "---\ntitle: Notes\nevidence: []\n---\nFirst claim.\n\n- Second. ^c-abcdef\n";

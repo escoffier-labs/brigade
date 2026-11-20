@@ -725,11 +725,26 @@ applies only when the stored reservation line is already the writer's canonical
 form, or absent; a card whose line is unsorted, duplicated, spaced differently
 or carries a comment stays a review proposal, so Tier 0 never rewrites those
 bytes. Unsupported Markdown stays opaque.
+Eligibility and coverage use the hub's own block classification: a card is
+proposed only when the hub can address a block in it, and the Rust and Python
+classifiers share `engines/hub/tests/anchor-classification-golden.json`. A
+replica pulled before `auto_authored` existed refreshes that metadata in place
+before the first run instead of waiting for a rebuild. A hub that still omits
+the field is asked once for that revision, so later runs do not refetch it.
 Each run handles at most 25 anchoring proposals, including retries. The normal
 run limit and hub quotas can reduce that number. Anchoring stops with four
 pending slots reserved for repair proposals. Unapplied anchoring proposals are
-withdrawn in the same run with a recorded reason. A withdrawn anchor waits seven
-days before reflection proposes it again.
+withdrawn in the same run with a recorded reason. The withdrawal request id is
+persisted before the call, so a rejection whose answer was lost replays instead
+of deciding a closed proposal. A proposal the hub reports as already decided is
+read before anything is recorded: `rejected` counts as withdrawn, `applied`
+means the anchor is already written and is recorded without holding anything
+back, and any other state stays a failed retry. A withdrawal that still fails is
+recorded with the proposal id and leaves the suppression flag unset, so a later
+apply run retries it rather than failing the run or pausing scheduled
+reflection. After three consecutive failed withdrawals for the same proposal,
+reflection stops retrying it and holds the anchor like a withdrawn one. A
+withdrawn anchor waits seven days before reflection proposes it again.
 
 Anchoring uses the existing Tier 0 proposal, policy, journal and rollback path.
 An automatic anchor needs `anchor_blocks` in the hub policy's

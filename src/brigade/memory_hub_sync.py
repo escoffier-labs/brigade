@@ -270,13 +270,28 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     return report
 
 
-def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> int:
-    """Fill in scan metadata on readable heads that lack `scan_state`, in place. Returns how many it refreshed.
+def needs_scan_metadata(head: dict[str, Any]) -> bool:
+    """True when a replica head lacks a field the reflection join reads.
 
-    The live replica keeps serving the whole time: nothing is discarded or
-    rebuilt. Each stale head costs one `card` read of its own revision, made
-    under the pull lock, and the results are written back under the state lock
-    only if the replica is still the same hub, principal and log_epoch.
+    `auto_authored` is checked by presence, not truth: an explicit false is a
+    hub-backed answer, and a present null records that the hub was asked and
+    had no answer, so neither is refetched. A missing key means the replica
+    predates the field and an incremental pull will never revisit an unchanged
+    revision.
+    """
+    return any(name not in head for name in ("scan_state", "auto_authored"))
+
+
+def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> int:
+    """Fill in scan metadata on readable heads that lack it, in place. Returns how many it refreshed.
+
+    A head is stale when it lacks `scan_state` or `auto_authored`. The live
+    replica keeps serving the whole time: nothing is discarded or rebuilt. Each
+    stale head costs one `card` read of its own revision, made under the pull
+    lock, and the results are written back under the state lock only if the
+    replica is still the same hub, principal and log_epoch. A hub reply that
+    omits `auto_authored` records null on the head, so the check is not repeated
+    for an unchanged revision and reflection still skips the card.
     Raises HubConfigError when the hub answers without `scan_state` (it predates
     scan metadata) or the replica or log moved meanwhile. A HubUnavailable
     propagates, with the replica untouched.
@@ -287,7 +302,9 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
             live = store.replica(target)
             epoch, principal = str(live.meta.get("log_epoch") or ""), live.meta.get("principal")
             stale = {
-                key: head for key, head in live.readable_heads(settings.read_scopes).items() if "scan_state" not in head
+                key: head
+                for key, head in live.readable_heads(settings.read_scopes).items()
+                if needs_scan_metadata(head)
             }
         fetched: dict[str, dict[str, Any]] = {}
         for key, head in stale.items():
@@ -316,6 +333,11 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
                     f"the hub's {head['scope']}/{head['card_id']} differs from the replica. Run memory hub pull"
                 )
             fetched[key] = {name: card[name] for name in SCAN_FIELDS if name in card}
+            if "auto_authored" not in card:
+                # The hub predates the field. Record that it was asked so an
+                # unchanged head is not refetched on every run; reflection still
+                # refuses to anchor it because null is not true.
+                fetched[key]["auto_authored"] = None
         with _state_lock(target):
             live = store.replica(target)
             if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:

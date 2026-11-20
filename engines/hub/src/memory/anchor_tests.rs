@@ -170,8 +170,11 @@ async fn human_anchoring_is_review_only_and_rollback_restores_exact_bytes() {
 
 #[test]
 fn shared_span_table_and_whitespace_suffixes() {
-    let cases: Json =
-        serde_json::from_str(include_str!("../../../../tests/fixtures/anchor_spans.json")).unwrap();
+    // The Python reflection classifier reads the same generated golden.
+    let cases: Json = serde_json::from_str(include_str!(
+        "../../tests/anchor-classification-golden.json"
+    ))
+    .unwrap();
     for case in cases.as_array().unwrap() {
         let text = case["text"].as_str().unwrap();
         let expected: Vec<_> = case["blocks"]
