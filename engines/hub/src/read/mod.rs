@@ -136,9 +136,14 @@ impl ReaderPool {
             // snapshot is hundreds of `PRAGMA table_xinfo`/`index_xinfo`
             // statements, and the read-only audit records each of those it
             // prepares as a write. A job re-checks only a schema that changed.
+            // The pair is read before the check, outside one transaction: a
+            // schema change that lands between the two leaves the reader an
+            // older pair, so its first job checks again instead of trusting a
+            // schema nobody verified.
             let cookie = if checked {
+                let seen = schema::cookie(&c).map_err(|e| e.to_string())?;
                 schema::check(&c)?;
-                Some(schema::cookie(&c).map_err(|e| e.to_string())?)
+                Some(seen)
             } else {
                 None
             };
