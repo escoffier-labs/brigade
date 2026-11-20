@@ -2114,3 +2114,61 @@ def test_archive_discovers_tracked_handoff_across_filesystem_boundary(tmp_path: 
         ingest_mod._archive(handoff, inbox / "processed")
     assert handoff.is_file()
     assert not (inbox / "processed").exists()
+
+
+def test_ingest_distinguishes_case_variant_from_tracked_name(tmp_target: Path):
+    # A case-sensitive inbox can hold a tracked `Tracked.md` and a distinct
+    # untracked `tracked.md`; only the indexed spelling is skipped.
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    variant = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    if (inbox / "Tracked.md").exists():
+        pytest.skip("distinct case variants need a case-sensitive filesystem")
+    indexed = _write_handoff(inbox, "Tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_target, "add", "-f", "--", str(indexed.relative_to(tmp_target)))
+
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert indexed.is_file()
+    assert not variant.exists()
+    assert (inbox / "processed" / variant.name).is_file()
+    assert stats.processed == 1
+    assert stats.skipped == 1
+    assert any("tracked-or-unverifiable" in line and indexed.name in line for line in stats.actions)
+
+
+def test_case_alias_probe_reads_the_directory_not_the_platform(tmp_path: Path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    if (inbox / "Tracked.md").exists():
+        # The filesystem itself aliases case, so the probe must say so.
+        assert ingest_mod._probe_case_aliases(inbox) is True
+    else:
+        _write_handoff(inbox, "Tracked.md", _PLAIN_HANDOFF)
+        assert ingest_mod._probe_case_aliases(inbox) is False
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert ingest_mod._probe_case_aliases(empty) is None
+
+
+@pytest.mark.parametrize("probe", [True, None], ids=["aliasing", "undecided"])
+def test_casefold_name_guard_survives_aliasing_or_undecided_probe(tmp_path: Path, monkeypatch, probe):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    if (inbox / "Tracked.md").exists():
+        pytest.skip("stand-in requires a case-sensitive filesystem")
+    monkeypatch.setattr(ingest_mod, "_git_tracked_names", lambda directory: {"Tracked.md"})
+    monkeypatch.setattr(ingest_mod, "_probe_case_aliases", lambda directory: probe)
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+
+    assert handoffs == []
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    assert not (inbox / "processed").exists()

@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, NamedTuple
 
 from . import dirfd, handoff_worktrees, instruction_overflow, ingest_near_duplicate
 from .card_fingerprint import (
@@ -1766,8 +1766,57 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
         return None
 
 
-def _git_tracked_files(directory: Path) -> tuple[set[str], set[tuple[int, int]]] | None:
-    """Return indexed names and file identities directly in `directory`.
+class _TrackedIndex(NamedTuple):
+    """What one Git index says about the handoffs in a directory."""
+
+    names: set[str]
+    identities: set[tuple[int, int]]
+    unread: set[str]
+    case_aliases: bool | None
+
+
+# Bound the probe so a crowded inbox cannot turn it into a directory walk.
+_CASE_PROBE_LIMIT = 32
+
+
+def _probe_case_aliases(directory: Path) -> bool | None:
+    """Whether two spellings can name one file in `directory`.
+
+    Case sensitivity is a property of the mounted filesystem, not the
+    platform, so ask the directory itself: stat a case-swapped spelling of an
+    entry that exists. True means the spellings alias one file. False means
+    they are distinct names. None means the probe could not decide, and
+    callers then treat them as aliasing.
+    """
+    checked = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if checked >= _CASE_PROBE_LIMIT:
+                    break
+                alternate = entry.name.swapcase()
+                if alternate == entry.name:
+                    continue
+                checked += 1
+                try:
+                    original = entry.stat()
+                except OSError:
+                    continue
+                try:
+                    alias = os.stat(directory / alternate)
+                except FileNotFoundError:
+                    # The swapped spelling is a name of its own.
+                    return False
+                except OSError:
+                    continue
+                return (alias.st_dev, alias.st_ino) == (original.st_dev, original.st_ino)
+    except OSError:
+        return None
+    return None
+
+
+def _git_tracked_files(directory: Path) -> _TrackedIndex | None:
+    """Return indexed names, file identities and case behavior for `directory`.
 
     Names protect deleted and recreated files. Identities also protect case
     aliases on case-insensitive filesystems. None means the check failed.
@@ -1776,30 +1825,41 @@ def _git_tracked_files(directory: Path) -> tuple[set[str], set[tuple[int, int]]]
     if names is None:
         return None
     identities: set[tuple[int, int]] = set()
+    unread: set[str] = set()
     for name in names:
         try:
             st = (directory / name).stat()
         except FileNotFoundError:
+            # Its own spelling still protects it; see _is_tracked.
+            unread.add(name)
             continue
         except OSError as exc:
             _warn_tracking_check_failed(directory, str(exc))
             return None
         identities.add((st.st_dev, st.st_ino))
-    return names, identities
+    case_aliases = _probe_case_aliases(directory) if names else None
+    return _TrackedIndex(names, identities, unread, case_aliases)
 
 
-def _is_tracked(path: Path, tracked: tuple[set[str], set[tuple[int, int]]] | None) -> bool:
+def _is_tracked(path: Path, tracked: _TrackedIndex | None) -> bool:
     if tracked is None:
         return True
-    names, identities = tracked
-    # Protect case aliases even when their identities could not be read.
-    if path.name.casefold() in {name.casefold() for name in names}:
+    if path.name in tracked.names:
+        return True
+    # A name whose identity was unreadable may still be this file under
+    # another spelling, so keep the fail-closed casefold comparison.
+    if path.name.casefold() in {name.casefold() for name in tracked.unread}:
+        return True
+    # A case-insensitive filesystem, or one where the probe could not decide,
+    # cannot tell these spellings apart either. Elsewhere they are distinct
+    # names and only an identical identity protects them.
+    if tracked.case_aliases is not False and path.name.casefold() in {name.casefold() for name in tracked.names}:
         return True
     try:
         st = path.stat()
     except OSError:
         return True
-    return (st.st_dev, st.st_ino) in identities
+    return (st.st_dev, st.st_ino) in tracked.identities
 
 
 def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:

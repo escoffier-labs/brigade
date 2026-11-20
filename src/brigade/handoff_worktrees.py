@@ -51,9 +51,13 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
+from typing import TYPE_CHECKING
 
 from . import dirfd
 from .selection import WRITER_INBOXES
+
+if TYPE_CHECKING:
+    from .ingest import _TrackedIndex
 
 # Linked worktrees considered per repository; records past this are never
 # resolved or stat'ed.
@@ -572,7 +576,7 @@ def _known_digests(dest_fd: int) -> set[str]:
     return known
 
 
-def _tracked(inbox: Path) -> tuple[set[str], set[tuple[int, int]]] | None:
+def _tracked(inbox: Path) -> _TrackedIndex | None:
     """Names and identities git tracks in `inbox`; None when unknown.
 
     A confirmed non-repository yields empty sets. Broken git metadata or a
@@ -1031,10 +1035,10 @@ def _rescue_one(
     label: str,
     dest: _Dest,
     parts: tuple[str, ...],
-    tracked: tuple[set[str], set[tuple[int, int]]],
+    tracked: _TrackedIndex,
 ) -> Rescue | None:
     source = f"{label}/{name}"
-    tracked_names, tracked_ids = tracked
+    tracked_names, tracked_ids = tracked.names, tracked.identities
     if name.casefold() in {n.casefold() for n in tracked_names}:
         return None
     try:
