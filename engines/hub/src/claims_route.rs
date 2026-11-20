@@ -14,6 +14,9 @@ use std::{
 #[derive(Clone)]
 pub struct Claims {
     pub readers: Arc<ReaderPool>,
+    /// Credential reads only. The auth read below is a token check, so it must
+    /// not wait behind a handler read.
+    pub lookups: Arc<ReaderPool>,
     pub writer: writer::Writer,
     pub admin: String,
     pub clock: Option<String>,
@@ -48,7 +51,8 @@ impl Claims {
         path == "/claims" && matches!(method, "GET" | "POST")
     }
     /// `_caller` and `admit_post`, before the body is read. `Ok` carries the
-    /// caller's node, or `None` for the admin token.
+    /// caller's node, or `None` for the admin token. A pure token read, so it
+    /// runs on the lookup pool: a slow handler read cannot make it 503.
     pub async fn auth(&self, parts: &Parts) -> Result<Option<String>, Box<Response<Body>>> {
         let Some(key) = key(parts) else {
             return Err(Box::new(reply(claims::error(401, "unauthorized"))));
@@ -57,7 +61,7 @@ impl Claims {
         let write = parts.method == "POST";
         let allow = self.allow_admin_writes;
         match self
-            .readers
+            .lookups
             .submit(move |c| claims::caller(&claims::ReadConnection(c), &key, &admin, write, allow))
             .await
         {

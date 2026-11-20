@@ -238,6 +238,8 @@ fn authorize<T: ReadTx + ?Sized>(
 #[derive(Clone)]
 pub struct Registration {
     pub readers: Arc<ReaderPool>,
+    /// Credential reads only: the auth check before any handler read.
+    pub lookups: Arc<ReaderPool>,
     pub writer: writer::Writer,
     pub admin: String,
     pub clock: Option<String>,
@@ -294,8 +296,10 @@ impl Registration {
         };
         let admin = self.admin.clone();
         let path = parts.uri.path().to_string();
+        // A pure token read: the lookup pool keeps a slow handler read from
+        // answering this request with `credential-lookup`.
         match self
-            .readers
+            .lookups
             .submit(move |c| authorize(&ConnectionRead(c), &key, &admin, &path))
             .await
         {

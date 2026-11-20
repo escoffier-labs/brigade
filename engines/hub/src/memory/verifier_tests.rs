@@ -853,6 +853,7 @@ async fn a_failed_startup_republish_refuses_to_start_memory() {
     std::fs::create_dir(&temp).unwrap();
     std::fs::write(temp.join("blocker"), b"x").unwrap();
     let readers = Arc::new(ReaderPool::open_unchecked(&h.hub, 1, 64, READ_LIMIT).unwrap());
+    let lookups = Arc::new(ReaderPool::open_unchecked(&h.hub, 1, 64, READ_LIMIT).unwrap());
     let opened = Store::open(
         Options {
             memory: h.memory(),
@@ -866,6 +867,7 @@ async fn a_failed_startup_republish_refuses_to_start_memory() {
             hook: None,
         },
         readers,
+        lookups,
     );
     assert!(opened.is_err());
     // The stale list stays below the hub's generation, so the policy writer

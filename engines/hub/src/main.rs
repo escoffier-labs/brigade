@@ -523,18 +523,21 @@ fn long_poll_deadline(path: &str, bytes: &[u8]) -> Duration {
 fn admin_authorized(app: &App, req: &Request<Body>) -> bool {
     use sha2::Digest;
     use subtle::ConstantTimeEq;
-    let Some(token) = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .filter(|v| !v.is_empty())
-    else {
+    let Some(token) = bearer_token(req) else {
         return false;
     };
     let digest: [u8; 32] = sha2::Sha256::digest(token.as_bytes()).into();
     app.admin_digest
         .is_some_and(|admin| bool::from(admin.ct_eq(&digest)))
+}
+/// The bearer token the request presents, whatever its value. The request log
+/// needs only whether one was presented: `anonymous` means none was.
+fn bearer_token(req: &Request<Body>) -> Option<&str> {
+    req.headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|v| !v.is_empty())
 }
 async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     use brigade_hub::{
@@ -557,22 +560,22 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     };
     log.credential_kind = if admin_authorized(&app, &req) {
         "admin"
-    } else if f == "health" {
-        // Liveness and readiness never wait on the reader pool for a log label.
+    } else if f == "health" || bearer_token(&req).is_some() {
+        // A token was presented but no lookup has completed for it yet:
+        // `unchecked`. The lookup below overwrites this with `anonymous` when
+        // it completes without a live row.
         "unchecked"
-    } else if let Some(lookup) = &app.lookup {
-        lookup
-            .kind(
-                req.headers()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok()),
-            )
-            .await
     } else {
+        // handle_inner names the credential from the single lookup it admits on.
         "anonymous"
     };
+    // Filled by that lookup. Kept out of the health path, whose label is fixed.
+    let kind_slot = (f != "health").then(|| Arc::new(std::sync::OnceLock::<&'static str>::new()));
     let request_bytes = log.request_bytes.clone();
     let (mut parts, body) = req.into_parts();
+    if let Some(slot) = &kind_slot {
+        parts.extensions.insert(slot.clone());
+    }
     // handle_inner fills this in for POST /messages once the body is buffered.
     let action_family = FamilySlot::default();
     parts.extensions.insert(action_family.clone());
@@ -666,7 +669,14 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if let Some(family) = action_family.0.get() {
         log.family = family;
     }
+    if let Some(kind) = kind_slot.as_ref().and_then(|slot| slot.get()).copied() {
+        log.credential_kind = kind;
+    }
     log.status = response.status().as_u16();
+    // The label is final here, before the body streams. Tests read the same
+    // line the request log emits, keyed by this app's telemetry.
+    #[cfg(test)]
+    request_lines::record(Arc::as_ptr(&log.telemetry) as usize, log.line());
     let (parts, body) = response.into_parts();
     // Hold the logger until completion or disconnect and count actual streamed bytes.
     let stream = futures_util::stream::unfold(
@@ -864,7 +874,17 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             )
             .await
         {
-            Ok(value) => value,
+            Ok(found) => {
+                // The request log's credential label comes from this lookup,
+                // not from a second reader job.
+                if let Some(slot) = req
+                    .extensions()
+                    .get::<Arc<std::sync::OnceLock<&'static str>>>()
+                {
+                    let _ = slot.set(found.kind);
+                }
+                found.key
+            }
             // A checked reader can refuse a malformed fence schema before the
             // route runs. Read-only heartbeat falls through to Python, which
             // authenticates and returns the authoritative database error.
@@ -1486,11 +1506,12 @@ async fn start_and_serve(
                 .map(|v| v.trim().to_owned())
         })
         .ok_or("no fleet hub token")?;
-    let readers = Arc::new(brigade_hub::read::ReaderPool::open(
-        &path,
-        brigade_hub::read::hub_threads(),
-        brigade_hub::read::HUB_QUEUE,
-    )?);
+    // Handler reads and credential lookups read the same file on separate
+    // pools, so a slow status or claims read never holds a request's
+    // two-second credential deadline.
+    let pools = brigade_hub::read::HubPools::open(&path)?;
+    let readers = Arc::new(pools.readers);
+    let lookups = Arc::new(pools.lookups);
     // Shared by every writer of the hub file, the memory writer included (D23).
     let arbiter = Arc::new(brigade_hub::writer::Arbiter::default());
     let memory_path = path.with_file_name("fleet-hub-memory.db");
@@ -1545,6 +1566,7 @@ async fn start_and_serve(
                         hook: None,
                     },
                     readers.clone(),
+                    lookups.clone(),
                 ) {
                     Ok(mut store) => match store.configure_retrieval(&memory_config) {
                         Ok(()) => {
@@ -1602,8 +1624,19 @@ async fn start_and_serve(
         config.trust_forwarded_proto,
     );
     state.telemetry.attach_readers(readers.queue_probe());
+    state
+        .telemetry
+        .attach_reader_stats(brigade_hub::telemetry::Pool::Handler, readers.stats());
+    // The lookup pool is in the per-pool counters only: `reader_queue_depth`
+    // keeps reporting what it reported before the pools split.
+    state
+        .telemetry
+        .attach_reader_stats(brigade_hub::telemetry::Pool::Lookup, lookups.stats());
     if let Some(memory_route::MemoryRoute::Store(store)) = &memory {
         state.telemetry.attach_readers(store.reader_probe());
+        state
+            .telemetry
+            .attach_reader_stats(brigade_hub::telemetry::Pool::Memory, store.reader_stats());
     }
     state.telemetry.attach_cpu(cpu.queue_probe());
     // Only a native family's writer commits here. Without one the writer
@@ -1618,7 +1651,7 @@ async fn start_and_serve(
         use sha2::Digest;
         state.admin_digest = Some(sha2::Sha256::digest(admin.as_bytes()).into());
     }
-    state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
+    state.lookup = Some(admission::Lookup::new(lookups.clone(), &admin));
     let native = |family| state.modes.get(family) == brigade_hub::modes::Mode::Native;
     let families =
         native("registration") || native("claims") || native("messages") || native("heartbeat");
@@ -1657,6 +1690,7 @@ async fn start_and_serve(
     if native("registration") {
         state.registration = Some(registration::Registration {
             readers: readers.clone(),
+            lookups: lookups.clone(),
             writer: writer.clone().unwrap(),
             admin: registration::digest(&admin),
             clock: native_clock.clone(),
@@ -1685,6 +1719,7 @@ async fn start_and_serve(
         })));
         state.messages = Some(messages_route::Messages::new(
             readers.clone(),
+            lookups.clone(),
             writer,
             registration::digest(&admin),
             native_clock.clone(),
@@ -1696,6 +1731,7 @@ async fn start_and_serve(
     if native("heartbeat") {
         state.heartbeat = Some(heartbeat::Heartbeat {
             readers: readers.clone(),
+            lookups: lookups.clone(),
             writer: writer.clone().unwrap(),
             admin: registration::digest(&admin),
             clock: native_clock.clone(),
@@ -1707,6 +1743,7 @@ async fn start_and_serve(
     if native("claims") {
         state.claims = Some(claims_route::Claims {
             readers,
+            lookups,
             writer: writer.unwrap(),
             admin: registration::digest(&admin),
             clock: native_clock.clone(),
@@ -2391,4 +2428,37 @@ mod tests_s3c;
 mod tests_s9;
 
 #[cfg(test)]
+mod tests_pools;
+
+#[cfg(test)]
 mod tests_verifier;
+
+/// The request line `handle` logs, keyed by the app's telemetry, so a test can
+/// assert a logged value. The process's stderr cannot be captured in-process.
+#[cfg(test)]
+mod request_lines {
+    use std::sync::Mutex;
+    static LINES: Mutex<Vec<(usize, serde_json::Value)>> = Mutex::new(Vec::new());
+    pub fn record(key: usize, line: serde_json::Value) {
+        LINES.lock().unwrap().push((key, line));
+    }
+    /// The lines one app logged for one family, oldest first.
+    pub fn entries(key: usize, family: &str) -> Vec<serde_json::Value> {
+        LINES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, line)| *k == key && line["family"] == family)
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+    /// The `credential_kind` the app logged for the last request of a family.
+    pub fn credential_kind(key: usize, family: &str) -> Option<String> {
+        entries(key, family).last().map(|line| {
+            line["credential_kind"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+    }
+}

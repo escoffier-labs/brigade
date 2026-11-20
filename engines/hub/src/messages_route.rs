@@ -37,6 +37,8 @@ const GROUP: usize = 256;
 #[derive(Clone)]
 pub struct Messages {
     pub readers: Arc<ReaderPool>,
+    /// Credential reads only: the auth check before the body is parsed.
+    pub lookups: Arc<ReaderPool>,
     pub writer: writer::Writer,
     pub admin: String,
     pub clock: Option<String>,
@@ -78,6 +80,7 @@ impl Messages {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         readers: Arc<ReaderPool>,
+        lookups: Arc<ReaderPool>,
         writer: writer::Writer,
         admin: String,
         clock: Option<String>,
@@ -88,6 +91,7 @@ impl Messages {
         let (rereads, receiver) = mpsc::channel(16 * 1024);
         let route = Self {
             readers,
+            lookups,
             writer,
             admin,
             events: brigade_hub::claims::events_enabled(),
@@ -104,14 +108,15 @@ impl Messages {
         method == "POST" && path == "/messages"
     }
     /// `_caller` and `admit_post`, before the body is read. `Ok(None)` is the
-    /// admin token under `--allow-admin-writes`.
+    /// admin token under `--allow-admin-writes`. A pure token read, so it runs
+    /// on the lookup pool.
     pub async fn auth(&self, parts: &Parts) -> Result<Option<String>, Box<Response<Body>>> {
         let Some(key) = key(parts) else {
             return Err(Box::new(reply(messages::error_reply(401, "unauthorized"))));
         };
         let (admin, allow) = (self.admin.clone(), self.allow_admin_writes);
         match self
-            .readers
+            .lookups
             .submit(move |c| messages::authenticate(&ReadConnection(c), &key, &admin, allow))
             .await
         {

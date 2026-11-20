@@ -200,6 +200,16 @@ pub fn check(c: &Connection) -> Result<(), String> {
     let actual = snapshot(c).map_err(|e| e.to_string())?;
     accepts(&actual)
 }
+/// The pair a reader compares to know whether its checked schema is still the
+/// one it verified: `schema_version` changes on DDL, `user_version` on a
+/// migration. Read it in the same transaction as `check`, or before it: a pair
+/// read after a separate check could describe a schema that was never checked.
+pub fn cookie(c: &Connection) -> rusqlite::Result<(i64, i64)> {
+    Ok((
+        c.pragma_query_value(None, "schema_version", |r| r.get(0))?,
+        c.pragma_query_value(None, "user_version", |r| r.get(0))?,
+    ))
+}
 fn accepts(actual: &Value) -> Result<(), String> {
     accepts_against(
         actual,

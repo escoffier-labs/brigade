@@ -102,6 +102,7 @@ impl Hub {
     }
     pub(super) fn open(&mut self, scanner: Arc<dyn Scanner>, hook: Option<writer::Hook>) {
         let readers = Arc::new(ReaderPool::open_unchecked(&self.hub, 1, 64, READ_LIMIT).unwrap());
+        let lookups = Arc::new(ReaderPool::open_unchecked(&self.hub, 1, 64, READ_LIMIT).unwrap());
         self.store = Some(
             Store::open(
                 Options {
@@ -116,6 +117,7 @@ impl Hub {
                     hook,
                 },
                 readers,
+                lookups,
             )
             .unwrap(),
         );

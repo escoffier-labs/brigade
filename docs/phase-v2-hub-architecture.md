@@ -577,6 +577,44 @@ handler interrupts it and the request gets 503. A queue timeout answers
 `503 {"error": "hub busy", "reason": "reader-queue-full"}`, the same
 `{error, reason}` shape the Python hub uses for its existing 503 answers.
 
+The deadline that caps a handler or credential job counts from when the caller
+queued it, so a request never waits out a queue wait and then a run window no
+one reads. The handler pool keeps at least two readers even on a single-CPU
+machine. Credential reads run on their own pool, on the same file, sized like
+the handler pool: `hub_threads()` readers (2 to 8) and the same 1,024-job queue,
+because on main they shared that capacity. Admission's one lookup per request,
+and the token check every native route repeats before it reads, in `claims`,
+`heartbeat`, `messages`, `registration` and the memory route's
+`Store::authenticate`, run there. A slow status or claims read cannot hold a
+request's 2 s credential deadline, and a slow credential lookup cannot hold a
+handler read. A route read that re-checks the credential inside its own
+snapshot, such as `heartbeat`'s `GET /status` or `claims`' `inspect`, stays on
+the handler pool: it is a data read, and the check belongs to that snapshot.
+
+The memory pool keeps the deadline policy it had before the split: its run
+budget counts from when a reader starts the job, and the caller's final wait is
+not cut short. A memory search that queued for most of its 2 s limit therefore
+still gets a full run window, as it did on main.
+
+`/metrics` keeps one `brigade_hub_reader_queue_depth` gauge, summing the handler
+and memory pools as before the split; the lookup pool is not folded into it.
+The reader counters (`brigade_hub_reader_jobs_total`,
+`brigade_hub_reader_queue_wait_seconds_total`,
+`brigade_hub_reader_run_seconds_total` and
+`brigade_hub_reader_timeouts_total`) carry a bounded `pool` label of `handler`,
+`lookup` or `memory`, and a timeout names its cause: `aged-in-queue`,
+`run-deadline`, `caller-gone`, or `queue-full` for a full queue that refused the
+job before any reader saw it.
+
+The request log's `credential_kind` names a credential only when a lookup
+finished and matched one: `node`, `principal` or `admin`. `anonymous` means the
+request presented no bearer token, or its lookup finished without a live row:
+an unknown or revoked token reads as `anonymous`, as it did on main.
+`unchecked` means a token was presented but no lookup completed for it, whether
+the request was refused before the lookup or the lookup timed out, and it stays
+the label for the health family (`/health` and `/ready`), which never waits on
+a reader for a label.
+
 Python reads pick up enrollments and revocations by opening a new connection
 per request. The Rust readers see them because every request starts a new
 read transaction, which sees all committed data. There is no token cache and
@@ -641,7 +679,10 @@ no result cache anywhere in the hub.
   `query_only` connection, the same per-request lookup native authentication
   uses, so a revocation applies to the next request and nothing is cached.
   Until S4b's reader pool lands, S3c keeps one dedicated connection for this
-  lookup, with the 2 s read cap, the wait for that connection included. The
+  lookup, with the 2 s read cap, the wait for that connection included. S4b
+  replaces that dedicated connection with the credential reader pool under
+  [Read path](#read-path), which is where this lookup and every native route's
+  repeat of it now run. The
   lookup steps its prepared statement once and resets it at once, so no read
   transaction outlives the lookup: a held read snapshot would pin the WAL
   under `wal_autocheckpoint=0`. A lookup that fails or passes the 2 s cap
