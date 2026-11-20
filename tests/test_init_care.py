@@ -69,7 +69,7 @@ def test_no_care_skips_extras_and_schedule(tmp_path, systemctl_calls, capsys):
     assert systemctl_calls == []
     assert "care schedule skipped (--no-care)" in out
     assert "`brigade extras on`" in out
-    assert f"`brigade care install --target {target.resolve()}`" in out
+    assert f"`{init_care.care_command(target.resolve())}`" in out
 
 
 def test_dry_run_reports_the_plan_and_writes_nothing(tmp_path, systemctl_calls, capsys):
@@ -79,7 +79,7 @@ def test_dry_run_reports_the_plan_and_writes_nothing(tmp_path, systemctl_calls, 
 
     out = capsys.readouterr().out
     assert "[dry-run] would turn on extras and install the care schedule" in out
-    assert f"brigade care install --target {target.resolve()}" in out
+    assert init_care.care_command(target.resolve()) in out
     assert "--no-care" in out
     assert not target.exists()
     assert not extras.marker_path().exists()
@@ -133,7 +133,7 @@ def test_failed_care_install_keeps_init_exit_zero_and_warns_once(tmp_path, monke
     warnings = [line for line in captured.err.splitlines() if line.startswith("warning:")]
     assert warnings == [
         "warning: care schedule not installed (care scheduler is unsupported on plan9); "
-        f"run `brigade care install --target {target.resolve()}` later"
+        f"run `{init_care.care_command(target.resolve())}` later"
     ]
     assert (target / ".brigade/config.json").is_file(), "the core install still completed"
 
@@ -152,7 +152,7 @@ def test_failed_care_install_reports_status_in_json(tmp_path, monkeypatch, capsy
     assert payload["exit_code"] == 0
     assert payload["care"]["status"] == "failed"
     assert "no scheduler here" in payload["care"]["reason"]
-    assert payload["care"]["command"] == f"brigade care install --target {target.resolve()}"
+    assert payload["care"]["command"] == init_care.care_command(target.resolve())
 
 
 def test_timers_that_cannot_start_warn_with_the_commands_to_run(tmp_path, monkeypatch, capsys):
@@ -345,7 +345,7 @@ def test_quickstart_no_care_skips_both_steps_and_names_the_commands(tmp_path, sy
     assert not _unit_dir().exists()
     assert systemctl_calls == []
     assert "brigade extras on" in payload["next_commands"]
-    assert f"brigade care install --target {target.resolve()}" in payload["next_commands"]
+    assert init_care.care_command(target.resolve()) in payload["next_commands"]
 
 
 def test_quickstart_dry_run_plans_the_care_step_and_writes_nothing(tmp_path, systemctl_calls, capsys):
@@ -376,7 +376,7 @@ def test_quickstart_fails_open_when_care_cannot_install(tmp_path, monkeypatch, c
     step = _care_step(payload)
     assert step["status"] == "failed"
     assert "no scheduler here" in step["care"]["reason"]
-    assert f"brigade care install --target {target.resolve()}" in payload["next_commands"]
+    assert init_care.care_command(target.resolve()) in payload["next_commands"]
     assert (target / ".brigade/config.json").is_file()
 
 
@@ -410,3 +410,13 @@ def test_quickstart_skips_the_care_step_when_the_install_fails(tmp_path, monkeyp
 
     payload = json.loads(capsys.readouterr().out)
     assert all(step["id"] != "care-schedule" for step in payload["steps"])
+
+
+def test_care_command_quotes_for_the_windows_shell(monkeypatch) -> None:
+    """A plain Windows path prints as is, a spaced one in double quotes, and an unsafe one is withheld."""
+    from brigade import shell_quote
+
+    monkeypatch.setattr(shell_quote, "is_windows", lambda: True)
+    assert init_care.care_command(Path(r"D:\work\ws")) == r"brigade care install --target D:\work\ws"
+    assert init_care.care_command(Path(r"D:\my work\ws")) == r'brigade care install --target "D:\my work\ws"'
+    assert init_care.care_command(Path(r"D:\a&b\ws")) == "brigade care install --target <target>"

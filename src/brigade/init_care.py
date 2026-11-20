@@ -12,7 +12,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import shlex
 from pathlib import Path
 from typing import Any
 
@@ -26,8 +25,16 @@ NOT_RUN = "not-run"
 
 
 def care_command(target: Path) -> str:
-    """The command that installs the care schedule for *target* later."""
-    return f"brigade care install --target {shlex.quote(str(target))}"
+    """The command that installs the care schedule for *target* later.
+
+    Quoted for this platform's shell. A Windows path that cannot be quoted safely is
+    withheld behind a `<target>` placeholder instead of printing a broken command.
+    """
+    from . import shell_quote
+
+    value = str(target)
+    shown = shell_quote.quote_argument(value) if shell_quote.is_safe_argument(value) else "<target>"
+    return f"brigade care install --target {shown}"
 
 
 def plan(target: Path) -> dict[str, Any]:
