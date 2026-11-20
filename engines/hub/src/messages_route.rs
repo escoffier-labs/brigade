@@ -60,21 +60,27 @@ fn key(parts: &Parts) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(digest)
 }
-fn random_hex() -> Option<String> {
-    use std::io::Read;
-    let mut raw = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
-        .ok()?;
-    Some(raw.iter().fold(String::with_capacity(32), |mut out, b| {
-        use std::fmt::Write;
-        let _ = write!(out, "{b:02x}");
-        out
-    }))
-}
 /// Actions the Python upstream keeps answering in native mode.
 fn proxied(action: &str) -> bool {
     matches!(action, "who" | "claims" | "keys_publish") || action.starts_with("events_")
+}
+/// The response for a packed writer answer, or `None` to leave the request to
+/// the Python upstream. An unavailable random source keeps main's route answer
+/// byte for byte: `busy("messages-unavailable")`, 503 with `retry-after: 1`.
+fn packed_response(answer: Json) -> Option<Response<Body>> {
+    if answer.get("python") == Some(&Json::Bool(true)) {
+        return None;
+    }
+    if answer.get("unavailable") == Some(&Json::Bool(true)) {
+        return Some(crate::busy("messages-unavailable"));
+    }
+    Some(
+        Reply {
+            status: answer["status"].as_u64().unwrap() as u16,
+            body: answer["body"].as_str().unwrap().into(),
+        }
+        .response(),
+    )
 }
 impl Messages {
     #[allow(clippy::too_many_arguments)]
@@ -251,21 +257,14 @@ impl Messages {
         raw: Map<String, Json>,
         size: usize,
     ) -> Option<Response<Body>> {
-        let seeds = match (random_hex(), random_hex(), random_hex(), random_hex()) {
-            (Some(a), Some(b), Some(c), Some(d)) => messages::Seeds {
-                client_id: a,
-                event: b,
-                question: [c, d],
-            },
-            _ => return Some(crate::busy("messages-unavailable")),
-        };
         let command = messages::Write {
             caller,
             key,
             raw,
             policy: self.policy.clone(),
             clock: self.clock.clone(),
-            seeds,
+            // Ids are drawn by the write itself, where it needs one.
+            seeds: Box::new(messages::OsSeeds),
             events: self.events,
             operator: std::env::var("BRIGADE_FLEET_OPERATOR_RECIPIENT").unwrap_or_default(),
             wake: self.wake.clone(),
@@ -287,12 +286,10 @@ impl Messages {
             Err(e) => Err(e),
         };
         Some(match result {
-            Ok(v) if v.get("python") == Some(&Json::Bool(true)) => return None,
-            Ok(v) => Reply {
-                status: v["status"].as_u64().unwrap() as u16,
-                body: v["body"].as_str().unwrap().into(),
-            }
-            .response(),
+            Ok(v) => match packed_response(v) {
+                Some(response) => response,
+                None => return None,
+            },
             Err(e) => Reply::new(
                 e.status,
                 &[("error", quote("hub busy")), ("reason", quote(e.reason))],
@@ -444,5 +441,43 @@ impl Messages {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    /// An unavailable random source keeps main's `busy` answer for the write
+    /// route: 503, the exact body bytes, and `retry-after: 1`. The write itself
+    /// proves the other half (no id means no source touch) in
+    /// `messages::tests::ack_and_question_status_mint_no_id_and_never_ask_the_source`.
+    #[tokio::test]
+    async fn an_unavailable_random_source_answers_exactly_as_busy_did() {
+        let answer = messages::unavailable_answer();
+        assert_eq!(answer, serde_json::json!({"unavailable": true}));
+        let response = packed_response(answer).expect("the route answers it");
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers()["retry-after"], "1");
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..],
+            br#"{"error":"hub busy","reason":"messages-unavailable"}"#
+        );
+    }
+
+    #[test]
+    fn other_packed_answers_keep_their_status_and_body() {
+        assert!(packed_response(messages::python_answer()).is_none());
+        let response = packed_response(serde_json::json!({
+            "status": 201,
+            "body": "{\"message\": {}}",
+        }))
+        .expect("a stored answer is answered here");
+        assert_eq!(response.status(), 201);
+        assert!(response.headers().get("retry-after").is_none());
     }
 }

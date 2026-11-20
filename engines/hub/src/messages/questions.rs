@@ -212,7 +212,7 @@ fn create_question(op: &mut Op, generation: &str, now: &str) -> Result<Reply, Fa
             code: "question_operator_invalid",
         });
     }
-    let [question_id, client_id] = w.seeds.question.clone();
+    let [question_id, client_id] = w.seeds.question()?;
     let deadline = iso_us(op.now + timeout * SECOND_US);
     let mut fields = Map::new();
     fields.insert("to".into(), Json::String(operator.into()));

@@ -1,0 +1,2 @@
+- Route the hub's native random bytes through one `platform::random_bytes`: registration tokens, memory ids and message ids now share a source that reads `/dev/urandom` on Unix and calls `BCryptGenRandom` with `BCRYPT_USE_SYSTEM_PREFERRED_RNG` on Windows, with the same entropy and no weaker fallback.
+- Draw message and question ids where they are used, so `ack` and `question_status` answer without a random source; a source that fails still refuses the writes that must mint an id with the existing 503.

@@ -75,6 +75,9 @@ pub enum Fail {
     Inactive(String),
     Auth(String),
     Reply(Reply),
+    /// The OS random source could not supply an id. Main answered this from
+    /// the route with `busy`, so the route keeps that exact answer.
+    Unavailable,
     /// Leave the request to the Python upstream. Nothing was written.
     Python,
     Sql(rusqlite::Error),
@@ -110,6 +113,11 @@ impl Fail {
             code,
             recipient: recipient.map(Into::into),
         }
+    }
+    /// The OS random source could not supply an id: a 503 `messages-unavailable`
+    /// with `retry-after: 1`, built by the route as main's `busy` built it.
+    pub fn unavailable() -> Self {
+        Self::Unavailable
     }
     fn auth(message: &str) -> Self {
         Self::Auth(message.into())
@@ -161,7 +169,9 @@ impl Fail {
                 object(&[error(&message), ("code", quote("message_sender_inactive"))]),
             ),
             Self::Reply(reply) => reply,
-            Self::Python | Self::Sql(_) => return None,
+            // The route answers these itself: `busy` for the random source,
+            // the upstream for Python, and the writer for SQLite.
+            Self::Unavailable | Self::Python | Self::Sql(_) => return None,
         })
     }
 }
@@ -1100,16 +1110,60 @@ fn keys_get<T: ReadTx + ?Sized>(tx: &T, r: &Request) -> Result<Reply, Fail> {
 
 // ----------------------------------------------------------------- writes
 
-/// Random values a write may need, drawn before submission so a replayed
-/// command makes the same decisions.
-#[derive(Clone, Debug, Default)]
-pub struct Seeds {
+/// Random material for the ids a write mints. Every method is asked for at
+/// its use site, so an action that mints no id never touches the source: a
+/// missing `/dev/urandom` or a failing `BCryptGenRandom` cannot refuse an
+/// `ack` or a `question_status`.
+pub trait Seeds: Send + Sync {
     /// `secrets.token_hex(16)` for a missing plaintext `client_id`.
-    pub client_id: String,
+    fn client_id(&self) -> Result<String, Fail>;
     /// `uuid4().hex` for a `message.created` event.
-    pub event: String,
+    fn event(&self) -> Result<String, Fail>;
     /// `question_id` and the operator message's `client_id`.
+    fn question(&self) -> Result<[String; 2], Fail>;
+}
+/// The process-wide OS source. Every draw is 16 bytes of entropy spelled as 32
+/// lowercase hex characters, so the ids keep Python's shape and entropy.
+pub struct OsSeeds;
+impl Seeds for OsSeeds {
+    fn client_id(&self) -> Result<String, Fail> {
+        hex16()
+    }
+    fn event(&self) -> Result<String, Fail> {
+        hex16()
+    }
+    fn question(&self) -> Result<[String; 2], Fail> {
+        Ok([hex16()?, hex16()?])
+    }
+}
+/// 16 bytes from [`crate::platform`] as 32 lowercase hex characters.
+fn hex16() -> Result<String, Fail> {
+    let mut raw = [0u8; 16];
+    crate::platform::random_bytes(&mut raw).map_err(|_| Fail::unavailable())?;
+    Ok(raw.iter().fold(String::with_capacity(32), |mut out, b| {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+        out
+    }))
+}
+/// Seed material a test fixes, so a replay or a cut schedule sees the same ids.
+#[cfg(test)]
+pub struct FixedSeeds {
+    pub client_id: String,
+    pub event: String,
     pub question: [String; 2],
+}
+#[cfg(test)]
+impl Seeds for FixedSeeds {
+    fn client_id(&self) -> Result<String, Fail> {
+        Ok(self.client_id.clone())
+    }
+    fn event(&self) -> Result<String, Fail> {
+        Ok(self.event.clone())
+    }
+    fn question(&self) -> Result<[String; 2], Fail> {
+        Ok(self.question.clone())
+    }
 }
 /// One message write: `send`, `reply`, `ack` or a `question_*` action.
 pub struct Write {
@@ -1118,7 +1172,7 @@ pub struct Write {
     pub raw: Map<String, Json>,
     pub policy: Policy,
     pub clock: Option<String>,
-    pub seeds: Seeds,
+    pub seeds: Box<dyn Seeds>,
     pub events: bool,
     /// `BRIGADE_FLEET_OPERATOR_RECIPIENT`, read when the request arrived.
     pub operator: String,
@@ -1128,6 +1182,12 @@ pub struct Write {
 /// `{"python": true}` tells the route to forward the request upstream.
 pub fn python_answer() -> Json {
     json!({"python": true})
+}
+/// `{"unavailable": true}` tells the route the OS random source could not be
+/// read, so it answers as main's route did: 503, the `messages-unavailable`
+/// body and `retry-after: 1`. Nothing was written.
+pub fn unavailable_answer() -> Json {
+    json!({"unavailable": true})
 }
 pub fn pack((status, body): Reply) -> Json {
     json!({"status": status, "body": body})
@@ -1154,6 +1214,7 @@ impl Command for Write {
                 Ok(pack(reply))
             }
             Err(Fail::Python) => Err(ApplyError::Refused(python_answer())),
+            Err(Fail::Unavailable) => Err(ApplyError::Refused(unavailable_answer())),
             Err(Fail::Sql(e)) => Err(e.into()),
             Err(fail) => Err(ApplyError::Refused(pack(fail.reply().unwrap()))),
         }
@@ -1441,9 +1502,13 @@ impl Op<'_> {
             subject = text(raw.get("subject"), "subject", SUBJECT_LIMIT, true)?.unwrap();
             body = text(raw.get("body"), "body", BODY_LIMIT, true)?.unwrap();
             reference = text(raw.get("ref"), "ref", REF_LIMIT, false)?;
-            client_id = text(raw.get("client_id"), "client_id", 64, false)?
+            client_id = match text(raw.get("client_id"), "client_id", 64, false)?
                 .filter(|c| !c.is_empty())
-                .unwrap_or_else(|| w.seeds.client_id.clone());
+            {
+                Some(id) => id,
+                // Only a send that omits `client_id` mints one.
+                None => w.seeds.client_id()?,
+            };
             enqueued = self.enqueued_at(raw.get("enqueued_at"))?;
             priority = match raw.get("priority") {
                 None => "normal".into(),
@@ -1692,7 +1757,7 @@ impl Op<'_> {
         priority: &str,
         created_at: &str,
         kind: &Value,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), Fail> {
         if !self.w.events {
             return Ok(());
         }
@@ -1713,6 +1778,8 @@ impl Op<'_> {
             return Ok(());
         }
         let kind = text_of(kind).filter(|k| !k.is_empty()).unwrap_or("message");
+        // Only a recorded `message.created` event mints an event id.
+        let event = format!("evt_{}", self.w.seeds.event()?);
         let data = format!(
             "{{\"message_id\":{},\"recipient\":{},\"sender\":{},\"priority\":{},\"created_at\":{},\"kind\":{}}}",
             quote(&id.to_string()),
@@ -1725,7 +1792,7 @@ impl Op<'_> {
         self.tx.execute(
             "INSERT OR IGNORE INTO fleet_events(event_id,name,subject,producer,data,created_at) VALUES(?,?,?,?,?,?)",
             &[
-                t(&format!("evt_{}", self.w.seeds.event)),
+                t(&event),
                 t("message.created"),
                 t(recipient),
                 t(sender),

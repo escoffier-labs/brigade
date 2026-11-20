@@ -77,13 +77,10 @@ pub fn refuse<T>(message: &str) -> Result<T> {
     Err(DomainError::Refusal(Reply::error(400, message)))
 }
 pub fn random(bytes: usize) -> Result<String> {
-    use std::io::Read;
     let mut raw = vec![0u8; bytes];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
-        .map_err(|_| {
-            DomainError::Refusal(Reply::error(503, "message authorization unavailable"))
-        })?;
+    brigade_hub::platform::random_bytes(&mut raw).map_err(|_| {
+        DomainError::Refusal(Reply::error(503, "message authorization unavailable"))
+    })?;
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     let mut acc = 0u32;
