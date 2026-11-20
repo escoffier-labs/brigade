@@ -20,6 +20,14 @@ from brigade import runguard
 INTEGRATE = run_batch_integrate
 
 
+@pytest.fixture(autouse=True)
+def _quarantine_root(tmp_path, monkeypatch):
+    root = tmp_path / "q"
+    root.mkdir()
+    monkeypatch.setattr(INTEGRATE, "QUARANTINE_ROOT", root)
+    return root
+
+
 @pytest.fixture
 def site(request):
     """The per-task worktree site from the worktree suite, unchanged."""
@@ -162,7 +170,7 @@ def test_two_non_conflicting_tasks_integrate_into_one_commit_on_a_new_ref(site, 
         assert fact.payload["integration_commit"] == commit
 
     # The quarantined merge repository is gone.
-    assert list(run_dir.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*")) == []
+    assert list(INTEGRATE.QUARANTINE_ROOT.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*")) == []
 
 
 def test_check_validates_the_selection_and_writes_nothing(site, capsys, monkeypatch):
@@ -208,7 +216,7 @@ def test_two_tasks_editing_the_same_lines_refuse_the_whole_integration(site, cap
     assert refs(site.repo) == refs_before
     assert not list(run_dir.glob("batch-integration-*"))
     assert run_lifecycle._journal_path(run_dir).read_bytes() == journal_before
-    assert list(run_dir.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*")) == []
+    assert list(INTEGRATE.QUARANTINE_ROOT.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*")) == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the merge driver shim needs a POSIX shell")
@@ -314,7 +322,6 @@ def test_a_moved_ref_after_the_record_refuses_ref_conflict(site, capsys, monkeyp
 
 def test_a_crash_after_the_ref_and_record_is_repaired_by_rerunning(site, capsys, monkeypatch):
     run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
-    run_dir = site.run_dir()
     real_append = INTEGRATE._append_facts
 
     def crash(plan, commit):
@@ -347,7 +354,7 @@ def test_a_crash_after_the_ref_and_record_is_repaired_by_rerunning(site, capsys,
     facts = [e for e in events(site) if e.event_type == "task.integrated"]
     assert [fact.payload["task_id"] for fact in facts] == ["a", "b"]
     assert len(facts) == 2
-    assert not list(run_dir.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
+    assert not list(INTEGRATE.QUARANTINE_ROOT.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
 
 
 def explode_quarantine_cleanup(monkeypatch) -> None:
@@ -408,7 +415,7 @@ def test_a_failing_cleanup_fsync_with_nothing_else_in_flight_refuses_git_failed(
     assert payload["refusal"]["code"] == "git-failed"
     assert refs(site.repo) == refs_before
     assert not list(site.run_dir().glob("batch-integration-*"))
-    assert not list(site.run_dir().glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
+    assert not list(INTEGRATE.QUARANTINE_ROOT.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
 
 
 def test_a_record_without_a_ref_is_completed_by_rerunning(site, capsys, monkeypatch):
@@ -442,7 +449,6 @@ def test_a_record_without_a_ref_is_completed_by_rerunning(site, capsys, monkeypa
 
 def test_a_ref_without_a_record_is_recognized_as_this_integration_and_repaired(site, capsys, monkeypatch):
     run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}, "b": {"beta.txt": "beta\n"}})
-    run_dir = site.run_dir()
     identity = identity_for(site, "a", "b")
     ref = INTEGRATE.ref_name(identity)
     real_write = INTEGRATE._write_record
@@ -473,7 +479,7 @@ def test_a_ref_without_a_record_is_recognized_as_this_integration_and_repaired(s
     assert json.loads(record_path(site, identity).read_text())["integration_commit"] == ref_commit
     facts = [e for e in events(site) if e.event_type == "task.integrated"]
     assert [fact.payload["task_id"] for fact in facts] == ["a", "b"]
-    assert not list(run_dir.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
+    assert not list(INTEGRATE.QUARANTINE_ROOT.glob(f"{INTEGRATE.QUARANTINE_PREFIX}*"))
 
 
 def test_rerunning_after_success_reports_already_integrated_and_writes_nothing(site, capsys, monkeypatch):

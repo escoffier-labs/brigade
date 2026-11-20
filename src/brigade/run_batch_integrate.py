@@ -59,6 +59,10 @@ CLI_SCHEMA = "brigade.runs_tasks_integrate.v1"
 REF_PREFIX = "refs/heads/brigade/integrate/"
 RECORD_PREFIX = "batch-integration-"
 QUARANTINE_PREFIX = "q-"
+# Where quarantine repositories are created. None means the system temporary
+# directory: a run directory path is already long enough that Git's own files
+# inside it pass the Windows path limit.
+QUARANTINE_ROOT: Path | None = None
 
 STATUS_CREATED = "created"
 STATUS_CHECKED = "checked"
@@ -425,7 +429,9 @@ def _quarantine(run_dir: Path, plan: Plan) -> Iterator[Path]:
     caller's object store through ``GIT_OBJECT_DIRECTORY``, so nothing is
     transferred back over any Git transport afterwards.
     """
-    path = Path(tempfile.mkdtemp(dir=str(run_dir), prefix=f"{QUARANTINE_PREFIX}{plan.integration_id}-"))
+    root = QUARANTINE_ROOT if QUARANTINE_ROOT is not None else Path(tempfile.gettempdir())
+    # mkdtemp creates a fresh 0700 directory and never follows or reuses an entry.
+    path = Path(tempfile.mkdtemp(dir=str(root), prefix=f"{QUARANTINE_PREFIX}{plan.integration_id[:8]}-"))
     try:
         init = _git(["init", "--bare", "-q", "--template=", str(path)], cwd=run_dir)
         if init.code != 0:
@@ -436,12 +442,12 @@ def _quarantine(run_dir: Path, plan: Plan) -> Iterator[Path]:
         # A cleanup failure must never replace the refusal that caused it.
         shutil.rmtree(path, ignore_errors=True)
         with contextlib.suppress(OSError, run_journal.RunJournalError):
-            run_journal._fsync_directory(run_dir)
+            run_journal._fsync_directory(path.parent)
         raise
     else:
         shutil.rmtree(path, ignore_errors=True)
         try:
-            run_journal._fsync_directory(run_dir)
+            run_journal._fsync_directory(path.parent)
         except (OSError, run_journal.RunJournalError) as exc:
             raise IntegrationError(GIT_FAILED, "quarantine removal could not be recorded") from exc
 
