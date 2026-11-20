@@ -7,13 +7,17 @@ Persists the Selection to .brigade/config.json.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import dataclasses
+import stat
 import sys
 from pathlib import Path
 from typing import List, Tuple
 
+from . import shipped_history
 from .config import Config, load_config, write_config
 from .skill_wiring import BLOCKED, SYMLINKED, SkillWirer
 from .selection import Selection, SurfaceInstallRefusal, SurfaceRecord, WRITER_INBOXES
@@ -34,6 +38,84 @@ LEGACY_GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
 LEGACY_GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
 DEFAULT_WIRED_SKILLS = ("brigade-work", "ultra-work-scout")
 SURFACE_EVIDENCE_REL_PATH = ".brigade/surface-evidence.json"
+
+
+# Antigravity projections lived under .antigravity/ until agy's documented
+# workspace roots (.agents/skills/ and friends) were adopted (#2810).
+_LEGACY_ANTIGRAVITY_PROJECTION_DIRS = ("commands", "superpowers", "skills")
+
+
+def _is_plain(path: Path, *, directory: bool) -> bool:
+    """True for a real (non-link) directory or regular file."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)
+
+
+def _brigade_owned_legacy_skill(rel: str, skill_id: str, data: bytes, recorded: dict[str, object]) -> bool:
+    """A legacy SKILL.md is Brigade's only while it is a text Brigade wrote or shipped, unedited."""
+    digest = shipped_history.skill_digest(data)
+    record = recorded.get(rel)
+    recorded_sha = record.get("sha256") if isinstance(record, dict) else None
+    if recorded_sha in (hashlib.sha256(data).hexdigest(), digest):
+        return True
+    return digest in shipped_history.digests(shipped_history.skill_key(skill_id))
+
+
+def prune_legacy_antigravity_projections(target: Path, recorded: dict[str, object] | None = None) -> list[str]:
+    """Remove Brigade-owned Antigravity projections from the pre-#2810 .antigravity/ paths.
+
+    Owned means a tool projection carrying the managed marker, or a SKILL.md
+    that is still byte-identical (newline-folded) to a text Brigade wrote or
+    shipped. Anything an operator edited, any link, and any other file stays.
+    `.antigravity/memory-handoffs` is never touched. Returns the removed paths.
+    """
+    from .tools_cmd.constants import PROJECTION_MARKER
+
+    recorded = recorded or {}
+    root = target / ".antigravity"
+    removed: list[str] = []
+    if not _is_plain(root, directory=True):
+        return removed
+    for name in _LEGACY_ANTIGRAVITY_PROJECTION_DIRS:
+        base = root / name
+        if not _is_plain(base, directory=True):
+            continue
+        for path in sorted(base.rglob("*")):
+            if not _is_plain(path, directory=False) or any(
+                parent.is_symlink() for parent in path.parents if base in (parent, *parent.parents)
+            ):
+                continue
+            rel = path.relative_to(target).as_posix()
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            if name == "skills":
+                parts = path.relative_to(base).parts
+                owned = (
+                    len(parts) == 2
+                    and parts[1] == "SKILL.md"
+                    and _brigade_owned_legacy_skill(rel, parts[0], data, recorded)
+                )
+            else:
+                owned = PROJECTION_MARKER.encode() in data[:512]
+            if not owned:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(rel)
+        # Drop only the directories this emptied; os.rmdir refuses a non-empty one.
+        for directory in sorted((d for d in (*base.rglob("*"), base) if _is_plain(d, directory=True)), reverse=True):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
+    for rel in removed:
+        print(f"brigade: removed legacy Antigravity projection: {rel}")
+    return removed
 
 
 def is_skill_md(dst: str) -> bool:
@@ -135,8 +217,9 @@ def build_gitignore_block(selection: Selection) -> str:
             ".codex/skills/",
             ".opencode/commands/",
             ".opencode/superpowers/",
-            ".antigravity/commands/",
-            ".antigravity/superpowers/",
+            ".agents/commands/",
+            ".agents/superpowers/",
+            ".agents/skills/",
             ".pi/commands/",
             ".pi/superpowers/",
             ".cursor/rules/",
@@ -500,6 +583,13 @@ def install_selection(
                         wired_skills.append((h, skill_id))
     finally:
         wirer.finish()
+
+    # New projections are in place; retire the Brigade-owned ones at the old path.
+    if "antigravity" in selection.harnesses:
+        try:
+            prune_legacy_antigravity_projections(target, wirer._recorded)
+        except OSError as exc:
+            print(f"warning: unable to prune legacy .antigravity projections: {exc}", file=sys.stderr)
 
     # Claude Code project hooks enforce the same work loop described by the
     # managed skill. The merge helper owns only Brigade handlers and preserves

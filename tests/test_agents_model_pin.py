@@ -190,7 +190,19 @@ def test_antigravity_maps_gemini_api_id_to_low_effort_slug():
         ("gemini-4-argon-high", "gemini-4-argon-high"),
         ("gemini-3.8-flash-high", "gemini-3.8-flash-high"),
         ("gemini-3.1-pro-high", "gemini-3.1-pro-high"),
-        ("gemini-4-unknown", "gemini-4-unknown"),
+        # #2810: agy lists every Gemini family as effort-suffixed slugs only, so
+        # any bare gemini-<version>-<family> id gets the default effort. This
+        # used to expect gemini-4-unknown to pass through unchanged.
+        ("gemini-4-unknown", "gemini-4-unknown-low"),
+        ("gemini-4-hydrogen", "gemini-4-hydrogen-low"),
+        ("gemini-4-neon", "gemini-4-neon-low"),
+        ("gemini-4-hydrogen-low", "gemini-4-hydrogen-low"),
+        ("gemini-4-neon-medium", "gemini-4-neon-medium"),
+        ("gemini-4-neon-xhigh", "gemini-4-neon-xhigh"),
+        ("gemini-4-neon-max", "gemini-4-neon-max"),
+        ("gpt-5", "gpt-5"),
+        ("claude-opus-5-5", "claude-opus-5-5"),
+        ("Gemini 3.8 Flash (Low)", "Gemini 3.8 Flash (Low)"),
     ],
 )
 def test_antigravity_gemini_model_family_pins(model, expected):

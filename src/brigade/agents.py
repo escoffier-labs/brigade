@@ -237,7 +237,11 @@ def _antigravity_argv(
     cwd: Path | None,
     timeout_seconds: int | float | None = None,
     print_timeout_supported: bool | None = None,
+    mode_supported: bool | None = None,
 ) -> List[str]:
+    # ``mode_supported`` is resolved by run_agent from the resolved seat's
+    # ``agy --help``. None means "not probed" and keeps the legacy argv, so
+    # build_argv stays hermetic and never spawns agy itself.
     timeout_flags: List[str] = []
     if timeout_seconds is not None and (
         _antigravity_supports_print_timeout() if print_timeout_supported is None else print_timeout_supported
@@ -245,7 +249,10 @@ def _antigravity_argv(
         seconds = max(60, int(timeout_seconds) - 30)
         timeout_flags = ["--print-timeout", f"{seconds}s"]
     if read_only or sandbox == "read-only":
-        return ["agy", "--sandbox", *timeout_flags, "--print", prompt]
+        # --sandbox restricts the terminal only; file edit tools stay available.
+        # Plan mode is what stops writes, so add it whenever agy advertises it.
+        mode_flags = ["--mode", "plan"] if mode_supported else []
+        return ["agy", "--sandbox", *mode_flags, *timeout_flags, "--print", prompt]
     effective_cwd = cwd if cwd is not None else Path.cwd().resolve()
     argv = ["agy", "--add-dir", str(effective_cwd)]
     argv.extend(["--dangerously-skip-permissions", *timeout_flags, "--print", prompt])
@@ -676,6 +683,11 @@ def _oracle_supports_browser_engine(
 _ANTIGRAVITY_PRINT_TIMEOUT_HELP = "--print-timeout"
 _ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT = 16
 _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED: OrderedDict[tuple[str, str], bool] = OrderedDict()
+# ``--mode`` must not match ``--model``; plan mode is the value the read-only
+# argv needs, so a build that lists --mode without plan does not count.
+_ANTIGRAVITY_MODE_FLAG_RE = re.compile(r"(?<![\w-])--mode(?![\w-])")
+_ANTIGRAVITY_MODE_PLAN_RE = re.compile(r"(?<![\w-])plan(?![\w-])")
+_ANTIGRAVITY_MODE_SUPPORTED: OrderedDict[tuple[str, str], bool] = OrderedDict()
 
 
 def _antigravity_env_fingerprint(env: dict[str, str] | None) -> str:
@@ -689,22 +701,22 @@ def _antigravity_env_fingerprint(env: dict[str, str] | None) -> str:
     return hashlib.sha256(json.dumps(items, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _antigravity_supports_print_timeout(
-    executable: str = "agy",
-    *,
-    env: dict[str, str] | None = None,
-    process_registry: proc.ProcessRegistry | None = None,
+def _antigravity_help_supports(
+    cache: OrderedDict[tuple[str, str], bool],
+    check: Callable[[str], bool],
+    executable: str,
+    env: dict[str, str] | None,
+    process_registry: proc.ProcessRegistry | None,
 ) -> bool:
-    """Whether this Antigravity executable advertises --print-timeout in agy --help.
+    """Run ``<executable> --help`` once per (executable, env fingerprint) and cache ``check(help)``.
 
-    Probes are cached per (executable, environment fingerprint) and bounded to
-    ``_ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT`` entries.  The cache stores only
-    the executable string and a SHA-256 hex digest of the environment; it never
-    retains env keys or values.
+    The cache is bounded to ``_ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT`` entries
+    and stores only the executable string and a SHA-256 hex digest of the
+    environment; it never retains env keys or values.
     """
     cache_key = (executable, _antigravity_env_fingerprint(env))
-    if cache_key in _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED:
-        return _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED[cache_key]
+    if cache_key in cache:
+        return cache[cache_key]
     result = proc.run(
         [executable, "--help"],
         timeout=5.0,
@@ -714,19 +726,56 @@ def _antigravity_supports_print_timeout(
     if result.code != 0:
         supported = False
     else:
-        combined = "\n".join((result.stdout, result.stderr))
-        supported = _ANTIGRAVITY_PRINT_TIMEOUT_HELP in combined
-    if len(_ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED) >= _ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT:
-        _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED.popitem(last=False)
-    _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED[cache_key] = supported
+        supported = check("\n".join((result.stdout, result.stderr)))
+    if len(cache) >= _ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT:
+        cache.popitem(last=False)
+    cache[cache_key] = supported
     return supported
+
+
+def _antigravity_supports_print_timeout(
+    executable: str = "agy",
+    *,
+    env: dict[str, str] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> bool:
+    """Whether this Antigravity executable advertises --print-timeout in agy --help."""
+    return _antigravity_help_supports(
+        _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED,
+        lambda text: _ANTIGRAVITY_PRINT_TIMEOUT_HELP in text,
+        executable,
+        env,
+        process_registry,
+    )
+
+
+def _antigravity_supports_mode(
+    executable: str = "agy",
+    *,
+    env: dict[str, str] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> bool:
+    """Whether this Antigravity executable advertises ``--mode`` with a ``plan`` value in agy --help.
+
+    Older builds (for example 1.4.1) lack it, and passing an unknown flag would
+    fail the seat, so read-only runs only add ``--mode plan`` when detected.
+    """
+    return _antigravity_help_supports(
+        _ANTIGRAVITY_MODE_SUPPORTED,
+        lambda text: bool(_ANTIGRAVITY_MODE_FLAG_RE.search(text) and _ANTIGRAVITY_MODE_PLAN_RE.search(text)),
+        executable,
+        env,
+        process_registry,
+    )
 
 
 def _clear_antigravity_print_timeout_cache() -> None:
     _ANTIGRAVITY_PRINT_TIMEOUT_SUPPORTED.clear()
+    _ANTIGRAVITY_MODE_SUPPORTED.clear()
 
 
 _antigravity_supports_print_timeout.cache_clear = _clear_antigravity_print_timeout_cache  # type: ignore[attr-defined]
+_antigravity_supports_mode.cache_clear = _clear_antigravity_print_timeout_cache  # type: ignore[attr-defined]
 
 
 def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
@@ -845,9 +894,11 @@ def _with_reasoning(cli_ref: str, argv: List[str], reasoning: str) -> List[str]:
     raise ValueError(f"{cli_ref!r} does not support reasoning pins (supported: {supported})")
 
 
-# agy lists Gemini models as effort-suffixed slugs (gemini-3.8-flash-low). The
-# published API id (gemini-3.8-flash) is recognized but requires --effort.
-_ANTIGRAVITY_GEMINI_BASE_RE = re.compile(r"^gemini-\d+(?:\.\d+)?-(?:flash|pro|argon)$")
+# agy lists Gemini models as effort-suffixed slugs (gemini-3.8-flash-low,
+# gemini-4-hydrogen-low). A bare gemini-<version>-<family> id is not resolvable
+# and requires --effort, so any family name without an effort suffix gets the
+# default one. Already-suffixed ids and non-Gemini ids pass through unchanged.
+_ANTIGRAVITY_GEMINI_BASE_RE = re.compile(r"^gemini-\d+(?:\.\d+)?-(?!(?:low|medium|high|xhigh|max)$)[a-z][a-z0-9]*$")
 _ANTIGRAVITY_DEFAULT_EFFORT = "low"
 
 
@@ -883,6 +934,7 @@ def build_argv(
     oracle_browser_engine: bool = False,
     timeout_seconds: int | float | None = None,
     antigravity_print_timeout_supported: bool | None = None,
+    antigravity_mode_supported: bool | None = None,
 ) -> List[str]:
     if resume_session_id is not None:
         if cli_ref != "grok":
@@ -926,6 +978,8 @@ def build_argv(
         builder_kwargs["timeout_seconds"] = timeout_seconds
     if _accepts_keyword(builder, "print_timeout_supported"):
         builder_kwargs["print_timeout_supported"] = antigravity_print_timeout_supported
+    if _accepts_keyword(builder, "mode_supported"):
+        builder_kwargs["mode_supported"] = antigravity_mode_supported
     argv = builder(prompt, read_only, sandbox, cwd, **builder_kwargs)
     if cli_ref == "oracle" and oracle_browser_engine:
         argv = [argv[0], "--engine", "browser", *argv[1:]]
@@ -1405,6 +1459,7 @@ def run_agent(
     try:
         oracle_browser_engine = False
         antigravity_print_timeout_supported = None
+        antigravity_mode_supported = None
         if cli_ref == "oracle":
             assert executable.path is not None
             oracle_browser_engine = _oracle_supports_browser_engine(
@@ -1415,6 +1470,13 @@ def run_agent(
         if cli_ref == "antigravity" and timeout is not None:
             assert executable.path is not None
             antigravity_print_timeout_supported = _antigravity_supports_print_timeout(
+                executable.path,
+                env=child_env,
+                process_registry=process_registry,
+            )
+        if cli_ref == "antigravity" and (read_only or sandbox == "read-only"):
+            assert executable.path is not None
+            antigravity_mode_supported = _antigravity_supports_mode(
                 executable.path,
                 env=child_env,
                 process_registry=process_registry,
@@ -1432,6 +1494,7 @@ def run_agent(
             oracle_browser_engine=oracle_browser_engine,
             timeout_seconds=timeout,
             antigravity_print_timeout_supported=antigravity_print_timeout_supported,
+            antigravity_mode_supported=antigravity_mode_supported,
         )
     except UnsupportedSandboxError as exc:
         # A builder rejected the launch before spawning because the requested

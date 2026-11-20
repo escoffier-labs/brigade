@@ -457,6 +457,127 @@ def test_build_argv_antigravity_read_only_keeps_sandbox_without_write_flags(tmp_
     assert "--dangerously-skip-permissions" not in argv
 
 
+def test_build_argv_antigravity_read_only_adds_plan_mode_when_supported(tmp_path):
+    argv = agents.build_argv("antigravity", "hi", read_only=True, cwd=tmp_path, antigravity_mode_supported=True)
+    assert argv == ["agy", "--sandbox", "--mode", "plan", "--print", "hi"]
+    sandboxed = agents.build_argv(
+        "antigravity", "hi", sandbox="read-only", cwd=tmp_path, antigravity_mode_supported=True
+    )
+    assert sandboxed == argv
+    # Model pin and print timeout still compose with plan mode.
+    pinned = agents.build_argv(
+        "antigravity",
+        "hi",
+        read_only=True,
+        model="gemini-4-hydrogen",
+        timeout_seconds=300,
+        antigravity_print_timeout_supported=True,
+        antigravity_mode_supported=True,
+    )
+    assert pinned == [
+        "agy",
+        "--model",
+        "gemini-4-hydrogen-low",
+        "--sandbox",
+        "--mode",
+        "plan",
+        "--print-timeout",
+        "270s",
+        "--print",
+        "hi",
+    ]
+
+
+def test_build_argv_antigravity_write_argv_never_gets_plan_mode(tmp_path):
+    argv = agents.build_argv("antigravity", "hi", cwd=tmp_path, antigravity_mode_supported=True)
+    assert argv == ["agy", "--add-dir", str(tmp_path.resolve()), "--dangerously-skip-permissions", "--print", "hi"]
+    assert "--mode" not in argv
+
+
+def test_build_argv_antigravity_read_only_keeps_legacy_argv_when_mode_unsupported(tmp_path):
+    for supported in (None, False):
+        argv = agents.build_argv(
+            "antigravity", "hi", read_only=True, cwd=tmp_path, antigravity_mode_supported=supported
+        )
+        assert argv == ["agy", "--sandbox", "--print", "hi"]
+
+
+def test_antigravity_supports_mode_probe_detects_flag_and_plan_value(monkeypatch):
+    agents._clear_antigravity_print_timeout_cache()
+    calls = []
+
+    def stub_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == "/new/agy":
+            return agents.proc.Result(
+                0, "  --mode <mode>   Permission mode: accept-edits, auto, plan\n  --model <id>\n", ""
+            )
+        if argv[0] == "/old/agy":
+            # 1.4.1 style help: --model exists, --mode does not.
+            return agents.proc.Result(0, "  --model <id>   Model to use\n  --sandbox\n", "")
+        if argv[0] == "/nomodeplan/agy":
+            return agents.proc.Result(0, "  --mode <mode>   Permission mode: auto\n", "")
+        return agents.proc.Result(2, "", "boom")
+
+    monkeypatch.setattr(agents.proc, "run", stub_run)
+    assert agents._antigravity_supports_mode("/new/agy", env={"PATH": "/bin"}) is True
+    assert agents._antigravity_supports_mode("/old/agy", env={"PATH": "/bin"}) is False
+    assert agents._antigravity_supports_mode("/nomodeplan/agy", env={"PATH": "/bin"}) is False
+    assert agents._antigravity_supports_mode("/broken/agy", env={"PATH": "/bin"}) is False
+    # Cached per (executable, env fingerprint): no second help call.
+    assert agents._antigravity_supports_mode("/new/agy", env={"PATH": "/bin"}) is True
+    assert calls == [
+        ["/new/agy", "--help"],
+        ["/old/agy", "--help"],
+        ["/nomodeplan/agy", "--help"],
+        ["/broken/agy", "--help"],
+    ]
+    # A different environment is a different cache entry.
+    assert agents._antigravity_supports_mode("/new/agy", env={"PATH": "/other"}) is True
+    assert len(calls) == 5
+    # The cache holds no environment values.
+    assert "/other" not in repr(agents._ANTIGRAVITY_MODE_SUPPORTED)
+    agents._clear_antigravity_print_timeout_cache()
+
+
+def test_antigravity_mode_cache_bounds_to_sixteen_entries(monkeypatch):
+    agents._clear_antigravity_print_timeout_cache()
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, "--mode plan", ""))
+    for i in range(20):
+        assert agents._antigravity_supports_mode(f"/agy/{i}", env={"PATH": "/bin"}) is True
+    assert len(agents._ANTIGRAVITY_MODE_SUPPORTED) == 16
+    agents._clear_antigravity_print_timeout_cache()
+
+
+def _run_antigravity_read_only(monkeypatch, tmp_path, help_text):
+    agents._clear_antigravity_print_timeout_cache()
+    launched = []
+
+    def fake_run(argv, **kwargs):
+        if argv == ["/seat/bin/agy", "--help"]:
+            return agents.proc.Result(0, help_text, "")
+        launched.append(argv)
+        return agents.proc.Result(0, "answer", "")
+
+    _stub_agent_executable(monkeypatch, path_for="/seat/bin/agy")
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    res = agents.run_agent("antigravity", "hi", read_only=True, cwd=tmp_path)
+    agents._clear_antigravity_print_timeout_cache()
+    return res, launched
+
+
+def test_run_agent_antigravity_read_only_probes_resolved_seat_and_adds_plan_mode(monkeypatch, tmp_path):
+    res, launched = _run_antigravity_read_only(monkeypatch, tmp_path, "--mode <mode> accept-edits, auto, plan")
+    assert res.ok is True
+    assert launched == [["/seat/bin/agy", "--sandbox", "--mode", "plan", "--print", "hi"]]
+
+
+def test_run_agent_antigravity_read_only_keeps_legacy_argv_on_old_agy(monkeypatch, tmp_path):
+    res, launched = _run_antigravity_read_only(monkeypatch, tmp_path, "--model <id>\n--sandbox")
+    assert res.ok is True
+    assert launched == [["/seat/bin/agy", "--sandbox", "--print", "hi"]]
+
+
 def test_build_argv_antigravity_with_timeout_seconds_and_help_probe_adds_print_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(agents, "_antigravity_supports_print_timeout", lambda *args, **kwargs: True)
 
@@ -1277,13 +1398,18 @@ def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
     captured = {}
 
     def fake_run(argv, **kw):
+        if argv[1:] == ["--help"]:
+            # Feature-detection probe; independent of the shared probe cache state.
+            return agents.proc.Result(0, "", "")
         captured["argv"] = argv
         captured["cwd"] = kw["cwd"]
         return agents.proc.Result(0, "answer", "")
 
+    agents._clear_antigravity_print_timeout_cache()
     _stub_agent_executable(monkeypatch)
     monkeypatch.setattr(agents.proc, "run", fake_run)
     res = agents.run_agent("antigravity", "hi", cwd=tmp_path)
+    agents._clear_antigravity_print_timeout_cache()
     assert res.ok is True
     assert captured["cwd"] == tmp_path
     assert captured["argv"] == [

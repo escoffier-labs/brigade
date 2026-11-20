@@ -198,8 +198,9 @@ memory/handoff-inbox/
 .codex/skills/
 .opencode/commands/
 .opencode/superpowers/
-.antigravity/commands/
-.antigravity/superpowers/
+.agents/commands/
+.agents/superpowers/
+.agents/skills/
 .pi/commands/
 .pi/superpowers/
 .cursor/rules/

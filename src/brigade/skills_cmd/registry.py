@@ -58,7 +58,7 @@ HARNESS_ADAPTERS: dict[str, dict[str, Any]] = {
     "antigravity": {
         "status": "built-in",
         "format": "antigravity-skill",
-        "install_path": ".antigravity/skills/{skill_id}",
+        "install_path": ".agents/skills/{skill_id}",
     },
     "pi": {"status": "built-in", "format": "pi-skill", "install_path": ".pi/skills/{skill_id}"},
     "cursor": {"status": "built-in", "format": "cursor-skill", "install_path": ".cursor/skills/{skill_id}"},
