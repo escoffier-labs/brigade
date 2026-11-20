@@ -1755,8 +1755,8 @@ def test_run_agent_antigravity_normal_output_exit_zero_is_success(monkeypatch, t
 
 
 def test_run_agent_antigravity_marker_later_in_output_is_not_a_failure(monkeypatch, tmp_path):
-    # Only a first non-empty line match means the run produced nothing; a real
-    # report that quotes the marker is still a success.
+    # Any stdout line that is not the marker is real output, so a report
+    # that quotes the marker is still a success.
     stdout = "Summary of the bug.\nThe log line `jetski: no output produced` is the symptom.\n"
     result = _run_antigravity_with_stdout(monkeypatch, stdout, cwd=tmp_path)
 
@@ -1787,6 +1787,7 @@ def test_run_agent_antigravity_marker_without_permission_reason_stays_empty_outp
 
     assert result.ok is False
     assert result.failure_kind == "empty-output"
+    assert result.failure_phase == "output-validation"
     assert "turn ended early" in result.detail
     assert "later noise" not in result.detail
 

@@ -1759,7 +1759,7 @@ def run_agent(
             text="",
             ok=False,
             detail=scrub_detail(antigravity_no_output)[:200],
-            failure_phase="dispatch" if no_output_kind == "permission-denied" else None,
+            failure_phase="dispatch" if no_output_kind == "permission-denied" else "output-validation",
             failure_kind=no_output_kind,
             stdout=safe_stdout,
             stderr=safe_stderr,

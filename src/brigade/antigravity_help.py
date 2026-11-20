@@ -174,6 +174,8 @@ def _antigravity_no_output_kind(detail: str) -> str:
 
     Only an auto-denied tool permission is ``permission-denied``. Any other
     no-output reason stays the generic ``empty-output`` failure.
+    The wording was checked against agy 1.5.12. Recheck it when agy changes
+    its no-output message.
     """
     lowered = detail.lower()
     return "permission-denied" if "permission" in lowered or "auto-denied" in lowered else "empty-output"
