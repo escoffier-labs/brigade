@@ -29,16 +29,7 @@ class LandError(ValueError):
 
 # A pushed landing whose branch is gone is never rebuilt: publishing again could
 # move the branch to different content, so the operator chooses the recovery.
-_LANDING_REF_MISSING = (
-    "landing-ref-missing: the remote landing branch is gone; restore it, or open the PR for "
-    "the recorded commit and register it with "
-    "`brigade run cloud adopt --provider codex-cloud --task-id <task> --pr <url>`"
-)
-_LANDING_COMMIT_MISSING = (
-    "landing-ref-missing: the registry records a pushed landing without its commit; restore "
-    "the remote landing branch or register the existing PR with "
-    "`brigade run cloud adopt --provider codex-cloud --task-id <task> --pr <url>`"
-)
+_PUBLISHED_STATES = frozenset({"branch-pushed", "pr-created"})
 
 
 _CREDENTIALS = {
@@ -725,12 +716,12 @@ def _private_root(saved: str | None, target: Path) -> Path:
 
 
 def _resume_without_workspace(entry: dict[str, Any]) -> bool:
-    """A landing that already pushed can resume without its private workspace.
+    """A landing that already published can resume without its private workspace.
 
     Only a path that does not exist at all counts as gone. An existing path is
     left to ``_private_root``, which still refuses an unsafe workspace.
     """
-    if entry.get("landing_state") != "branch-pushed" or not entry.get("landing_commit"):
+    if entry.get("landing_state") not in _PUBLISHED_STATES or not entry.get("landing_commit"):
         return False
     saved = entry.get("landing_workspace")
     if not saved:
@@ -797,19 +788,111 @@ def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dic
                 result = _land_locked(target, entry, issue, closes, git, root, repo, canonical, resumed=resumed)
             except BaseException:
                 # Keep a private workspace only when the registry points at it and a
-                # retry can resume from its recorded commit.
+                # retry can resume from its recorded commit. Cleanup never replaces
+                # the refusal that is already propagating.
                 if not entry.get("landing_commit") or entry.get("landing_workspace") != str(root):
-                    shutil.rmtree(root)
+                    shutil.rmtree(root, ignore_errors=True)
                     try:
                         _update(target, entry, landing_workspace=None)
                     except LandError:
                         pass
                 raise
-            shutil.rmtree(root)
-            _update(target, entry, landing_workspace=None)
+            # The landing is published, so workspace cleanup cannot turn it into an error.
+            shutil.rmtree(root, ignore_errors=True)
+            try:
+                _update(target, entry, landing_workspace=None)
+            except LandError:
+                pass
             return result
     except InboxLockTimeout as exc:
         raise LandError("landing-busy") from exc
+
+
+def _land_command(task_id: str, issue: int) -> str:
+    """The exact CLI command that resumes this landing."""
+    return shlex.join(
+        [
+            "brigade",
+            "run",
+            "cloud",
+            "land",
+            "--provider",
+            "codex-cloud",
+            "--task-id",
+            task_id,
+            "--issue",
+            str(issue),
+        ]
+    )
+
+
+def _missing_ref_message(canonical: str, branch: str, commit: str, task_id: str, issue: int) -> str:
+    """A recovery an operator can run today: restore the ref, then rerun land."""
+    restore = shlex.join(["git", "push", canonical, f"{commit}:refs/heads/{branch}"])
+    return (
+        f"landing-ref-missing: the remote landing branch {branch} is gone; restore it with `{restore}` "
+        f"and rerun `{_land_command(task_id, issue)}` to resume PR creation"
+    )
+
+
+def _missing_commit_message(canonical: str, branch: str, task_id: str, issue: int) -> str:
+    inspect = shlex.join(["git", "ls-remote", "--refs", canonical, f"refs/heads/{branch}"])
+    return (
+        "landing-ref-missing: the registry records a published landing without its commit; "
+        f"read the remote branch with `{inspect}`, repair the entry, then rerun "
+        f"`{_land_command(task_id, issue)}`"
+    )
+
+
+def _conflict_pr_message(repo: str, branch: str, url: str, task_id: str, issue: int) -> str:
+    inspect = shlex.join(["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "all"])
+    return (
+        f"pr-recovery-conflict: {url} is open for the landing branch at a different commit; "
+        f"inspect `{inspect}` and close it, then rerun `{_land_command(task_id, issue)}` to create "
+        "a new PR for the recorded commit"
+    )
+
+
+_PR_QUERY_LIMIT = 100
+
+
+def _recover_pr(found: str, repo: str, branch: str, commit: str, task_id: str, issue: int) -> str | None:
+    """The existing PR that already carries the recorded commit, if any.
+
+    A merged PR with the recorded commit already landed it and is recorded as
+    the landing. A closed PR is not adopted: a new PR is created for the same
+    commit instead. An open PR whose head is another commit is never recorded
+    and never duplicated, so it refuses with the operator's next step.
+    """
+    try:
+        inventory = json.loads(found)
+    except ValueError as exc:
+        raise LandError("pr-recovery-failed") from exc
+    if not isinstance(inventory, list):
+        raise LandError("pr-recovery-failed")
+    merged: str | None = None
+    conflict: str | None = None
+    for item in inventory:
+        if not isinstance(item, dict):
+            raise LandError("pr-recovery-failed")
+        if item.get("headRefName") != branch:
+            continue
+        url = item.get("url")
+        if not isinstance(url, str):
+            raise LandError("pr-recovery-failed")
+        _validate_pr_url(url, repo)
+        state = str(item.get("state") or "").upper()
+        if item.get("headRefOid") != commit:
+            if state == "OPEN" and conflict is None:
+                conflict = url
+            continue
+        if state == "OPEN":
+            return url
+        if state == "MERGED" and merged is None:
+            merged = url
+    if conflict is not None:
+        raise LandError(_conflict_pr_message(repo, branch, conflict, task_id, issue))
+    return merged
 
 
 def _land_locked(
@@ -829,9 +912,9 @@ def _land_locked(
         raise LandError("invalid-landing-branch")
     _update(target, entry, landing_branch=branch)
     commit = entry.get("landing_commit")
-    pushed = entry.get("landing_state") == "branch-pushed"
-    if pushed and not commit:
-        raise LandError(_LANDING_COMMIT_MISSING)
+    published = entry.get("landing_state") in _PUBLISHED_STATES
+    if published and not commit:
+        raise LandError(_missing_commit_message(canonical, branch, entry["task_id"], issue))
     checkout = _reconcile_checkouts(git, root, branch, commit)
     remote = git.git(
         ["ls-remote", "--refs", canonical, f"refs/heads/{branch}"], git.repository, "ref-inspection-failed"
@@ -846,10 +929,10 @@ def _land_locked(
     if commit:
         if remote_sha and remote_sha != commit:
             raise LandError("landing-ref-mismatch")
-        if not remote_sha and pushed:
-            # A pushed landing survives only on the remote. Rebuilding it would
-            # publish different content under the same branch name.
-            raise LandError(_LANDING_REF_MISSING)
+        if not remote_sha and published:
+            # A published landing survives only on the remote. Rebuilding it
+            # would publish different content under the same branch name.
+            raise LandError(_missing_ref_message(canonical, branch, commit, entry["task_id"], issue))
         if not local and remote_sha:
             # A cleared runtime workspace keeps the commit only on the remote. Fetch
             # into FETCH_HEAD first: the branch ref is created only after the fetched
@@ -871,22 +954,26 @@ def _land_locked(
         else:
             found = git.tool(
                 "gh",
-                ["pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json", "url", "--limit", "1"],
+                [
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--head",
+                    branch,
+                    "--state",
+                    "all",
+                    "--json",
+                    "url,state,headRefName,headRefOid",
+                    "--limit",
+                    str(_PR_QUERY_LIMIT),
+                ],
                 git.repository,
                 "pr-recovery-failed",
             )
-            try:
-                inventory = json.loads(found)
-                if not isinstance(inventory, list):
-                    raise ValueError("invalid inventory")
-                if inventory:
-                    url = inventory[0]["url"]
-                    _validate_pr_url(url, repo)
-                    if remote_sha != commit:
-                        raise LandError("landing-ref-mismatch")
-                    return _record_pr(target, entry, url)
-            except (ValueError, KeyError, TypeError) as exc:
-                raise LandError("pr-recovery-failed") from exc
+            url = _recover_pr(found, repo, branch, commit, entry["task_id"], issue)
+            if url is not None:
+                return _record_pr(target, entry, url)
     elif local or remote_sha:
         if remote_sha:
             raise LandError("landing-ref-mismatch")

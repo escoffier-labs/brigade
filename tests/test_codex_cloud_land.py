@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -88,6 +90,7 @@ def landing(tmp_path, monkeypatch):
         "runtime": runtime,
         "pushes": [],
         "pr_creates": [],
+        "prs": [],
     }
 
     def probe_transport(argv, kwargs):
@@ -196,7 +199,7 @@ def landing(tmp_path, monkeypatch):
             if state["failure"] == "apply":
                 return proc.Result(1, "", "")
         if argv[:3] == ["gh", "pr", "list"]:
-            return proc.Result(0, json.dumps([{"url": state["published"]}] if state.get("published") else []), "")
+            return proc.Result(0, json.dumps(state["prs"]), "")
         if argv[:3] == ["gh", "pr", "create"]:
             state["pr_creates"].append(list(argv))
             body = Path(argv[argv.index("--body-file") + 1]).read_text()
@@ -206,6 +209,14 @@ def landing(tmp_path, monkeypatch):
             if state["failure"] == "pr":
                 return proc.Result(1, "", "")
             state["published"] = "https://github.com/example/repo/pull/123"
+            state["prs"].append(
+                {
+                    "url": state["published"],
+                    "state": "OPEN",
+                    "headRefName": argv[argv.index("--head") + 1],
+                    "headRefOid": state.get("remote_sha"),
+                }
+            )
             if state.get("lose_pr_response"):
                 return proc.Result(1, "", "")
             return proc.Result(0, state["published"] + "\n", "")
@@ -922,6 +933,7 @@ def test_r2_retry_reconciles_every_checkout_transition(landing, monkeypatch, ope
     cloud_tracker.register(caller, provider="codex-cloud", task_id="task_example", label="example")
     for name in ("remote_sha", "published"):
         state.pop(name, None)
+    state["prs"].clear()
     calls.clear()
     original = codex_cloud_land._LandingGit.git
     interrupted = False
@@ -2036,7 +2048,14 @@ def test_r4_expired_workspace_resumes_pr_creation(landing):
 def test_r4_expired_workspace_reuses_existing_pr(landing):
     caller, state, calls = landing
     entry = _expire_private_workspace(caller, state)
-    state["published"] = "https://github.com/example/repo/pull/321"
+    state["prs"] = [
+        {
+            "url": "https://github.com/example/repo/pull/321",
+            "state": "OPEN",
+            "headRefName": entry["landing_branch"],
+            "headRefOid": entry["landing_commit"],
+        }
+    ]
     calls.clear()
     result = codex_cloud_land.land(caller, "task_example", 2473)
     assert result["pr_url"] == "https://github.com/example/repo/pull/321"
@@ -2176,3 +2195,172 @@ def test_r4_resume_without_workspace_ignores_unreadable_and_dangling_paths(tmp_p
         saved.parent.chmod(0o700)
     assert codex_cloud_land._resume_without_workspace(entry) is False
     assert codex_cloud_land._resume_without_workspace({**entry, "landing_state": "prepared"}) is False
+
+
+def test_r5_ref_missing_message_names_a_working_recovery(landing, monkeypatch):
+    caller, state, _ = landing
+    entry = _expire_private_workspace(caller, state)
+    state["remote_sha"] = ""
+    with pytest.raises(codex_cloud_land.LandError) as error:
+        codex_cloud_land.land(caller, "task_example", 2473)
+    message = str(error.value)
+    assert message.startswith("landing-ref-missing")
+    restore = re.search(r"`(git push [^`]+)`", message)
+    assert restore, message
+    assert shlex.split(restore[1]) == [
+        "git",
+        "push",
+        "https://github.com/example/repo.git",
+        f"{entry['landing_commit']}:refs/heads/{entry['landing_branch']}",
+    ]
+    rerun = re.search(r"`(brigade [^`]+)`", message)
+    assert rerun, message
+    seen = []
+    monkeypatch.setattr(codex_cloud_land, "land", lambda *args: seen.append(args) or {"pr_url": "example"})
+    assert cli.main(shlex.split(rerun[1])[1:]) == 0
+    assert seen[0][1:] == ("task_example", 2473)
+
+
+def test_r5_merged_pr_with_recorded_commit_is_adopted(landing):
+    caller, state, calls = landing
+    entry = _expire_private_workspace(caller, state)
+    url = "https://github.com/example/repo/pull/321"
+    state["prs"] = [
+        {
+            "url": url,
+            "state": "MERGED",
+            "headRefName": entry["landing_branch"],
+            "headRefOid": entry["landing_commit"],
+        }
+    ]
+    calls.clear()
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"] == url
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert not any(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls)
+    final = cloud_tracker.load_registry(caller)["entries"][0]
+    assert final["pr_url"] == url
+    assert final["landing_state"] == "pr-created"
+
+
+def test_r5_closed_pr_is_not_adopted_and_a_new_pr_is_created(landing):
+    caller, state, calls = landing
+    entry = _expire_private_workspace(caller, state)
+    state["prs"] = [
+        {
+            "url": "https://github.com/example/repo/pull/320",
+            "state": "CLOSED",
+            "headRefName": entry["landing_branch"],
+            "headRefOid": entry["landing_commit"],
+        }
+    ]
+    creates = len(state["pr_creates"])
+    pushes = len(state["pushes"])
+    calls.clear()
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"] == "https://github.com/example/repo/pull/123"
+    assert len(state["pr_creates"]) == creates + 1
+    assert len(state["pushes"]) == pushes
+
+
+def test_r5_open_pr_with_another_head_is_refused(landing):
+    caller, state, calls = landing
+    entry = _expire_private_workspace(caller, state)
+    url = "https://github.com/example/repo/pull/322"
+    state["prs"] = [
+        {
+            "url": url,
+            "state": "OPEN",
+            "headRefName": entry["landing_branch"],
+            "headRefOid": "d" * 40,
+        }
+    ]
+    creates = len(state["pr_creates"])
+    calls.clear()
+    with pytest.raises(codex_cloud_land.LandError, match="^pr-recovery-conflict") as error:
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert url in str(error.value)
+    assert len(state["pr_creates"]) == creates
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    kept = cloud_tracker.load_registry(caller)["entries"][0]
+    assert kept.get("pr_url") is None
+    assert kept["landing_state"] == "branch-pushed"
+
+
+def test_r5_lost_pr_url_on_pr_created_never_republishes(landing):
+    caller, state, calls = landing
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    with cloud_tracker.registry_lock(caller):
+        registry = cloud_tracker.load_registry(caller)
+        registry["entries"][0]["pr_url"] = None
+        cloud_tracker.save_registry(caller, registry)
+    state["remote_sha"] = ""
+    state["prs"] = []
+    creates = len(state["pr_creates"])
+    calls.clear()
+    with pytest.raises(codex_cloud_land.LandError, match="^landing-ref-missing"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+    assert not any(argv[:3] == ["codex", "cloud", "diff"] for argv, _ in calls)
+    assert len(state["pr_creates"]) == creates
+    kept = cloud_tracker.load_registry(caller)["entries"][0]
+    assert kept["landing_state"] == "pr-created"
+    assert kept["landing_commit"] == entry["landing_commit"]
+    assert kept["pr_url"] is None
+    assert result["pr_url"] == "https://github.com/example/repo/pull/123"
+
+
+def test_r5_lost_pr_url_on_pr_created_recovers_the_existing_pr(landing):
+    caller, state, calls = landing
+    entry = _expire_private_workspace(caller, state)
+    url = "https://github.com/example/repo/pull/321"
+    with cloud_tracker.registry_lock(caller):
+        registry = cloud_tracker.load_registry(caller)
+        registry["entries"][0].update({"landing_state": "pr-created", "pr_url": None})
+        cloud_tracker.save_registry(caller, registry)
+    state["prs"] = [
+        {
+            "url": url,
+            "state": "OPEN",
+            "headRefName": entry["landing_branch"],
+            "headRefOid": entry["landing_commit"],
+        }
+    ]
+    creates = len(state["pr_creates"])
+    calls.clear()
+    recovered = codex_cloud_land.land(caller, "task_example", 2473)
+    assert recovered["pr_url"] == url
+    assert len(state["pr_creates"]) == creates
+    assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
+
+
+def test_r5_cleanup_failure_never_masks_the_landing_error(landing, monkeypatch):
+    caller, state, _ = landing
+    state["failure"] = "apply"
+    removed = []
+
+    def failing_rmtree(path, *args, **kwargs):
+        if not kwargs.get("ignore_errors"):
+            raise OSError("simulated cleanup failure")
+        removed.append(path)
+
+    monkeypatch.setattr(codex_cloud_land.shutil, "rmtree", failing_rmtree)
+    with pytest.raises(codex_cloud_land.LandError, match="^apply-conflict$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert removed
+
+
+def test_r5_cleanup_failure_never_fails_a_successful_landing(landing, monkeypatch):
+    caller, _, _ = landing
+    removed = []
+
+    def failing_rmtree(path, *args, **kwargs):
+        if not kwargs.get("ignore_errors"):
+            raise OSError("simulated cleanup failure")
+        removed.append(path)
+
+    monkeypatch.setattr(codex_cloud_land.shutil, "rmtree", failing_rmtree)
+    result = codex_cloud_land.land(caller, "task_example", 2473)
+    assert result["pr_url"] == "https://github.com/example/repo/pull/123"
+    assert removed
