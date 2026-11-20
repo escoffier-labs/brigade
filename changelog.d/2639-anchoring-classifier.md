@@ -1,0 +1,4 @@
+- Classify anchoring eligibility and coverage with the hub's own claim-block rules. A paragraph with inline code is no longer read as an addressable claim, an ordered list is one block as the hub reads it, and `engines/hub/tests/anchor-classification-golden.json` pins the Rust and Python classifiers to the same blocks (#2639).
+- Refresh replica metadata when `auto_authored` is missing as well as when `scan_state` is missing, so a replica pulled before automatic anchoring existed can anchor unchanged heads without a rebuild. An explicit `false` is a hub-backed answer and is not refetched.
+- Persist the withdrawal `client_event_id` and replay it, and treat an already decided anchoring proposal as withdrawn, so a lost withdrawal answer cannot pause reflection.
+- Record a failed anchoring withdrawal per proposal and retry it on a later apply run instead of failing the run, keeping the proposal id and leaving the suppression flag unset.

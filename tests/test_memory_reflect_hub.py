@@ -775,6 +775,64 @@ def test_missing_metadata_after_refresh_stays_skipped(setup, capsys, monkeypatch
     assert writes(hub) == []
 
 
+def test_replica_missing_auto_authored_refreshes_its_metadata(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "unique", "Unique claim.\n", "live", "unique")
+    # The first pull ran before the hub published `auto_authored`.
+    assert run(target, capsys, "run", "--dry-run")[0] == 0
+    original = hub.do_card
+
+    def card(body):
+        code, payload = original(body)
+        if code == 200:
+            payload["card"]["auto_authored"] = True
+        return code, payload
+
+    monkeypatch.setattr(hub, "do_card", card)
+    status = hub.do_status
+
+    def quota(body):
+        code, payload = status(body)
+        payload["proposal_quota"] = {"pending": 0, "pending_per_principal": 32}
+        return code, payload
+
+    monkeypatch.setattr(hub, "do_status", quota)
+    monkeypatch.setattr(hub, "do_decide", lambda body: (200, {"state": "rejected"}), raising=False)
+    before = len(hub.calls)
+    code, report = run(target, capsys, "run")
+    assert code == 0
+    assert [call for call in hub.calls[before:] if call["action"] == "card"]
+    assert "anchor_quota_reserve" not in report["skipped_reasons"]
+    anchored = [
+        call for call in writes(hub) if call["action"] == "propose" and call["ops"][0]["type"] == "anchor_blocks"
+    ]
+    assert len(anchored) == 1
+
+
+def test_replica_explicit_auto_authored_false_is_not_refreshed(setup, capsys, monkeypatch):
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "human", "Human claim.\n", "live", "human")
+    original = hub.do_card
+
+    def card(body):
+        code, payload = original(body)
+        if code == 200:
+            payload["card"]["auto_authored"] = False
+        return code, payload
+
+    monkeypatch.setattr(hub, "do_card", card)
+    assert run(target, capsys, "run", "--dry-run")[0] == 0
+    before = len(hub.calls)
+    code, report = run(target, capsys, "run")
+    assert code == 0
+    assert not [call for call in hub.calls[before:] if call["action"] == "card"]
+    assert "anchor_blocks" not in [op["type"] for op in report["ops"]]
+
+
 @pytest.mark.parametrize("failure", ["auth", "unavailable"])
 def test_refresh_failures_do_not_propose(setup, capsys, monkeypatch, failure):
     target, hub, _ = setup

@@ -525,6 +525,15 @@ class Anchoring(unittest.TestCase):
         spec.loader.exec_module(module)
         self.assertEqual(module.main(["--check"]), 0)
 
+    def test_classification_goldens_are_current_for_this_python(self):
+        spec = importlib.util.spec_from_file_location(
+            "anchor_classification_golden",
+            ROOT / "engines/hub/tests/anchor_classification_golden.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.main(["--check"]), 0)
+
 
 def raw(hub: hc.Hub, method: str, headers: dict, body: bytes = b"") -> "tuple[int, dict, bytes]":
     """One request with exactly the given framing headers, through http.client."""

@@ -1,0 +1,243 @@
+[
+ {
+  "blocks": [
+   "Plain claim."
+  ],
+  "name": "inline-code",
+  "text": "Use `pytest` to test.\n\nPlain claim.\n"
+ },
+ {
+  "blocks": [],
+  "name": "inline-code-only",
+  "text": "Use `pytest` to test.\n"
+ },
+ {
+  "blocks": [
+   "One.\ncontinued.",
+   "Two."
+  ],
+  "name": "paragraphs",
+  "text": "One.\ncontinued.\n\nTwo.\n"
+ },
+ {
+  "blocks": [
+   "Before.",
+   "After."
+  ],
+  "name": "fenced-code",
+  "text": "Before.\n\n```\nhidden ^c-abcdef\n```\n\nAfter.\n"
+ },
+ {
+  "blocks": [
+   "Before.",
+   "After."
+  ],
+  "name": "fenced-tilde",
+  "text": "Before.\n\n~~~\nhidden\n~~~\n\nAfter.\n"
+ },
+ {
+  "blocks": [
+   "Before."
+  ],
+  "name": "fenced-unclosed",
+  "text": "Before.\n\n```\nnever closed\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "fenced-empty",
+  "text": "```\n```\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "1. One.\n2. Two."
+  ],
+  "name": "ordered-list",
+  "text": "1. One.\n2. Two.\n"
+ },
+ {
+  "blocks": [
+   "1) One.\n2) Two."
+  ],
+  "name": "ordered-paren",
+  "text": "1) One.\n2) Two.\n"
+ },
+ {
+  "blocks": [
+   "- One.",
+   "+ Two.",
+   "* Three."
+  ],
+  "name": "unordered-list",
+  "text": "- One.\n+ Two.\n* Three.\n"
+ },
+ {
+  "blocks": [
+   "- sibling"
+  ],
+  "name": "nested-list",
+  "text": "- parent\n  - child\n- sibling\n"
+ },
+ {
+  "blocks": [
+   "Plain."
+  ],
+  "name": "nested-list-continuation",
+  "text": "- a\n  continued\n\nPlain.\n"
+ },
+ {
+  "blocks": [
+   "Plain."
+  ],
+  "name": "block-quote",
+  "text": "> quoted\n\nPlain.\n"
+ },
+ {
+  "blocks": [],
+  "name": "block-quote-only",
+  "text": "> quoted\nlazy continuation\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "heading",
+  "text": "# Heading\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "heading-anchored",
+  "text": "## Section ^c-abcdef\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "setext-heading",
+  "text": "Title\n===\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "table",
+  "text": "| a | b |\n|---|---|\n| 1 | 2 |\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "table-pipe-only",
+  "text": "a | b\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "front-matter",
+  "text": "---\ntitle: Notes\n---\n# Notes\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "front-matter-paragraph",
+  "text": "---\ntitle: Notes\n---\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "One.",
+   "Two."
+  ],
+  "name": "crlf",
+  "text": "One.\r\n\r\nTwo.\r\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "crlf-front-matter",
+  "text": "---\r\ntitle: Notes\r\n---\r\n# Notes\r\n\r\nClaim.\r\n"
+ },
+ {
+  "blocks": [
+   "Visible.\t"
+  ],
+  "name": "crlf-fence",
+  "text": "```\r\nHidden.\r\n```\r\n\r\nVisible.\t\r\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "indented-code",
+  "text": "    code\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "reference-definition",
+  "text": "[ref]: https://example.invalid\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "thematic-break",
+  "text": "***\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim."
+  ],
+  "name": "previously-line",
+  "text": "previously Old.\n\nClaim.\n"
+ },
+ {
+  "blocks": [
+   "Claim. ^c-abcdef   "
+  ],
+  "name": "suffix-spaces",
+  "text": "Claim. ^c-abcdef   \n"
+ },
+ {
+  "blocks": [
+   "Caf\u00e9. ^c-abcdef\t"
+  ],
+  "name": "suffix-tab-crlf",
+  "text": "Caf\u00e9. ^c-abcdef\t\r\n"
+ },
+ {
+  "blocks": [
+   "Claim.  \ncontinued.\t"
+  ],
+  "name": "hard-break",
+  "text": "Claim.  \ncontinued.\t\n"
+ },
+ {
+  "blocks": [
+   "Caf\u00e9.",
+   "Two."
+  ],
+  "name": "unicode",
+  "text": "Caf\u00e9.\n\nTwo.\n"
+ },
+ {
+  "blocks": [
+   "Caf\u00e9.\u2028continues."
+  ],
+  "name": "unicode-line-separator",
+  "text": "Caf\u00e9.\u2028continues.\n"
+ },
+ {
+  "blocks": [
+   "\u001cClaim."
+  ],
+  "name": "non-white-control",
+  "text": "\u001cClaim.\n"
+ }
+]

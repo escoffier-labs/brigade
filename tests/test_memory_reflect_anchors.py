@@ -81,18 +81,37 @@ def test_anchoring_allows_later_broken_link_repair():
     assert op["text"] == "See [[new]] for more."
 
 
-def test_hub_classifier_shared_table():
+def test_eligibility_and_coverage_read_the_shared_hub_golden():
     import json
     from pathlib import Path
 
-    cases = json.loads((Path(__file__).parent / "fixtures/anchor_spans.json").read_text())
+    # The hub's Rust test asserts the same blocks from its own classifier.
+    golden = Path(__file__).resolve().parents[1] / "engines/hub/tests/anchor-classification-golden.json"
+    cases = json.loads(golden.read_text(encoding="utf-8"))
+    assert cases
     for case in cases:
         assert [block.text for block in anchors.blocks(case["text"])] == case["blocks"], case["name"]
         candidate = head(case["name"], case["text"], state="live")
         candidate["auto_authored"] = True
-        missing = any(not anchors.suffix(block) for block in case["blocks"])
+        missing = any(anchors.suffix(block) is None for block in case["blocks"])
         assert bool(anchors.ops([candidate])) == missing, case["name"]
         assert anchors.coverage([candidate])["fraction"] == int(not missing), case["name"]
+
+
+def test_block_texts_are_extracted_from_hub_byte_spans():
+    from brigade import memory_claim_blocks as claim_blocks
+
+    for name, text in (
+        ("inline", "Use `pytest` to test.\n\nPlain.\n"),
+        ("ordered", "1. One.\n2. Two.\n"),
+        ("nested", "- parent\n  - child\n- sibling\n"),
+        ("quote", "> quoted\n\nPlain.\n"),
+        ("unicode", "Caf\u00e9.\n\nTwo.\n"),
+    ):
+        data = text.encode("utf-8")
+        assert [block.text for block in anchors.blocks(text)] == [
+            data[start:end].decode("utf-8") for start, end in sorted(claim_blocks.hub_spans(text))
+        ], name
 
 
 @pytest.mark.skipif(
@@ -625,3 +644,106 @@ def test_future_withdrawal_time_does_not_extend_suppression(setup, capsys, monke
     assert "anchor_review_only" not in second["skipped_reasons"]
     again = [call for call in writes(hub) if call["action"] == "propose"][proposed:]
     assert [call["ops"][0]["card_id"] for call in again] == ["robot-a"]
+
+
+def _withdrawable(setup, monkeypatch):
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "robot-a", card_text("Unique robot-a.", None), "live", "robot-a")
+    policy.set_enabled(target, True)
+    monkeypatch.setattr(
+        hub,
+        "do_auto_apply",
+        lambda body: (200, {"state": "pending", "reason": "auto_apply_held", "preflight": {"checks": []}}),
+        raising=False,
+    )
+    return target, hub, target / ".brigade/memory/reflect/schedule.json"
+
+
+def _decisions(hub):
+    return [call for call in hub.calls if call["action"] == "decide"]
+
+
+@pytest.mark.parametrize(
+    "failure, expected",
+    [
+        ("unavailable", "hub_unavailable"),
+        ("refusal", "memory_scan_failed"),
+        ("not-rejected", "hub_withdrawal_not_rejected"),
+    ],
+)
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_failed_withdrawal_is_recorded_and_never_fails_the_run(setup, capsys, monkeypatch, failure, expected):
+    import json
+
+    target, hub, path = _withdrawable(setup, monkeypatch)
+
+    def decide(body):
+        if failure == "unavailable":
+            raise ConnectionResetError("response lost after commit")
+        if failure == "refusal":
+            return 503, {"code": "memory_scan_failed", "error": "scan failed"}
+        return 200, {"state": "pending"}
+
+    monkeypatch.setattr(hub, "do_decide", decide)
+    code, first = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert first["status"] == "completed"
+    assert first["proposals"][0]["withdrawal"] == {"state": "failed", "code": expected}
+    [record] = json.loads(path.read_text())["submissions"].values()
+    assert record.get("proposal_id")
+    # No suppression: the retry path still owns this proposal.
+    assert "anchor_review_only" not in record
+
+    # A later run retries. A lost answer replays the same withdrawal request; a
+    # definitive refusal is a new request, because the hub stored no reply.
+    monkeypatch.setattr(hub, "do_decide", lambda body: (200, {"state": "rejected"}))
+    assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    decisions = _decisions(hub)
+    assert len(decisions) == 2
+    replayed = decisions[0]["client_event_id"] == decisions[1]["client_event_id"]
+    assert replayed == (failure == "unavailable")
+    [closed] = json.loads(path.read_text())["submissions"].values()
+    assert "anchor_review_only" in closed
+    assert "withdrawal_event_id" not in closed
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_withdrawal_after_a_lost_answer_treats_an_already_rejected_proposal_as_withdrawn(setup, capsys, monkeypatch):
+    import json
+
+    target, hub, path = _withdrawable(setup, monkeypatch)
+
+    def lost(body):
+        raise ConnectionResetError("response lost after commit")
+
+    monkeypatch.setattr(hub, "do_decide", lost)
+    assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    state = json.loads(path.read_text())
+    for record in state["submissions"].values():
+        # State written before the request id was persisted. The hub already decided.
+        record.pop("withdrawal_event_id", None)
+    path.write_text(json.dumps(state))
+    monkeypatch.setattr(
+        hub,
+        "do_decide",
+        lambda body: (409, {"code": "memory_proposal_state", "error": "proposal already decided"}),
+    )
+    code, second = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert second["status"] == "completed"
+    assert second["proposals"][0]["withdrawal"] == {"state": "rejected", "reason": "anchor_already_decided"}
+    decisions = _decisions(hub)
+    assert decisions[1]["client_event_id"] != decisions[0]["client_event_id"]
+    [closed] = json.loads(path.read_text())["submissions"].values()
+    assert "anchor_review_only" in closed
+    assert "withdrawal_event_id" not in closed
