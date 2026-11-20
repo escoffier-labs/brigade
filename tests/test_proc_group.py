@@ -15,10 +15,8 @@ pytestmark = pytest.mark.skipif(not proc_group.drain_supported(), reason="requir
 
 
 def _stop(process: subprocess.Popen[bytes]) -> None:
-    try:
-        os.killpg(process.pid, 9)
-    except OSError:
-        pass
+    if process.poll() is None:
+        process.kill()
     process.wait(timeout=10)
 
 
