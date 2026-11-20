@@ -13,8 +13,8 @@ The index stores:
   receipts, and a digest of the last folded receipt, which together fingerprint
   the prefix the index covers;
 * one compact identity row per folded receipt (path, order key, size,
-  ``mtime_ns``, inode, task) so added, rewritten, and removed receipts are
-  detectable without reading them;
+  ``mtime_ns``, inode, task, content digest) so added, rewritten, and removed
+  receipts are detectable;
 * the derived per-task fold state: the failure count, the last active receipt,
   and the last completed receipt.
 
@@ -25,6 +25,18 @@ would serve stale exclusions; the identity rows are what keep a rewritten
 receipt honest, and per-task re-derivation keeps the cost proportional to that
 task's own attempts instead of the full history.
 
+Identity alone is not proof of unchanged bytes. A receipt rewritten through
+``os.replace`` can reuse a recycled inode, keep the same size (state names of
+equal length), and land in the same filesystem timestamp tick, so size,
+``mtime_ns``, and inode can all match while the state changed. The index
+therefore also stores a content digest per receipt and re-reads any receipt whose
+recorded ``mtime`` is inside ``SAFETY_WINDOW_NS`` of the index's own write time,
+or of now, before trusting it. Inside one timestamp tick identity cannot settle
+the question; outside it, a later write cannot reproduce the recorded ``mtime``.
+Comparing the digest means a re-read whose bytes match costs one read and no
+re-fold, and correctness rests on the digest rather than on timestamps or
+inodes.
+
 Invalidation:
 
 * missing, unreadable, or schema-mismatched index: rebuild from the receipts;
@@ -32,8 +44,10 @@ Invalidation:
 * reset receipts changed (they erase history for a task): rebuild;
 * a receipt's order key or task moved, or a receipt appeared behind the
   cursor: rebuild, because the fold order is no longer append-only;
-* a receipt identity changed in place: re-fold only its task;
-* nothing changed: serve the persisted fold without reading any receipt.
+* a receipt identity changed in place, or its ``mtime`` is inside the safety
+  window: read it, and re-fold only its task when the content digest moved;
+* nothing changed and nothing is inside the window: serve the persisted fold
+  without reading any receipt.
 
 ``exclusions`` additionally re-evaluates the completed-but-unlanded arm against
 the live task ledger on every call, so a ledger change (a release or a landed
@@ -52,6 +66,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -60,9 +75,14 @@ from typing import Any, Iterable
 from .. import localio, worker_failure
 from . import dispatch_state
 
-SCHEMA = "brigade.work_dispatch_exclusion_index.v1"
+SCHEMA = "brigade.work_dispatch_exclusion_index.v2"
 INDEX_NAME = "exclusion-index.json"
 BREAKER_THRESHOLD = 3
+# A receipt whose recorded mtime is this close to the index write time, or to
+# now, is verified by content before its identity is trusted. Two seconds covers
+# filesystem timestamp ticks comfortably and only costs reads for receipts that
+# were just written.
+SAFETY_WINDOW_NS = 2_000_000_000
 
 # (size, mtime_ns, inode). The inode changes on the atomic replace every receipt
 # writer uses, so a rewrite is detected even when timestamps are coarse.
@@ -80,6 +100,7 @@ class _Record:
     mtime_ns: int
     inode: int
     task_id: str
+    digest: str
 
     @property
     def key(self) -> tuple[str, str]:
@@ -111,6 +132,7 @@ class _Index:
     resets_digest: str
     tail: str | None
     bytes: int
+    written_at: int
 
 
 def state_path(target: Path) -> Path:
@@ -138,7 +160,19 @@ def _record(path: str, row: dict[str, Any], identity: _Identity) -> _Record:
         mtime_ns=identity[1],
         inode=identity[2],
         task_id=row["task_id"],
+        digest=_digest(row),
     )
+
+
+def _inside_safety_window(mtime_ns: int, written_at: int, now_ns: int) -> bool:
+    """Report whether identity alone cannot rule out a same-tick rewrite.
+
+    A later write can only reproduce the recorded mtime when it lands in the same
+    filesystem timestamp tick, which means the receipt was written within that
+    tick of the moment the identity was recorded (the index write). A backward
+    clock step is covered by comparing against now as well.
+    """
+    return written_at - mtime_ns <= SAFETY_WINDOW_NS or now_ns - mtime_ns <= SAFETY_WINDOW_NS
 
 
 def _identities(target: Path) -> dict[str, _Identity]:
@@ -207,10 +241,10 @@ def _fold_onto(state: _TaskState, rows: Iterable[dict[str, Any]], resets: dict[s
 
 
 def _decode_record(value: Any) -> _Record | None:
-    if not isinstance(value, list) or len(value) != 7:
+    if not isinstance(value, list) or len(value) != 8:
         return None
-    path, created_at, intent_id, size, mtime_ns, inode, task_id = value
-    if not all(isinstance(item, str) for item in (path, created_at, intent_id, task_id)):
+    path, created_at, intent_id, size, mtime_ns, inode, task_id, digest = value
+    if not all(isinstance(item, str) for item in (path, created_at, intent_id, task_id, digest)):
         return None
     if any(type(item) is not int or item < 0 for item in (size, mtime_ns, inode)):
         return None
@@ -222,6 +256,7 @@ def _decode_record(value: Any) -> _Record | None:
         mtime_ns=mtime_ns,
         inode=inode,
         task_id=task_id,
+        digest=digest,
     )
 
 
@@ -272,9 +307,12 @@ def _decode(raw: dict[str, Any] | None) -> _Index | None:
         offset = journal["offset"]
         total = journal["bytes"]
         tail = journal.get("tail")
+        written_at = journal["written_at"]
     except (KeyError, TypeError, AttributeError):
         return None
     if type(offset) is not int or type(total) is not int or offset < 0 or total < 0:
+        return None
+    if type(written_at) is not int or written_at < 0:
         return None
     if not isinstance(resets_digest, str) or not (tail is None or isinstance(tail, str)):
         return None
@@ -299,7 +337,16 @@ def _decode(raw: dict[str, Any] | None) -> _Index | None:
         return None
     if (tail is None) != (not decoded):
         return None
-    return _Index(records=decoded, tasks=tasks, resets_digest=resets_digest, tail=tail, bytes=total)
+    if decoded and tail != decoded[-1].digest:
+        return None
+    return _Index(
+        records=decoded,
+        tasks=tasks,
+        resets_digest=resets_digest,
+        tail=tail,
+        bytes=total,
+        written_at=written_at,
+    )
 
 
 def _rebuild(target: Path, current: dict[str, _Identity], resets: dict[str, str], resets_digest: str) -> _Index:
@@ -320,8 +367,9 @@ def _rebuild(target: Path, current: dict[str, _Identity], resets: dict[str, str]
         records=records,
         tasks=tasks,
         resets_digest=resets_digest,
-        tail=_digest(pairs[-1][1]) if pairs else None,
+        tail=records[-1].digest if records else None,
         bytes=sum(record.size for record in records),
+        written_at=time.time_ns(),
     )
 
 
@@ -358,23 +406,34 @@ def _advance(
     if len(indexed) != len(index.records):
         return None, False
     new_paths = [path for path in current if path not in indexed]
-    rewritten = [record for record in index.records if current[record.path] != record.identity]
-    if not new_paths and not rewritten:
+    now_ns = time.time_ns()
+    candidates = [
+        record
+        for record in index.records
+        if current[record.path] != record.identity or _inside_safety_window(record.mtime_ns, index.written_at, now_ns)
+    ]
+    if not new_paths and not candidates:
         return index, False
     base = dispatch_state.root(target)
     cache: dict[str, dict[str, Any]] = {}
-    tail_path = index.records[-1].path if index.records else None
+    refreshed: list[_Record] = []
     effective: list[_Record] = []
-    for record in rewritten:
+    digests: dict[str, str] = {}
+    for record in candidates:
         row = _read_record(base / record.path)
         cache[record.path] = row
+        digest = _digest(row)
+        if digest == record.digest:
+            # The bytes are the folded ones. Inside the safety window this is the
+            # answer identity could not give, and outside it a rewrite that keeps
+            # every recorded field is impossible.
+            if current[record.path] != record.identity:
+                refreshed.append(record)
+            continue
         if _key(row) != record.key or row["task_id"] != record.task_id:
             # The receipt moved in the fold order or changed owner.
             return None, False
-        if record.path == tail_path and _digest(row) == index.tail:
-            # The stored fingerprint still matches the rewritten bytes, so only
-            # the timestamp moved and the fold is unchanged.
-            continue
+        digests[record.path] = digest
         effective.append(record)
     added: list[_Record] = []
     for path in new_paths:
@@ -388,6 +447,10 @@ def _advance(
             # A receipt behind the cursor changes the prefix order.
             return None, False
         cursor = record.key
+    if not added and not refreshed and not effective:
+        # Re-verification found the same bytes, so there is nothing to persist and
+        # the safety window keeps aging from the recorded write time.
+        return index, False
     tasks = dict(index.tasks)
     rewritten_tasks = {record.task_id for record in effective}
     appended_tasks = {record.task_id for record in added} - rewritten_tasks
@@ -399,29 +462,28 @@ def _advance(
             [cache[record.path] for record in added if record.task_id == task_id],
             resets,
         )
-    identities = {record.path: current[record.path] for record in rewritten}
+    identities = {record.path: current[record.path] for record in refreshed + effective}
     records = [
         replace(
             record,
             size=identities[record.path][0],
             mtime_ns=identities[record.path][1],
             inode=identities[record.path][2],
+            digest=digests.get(record.path, record.digest),
         )
         if record.path in identities
         else record
         for record in index.records
     ]
     records.extend(added)
-    tail = index.tail
-    if records and records[-1].path in cache:
-        tail = _digest(cache[records[-1].path])
     return (
         _Index(
             records=records,
             tasks=tasks,
             resets_digest=resets_digest,
-            tail=tail,
+            tail=records[-1].digest if records else None,
             bytes=sum(record.size for record in records),
+            written_at=time.time_ns(),
         ),
         True,
     )
@@ -470,7 +532,12 @@ def _render(index: _Index) -> bytes:
     payload = {
         "schema": SCHEMA,
         "resets": index.resets_digest,
-        "journal": {"offset": len(index.records), "bytes": index.bytes, "tail": index.tail},
+        "journal": {
+            "offset": len(index.records),
+            "bytes": index.bytes,
+            "tail": index.tail,
+            "written_at": index.written_at,
+        },
         "records": [
             [
                 record.path,
@@ -480,6 +547,7 @@ def _render(index: _Index) -> bytes:
                 record.mtime_ns,
                 record.inode,
                 record.task_id,
+                record.digest,
             ]
             for record in index.records
         ],

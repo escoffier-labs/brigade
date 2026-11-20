@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -148,6 +150,30 @@ def _rewrite(path: Path, row: dict, state: str, terminal: dict | None = None, **
     updated = {**row, **updates, "state": state, "terminal": terminal, "state_seq": row["state_seq"] + 1}
     localio.write_json(path, updated)
     return updated
+
+
+def _rewrite_in_place(path: Path, row: dict, state: str) -> None:
+    """Rewrite a receipt keeping its inode, byte length, and mtime.
+
+    This is what a recycled inode plus a coarse filesystem timestamp look like to
+    a reader that trusts those three values: the bytes changed and nothing else
+    did.
+    """
+    before = path.stat()
+    path.write_text(json.dumps({**row, "state": state}, indent=2, sort_keys=True) + "\n")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ino == before.st_ino
+
+
+def _age_receipts(target: Path, *, seconds: int = 3600) -> None:
+    """Move receipt mtimes into the past, as an established watch history has."""
+    stamp = time.time_ns() - seconds * 1_000_000_000
+    for path in store.root(target).glob("dispatch-*/intents/*.json"):
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stamp))
 
 
 def _reset(target: Path, task_id: str, created_at: str) -> None:
@@ -343,7 +369,7 @@ def test_index_rebuilds_when_missing(target):
     assert dispatch_index.state_path(target).is_file()
 
 
-def test_index_reads_only_new_receipts_per_tick(target, monkeypatch):
+def test_index_reads_only_new_or_recently_written_receipts_per_tick(target, monkeypatch):
     for step in range(8):
         _receipt(
             target,
@@ -353,6 +379,9 @@ def test_index_reads_only_new_receipts_per_tick(target, monkeypatch):
             attempt=step + 1,
             terminal=FAIL_KIND,
         )
+    # An established history: these receipts are older than the safety window.
+    _age_receipts(target)
+    _assert_matches_full_scan(target)
     _assert_matches_full_scan(target)
 
     reads: list[str] = []
@@ -364,14 +393,29 @@ def test_index_reads_only_new_receipts_per_tick(target, monkeypatch):
 
     monkeypatch.setattr(dispatch_index, "_read_record", counting)
 
-    # One more receipt arrives. A tick must not re-read the eight already folded.
-    _receipt(target, task_id="task-0", stamp=_stamp(8), state="completed", attempt=99)
+    # A tick with no journal change reads nothing.
     _assert_matches_full_scan(target)
+    assert reads == []
+
+    # One more receipt arrives. A planning call must not re-read the eight already
+    # folded ones.
+    _receipt(target, task_id="task-0", stamp=_stamp(8), state="completed", attempt=99)
+    with store.dispatch_lock(target):
+        assert store.exclusions(target) == _reference_exclusions(target)
     assert len(reads) == 1, reads
 
+    # A receipt written inside the safety window is re-verified by content until
+    # it ages out, because identity alone cannot rule out a same-tick rewrite.
     reads.clear()
-    # Two ticks with no journal change read no receipts at all.
+    with store.dispatch_lock(target):
+        assert store.exclusions(target) == _reference_exclusions(target)
+    assert len(reads) == 1, reads
+
+    _age_receipts(target)
     _assert_matches_full_scan(target)
+    reads.clear()
+    with store.dispatch_lock(target):
+        assert store.exclusions(target) == _reference_exclusions(target)
     assert reads == []
 
 
@@ -391,6 +435,32 @@ def test_index_refolds_a_rewritten_receipt(target):
             assert store.failure_counts(target)["task-0"] == expected
         _assert_matches_full_scan(target)
     assert store.exclusions(target) == {"task-0": "circuit-breaker"}
+
+
+def test_index_verifies_a_receipt_that_hides_its_active_state(target):
+    # A finished receipt becomes an active state with the same byte length, the
+    # same mtime, and the same inode. Trusting that identity alone leaves the task
+    # dispatchable while a worker already holds it.
+    path, row = _receipt(target, task_id="task-0", stamp=_stamp(0), state="completed", attempt=1)
+    _assert_matches_full_scan(target)
+    assert store.exclusions(target) == {}
+
+    _rewrite_in_place(path, row, "launching")
+
+    assert _reference_exclusions(target) == {"task-0": "active-intent"}
+    _assert_matches_full_scan(target)
+
+
+def test_index_verifies_a_receipt_that_hides_its_completion(target):
+    # The same rewrite the other way: a stale view keeps a finished task excluded.
+    path, row = _receipt(target, task_id="task-0", stamp=_stamp(0), state="launching", attempt=1)
+    _assert_matches_full_scan(target)
+    assert store.exclusions(target) == {"task-0": "active-intent"}
+
+    _rewrite_in_place(path, row, "completed")
+
+    assert _reference_exclusions(target) == {}
+    _assert_matches_full_scan(target)
 
 
 def test_index_rebuilds_when_reset_receipts_change(target, monkeypatch):
@@ -417,6 +487,8 @@ def test_index_rebuilds_when_reset_receipts_change(target, monkeypatch):
 def test_index_reevaluates_completed_unlanded_against_the_live_ledger(target, monkeypatch):
     _, row = _receipt(target, task_id="task-0", stamp=_stamp(0), state="completed", attempt=1, claimed_revision=3)
     _write_ledger(target, [_task("task-0", item_revision=3, claim_id=row["claim_id"])])
+    _age_receipts(target)
+    _assert_matches_full_scan(target)
     _assert_matches_full_scan(target)
     assert store.exclusions(target) == {"task-0": "completed-unlanded"}
 
@@ -434,11 +506,13 @@ def test_index_reevaluates_completed_unlanded_against_the_live_ledger(target, mo
     assert reads == []
 
 
-def test_index_skips_refolding_a_tail_rewrite_that_keeps_its_bytes(target, monkeypatch):
+def test_index_skips_refolding_a_rewrite_whose_bytes_match(target, monkeypatch):
     receipts = [
         _receipt(target, task_id="task-0", stamp=_stamp(attempt), state="failed", attempt=attempt, terminal=FAIL_KIND)
         for attempt in range(1, 4)
     ]
+    _age_receipts(target)
+    _assert_matches_full_scan(target)
     _assert_matches_full_scan(target)
 
     reads: list[str] = []
@@ -449,10 +523,11 @@ def test_index_skips_refolding_a_tail_rewrite_that_keeps_its_bytes(target, monke
         return read_record(path)
 
     monkeypatch.setattr(dispatch_index, "_read_record", counting)
-    # The last receipt is rewritten with its own bytes, so the stored prefix
-    # fingerprint still matches and the task does not need re-folding.
+    # The last receipt is rewritten with its own bytes, so its digest still
+    # matches and the task does not need re-folding.
     localio.write_json(receipts[-1][0], receipts[-1][1])
-    _assert_matches_full_scan(target)
+    with store.dispatch_lock(target):
+        assert store.exclusions(target) == _reference_exclusions(target)
     assert len(reads) == 1, reads
 
 

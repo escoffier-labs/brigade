@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import tempfile
 import time
@@ -28,6 +29,25 @@ from typing import Callable
 
 from brigade import localio, work_cmd, worker_failure
 from brigade.work_cmd import dispatch_index, dispatch_state
+
+
+def _age(target: Path, seconds: int) -> None:
+    """Move receipt mtimes into the past, as an established history has.
+
+    Receipts written inside the index safety window are re-read and verified by
+    content, so a freshly injected history would measure that verification cost
+    rather than the steady state of a long watch.
+    """
+    now = time.time_ns()
+    stamp = now - seconds * 1_000_000_000
+    horizon = now - dispatch_index.SAFETY_WINDOW_NS
+    for path in dispatch_state.root(target).glob("dispatch-*/intents/*.json"):
+        before = path.stat()
+        if before.st_mtime_ns <= horizon:
+            # Already older than the safety window; re-stamping it would churn
+            # its identity and cost a re-read for nothing.
+            continue
+        os.utime(path, ns=(before.st_atime_ns, stamp))
 
 
 def _receipt_count(path: Path) -> bool:
@@ -136,7 +156,7 @@ def _instrumented(attribute: str, module: object, call: Callable[[], object]) ->
     return result, reads
 
 
-def _inject_extra(target: Path, index: int) -> None:
+def _inject_extra(target: Path, index: int) -> Path:
     session = f"dispatch-{index % 40:08x}"
     task_id = f"task-{index % 200}"
     intent_id = f"{index:016x}"
@@ -155,16 +175,19 @@ def _inject_extra(target: Path, index: int) -> None:
             "terminal": None,
         },
     )
+    return dispatch_state.root(target) / session / "intents" / f"{intent_id}.json"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--records", type=int, default=10_000)
     parser.add_argument("--trials", type=int, default=5)
+    parser.add_argument("--age-seconds", type=int, default=3600)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory)
         _inject(target, args.records)
+        _age(target, args.age_seconds)
 
         def full_scan() -> object:
             return _full_scan_exclusions(target)
@@ -202,6 +225,11 @@ def main() -> int:
             tick_times: list[float] = []
             tick_reads = 0
             for step in range(args.trials):
+                # Settle the previous tick first: it ages out of the safety window
+                # and one unmeasured call records the resulting identities, so the
+                # measured tick carries only this tick's new receipt.
+                _age(target, args.age_seconds)
+                indexed()
                 _inject_extra(target, args.records + step)
                 started = time.perf_counter()
                 _, reads = _instrumented("_read_record", dispatch_index, indexed)
@@ -218,6 +246,7 @@ def main() -> int:
         index_bytes = dispatch_index.state_path(target).stat().st_size
         print(f"receipts injected: {receipts}")
         print(f"trials: {args.trials} (median for repeated cells)")
+        print(f"injected history aged by: {args.age_seconds}s")
         print(f"index size: {index_bytes} bytes ({index_bytes / receipts:.0f} bytes per receipt)")
         print(f"identity stats per call: {receipts} (one os.scandir stat per receipt)")
         print()
