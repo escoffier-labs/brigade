@@ -67,6 +67,17 @@ native long poll with its current page, lets in-flight requests finish for at
 most 25 seconds, then stops the child, which gets 10 seconds for its own
 shutdown. A container stop grace period must exceed 35 seconds.
 
+On a host terminal, the managed Python upstream runs in its own process group
+so a group signal reaches `brigade-hub` once instead of both processes. With
+`stty tostop` enabled, the upstream stops on its first stderr write because
+the terminal treats a write from a background process group as `SIGTTOU`.
+Run `brigade-hub` from a service manager, or redirect the upstream's stderr
+(for example `brigade-hub ... 2>>hub.log`), when starting it from a terminal.
+This is the smaller safe change: piping and draining stderr in the Rust
+supervisor would add a second stream to manage and could stall startup if the
+reader stops, while a redirect keeps the existing stderr text without a code
+change.
+
 `--upstream http://<numeric-loopback>:<port>` uses an existing Python hub.
 Its operator must configure matching token, database, deck, sealing and trust
 settings. Validation checks the front's supplied settings, not the upstream's

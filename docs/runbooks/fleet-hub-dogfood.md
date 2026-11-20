@@ -368,6 +368,15 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
   the wrapper for an older pin) logs
   `brigade fleet hub stopped cleanly`, which the restart and UPS checks look
   for. It logs `brigade fleet hub listening on` once `/health` answers.
+- A systemd unit that runs `brigade-hub` directly on the host (an S10 layout,
+  not this Compose recipe) needs `KillMode=mixed` in its `[Service]` section,
+  as the grokbot units use. The default `control-group` mode signals the Python
+  upstream at the same moment as `brigade-hub`, so requests still draining are
+  proxied to an upstream that is already shutting down. `mixed` signals the
+  main process first and the rest of the cgroup after its `TimeoutStopSec`
+  grace period, leaving room for the 25 s drain and 10 s upstream stop above.
+  The units this recipe ships run Docker Compose, the watchdog script or the
+  backup job, so none of them needs this setting.
 - Fence the hub with `touch hub.fenced && docker compose stop hub front` in
   the project directory. The boot unit and the watchdog leave the hub down
   while `hub.fenced` exists, so the fence survives a reboot or a Docker

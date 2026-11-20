@@ -2459,13 +2459,16 @@ def test_memory_file_probe_asks_the_hub_container(monkeypatch):
     def run(argv, **_):
         calls.append(argv)
         if argv[:2] == ["docker", "exec"]:
-            return SimpleNamespace(stdout="True\n", stderr="", returncode=0)
+            report = {"present": True, "mtime": 750.0, "ino": 42}
+            return SimpleNamespace(stdout=json.dumps(report) + "\n", stderr="", returncode=0)
         return SimpleNamespace(stdout="hub-cid\n", stderr="", returncode=0)
 
     monkeypatch.setattr(checks, "run", run)
-    assert checks.memory_file_present() is True
-    assert calls[-1] == ["docker", "exec", "hub-cid", "python", "-c", checks.MEMORY_FILE_PRESENT]
-    assert '"/var/lib/brigade/fleet-hub-memory.db"' in checks.MEMORY_FILE_PRESENT
+    info = checks.memory_file_info()
+    assert info["present"] is True and info["mtime"] == 750.0 and info["ino"] == 42 and info["reason"] is None
+    assert calls[-1] == ["docker", "exec", "hub-cid", "python", "-c", checks.MEMORY_FILE_PROBE]
+    assert '"/var/lib/brigade/fleet-hub-memory.db"' in checks.MEMORY_FILE_PROBE
+    assert "st_mtime" in checks.MEMORY_FILE_PROBE
     monkeypatch.setattr(checks, "container_id", lambda *_a, **_k: "")
     assert checks.memory_file_present() is None
 
@@ -2473,8 +2476,8 @@ def test_memory_file_probe_asks_the_hub_container(monkeypatch):
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
 def test_backup_job_reports_a_signal_death_as_a_shell_would():
     killed = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
-    assert backup_job.status(killed) == 137
-    assert backup_job.status([sys.executable, "-c", "raise SystemExit(3)"]) == 3
+    assert backup_job.call(killed)[0] == 137
+    assert backup_job.call([sys.executable, "-c", "raise SystemExit(3)"])[0] == 3
 
 
 def test_backup_job_refuses_a_db_argument():
@@ -2495,9 +2498,26 @@ def test_backups_check_reads_hub_and_memory_copies_apart(tmp_path, monkeypatch):
     include = tmp_path / "include.txt"
     include.write_text(f"{folder}\n", encoding="utf-8")
     namespace = argparse.Namespace(backup_dir=str(folder), last=3, include_file=str(include), refusal=False)
-    # No memory copy passes only while the memory file is absent from the volume.
+    # The copy job, not the status writer, owns this directory.
+    (folder / "memory").mkdir(parents=True, exist_ok=True)
+    os.chmod(folder / "memory", 0o700)
+    # No memory copy fails only when a run has covered the current memory file.
+    status_path = folder / "memory" / checks.MEMORY_STATUS_NAME
+    monkeypatch.setattr(checks, "now", lambda: 7000.0)
     for present, expected, status in ((False, "INFO", "pass"), (True, "FAIL", "fail"), (None, "PENDING", "pending")):
-        monkeypatch.setattr(checks, "memory_file_present", lambda present=present: present)
+        monkeypatch.setattr(
+            checks,
+            "memory_file_info",
+            lambda present=present: {
+                "present": present,
+                "mtime": 5000.0,
+                "ino": 7,
+                "reason": "no container answered" if present is None else None,
+            },
+        )
+        if present is True:
+            report = {"time": 6000.0, "ok": False, "stamp": None, "file_since": 5000.0, "ident": 7}
+            status_path.write_text(json.dumps(report) + "\n", encoding="utf-8")
         result = checks.Result("backups")
         checks.check_backups(namespace, result)
         assert result.status == status, result.items
@@ -2508,6 +2528,392 @@ def test_backups_check_reads_hub_and_memory_copies_apart(tmp_path, monkeypatch):
     refusal = source[source.index("if args.refusal:") :]
     refusal = refusal[: refusal.index("def check_restore")]
     assert '"--db"' not in refusal and '"--dest",\n                "/backups",' in refusal
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and modes")
+def test_status_writer_never_creates_the_memory_dir(tmp_path, capsys):
+    dest = tmp_path / "copies"
+    report = {"time": 1.0, "ok": True, "stamp": None}
+    result = backup_job.write_status(dest, report=report, owner=(os.getuid(), os.getgid()))
+    assert result is None
+    assert not (dest / "memory").exists()
+    assert "skipped" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and modes")
+def test_status_writer_skips_a_root_owned_or_loose_dir(tmp_path, capsys):
+    dest = tmp_path / "copies"
+    folder = dest / "memory"
+    folder.mkdir(parents=True)
+    os.chmod(folder, 0o755)
+    report = {"time": 1.0, "ok": True, "stamp": None}
+    assert backup_job.write_status(dest, report=report, owner=(os.getuid() + 1, os.getgid())) is None
+    assert "belongs to uid" in capsys.readouterr().err
+    assert not (folder / backup_job.STATUS_NAME).exists()
+
+    assert backup_job.write_status(dest, report=report, owner=(os.getuid(), os.getgid())) is None
+    assert "0700" in capsys.readouterr().err
+    assert not (folder / backup_job.STATUS_NAME).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and modes")
+def test_status_writer_is_private_and_atomic(tmp_path):
+    dest = tmp_path / "copies"
+    folder = dest / "memory"
+    folder.mkdir(parents=True)
+    os.chmod(folder, 0o700)
+    report = {"time": 1.0, "ok": True, "stamp": "stamp-1"}
+    path = backup_job.write_status(dest, report=report, owner=(os.getuid(), os.getgid()))
+    assert path == folder / backup_job.STATUS_NAME
+    info = path.stat()
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    assert info.st_uid == os.getuid()
+    assert json.loads(path.read_text(encoding="utf-8")) == report
+    assert list(folder.glob(".*.tmp")) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and modes")
+def test_backup_job_writes_the_memory_run_status(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    source = data / "fleet-hub-memory.db"
+    source.write_bytes(b"fake")
+    dest = tmp_path / "copies"
+    folder = dest / "memory"
+    folder.mkdir(parents=True)
+    os.chmod(folder, 0o700)
+
+    def fake_call(argv):
+        if str(folder) in argv:
+            return 0, "20261119T210000Z"
+        return 0, None
+
+    monkeypatch.setattr(backup_job, "call", fake_call)
+    monkeypatch.setattr(backup_job, "now", lambda: 1000.0)
+    owner = f"{os.getuid()}:{os.getgid()}"
+    assert backup_job.main(["--state-dir", str(data), "--dest", str(dest), "--owner", owner, "--json"]) == 0
+    report = json.loads((folder / backup_job.STATUS_NAME).read_text(encoding="utf-8"))
+    assert report == {
+        "time": 1000.0,
+        "ok": True,
+        "stamp": "20261119T210000Z",
+        "file_since": 1000.0,
+        "ident": source.stat().st_ino,
+    }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and modes")
+def test_backup_job_status_records_failure_and_a_skipped_file(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    source = data / "fleet-hub-memory.db"
+    source.write_bytes(b"fake")
+    dest = tmp_path / "copies"
+    folder = dest / "memory"
+    folder.mkdir(parents=True)
+    os.chmod(folder, 0o700)
+    ident = source.stat().st_ino
+
+    def fake_call(argv):
+        return (2, None) if str(folder) in argv else (0, None)
+
+    monkeypatch.setattr(backup_job, "call", fake_call)
+    monkeypatch.setattr(backup_job, "now", lambda: 2000.0)
+    owner = f"{os.getuid()}:{os.getgid()}"
+    assert backup_job.main(["--state-dir", str(data), "--dest", str(dest), "--owner", owner]) == 2
+    report = json.loads((folder / backup_job.STATUS_NAME).read_text(encoding="utf-8"))
+    assert report == {"time": 2000.0, "ok": False, "stamp": None, "file_since": 2000.0, "ident": ident}
+
+    # A later run with no memory file leaves the last real result untouched.
+    source.unlink()
+    monkeypatch.setattr(backup_job, "now", lambda: 3000.0)
+    assert backup_job.main(["--state-dir", str(data), "--dest", str(dest), "--owner", owner]) == 0
+    assert json.loads((folder / backup_job.STATUS_NAME).read_text(encoding="utf-8")) == report
+
+
+def test_backup_job_reads_stamp_from_indented_cli_json(monkeypatch, capsys):
+    import subprocess as sp
+
+    from brigade.cli.fleet_backup import _emit
+
+    _emit({"copy": "/backups/memory/20261120T030000Z", "stamp": "20261120T030000Z", "files": {}}, True)
+    out = capsys.readouterr().out
+    assert len(out.splitlines()) > 1 and out.strip().endswith("}")
+
+    def fake_run(argv, **_kwargs):
+        return sp.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(backup_job.subprocess, "run", fake_run)
+    code, stamp = backup_job.call(["brigade", "fleet", "backup", "--json"])
+    assert code == 0 and stamp == "20261120T030000Z"
+
+    def bad_run(argv, **_kwargs):
+        return sp.CompletedProcess(argv, 0, "not json\n", "")
+
+    monkeypatch.setattr(backup_job.subprocess, "run", bad_run)
+    assert backup_job.call(["brigade", "fleet", "backup", "--json"])[1] is None
+    assert "stamp" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and modes")
+def test_backup_job_carries_file_since_across_two_runs(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    source = data / "fleet-hub-memory.db"
+    source.write_bytes(b"fake")
+    dest = tmp_path / "copies"
+    folder = dest / "memory"
+    folder.mkdir(parents=True)
+    os.chmod(folder, 0o700)
+    monkeypatch.setattr(backup_job, "call", lambda argv: (0, None))
+    times = iter([1000.0, 2000.0])
+    monkeypatch.setattr(backup_job, "now", lambda: next(times))
+    owner = f"{os.getuid()}:{os.getgid()}"
+    argv = ["--state-dir", str(data), "--dest", str(dest), "--owner", owner]
+    assert backup_job.main(argv) == 0
+    path = folder / backup_job.STATUS_NAME
+    first = json.loads(path.read_text(encoding="utf-8"))
+    assert first["file_since"] == 1000.0
+    assert backup_job.main(argv) == 0
+    second = json.loads(path.read_text(encoding="utf-8"))
+    assert second["file_since"] == 1000.0
+    assert second["time"] == 2000.0
+    assert second["ident"] == first["ident"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and modes")
+def test_status_write_failure_does_not_change_the_backup_result(tmp_path, monkeypatch, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "fleet-hub-memory.db").write_bytes(b"fake")
+    dest = tmp_path / "copies"
+
+    def fake_call(argv):
+        return (7, None) if str(dest / "memory") in argv else (0, None)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("status disk full")
+
+    monkeypatch.setattr(backup_job, "call", fake_call)
+    monkeypatch.setattr(backup_job, "write_status", boom)
+    assert backup_job.main(["--state-dir", str(data), "--dest", str(dest)]) == 7
+    assert "memory status not written" in capsys.readouterr().err
+
+
+def test_memory_file_probe_does_not_start_the_one_shot_backup_service(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def run(argv, **_):
+        calls.append(argv)
+        if "ps" in argv and argv[-1] == "hub":
+            return SimpleNamespace(stdout="\n", stderr="", returncode=0)
+        if "ps" in argv and argv[-1] == "backup":
+            return SimpleNamespace(stdout="backup-cid\n", stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(checks, "run", run)
+    info = checks.memory_file_info()
+    assert info["present"] is None
+    assert "one-shot" in info["reason"]
+    assert not any("backup" in argv for argv in calls)
+    assert not any(argv[:2] == ["docker", "exec"] for argv in calls)
+
+
+def test_run_reports_a_wedged_docker_exec_without_a_traceback(monkeypatch):
+    def boom(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 120), output="", stderr="")
+
+    monkeypatch.setattr(checks.subprocess, "run", boom)
+    done = checks.run(["docker", "exec", "cid", "python", "-c", "x"], timeout=5)
+    assert done.returncode != 0
+    assert "timed out after 5s" in done.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def test_backups_check_reports_a_wedged_probe_as_pending(tmp_path, monkeypatch):
+    import argparse
+
+    data = tmp_path / "data"
+    _hub_files(data, memory=False)
+    assert _run_backup_job(tmp_path, data).returncode == 0
+    folder = tmp_path / "copies"
+    monkeypatch.setattr(checks, "env_file", lambda *_a, **_k: {"BRIGADE_BACKUP_OWNER": f"{os.getuid()}:{os.getgid()}"})
+    namespace = argparse.Namespace(backup_dir=str(folder), last=3, include_file=None, refusal=False)
+    monkeypatch.setattr(checks, "container_id", lambda service, project=checks.RECIPE: "cid")
+
+    def boom(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 120), output="", stderr="")
+
+    monkeypatch.setattr(checks.subprocess, "run", boom)
+    result = checks.Result("backups")
+    checks.check_backups(namespace, result)
+    row = next(item for item in result.items if item["name"] == "memory copies")
+    assert row["status"] == "PENDING" and "timed out" in row["detail"]
+    assert result.status == "pending", result.items
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def _backups_fixture(tmp_path, monkeypatch):
+    import argparse
+
+    data = tmp_path / "data"
+    _hub_files(data, memory=False)
+    assert _run_backup_job(tmp_path, data).returncode == 0
+    folder = tmp_path / "copies"
+    (folder / "memory").mkdir(parents=True, exist_ok=True)
+    os.chmod(folder / "memory", 0o700)
+    monkeypatch.setattr(checks, "env_file", lambda *_a, **_k: {"BRIGADE_BACKUP_OWNER": f"{os.getuid()}:{os.getgid()}"})
+    include = tmp_path / "include.txt"
+    include.write_text(f"{folder}\n", encoding="utf-8")
+    namespace = argparse.Namespace(backup_dir=str(folder), last=3, include_file=str(include), refusal=False)
+    return folder, namespace
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def test_backups_check_pends_with_no_run_since_the_file_appeared(tmp_path, monkeypatch):
+    folder, namespace = _backups_fixture(tmp_path, monkeypatch)
+    (folder / "memory" / checks.MEMORY_STATUS_NAME).unlink(missing_ok=True)
+    monkeypatch.setattr(
+        checks,
+        "memory_file_info",
+        lambda: {"present": True, "mtime": 5000.0, "ino": 7, "reason": None},
+    )
+    result = checks.Result("backups")
+    checks.check_backups(namespace, result)
+    entry = next(item for item in result.items if item["name"] == "memory copies")
+    assert entry["status"] == "PENDING"
+    assert "no memory backup run" in entry["detail"]
+    assert len(entry["detail"]) < 160, entry["detail"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def test_backups_check_fails_a_recent_failed_run_even_as_mtime_moves(tmp_path, monkeypatch):
+    folder, namespace = _backups_fixture(tmp_path, monkeypatch)
+    report = {"time": 1000.0, "ok": False, "stamp": None, "file_since": 900.0, "ident": 7}
+    (folder / "memory" / checks.MEMORY_STATUS_NAME).write_text(json.dumps(report) + "\n", encoding="utf-8")
+    # The hourly run at 1000 is recent; the WAL checkpoint keeps moving mtime.
+    monkeypatch.setattr(checks, "now", lambda: 1000.0 + 60.0)
+    for mtime in (2000.0, 9000.0, 90000.0):
+        monkeypatch.setattr(
+            checks,
+            "memory_file_info",
+            lambda m=mtime: {"present": True, "mtime": m, "ino": 7, "reason": None},
+        )
+        result = checks.Result("backups")
+        checks.check_backups(namespace, result)
+        entry = next(item for item in result.items if item["name"] == "memory copies")
+        assert entry["status"] == "FAIL", (mtime, entry)
+        assert "failed" in entry["detail"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def test_backups_check_pends_when_the_file_was_replaced_after_the_last_run(tmp_path, monkeypatch):
+    folder, namespace = _backups_fixture(tmp_path, monkeypatch)
+    report = {"time": 1000.0, "ok": False, "stamp": None, "file_since": 900.0, "ident": 7}
+    (folder / "memory" / checks.MEMORY_STATUS_NAME).write_text(json.dumps(report) + "\n", encoding="utf-8")
+    monkeypatch.setattr(checks, "now", lambda: 1060.0)
+    monkeypatch.setattr(
+        checks,
+        "memory_file_info",
+        lambda: {"present": True, "mtime": 1000.0, "ino": 8, "reason": None},
+    )
+    result = checks.Result("backups")
+    checks.check_backups(namespace, result)
+    entry = next(item for item in result.items if item["name"] == "memory copies")
+    assert entry["status"] == "PENDING"
+
+
+def _add_memory_copy(folder, stamp="20261120T030000Z"):
+    import sqlite3
+
+    copy = folder / "memory" / stamp
+    copy.mkdir(parents=True)
+    conn = sqlite3.connect(copy / "fleet-hub-memory.db")
+    try:
+        conn.execute("CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+    (copy / "manifest.json").write_text(
+        json.dumps({"files": [{"name": "fleet-hub-memory.db", "bytes": 1}]}), encoding="utf-8"
+    )
+    return copy
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def test_backups_check_fails_a_failing_run_even_with_existing_copies(tmp_path, monkeypatch):
+    folder, namespace = _backups_fixture(tmp_path, monkeypatch)
+    _add_memory_copy(folder)
+    report = {"time": 1000.0, "ok": False, "stamp": None, "file_since": 900.0, "ident": 7}
+    (folder / "memory" / checks.MEMORY_STATUS_NAME).write_text(json.dumps(report) + "\n", encoding="utf-8")
+    monkeypatch.setattr(checks, "now", lambda: 1060.0)
+    monkeypatch.setattr(
+        checks,
+        "memory_file_info",
+        lambda: {"present": True, "mtime": 5000.0, "ino": 7, "reason": None},
+    )
+    result = checks.Result("backups")
+    checks.check_backups(namespace, result)
+    entry = next(item for item in result.items if item["name"] == "memory copies")
+    assert entry["status"] == "FAIL"
+    assert result.status == "fail", result.items
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def test_backups_check_pends_with_existing_copies_and_no_covering_run(tmp_path, monkeypatch):
+    folder, namespace = _backups_fixture(tmp_path, monkeypatch)
+    _add_memory_copy(folder)
+    report = {"time": 1000.0, "ok": True, "stamp": "old", "ident": 7}
+    (folder / "memory" / checks.MEMORY_STATUS_NAME).write_text(json.dumps(report) + "\n", encoding="utf-8")
+    monkeypatch.setattr(checks, "now", lambda: 1060.0)
+    monkeypatch.setattr(
+        checks,
+        "memory_file_info",
+        lambda: {"present": True, "mtime": 5000.0, "ino": 7, "reason": None},
+    )
+    result = checks.Result("backups")
+    checks.check_backups(namespace, result)
+    entry = next(item for item in result.items if item["name"] == "memory copies")
+    assert entry["status"] == "PENDING"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def test_backups_check_pends_with_existing_copies_and_no_identity(tmp_path, monkeypatch):
+    folder, namespace = _backups_fixture(tmp_path, monkeypatch)
+    _add_memory_copy(folder)
+    report = {"time": 1000.0, "ok": False, "stamp": None, "file_since": 900.0, "ident": None}
+    (folder / "memory" / checks.MEMORY_STATUS_NAME).write_text(json.dumps(report) + "\n", encoding="utf-8")
+    monkeypatch.setattr(checks, "now", lambda: 1060.0)
+    monkeypatch.setattr(
+        checks,
+        "memory_file_info",
+        lambda: {"present": True, "mtime": 5000.0, "ino": 7, "reason": None},
+    )
+    result = checks.Result("backups")
+    checks.check_backups(namespace, result)
+    entry = next(item for item in result.items if item["name"] == "memory copies")
+    assert entry["status"] == "PENDING"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
+def test_backups_check_passes_with_existing_copies_and_a_successful_run(tmp_path, monkeypatch):
+    folder, namespace = _backups_fixture(tmp_path, monkeypatch)
+    _add_memory_copy(folder)
+    report = {"time": 1000.0, "ok": True, "stamp": "fresh", "file_since": 900.0, "ident": 7}
+    (folder / "memory" / checks.MEMORY_STATUS_NAME).write_text(json.dumps(report) + "\n", encoding="utf-8")
+    monkeypatch.setattr(checks, "now", lambda: 1060.0)
+    monkeypatch.setattr(
+        checks,
+        "memory_file_info",
+        lambda: {"present": True, "mtime": 5000.0, "ino": 7, "reason": None},
+    )
+    result = checks.Result("backups")
+    checks.check_backups(namespace, result)
+    entry = next(item for item in result.items if item["name"] == "memory copies")
+    assert entry["status"] == "PASS"
+    assert result.status == "pass", result.items
 
 
 def _memory_fakes(monkeypatch, report):
