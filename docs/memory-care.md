@@ -30,8 +30,9 @@ Reinitializing an existing workspace does not opt it in or change its policy.
 entry. Selecting `--entry memory-reflect` installs just that entry. Care
 installation leaves a missing reflect policy off and preserves an existing one.
 The explicit `--reflect-auto-apply` install flag enables the workspace policy.
-Installing OS timers remains an explicit care-install action, and on systemd
-install also enables each timer it writes by linking it into
+`brigade init` runs the default care install for the target (pass `--no-care`
+to skip it); otherwise installing OS timers is an explicit care-install action.
+On systemd, install also enables each timer it writes by linking it into
 `timers.target.wants` and starting it; `--no-enable` keeps the unit-file-only
 behavior.
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import sys
 from pathlib import Path
 
@@ -43,6 +45,21 @@ def register(sub: argparse._SubParsersAction) -> None:
         "Use this in a third-party clone you do not want to commit Brigade ignores into.",
     )
     p_init.add_argument("--dry-run", action="store_true", help="Show what would happen.")
+    p_init.add_argument(
+        "--no-care",
+        dest="care",
+        action="store_false",
+        default=True,
+        help="Do not turn on extras or install the care schedule. By default init runs `brigade extras on` and "
+        "`brigade care install --target <target>` so the scheduled care jobs, including the weekly outcome ratchet, "
+        "run with no further step. A host with no scheduler only warns; install later with `brigade care install`.",
+    )
+    p_init.add_argument(
+        "--json",
+        action="store_true",
+        help="Print one machine-readable JSON result on stdout (install narration moves to stderr), "
+        "including the status of the extras and care steps.",
+    )
     p_init.add_argument(
         "--profile",
         default=None,
@@ -121,6 +138,33 @@ def _recorded_selection(target: Path):
 
 
 def dispatch(args) -> int:
+    from .. import init_care
+
+    target = Path(args.target).expanduser().resolve()
+    as_json = bool(getattr(args, "json", False))
+    if as_json:
+        # Keep stdout to the one JSON object; the install narration goes to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            rc = _install(args)
+    else:
+        rc = _install(args)
+    # Only after the core install succeeded, and never able to change its exit code.
+    if rc != 0:
+        care = init_care.not_run(f"init exited {rc}")
+    elif not getattr(args, "care", True):
+        care = init_care.skipped(target, "--no-care")
+    elif getattr(args, "dry_run", False):
+        care = init_care.plan(target)
+    else:
+        care = init_care.run(target)
+    if as_json:
+        print(json.dumps({"exit_code": rc, "target": str(target), **care}, indent=2))
+    elif rc == 0:
+        init_care.report(care, stdout=sys.stdout, stderr=sys.stderr)
+    return rc
+
+
+def _install(args) -> int:
     profile = getattr(args, "profile", None)
     depth_arg = getattr(args, "depth", None)
     harnesses_arg = getattr(args, "harnesses", None)

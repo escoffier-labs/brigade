@@ -3,8 +3,12 @@
 The operator chooses when scheduled care runs and which runbooks it may execute.
 Each runbook run records step exit codes and log paths for later inspection. Copy
 one of the recipes below into your own crontab, user timer, or CI job after
-`brigade init` wires the target, or explicitly opt in with
-`brigade care install --target .`. With the default `auto` backend it installs
+`brigade init` wires the target. `brigade init` also turns on extras and installs
+the default care schedule for the target (the same as `brigade extras on` and
+`brigade care install --target .`), so the jobs below that the care installer
+owns run with no further step. Pass `--no-care` to skip both and install later
+with `brigade care install --target .`. With the default `auto` backend the
+installer writes
 systemd user timers on Linux or launchd agents on macOS. On Linux, install also
 links every timer it wrote into `timers.target.wants`, reloads systemd, and starts
 each newly linked timer; pass `--no-enable` to write unit files without the links. On Windows it prints
@@ -22,11 +26,12 @@ Prerequisites:
 ```bash
 pipx install brigade-cli
 pipx ensurepath   # open a new shell, or set PATH manually (see Scheduler wiring)
-brigade init --depth repo --harnesses codex --target .
+brigade init --depth repo --harnesses codex --target .   # also runs `brigade extras on` and `brigade care install`
 brigade memory care init --target .
 brigade daily init --target .
-brigade extras on   # once per machine; required for center report and runbook commands
 ```
+
+If the host has no scheduler (a container, CI, a machine with no systemd user session), `brigade init` still exits 0, prints one warning that names `brigade care install --target <target>`, and `brigade init --json` reports the care step as `failed` with the reason. Run the named command once a scheduler exists. A repeat `brigade init` is safe: an already-installed schedule reports `installed` and no timer is restarted. `brigade init --dry-run` lists the extras and care steps without running them.
 
 Replace `WORKSPACE` with the absolute path to your Brigade-wired repo or operator workspace. Every `brigade` command below assumes `cd` into that directory first, so `--target .` resolves correctly. In crontab lines, quote the path (`cd "WORKSPACE"`) so spaces and shell metacharacters do not break the job.
 
@@ -255,7 +260,7 @@ Use this step block before the recipe commands in each workflow below. Restore t
             brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
-          brigade init --depth repo --harnesses codex --target .
+          brigade init --depth repo --harnesses codex --target . --no-care
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
@@ -263,7 +268,7 @@ Use this step block before the recipe commands in each workflow below. Restore t
 
 The cache `key` includes `${{ github.run_id }}` so each run writes a fresh entry. `restore-keys` keeps the stable workflow/ref prefix so the latest prior `.brigade` state restores on the next run.
 
-Adjust `--depth` and `--harnesses` to match your repo. `brigade init` is idempotent on an already-wired checkout.
+Adjust `--depth` and `--harnesses` to match your repo. `brigade init` is idempotent on an already-wired checkout. The recipes pass `--no-care` because CI is the trigger here, so no host timer is written on the runner.
 
 ## Daily care pass
 
@@ -361,7 +366,7 @@ jobs:
             brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
-          brigade init --depth repo --harnesses codex --target .
+          brigade init --depth repo --harnesses codex --target . --no-care
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
@@ -447,7 +452,7 @@ jobs:
             brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
-          brigade init --depth repo --harnesses codex --target .
+          brigade init --depth repo --harnesses codex --target . --no-care
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
@@ -457,10 +462,10 @@ jobs:
 
 ## Weekly outcome ratchet
 
-The weekly ratchet is the scheduled half of the automated scoring loop described in [Outcome scoring](outcome-scoring.md#the-default-loop). It is part of the default care set, so `brigade care install --target .` with no `--entry` installs it. `brigade init` does not install it, so a new workspace has no ratchet until you run that command. To schedule only the ratchet:
+The weekly ratchet is the scheduled half of the automated scoring loop described in [Outcome scoring](outcome-scoring.md#the-default-loop). It is part of the default care set, and `brigade init` installs that set, so a newly initialized workspace schedules the ratchet with no further step. After `brigade init --no-care`, or on a host where the init warning said the schedule was not installed, run `brigade care install --target .` with no `--entry`. To schedule only the ratchet:
 
 ```bash
-brigade extras on   # once per machine, runbook steps are extras-gated
+brigade extras on   # once per machine, runbook steps are extras-gated; `brigade init` already did this
 brigade care install --target . --entry weekly-outcome-ratchet
 ```
 
@@ -607,7 +612,7 @@ jobs:
             brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
-          brigade init --depth repo --harnesses codex --target .
+          brigade init --depth repo --harnesses codex --target . --no-care
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
@@ -631,7 +636,7 @@ jobs:
             brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
-          brigade init --depth repo --harnesses codex --target .
+          brigade init --depth repo --harnesses codex --target . --no-care
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
@@ -723,7 +728,7 @@ jobs:
             brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
-          brigade init --depth repo --harnesses codex --target .
+          brigade init --depth repo --harnesses codex --target . --no-care
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
@@ -825,7 +830,7 @@ jobs:
             brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
-          brigade init --depth repo --harnesses codex --target .
+          brigade init --depth repo --harnesses codex --target . --no-care
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
