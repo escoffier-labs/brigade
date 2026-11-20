@@ -55,6 +55,9 @@ counter = [0]
 
 
 def rpc(method, params=None):
+    # Reads stay unbounded on purpose: a short read bound made the fake exit 1 on every
+    # server-driven test on slow runners. The adapter owns the timeout; stop_server owns
+    # the bounded shutdown.
     counter[0] += 1
     proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": counter[0], "method": method, "params": params or {}}) + "\n")
     proc.stdin.flush()
@@ -144,9 +147,45 @@ if SC.get("end_conversation"):
 final = SC.get("final", "receipt")
 if final == "receipt" and receipt:
     final = {"run_id": receipt["run_id"], "status": receipt["status"], "eligible": False}
+
+
+def stop_server(proc, timeout=30.0):
+    # Stop the server through the Popen handle we created. Reads above stay unbounded;
+    # only the final wait is bounded, and generously, so a slow Windows runner is never
+    # cut short. Close stdin, wait, terminate, wait, kill. The child is gone on return.
+    try:
+        if proc.stdin is not None:
+            proc.stdin.close()
+    except (OSError, ValueError):
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
+
+
 if proc is not None:
-    proc.stdin.close()
-    proc.wait()
+    stop_server(proc)
 emit({"type": "result", "subtype": SC.get("result_subtype", "success"), "is_error": bool(SC.get("is_error")),
       "session_id": sid, "result": json.dumps(final) if isinstance(final, dict) else (final or "")})
 """
