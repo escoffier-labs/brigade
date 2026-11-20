@@ -28,6 +28,7 @@ import argparse
 import contextlib
 import json
 import os
+import secrets
 import stat
 import subprocess
 import sys
@@ -72,10 +73,15 @@ def call(argv: list[str]) -> tuple[int, str | None]:
     code = 128 - returncode if returncode < 0 else returncode
     stamp = None
     if returncode == 0:
+        # fleet backup --json prints indented JSON, so the last line is just
+        # a closing brace. Parse the whole report, never one line of it.
         try:
-            stamp = json.loads(done.stdout.strip().splitlines()[-1]).get("stamp")
-        except (ValueError, IndexError, AttributeError):
-            pass
+            report = json.loads(done.stdout)
+            stamp = report.get("stamp") if isinstance(report, dict) else None
+        except ValueError:
+            stamp = None
+        if stamp is None:
+            print("memory backup report has no readable stamp", file=sys.stderr, flush=True)
     return code, stamp
 
 
@@ -128,7 +134,9 @@ def write_status(dest: Path, *, report: dict[str, Any], owner: Owner | None) -> 
             print(f"memory status skipped: {folder} has mode {mode:04o}; it must be 0700", file=sys.stderr, flush=True)
             return None
     path = folder / STATUS_NAME
-    temp = folder / f".{path.name}.{os.getpid()}.tmp"
+    # A stale temp from a killed run must not block later writes. In the
+    # container the pid is always 1, so use a random suffix instead.
+    temp = folder / f".{path.name}.{secrets.token_hex(6)}.tmp"
     payload = (json.dumps(report, sort_keys=True) + "\n").encode("utf-8")
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

@@ -1541,11 +1541,12 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
     The job copies fleet-hub.db into the backup directory and, in a separate
     call, fleet-hub-memory.db into its `memory` subdirectory, so the hub
     file's copies are checked on their own. `memory/last-run.json` records
-    when the current memory file was first seen and each call's result. A
-    recent failed call, or a succeeded call with no surviving copy, FAILs.
-    With no run covering the file, the row is PENDING. mtime is never used as
-    the file's appearance: SQLite WAL checkpoints move it on every write.
-    An absent memory file fails nothing here.
+    when the current memory file was first seen and each call's result. The
+    status is read even when older copies exist: a failed call for the
+    current file FAILs, a run that has never covered it is PENDING, and only
+    a covering successful run with verifying copies PASSes. mtime is never
+    used as the file's appearance: SQLite WAL checkpoints move it on every
+    write. An absent memory file fails nothing here.
     """
     folder = Path(args.backup_dir or env_file().get("BRIGADE_BACKUP_DIR", "")).expanduser()
     info = folder.stat()
@@ -1562,39 +1563,38 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
             files,
         )
     memory_copies = completed_copies(folder / "memory")
-    if not memory_copies:
-        probe = memory_file_info()
-        if probe["present"] is None:
-            result.add("PENDING", "memory copies", f"none, and the hub could not answer: {probe['reason']}")
-        elif not probe["present"]:
-            result.add("INFO", "memory copies", "none: the memory file is absent from the state volume")
-        else:
-            status = memory_backup_status(folder / "memory")
-            covered = (
-                status is not None
-                and status["file_since"] is not None
-                and status["time"] >= status["file_since"]
-                and (probe["ino"] is None or status["ident"] is None or status["ident"] == probe["ino"])
-            )
-            if not covered:
-                result.add("PENDING", "memory copies", "none; no memory backup run has covered the current memory file")
-            elif status["ok"] is False:
-                age = now() - status["time"]
-                window = MEMORY_BACKUP_INTERVAL + MEMORY_STATUS_GRACE
-                freshness = f"{int(age)}s ago" if age <= window else f"{int(age)}s ago, past the hourly window"
-                result.add("FAIL", "memory copies", f"none; memory call failed {freshness}: stamp {status['stamp']}")
-            else:
-                result.add(
-                    "FAIL",
-                    "memory copies",
-                    f"none; last memory call succeeded at {status['time']} but no copy remains",
-                )
+    copies_ok = bool(memory_copies)
     for copy in memory_copies[-args.last :]:
         files = verify_copy(copy)
-        result.ok(
-            set(files) == {"fleet-hub-memory.db"} and all(item["integrity_check"] == "ok" for item in files.values()),
-            f"memory/{copy.name} passes integrity_check",
-            files,
+        good = set(files) == {"fleet-hub-memory.db"} and all(item["integrity_check"] == "ok" for item in files.values())
+        copies_ok = copies_ok and good
+        result.ok(good, f"memory/{copy.name} passes integrity_check", files)
+    probe = memory_file_info()
+    status = memory_backup_status(folder / "memory")
+    covered = (
+        status is not None
+        and status["file_since"] is not None
+        and status["ident"] is not None
+        and probe["ino"] is not None
+        and status["time"] >= status["file_since"]
+        and status["ident"] == probe["ino"]
+    )
+    if probe["present"] is None:
+        result.add("PENDING", "memory copies", f"hub could not answer: {probe['reason']}")
+    elif not probe["present"]:
+        result.add("INFO", "memory copies", "memory file is absent from the state volume")
+    elif not covered:
+        result.add("PENDING", "memory copies", "no memory backup run covers the current memory file")
+    elif status["ok"] is False:
+        age = now() - status["time"]
+        window = MEMORY_BACKUP_INTERVAL + MEMORY_STATUS_GRACE
+        freshness = f"{int(age)}s ago" if age <= window else f"{int(age)}s ago, past the hourly window"
+        result.add("FAIL", "memory copies", f"memory call failed {freshness}: stamp {status['stamp']}")
+    elif not copies_ok:
+        result.add("FAIL", "memory copies", f"run at {status['time']} succeeded but the copies do not verify")
+    else:
+        result.add(
+            "PASS", "memory copies", f"run at {status['time']} covers the current file; {len(memory_copies)} copies"
         )
     stamps = [copy.name for copy in copies]
     hours = sorted({stamp[:11] for stamp in stamps})
