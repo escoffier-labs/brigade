@@ -171,8 +171,26 @@ the commit SHA. `status` and `sync` show pending landings. Retries compare local
 and remote refs with that commit and reuse an existing branch or PR. A
 conflicting ref refuses publication. Failed preparations remove their temporary
 worktree and unpublished branch. Push and PR creation failures preserve the
-prepared commit for retry. Registry updates compare the entry id and revision
-under a short lock, while a task-specific lock prevents concurrent landings.
+prepared commit for retry.
+
+A landing that reached `branch-pushed` or `pr-created` is never rebuilt or
+pushed again. If the private runtime workspace is gone, as after a logout or
+reboot, the retry allocates a fresh workspace and resumes PR creation only while
+`git ls-remote` still shows the recorded commit on the landing branch. A moved
+ref refuses with `landing-ref-mismatch`. A missing ref refuses with
+`landing-ref-missing`, whose message carries the exact
+`git push <remote> <recorded sha>:refs/heads/<branch>` command that restores the
+branch and the `brigade run cloud land` command that resumes PR creation. An
+existing workspace that fails the safety check still refuses with
+`unsafe-git-config`.
+
+PR recovery adopts an open or merged PR whose head branch is the landing branch
+and whose head commit is the recorded commit. A merged PR is recorded as the
+landing because it already carried that commit. A closed PR is not adopted, and
+a new PR is created for the same commit without pushing again. An open PR whose
+head commit differs refuses with `pr-recovery-conflict` rather than being
+recorded or duplicated. Registry updates compare the entry id and revision under
+a short lock, while a task-specific lock prevents concurrent landings.
 
 Named refusals include `task-not-ready`, `protected-policy-path`, `credential-path`,
 `unsafe-git-config`, `apply-conflict`, `guard-failed` and `pr-body-lint-failed`. A `push-failed` refusal
