@@ -29,6 +29,8 @@ from .inbox_lock import held_file_lock
 
 STATE = ".brigade/memory/reflect/schedule.json"
 FAILURES = 3
+# Consecutive failed withdrawals for one proposal before reflection stops retrying it.
+WITHDRAWAL_ATTEMPTS = 3
 MAX_SCOPE_CARDS = 50_000
 MAX_SCOPE_BYTES = 64 * 1024 * 1024
 # Also bound the replica before loading candidate heads, independently of workspace settings.
@@ -85,6 +87,8 @@ LEDGER_FIELDS = {
     "anchor_review_only": lambda value: type(value) is int and value >= 0,
     # The persisted request id of a withdrawal, replayed if its answer was lost.
     "withdrawal_event_id": _event_id,
+    # Consecutive failed withdrawals for one proposal, up to the bounded give-up.
+    "withdrawal_failures": lambda value: type(value) is int and 0 <= value <= WITHDRAWAL_ATTEMPTS,
     # The time the hub left the proposal open for review. Older state wrote `True`.
     "lineage_review": lambda value: value is True or (type(value) is int and value >= 0),
     "ops_sha256": _digest,
@@ -133,7 +137,16 @@ def schedule_status(target: Path) -> dict[str, Any]:
             valid_submission(
                 digest,
                 pending,
-                frozenset({"pins", "attempted_ms", "anchor_review_only", "lineage_review", "withdrawal_event_id"}),
+                frozenset(
+                    {
+                        "pins",
+                        "attempted_ms",
+                        "anchor_review_only",
+                        "lineage_review",
+                        "withdrawal_event_id",
+                        "withdrawal_failures",
+                    }
+                ),
             )
             for digest, pending in submissions.items()
         ):
@@ -456,6 +469,36 @@ def submit(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def _proposal_state(client: hubc.MemoryHubClient, proposal_id: str) -> str | None:
+    """The hub's stored proposal state, or None when it cannot be read."""
+    try:
+        reply = client.call("proposal_show", proposal_id=proposal_id)
+    except (hubc.HubRefusal, hubc.HubUnavailable):
+        return None
+    state = reply.get("state")
+    return state if state in ("pending", "held", "applied", "rejected", "stale") else None
+
+
+def _withdrawn(entry: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Record a closed proposal and hold the anchor for the retry window."""
+    entry.pop("withdrawal_event_id", None)
+    entry.pop("withdrawal_failures", None)
+    entry["anchor_review_only"] = _now_ms()
+    return {"state": "rejected", "reason": reason}
+
+
+def _withdrawal_failed(entry: dict[str, Any], code: str) -> dict[str, Any]:
+    """Record one failed withdrawal, and stop retrying it after the bounded give-up."""
+    failures = min(entry.get("withdrawal_failures", 0) + 1, WITHDRAWAL_ATTEMPTS)
+    entry["withdrawal_failures"] = failures
+    if failures < WITHDRAWAL_ATTEMPTS:
+        return {"state": "failed", "code": code}
+    # A permanently refused withdrawal must not retry on every run. The seven-day
+    # window still admits one later attempt, and the kept count limits it to one.
+    entry["anchor_review_only"] = _now_ms()
+    return {"state": "failed", "code": code, "reason": "anchor_withdrawal_abandoned"}
+
+
 def _withdraw(
     target: Path,
     state: dict[str, Any],
@@ -465,18 +508,20 @@ def _withdraw(
     proposal_id: str,
     epoch: str,
 ) -> dict[str, Any]:
-    """Close an unapplied anchoring proposal, recording a failure instead of raising.
+    """Close an unapplied anchoring proposal, recording the outcome instead of raising.
 
     The request id is published before the call, so a rejection that committed
     while its answer was lost replays the same request and reads the stored
     `rejected` reply instead of a second decision the hub would refuse. A
-    proposal the hub reports as already decided is treated as withdrawn: the
-    only consequence is the suppression window, and a retry could never close it.
+    proposal the hub reports as already decided is read before anything is
+    recorded: `rejected` is a withdrawal, `applied` means the anchor is already
+    written and nothing is suppressed, and any other state is a failed retry.
     """
-    event_id = previous[digest].get("withdrawal_event_id")
+    entry = previous[digest]
+    event_id = entry.get("withdrawal_event_id")
     if event_id is None:
         event_id = hubc.event_id()
-        previous[digest]["withdrawal_event_id"] = event_id
+        entry["withdrawal_event_id"] = event_id
         _save(target, state)
     try:
         closed = client.call(
@@ -488,20 +533,26 @@ def _withdraw(
         )
     except hubc.HubRefusal as exc:
         # A refusal never stores a reply, so the next attempt mints a fresh id.
-        previous[digest].pop("withdrawal_event_id", None)
+        entry.pop("withdrawal_event_id", None)
         code = exc.code if _code(exc.code) else "hub_refused"
         if exc.status == 409 and code == "memory_proposal_state":
-            # The rejection may have committed before the answer was lost. The
-            # proposal is decided either way, so the anchor stays withdrawn.
-            return {"state": "rejected", "reason": "anchor_already_decided"}
-        return {"state": "failed", "code": code}
+            # The rejection may have committed, or another actor applied, held or
+            # staleness-decided the proposal. Read it before recording anything.
+            decided = _proposal_state(client, proposal_id)
+            if decided == "rejected":
+                return _withdrawn(entry, "anchor_already_decided")
+            if decided == "applied":
+                # The anchor is already on the card, so there is nothing to hold back.
+                entry.pop("withdrawal_failures", None)
+                return {"state": "applied", "reason": "anchor_already_applied"}
+        return _withdrawal_failed(entry, code)
     except hubc.HubUnavailable:
         # The rejection may have committed, so keep the request id for the replay.
-        return {"state": "failed", "code": "hub_unavailable"}
-    previous[digest].pop("withdrawal_event_id", None)
+        return _withdrawal_failed(entry, "hub_unavailable")
+    entry.pop("withdrawal_event_id", None)
     if closed.get("state") == "rejected":
-        return {"state": "rejected", "reason": "anchor_withdrawn"}
-    return {"state": "failed", "code": "hub_withdrawal_not_rejected"}
+        return _withdrawn(entry, "anchor_withdrawn")
+    return _withdrawal_failed(entry, "hub_withdrawal_not_rejected")
 
 
 def _check_replica_files(target: Path, *, scope: str | None, dry_run: bool) -> None:
@@ -921,8 +972,6 @@ def _reflect(
                         target, state, client, previous, digest, sent.proposal_id, report["log_epoch"]
                     )
                     proposal["withdrawal"] = withdrawal
-                    if withdrawal["state"] == "rejected":
-                        previous[digest]["anchor_review_only"] = _now_ms()
                     _save(target, state)
                 proposals.append(proposal)
         if served_any:

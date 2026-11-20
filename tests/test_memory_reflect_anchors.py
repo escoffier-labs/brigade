@@ -738,6 +738,12 @@ def test_withdrawal_after_a_lost_answer_treats_an_already_rejected_proposal_as_w
         "do_decide",
         lambda body: (409, {"code": "memory_proposal_state", "error": "proposal already decided"}),
     )
+    monkeypatch.setattr(
+        hub,
+        "do_proposal_show",
+        lambda body: (200, {"proposal_id": body["proposal_id"], "state": "rejected"}),
+        raising=False,
+    )
     code, second = run(target, capsys, "run", "--apply", "--limit", "1")
     assert code == 0
     assert second["status"] == "completed"
@@ -747,3 +753,126 @@ def test_withdrawal_after_a_lost_answer_treats_an_already_rejected_proposal_as_w
     [closed] = json.loads(path.read_text())["submissions"].values()
     assert "anchor_review_only" in closed
     assert "withdrawal_event_id" not in closed
+
+
+@pytest.mark.parametrize(
+    "decided, expected, suppressed",
+    [
+        ("rejected", {"state": "rejected", "reason": "anchor_already_decided"}, True),
+        ("applied", {"state": "applied", "reason": "anchor_already_applied"}, False),
+        ("pending", {"state": "failed", "code": "memory_proposal_state"}, False),
+        ("held", {"state": "failed", "code": "memory_proposal_state"}, False),
+        ("stale", {"state": "failed", "code": "memory_proposal_state"}, False),
+    ],
+)
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_a_decided_withdrawal_reads_the_proposal_before_recording(
+    setup, capsys, monkeypatch, decided, expected, suppressed
+):
+    import json
+
+    target, hub, path = _withdrawable(setup, monkeypatch)
+    monkeypatch.setattr(
+        hub,
+        "do_decide",
+        lambda body: (409, {"code": "memory_proposal_state", "error": "proposal already decided"}),
+    )
+    monkeypatch.setattr(
+        hub,
+        "do_proposal_show",
+        lambda body: (200, {"proposal_id": body["proposal_id"], "state": decided}),
+        raising=False,
+    )
+    code, report = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert report["status"] == "completed"
+    assert report["proposals"][0]["withdrawal"] == expected
+    [record] = json.loads(path.read_text())["submissions"].values()
+    assert ("anchor_review_only" in record) is suppressed
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_an_unreadable_decided_proposal_stays_a_failed_withdrawal(setup, capsys, monkeypatch):
+    import json
+
+    target, hub, path = _withdrawable(setup, monkeypatch)
+    monkeypatch.setattr(
+        hub,
+        "do_decide",
+        lambda body: (409, {"code": "memory_proposal_state", "error": "proposal already decided"}),
+    )
+
+    def unavailable(body):
+        raise ConnectionResetError("proposal read failed")
+
+    monkeypatch.setattr(hub, "do_proposal_show", unavailable, raising=False)
+    code, report = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert report["proposals"][0]["withdrawal"] == {"state": "failed", "code": "memory_proposal_state"}
+    [record] = json.loads(path.read_text())["submissions"].values()
+    assert "anchor_review_only" not in record
+    assert record["withdrawal_failures"] == 1
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_a_permanently_failing_withdrawal_gives_up_after_three_attempts(setup, capsys, monkeypatch):
+    import json
+
+    target, hub, path = _withdrawable(setup, monkeypatch)
+    monkeypatch.setattr(
+        hub,
+        "do_decide",
+        lambda body: (422, {"code": "memory_proposal_invalid", "error": "invalid ops"}),
+    )
+    for _ in range(2):
+        code, report = run(target, capsys, "run", "--apply", "--limit", "1")
+        assert code == 0
+        assert report["proposals"][0]["withdrawal"] == {"state": "failed", "code": "memory_proposal_invalid"}
+    code, third = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert third["proposals"][0]["withdrawal"] == {
+        "state": "failed",
+        "code": "memory_proposal_invalid",
+        "reason": "anchor_withdrawal_abandoned",
+    }
+    [record] = json.loads(path.read_text())["submissions"].values()
+    assert "anchor_review_only" in record
+    assert record["withdrawal_failures"] == 3
+    # The next run stops retrying the same proposal.
+    decided = len(_decisions(hub))
+    code, fourth = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert fourth["skipped_reasons"]["anchor_review_only"] == 1
+    assert len(_decisions(hub)) == decided
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
+    reason="safe directory descriptors unavailable",
+)
+def test_a_single_failed_withdrawal_does_not_give_up(setup, capsys, monkeypatch):
+    import json
+
+    target, hub, path = _withdrawable(setup, monkeypatch)
+    monkeypatch.setattr(
+        hub,
+        "do_decide",
+        lambda body: (422, {"code": "memory_proposal_invalid", "error": "invalid ops"}),
+    )
+    assert run(target, capsys, "run", "--apply", "--limit", "1")[0] == 0
+    monkeypatch.setattr(hub, "do_decide", lambda body: (200, {"state": "rejected"}))
+    code, report = run(target, capsys, "run", "--apply", "--limit", "1")
+    assert code == 0
+    assert report["proposals"][0]["withdrawal"] == {"state": "rejected", "reason": "anchor_withdrawn"}
+    [record] = json.loads(path.read_text())["submissions"].values()
+    assert "withdrawal_failures" not in record
+    assert "anchor_review_only" in record

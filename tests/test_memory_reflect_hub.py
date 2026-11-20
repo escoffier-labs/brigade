@@ -776,12 +776,17 @@ def test_missing_metadata_after_refresh_stays_skipped(setup, capsys, monkeypatch
 
 
 def test_replica_missing_auto_authored_refreshes_its_metadata(setup, capsys, monkeypatch):
+    from brigade import memory_hub_client as hubc
+    from brigade import memory_hub_sync as sync
+
     target, hub, _ = setup
     hub.cards.clear()
     hub.events.clear()
     hub._commit("card.put", "fleet", "unique", "Unique claim.\n", "live", "unique")
-    # The first pull ran before the hub published `auto_authored`.
-    assert run(target, capsys, "run", "--dry-run")[0] == 0
+    # This pull ran before the hub published `auto_authored`, and no reflection
+    # pass has asked for the field yet.
+    settings = hubc.load_settings(target)
+    sync.pull(target, hubc.client_for(settings), settings)
     original = hub.do_card
 
     def card(body):
@@ -826,6 +831,24 @@ def test_replica_explicit_auto_authored_false_is_not_refreshed(setup, capsys, mo
 
     monkeypatch.setattr(hub, "do_card", card)
     assert run(target, capsys, "run", "--dry-run")[0] == 0
+    before = len(hub.calls)
+    code, report = run(target, capsys, "run")
+    assert code == 0
+    assert not [call for call in hub.calls[before:] if call["action"] == "card"]
+    assert "anchor_blocks" not in [op["type"] for op in report["ops"]]
+
+
+def test_a_hub_without_auto_authored_is_asked_once(setup, capsys):
+    from brigade import memory_hub_store as store
+
+    target, hub, _ = setup
+    hub.cards.clear()
+    hub.events.clear()
+    hub._commit("card.put", "fleet", "unique", "Unique claim.\n", "live", "unique")
+    # The dry-run pull and refresh see a hub that predates the field.
+    assert run(target, capsys, "run", "--dry-run")[0] == 0
+    marker = store.replica(target).heads["fleet\nunique"]
+    assert "auto_authored" in marker and marker["auto_authored"] is None
     before = len(hub.calls)
     code, report = run(target, capsys, "run")
     assert code == 0
