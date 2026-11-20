@@ -63,6 +63,8 @@ brigade operator quickstart --target ./my-repo --harnesses codex
 brigade operator doctor --target ./my-repo --profile local-operator
 ```
 
+After a successful install, quickstart also turns on extras and installs the care schedule, the same step `brigade init` runs, so the weekly outcome ratchet runs with no further command. Pass `--no-care` to skip it, for example for a throwaway target or in CI. The `care-schedule` step reports `installed`, `unsupported` (Windows), `skipped` or `failed`. A host with no scheduler never fails quickstart: the step names the command to run later.
+
 Or apply an agent workspace setup:
 
 ```bash

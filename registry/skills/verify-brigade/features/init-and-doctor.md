@@ -84,10 +84,25 @@ drops `ok` sharply, is the regression.
 
 ## Gotchas
 
-- `brigade init` has no `--json`. Its output is prose; assert on exit code and
-  on the files it wrote. `doctor` does have `--json` - use it.
+- `brigade init --json` prints one object on stdout (the install narration
+  moves to stderr): `exit_code`, `target`, `extras` and `care`. Each of the last
+  two carries a `status`. `care.status` is `installed` (with a `not_started`
+  list when no systemd user manager was reachable), `unsupported` (Windows),
+  `skipped` (`--no-care`), `failed` (a real install error, with a `reason`) or
+  `not-run` (the install itself failed). Assert on `exit_code` and the files it
+  wrote, and treat `care` as advisory: it never changes init's exit code. The
+  prose form also prints an `extras ...` line and a `care schedule ...` line.
+  `doctor` has `--json` too - use it.
+- The helper's `new-target` and `init` pass `--no-care`, so a proof target never
+  gets a real scheduler entry or turns on the machine-wide extras marker. `cleanup`
+  also runs `brigade care uninstall` best-effort before removing a target. To
+  drive the care step itself, run it by hand in a disposable HOME, never on the
+  host's own config.
 - Six WARNs on a fresh target are expected, not a bug: memory-care, security,
-  backups, notifications, and friends are not initialized by `init`.
+  backups, notifications, and friends are not initialized by `init`. The care
+  schedule is not one of them: a default `init` installs it, but the helper
+  passes `--no-care`, so the recorded baseline above is unchanged by the care
+  step.
 - `init` refuses to install into `$HOME` without `--allow-home`. Do not pass
   that flag while verifying - the helper refuses the home directory outright.
 - Piping `brigade doctor --json` into `head` returns exit 120 (SIGPIPE), not

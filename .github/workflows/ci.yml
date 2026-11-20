@@ -1315,7 +1315,7 @@ jobs:
         run: |
           target="$(mktemp -d)"
           git init -q -b main "$target"
-          brigade init --target "$target" ${{ matrix.combo.flags }}
+          brigade init --target "$target" --no-care ${{ matrix.combo.flags }}
           brigade doctor --target "$target"
           case "${{ matrix.combo.flags }}" in
             *hermes*)
@@ -1361,7 +1361,7 @@ jobs:
         run: |
           target="$(mktemp -d)"
           git init -q -b main "$target"
-          brigade operator quickstart --target "$target" --harnesses codex --json
+          brigade operator quickstart --target "$target" --harnesses codex --no-care --json
           brigade operator doctor --target "$target" --profile local-operator --json
           test -f "$target/.brigade/config.json"
           test -d "$target/.codex/memory-handoffs"
@@ -1376,7 +1376,7 @@ jobs:
         run: |
           $target = Join-Path $env:RUNNER_TEMP "brigade-quickstart-minimal"
           git init -q -b main $target
-          brigade operator quickstart --target $target --harnesses codex --json
+          brigade operator quickstart --target $target --harnesses codex --no-care --json
           brigade operator doctor --target $target --profile local-operator --json
           if (-not (Test-Path (Join-Path $target ".brigade/config.json"))) { throw "missing Brigade config" }
           if (-not (Test-Path (Join-Path $target ".codex/memory-handoffs"))) { throw "missing Codex handoff inbox" }
@@ -1390,7 +1390,7 @@ jobs:
         run: |
           target="$(mktemp -d)"
           git init -q -b main "$target"
-          brigade operator quickstart --target "$target" --harnesses codex --full --json
+          brigade operator quickstart --target "$target" --harnesses codex --full --no-care --json
           brigade operator doctor --target "$target" --profile local-operator --json
           test -f "$target/.codex/skills/frontend/SKILL.md"
           test -f "$target/tools/antislop.md"
@@ -1402,7 +1402,7 @@ jobs:
         run: |
           $target = Join-Path $env:RUNNER_TEMP "brigade-quickstart-full"
           git init -q -b main $target
-          brigade operator quickstart --target $target --harnesses codex --full --json
+          brigade operator quickstart --target $target --harnesses codex --full --no-care --json
           brigade operator doctor --target $target --profile local-operator --json
           if (-not (Test-Path (Join-Path $target ".codex/skills/frontend/SKILL.md"))) { throw "missing frontend skill" }
           if (-not (Test-Path (Join-Path $target "tools/antislop.md"))) { throw "missing antislop tool" }
@@ -1432,7 +1432,7 @@ jobs:
           target="$(mktemp -d)"
           trap 'rm -rf "$target"' EXIT
           git init -q -b main "$target"
-          python3 -m brigade init --target "$target" --depth workspace --harnesses claude,codex
+          python3 -m brigade init --target "$target" --depth workspace --harnesses claude,codex --no-care
           python3 -m brigade doctor --target "$target"
 
   windows-native-acceptance:

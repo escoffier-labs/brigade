@@ -557,7 +557,17 @@ def cmd_new_target(args: argparse.Namespace) -> int:
                 "would_create_under": str(root / "targets"),
                 "would_run": [
                     [git, "init", "-q", "-b", "main", "<target>"],
-                    brigade + ["init", "--target", "<target>", "--depth", args.depth, "--harnesses", args.harnesses],
+                    brigade
+                    + [
+                        "init",
+                        "--target",
+                        "<target>",
+                        "--depth",
+                        args.depth,
+                        "--harnesses",
+                        args.harnesses,
+                        "--no-care",
+                    ],
                 ],
             }
         )
@@ -576,7 +586,8 @@ def cmd_new_target(args: argparse.Namespace) -> int:
         )
 
     init_record = run(
-        brigade + ["init", "--target", str(target), "--depth", args.depth, "--harnesses", args.harnesses],
+        # --no-care: a throwaway target must never get a real scheduler entry.
+        brigade + ["init", "--target", str(target), "--depth", args.depth, "--harnesses", args.harnesses, "--no-care"],
         root=root,
         name="new-target-init",
         timeout=args.timeout,
@@ -624,6 +635,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         args.depth,
         "--harnesses",
         args.harnesses,
+        # Helper-owned targets are throwaway: never give them a real scheduler entry.
+        "--no-care",
     ]
     if args.dry_run:
         return emit(
@@ -1347,6 +1360,23 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     return emit({"action": "evidence", "ok": True, "dry_run": False, "evidence_dir": str(evidence), "items": copied})
 
 
+def _uninstall_care(args: argparse.Namespace, root: Path, target: Path) -> None:
+    """Best-effort `brigade care uninstall` so a target from an older helper leaves no schedule behind.
+
+    New targets are created with --no-care, so this is normally a no-op. Any failure,
+    including an older brigade without the subcommand, is ignored: cleanup still removes the directory.
+    """
+    try:
+        run(
+            brigade_args(args) + ["care", "uninstall", "--target", str(target)],
+            root=root,
+            name="cleanup-care-uninstall",
+            timeout=min(args.timeout, 60),
+        )
+    except Exception:  # noqa: BLE001 - cleanup must continue whatever the uninstall does
+        return
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     """Remove only the targets this helper created. Evidence is never touched."""
     root = state_root(args)
@@ -1388,6 +1418,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         if args.dry_run:
             removed.append(str(entry))
             continue
+        _uninstall_care(args, root, entry)
         shutil.rmtree(entry, ignore_errors=True)
         try:
             entry.lstat()

@@ -61,7 +61,7 @@ in 0.32.0 ([retirement notice](grokbot-t3-dispatch.md)).
 ## Scheduled memory application
 
 Two optional memory jobs can run on a schedule. Both need a care install to
-activate OS timers.
+activate OS timers, and `brigade init` runs one by default.
 
 `memory-reflect` runs `memory reflect run --scheduled` and is part of the
 default care set. A scheduled hub run also attempts policy-gated application.
@@ -304,7 +304,8 @@ can call Brigade commands or approved runbooks. The operator chooses the
 schedule, host, and restart policy. Each runbook run records its steps and their
 exit codes even when the operator is away.
 
-`brigade care install --target .` opts the target into namespaced systemd user
+`brigade care install --target .` (which `brigade init` runs by default; pass
+`--no-care` to skip it) opts the target into namespaced systemd user
 timers on Linux or launchd agents on macOS. Windows prints Task Scheduler
 commands and returns exit 3 without creating tasks. Other platforms report
 managed scheduling as unsupported. Each systemd or launchd registration

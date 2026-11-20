@@ -44,14 +44,13 @@ for the `auto_apply` policy field, the switch and rollback.
 
 ## The default loop
 
-This is the setup the rest of this page assumes. `brigade init` with the Claude harness (the default) already writes the project-scope Claude Code work-loop hooks to `.claude/settings.json`, so verify routing and the Stop gate work from the first session. Two one-time commands add the schedule. After that, scoring keeps running without anyone remembering to capture, rank or reconcile.
+This is the setup the rest of this page assumes, and it is one command. `brigade init` with the Claude harness (the default) writes the project-scope Claude Code work-loop hooks to `.claude/settings.json`, so verify routing and the Stop gate work from the first session. It also turns on extras and installs the care schedule, so scoring keeps running without anyone remembering to capture, rank or reconcile.
 
 ```bash
-brigade extras on                         # once per machine, runbook steps are extras-gated
-brigade care install --target .           # schedules the care entries, including the weekly ratchet
+brigade init --target . --depth repo --harnesses claude   # hooks, extras on, care schedule installed
 ```
 
-`brigade init` writes no timer and does not enable extras, so a newly initialized workspace routes verifies but runs no weekly ratchet until the commands above run. `brigade work hooks install --scope user` is optional: it adds the same hooks at user scope so every repository on the machine gets them. To schedule only the ratchet, use `brigade care install --target . --entry weekly-outcome-ratchet`. See [scheduled care](scheduled-care.md#weekly-outcome-ratchet) for what install writes and how to confirm it ran.
+That is the same as running `brigade extras on` and `brigade care install --target .` after init. Pass `--no-care` to skip both, for example in CI where the pipeline is the trigger, and run the two commands later. The care step always leaves init at exit 0 and reports one status in `brigade init --json`: `installed`, `installed` with a `not_started` list (the timer files were written but no systemd user manager was reachable, as in a container, so the warning names the `systemctl --user` commands to run), `unsupported` (Windows, where care install does not write the scheduler in this release and nothing is scheduled), `skipped` (`--no-care`), or `failed` (a real install error, with the reason and the command to run later). `brigade operator quickstart` runs the same step. `brigade work hooks install --scope user` is optional: it adds the same hooks at user scope so every repository on the machine gets them. To schedule only the ratchet, use `brigade care install --target . --entry weekly-outcome-ratchet`. See [scheduled care](scheduled-care.md#weekly-outcome-ratchet) for what install writes and how to confirm it ran.
 
 With the hooks and the schedule on, this happens with no operator command:
 

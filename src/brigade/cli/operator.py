@@ -313,6 +313,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Repo depth: install the full kit (rules/, hooks/pre-push, INSTALL_FOR_AGENTS.md) and project "
         "the default tool packs into tools/ and scripts/. Default is the minimal footprint.",
     )
+    p_operator_quickstart.add_argument(
+        "--no-care",
+        dest="care",
+        action="store_false",
+        default=True,
+        help="Do not turn on extras or install the care schedule. By default quickstart runs `brigade extras on` "
+        "and `brigade care install --target <target>` after a successful install, like `brigade init`. "
+        "A host with no scheduler only warns.",
+    )
     p_operator_quickstart.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator.set_defaults(func=dispatch)
 
@@ -419,6 +428,7 @@ def _dispatch_impl(args) -> int:
             dry_run=args.dry_run,
             force=args.force,
             full=args.full,
+            care=args.care,
             json_output=args.json,
         )
     args._brigade_parser.error(f"unknown operator command: {args.operator_command}")
