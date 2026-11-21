@@ -455,28 +455,43 @@ def pin_available() -> bool:
 MAX_REMOVE_DEPTH = 512
 
 
+class DirectoryIdentityError(OSError):
+    """A directory entry no longer matches the identity that was enumerated."""
+
+
 def remove_directory_contents(descriptor: int, *, depth: int = 0) -> None:
     """Remove every entry under a held directory, never following a link.
 
     The descriptor is the object, not the name, so a rename that swaps
-    another tree into the path cannot redirect the deletion. Directories are
-    opened no-follow and emptied through their own descriptor, then removed
-    with ``rmdir`` relative to this one. Anything that cannot be opened as a
-    plain directory is unlinked as a single entry.
+    another tree into the path cannot redirect the deletion. Each child is
+    bound to the identity taken when it was enumerated: a directory is opened
+    no-follow and its descriptor must match, a child on another device is
+    refused so a mount crossing cannot be walked, and the name is re-checked
+    with no-follow immediately before its ``rmdir``. Anything that cannot be
+    opened as a plain directory is unlinked as a single entry.
     """
     if depth > MAX_REMOVE_DEPTH:
         raise OSError(errno.ELOOP, "directory tree is too deep to remove")
+    device = os.fstat(descriptor).st_dev
     os.lseek(descriptor, 0, os.SEEK_SET)
     for name in [entry.name for entry in os.scandir(descriptor)]:
-        try:
-            child = os.open(name, directory_flags(), dir_fd=descriptor)
-        except OSError:
+        enumerated = stat_child(descriptor, name)
+        if enumerated.st_dev != device:
+            raise DirectoryIdentityError(errno.EXDEV, "child is on another device", name)
+        if not stat.S_ISDIR(enumerated.st_mode):
             os.unlink(name, dir_fd=descriptor)
             continue
+        child = open_child_directory(descriptor, name, writable=False)
         try:
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino) != (enumerated.st_dev, enumerated.st_ino):
+                raise DirectoryIdentityError(errno.EAGAIN, "child changed after enumeration", name)
             remove_directory_contents(child, depth=depth + 1)
         finally:
             os.close(child)
+        current = stat_child(descriptor, name)
+        if (current.st_dev, current.st_ino) != (enumerated.st_dev, enumerated.st_ino):
+            raise DirectoryIdentityError(errno.EAGAIN, "child changed before removal", name)
         os.rmdir(name, dir_fd=descriptor)
 
 

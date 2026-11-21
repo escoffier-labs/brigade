@@ -173,7 +173,12 @@ def remove_held(root: Path, hold: RemovalHandle, *, force: bool = False) -> bool
     to remove a locked worktree, the same as `git worktree remove`.
     """
     path = hold.path
-    if not force and _locked(root, path):
+    locked = _lock_state(root, path)
+    if locked is None:
+        # The lock cannot be verified, so nothing is deleted even when forced.
+        _keep(path, UNVERIFIED_REASON)
+        return False
+    if locked and not force:
         _keep(path, LOCKED_REASON)
         return False
     try:
@@ -209,6 +214,14 @@ def remove_held(root: Path, hold: RemovalHandle, *, force: bool = False) -> bool
                 return _restore(parent_fd, private, path=path, reason=UNREMOVABLE_REASON)
         finally:
             os.close(private_fd)
+        try:
+            current: os.stat_result | None = dirfd.stat_child(parent_fd, private)
+            expected: os.stat_result | None = os.fstat(hold.root_fd)
+        except OSError:
+            current = expected = None
+        if current is None or expected is None or _identity(current) != _identity(expected):
+            _keep(path, f"{MOVED_REASON} (entry kept as {path.parent / private})")
+            return False
         try:
             # Only an empty directory goes, so an exchanged tree survives.
             os.rmdir(private, dir_fd=parent_fd)
@@ -250,16 +263,20 @@ def _unregister(hold: RemovalHandle) -> bool:
     return True
 
 
-def _locked(root: Path, worktree_path: Path) -> bool:
-    """Whether Git records this worktree as locked.
+def _lock_state(root: Path, worktree_path: Path) -> bool | None:
+    """Whether Git records this worktree as locked, or None when unknown.
 
     Read from `git worktree list` so ``git worktree lock`` reason text and the
-    admin dir layout stay Git's business. An unregistered path is not locked,
-    because there is no lock to respect.
+    admin dir layout stay Git's business. A failed command, OSError, or
+    unparseable output cannot verify the lock and returns None, which the
+    caller treats as a refusal rather than as unlocked.
     """
-    result = proc.run(["git", "worktree", "list", "--porcelain"], cwd=root, timeout=120.0)
+    try:
+        result = proc.run(["git", "worktree", "list", "--porcelain"], cwd=root, timeout=120.0)
+    except OSError:
+        return None
     if result.code != 0:
-        return False
+        return None
     target = _identity_key(worktree_path)
     for record in result.stdout.split("\n\n"):
         lines = record.splitlines()
@@ -268,7 +285,7 @@ def _locked(root: Path, worktree_path: Path) -> bool:
         if _identity_key(Path(lines[0][len("worktree ") :])) != target:
             continue
         return any(line == "locked" or line.startswith("locked ") for line in lines[1:])
-    return False
+    return None
 
 
 def _identity_key(path: Path) -> str:

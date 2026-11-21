@@ -638,3 +638,59 @@ def test_remove_tree_child_fails_closed_without_safe_tree_removal(tmp_path: Path
     assert (tmp_path / "tree").exists()
     with pytest.raises(OSError):
         dirfd.remove_tree_child(-1, "..")
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX dir_fd plus O_NOFOLLOW required")
+def test_remove_directory_contents_refuses_a_swapped_child(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    (root / "child").mkdir(parents=True)
+    (root / "child" / "kept.txt").write_text("kept", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.txt").write_text("outside", encoding="utf-8")
+    real_open = dirfd.open_child_directory
+    state: dict[str, bool] = {}
+
+    def open_child_directory(parent: int, name: str, **kwargs: object) -> int:
+        if name == "child" and "swapped" not in state:
+            state["swapped"] = True
+            (root / "child").rename(root / "child-real")
+            outside.rename(root / "child")
+        return real_open(parent, name, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dirfd, "open_child_directory", open_child_directory)
+    descriptor = dirfd.open_directory_chain(root, writable=True)
+    try:
+        with pytest.raises(OSError):
+            dirfd.remove_directory_contents(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert (root / "child" / "outside.txt").read_text(encoding="utf-8") == "outside"
+    assert (root / "child-real" / "kept.txt").read_text(encoding="utf-8") == "kept"
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX dir_fd plus O_NOFOLLOW required")
+def test_remove_directory_contents_refuses_a_device_crossing(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    (root / "child").mkdir(parents=True)
+    (root / "child" / "kept.txt").write_text("kept", encoding="utf-8")
+    real_stat_child = dirfd.stat_child
+
+    def stat_child(parent: int, name: str, **kwargs: object) -> os.stat_result:
+        info = real_stat_child(parent, name, **kwargs)  # type: ignore[arg-type]
+        if name != "child":
+            return info
+        values = list(info)
+        values[2] = info.st_dev + 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(dirfd, "stat_child", stat_child)
+    descriptor = dirfd.open_directory_chain(root, writable=True)
+    try:
+        with pytest.raises(OSError):
+            dirfd.remove_directory_contents(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert (root / "child" / "kept.txt").read_text(encoding="utf-8") == "kept"

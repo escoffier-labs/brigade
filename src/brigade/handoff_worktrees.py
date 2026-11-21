@@ -1271,10 +1271,13 @@ def _tracked_for_inbox(
     parts: tuple[str, ...],
     src_fd: int,
 ) -> _TrackedIndex | None:
-    """Tracked names for an inbox, pinned where the platform allows it."""
-    if not _proc_fd_paths():
-        # Windows keeps the pre-PR path query. Other platforms are not
-        # followed by a rescue-backed removal, which refuses instead.
+    """Tracked names for an inbox, pinned except on the pre-PR Windows path.
+
+    Windows keeps the path query, because its removal is unchanged. Every
+    other platform refuses when pinning is gone rather than running Git by
+    path, which a swap could answer for another tree.
+    """
+    if os.name == "nt":
         return _tracked(worktree.joinpath(*parts))
     return _tracked_pinned(worktree, git_dir, root_fd, admin_fd, parts, src_fd)
 
@@ -1311,6 +1314,8 @@ def _rescue_inbox(worktree: Path, root_fd: int, admin_fd: int, git_dir: Path, re
         candidates = sorted(n for n in names if _is_candidate(n))
         if not candidates:
             return []
+        if os.name != "nt" and not _proc_fd_paths():
+            return [Rescue(label, "failed", reason="worktree-unverified")]
         tracked = _tracked_for_inbox(worktree, git_dir, root_fd, admin_fd, parts, src_fd)
         if tracked is None:
             return [Rescue(label, "failed", reason="tracking-unverifiable")]
