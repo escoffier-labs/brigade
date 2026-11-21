@@ -187,20 +187,28 @@ def test_release_gate_binds_every_attestation_to_source_commit_and_ref(tmp_path)
         "for flag, key in [('--source-digest', 'GITHUB_SHA'), ('--source-ref', 'GITHUB_REF')]:\n"
         "    assert flag in args, f'missing attestation constraint: {flag}'\n"
         "    assert args[args.index(flag)+1] == os.environ[key]\n"
+        "assert args[-2:] == ['--format', 'json']\n"
         "with Path(os.environ['ATTEST_LOG']).open('a') as output:\n"
         "    output.write(json.dumps(args) + '\\n')\n"
+        "certificate = {'sourceRepositoryIdentifier': os.environ.get('ATTEST_CERT_ID', '1238165856')}\n"
+        "print(json.dumps([{'verificationResult': {'signature': {'certificate': certificate}}}]))\n"
     )
     step = _workflow_step_section(
         workflow(), "release-asset-gate", "Redownload, checksum, provenance, and attestation gate"
     )
     loop = textwrap.dedent(step.split("        run: |\n", 1)[1]).split("while read -r", 1)[1]
-    script = 'gh() { python3 "$ATTEST_PROBE" "$@"; }\nwhile read -r' + loop
+    # The loop also runs the repository's certificate check; run the real script, not a copy.
+    script = (
+        'gh() { python3 "$ATTEST_PROBE" "$@"; }\npython() { python3 "$VERIFY_SCRIPT" "${@:2}"; }\nwhile read -r' + loop
+    )
     log = tmp_path / "attestations.jsonl"
     env = dict(
         os.environ,
         GITHUB_SHA="a" * 40,
         GITHUB_REF="refs/tags/v1.2.3",
         GITHUB_REPOSITORY="example/project",
+        RUNNER_TEMP=str(tmp_path),
+        VERIFY_SCRIPT=str(ROOT / "scripts/verify_component_manifest_provenance.py"),
         ATTEST_PROBE=str(probe),
         ATTEST_LOG=str(log),
     )
@@ -209,3 +217,36 @@ def test_release_gate_binds_every_attestation_to_source_commit_and_ref(tmp_path)
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert len(calls) == 43
     assert {Path(args[2]).name for args in calls} == subjects
+
+
+def test_release_gate_rejects_an_attestation_signed_for_another_repository_id(tmp_path):
+    assets = tmp_path / "release-assets"
+    assets.mkdir()
+    (assets / "checksums.txt").write_text(f"{'a' * 64}  component-manifest-v1.json\n", newline="\n")
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import json\n"
+        "certificate = {'sourceRepositoryIdentifier': '999'}\n"
+        "print(json.dumps([{'verificationResult': {'signature': {'certificate': certificate}}}]))\n"
+    )
+    step = _workflow_step_section(
+        workflow(), "release-asset-gate", "Redownload, checksum, provenance, and attestation gate"
+    )
+    loop = textwrap.dedent(step.split("        run: |\n", 1)[1]).split("while read -r", 1)[1]
+    script = (
+        'gh() { python3 "$ATTEST_PROBE" "$@"; }\npython() { python3 "$VERIFY_SCRIPT" "${@:2}"; }\nwhile read -r' + loop
+    )
+    env = dict(
+        os.environ,
+        GITHUB_SHA="a" * 40,
+        GITHUB_REF="refs/tags/v1.2.3",
+        GITHUB_REPOSITORY="example/project",
+        RUNNER_TEMP=str(tmp_path),
+        VERIFY_SCRIPT=str(ROOT / "scripts/verify_component_manifest_provenance.py"),
+        ATTEST_PROBE=str(probe),
+    )
+
+    result = subprocess.run(_workflow_bash_command(script, "-e"), cwd=tmp_path, env=env, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "repository ID" in result.stderr

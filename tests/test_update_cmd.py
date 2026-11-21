@@ -134,6 +134,8 @@ class _Http:
 
     def json(self, url):
         self.urls.append(url)
+        if url == "https://api.github.com/repos/escoffier-labs/brigade":
+            return {"id": update_cmd.REPOSITORY_ID, "full_name": "escoffier-labs/brigade"}
         if url.endswith("/releases/latest"):
             return self.release
         if url == REF_URL:
@@ -185,6 +187,8 @@ class _PypiHttp(_Http):
             # Mirror live PyPI: info.version stays on the latest stable release
             # even when releases contains 0.32.0.devYYYYMMDD wheels.
             return {"info": {"version": self.info_version}, "releases": self.pypi_releases}
+        if url == "https://api.github.com/repos/escoffier-labs/brigade":
+            return {"id": update_cmd.REPOSITORY_ID, "full_name": "escoffier-labs/brigade"}
         if url.endswith("/releases/latest"):
             return self.release
         if url == REF_URL:
@@ -551,7 +555,8 @@ def test_release_resolution_dereferences_annotated_tags_to_their_commit():
     release = update_cmd.resolve_release(http, latest=True)
 
     assert release.target_commit == "a" * 40
-    assert http.urls[1:4] == [REF_URL, TAG_OBJECT_URL + first_tag, TAG_OBJECT_URL + second_tag]
+    # urls[1] is the repository identity check that follows the release lookup.
+    assert http.urls[2:5] == [REF_URL, TAG_OBJECT_URL + first_tag, TAG_OBJECT_URL + second_tag]
 
 
 @pytest.mark.parametrize(
@@ -1529,7 +1534,7 @@ def test_rename_retry_refuses_a_second_slug_with_a_different_identity(tmp_path, 
     assert f"https://api.github.com/repos/{RENAMED_SLUG}/releases/latest" not in http.urls
 
 
-def test_current_name_makes_exactly_the_same_requests_as_before(tmp_path):
+def test_current_name_makes_the_same_requests_as_before_plus_one_repository_identity_check(tmp_path):
     paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
     http = _GithubServing(CURRENT_SLUG, CURRENT_SLUG)
 
@@ -1544,6 +1549,8 @@ def test_current_name_makes_exactly_the_same_requests_as_before(tmp_path):
     assert result == 0
     assert http.urls == [
         f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest",
+        # New: a name that answers directly is trusted only while it still resolves to the repository ID.
+        f"https://api.github.com/repos/{CURRENT_SLUG}",
         f"https://api.github.com/repos/{CURRENT_SLUG}/git/ref/tags/{TAG}",
         BASE + "component-manifest-v1.json",
     ]
@@ -1738,3 +1745,53 @@ def test_installed_pypi_project_ignores_an_unrelated_pipx_record(tmp_path, monke
 
     monkeypatch.setattr(update_cmd.importlib.metadata, "distribution", missing)
     assert update_cmd.installed_pypi_project() == "brigadestack"
+
+
+# The names are labels; the immutable repository ID is the identity (#2816). After the rename an
+# organization member can create a new escoffier-labs/brigade, which then answers directly instead of
+# redirecting, and its self-consistent release must never be installed.
+
+
+def test_update_pins_the_repository_id():
+    assert update_cmd.REPOSITORY_ID == 1238165856
+
+
+@pytest.mark.parametrize("impostor_id", [1, update_cmd.REPOSITORY_ID + 1, "1238165856"])
+def test_a_reused_current_name_answering_directly_is_refused_before_anything_is_installed(
+    tmp_path, impostor_id, capsys
+):
+    class _Impostor(_GithubServing):
+        """The old name now belongs to another repository, which serves a complete release itself."""
+
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    http = _Impostor(CURRENT_SLUG, CURRENT_SLUG, repository_id=impostor_id)
+    commands = []
+
+    result = update_cmd.run_update(
+        channel="stable",
+        paths=paths,
+        http=http,
+        runner=lambda argv: commands.append(argv) or 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+
+    assert result == 1
+    assert "is not repository ID" in capsys.readouterr().err
+    assert commands == []
+    assert not any(url.endswith("component-manifest-v1.json") for url in http.urls)
+
+
+def test_the_real_repository_id_under_the_current_name_still_updates(tmp_path):
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    http = _GithubServing(CURRENT_SLUG, CURRENT_SLUG)
+
+    result = update_cmd.run_update(
+        channel="stable",
+        paths=paths,
+        http=http,
+        runner=lambda argv: 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+
+    assert result == 0
+    assert f"https://api.github.com/repos/{CURRENT_SLUG}" in http.urls

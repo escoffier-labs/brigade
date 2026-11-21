@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,11 @@ LEGACY_ALIASES = ("graphtrail", "graphtrail-mcp", "miseledger")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 # Mirrors component_manifest.COMPONENT_PLATFORMS: brigade-hub ships for Linux only.
 COMPONENT_PLATFORMS = {"brigade-hub": ("linux-amd64", "linux-arm64")}
-REPOSITORY = "escoffier-labs/brigade"
+# The repository is renamed after 0.32.0 publishes. A manifest records the repository its
+# workflow runs in (GITHUB_REPOSITORY), never a fixed slug, because the release attestations
+# are signed under that name. Exactly these two names are accepted, matching
+# scripts/verify_component_manifest_provenance.py.
+ACCEPTED_REPOSITORIES = ("escoffier-labs/brigade", "escoffier-labs/brigadestack")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -46,6 +51,16 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _resolve_repository(repository: str | None) -> str:
+    repository = repository if repository is not None else os.environ.get("GITHUB_REPOSITORY", "")
+    if repository not in ACCEPTED_REPOSITORIES:
+        raise ValueError(
+            f"repository {repository!r} must be one of {', '.join(ACCEPTED_REPOSITORIES)} "
+            "(pass --repository or run inside GitHub Actions)"
+        )
+    return repository
 
 
 def _validate_inputs(tag: str, commit: str, assets_dir: Path) -> set[str]:
@@ -72,11 +87,21 @@ def _validate_inputs(tag: str, commit: str, assets_dir: Path) -> set[str]:
 
 
 def generate_manifest(
-    *, tag: str, commit: str, assets_dir: Path, output: Path, checksums_output: Path
+    *,
+    tag: str,
+    commit: str,
+    assets_dir: Path,
+    output: Path,
+    checksums_output: Path,
+    repository: str | None = None,
 ) -> dict[str, Any]:
-    """Write the manifest and its complete checksums map in deterministic order."""
+    """Write the manifest and its complete checksums map in deterministic order.
+
+    The manifest records ``repository``, defaulting to ``GITHUB_REPOSITORY``.
+    """
+    repository = _resolve_repository(repository)
     native_names = _validate_inputs(tag, commit, assets_dir)
-    base_url = f"https://github.com/{REPOSITORY}/releases/download/{tag}/"
+    base_url = f"https://github.com/{repository}/releases/download/{tag}/"
     components: dict[str, Any] = {}
     native_digests = {name: sha256(assets_dir / name) for name in sorted(native_names)}
     for component in COMPONENT_IDS:
@@ -93,7 +118,7 @@ def generate_manifest(
             }
         components[component] = {
             "component_revision": commit,
-            "source": {"repository": REPOSITORY, "release_tag": tag},
+            "source": {"repository": repository, "release_tag": tag},
             "executable": component,
             "assets": assets,
         }
@@ -122,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--assets-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--checksums-output", type=Path, required=True)
+    parser.add_argument("--repository", help="repository to record; defaults to GITHUB_REPOSITORY")
     args = parser.parse_args(argv)
     try:
         generate_manifest(
@@ -130,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             assets_dir=args.assets_dir,
             output=args.output,
             checksums_output=args.checksums_output,
+            repository=args.repository,
         )
     except ValueError as exc:
         parser.error(str(exc))

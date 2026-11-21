@@ -99,7 +99,7 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
     assert "attestations: write" in text
     assert "artifact-metadata: write" in text
     assert "gh attestation verify" in text
-    assert "--signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml" in text
+    assert '--signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish.yml"' in text
     assert "component-manifest-v1.json" in text
     assert "checksums.txt" in text
     assert "brigade-cli==${VERSION}" in text
@@ -291,12 +291,29 @@ def _load_workflow_yaml(path: Path):
     try:
         import yaml
     except ImportError:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "pyyaml", "-q"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        import yaml
+        # Windows CI runs test files concurrently, so two files can race to install PyYAML and
+        # the loser's pip exits non-zero even though the winner's install makes the import work.
+        # Retry the import after each attempt and report pip's own error if it never does.
+        import importlib
+        import time
+
+        error = ""
+        last_import_error: ImportError | None = None
+        for attempt in range(3):
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "pyyaml", "-q"], capture_output=True, text=True
+            )
+            error = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
+            importlib.invalidate_caches()
+            try:
+                import yaml
+
+                break
+            except ImportError as exc:
+                last_import_error = exc
+                time.sleep(2 * (attempt + 1))
+        else:
+            raise RuntimeError(f"pyyaml is unavailable and pip install failed: {error}") from last_import_error
     return yaml.safe_load(path.read_text())
 
 
@@ -654,9 +671,12 @@ def test_npm_revalidation_is_read_only_and_pins_two_source_identities():
         "duplicate-name",
         "symlink",
         "extra-file",
+        "other-accepted-repository",
+        "reused-name-id",
     ],
 )
-def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_path, mutation):
+@pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
+def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_path, mutation, repository):
     import hashlib
     import json
     import os
@@ -664,7 +684,15 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
     import zipfile
 
     workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-registry-revalidate.yml")
-    env = {**os.environ, **workflow["env"], "RUNNER_TEMP": str(tmp_path)}
+    # The repository ID, not its name, is the identity: a reused name carries another ID.
+    repository_id = 123 if mutation == "reused-name-id" else 1238165856
+    env = {
+        **os.environ,
+        **workflow["env"],
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_REPOSITORY": repository,
+        "GITHUB_REPOSITORY_ID": "1238165856",
+    }
     proof = tmp_path / "npm-revalidation"
     proof.mkdir()
     archive = proof / "original-archives.zip"
@@ -703,8 +731,8 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
         "workflow_run": {
             "id": 39256315934,
             "head_sha": env["PACKAGING_SHA"],
-            "repository_id": 123,
-            "head_repository_id": 123,
+            "repository_id": repository_id,
+            "head_repository_id": repository_id,
         },
     }
     run = {
@@ -712,8 +740,8 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
         "head_sha": env["PACKAGING_SHA"],
         "event": "workflow_dispatch",
         "path": ".github/workflows/npm-publish.yml",
-        "repository": {"id": 123, "full_name": "escoffier-labs/brigade"},
-        "head_repository": {"id": 123, "full_name": "escoffier-labs/brigade"},
+        "repository": {"id": repository_id, "full_name": repository},
+        "head_repository": {"id": repository_id, "full_name": repository},
     }
     if mutation == "artifact-id":
         metadata["id"] += 1
@@ -721,6 +749,10 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
         metadata["workflow_run"]["id"] += 1
     elif mutation == "repository":
         run["repository"]["full_name"] = "someone/brigade"
+    elif mutation == "other-accepted-repository":
+        # The run reports the other accepted name, not the repository this workflow runs in.
+        other = "escoffier-labs/brigadestack" if repository == "escoffier-labs/brigade" else "escoffier-labs/brigade"
+        run["repository"]["full_name"] = run["head_repository"]["full_name"] = other
     elif mutation == "source":
         metadata["workflow_run"]["head_sha"] = "b" * 40
     elif mutation == "expired":
@@ -748,9 +780,21 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
 
 
 @pytest.mark.parametrize(
-    "mutation", [None, "harness-head", "payload-head", "dirty", "provenance", "malformed-sha", "non-main"]
+    "mutation",
+    [
+        None,
+        "harness-head",
+        "payload-head",
+        "dirty",
+        "provenance",
+        "malformed-sha",
+        "non-main",
+        "third-repository",
+        "reused-name-id",
+    ],
 )
-def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutation):
+@pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
+def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutation, repository):
     import json
     import os
 
@@ -786,19 +830,24 @@ def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutati
         "GITHUB_WORKSPACE": str(tmp_path),
         "PACKAGING_SHA": heads["payload-source"],
         "GITHUB_SHA": heads["validation-harness"],
-        "GITHUB_REPOSITORY": "escoffier-labs/brigade",
+        "GITHUB_REPOSITORY": repository,
+        "GITHUB_REPOSITORY_ID": "1238165856",
         "GITHUB_REF": "refs/heads/main",
-        "GITHUB_WORKFLOW_REF": "escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/main",
+        "GITHUB_WORKFLOW_REF": f"{repository}/.github/workflows/npm-registry-revalidate.yml@refs/heads/main",
     }
+    if mutation == "reused-name-id":
+        # The name is accepted but the runner reports another repository ID: a reused name.
+        env["GITHUB_REPOSITORY_ID"] = "123"
+    if mutation == "third-repository":
+        env["GITHUB_REPOSITORY"] = "someone/brigade"
+        env["GITHUB_WORKFLOW_REF"] = "someone/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/main"
     if mutation == "harness-head":
         env["GITHUB_SHA"] = "a" * 40
     elif mutation == "payload-head":
         env["PACKAGING_SHA"] = "a" * 40
     elif mutation == "non-main":
         env["GITHUB_REF"] = "refs/heads/other"
-        env["GITHUB_WORKFLOW_REF"] = (
-            "escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/other"
-        )
+        env["GITHUB_WORKFLOW_REF"] = f"{repository}/.github/workflows/npm-registry-revalidate.yml@refs/heads/other"
     elif mutation == "malformed-sha":
         env["GITHUB_SHA"] = "invalid"
     elif mutation == "dirty":
@@ -991,3 +1040,25 @@ def test_acceptance_scripts_accept_the_same_checksum_inventories() -> None:
     assert "if len(checksums) not in (41, 43):" in posix
     assert "if ($checksums.Count -notin @(41, 43)) {" in windows
     assert "$checksums.Count -ne 41" not in windows
+
+
+def test_workflow_yaml_loader_reports_pip_exit_code_and_chains_the_import_error(monkeypatch, tmp_path):
+    import time
+
+    workflow = tmp_path / "workflow.yml"
+    workflow.write_text("name: x\n")
+    monkeypatch.setitem(sys.modules, "yaml", None)  # `import yaml` raises ImportError
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    attempts = []
+
+    def silent_failure(argv, **kwargs):
+        attempts.append(argv)
+        return subprocess.CompletedProcess(argv, 3, "", "")
+
+    monkeypatch.setattr(subprocess, "run", silent_failure)
+
+    with pytest.raises(RuntimeError, match="exit code 3") as raised:
+        _load_workflow_yaml(workflow)
+
+    assert len(attempts) == 3
+    assert isinstance(raised.value.__cause__, ImportError)

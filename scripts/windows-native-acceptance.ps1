@@ -863,19 +863,8 @@ function Get-ComponentReport {
     return ($raw | Out-String).Trim() | ConvertFrom-Json
 }
 
-function Assert-ReleaseManifestAndAssets {
-    param(
-        [string]$Version,
-        [string]$Destination,
-        [string]$PythonExe = "python"
-    )
-    $tag = "v$Version"
-    $base = "https://github.com/escoffier-labs/brigade/releases/download/$tag"
-    $manifestPath = Join-Path $Destination "component-manifest-v1.json"
-    $checksumsPath = Join-Path $Destination "checksums.txt"
-    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/component-manifest-v1.json" -OutFile $manifestPath
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $checksumsPath
+function Assert-UniqueManifestKeys {
+    param([string]$ManifestPath, [string]$PythonExe)
     # ConvertFrom-Json silently overwrites identical keys. Use the existing
     # bootstrap Python to reject them before PowerShell consumes the manifest.
     $uniqueKeysProbe = @'
@@ -890,9 +879,89 @@ def unique(pairs):
     return result
 json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=unique)
 '@
-    & $PythonExe -c $uniqueKeysProbe $manifestPath
+    & $PythonExe -c $uniqueKeysProbe $ManifestPath
     if ($LASTEXITCODE -ne 0) { throw "invalid or duplicate release manifest keys" }
+}
+
+function Assert-RepositoryId {
+    param([string]$Repository)
+    # A name is only a label: after the rename anyone in the organization can create a new
+    # repository called escoffier-labs/brigade, and GitHub then stops redirecting that name.
+    # The immutable repository ID survives the rename, so a name is trusted only while it
+    # resolves to it. Keep in step with REPOSITORY_ID in scripts/published-artifact-acceptance.py.
+    $repositoryId = 1238165856
+    $headers = @{ Accept = "application/vnd.github+json" }
+    if ($env:GH_TOKEN) { $headers.Authorization = "Bearer $($env:GH_TOKEN)" }
+    try {
+        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository" -Headers $headers
+    } catch {
+        throw "repository lookup failed for ${Repository}: $($_.Exception.Message)"
+    }
+    $identifier = $response.id
+    if (($identifier -isnot [int] -and $identifier -isnot [long]) -or $identifier -ne $repositoryId) {
+        throw "repository $Repository is repository ID '$identifier', not $repositoryId"
+    }
+}
+
+function Get-ManifestRepository {
+    param($Manifest)
+    # The repository is renamed after 0.32.0 publishes. A release records the repository its
+    # workflow ran in and its attestations are signed under that name, so the release's
+    # repository comes from its manifest, never from the environment. Exactly these two names
+    # are accepted. Keep in step with scripts/published-artifact-acceptance.py.
+    $accepted = @("escoffier-labs/brigade", "escoffier-labs/brigadestack")
+    $required = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+    $allowed = $required + @("brigade-hub")
+    $names = @($Manifest.components.PSObject.Properties | ForEach-Object { $_.Name })
+    foreach ($name in $names) {
+        if (@($allowed | Where-Object { $_ -ceq $name }).Count -ne 1) { throw "release manifest has an unknown component: $name" }
+    }
+    foreach ($id in $required) {
+        if (@($names | Where-Object { $_ -ceq $id }).Count -ne 1) { throw "release manifest is missing component $id" }
+    }
+    $recorded = @()
+    foreach ($property in $Manifest.components.PSObject.Properties) { $recorded += [string]$property.Value.source.repository }
+    $repository = $recorded[0]
+    foreach ($value in $recorded) {
+        if ($value -cne $repository) { throw "release manifest components record different repositories" }
+    }
+    if (@($accepted | Where-Object { $_ -ceq $repository }).Count -ne 1) {
+        throw "release manifest must record exactly one of $($accepted -join ', ') for every component"
+    }
+    return $repository
+}
+
+function Assert-ReleaseManifestAndAssets {
+    param(
+        [string]$Version,
+        [string]$Destination,
+        [string]$PythonExe = "python"
+    )
+    $tag = "v$Version"
+    $manifestPath = Join-Path $Destination "component-manifest-v1.json"
+    $checksumsPath = Join-Path $Destination "checksums.txt"
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    # Look the manifest up under each accepted name (the release only exists under one until the
+    # rename, and the old name redirects after it), then follow the repository it records.
+    $found = $false
+    foreach ($candidate in @("escoffier-labs/brigade", "escoffier-labs/brigadestack")) {
+        try {
+            # Resolve the name to the repository ID before any release request under it.
+            Assert-RepositoryId -Repository $candidate
+            Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$candidate/releases/download/$tag/component-manifest-v1.json" -OutFile $manifestPath
+            $found = $true
+            break
+        } catch {
+            continue
+        }
+    }
+    if (-not $found) { throw "could not download the release manifest under any accepted repository name" }
+    Assert-UniqueManifestKeys -ManifestPath $manifestPath -PythonExe $PythonExe
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $repository = Get-ManifestRepository -Manifest $manifest
+    Assert-RepositoryId -Repository $repository
+    $base = "https://github.com/$repository/releases/download/$tag"
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $checksumsPath
     $checksums = @{}
     foreach ($line in Get-Content -LiteralPath $checksumsPath) {
         if ($line -cnotmatch '^([0-9a-f]{64})\s+(\S+)$') { throw "malformed checksums.txt line: $line" }
@@ -913,8 +982,8 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     $expected = @{}
     foreach ($componentId in $legacyIds) {
         $component = $manifest.components.$componentId
-        if (-not $component -or $component.source.repository -cne "escoffier-labs/brigade" -or $component.source.release_tag -cne $tag) {
-            throw "release manifest component $componentId does not point to escoffier-labs/brigade@$tag"
+        if (-not $component -or $component.source.repository -cne $repository -or $component.source.release_tag -cne $tag) {
+            throw "release manifest component $componentId does not point to $repository@$tag"
         }
         if (@($component.assets.PSObject.Properties).Count -ne 5) { throw "release manifest has invalid platform matrix" }
         foreach ($property in $component.assets.PSObject.Properties) {
@@ -932,8 +1001,8 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     }
     $hub = $manifest.components."brigade-hub"
     if ($hub) {
-        if ($hub.source.repository -cne "escoffier-labs/brigade" -or $hub.source.release_tag -cne $tag) {
-            throw "release manifest component brigade-hub does not point to escoffier-labs/brigade@$tag"
+        if ($hub.source.repository -cne $repository -or $hub.source.release_tag -cne $tag) {
+            throw "release manifest component brigade-hub does not point to $repository@$tag"
         }
         if (@($hub.assets.PSObject.Properties).Count -ne 2) { throw "release manifest has invalid brigade-hub platform matrix" }
         foreach ($platform in $hubPlatforms) {
@@ -993,11 +1062,12 @@ function Invoke-CanonicalComponentSmoke {
 }
 
 function Invoke-CanonicalAttestationVerifier {
-    param([string]$GhExe, [string]$Subject, [string]$Revision, [string]$Version)
+    param([string]$GhExe, [string]$Subject, [string]$Revision, [string]$Version, [string]$Repository)
+    if (-not $Repository) { throw "canonical attestation verification failed: repository is required" }
     if (-not $GhExe -or -not [IO.Path]::IsPathRooted($GhExe) -or -not (Test-Path -LiteralPath $GhExe -PathType Leaf)) {
         throw "canonical attestation verification failed: verifier unavailable"
     }
-    $arguments = @("attestation", "verify", $Subject, "--repo", "escoffier-labs/brigade", "--signer-workflow", "escoffier-labs/brigade/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version")
+    $arguments = @("attestation", "verify", $Subject, "--repo", $Repository, "--signer-workflow", "$Repository/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version", "--format", "json")
     # Quote for Windows CreateProcess/CommandLineToArgvW, without a shell.
     $quoted = foreach ($argument in $arguments) {
         $escaped = [regex]::Replace($argument, '(\\*)"', '$1$1\"')
@@ -1017,18 +1087,37 @@ function Invoke-CanonicalAttestationVerifier {
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
-        $null = $stdout.GetAwaiter().GetResult()
+        $verified = $stdout.GetAwaiter().GetResult()
         $null = $stderr.GetAwaiter().GetResult()
-        return $process.ExitCode
+        if ($process.ExitCode -ne 0) { return $process.ExitCode }
     } catch {
         throw "canonical attestation verification failed: verifier process unavailable"
     } finally {
         $process.Dispose()
     }
+    # A name is only a label: every verified attestation's certificate must name the Brigade
+    # repository ID (verificationResult.signature.certificate.sourceRepositoryIdentifier, a
+    # decimal string in `gh attestation verify --format json`).
+    # The output must be a JSON array. ConvertFrom-Json turns a lone object into one result too,
+    # so check the top-level shape on the raw text before parsing.
+    if ($verified -isnot [string] -or -not $verified.TrimStart().StartsWith("[")) { return 1 }
+    try {
+        # Windows PowerShell 5.1 emits a JSON array as one object; piping enumerates it in both editions.
+        $parsed = $verified | ConvertFrom-Json
+        $results = @($parsed | ForEach-Object { $_ })
+    } catch {
+        return 1
+    }
+    if ($results.Count -eq 0) { return 1 }
+    foreach ($result in $results) {
+        $identifier = $result.verificationResult.signature.certificate.sourceRepositoryIdentifier
+        if ($identifier -isnot [string] -or $identifier -cne "1238165856") { return 1 }
+    }
+    return 0
 }
 
 function Invoke-VerifiedCanonicalSmoke {
-    param([string]$Version, [string]$ReleaseDirectory, [string]$GhExe)
+    param([string]$Version, [string]$ReleaseDirectory, [string]$GhExe, [string]$PythonExe = "python")
     $checksums = @(Get-Content -LiteralPath (Join-Path $ReleaseDirectory "checksums.txt"))
     if ($checksums.Count -eq 26) { return }
     # 40 native assets and the manifest, plus brigade-hub's two Linux assets
@@ -1041,7 +1130,12 @@ function Invoke-VerifiedCanonicalSmoke {
         $path
     }
     $manifestPath = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "component-manifest-v1.json"))
+    Assert-UniqueManifestKeys -ManifestPath $manifestPath -PythonExe $PythonExe
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    # Attestations are signed under the repository name the release was built in, which
+    # the manifest records, so --repo and the signer workflow both follow the manifest.
+    $repository = Get-ManifestRepository -Manifest $manifest
+    Assert-RepositoryId -Repository $repository
     $revision = $null
     foreach ($id in @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")) {
         $current = $manifest.components.$id.component_revision
@@ -1052,7 +1146,7 @@ function Invoke-VerifiedCanonicalSmoke {
     }
     # Verify exact local bytes, including the manifest that supplies the source.
     foreach ($path in @($manifestPath) + @($paths)) {
-        $exitCode = Invoke-CanonicalAttestationVerifier -GhExe $GhExe -Subject $path -Revision $revision -Version $Version
+        $exitCode = Invoke-CanonicalAttestationVerifier -GhExe $GhExe -Subject $path -Revision $revision -Version $Version -Repository $repository
         if ($exitCode -ne 0) { throw "canonical attestation verification failed (exit $exitCode)" }
     }
     $saved = @{}
@@ -1386,7 +1480,7 @@ try {
     $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
 
     if ($InstallMode -eq "pypi") {
-        Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets") -GhExe $ghExe
+        Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets") -GhExe $ghExe -PythonExe $bootstrapPython
     }
 
     # The managed bin holds only the legacy code graph names until setup

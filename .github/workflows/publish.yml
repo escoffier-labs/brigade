@@ -442,11 +442,17 @@ jobs:
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 44
           (cd release-assets && sha256sum --check checksums.txt)
-          python scripts/verify_component_manifest_provenance.py --manifest release-assets/component-manifest-v1.json
+          # The release records the repository this workflow ran in, and its attestations are
+          # signed under that name, so the signer workflow follows GITHUB_REPOSITORY. The verifier
+          # accepts only escoffier-labs/brigade or escoffier-labs/brigadestack.
+          python scripts/verify_component_manifest_provenance.py --manifest release-assets/component-manifest-v1.json \
+            --expected-repository "$GITHUB_REPOSITORY"
           while read -r _digest asset; do
             gh attestation verify "release-assets/$asset" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml \
-              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF"
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish.yml" \
+              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --format json > "$RUNNER_TEMP/attestation.json"
+            # A name is only a label: require the certificate to name the Brigade repository ID.
+            python scripts/verify_component_manifest_provenance.py --check-attestation-json "$RUNNER_TEMP/attestation.json"
           done < release-assets/checksums.txt
 
   build-and-publish:
@@ -565,7 +571,7 @@ jobs:
         env:
           BRIGADE_VERSION: ${{ github.ref_name }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/published-artifact-acceptance.py --brigade-version "${BRIGADE_VERSION#v}" ${{ matrix.extra }}
+        run: python scripts/published-artifact-acceptance.py --brigade-version "${BRIGADE_VERSION#v}" --pin-workflow-repository ${{ matrix.extra }}
       - name: Run Windows native acceptance (published CLI)
         if: matrix.kind == 'windows'
         shell: powershell
