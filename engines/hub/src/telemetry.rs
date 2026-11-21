@@ -345,6 +345,11 @@ pub struct RequestLog {
 }
 /// Where a request was when its log line was written. Labels are bounded strings
 /// and carry no request data.
+///
+/// A request that reaches a response always logs `replying`, including the
+/// early 503 refusals, because `handle` marks the reply before the line is
+/// recorded. The field therefore names a stall point only for a request the
+/// client abandons; that request keeps the last phase it entered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Stage {
@@ -358,7 +363,9 @@ pub enum Stage {
     /// writer set it: registration, claims, messages and heartbeat. Memory
     /// writes go through the memory store's own writer and stay `handler`.
     Writer,
-    /// Waiting on, or streaming from, the Python upstream.
+    /// Waiting for the Python upstream's headers. Once it answers, its body
+    /// streams under `replying`, so a stall in that body does not read as
+    /// `upstream`.
     Upstream,
     /// The reply is built; its body is streaming to the client.
     Replying,

@@ -83,6 +83,9 @@ const ZONE_SLACK_SECONDS: f64 = 86400.0;
 /// qualifying row's date, and never more than one day earlier. Widening the
 /// scan can only add candidates: `project` applies the exact parsed-age test
 /// per row.
+///
+/// So the scan covers the bound's calendar date through now: between about
+/// 24.5 and 48.5 hours of events, not the 30 minute window itself.
 fn candidate_bound(now: f64) -> Value {
     text(&iso(now - ACTIVE_SECONDS - ZONE_SLACK_SECONDS)[..10])
 }
@@ -488,8 +491,9 @@ mod tests {
         assert!(tightest.starts_with(bound), "{tightest} is before {bound}");
     }
 
-    /// Ties on sequence and digest, a run split across both partitions, blank
-    /// and hyphen seats, sequences that disagree with receipts, every receipt
+    /// Ties on sequence and digest in both partitions, a run split across both
+    /// partitions with the node row out-sequencing the Grok Bot row, blank and
+    /// hyphen seats, sequences that disagree with receipts, every receipt
     /// spelling, terminal and live runs, and runs older than the candidate
     /// window. The active view must return exactly what the history ranking
     /// returns after its own filters.
@@ -497,7 +501,8 @@ mod tests {
     fn active_view_matches_the_history_ranking() {
         let (db, _) = database("parity");
         let tx = ReadConnection(&db);
-        // seq ties, resolved by receipt then digest.
+        // A sequence tie where the later receipt carries the smaller digest:
+        // `aaa` wins and dropping the receipt from the lookup picks `bbb`.
         event(
             &db,
             ("node-a", "run-tie", 1, "t0"),
@@ -512,18 +517,18 @@ mod tests {
             ("node-a", "run-tie", 2, "aaa"),
             seat("seat-a"),
             Some("codex"),
-            "run.created",
-            &at(-500.0),
-            &at(-500.0),
+            "run.progress",
+            &at(-400.0),
+            &at(-400.0),
         );
         event(
             &db,
             ("node-a", "run-tie", 2, "bbb"),
             seat("seat-b"),
             Some("codex"),
-            "run.progress",
-            &at(-400.0),
-            &at(-400.0),
+            "run.created",
+            &at(-500.0),
+            &at(-500.0),
         );
         // One run_id in both partitions on one node, plus a blank-seat winner.
         event(
@@ -537,7 +542,7 @@ mod tests {
         );
         event(
             &db,
-            ("node-a", "run-shared", 1, "n1"),
+            ("node-a", "run-shared", 2, "n1"),
             Some(""),
             Some("codex"),
             "run.created",
@@ -553,24 +558,16 @@ mod tests {
             &at(-200.0),
             &at(-150.0),
         );
-        // Grok Bot revisions rank by run_id across nodes.
+        // Grok Bot revisions rank by run_id across nodes. This run's lower
+        // sequence has the later receipt, so sequence has to decide alone.
         event(
             &db,
             ("node-c", "run-grok", 3, "x0"),
             Some("-"),
             Some("grokbot"),
             "grokbot.queued",
-            &at(-120.0),
-            &at(-120.0),
-        );
-        event(
-            &db,
-            ("node-d", "run-grok", 3, "x1"),
-            None,
-            Some("grokbot"),
-            "grokbot.running",
-            &at(-110.0),
-            &at(-110.0),
+            &at(-200.0),
+            &at(-200.0),
         );
         event(
             &db,
@@ -578,8 +575,47 @@ mod tests {
             seat("seat-g"),
             Some("grokbot"),
             "grokbot.queued",
-            &at(-200.0),
-            &at(-200.0),
+            &at(-110.0),
+            &at(-110.0),
+        );
+        // Across nodes, a sequence tie where the later receipt has the smaller
+        // digest: `gta` wins and dropping the receipt picks `gtz`.
+        event(
+            &db,
+            ("node-c", "run-grok-tie", 4, "gta"),
+            seat("seat-gt"),
+            Some("grokbot"),
+            "grokbot.running",
+            &at(-110.0),
+            &at(-110.0),
+        );
+        event(
+            &db,
+            ("node-d", "run-grok-tie", 4, "gtz"),
+            seat("seat-gt"),
+            Some("grokbot"),
+            "grokbot.running",
+            &at(-120.0),
+            &at(-120.0),
+        );
+        // Across nodes, a sequence and receipt tie that only the digest breaks.
+        event(
+            &db,
+            ("node-c", "run-grok-digest", 5, "gda"),
+            seat("seat-gd"),
+            Some("grokbot"),
+            "grokbot.running",
+            &at(-130.0),
+            &at(-130.0),
+        );
+        event(
+            &db,
+            ("node-d", "run-grok-digest", 5, "gdz"),
+            seat("seat-gd"),
+            Some("grokbot"),
+            "grokbot.running",
+            &at(-130.0),
+            &at(-130.0),
         );
         // Highest sequence recent keeps the run; highest sequence old drops it.
         event(
@@ -829,8 +865,16 @@ mod tests {
             Json::String("external.unknown".into())
         );
         assert_eq!(entry("run-tie", "sequence"), Json::from(2));
-        assert_eq!(entry("run-tie", "digest"), Json::String("bbb".into()));
+        assert_eq!(entry("run-tie", "digest"), Json::String("aaa".into()));
         assert_eq!(entry("run-digest", "digest"), Json::String("zzz".into()));
+        // Grok Bot partitions: sequence alone, then receipt alone, then digest.
+        assert_eq!(entry("run-grok", "digest"), Json::String("x0".into()));
+        assert_eq!(entry("run-grok", "node_id"), Json::String("node-c".into()));
+        assert_eq!(entry("run-grok-tie", "digest"), Json::String("gta".into()));
+        assert_eq!(
+            entry("run-grok-digest", "digest"),
+            Json::String("gdz".into())
+        );
         // The reply is ordered by node_id, run_id, then the ranking's partition
         // key: a split run lists its Grok Bot row first.
         let shared: Vec<&str> = runs
@@ -908,6 +952,35 @@ mod tests {
                 &at(-60.0),
             );
         }
+        // A live Grok Bot run and two blank-seat winners make the plan test
+        // reach the Grok Bot lookup and both seat-fallback statements.
+        event(
+            &db,
+            ("node-a", "live-grok", 1, "digest"),
+            Some(""),
+            Some("grokbot"),
+            "grokbot.running",
+            &at(-60.0),
+            &at(-60.0),
+        );
+        event(
+            &db,
+            ("node-a", "live-blank-grok", 1, "digest"),
+            Some("-"),
+            Some("grokbot"),
+            "grokbot.running",
+            &at(-60.0),
+            &at(-60.0),
+        );
+        event(
+            &db,
+            ("node-a", "live-blank-node", 1, "digest"),
+            Some(""),
+            Some("codex"),
+            "run.progress",
+            &at(-60.0),
+            &at(-60.0),
+        );
         let traced = rusqlite::Connection::open(&path).unwrap();
         traced.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(record));
         let reply = list(&ReadConnection(&traced), false, NOW, 86400)
@@ -916,7 +989,7 @@ mod tests {
             .unwrap();
         traced.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
         assert_eq!(reply.status, 200);
-        assert_eq!(run_ids(&reply).len(), 5);
+        assert_eq!(run_ids(&reply).len(), 8);
 
         let captured = TRACED.lock().unwrap().clone();
         assert!(!captured.is_empty());

@@ -630,10 +630,13 @@ no result cache anywhere in the hub.
 
 `GET /status` without `?all=1` ranks only the runs whose latest event can still
 be inside the active 30-minute view: `events_received_at` finds the runs with an
-event in that window (a day wider, so a receipt written with a UTC offset still
-compares safe), and one `events_run_seq` lookup per candidate resolves the
-winning event by sequence, then receipt, then digest. `?all=1` returns every
-run, so it ranks the journal, as it did before.
+event at or after a date-only bound, which is the calendar date of the window's
+start minus a day (the day covers a receipt written with a UTC offset, and a
+date sorts at or below every timestamp spelling on it), and one `events_run_seq`
+lookup per candidate resolves the winning event by sequence, then receipt, then
+digest. The candidate scan therefore covers between about 24.5 and 48.5 hours of
+events, not 30 minutes; the parsed-age test still applies the window per row.
+`?all=1` returns every run, so it ranks the journal, as it did before.
 
 ### Admission and backpressure
 

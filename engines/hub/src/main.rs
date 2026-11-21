@@ -630,6 +630,11 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
                 if let Some(peer) = peer {
                     request.extensions_mut().insert(peer);
                 }
+                // Each attempt keeps the same request log and stage slot, so a
+                // retry that stalls still names its own phase. The credential
+                // label and action family are not carried: this path is always
+                // GET /health, which sets neither.
+                request.extensions_mut().insert(stage.clone());
                 request
             });
             let python = handle_inner(State(app.clone()), request).await;
