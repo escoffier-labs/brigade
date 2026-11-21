@@ -581,6 +581,8 @@ Always-loaded instruction files (`AGENTS.md`, `USER.md`, `TOOLS.md`, `MEMORY.md`
 
 **Thresholds and states.** Act-at is 85% of the limit and trim-to is 70%. A file at or under act-at is `within`. Between act-at and the limit it is `over-act-at`: nothing is cut yet and no alert is raised. Over the limit it is `could-not-trim` with reason `report-only`, because no file can be moved yet. A loader total over its cap is `total-over-cap`.
 
+**Moved cards are capped per file.** A moved section becomes one private card under `memory/cards/instructions/` and carries `archive: never`, so the retire stage never removes it. The move planner stops creating cards for a file once `MAX_MOVED_CARDS_PER_FILE` (50) moved cards carry its source. It counts only cards that still exist and still name that file in `source_file`, so a card that an undo removes frees its place again. A file at the cap is left byte for byte as it is, a pending overflow pointer waits, and the pass reports `moved_card_cap_reached` instead of failing. The pass that first reaches the cap still finishes its move quota, so the folder settles at most one pass above 50 and then stops growing. The cap never merges, compacts or deletes an existing card, so every move the journal still records can still be undone exactly.
+
 **Where it shows.**
 
 - `brigade memory care tend --stage instructions --dry-run --json` prints one row per file (display path, loaders, class, bytes, limit and its source, act-at, trim-to, state, and any overflow cards the file does not name yet) and the loader totals. It also runs as part of a full `memory care tend`.

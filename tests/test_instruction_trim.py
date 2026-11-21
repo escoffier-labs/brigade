@@ -11,6 +11,7 @@ from brigade.guard.engine import scan_text
 from brigade.instruction_overflow import card_trust_problem
 from brigade.instruction_sections import KEEP, parse
 from brigade.instruction_trim import (
+    MAX_MOVED_CARDS_PER_FILE,
     AddedPointer,
     Limits,
     card_bytes,
@@ -135,6 +136,26 @@ def test_owner_smaller_file_moves_nothing():
     data = owner_user_md(sections=(("Voice & Communication", 651), ("Preferences (core)", 510)))
     plan = _plan(data)
     assert (len(data), plan.reason, plan.after, plan.runs) == (2869, "within", data, ())
+
+
+def test_a_file_at_the_moved_card_cap_creates_no_card():  # issue #2565
+    data = owner_user_md()
+    plan = _plan(data, moved_cards=MAX_MOVED_CARDS_PER_FILE)
+    assert plan.reason == "moved_card_cap_reached"
+    assert (plan.before, plan.after, plan.runs, plan.added, plan.skipped) == (data, data, (), (), ())
+    assert check(plan, {}, config_pins=(), today=TODAY, limits=LIMITS) == []
+
+
+def test_a_file_one_card_below_the_cap_still_moves():  # issue #2565
+    plan = _plan(owner_user_md(), moved_cards=MAX_MOVED_CARDS_PER_FILE - 1)
+    assert len(plan.runs) == 3
+    assert (len(plan.after), plan.reason) == (3660, "nothing-movable")
+
+
+def test_the_cap_leaves_a_due_overflow_pointer_waiting():  # issue #2565
+    data = owner_user_md()
+    plan = _plan(data, overflow=(PREF,), moved_cards=MAX_MOVED_CARDS_PER_FILE)
+    assert (plan.before, plan.after, plan.added, plan.reason) == (data, data, (), "moved_card_cap_reached")
 
 
 def test_renamed_pinned_heading_stops_the_file():
