@@ -3117,7 +3117,7 @@ class Stub {
         + ("Remove-Item -LiteralPath $ghExe\n" if case in {"unavailable", "legacy"} else "")
         + "function Invoke-CanonicalComponentSmoke { param($Paths)\n"
         + "foreach ($key in $keys) { if ([Environment]::GetEnvironmentVariable($key, 'Process')) { throw 'native credential leak' } }\n"
-        + "if (@(Get-Content -LiteralPath $env:FIXTURE_LOG).Count -ne 44) { throw 'smoke before four verifications' }\n"
+        + "if (@(Get-Content -LiteralPath $env:FIXTURE_LOG).Count -ne 52) { throw 'smoke before four verifications' }\n"
         + "Set-Content -LiteralPath $env:FIXTURE_SMOKE -Value 'smoked'\n"
         + ("throw 'fixture smoke failed'\n" if case == "smoke-failure" else "")
         + "}\ntry {\n"
