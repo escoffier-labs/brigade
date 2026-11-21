@@ -105,8 +105,22 @@ def _stat_fields(pid: int) -> list[bytes] | None:
     except OSError as exc:
         if isinstance(exc, (FileNotFoundError, ProcessLookupError)) or exc.errno in (errno.ENOENT, errno.ESRCH):
             return None
+        if isinstance(exc, PermissionError) and not _owned_by_us(pid):
+            # Under hidepid=1 another user's stat is unreadable. Such a process cannot be signalled
+            # by us, so it is not a member we could drain.
+            return None
         raise ProcessGroupUnreadable(f"cannot read the process table for {pid}") from exc
     return rest.split()
+
+
+def _owned_by_us(pid: int) -> bool:
+    """Whether ``/proc/<pid>`` belongs to this user. An unknown owner counts as ours, so it fails closed."""
+    try:
+        return os.stat(f"/proc/{pid}").st_uid == os.getuid()
+    except FileNotFoundError:
+        return False  # The process is gone, so there is nothing to drain.
+    except OSError:
+        return True
 
 
 def kill_group_members(pgid: int, sig: int) -> int:

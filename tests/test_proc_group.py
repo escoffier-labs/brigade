@@ -170,6 +170,35 @@ def test_a_stat_read_error_makes_the_group_unreadable(monkeypatch):
         process.wait(timeout=10)
 
 
+def test_another_users_unreadable_stat_is_skipped(monkeypatch):
+    """Under hidepid=1 another user's stat is unreadable. It cannot be an arm descendant, so skip it."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    target = f"/proc/{process.pid}/stat"
+    real_read_bytes = Path.read_bytes
+    real_stat = os.stat
+
+    def read_bytes(self):
+        if str(self) == target:
+            raise PermissionError(errno.EACCES, "denied")
+        return real_read_bytes(self)
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if str(path) == f"/proc/{process.pid}":
+            fields = list(result)
+            fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(proc_group.os, "stat", fake_stat)
+    try:
+        assert proc_group.group_member_pids(process.pid) == []
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+
+
 def test_clean_drain_records_descendants_reaped():
     """A group observed empty is confirmed gone, so the receipt says reaped."""
     result = proc.run(
