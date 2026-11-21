@@ -44,6 +44,7 @@ class FakeGh:
         self.runs: dict[str, list[dict[str, Any]]] = {}
         self.pulls: dict[int, dict[str, Any]] = {}
         self.calls: list[str] = []
+        self.overrides: dict[str, Any] = {}
         self._next_id = 1000
 
     def attest(
@@ -94,28 +95,37 @@ class FakeGh:
     def __call__(self, endpoint: str) -> Any:
         self.calls.append(endpoint)
         path, _, query = endpoint.partition("?")
+        params = dict(item.split("=") for item in query.split("&")) if query else {}
         parts = path.split("/")
         base = ["repos", *SLUG.split("/")]
         assert parts[:3] == base, endpoint
         rest = parts[3:]
+        for needle, answer in self.overrides.items():
+            if needle in endpoint:
+                return answer
         if not rest:
             return {"id": REPO_ID}
         if rest[:3] == ["actions", "workflows", A.ATTEST_WORKFLOW_FILE] and rest[3:] == ["runs"]:
-            sha = dict(item.split("=") for item in query.split("&"))["head_sha"]
-            return {"workflow_runs": [{k: v for k, v in run.items() if k != "_jobs"} for run in self.runs.get(sha, [])]}
+            rows = [{k: v for k, v in run.items() if k != "_jobs"} for run in self.runs.get(params["head_sha"], [])]
+            return self.page(rows, params, "workflow_runs")
         if rest[:2] == ["actions", "runs"] and rest[3] == "attempts" and rest[5:] == ["jobs"]:
             run_id, attempt = int(rest[2]), int(rest[4])
             for runs in self.runs.values():
                 for run in runs:
                     if run["id"] == run_id:
-                        return {"jobs": run["_jobs"].get(attempt, [])}
-            return {"jobs": []}
+                        return self.page(run["_jobs"].get(attempt, []), params, "jobs")
+            return self.page([], params, "jobs")
         if rest[0] == "pulls" and len(rest) == 2:
             return {"head": {"sha": self.pulls[int(rest[1])]["head"]}}
         if rest[0] == "pulls" and rest[2:] == ["reviews"]:
-            page = int(dict(item.split("=") for item in query.split("&")).get("page", "1"))
-            return self.pulls[int(rest[1])]["reviews"] if page == 1 else []
+            size, number = int(params.get("per_page", "100")), int(params.get("page", "1"))
+            return self.pulls[int(rest[1])]["reviews"][(number - 1) * size : number * size]
         raise AssertionError(f"the ledger may not read {endpoint}")
+
+    @staticmethod
+    def page(rows: list[dict[str, Any]], params: dict[str, str], key: str) -> dict[str, Any]:
+        size, number = int(params.get("per_page", "100")), int(params.get("page", "1"))
+        return {"total_count": len(rows), key: rows[(number - 1) * size : number * size]}
 
 
 class World:
@@ -345,11 +355,27 @@ def test_an_attempt_finished_after_the_cutoff_is_ignored():
     assert trial(gh) is None
 
 
-@pytest.mark.parametrize("conclusion", ["cancelled", "skipped", "timed_out", "neutral", "action_required"])
-def test_cancelled_skipped_and_timed_out_jobs_count_for_nothing(conclusion):
+@pytest.mark.parametrize("conclusion", ["cancelled", "skipped", "neutral", "action_required"])
+def test_cancelled_and_skipped_jobs_count_for_nothing(conclusion):
     gh = FakeGh()
     gh.attest(SHA, [(conclusion, "2026-11-22T00:10:00Z")])
     assert trial(gh) is None
+
+
+def test_a_timed_out_job_is_a_hurt_trial_like_a_failure():
+    """A worse revision that hangs instead of failing must still be rolled back."""
+    gh = FakeGh()
+    gh.attest(SHA, [("timed_out", "2026-11-22T00:10:00Z")])
+    found = trial(gh)
+    assert found is not None and found["outcome"] == "hurt"
+    gh = FakeGh()
+    gh.attest(SHA, [("timed_out", "2026-11-22T00:10:00Z")], [("success", "2026-11-22T00:20:00Z")])
+    found = trial(gh)
+    assert found is not None and found["outcome"] == "hurt"
+    gh = FakeGh()
+    gh.attest(SHA, [("cancelled", "2026-11-22T00:10:00Z")], [("success", "2026-11-22T00:20:00Z")])
+    found = trial(gh)
+    assert found is not None and found["outcome"] == "helped"
 
 
 def test_an_unfinished_job_is_not_a_trial():
@@ -479,7 +505,7 @@ def test_genesis_ledger_recomputes_without_a_previous_ledger(world):
         prev_raw=None, covers=world.c0, approved=(world.approved_row(world.c0),), cutoff=T % (21, "00:00:00Z")
     )
     world.propose(raw, world.c0)
-    assert world.verify(raw, None) == []
+    assert world.verify(raw, None, now=dt.datetime(2026, 11, 21, 1, 0, tzinfo=dt.timezone.utc)) == []
 
 
 def test_a_hand_edited_ledger_fails(world, promoted):

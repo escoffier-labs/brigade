@@ -1297,7 +1297,8 @@ jobs:
           fi
 
   # Rebuilds outcome-ledger/skills.json from trusted main and fails on any difference
-  # (#2589). Never docs-skipped: a ledger edit is data, and the check must see it. The
+  # (#2589). A push to main is checked too, against the ledger the push replaced.
+  # Never docs-skipped: a ledger edit is data, and the check must see it. The
   # logic comes from a copy of main's tree, never from the proposal, the way the hub
   # selector does. The proposal's ledger is read as data only.
   ledger-recompute:
@@ -1320,6 +1321,12 @@ jobs:
           git fetch --no-tags --no-recurse-submodules origin '+refs/heads/main:refs/ci-trusted/main'
           trusted=$(git rev-parse --verify 'refs/ci-trusted/main^{commit}')
           if ! git cat-file -e "$trusted:scripts/ledger_recompute.py" 2>/dev/null; then
+            # The bootstrap pass is only for the change that introduces the logic. Once main
+            # carries a ledger, a missing script is a removed check, never a reason to pass.
+            if git cat-file -e "$trusted:outcome-ledger/skills.json" 2>/dev/null; then
+              echo "Trusted main has an outcome ledger but no scripts/ledger_recompute.py. The check was removed, so this fails." >&2
+              exit 1
+            fi
             echo "Trusted main has no ledger recompute logic yet, so there is nothing to recompute against."
             exit 0
           fi

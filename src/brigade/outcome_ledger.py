@@ -14,6 +14,11 @@ functions read, and adds the two ledger rules they do not know about:
 - New skill text that was never approved cannot be promoted. It waits for owner approval.
 - A regression restores the last approved text. Restoring is a rollback, not a hold.
 
+Trial evidence is append only. A ledger keeps the trials of the previous ledger for every
+commit it already covered, and reads the Actions API only for newer commits. Runs and jobs
+expire with Actions retention, so rebuilding old trials from the API would let a failure
+vanish and a regressed text promote.
+
 Trials come only from ``outcome_ledger_actions`` (Actions API jobs, never check runs).
 Git reads come only from ``outcome_ledger_git`` (commit ids, never a working tree).
 """
@@ -34,9 +39,9 @@ from .outcome_ledger_actions import (
     has_completed_verdict,
     owner_review_ok,
     parse_time,
-    trial_for_commit,
+    push_tip_evidence,
 )
-from .outcome_ledger_git import GitError, Repo, bundle_fingerprint, is_sha
+from .outcome_ledger_git import Repo, bundle_fingerprint, is_sha
 
 SCHEMA = "brigade.outcome_ledger.v1"
 LEDGER_PATH = "outcome-ledger/skills.json"
@@ -49,6 +54,11 @@ OWNER_LOGINS = ("solomonneas",)
 BASES = ("release", "owner_review")
 STATUSES = ("candidate", "promoted", "demoted")
 CLOCK_SKEW = dt.timedelta(minutes=5)
+# How far behind the check's clock a ledger's cutoff may sit. A writer that runs at least
+# daily rebuilds well inside a day, and a pull request normally merges the same day, so a
+# day is room for an overnight wait. The completeness check is the real defense against a
+# parked cutoff. This bound only keeps a ledger from sitting on old evidence.
+MAX_LEDGER_AGE = dt.timedelta(hours=24)
 
 
 class LedgerError(Exception):
@@ -298,34 +308,62 @@ def _load_manifest(repo: Repo, commit: str, definition: SubjectDef) -> tuple[ver
 
 
 def _snapshot_fingerprint(repo: Repo, commit: str, directory: str) -> str | None:
-    try:
-        return bundle_fingerprint(repo.snapshot(commit, directory))
-    except GitError:
-        return None
+    """The bundle fingerprint at ``commit``, or None when the directory holds no skill content.
+
+    A bundle that exists but cannot be read (a symlink, a missing blob, a failed git read)
+    raises ``GitError`` instead of reading as absent.
+    """
+    return bundle_fingerprint(repo.snapshot(commit, directory))
+
+
+def _seed_for(prev: Mapping[str, Any] | None, key: str, pin: str) -> tuple[list[dict[str, Any]], str | None]:
+    """The trials carried forward from the previous ledger, and the commit they are complete up to.
+
+    Carried trials count only while the manifest is unchanged, the same rule that restarts
+    the count when a manifest is edited. The boundary is kept either way, so evidence for
+    commits the previous ledger covered is never read again.
+    """
+    if prev is None:
+        return [], None
+    before = prev["subjects"].get(key) or {}
+    rows = before.get("trials") if before.get("manifest_sha256") == pin else []
+    return [dict(row) for row in rows or [] if isinstance(row, dict)], prev["covers"]["main_sha"]
 
 
 def collect_trials(
     ev: Evidence,
     definition: SubjectDef,
-    manifest: verify_manifest.VerifyManifest,
     pin: str,
     covers: str,
     cutoff: dt.datetime,
+    *,
+    seed: Sequence[Mapping[str, Any]] = (),
+    seed_tip: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Trials on main commits after ``since_commit`` that touched the manifest scope under the pinned manifest."""
+    """Trials for main commits after ``since_commit`` under the pinned manifest.
+
+    ``seed`` holds the trials already recorded for commits up to ``seed_tip``. Only newer
+    commits are asked about. A trial belongs to the tip of a push, because ``outcome-attest``
+    runs once per push and its job carries the head of the whole push range. A hurt verdict
+    on a tip that did not itself touch the manifest scope is still a trial for that tip.
+    """
     directory = skill_dir(definition.subject_path)
-    trials: list[dict[str, Any]] = []
-    for sha, paths in ev.repo.first_parent_touching(definition.since_commit, covers):
-        if not any(verify_manifest.path_in_manifest_scope(manifest, path) for path in paths):
+    trials = [dict(row) for row in seed]
+    chain = ev.repo.first_parent(definition.since_commit, covers)
+    if seed_tip is not None:
+        if seed_tip in chain:
+            chain = chain[chain.index(seed_tip) + 1 :]
+        else:
+            chain = [sha for sha in chain if not ev.repo.is_ancestor(sha, seed_tip)]
+    for sha in chain:
+        _is_tip, trial = push_tip_evidence(ev.gh, ev.slug, ev.repo_id, definition.manifest_id, sha, cutoff)
+        if trial is None:
             continue
         at_commit = ev.repo.show(sha, f"{MANIFESTS_DIR}/{definition.manifest_id}.json")
         if at_commit is None or sha256_hex(at_commit) != pin:
             continue
         fingerprint = _snapshot_fingerprint(ev.repo, sha, directory)
-        if fingerprint is None:
-            continue
-        trial = trial_for_commit(ev.gh, ev.slug, ev.repo_id, definition.manifest_id, sha, cutoff)
-        if trial is not None:
+        if fingerprint is not None:
             trials.append({"fingerprint": fingerprint, **trial})
     return trials
 
@@ -350,11 +388,12 @@ def build_ledger(
     for key in sorted(definitions):
         definition = definitions[key]
         directory = skill_dir(definition.subject_path)
-        manifest, pin = _load_manifest(ev.repo, covers_sha, definition)
+        _manifest, pin = _load_manifest(ev.repo, covers_sha, definition)
         fingerprint = _snapshot_fingerprint(ev.repo, covers_sha, directory)
         if fingerprint is None:
             raise LedgerError(f"{key}: skill bundle is missing at {covers_sha[:12]}")
-        trials = collect_trials(ev, definition, manifest, pin, covers_sha, cutoff)
+        seed, seed_tip = _seed_for(prev, key, pin)
+        trials = collect_trials(ev, definition, pin, covers_sha, cutoff, seed=seed, seed_tip=seed_tip)
         before = prev_subjects.get(key) or {}
         demoted: list[str] = list(before.get("demoted", []))
         same_cohort = (before.get("current") or {}).get("fingerprint") == fingerprint
@@ -489,9 +528,16 @@ def verify_ledger(
     owners: Sequence[str] = OWNER_LOGINS,
     config: outcome_core.ReconcileConfig | None = None,
     on_stage: Callable[[str], None] | None = None,
+    landed: bool = False,
 ) -> list[str]:
-    """Recompute the ledger from trusted inputs and return every reason ``raw`` is not it. Empty means valid."""
+    """Recompute the ledger from trusted inputs and return every reason ``raw`` is not it. Empty means valid.
+
+    ``landed`` is for a change already on main. Other commits may have merged alongside it and
+    the pull request is over, so the age limit and the rule on which paths a change may touch no
+    longer apply. Every rule about the ledger itself still does, restored bundle included.
+    """
     stage = on_stage or (lambda _name: None)
+    ev = dataclasses.replace(ev, gh=_memoized(ev.gh))
     try:
         proposed = parse_ledger(raw)
     except LedgerError as exc:
@@ -519,6 +565,8 @@ def verify_ledger(
         covers_time = parse_time(repo.commit_time(covers))
         if covers_time is None or cutoff < covers_time or cutoff > now + CLOCK_SKEW:
             errors.append("cutoff_at is outside the allowed window")
+        elif not landed and now - cutoff > MAX_LEDGER_AGE:
+            errors.append("cutoff_at is older than the allowed ledger age")
         if proposed.get("policy") != policy_block(config or outcome_core.ReconcileConfig()):
             errors.append("policy differs from the trusted scoring policy")
         definitions = defs_from_ledger(proposed)
@@ -537,15 +585,16 @@ def verify_ledger(
             if not repo.is_ancestor(definition.since_commit, covers):
                 errors.append(f"{key}: since_commit is not in main history")
             errors += _approved_errors(ev, key, definition, previous, covers, context, owners)
+            if before and prev is not None:
+                errors += _trial_history_errors(
+                    repo, key, before, proposed["subjects"][key], prev["covers"]["main_sha"]
+                )
         if errors:
             return errors
         stage("stale")
         for key, definition in definitions.items():
-            manifest, _pin = _load_manifest(repo, covers, definition)
-            for sha, paths in repo.first_parent_touching(covers, main_sha):
-                if any(
-                    verify_manifest.path_in_manifest_scope(manifest, path) for path in paths
-                ) and has_completed_verdict(ev.gh, ev.slug, ev.repo_id, definition.manifest_id, sha, now):
+            for sha in repo.first_parent(covers, main_sha):
+                if has_completed_verdict(ev.gh, ev.slug, ev.repo_id, definition.manifest_id, sha, now):
                     return [f"{key}: ledger is stale, main commit {sha[:12]} already has a completed attest verdict"]
         stage("rebuild")
         expected = build_ledger(
@@ -559,15 +608,81 @@ def verify_ledger(
         )
         if canonical_bytes(expected) != raw:
             errors.append("ledger differs from the recomputed ledger")
+        stage("complete")
+        errors += _completeness_errors(ev, definitions, expected, prev, covers, now)
         stage("paths")
         base = repo.merge_base(main_sha, head_sha)
-        errors += _path_errors(repo, expected, base, head_sha)
+        errors += _path_errors(repo, expected, base, head_sha, any_other_path=landed)
     except Exception as exc:  # noqa: BLE001 - any failed read must fail the check closed
         errors.append(f"recompute could not finish: {type(exc).__name__}: {str(exc)[:200]}")
     return errors
 
 
-def _path_errors(repo: Repo, expected: Mapping[str, Any], base: str, head: str) -> list[str]:
+def _memoized(gh: GhApi) -> GhApi:
+    """Answer a repeated endpoint once. A read that raises is not remembered."""
+    seen: dict[str, Any] = {}
+
+    def read(endpoint: str) -> Any:
+        if endpoint not in seen:
+            seen[endpoint] = gh(endpoint)
+        return seen[endpoint]
+
+    return read
+
+
+def _trial_history_errors(
+    repo: Repo, key: str, before: Mapping[str, Any], after: Mapping[str, Any], prev_tip: str
+) -> list[str]:
+    """Trials for commits the previous ledger covered are evidence now. They may not change."""
+    if after.get("manifest_sha256") != before.get("manifest_sha256"):
+        return []
+    old = before.get("trials")
+    new = after.get("trials")
+    if not (isinstance(old, list) and isinstance(new, list)):
+        return [f"{key}: trials must be a list"]
+    kept = []
+    for row in new:
+        if not (isinstance(row, dict) and is_sha(row.get("sha"))):
+            return [f"{key}: a trial row is malformed"]
+        if repo.is_ancestor(row["sha"], prev_tip):
+            kept.append(row)
+    if kept != old:
+        return [f"{key}: trials for commits the previous ledger covered may not change"]
+    return []
+
+
+def _completeness_errors(
+    ev: Evidence,
+    definitions: Mapping[str, SubjectDef],
+    expected: Mapping[str, Any],
+    prev: Mapping[str, Any] | None,
+    covers: str,
+    now: dt.datetime,
+) -> list[str]:
+    """Fail when the evidence as of ``now`` holds a verdict the ledger lacks or reads differently.
+
+    The ledger's own ``cutoff_at`` cannot decide what counts, or a cutoff set before a failed
+    verdict would hide it. One direction only: a verdict the ledger has and the API no longer
+    returns (expired Actions evidence) is fine, so old evidence cannot deadlock the check.
+    """
+    errors: list[str] = []
+    for key, definition in definitions.items():
+        body = expected["subjects"][key]
+        recorded = {row["sha"]: row["outcome"] for row in body["trials"]}
+        seed, seed_tip = _seed_for(prev, key, body["manifest_sha256"])
+        current = collect_trials(ev, definition, body["manifest_sha256"], covers, now, seed=seed, seed_tip=seed_tip)
+        for row in current:
+            if recorded.get(row["sha"]) != row["outcome"]:
+                errors.append(
+                    f"{key}: ledger is stale, commit {row['sha'][:12]} has a {row['outcome']} attest verdict "
+                    "the ledger does not record"
+                )
+    return errors
+
+
+def _path_errors(
+    repo: Repo, expected: Mapping[str, Any], base: str, head: str, *, any_other_path: bool = False
+) -> list[str]:
     """A ledger change may touch the ledger file and the restored bundle, and nothing else."""
     errors: list[str] = []
     restores = {
@@ -575,7 +690,7 @@ def _path_errors(repo: Repo, expected: Mapping[str, Any], base: str, head: str) 
     }
     bundle_dirs = {skill_dir(expected["subjects"][key]["subject_path"]) + "/": row for key, row in restores.items()}
     for path in repo.changed_paths(base, head):
-        if path == LEDGER_PATH:
+        if any_other_path or path == LEDGER_PATH:
             continue
         if any(path.startswith(prefix) for prefix in bundle_dirs):
             continue

@@ -105,11 +105,11 @@ The first subject is the bundled `note` skill (`verify/manifests/skill-note.json
 | Field | Meaning |
 | --- | --- |
 | `approved` | Texts the ledger accepts, oldest first and append only. Each entry has the bundle `fingerprint`, the `skill_md_sha256`, the `commit` the bytes come from, and a `basis`. |
-| `trials` | One row per main commit that touched the manifest scope and finished a verdict. Each row has the bundle fingerprint at that commit and the CI jobs behind it. |
+| `trials` | One row per main commit that is the tip of a push with a finished verdict. Each row has the bundle fingerprint at that commit and the CI jobs behind it. Rows for commits an earlier ledger covered are carried forward unchanged. |
 | `current`, `status`, `band` | The text on main at `covers.main_sha`, its status (`candidate`, `promoted` or `demoted`) and its band. |
 | `decision`, `restore` | The action the rule chose, and when it is a rollback, the approved text to put back. |
 | `demoted` | Fingerprints that were promoted and then regressed. They never promote again. |
-| `covers` | The main commit and the `cutoff_at` time the ledger reflects. Only jobs finished by the cutoff count. |
+| `covers` | The main commit and the `cutoff_at` time the ledger reflects. Only jobs finished by the cutoff go into the rebuild, but the cutoff does not decide what the check treats as complete. See the required check below. |
 
 The identity of a text is the bundle fingerprint, the same sha256 `SubjectRef.content_fingerprint` carries. The commit is provenance and the place the bytes are recovered from. An approved entry has basis `release` when its `SKILL.md` digest is a tagged text in the shipped file history, or `owner_review` when an owner approved it on a merged pull request.
 
@@ -117,9 +117,15 @@ The identity of a text is the bundle fingerprint, the same sha256 `SubjectRef.co
 
 A trial comes from a job of the `outcome-attest` workflow run, read from the Actions API. Check runs and commit statuses are never read. Jobs belong to a workflow run and cannot be created through the checks API, so a forged check run does not become a trial.
 
-A run counts only when GitHub reports all of these: the workflow path `.github/workflows/outcome-attest.yml`, the `push` event, the `main` branch, the commit in question, and the same repository id for the run and its head repository. A run that fails any of them is rejected. The ledger reads the jobs of every attempt. A trial is the job named `outcome-attest/<manifest>`. If any attempt failed, the commit is a hurt trial, so a rerun cannot launder a failure. Cancelled, skipped and timed-out jobs count for nothing.
+A run counts only when GitHub reports all of these: the workflow path `.github/workflows/outcome-attest.yml`, the `push` event, the `main` branch, the commit in question, and the same repository id for the run and its head repository. A run that fails any of them is rejected. The ledger reads the jobs of every attempt. A trial is the job named `outcome-attest/<manifest>`. If any attempt failed or timed out, the commit is a hurt trial, so a rerun cannot launder a failure and a revision that hangs is rolled back like one that fails. Cancelled and skipped jobs count for nothing.
+
+`outcome-attest` plans over the whole range of one push and runs once, so its job carries the head commit of that range. The ledger therefore attributes a trial to the tip of a push, not to each commit in it. A two commit push where only the first commit touches the manifest scope still gives one trial, for the second commit, and a failure there is never lost.
 
 A trial counts only while the manifest bytes at its commit equal the manifest at the covered commit. Editing a manifest restarts the count under the new manifest.
+
+Every read fails closed. A response that is not the expected shape, a page that ends before `total_count`, a finished job with no readable verdict, and a run with more attempts than the ledger reads (50) all stop the build and the check. None of them reads as "no runs".
+
+Trials are append only evidence. Actions deletes runs and jobs after its retention period, so a ledger never rebuilds an old trial from the API. It keeps the trials of the previous ledger for every commit that ledger covered and asks the API only about newer commits. The check verifies that the trials for older commits are exactly the previous ledger's.
 
 ### The decision rule
 
@@ -142,10 +148,15 @@ For a change that does, the check requires all of these:
 1. `prev_ledger_sha256` equals the hash of the ledger on main, so history stays linear.
 2. `covers.main_sha` is in main's history and no later main commit already has a finished verdict. A stale ledger is rejected and the writer rebuilds it.
 3. The ledger equals the rebuild byte for byte. The rebuild uses only jobs finished by `cutoff_at`.
-4. `approved` is append only. Every entry matches git history at its commit, `release` entries match the shipped file history, and `owner_review` entries have the review described below.
-5. The change touches the ledger file and a restored skill bundle, and nothing else. A ledger pull request that also touches `scripts/`, `src/brigade/outcome_ledger*`, `.github/workflows/` or `verify/manifests/` is rejected.
+4. The ledger is complete as of the check's own clock, not the ledger's. Every trial the API holds now for a commit up to and including `covers.main_sha` must appear in the ledger with the same outcome. A cutoff placed before a failed verdict cannot hide it. The comparison runs one way, so a trial that is recorded but has since expired from the API does not fail the check.
+5. `cutoff_at` is not earlier than the `covers` commit time, not in the future, and at most 24 hours behind the check's clock. The writer runs at least daily and a pull request normally merges the same day, so a day leaves room for an overnight wait.
+6. Trials for commits the previous ledger covered equal the previous ledger's trials exactly.
+7. `approved` is append only. Every entry matches git history at its commit, `release` entries match the shipped file history, and `owner_review` entries have the review described below.
+8. The change touches the ledger file and a restored skill bundle, and nothing else. A ledger pull request that also touches `scripts/`, `src/brigade/outcome_ledger*`, `.github/workflows/` or `verify/manifests/` is rejected.
 
-The bootstrap exception is narrow. While main has no `scripts/ledger_recompute.py`, the job passes with a notice. That is true only for the change that introduces the logic.
+A push to main is checked as well. The ledger at the pushed commit is verified against the ledger at the commit before it, with the same rules, except that the age limit and the touched paths rule do not apply because the pull request is over and other changes may have merged in the same push. A push that leaves the ledger alone passes, and so does the first push that introduces a ledger, because there is no earlier ledger to build on.
+
+The bootstrap exception is narrow. While main has neither `scripts/ledger_recompute.py` nor `outcome-ledger/skills.json`, the job passes with a notice. That is true only for the change that introduces the logic. Once main has a ledger, a main without the script fails the job.
 
 ### Owner review
 

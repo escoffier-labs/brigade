@@ -84,11 +84,10 @@ class Repo:
         epoch = int(self._run("show", "-s", "--format=%ct", commit).stdout.decode("ascii").strip())
         return _utc_text(epoch)
 
-    def first_parent_touching(self, since_exclusive: str, tip: str) -> list[tuple[str, list[str]]]:
-        """Commits on the first-parent chain ``since..tip``, oldest first, with the paths each changed."""
+    def first_parent(self, since_exclusive: str, tip: str) -> list[str]:
+        """Commits on the first-parent chain ``since..tip``, oldest first. ``tip`` is included."""
         listing = self._run("rev-list", "--first-parent", "--reverse", f"{since_exclusive}..{tip}").stdout
-        shas = [line for line in listing.decode("ascii").split() if is_sha(line)]
-        return [(sha, self.changed_paths(f"{sha}^", sha)) for sha in shas]
+        return [line for line in listing.decode("ascii").split() if is_sha(line)]
 
     def changed_paths(self, base: str, head: str) -> list[str]:
         out = self._run("diff", "--name-only", "--no-renames", "-z", base, head).stdout
