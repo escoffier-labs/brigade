@@ -8,6 +8,7 @@ the implementation, and ``authority_store`` re-branches on its own names.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import importlib
 import os
@@ -16,6 +17,9 @@ import stat
 import sys
 from pathlib import Path
 from typing import Any
+
+# renameat2 flag for "fail if the destination exists".
+_RENAME_NOREPLACE = 1
 
 
 def _nt_dirfd() -> Any:
@@ -442,6 +446,40 @@ def tree_removal_available() -> bool:
     return posix_available() and bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
 
 
+def pin_available() -> bool:
+    """Whether ``/proc/self/fd`` can pin a child process to a held directory."""
+    return posix_available() and sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir()
+
+
+# A directory tree deeper than this is refused rather than walked recursively.
+MAX_REMOVE_DEPTH = 512
+
+
+def remove_directory_contents(descriptor: int, *, depth: int = 0) -> None:
+    """Remove every entry under a held directory, never following a link.
+
+    The descriptor is the object, not the name, so a rename that swaps
+    another tree into the path cannot redirect the deletion. Directories are
+    opened no-follow and emptied through their own descriptor, then removed
+    with ``rmdir`` relative to this one. Anything that cannot be opened as a
+    plain directory is unlinked as a single entry.
+    """
+    if depth > MAX_REMOVE_DEPTH:
+        raise OSError(errno.ELOOP, "directory tree is too deep to remove")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    for name in [entry.name for entry in os.scandir(descriptor)]:
+        try:
+            child = os.open(name, directory_flags(), dir_fd=descriptor)
+        except OSError:
+            os.unlink(name, dir_fd=descriptor)
+            continue
+        try:
+            remove_directory_contents(child, depth=depth + 1)
+        finally:
+            os.close(child)
+        os.rmdir(name, dir_fd=descriptor)
+
+
 def remove_tree_child(parent: int, name: str) -> None:
     """Remove a child directory and everything under it, relative to its held parent.
 
@@ -485,6 +523,68 @@ def rename_file_child(source_parent: int, source: str, destination_parent: int, 
         )
         return
     raise unavailable("file moves")
+
+
+def rename_child_noreplace(source_parent: int, source: str, destination_parent: int, destination: str) -> None:
+    """Move a child to a free name, never replacing whatever is already there.
+
+    Linux uses ``renameat2(RENAME_NOREPLACE)``. Windows uses a no-replace
+    handle rename. Other POSIX systems link the source to `destination`, which
+    fails if anything exists there, then unlink the source name only while it
+    is still the linked object. Directories cannot be hard-linked, so those
+    systems refuse a directory move instead of replacing an entry.
+    """
+    _validate_child_component(source)
+    _validate_child_component(destination)
+    if posix_available():
+        if _renameat2_noreplace(source_parent, source, destination_parent, destination):
+            return
+        os.link(
+            source,
+            destination,
+            src_dir_fd=source_parent,
+            dst_dir_fd=destination_parent,
+            follow_symlinks=False,
+        )
+        linked = stat_child(destination_parent, destination)
+        try:
+            current = stat_child(source_parent, source)
+        except FileNotFoundError:
+            return
+        if (current.st_dev, current.st_ino) == (linked.st_dev, linked.st_ino):
+            os.unlink(source, dir_fd=source_parent)
+        return
+    if nt_available():
+        _nt_dirfd().replace_children(
+            source_parent, source, destination, replace=False, destination_parent=destination_parent
+        )
+        return
+    raise unavailable("directory moves")
+
+
+def _renameat2_noreplace(source_parent: int, source: str, destination_parent: int, destination: str) -> bool:
+    """Linux renameat2(RENAME_NOREPLACE). False when the call is unavailable."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        function = ctypes.CDLL(None, use_errno=True).renameat2
+    except (OSError, AttributeError):
+        return False
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    code = function(
+        source_parent,
+        os.fsencode(source),
+        destination_parent,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    )
+    if code == 0:
+        return True
+    error = ctypes.get_errno()
+    if error in (errno.ENOSYS, errno.EINVAL):
+        return False
+    raise OSError(error, os.strerror(error), destination)
 
 
 def fsync_directory(descriptor: int) -> None:
