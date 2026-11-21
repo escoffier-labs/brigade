@@ -1600,9 +1600,11 @@ def test_beta_update_resolves_and_installs_brigadestack_even_on_a_brigade_cli_in
     )
     assert result == 0
     assert commands[0] == ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"]
-    # The old app goes last, after the new one owns `brigade` and setup ran.
-    assert commands[-1] == ["pipx", "uninstall", "brigade-cli"]
-    assert len(commands) == 3
+    # The old app goes after the new one owns `brigade` and setup ran, then the new app is
+    # installed again because copy-mode pipx (Windows) removes `brigade` by name.
+    assert commands[2] == ["pipx", "uninstall", "brigade-cli"]
+    assert commands[3] == commands[0]
+    assert len(commands) == 4
     assert update_cmd.PYPI_PROJECT_JSON_URL == "https://pypi.org/pypi/brigadestack/json"
 
 
@@ -1627,6 +1629,29 @@ def test_beta_update_keeps_the_new_install_when_removing_the_old_app_fails(tmp_p
     assert result == 0
     assert commands[-1] == ["pipx", "uninstall", "brigade-cli"]
     assert "pipx uninstall brigade-cli" in capsys.readouterr().err
+
+
+def test_beta_update_fails_loudly_when_the_restoring_install_fails(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    manifest = _manifest()
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        # The first install and setup succeed, the uninstall succeeds, the restore fails.
+        return 1 if len(commands) == 4 else 0
+
+    result = update_cmd.run_update(
+        channel="beta",
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=_PypiHttp(_release(manifest), manifest),
+        runner=runner,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+    assert result == 1
+    assert "could not restore brigadestack" in capsys.readouterr().err
 
 
 def test_beta_update_of_a_brigadestack_install_removes_nothing(tmp_path, monkeypatch):

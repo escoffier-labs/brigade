@@ -72,6 +72,12 @@ def test_compat_package_depends_on_exactly_the_root_version_and_declares_its_own
         "brigade-cli": "brigade.cli:process_main",
         "brigade-hook": "brigade.claude_hooks.entry:main",
     }
+    # Every user-facing extra of the real package is forwarded at the same exact version,
+    # so pins like `brigade-cli[connector]==X` keep installing the extra's dependencies.
+    user_extras = set(root["optional-dependencies"]) - {"dev"}
+    assert project["optional-dependencies"] == {
+        extra: [f"brigadestack[{extra}]=={root['version']}"] for extra in sorted(user_extras)
+    }
     # No discovery of a second brigade package or alternate implementation.
     assert manifest["tool"]["setuptools"]["packages"] == []
     assert manifest["tool"]["setuptools"]["py-modules"] == []

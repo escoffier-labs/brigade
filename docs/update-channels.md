@@ -24,10 +24,10 @@ Development wheels are not promoted to stable and PyPI's default resolver does n
 Install a chosen daily build with an exact version pin:
 
 ```bash
-pipx install 'brigade-cli==0.28.0.dev20260907'
+pipx install 'brigadestack==0.32.0.dev20261120'
 ```
 
-The same pin works with `pip install 'brigade-cli==0.28.0.dev20260907'`. Bare
+The same pin works with `pip install 'brigadestack==0.32.0.dev20261120'`. Bare
 `pipx install brigadestack` or `pip install brigadestack` resolves the latest stable
 release only; prerelease wheels are never selected as `latest`.
 
@@ -37,9 +37,9 @@ depends on exactly `brigadestack==X.Y.Z` and installs the same `brigade` command
 installed with: an app named `brigade-cli` is reinstalled as `brigade-cli==X.Y.Z`
 (which pulls `brigadestack==X.Y.Z`), and any other install uses `brigadestack`.
 Development wheels are published only as `brigadestack`, so `brigade update --channel beta`
-always installs `brigadestack`. On a machine whose pipx app is named `brigade-cli`, that
-creates a separate `brigadestack` pipx app, so switch such a machine with
-`pipx uninstall brigade-cli` first.
+always installs `brigadestack`. On a machine whose pipx app is named `brigade-cli`, the beta
+update installs `brigadestack`, runs setup, removes the `brigade-cli` app, and installs
+`brigadestack` once more so its `brigade` command survives on systems where pipx copies apps.
 
 Run `brigade update` for the production default. `brigade update --channel beta`
 selects the newest non-yanked exact `0.32.0.devYYYYMMDD` wheel for the `0.32`

@@ -16,6 +16,12 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+# Forward the extras the package carried before 0.32, so `brigade-cli[connector]` pins keep working.
+[project.optional-dependencies]
+connector = ["brigadestack[connector]==0.32.0"]
+grokbot = ["brigadestack[grokbot]==0.32.0"]
+research = ["brigadestack[research]==0.32.0"]
+
 [project.urls]
 Homepage = "https://brigadestack.com"
 Documentation = "https://brigade.tools/docs"

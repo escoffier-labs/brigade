@@ -68,10 +68,10 @@ PLUGIN_LOCATIONS = [
     ("plugins/brigade/.mcp.json", r'"@escoffier-labs/brigade@([^"]+)"'),
     ("plugins/brigade/codex.mcp.json", r'"@escoffier-labs/brigade@([^"]+)"'),
 ]
-# The brigade-cli compatibility package: its own version and its exact brigadestack pin.
+# The brigade-cli compatibility package: its own version and its exact brigadestack pins (base and forwarded extras).
 COMPAT_PACKAGE_LOCATIONS = [
     ("distribution/brigade-cli/pypi/pyproject.toml", r'(?m)^version\s*=\s*"([^"]+)"'),
-    ("distribution/brigade-cli/pypi/pyproject.toml", r'"brigadestack==([^"]+)"'),
+    ("distribution/brigade-cli/pypi/pyproject.toml", r'"brigadestack(?:\[[a-z]+\])?==([^"]+)"'),
 ]
 # ---------------------------------------------------------------------------
 
