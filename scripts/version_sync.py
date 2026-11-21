@@ -8,8 +8,10 @@ from the ``[project].version`` source of truth:
   - ``src/brigade/__init__.py``      -> ``__version__ = "X"``
   - ``src/brigade/templates/**/*.json`` -> ``"_brigade_version": "X"``
   - ``mcp-registry/*/server.json``    -> ``"version": "X"`` (server and package)
-  - ``distribution/brigade-cli/pypi/pyproject.toml`` -> the compatibility package
+  - ``distribution/brigade-cli/pypi/pyproject.toml`` -> the PyPI compatibility package
                                         version and its ``brigadestack==X`` pin
+  - ``distribution/escoffier-labs-brigade/npm/package.json`` -> the npm compatibility
+                                        package version and its ``brigadestack`` pin
   - recorded demo assets             -> a ``brigade X.Y.Z`` token baked into the
                                         rendered frames (``.cast`` and ``.svg``)
 
@@ -61,17 +63,20 @@ RECORDINGS = [
     ("docs/assets/quickstart.cast", r"brigade (\d+\.\d+\.\d+)"),
     ("docs/assets/quickstart.svg", r">brigade</text><text[^>]*>(\d+\.\d+\.\d+)</text>"),
 ]
-# The agent plugin manifests and the npm pin their MCP configs launch.
+# The agent plugin manifests and the npm package their MCP configs launch.
 PLUGIN_LOCATIONS = [
     ("plugins/brigade/.claude-plugin/plugin.json", r'"version"\s*:\s*"([^"]+)"'),
     ("plugins/brigade/.codex-plugin/plugin.json", r'"version"\s*:\s*"([^"]+)"'),
-    ("plugins/brigade/.mcp.json", r'"@escoffier-labs/brigade@([^"]+)"'),
-    ("plugins/brigade/codex.mcp.json", r'"@escoffier-labs/brigade@([^"]+)"'),
+    ("plugins/brigade/.mcp.json", r'"brigadestack@([^"]+)"'),
+    ("plugins/brigade/codex.mcp.json", r'"brigadestack@([^"]+)"'),
 ]
-# The brigade-cli compatibility package: its own version and its exact brigadestack pins (base and forwarded extras).
+# The compatibility packages: each one's own version and its exact brigadestack pins.
+# PyPI brigade-cli pins the base and the forwarded extras. npm @escoffier-labs/brigade pins one dependency.
 COMPAT_PACKAGE_LOCATIONS = [
     ("distribution/brigade-cli/pypi/pyproject.toml", r'(?m)^version\s*=\s*"([^"]+)"'),
     ("distribution/brigade-cli/pypi/pyproject.toml", r'"brigadestack(?:\[[a-z]+\])?==([^"]+)"'),
+    ("distribution/escoffier-labs-brigade/npm/package.json", r'(?m)^  "version"\s*:\s*"([^"]+)"'),
+    ("distribution/escoffier-labs-brigade/npm/package.json", r'"brigadestack"\s*:\s*"([^"]+)"'),
 ]
 # ---------------------------------------------------------------------------
 

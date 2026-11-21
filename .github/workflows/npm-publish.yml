@@ -284,7 +284,7 @@ jobs:
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
       - name: Full native npm and npx acceptance with fresh private HOME and Node-only PATH
         run: |
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}","--registry-spec","@escoffier-labs/brigade@0.31.0"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}","--registry-spec","brigadestack@0.31.0"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
           python - <<'PYCODE'
           import json, os
@@ -318,9 +318,131 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # @escoffier-labs/brigade is the compatibility package: it depends on exactly the
+  # brigadestack version this run published, so it publishes last, only after the
+  # registry copy of brigadestack passed native acceptance. It uses this workflow's
+  # existing npm trust entry, so renaming this file or the npm environment breaks it.
+  publish-compat:
+    needs: [build, registry-acceptance]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      COMPAT_DIR: distribution/escoffier-labs-brigade/npm
+      npm_config_registry: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.0'
+      - name: Pin npm archive and provenance toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(node --version)" = v24.22.0
+          test "$(npm --version)" = 11.19.1
+      - name: Bind to the exact main source before registry writes
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Read compatibility identity and require the exact brigadestack pin
+        id: identity
+        run: |
+          version=$(node - "$COMPAT_DIR/package.json" npm/feasibility/runtime.json <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const runtime = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+          assert.equal(manifest.name, '@escoffier-labs/brigade');
+          assert.match(manifest.version, /^\d+\.\d+\.\d+$/, 'compatibility package publishes stable versions only');
+          assert.equal(manifest.version, runtime.version, 'compatibility version must equal the brigadestack version this run published');
+          assert.deepEqual(manifest.dependencies, {brigadestack: manifest.version});
+          assert.deepEqual(manifest.bin, {brigade: 'launcher.cjs'});
+          assert.deepEqual(manifest.files, ['launcher.cjs', 'README.md', 'LICENSE']);
+          process.stdout.write(manifest.version);
+          JS
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "@escoffier-labs/brigade@$version depends on brigadestack@$version"
+      - name: Require the published dependency and a new compatibility version above latest
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          test "$(npm view "brigadestack@$VERSION" version)" = "$VERSION"
+          versions=$(npm view @escoffier-labs/brigade versions --json)
+          latest=$(npm view @escoffier-labs/brigade dist-tags.latest)
+          node - "$VERSION" "$versions" "$latest" <<'JS'
+          const [version, versionsJson, latest] = process.argv.slice(2);
+          // npm prints a bare string instead of an array when only one version exists.
+          if ([].concat(JSON.parse(versionsJson)).includes(version)) {
+            console.log(`::error::@escoffier-labs/brigade@${version} is already on npm; bump ${process.env.COMPAT_DIR} first`);
+            process.exit(1);
+          }
+          if (!/^\d+\.\d+\.\d+/.test(latest)) {
+            console.log(`::error::cannot read the current @escoffier-labs/brigade latest dist-tag (got '${latest}')`);
+            process.exit(1);
+          }
+          const triple = v => v.split(/[.-]/).slice(0, 3).map(Number);
+          const [a, b] = [triple(version), triple(latest)];
+          if ((a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) <= 0) {
+            console.log(`::error::@escoffier-labs/brigade@${version} is not above latest ${latest}; publishing it with --tag latest would move latest backwards`);
+            process.exit(1);
+          }
+          JS
+      - name: Run compatibility launcher contract tests
+        working-directory: ${{ env.COMPAT_DIR }}
+        run: node --test launcher.test.cjs
+      - name: Pack and check the compatibility-only payload
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          out="$RUNNER_TEMP/escoffier-brigade-npm"
+          mkdir -p "$out"
+          (cd "$COMPAT_DIR" && npm pack --ignore-scripts --pack-destination "$out")
+          test "$(ls "$out")" = "escoffier-labs-brigade-$VERSION.tgz"
+          entries=$(tar -tzf "$out/escoffier-labs-brigade-$VERSION.tgz" | LC_ALL=C sort | tr '\n' ' ')
+          test "$entries" = 'package/LICENSE package/README.md package/launcher.cjs package/package.json '
+      - name: Install the tarball with its real dependency and exercise the command
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          prefix="$RUNNER_TEMP/escoffier-brigade-smoke"
+          npm install --global --prefix "$prefix" "$RUNNER_TEMP/escoffier-brigade-npm/escoffier-labs-brigade-$VERSION.tgz"
+          cd "$RUNNER_TEMP"
+          reported=$("$prefix/bin/brigade" --version)
+          printf '%s\n' "$reported"
+          test "$reported" = "brigade $VERSION"
+          "$prefix/bin/brigade" --help
+      - name: Publish the checked tarball with provenance
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: npm publish "$RUNNER_TEMP/escoffier-brigade-npm/escoffier-labs-brigade-$VERSION.tgz" --provenance --access public --tag latest --ignore-scripts
+      - name: Confirm the registry serves the new version as latest
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          for attempt in $(seq 1 30); do
+            if test "$(npm view @escoffier-labs/brigade dist-tags.latest 2>/dev/null)" = "$VERSION"; then
+              npm view "@escoffier-labs/brigade@$VERSION" name version dependencies dist.integrity
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::@escoffier-labs/brigade latest did not reach $VERSION"
+          exit 1
+
   release-gate:
     if: always()
-    needs: [build, acceptance, publish, registry-acceptance]
+    needs: [build, acceptance, publish, registry-acceptance, publish-compat]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -330,8 +452,10 @@ jobs:
           ACCEPTANCE_RESULT: ${{ needs.acceptance.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           REGISTRY_RESULT: ${{ needs.registry-acceptance.result }}
+          COMPAT_RESULT: ${{ needs.publish-compat.result }}
         run: |
           test "$BUILD_RESULT" = success
           test "$ACCEPTANCE_RESULT" = success
           test "$PUBLISH_RESULT" = success
           test "$REGISTRY_RESULT" = success
+          test "$COMPAT_RESULT" = success

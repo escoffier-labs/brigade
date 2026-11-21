@@ -80,7 +80,7 @@ plugins/brigade/
   skills/enforce/SKILL.md                # /brigade:enforce
 ```
 
-- **MCP launch**: `.mcp.json` runs `npx -y @escoffier-labs/brigade@<pinned version> memory serve-mcp --stdio`. The npm package bundles its Python runtime, so the user needs no prior pipx install. The README documents swapping the command to `brigade` for users who already have the CLI. The pinned version is bumped by the release process.
+- **MCP launch**: `.mcp.json` runs `npx -y brigadestack@<pinned version> memory serve-mcp --stdio` (`@escoffier-labs/brigade@<pinned version>` before 0.32.0). The npm package bundles its Python runtime, so the user needs no prior pipx install. The README documents swapping the command to `brigade` for users who already have the CLI. The pinned version is bumped by the release process.
 - **Skill copy**: the plugin's `brigade-work` skill is generated from the canonical skill source by a script, and a test fails when the copy drifts. The plugin directory is not a third hand-maintained skill location.
 - **SessionStart hook**: Claude Code only; Codex has no verified plugin hook contract in codex-cli 0.163.0. Calls `brigade work brief` in compact form when the cwd is Brigade-wired, otherwise prints one line naming the user store. It runs under a 5-second timeout and always exits 0, so a missing CLI, slow npx cold start, or broken repo never blocks a session.
 - **`/brigade:enforce`** (a plugin skill named `enforce`, so it exists in both harnesses): runs `brigade init --target . --depth repo --harnesses <current harness> --git-exclude` after showing the user what it will wire. That reuses the existing enforced hooks (verify capture, raw-check blocking, handoff Stop gate). The plugin itself ships none of those hooks.
@@ -116,7 +116,7 @@ plugins/brigade/
 
 ## Dependencies and checks for the plan
 
-- The plugin pins the pyproject version through `scripts/version_sync.py`. The marketplace entries land with 0.31.0, the first release that contains these commands, and the plugin needs `@escoffier-labs/brigade@0.31.0` or later on npm.
+- The plugin pins the pyproject version through `scripts/version_sync.py`. The marketplace entries land with 0.31.0, the first release that contains these commands, and the plugin needs `@escoffier-labs/brigade@0.31.0` or later on npm, or `brigadestack@0.32.0` or later.
 - The Codex plugin manifest schema is confirmed from `codex plugin --help` and Codex documentation during planning. No design decision depends on it.
 - New modules stay well under the module size ceiling. `memory_cmd.py` should shrink as the card tool code moves into the core.
 

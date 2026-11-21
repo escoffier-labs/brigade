@@ -18,30 +18,37 @@ from tests.test_publish_workflow import _load_workflow_yaml
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-BRIDGE = ROOT / "distribution/brigadestack"  # npm bridge, flipped in the npm slice
+NPM_COMPAT = ROOT / "distribution/escoffier-labs-brigade/npm"
+NPM_REAL = ROOT / "npm/feasibility"
 COMPAT = ROOT / "distribution/brigade-cli/pypi"
 MAIN_DISPATCH = "github.repository_id == '1238165856' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'"
 
 
-@pytest.mark.parametrize(
-    ("workflow_file", "environment", "publish_permissions"),
-    [
-        ("brigadestack-npm-publish.yml", "npm", {"contents": "read", "id-token": "write"}),
-    ],
-)
-def test_bridge_publication_keeps_oidc_in_the_main_only_publish_job(workflow_file, environment, publish_permissions):
-    # The registry trust entries name these files and environments.
-    workflow = _load_workflow_yaml(ROOT / ".github/workflows" / workflow_file)
-    assert set(workflow.get("on", workflow.get(True))) == {"workflow_dispatch"}
-    assert workflow["permissions"] == {"contents": "read"}
+def test_retired_npm_bridge_workflow_is_gone_and_one_workflow_publishes_every_npm_package():
+    # npm allows one trusted publisher per package, so brigadestack moves to npm-publish.yml,
+    # the file the six existing names already trust. The bridge workflow no longer exists.
+    assert not (ROOT / ".github/workflows/brigadestack-npm-publish.yml").exists()
+    assert not (ROOT / "distribution/brigadestack/npm").exists()
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-publish.yml")
     jobs = workflow["jobs"]
-    assert set(jobs) == {"build", "publish"}
-    assert jobs["publish"]["needs"] == "build"
-    assert jobs["publish"]["environment"] == environment
-    assert jobs["publish"]["permissions"] == publish_permissions
-    assert "permissions" not in jobs["build"] and "environment" not in jobs["build"]
-    for job in jobs.values():
-        assert job["if"] == MAIN_DISPATCH
+    assert "publish-compat" in jobs
+    oidc = {name for name, job in jobs.items() if "id-token" in job.get("permissions", {})}
+    # Only the two registry-writing jobs may request an OIDC token, both inside the npm environment.
+    assert oidc == {"publish", "publish-compat"}
+    for name in oidc:
+        assert jobs[name]["environment"] == "npm"
+        assert jobs[name]["permissions"] == {"contents": "read", "id-token": "write"}
+    # The compatibility package depends on exactly the brigadestack version this run published.
+    assert set(jobs["publish-compat"]["needs"]) == {"build", "registry-acceptance"}
+    assert jobs["registry-acceptance"]["needs"] == "publish"
+    assert "publish-compat" in jobs["release-gate"]["needs"]
+    steps = "\n".join(step.get("run", "") for step in jobs["publish-compat"]["steps"])
+    assert 'test "$GITHUB_SHA" = "$EXPECTED_SHA"' in steps
+    assert 'npm view "brigadestack@$VERSION" version' in steps
+    assert (
+        "--provenance" in steps
+        and "distribution/escoffier-labs-brigade/npm" in jobs["publish-compat"]["env"]["COMPAT_DIR"]
+    )
 
 
 def test_root_package_is_brigadestack_with_the_brigadestack_and_brigade_scripts():
@@ -100,20 +107,39 @@ def test_retired_bridge_publish_workflow_is_gone():
     assert not (ROOT / "distribution/brigadestack/pypi").exists()
 
 
-def test_npm_bridge_keeps_existing_global_brigade_bin_and_pins_stable():
-    manifest = json.loads((BRIDGE / "npm/package.json").read_text())
-    assert (manifest["name"], manifest["version"]) == ("brigadestack", "0.31.0")
-    assert manifest["dependencies"] == {"@escoffier-labs/brigade": "0.31.0"}
-    assert manifest["bin"] == {"brigadestack": "launcher.cjs"}
+def test_npm_real_package_is_brigadestack_with_both_commands():
+    manifest = json.loads((NPM_REAL / "package.json").read_text())
+    assert manifest["name"] == "brigadestack"
+    assert manifest["bin"] == {"brigade": "launcher.cjs", "brigadestack": "launcher.cjs"}
+    assert "dependencies" not in manifest
+    assert all(name.startswith("@escoffier-labs/brigade-uv-") for name in manifest["optionalDependencies"])
+
+
+def test_npm_compat_package_depends_on_exactly_the_root_version_and_declares_its_own_bin():
+    root = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    manifest = json.loads((NPM_COMPAT / "package.json").read_text())
+    assert manifest["name"] == "@escoffier-labs/brigade"
+    assert manifest["version"] == root["version"]
+    assert manifest["dependencies"] == {"brigadestack": root["version"]}
+    # npm links only the installed package's own bins, so `npm update -g` needs this one.
+    assert manifest["bin"] == {"brigade": "launcher.cjs"}
+    assert manifest["files"] == ["launcher.cjs", "README.md", "LICENSE"]
     assert manifest["engines"]["node"] == "^22.15.0 || >=23.11.0"
+    assert manifest["repository"]["directory"] == "distribution/escoffier-labs-brigade/npm"
+
+
+def test_npm_compat_launcher_resolves_brigadestack_not_itself():
+    launcher = (NPM_COMPAT / "launcher.cjs").read_text()
+    assert "require.resolve('brigadestack/launcher.cjs')" in launcher
+    assert "@escoffier-labs/brigade/launcher.cjs" not in launcher
 
 
 def test_npm_launcher_contracts():
     node = shutil.which("node")
     if node is None:
-        pytest.skip("Node is required for bridge launcher contract tests")
+        pytest.skip("Node is required for compatibility launcher contract tests")
     result = subprocess.run(
-        [node, "--test", str(BRIDGE / "npm/launcher.test.cjs")],
+        [node, "--test", str(NPM_COMPAT / "launcher.test.cjs")],
         capture_output=True,
         text=True,
         timeout=60,
@@ -126,15 +152,15 @@ def test_npm_launcher_contracts():
     os.name != "posix" or shutil.which("bash") is None,
     reason="Requires a POSIX controlling terminal and bash job control",
 )
-@pytest.mark.parametrize("entrypoint", ["direct", "bridge"])
+@pytest.mark.parametrize("entrypoint", ["direct", "compat"])
 def test_npm_launcher_preserves_controlling_terminal_and_job_control(tmp_path, entrypoint):
     """A stopped foreground job must stop its workload, then resume and cancel."""
     import pty
 
     node = shutil.which("node")
     if node is None:
-        pytest.skip("Node is required for bridge terminal tests")
-    dependency = tmp_path / "node_modules/@escoffier-labs/brigade"
+        pytest.skip("Node is required for compatibility terminal tests")
+    dependency = tmp_path / "node_modules/brigadestack"
     dependency.mkdir(parents=True)
     ready = tmp_path / "ready.json"
     heartbeat = tmp_path / "heartbeat"
@@ -148,9 +174,9 @@ def test_npm_launcher_preserves_controlling_terminal_and_job_control(tmp_path, e
         f"setInterval(() => fs.appendFileSync({json.dumps(str(heartbeat))}, '.'), 25);\n"
     )
     launcher = tmp_path / "launcher.cjs"
-    shutil.copyfile(BRIDGE / "npm/launcher.cjs", launcher)
+    shutil.copyfile(NPM_COMPAT / "launcher.cjs", launcher)
     command = dependency / "launcher.cjs" if entrypoint == "direct" else launcher
-    prompt = b"BRIDGE_TEST_PROMPT> "
+    prompt = b"COMPAT_TEST_PROMPT> "
     shell_pid, terminal = pty.fork()
     if shell_pid == 0:
         os.execve(

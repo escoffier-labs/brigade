@@ -1,13 +1,13 @@
 {
-  "name": "brigadestack",
-  "version": "0.31.0",
-  "description": "Brigade Stack command alias for the stable Brigade CLI",
+  "name": "@escoffier-labs/brigade",
+  "version": "0.32.0",
+  "description": "Compatibility package for the Brigade CLI. Depends on exactly brigadestack of the same version.",
   "license": "MIT",
   "engines": {
     "node": "^22.15.0 || >=23.11.0"
   },
   "bin": {
-    "brigadestack": "launcher.cjs"
+    "brigade": "launcher.cjs"
   },
   "files": [
     "launcher.cjs",
@@ -15,7 +15,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@escoffier-labs/brigade": "0.31.0"
+    "brigadestack": "0.32.0"
   },
   "scripts": {
     "test": "node --test launcher.test.cjs"
@@ -27,7 +27,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/escoffier-labs/brigade.git",
-    "directory": "distribution/brigadestack/npm"
+    "directory": "distribution/escoffier-labs-brigade/npm"
   },
   "publishConfig": {
     "access": "public"

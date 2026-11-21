@@ -43,7 +43,7 @@ def test_mcp_configs_pin_the_npm_package_and_inbox():
         assert server["command"] == "npx"
         assert server["args"] == [
             "-y",
-            f"@escoffier-labs/brigade@{_version()}",
+            f"brigadestack@{_version()}",
             "memory",
             "serve-mcp",
             "--stdio",

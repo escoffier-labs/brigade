@@ -9,15 +9,15 @@ const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 
 function fixture(t, script) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'brigadestack-contract-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'escoffier-brigade-contract-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const pkg = path.join(root, 'bridge');
-  const dependency = path.join(pkg, 'node_modules', '@escoffier-labs', 'brigade');
+  const pkg = path.join(root, 'compat');
+  const dependency = path.join(pkg, 'node_modules', 'brigadestack');
   fs.mkdirSync(dependency, { recursive: true });
   const launcher = path.join(pkg, 'launcher.cjs');
   fs.copyFileSync(path.join(__dirname, 'launcher.cjs'), launcher);
   fs.writeFileSync(path.join(dependency, 'package.json'), JSON.stringify({
-    name: '@escoffier-labs/brigade', version: '0.31.0', bin: { brigade: 'launcher.cjs' },
+    name: 'brigadestack', version: '0.32.0', bin: { brigade: 'launcher.cjs', brigadestack: 'launcher.cjs' },
   }));
   fs.writeFileSync(path.join(dependency, 'launcher.cjs'), script);
   return { root, launcher, dependency };
@@ -49,8 +49,8 @@ test('missing dependency fails with an installation diagnostic', t => {
   fs.rmSync(f.dependency, { recursive: true });
   const result = spawnSync(process.execPath, [f.launcher], { encoding: 'utf8', timeout: 5000 });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /brigadestack.*dependency|brigadestack.*install/i);
-  assert.match(result.stderr, /Reinstall brigadestack with dependencies enabled/);
+  assert.match(result.stderr, /@escoffier-labs\/brigade.*brigadestack dependency/i);
+  assert.match(result.stderr, /Reinstall @escoffier-labs\/brigade with dependencies enabled/);
 });
 
 const posix = { skip: process.platform === 'win32' && 'POSIX signal and process group contract', timeout: 12000 };
@@ -74,7 +74,7 @@ test('process replacement rejection reports its cause instead of reinstall advic
     new Worker(process.argv[1]).on('exit', code => { process.exitCode = code; });
   `, f.launcher], { encoding: 'utf8', timeout: 5000 });
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /brigadestack: could not replace process: .*worker/i);
+  assert.match(result.stderr, /@escoffier-labs\/brigade: could not replace process: .*worker/i);
   assert.doesNotMatch(result.stderr, /reinstall/i);
   assert.equal(result.stdout, '');
 });
@@ -90,7 +90,7 @@ for (const executable of ['missing', 'invalid']) {
       require(process.argv[1]);
     `, f.launcher], { encoding: 'utf8', timeout: 5000 });
     assert.equal(result.status, 1, result.stderr);
-    assert.match(result.stderr, /brigadestack: could not spawn dependency:/);
+    assert.match(result.stderr, /@escoffier-labs\/brigade: could not spawn dependency:/);
     assert.match(result.stderr, executable === 'missing' ? /ENOENT/ : /string.*null/is);
     assert.doesNotMatch(result.stderr, /reinstall/i);
     assert.equal(result.stdout, '');

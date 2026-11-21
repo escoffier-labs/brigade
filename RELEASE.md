@@ -155,9 +155,11 @@ Cargo to be absent.
 
 ## 8. Coordinated stable npm promotion
 
-Wait for every Python published-artifact acceptance job and the published endpoint check. Pin the official PyPI wheel URL/SHA-256 and release component manifest/checksums in `npm/feasibility/runtime.json`. Keep the payload tag identity separate from the npm packaging commit. Merge the promotion only after review, security, focused/full verification, and all five native candidate jobs pass.
+Wait for every Python published-artifact acceptance job and the published endpoint check. Pin the official PyPI wheel URL/SHA-256 and release component manifest/checksums in `npm/feasibility/runtime.json`. From 0.32.0 the pinned wheel is the `brigadestack` wheel: set `payloadWheel.distribution` to `brigadestack` with its URL and hash. The 0.31.0 pin still names `brigade-cli`. Bump `version` and `payloadVersion` there and in `npm/feasibility/package.json`, and update the hard-coded `v0.31.0` tag, its commit, the concurrency group and the `--registry-spec brigadestack@<version>` value in `npm-publish.yml`, plus the version checks in `npm/feasibility/publish.cjs`. Keep the payload tag identity separate from the npm packaging commit. Merge the promotion only after review, security, focused/full verification, and all five native candidate jobs pass.
 
-Before configuring trust for the first release, bootstrap all six approved names: `@escoffier-labs/brigade` and the five `platforms.*.package` entries in `npm/feasibility/runtime.json`. These names are absent at initial setup, and [npm trust requires an existing package](https://docs.npmjs.com/cli/v11/commands/npm-trust/). Use a signed-in `@escoffier-labs` organization-owner account with 2FA enabled, npm 11.15.0 or later and Node 22.14.0 or later.
+The npm package set is `brigadestack` (the real launcher), the compatibility package `@escoffier-labs/brigade` (source `distribution/escoffier-labs-brigade/npm`, published last by the `publish-compat` job of `npm-publish.yml`) and the five `platforms.*.package` companions in `npm/feasibility/runtime.json`. All seven trust `npm-publish.yml` with the `npm` environment. `@escoffier-labs/brigade` and the companions already exist. `brigadestack` exists from the 0.31.0 bridge, with its trust entry on the retired `brigadestack-npm-publish.yml`: replace it with `npm trust revoke brigadestack --id <id>` and the `npm trust github` command below before the 0.32.0 dispatch, since npm allows one trusted publisher per package.
+
+Before configuring trust for a first release of a name, bootstrap that name: `@escoffier-labs/brigade` and the five `platforms.*.package` entries in `npm/feasibility/runtime.json` were the six original names. These names are absent at initial setup, and [npm trust requires an existing package](https://docs.npmjs.com/cli/v11/commands/npm-trust/). Use a signed-in `@escoffier-labs` organization-owner account with 2FA enabled, npm 11.15.0 or later and Node 22.14.0 or later.
 
 For each exact name, create a separate temporary folder containing only a minimal `package.json`. Use that name and version `0.0.0-bootstrap`, for example:
 
@@ -180,7 +182,7 @@ npm trust github "$package_name" --repo escoffier-labs/brigade --file npm-publis
 npm trust list "$package_name"
 ```
 
-Confirm the repository, workflow, environment and publish permission for all six packages. The [npm trust `--file` flag](https://docs.npmjs.com/cli/v11/commands/npm-trust/) takes the workflow basename `npm-publish.yml`, not `.github/workflows/npm-publish.yml`.
+Confirm the repository, workflow, environment and publish permission for all seven packages. The [npm trust `--file` flag](https://docs.npmjs.com/cli/v11/commands/npm-trust/) takes the workflow basename `npm-publish.yml`, not `.github/workflows/npm-publish.yml`.
 
 Protect the GitHub environment `npm` to allow only `main`. After merging, require the candidate gate to pass on the exact merged SHA before stable dispatch. Dispatch `npm-publish.yml` on main with that reviewed `expected_sha` and `release_tag: v0.29.0`. It builds once with Node 24.22.0/npm 11.19.1, retains original archives for 14 days, requires native tarball acceptance, publishes companions before the launcher with explicit provenance, and requires native registry acceptance plus the final release gate.
 

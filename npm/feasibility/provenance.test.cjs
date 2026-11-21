@@ -20,6 +20,7 @@ function bundle(r) {return r.attestations.find(a=>a.predicateType==='https://sls
 test('real public npm bundle verifies with exact foreign source policy',async()=>{
   assert.equal(verifier.purl('sigstore','3.1.0'),expected.purl);
   assert.equal(verifier.purl('@escoffier-labs/brigade','0.31.0'),'pkg:npm/%40escoffier-labs/brigade@0.31.0');
+  assert.equal(verifier.purl('brigadestack','0.32.0'),'pkg:npm/brigadestack@0.32.0');
   const result=await verifyResponse(response,sha512,expected);
   assert.equal(result.sourceCommit,expected.sourceCommit);
 });
