@@ -50,9 +50,16 @@ def fetch_releases(package: str) -> dict[str, list[dict]]:
         return json.load(response)["releases"]
 
 
+class MissingCommand(Exception):
+    """A console script the gate needs is not installed in the venv."""
+
+
 def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
     print("+ " + " ".join(argv), flush=True)
-    result = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise MissingCommand(f"{argv[0]} was not found") from exc
     for stream in (result.stdout, result.stderr):
         if stream.strip():
             print(stream.rstrip(), flush=True)
@@ -64,6 +71,15 @@ def check_upgrade(dist: Path, version: str, previous: str) -> list[str]:
     wheels = sorted(dist.glob(f"brigade_cli-{version}-*.whl"))
     if len(wheels) != 1:
         return [f"expected exactly one brigade_cli-{version} wheel in {dist}, found {[w.name for w in wheels]}"]
+    failures: list[str] = []
+    try:
+        failures = _upgrade_in_fresh_venv(wheels[0], dist, version, previous)
+    except MissingCommand as exc:
+        failures.append(f"console script missing before the upgrade: {exc}")
+    return failures
+
+
+def _upgrade_in_fresh_venv(wheel: Path, dist: Path, version: str, previous: str) -> list[str]:
     failures: list[str] = []
     with tempfile.TemporaryDirectory(prefix="brigade-cli-upgrade-") as tmp:
         env_dir = Path(tmp) / "venv"
@@ -77,19 +93,25 @@ def check_upgrade(dist: Path, version: str, previous: str) -> list[str]:
         if old.returncode != 0:
             return [f"the previous release {PACKAGE}=={previous} did not run before the upgrade"]
         upgrade = run(
-            [python, "-m", "pip", "install", "--upgrade", "--find-links", str(dist.resolve()), str(wheels[0].resolve())]
+            [python, "-m", "pip", "install", "--upgrade", "--find-links", str(dist.resolve()), str(wheel.resolve())]
         )
         if upgrade.returncode != 0:
-            return [f"pip could not upgrade {PACKAGE}=={previous} to {wheels[0].name}"]
-        reported = run([str(bin_dir / f"brigade{suffix}"), "--version"])
-        if reported.returncode != 0 or version not in reported.stdout.split():
-            failures.append(
-                f"`brigade --version` after the upgrade exited {reported.returncode} and printed "
-                f"{reported.stdout.strip()!r}, expected version {version}"
-            )
-        hook = run([str(bin_dir / f"brigade-hook{suffix}"), "--help"])
-        if hook.returncode != 0:
-            failures.append(f"`brigade-hook --help` after the upgrade exited {hook.returncode}")
+            return [f"pip could not upgrade {PACKAGE}=={previous} to {wheel.name}"]
+        try:
+            reported = run([str(bin_dir / f"brigade{suffix}"), "--version"])
+            if reported.returncode != 0 or version not in reported.stdout.split():
+                failures.append(
+                    f"`brigade --version` after the upgrade exited {reported.returncode} and printed "
+                    f"{reported.stdout.strip()!r}, expected version {version}"
+                )
+        except MissingCommand as exc:
+            failures.append(f"console script missing after the upgrade: {exc}")
+        try:
+            hook = run([str(bin_dir / f"brigade-hook{suffix}"), "--help"])
+            if hook.returncode != 0:
+                failures.append(f"`brigade-hook --help` after the upgrade exited {hook.returncode}")
+        except MissingCommand as exc:
+            failures.append(f"console script missing after the upgrade: {exc}")
     return failures
 
 
@@ -103,6 +125,10 @@ def main() -> int:
         previous = args.previous or previous_stable(fetch_releases(PACKAGE), args.version)
     except (OSError, ValueError, KeyError) as exc:
         print(f"::error::cannot resolve the release to upgrade from: {exc}", file=sys.stderr)
+        return 1
+    if version_key(previous) >= version_key(args.version):
+        # pip treats the same version as already installed, so the gate would pass without upgrading.
+        print(f"::error::--previous {previous} must be older than --version {args.version}", file=sys.stderr)
         return 1
     print(f"upgrading {PACKAGE}=={previous} -> {args.version}", flush=True)
     failures = check_upgrade(args.dist, args.version, previous)

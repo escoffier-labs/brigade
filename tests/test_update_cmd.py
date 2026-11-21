@@ -1576,11 +1576,69 @@ def _run_stable_update(tmp_path, channel="stable"):
     return result, commands
 
 
-def test_stable_update_upgrades_a_brigade_cli_install_under_its_own_name(tmp_path, monkeypatch):
+def _stable_update_with(tmp_path, runner):
+    manifest = _manifest()
+    return update_cmd.run_update(
+        channel="stable",
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=_Http(_release(manifest), manifest),
+        runner=runner,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+
+
+def test_stable_update_migrates_a_brigade_cli_install_to_brigadestack(tmp_path, monkeypatch):
+    # brigade-cli's last release becomes a stub, so a stable update must never install it over a working CLI.
     monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    result, commands = _run_stable_update(tmp_path)
-    assert result == 0
-    assert commands[0] == ["pipx", "install", "--force", "brigade-cli==1.2.3"]
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+    commands = []
+    assert _stable_update_with(tmp_path, lambda argv: commands.append(argv) or 0) == 0
+    install = ["pipx", "install", "--force", "brigadestack==1.2.3"]
+    assert commands[:3] == [install, ["pipx", "uninstall", "brigade-cli"], install]
+    assert commands[3][1] == "setup"
+    assert len(commands) == 4
+    assert list((tmp_path / "data").rglob("*state*.json"))
+
+
+def test_stable_update_keeps_the_new_install_when_removing_the_old_app_fails(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        return 1 if argv[1] == "uninstall" else 0
+
+    assert _stable_update_with(tmp_path, runner) == 0
+    assert commands[2] == commands[0]
+    assert commands[3][1] == "setup"
+    assert "pipx uninstall brigade-cli" in capsys.readouterr().err
+
+
+def test_stable_update_records_no_state_when_the_restoring_install_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        return 1 if len(commands) == 3 else 0  # the reinstall after the uninstall fails
+
+    assert _stable_update_with(tmp_path, runner) == 1
+    assert len(commands) == 3  # no setup
+    assert not list((tmp_path / "data").rglob("*state*.json"))
+
+
+def test_stable_update_prints_the_retire_commands_after_exit_where_pipx_copies_apps(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: True)
+    commands = []
+    assert _stable_update_with(tmp_path, lambda argv: commands.append(argv) or 0) == 0
+    assert commands[0] == ["pipx", "install", "--force", "brigadestack==1.2.3"]
+    assert all(command[1] != "uninstall" for command in commands)
+    assert "pipx uninstall brigade-cli ; pipx install --force brigadestack==1.2.3" in capsys.readouterr().err
 
 
 def test_stable_update_upgrades_a_brigadestack_install_under_its_own_name(tmp_path, monkeypatch):
@@ -1733,6 +1791,23 @@ def test_installed_pypi_project_falls_back_to_distribution_metadata(tmp_path, mo
 
     monkeypatch.setattr(update_cmd.importlib.metadata, "distribution", only_real_package)
     assert update_cmd.installed_pypi_project() == "brigadestack"
+
+
+def test_installed_pypi_project_prefers_brigadestack_when_both_dist_infos_exist(tmp_path, monkeypatch):
+    # A venv upgraded from the 0.31.0 brigadestack bridge keeps an orphaned brigade-cli dist-info.
+    monkeypatch.undo()
+    monkeypatch.setattr(update_cmd.sys, "prefix", str(tmp_path))  # no pipx record
+    present = {"brigadestack", "brigade-cli"}
+
+    def both(name):
+        if name in present:
+            return object()
+        raise update_cmd.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(update_cmd.importlib.metadata, "distribution", both)
+    assert update_cmd.installed_pypi_project() == "brigadestack"
+    present.discard("brigadestack")
+    assert update_cmd.installed_pypi_project() == "brigade-cli"
 
 
 def test_installed_pypi_project_ignores_an_unrelated_pipx_record(tmp_path, monkeypatch):

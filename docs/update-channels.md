@@ -39,13 +39,14 @@ It does not depend on `brigadestack`, so `pipx upgrade brigade-cli` is an ordina
 upgrade, and the publish job refuses to upload until an installed previous `brigade-cli`
 release upgrades to the built wheel and still runs. After 0.33 the last `brigade-cli`
 release becomes a stub that prints the migration command.
-`brigade update` on the stable channel upgrades the pipx app under the name it was
-installed with: an app named `brigade-cli` is reinstalled as `brigade-cli==X.Y.Z`,
-and any other install uses `brigadestack`.
-Development wheels are published only as `brigadestack`, so `brigade update --channel beta`
-always installs `brigadestack`. On a machine whose pipx app is named `brigade-cli`, the beta
-update installs `brigadestack`, removes the `brigade-cli` app, installs `brigadestack` again
-(older pipx removes launchers by name), and only then runs setup and records the update. On Windows,
+`brigade update` installs `brigadestack` on both channels, so it moves an install off
+`brigade-cli`: the last `brigade-cli` release becomes a stub, and an update must never install
+it over a working CLI. Development wheels are published only as `brigadestack`, which is also
+why the beta channel never installs `brigade-cli`. On a machine whose pipx app is named
+`brigade-cli`, the update installs `brigadestack`, removes the `brigade-cli` app, installs
+`brigadestack` again (older pipx removes launchers by name), and only then runs setup and
+records the update. If removing the old app fails, the update still succeeds and prints the
+`pipx uninstall brigade-cli` command; if the second install fails, no state is recorded. On Windows,
 where pipx copies launchers and cannot remove the running app, the update instead prints the
 two commands to run after it exits: `pipx uninstall brigade-cli`, then the same
 `pipx install --force brigadestack==<version>` to restore the `brigade` launcher.

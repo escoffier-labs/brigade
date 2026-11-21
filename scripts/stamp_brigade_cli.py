@@ -20,7 +20,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 README_SOURCE = "distribution/brigade-cli/pypi/README.md"
-# What MANIFEST.in puts in the sdist, besides src/ and the README that gets replaced.
+# What the root sdist holds besides src/ and the README that gets replaced: MANIFEST.in's files, plus
+# the tests/test*.py that setuptools adds by default. tests/test_brigadestack_distribution.py compares
+# the two sdists, so a file the root build includes and this copy drops fails a test.
 COPIED_FILES = ("pyproject.toml", "MANIFEST.in", "LICENSE", "QUICKSTART.md", "THIRD_PARTY_NOTICES.md")
 SCRIPTS = {
     "brigade": "brigade.cli:process_main",
@@ -52,8 +54,12 @@ def stamp(root: Path, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     for name in COPIED_FILES:
         shutil.copy2(root / name, out / name)
-    (out / "pyproject.toml").write_text(stamp_pyproject((root / "pyproject.toml").read_text()))
+    stamped = stamp_pyproject((root / "pyproject.toml").read_text(encoding="utf-8"))
+    (out / "pyproject.toml").write_text(stamped, encoding="utf-8")
     shutil.copy2(root / README_SOURCE, out / "README.md")
+    (out / "tests").mkdir()
+    for path in sorted((root / "tests").glob("test*.py")):
+        shutil.copy2(path, out / "tests" / path.name)
     shutil.copytree(
         root / "src",
         out / "src",

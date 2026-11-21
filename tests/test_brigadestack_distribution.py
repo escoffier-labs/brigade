@@ -10,7 +10,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import time
+import venv
 import zipfile
 from email.parser import Parser
 from pathlib import Path
@@ -143,34 +145,58 @@ def test_brigade_cli_readme_points_to_brigadestack_and_does_not_claim_the_regist
     assert "mcp-name: io.github.escoffier-labs/brigade-memory" in (ROOT / "README.md").read_text()
 
 
+def _copy_checkout(destination: Path) -> Path:
+    """Copy what a build of the real checkout can pick up: its top-level files, src/ and tests/."""
+    destination.mkdir()
+    for path in ROOT.iterdir():
+        if path.is_file():
+            shutil.copy2(path, destination / path.name)
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info")
+    shutil.copytree(ROOT / "src", destination / "src", ignore=ignore)
+    shutil.copytree(ROOT / "tests", destination / "tests", ignore=ignore)
+    return destination
+
+
+def _builder_python(work: Path) -> str:
+    """A Python that has ``build``; the project's own env does not."""
+    if importlib.util.find_spec("build") is not None:
+        return sys.executable
+    env_dir = work / "builder"
+    venv.EnvBuilder(with_pip=True).create(env_dir)
+    python = str(env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
+    result = subprocess.run(
+        [python, "-m", "pip", "install", "--quiet", "build"], capture_output=True, text=True, timeout=600
+    )
+    if result.returncode != 0:
+        pytest.skip(f"cannot install the build frontend offline: {result.stderr[-300:]}")
+    return python
+
+
 @pytest.fixture(scope="module")
-def built_wheels(tmp_path_factory):
-    """Build brigadestack from a copy of the tree and brigade-cli from the stamped copy of it."""
+def built_distributions(tmp_path_factory):
+    """Build brigadestack from a copy of the real checkout and brigade-cli from the stamped copy of it."""
     stamp = _load_script("stamp_brigade_cli")
-    work = tmp_path_factory.mktemp("wheels")
-    real = work / "brigadestack"
-    real.mkdir()
-    for name in (*stamp.COPIED_FILES, "README.md"):
-        shutil.copy2(ROOT / name, real / name)
-    shutil.copytree(ROOT / "src", real / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"))
+    work = tmp_path_factory.mktemp("distributions")
+    python = _builder_python(work)
+    real = _copy_checkout(work / "brigadestack")
     old = work / "brigade-cli"
     stamp.stamp(ROOT, old)
     out = work / "dist"
-    wheels = {}
-    for name, source in (("brigadestack", real), ("brigade-cli", old)):
+    for source in (real, old):
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "wheel", "--no-deps", "--quiet", "--wheel-dir", str(out), str(source)],
-            capture_output=True,
-            text=True,
-            timeout=600,
+            [python, "-m", "build", "--outdir", str(out), str(source)], capture_output=True, text=True, timeout=900
         )
         if result.returncode != 0 and any(
             marker in result.stderr for marker in ("Could not find a version", "Connection", "resolution")
         ):
             pytest.skip(f"cannot fetch the build backend offline: {result.stderr[-300:]}")
         assert result.returncode == 0, result.stdout + result.stderr
-        wheels[name] = next(out.glob(f"{name.replace('-', '_')}-*.whl"))
-    return wheels
+    return {
+        "brigadestack": next(out.glob("brigadestack-*.whl")),
+        "brigade-cli": next(out.glob("brigade_cli-*.whl")),
+        "brigadestack-sdist": next(out.glob("brigadestack-*.tar.gz")),
+        "brigade-cli-sdist": next(out.glob("brigade_cli-*.tar.gz")),
+    }
 
 
 def _read_wheel(path: Path):
@@ -179,20 +205,20 @@ def _read_wheel(path: Path):
         dist_info = next(name.split("/")[0] for name in names if name.endswith(".dist-info/METADATA"))
         metadata = Parser().parsestr(archive.read(f"{dist_info}/METADATA").decode())
         entry_points = archive.read(f"{dist_info}/entry_points.txt").decode()
-        files = {
-            name: hashlib.sha256(archive.read(name)).hexdigest()
+        hashes = {
+            name.replace(dist_info, "DIST-INFO", 1): hashlib.sha256(archive.read(name)).hexdigest()
             for name in names
-            if name.startswith("brigade/") and not name.endswith("/")
+            if not name.endswith("/")
         }
     scripts = dict(
         line.split(" = ", 1) for line in entry_points.split("[console_scripts]")[1].strip().splitlines() if line.strip()
     )
-    return metadata, scripts, files
+    return metadata, scripts, hashes
 
 
-def test_the_two_wheels_carry_the_same_code_version_and_dependencies(built_wheels):
-    real_metadata, real_scripts, real_files = _read_wheel(built_wheels["brigadestack"])
-    old_metadata, old_scripts, old_files = _read_wheel(built_wheels["brigade-cli"])
+def test_the_two_wheels_carry_the_same_code_version_and_dependencies(built_distributions):
+    real_metadata, real_scripts, real_files = _read_wheel(built_distributions["brigadestack"])
+    old_metadata, old_scripts, old_files = _read_wheel(built_distributions["brigade-cli"])
     root = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
 
     assert real_metadata["Name"] == "brigadestack"
@@ -204,14 +230,35 @@ def test_the_two_wheels_carry_the_same_code_version_and_dependencies(built_wheel
     assert old_metadata.get_all("Requires-Dist") == real_metadata.get_all("Requires-Dist")
     assert old_metadata.get_all("Provides-Extra") == real_metadata.get_all("Provides-Extra")
     assert set(old_metadata.get_all("Provides-Extra")) >= {"connector", "grokbot", "research"}
-    # Identical brigade/ file set and contents, including the packaged templates and manifest.
-    assert real_files and old_files == real_files
+    # The whole wheel matches file for file, not only brigade/: the same names and hashes, except the
+    # files that must differ because they carry the name, the scripts or the long description.
+    differing = {name for name in real_files.keys() | old_files.keys() if real_files.get(name) != old_files.get(name)}
+    assert differing == {"DIST-INFO/METADATA", "DIST-INFO/RECORD", "DIST-INFO/entry_points.txt"}
     assert "brigade/cli/__init__.py" in real_files
+    # Both wheels ship the license.
+    assert "DIST-INFO/licenses/LICENSE" in real_files
+    assert "DIST-INFO/licenses/LICENSE" in old_files
     assert real_scripts == BRIGADESTACK_SCRIPTS
     assert old_scripts == BRIGADE_CLI_SCRIPTS
     # Only the long description differs, and it names the old-name package.
     assert "old PyPI name" in old_metadata.get_payload()
     assert "old PyPI name" not in real_metadata.get_payload()
+
+
+def _sdist_files(path: Path) -> set[str]:
+    prefix = path.name.removesuffix(".tar.gz") + "/"
+    with tarfile.open(path) as archive:
+        names = {name.removeprefix(prefix) for name in archive.getnames() if name != prefix.rstrip("/")}
+    return {name for name in names if "egg-info" not in name}
+
+
+def test_the_two_sdists_hold_the_same_files_outside_the_generated_egg_info(built_distributions):
+    real = _sdist_files(built_distributions["brigadestack-sdist"])
+    old = _sdist_files(built_distributions["brigade-cli-sdist"])
+    assert old == real
+    # The root sdist carries tests/ (setuptools adds tests/test*.py), license and the manifest's files.
+    assert {"LICENSE", "MANIFEST.in", "QUICKSTART.md", "THIRD_PARTY_NOTICES.md", "pyproject.toml"} <= real
+    assert any(name.startswith("tests/test_") for name in real)
 
 
 def test_previous_stable_picks_the_newest_older_non_yanked_stable_release():
@@ -232,6 +279,30 @@ def test_previous_stable_picks_the_newest_older_non_yanked_stable_release():
     assert gate.previous_stable(releases, "0.100.0") == "0.33.0"
     with pytest.raises(ValueError, match="no stable"):
         gate.previous_stable(releases, "0.30.0")
+
+
+def test_upgrade_gate_rejects_a_previous_release_that_is_not_older(tmp_path, monkeypatch, capsys):
+    gate = _load_script("check_cli_upgrade")
+    for previous in ("1.0.0", "1.0.1"):
+        argv = ["check_cli_upgrade.py", "--dist", str(tmp_path), "--version", "1.0.0", "--previous", previous]
+        monkeypatch.setattr(sys, "argv", argv)
+        assert gate.main() == 1
+        assert "must be older than --version" in capsys.readouterr().err
+
+
+def test_upgrade_gate_names_a_missing_console_script(tmp_path, monkeypatch):
+    gate = _load_script("check_cli_upgrade")
+
+    def missing(argv, **_kwargs):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(gate.subprocess, "run", missing)
+    with pytest.raises(gate.MissingCommand, match="was not found"):
+        gate.run(["/nowhere/brigade", "--version"])
+    (tmp_path / "brigade_cli-1.0.0-py3-none-any.whl").write_bytes(b"")
+    monkeypatch.setattr(gate.venv.EnvBuilder, "create", lambda *_a, **_k: None)
+    failures = gate.check_upgrade(tmp_path, "1.0.0", "0.9.0")
+    assert failures and failures[0].startswith("console script missing before the upgrade")
 
 
 def test_upgrade_gate_fails_closed_when_it_cannot_run(tmp_path, monkeypatch, capsys):

@@ -717,8 +717,10 @@ def installed_pypi_project() -> str:
     """Name of the PyPI distribution this installation was made from.
 
     pipx records the requested package in ``pipx_metadata.json``, which is exact even
-    when the install is a brigade-cli app. Other layouts fall
-    back to the installed distribution metadata. Anything unknown is the real package.
+    when the install is a brigade-cli app. Other layouts fall back to the installed
+    distribution metadata, where the real package wins: a venv upgraded from the 0.31.0
+    brigadestack bridge keeps an orphaned brigade-cli dist-info. Anything unknown is the
+    real package.
     """
     try:
         recorded = json.loads((Path(sys.prefix) / "pipx_metadata.json").read_text(encoding="utf-8"))
@@ -727,11 +729,13 @@ def installed_pypi_project() -> str:
         package = None
     if package in (PYPI_PROJECT, LEGACY_PYPI_PROJECT):
         return package
-    try:
-        importlib.metadata.distribution(LEGACY_PYPI_PROJECT)
-    except importlib.metadata.PackageNotFoundError:
-        return PYPI_PROJECT
-    return LEGACY_PYPI_PROJECT
+    for name in (PYPI_PROJECT, LEGACY_PYPI_PROJECT):
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        return name
+    return PYPI_PROJECT
 
 
 def _pipx_copies_apps() -> bool:
@@ -810,19 +814,20 @@ def run_update(
                 return 0
             # Stable and beta both force-reinstall the one user-global pipx app
             # with an exact package pin. Beta never uses a mutable Git main SHA.
-            # Stable keeps the installed package name. Beta resolves daily wheels of the real
-            # package only: the compatibility package has no development builds.
+            # Both channels install the real package: brigade-cli is the same code under the old
+            # name, its last release becomes a stub, and it has no development builds, so an
+            # update must move a brigade-cli app to brigadestack.
             installed_project = installed_pypi_project()
-            install_project = installed_project if channel == "stable" else PYPI_PROJECT
+            install_project = PYPI_PROJECT
             pipx_spec = f"{install_project}=={coordinate}"
-            # A beta update of a brigade-cli app installs brigadestack as a new pipx app whose
+            # An update of a brigade-cli app installs brigadestack as a new pipx app whose
             # `brigade` and `brigade-hook` replace the old links (--force), removes the old app so
             # it cannot relink them on a later `pipx upgrade-all`, then installs brigadestack once
             # more, because older pipx (1.4.x) uninstalls launchers by name even when another app
             # owns them. Setup and the state write come after, so a lost launcher never records a
             # finished update. Where pipx copies apps (Windows), uninstall also fails on the
             # running interpreter, so there the user removes the old app after exit.
-            retire_legacy = installed_project == LEGACY_PYPI_PROJECT and install_project != LEGACY_PYPI_PROJECT
+            retire_legacy = installed_project == LEGACY_PYPI_PROJECT
             retire_after_exit = retire_legacy and _pipx_copies_apps()
             cached_manifest_path = Path(
                 component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)

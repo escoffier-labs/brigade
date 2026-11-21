@@ -452,14 +452,13 @@ jobs:
             python scripts/verify_component_manifest_provenance.py --check-attestation-json "$RUNNER_TEMP/attestation.json"
           done < release-assets/checksums.txt
 
-  build-and-publish:
+  build-python-dist:
+    # Builds both distributions without any registry credential: nothing here may hold id-token.
     needs: release-asset-gate
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -503,10 +502,49 @@ jobs:
               print(f"::error::dist/ holds {sorted(found)}, expected {sorted(expected)}")
               sys.exit(1)
           EOF
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: python-dist
+          path: dist/
+          if-no-files-found: error
+
+  check-cli-upgrade:
+    # Installs the previous brigade-cli release from PyPI and runs its code, so this job holds no
+    # id-token and no environment. It checks the exact dist/ the publish job uploads.
+    needs: build-python-dist
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: python-dist
+          path: dist
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.12'
       - name: Check an installed brigade-cli upgrades in place to the built wheel
         env:
           TAG: ${{ github.ref_name }}
         run: python scripts/check_cli_upgrade.py --dist dist --version "${TAG#v}"
+
+  build-and-publish:
+    # Only uploads the dist/ that build-python-dist built and check-cli-upgrade checked. PyPI trusted
+    # publishing matches the workflow file and the environment, not the job name.
+    needs: [build-python-dist, check-cli-upgrade]
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: python-dist
+          path: dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:
