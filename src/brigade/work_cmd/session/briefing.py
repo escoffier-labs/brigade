@@ -908,6 +908,7 @@ def _outcome_ratchet_line(ratchet: object) -> str:
         f"outcome_ratchet: generated_at={brief_values.name(report.get('generated_at'))} "
         f"mode={brief_values.name(report.get('mode') or 'dry-run')} "
         f"regression_holds={brief_values.name(report.get('regression_holds'))} ({listed}) "
+        f"{_trials_label(report)} "
         f"ineligibility_rate={brief_values.name(report.get('ineligibility_rate'))} "
         f"leading={brief_values.name(report.get('leading_reason') or 'none')} "
         f"pending_physical_actions={brief_values.name(report.get('pending_physical_actions') or 0)}"
@@ -916,6 +917,16 @@ def _outcome_ratchet_line(ratchet: object) -> str:
             if report.get("stale_physical_actions")
             else ""
         )
+    )
+
+
+def _trials_label(report: dict[str, Any]) -> str:
+    """Return ``trials=3 (attested=1 local=2)``, naming attested and local trials separately (#2779)."""
+    local = report.get("local_trials", "not recorded")
+    attested = report.get("attested_trials", "not recorded")
+    total = local + attested if isinstance(local, int) and isinstance(attested, int) else "not recorded"
+    return (
+        f"trials={brief_values.name(total)} (attested={brief_values.name(attested)} local={brief_values.name(local)})"
     )
 
 

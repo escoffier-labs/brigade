@@ -34,6 +34,12 @@ def _drain_orphan_claim_releases(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _no_ci_attestation_network(monkeypatch):
+    """Never call ``gh api`` from a test. Attestation tests inject a mock transport instead."""
+    monkeypatch.setenv("BRIGADE_CI_ATTESTATION", "off")
+
+
+@pytest.fixture(autouse=True)
 def systemctl_calls(monkeypatch):
     """Never reach the real user manager: record each ``systemctl --user`` call and succeed.
 

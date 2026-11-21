@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import outcome as outcome_core, outcome_cmd, verify_trial
+from . import ci_attestation, outcome as outcome_core, outcome_cmd, verify_trial
 
 SCORECARD_POLICY_VERSION = "scorecard.v1"
 EFFECTIVE_WILSON_MIN = 0.15
@@ -304,6 +304,7 @@ def _audit_receipt(
     receipt_path: Path,
     receipt: dict[str, Any],
     target: Path,
+    attestor: ci_attestation.Attestor | None = None,
 ) -> ReceiptAudit:
     binding = _binding_dict(receipt)
     projection = verify_trial.project_trial(
@@ -311,6 +312,10 @@ def _audit_receipt(
         target=target,
         patch_path=receipt_path.parent / "changes.patch",
     )
+    attestation = projection.attestation
+    if projection.eligible and attestor is not None and attestor.attest(receipt).attested:
+        # Local state chose the trial. The pass itself came from the CI check run (#2779).
+        attestation = "attested"
     reused = isinstance(receipt.get("reused_from"), str) and bool(receipt.get("reused_from"))
     unit_key = evidence_unit_key(receipt, binding) if binding is not None else None
     return ReceiptAudit(
@@ -325,7 +330,7 @@ def _audit_receipt(
         verifier_cost_s=_receipt_duration_seconds(receipt),
         reused=reused,
         evidence_unit_key=unit_key,
-        attestation=projection.attestation,
+        attestation=attestation,
     )
 
 
@@ -521,6 +526,9 @@ def build_scorecards(target: Path) -> list[SubjectScorecard]:
     target = target.expanduser().resolve()
     grouped: dict[tuple[str, str, str], list[ReceiptAudit]] = defaultdict(list)
     receipts_by_path: dict[str, dict[str, Any]] = {}
+    # One attestor per build: it memoises the API answers, so many receipts for one merged
+    # commit cost one lookup, and it fails closed to "local" on any transport error.
+    attestor = ci_attestation.Attestor(target)
 
     for receipt_path in discover_verify_receipt_paths(target):
         receipt = _load_receipt(receipt_path)
@@ -537,7 +545,7 @@ def build_scorecards(target: Path) -> list[SubjectScorecard]:
         cohort_fp = current_fp or subject.content_fingerprint
         if not _fingerprints_match(subject.content_fingerprint, cohort_fp):
             continue
-        audit = _audit_receipt(receipt_path=receipt_path, receipt=receipt, target=target)
+        audit = _audit_receipt(receipt_path=receipt_path, receipt=receipt, target=target, attestor=attestor)
         normalized_fp = _normalize_fingerprint(cohort_fp) or cohort_fp
         grouped[(subject.artifact_kind, subject.artifact_id, normalized_fp)].append(audit)
 

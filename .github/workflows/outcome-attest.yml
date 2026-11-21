@@ -1,0 +1,59 @@
+name: Outcome attest
+# Reruns the verify manifests a merged commit touches. Each matrix job is a GitHub
+# Actions check run named `outcome-attest/<manifest>`, so its pass or fail is recorded
+# on the merged commit by the github-actions app. `brigade outcome rank` reads those
+# check runs through `gh api` (src/brigade/ci_attestation.py). This file path and the
+# check name prefix are part of that contract. Job check runs need no `checks: write`.
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  plan:
+    name: outcome-attest-plan
+    runs-on: ubuntu-latest
+    outputs:
+      manifests: ${{ steps.plan.outputs.manifests }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install Brigade
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e .
+      - name: List touched manifests
+        id: plan
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          manifests="$(.venv/bin/python scripts/outcome_attest_plan.py --before "$BEFORE_SHA" --after "$AFTER_SHA")"
+          echo "manifests=$manifests" >> "$GITHUB_OUTPUT"
+  attest:
+    name: outcome-attest/${{ matrix.manifest }}
+    needs: plan
+    if: needs.plan.outputs.manifests != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJSON(needs.plan.outputs.manifests) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install Brigade
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e ".[dev]"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Rerun manifest
+        env:
+          MANIFEST_ID: ${{ matrix.manifest }}
+        run: brigade work verify run --target . --manifest "$MANIFEST_ID"

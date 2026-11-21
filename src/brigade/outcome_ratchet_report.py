@@ -302,8 +302,11 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     pending_count = raw_pending if isinstance(raw_pending, int) and not isinstance(raw_pending, bool) else 0
     raw_stale = summary.get("stale_physical_actions")
     stale_count = raw_stale if isinstance(raw_stale, int) and not isinstance(raw_stale, bool) else 0
+    local_label, attested_label = reported_trial_counts(summary)
     return {
         "present": True,
+        "local_trials": local_label,
+        "attested_trials": attested_label,
         "outcome_proposals": proposal_counts(summary),
         "generated_at": report.get("generated_at"),
         "pending_physical_actions": pending_count,
