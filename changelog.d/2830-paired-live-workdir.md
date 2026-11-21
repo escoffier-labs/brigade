@@ -1,1 +1,1 @@
-- Stop a live paired-trial cell only after every process it started is gone, so the cell removes its work directory on the first try and no leaked descendant keeps writing under it (#2830).
+- Keep a live paired-trial cell from leaking processes: the arm drains its process group with pidfd-pinned signals before removing its work dir, a drain failure fails only that cell and keeps its work dir, and the arm environment disables the update refresh so no detached child writes into its home (#2830).

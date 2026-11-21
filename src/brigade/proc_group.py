@@ -10,6 +10,7 @@ reserved for the whole wait, so a recycled id can never be probed or signalled
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -32,6 +33,10 @@ def observe_leader_exit(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
+class ProcessGroupUnreadable(OSError):
+    """The process table could not be read, so group membership cannot be verified."""
+
+
 def group_has_live_members(pgid: int) -> bool:
     """Whether any non-zombie process belongs to ``pgid``'s group or session.
 
@@ -40,53 +45,108 @@ def group_has_live_members(pgid: int) -> bool:
     that session id and still counts. A zombie cannot write, so a drained but
     deliberately unreaped leader does not count as a live member.
     """
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
+    records = _member_records(pgid)
+    if records is None:
         # The group's fate cannot be observed, so it is treated as alive.
         return True
-    return bool(_members(entries, pgid))
+    return bool(records)
 
 
-def group_member_pids(pgid: int) -> list[int]:
-    """Live (non-zombie) pids in ``pgid``'s group or session, in ``/proc`` order."""
+def group_member_pids(pgid: int) -> list[int] | None:
+    """Live (non-zombie) pids in ``pgid``'s group or session, or None when /proc is unreadable."""
+    records = _member_records(pgid)
+    if records is None:
+        return None
+    return [pid for pid, _ in records]
+
+
+def _member_records(pgid: int) -> list[tuple[int, int]] | None:
+    """(pid, starttime) for every live member, or None when the process table cannot be read."""
+    if pgid <= 0:
+        return []
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return []
+        return None
     return _members(entries, pgid)
 
 
-def _members(entries: list[str], pgid: int) -> list[int]:
+def _members(entries: list[str], pgid: int) -> list[tuple[int, int]]:
+    if pgid <= 0:
+        return []
     target = str(pgid).encode()
-    members: list[int] = []
+    members: list[tuple[int, int]] = []
     for entry in entries:
         if not entry.isdigit():
             continue
-        try:
-            rest = Path(f"/proc/{entry}/stat").read_bytes().rpartition(b")")[2]
-        except OSError:
+        fields = _stat_fields(int(entry))
+        if fields is None or len(fields) <= 19:
             continue
-        # The process name may contain ")", so the split above uses the last one.
-        fields = rest.split()
-        if len(fields) > 3 and target in (fields[2], fields[3]) and fields[0] != b"Z":
-            members.append(int(entry))
+        # The process name may contain ")", so the split in ``_stat_fields`` uses the last one.
+        # Field 22 is starttime, which pins this pid to one process across the scan and the signal.
+        if target not in (fields[2], fields[3]) or fields[0] == b"Z":
+            continue
+        try:
+            started = int(fields[19])
+        except ValueError:
+            continue
+        members.append((int(entry), started))
     return members
+
+
+def _stat_fields(pid: int) -> list[bytes] | None:
+    try:
+        rest = Path(f"/proc/{pid}/stat").read_bytes().rpartition(b")")[2]
+    except OSError:
+        return None
+    return rest.split()
 
 
 def kill_group_members(pgid: int, sig: int) -> int:
     """Signal every live member of ``pgid``'s group or session; return how many were signalled.
 
     A descendant that called ``setpgid`` keeps the leader's session id, so a group kill alone misses
-    it. Signalling its pid directly is the bounded stop for such a survivor.
+    it. Each candidate gets a pidfd before its stat is re-read. The signal goes through that
+    descriptor only when the re-read still names the same group or session, the state is not a
+    zombie, and starttime matches the scan, so a pid recycled in between can never be signalled.
+    Raises ``ProcessGroupUnreadable`` when the process table cannot be read.
     """
+    if pgid <= 0:
+        return 0
+    records = _member_records(pgid)
+    if records is None:
+        raise ProcessGroupUnreadable("the process table is unreadable")
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is None or pidfd_send_signal is None:
+        return 0
+    target = str(pgid).encode()
     signalled = 0
-    for pid in group_member_pids(pgid):
+    for pid, started in records:
         try:
-            os.kill(pid, sig)
+            descriptor = pidfd_open(pid)
         except OSError:
             continue
-        signalled += 1
+        try:
+            fields = _stat_fields(pid)
+            if fields is None or len(fields) <= 19:
+                continue
+            try:
+                started_now = int(fields[19])
+            except ValueError:
+                continue
+            if started_now != started or fields[0] == b"Z" or target not in (fields[2], fields[3]):
+                continue
+            try:
+                pidfd_send_signal(descriptor, sig)
+            except OSError:
+                continue
+            signalled += 1
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     return signalled
 
 

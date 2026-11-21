@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import signal
 import subprocess
@@ -14,6 +15,10 @@ from brigade import proc, proc_group
 from tests._child_publish import PUBLISH_SOURCE, process_is_running, wait_for_text
 
 pytestmark = pytest.mark.skipif(not proc_group.drain_supported(), reason="requires /proc and waitid(WNOWAIT)")
+requires_pidfd = pytest.mark.skipif(
+    not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"),
+    reason="pidfd signalling is not available",
+)
 
 
 def _stop(process: subprocess.Popen[bytes]) -> None:
@@ -70,6 +75,7 @@ def test_descendant_that_leaves_the_group_still_counts_as_live(tmp_path):
         _stop(process)
 
 
+@requires_pidfd
 def test_kill_group_members_stops_a_descendant_that_left_the_group(tmp_path):
     """The bounded stop reaches a setpgid descendant that a group kill cannot."""
     pid_path = tmp_path / "pid"
@@ -104,6 +110,41 @@ def test_kill_group_members_stops_a_descendant_that_left_the_group(tmp_path):
             except OSError:
                 pass
         _stop(process)
+
+
+def test_group_member_pids_ignores_a_non_positive_group(monkeypatch):
+    calls = []
+    monkeypatch.setattr(proc_group.os, "listdir", lambda path: calls.append(path) or [])
+    assert proc_group.group_member_pids(0) == []
+    assert calls == []
+
+
+def test_group_member_pids_reports_an_unreadable_process_table(monkeypatch):
+    real_listdir = os.listdir
+
+    def listdir(path):
+        if str(path) == "/proc":
+            raise PermissionError(errno.EACCES, "denied")
+        return real_listdir(path)
+
+    monkeypatch.setattr(proc_group.os, "listdir", listdir)
+    assert proc_group.group_member_pids(4242) is None
+
+
+@requires_pidfd
+def test_kill_group_members_skips_a_pid_whose_starttime_changed(monkeypatch):
+    """A pid recycled between the scan and the read must never be signalled."""
+    fields = [b"S", b"1", b"4242", b"4242"] + [b"0"] * 15 + [b"222"]
+    monkeypatch.setattr(proc_group, "group_member_pids", lambda pgid: [os.getpid()], raising=False)
+    monkeypatch.setattr(proc_group, "_member_records", lambda pgid: [(os.getpid(), 111)], raising=False)
+    monkeypatch.setattr(proc_group, "_stat_fields", lambda pid: list(fields), raising=False)
+    sent = []
+    monkeypatch.setattr(proc_group.os, "kill", lambda pid, sig: sent.append(("kill", pid, sig)))
+    monkeypatch.setattr(
+        proc_group.signal, "pidfd_send_signal", lambda fd, sig: sent.append(("pidfd", sig)), raising=False
+    )
+    assert proc_group.kill_group_members(4242, signal.SIGKILL) == 0
+    assert sent == []
 
 
 def test_clean_drain_records_descendants_reaped():
