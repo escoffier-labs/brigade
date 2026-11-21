@@ -26,10 +26,11 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator, Mapping, Sequence
+from typing import Any, BinaryIO, Callable, Iterator, Mapping, Sequence
 from urllib.parse import unquote
 
 from . import dirfd, proc
+from .proc_group import ProcessGroupUnreadable, drain_supported, group_has_live_members, kill_group_members
 from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS, open_executable
 from .model_trial_paired import (
     INSTRUCTION,
@@ -62,6 +63,11 @@ ANCESTOR_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
 VERSION_TIMEOUT = 30.0
 VERSION_MAX_BYTES = 4096
 EXIT_GRACE = 10.0
+# After the arm's leader exits, give every process it started this long to be gone before the work
+# directory is removed. The same bound the supervised scanner launches use.
+GROUP_DRAIN_SECONDS = proc.GROUP_DRAIN_SECONDS
+# A drain failure is a cell failure with a fixed reason, never a crash of the whole trial.
+DRAIN_FAILURE = "process_group_drain_failed"
 # Windows has no tree kill here, so give a grandchild's handles up to about 7 s to be released.
 WINDOWS_REMOVE_ATTEMPTS = 8
 WINDOWS_REMOVE_PAUSE = 0.25
@@ -112,6 +118,7 @@ ENV_PASSTHROUGH = (
 PROXY_ENV = tuple(key for key in ENV_PASSTHROUGH if key.lower().endswith("_proxy") and key.lower() != "no_proxy")
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 FIXED_ENV = {
+    "BRIGADE_NO_UPDATE_CHECK": "1",  # A cell has no network need and must not spawn a refresh under its home.
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -551,13 +558,45 @@ def _exited(proc: subprocess.Popen[bytes]) -> bool:
         return True
 
 
-def _reap(proc: subprocess.Popen[bytes], timeout: float) -> int:
+class ArmDrainError(RuntimeError):
+    """A process the arm started outlived the bounded group drain."""
+
+
+def _drain_arm_group(process: subprocess.Popen[bytes]) -> None:
+    """Stop every process the arm started, then wait bounded for its session to be gone.
+
+    Called only while the leader is still unreaped, so its pid remains the group and session id and
+    cannot be recycled. A descendant that moved to its own group with ``setpgid`` keeps that session
+    id, so a group kill alone misses it. Every live member is signalled through its pinned pidfd on
+    every poll, because a survivor can fork while the scan runs. Raises when a member survives
+    SIGKILL or the process table cannot be read: the arm directory must never be removed while
+    something it started can still write in it.
+    """
+    if not drain_supported():
+        return
+    deadline = time.monotonic() + GROUP_DRAIN_SECONDS
+    while True:
+        try:
+            kill_group_members(process.pid, signal.SIGKILL)
+        except ProcessGroupUnreadable as exc:
+            raise ArmDrainError("the arm's process table is unreadable") from exc
+        if not group_has_live_members(process.pid):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ArmDrainError("an arm descendant outlived the process-group drain")
+        time.sleep(min(0.005, remaining))
+
+
+def _reap(proc: subprocess.Popen[bytes], timeout: float, *, drain: Callable[[], None] | None = None) -> int:
     """Wait for the child to exit, end its process group, then reap it.
 
     On POSIX the exit is awaited without reaping. An unreaped zombie leader keeps its pid and group id
     reserved, so killing the group then cannot reach another process, and it ends an MCP server child
-    that outlived the CLI before the arm directory is removed. Only then is the leader reaped. Raises
-    ``TimeoutExpired`` when the child is still running after ``timeout``. Windows only waits.
+    that outlived the CLI before the arm directory is removed. The whole group is then drained before
+    the leader is reaped, so removal starts on a quiet tree. ``drain`` lets a caller own the drain's
+    error handling. Raises ``TimeoutExpired`` when the child is still running after ``timeout``.
+    Windows only waits.
     """
     if os.name != "posix" or proc.returncode is not None:
         return proc.wait(timeout=timeout)
@@ -567,6 +606,10 @@ def _reap(proc: subprocess.Popen[bytes], timeout: float) -> int:
             raise subprocess.TimeoutExpired(proc.args, timeout)
         time.sleep(0.01)
     _kill(proc)
+    if drain is None:
+        _drain_arm_group(proc)
+    else:
+        drain()
     return proc.wait()
 
 
@@ -671,8 +714,12 @@ def _run_process(
     token: str,
     *,
     pass_fds: tuple[int, ...] = (),
-) -> tuple[bytes, bytes, int | None, bool]:
-    """Run one arm. Stdout and stderr stay in memory, redacted, and bounded line by line and in total."""
+) -> tuple[bytes, bytes, int | None, bool, bool]:
+    """Run one arm. Stdout and stderr stay in memory, redacted, and bounded line by line and in total.
+
+    The fifth element is True when the arm's process drain failed. The caller turns that into a cell
+    failure and keeps the work dir for diagnosis.
+    """
     raw: list[bytes] = []
     size = 0
     capture = _StderrCapture(token)
@@ -690,10 +737,34 @@ def _run_process(
     timed_out = threading.Event()
     # Every kill, and every reap, holds this lock: a signal is never sent for a pid that was just reaped.
     expiry = threading.Lock()
+    drained = False
+    drain_failure: ArmDrainError | None = None
+
+    def signal_arm() -> None:
+        """Kill the arm's group and every session member. The caller holds ``expiry``."""
+        if child.returncode is not None:
+            return
+        _kill(child)
+        if drain_supported():
+            try:
+                kill_group_members(child.pid, signal.SIGKILL)
+            except OSError:
+                pass
 
     def kill() -> None:
         with expiry:
-            _kill(child)
+            signal_arm()
+
+    def drain_once() -> None:
+        """Drain at most once. A failure is recorded, never raised over a primary error."""
+        nonlocal drained, drain_failure
+        if drained:
+            return
+        drained = True
+        try:
+            _drain_arm_group(child)
+        except ArmDrainError as exc:
+            drain_failure = exc
 
     def expire() -> None:
         with expiry:
@@ -702,13 +773,15 @@ def _run_process(
             if child.returncode is None:
                 if not _exited(child):
                     timed_out.set()
-                _kill(child)
+                signal_arm()
 
     drainer = threading.Thread(target=capture.drain, args=(child.stderr, kill), daemon=True)
     drainer.start()
     timer = threading.Timer(timeout, expire)
     timer.daemon = True
     timer.start()
+    primary: BaseException | None = None
+    cleanup_failed = False
     try:
         assert child.stdin is not None and child.stdout is not None
         try:
@@ -744,22 +817,43 @@ def _run_process(
         timer.cancel()
         try:
             with expiry:  # An expiry already running finishes before we reap.
-                code = _reap(child, EXIT_GRACE)
+                code = _reap(child, EXIT_GRACE, drain=drain_once)
         except subprocess.TimeoutExpired:  # Closed stdout but kept running.
             timed_out.set()
             with expiry:
-                _kill(child)
+                signal_arm()
+                drain_once()
                 code = child.wait()
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
         timer.cancel()
         kill()
-        drainer.join(timeout=EXIT_GRACE)
-        for pipe in (child.stdout, child.stderr):
-            if pipe is not None:
-                pipe.close()
+        drain_once()
+        cleanup_failed = drain_failure is not None
+        try:
+            drainer.join(timeout=EXIT_GRACE)
+        finally:
+            if drainer.is_alive():
+                cleanup_failed = True
+            for pipe in (child.stdout, child.stderr):
+                if pipe is not None:
+                    pipe.close()
+            try:
+                child.wait(timeout=EXIT_GRACE)
+            except (OSError, subprocess.TimeoutExpired):
+                cleanup_failed = True
+        if primary is not None and cleanup_failed:
+            # The caller keeps the work dir for a cleanup that did not confirm a quiet arm.
+            primary.arm_cleanup_failed = True  # type: ignore[attr-defined]
+            add_note = getattr(primary, "add_note", None)
+            if callable(add_note):
+                reason = drain_failure or "the drainer or the leader did not finish"
+                add_note(f"cell process cleanup also failed: {reason}")
     if capture.overflow:
         observer.failure = observer.failure or "stderr_too_large"
-    return b"".join(raw), bytes(capture.tail), code, timed_out.is_set()
+    return b"".join(raw), bytes(capture.tail), code, timed_out.is_set(), cleanup_failed
 
 
 def read_capped(path: Path, cap: int) -> bytes:
@@ -860,10 +954,10 @@ def run_cell(
     observer = _Observer(expected_model=ctx["expected_model"], session_id=session_id, version=ctx["version"], cwd=cwd)
     blocked = ancestor_instruction_file(cwd)
     if blocked is not None:  # Never launch: the CLI would load this file as instructions.
-        stream, stderr, code, timed_out = b"", b"", None, False
+        stream, stderr, code, timed_out, drain_failed = b"", b"", None, False, False
     else:
         executable.verify()  # What runs is the file hashed at the start, never a replacement.
-        stream, stderr, code, timed_out = _run_process(
+        stream, stderr, code, timed_out, drain_failed = _run_process(
             executable.command(argv),
             build_env(ctx["environ"], work),
             cwd,
@@ -887,12 +981,15 @@ def run_cell(
         failure = f"model_error:{result.get('subtype')}"
     diagnostics = [] if server_failure is None else [server_failure]
     failure = failure or server_failure
+    if drain_failed:
+        failure = DRAIN_FAILURE
     return {
         "trace": trace,
         "receipt": json.loads(receipt_bytes) if receipt_bytes is not None else None,
         "receipt_bytes": receipt_bytes,
         "final": None if failure else _final(result),
         "failure": failure,
+        "keep_work_dir": drain_failed,
         "live": {
             "session_id": session_id,
             "cwd": str(cwd),
@@ -1155,12 +1252,19 @@ def _execute(
         artifact_dir = output / "attempts" / attempt_id
         bound.dir_fd(*artifact_dir.relative_to(output).parts, create=True)
         work = Path(tempfile.mkdtemp(prefix="brigade-paired-live-"))
+        keep_work_dir = False
         try:
             ran = run_cell(
                 cell=cell, files=packages[cell["arm"]], package_dir=snapshots[cell["arm"]], ctx=ctx, work=work
             )
+            keep_work_dir = bool(ran.pop("keep_work_dir", False))
+        except BaseException as exc:
+            # A primary error still wins, but a cleanup that never confirmed a quiet arm keeps the dir.
+            keep_work_dir = bool(getattr(exc, "arm_cleanup_failed", False))
+            raise
         finally:
-            remove_work_dir(work)
+            if not keep_work_dir:
+                remove_work_dir(work)
         for name, data in ran.pop("artifacts").items():
             safe_write(bound, artifact_dir / name, data)
         receipt_bytes = ran.pop("receipt_bytes")
