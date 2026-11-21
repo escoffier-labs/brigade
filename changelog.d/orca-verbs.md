@@ -1,0 +1,1 @@
+- Orca coordinators can use `brigade orca` to enroll local work, claim replay-safe starts, report worker outcomes, and track workspace capacity through worker release and acknowledgement.

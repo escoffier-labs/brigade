@@ -234,6 +234,7 @@ EVENT_TYPES.update(
                 "attempt_id",
                 "dispatch_attempt",
                 "parent_thread",
+                "orca_task_id",
                 "template_digest",
                 "intent_digest",
                 # Digests-only admission evidence: the roster digest that
@@ -263,6 +264,7 @@ EVENT_TYPES.update(
         "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
         "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
         "task.native-hold-resolved": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
+        "task.native-capacity": frozenset({"task_id", "attempt_id", "reason"}),
         # Native T3 enrollment holds one immutable delegation input asset
         # outside the journal. Only its relative name and digests are retained
         # here, never task text, options values, or raw native JSON.
@@ -318,6 +320,7 @@ _NATIVE_T3_EVENT_TYPES = frozenset(
         "task.native-held",
         "task.native-cancel-requested",
         "task.native-hold-resolved",
+        "task.native-capacity",
     }
 )
 # The only event types written under schema version 3. A v3 envelope must carry
@@ -362,6 +365,7 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
     "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
     "task.native-hold-resolved": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
+    "task.native-capacity": frozenset({"task_id", "attempt_id", "reason"}),
 }
 
 # Private-data exclusion list: these payload key names are never part of any
@@ -591,6 +595,8 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
             raise CanonicalizationError("task.native-claimed dispatch attempt is invalid")
         if not run_task_journal.provider_reference(payload.get("parent_thread")):
             raise CanonicalizationError("task.native-claimed parent thread is invalid")
+        if "orca_task_id" in payload and not run_task_journal.provider_reference(payload["orca_task_id"]):
+            raise CanonicalizationError("task.native-claimed Orca task is invalid")
         for field in ("template_digest", "intent_digest"):
             if not run_task_journal.digest(payload.get(field)):
                 raise CanonicalizationError(f"task.native-claimed {field} is invalid")
@@ -608,6 +614,13 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
         for field in ("handle_digest", "cancel_key"):
             if not run_task_journal.digest(payload.get(field)):
                 raise CanonicalizationError(f"task.native-cancel-requested {field} is invalid")
+        return
+    if event_type == "task.native-capacity":
+        from .native_child_observations import RESOURCE_STATES
+
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or reason not in RESOURCE_STATES:
+            raise CanonicalizationError("task.native-capacity reason is invalid")
         return
     if event_type == "task.native-hold-resolved":
         if payload.get("reason") != "accept-conflict":

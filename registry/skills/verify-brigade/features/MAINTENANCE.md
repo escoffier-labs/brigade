@@ -168,6 +168,7 @@ model                no feature file yet
 node                 no feature file yet
 notifications        no feature file yet; extras surface
 operator             no feature file yet
+orca                 fixture tests cover the verbs. A live drive belongs to the qualification workstream of #2800
 outcome              no feature file yet
 pantry               no feature file yet; extras surface
 profiles             no feature file yet
