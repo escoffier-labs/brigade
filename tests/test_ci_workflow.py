@@ -3297,6 +3297,8 @@ def test_windows_attestation_verifier_rejects_an_empty_repository(tmp_path, engi
             "1",
         ),
         ("[]", 0, "1"),
+        # A lone object naming the right ID is the wrong shape: gh prints an array.
+        ('{"verificationResult":{"signature":{"certificate":{"sourceRepositoryIdentifier":"1238165856"}}}}', 0, "1"),
         ("not json", 0, "1"),
         ("", 0, "1"),
         ('[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryIdentifier":"1238165856"}}}}]', 1, "1"),

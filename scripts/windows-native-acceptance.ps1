@@ -1098,6 +1098,9 @@ function Invoke-CanonicalAttestationVerifier {
     # A name is only a label: every verified attestation's certificate must name the Brigade
     # repository ID (verificationResult.signature.certificate.sourceRepositoryIdentifier, a
     # decimal string in `gh attestation verify --format json`).
+    # The output must be a JSON array. ConvertFrom-Json turns a lone object into one result too,
+    # so check the top-level shape on the raw text before parsing.
+    if ($verified -isnot [string] -or -not $verified.TrimStart().StartsWith("[")) { return 1 }
     try {
         # Windows PowerShell 5.1 emits a JSON array as one object; piping enumerates it in both editions.
         $parsed = $verified | ConvertFrom-Json
