@@ -793,8 +793,14 @@ def run_update(
             # with an exact package pin. Beta never uses a mutable Git main SHA.
             # Stable keeps the installed package name. Beta resolves daily wheels of the real
             # package only: the compatibility package has no development builds.
-            install_project = installed_pypi_project() if channel == "stable" else PYPI_PROJECT
+            installed_project = installed_pypi_project()
+            install_project = installed_project if channel == "stable" else PYPI_PROJECT
             pipx_spec = f"{install_project}=={coordinate}"
+            # A beta update of a brigade-cli app installs brigadestack as a new pipx app whose
+            # `brigade` and `brigade-hook` replace the old links (--force), then removes the old
+            # app so it cannot relink them on a later `pipx upgrade-all`. It runs last because
+            # the old app's venv may be the one running this process.
+            retire_legacy = installed_project == LEGACY_PYPI_PROJECT and install_project != LEGACY_PYPI_PROJECT
             cached_manifest_path = Path(
                 component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)
             )
@@ -805,8 +811,9 @@ def run_update(
                 [selected_paths.pipx_executable, "install", "--force", pipx_spec],
                 setup_command,
             ]
+            retire_command = [selected_paths.pipx_executable, "uninstall", LEGACY_PYPI_PROJECT]
             if dry_run:
-                for command in commands:
+                for command in commands + ([retire_command] if retire_legacy else []):
                     print(" ".join(command))
                 return 0
             manifest_path = _cache_manifest(selected_paths, release)
@@ -816,6 +823,12 @@ def run_update(
                 if _returncode(selected_runner(command)) != 0:
                     raise UpdateError(f"update command failed: {' '.join(command)}")
             write_update_state(state_path, next_state)
+            if retire_legacy and _returncode(selected_runner(retire_command)) != 0:
+                # The new app already owns `brigade`; a leftover old app is untidy, not broken.
+                print(
+                    f"brigade update: installed {PYPI_PROJECT}; remove the old app with: {' '.join(retire_command)}",
+                    file=sys.stderr,
+                )
     except (UpdateError, OSError, UnicodeDecodeError, ValueError) as exc:
         print(f"brigade update: {exc}", file=sys.stderr)
         return 1
