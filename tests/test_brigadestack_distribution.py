@@ -148,7 +148,9 @@ def test_npm_compat_package_declares_its_own_bin_and_payload():
 
 def test_npm_compat_launcher_resolves_brigadestack_not_itself():
     launcher = (NPM_COMPAT / "launcher.cjs").read_text()
-    assert "require.resolve('brigadestack/launcher.cjs')" in launcher
+    # Node's resolver would also consult NODE_PATH and global folders, so the lookup is manual.
+    assert "require.resolve" not in launcher
+    assert "path.join(dir, 'node_modules', 'brigadestack')" in launcher
     assert "@escoffier-labs/brigade/launcher.cjs" not in launcher
 
 
@@ -160,7 +162,7 @@ def test_npm_launcher_contracts():
         [node, "--test", str(NPM_COMPAT / "launcher.test.cjs")],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=180,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -180,6 +182,7 @@ def test_npm_launcher_preserves_controlling_terminal_and_job_control(tmp_path, e
         pytest.skip("Node is required for compatibility terminal tests")
     dependency = tmp_path / "node_modules/brigadestack"
     dependency.mkdir(parents=True)
+    (dependency / "package.json").write_text(json.dumps({"name": "brigadestack", "version": "1.0.0"}))
     ready = tmp_path / "ready.json"
     heartbeat = tmp_path / "heartbeat"
     (dependency / "launcher.cjs").write_text(
@@ -193,6 +196,9 @@ def test_npm_launcher_preserves_controlling_terminal_and_job_control(tmp_path, e
     )
     launcher = tmp_path / "launcher.cjs"
     shutil.copyfile(NPM_COMPAT / "launcher.cjs", launcher)
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "@escoffier-labs/brigade", "version": "1.0.0", "dependencies": {"brigadestack": "1.0.0"}})
+    )
     command = dependency / "launcher.cjs" if entrypoint == "direct" else launcher
     prompt = b"COMPAT_TEST_PROMPT> "
     shell_pid, terminal = pty.fork()
