@@ -291,12 +291,27 @@ def _load_workflow_yaml(path: Path):
     try:
         import yaml
     except ImportError:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "pyyaml", "-q"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        import yaml
+        # Windows CI runs test files concurrently, so two files can race to install PyYAML and
+        # the loser's pip exits non-zero even though the winner's install makes the import work.
+        # Retry the import after each attempt and report pip's own error if it never does.
+        import importlib
+        import time
+
+        error = ""
+        for attempt in range(3):
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "pyyaml", "-q"], capture_output=True, text=True
+            )
+            error = result.stderr or result.stdout
+            importlib.invalidate_caches()
+            try:
+                import yaml
+
+                break
+            except ImportError:
+                time.sleep(2 * (attempt + 1))
+        else:
+            raise RuntimeError(f"pyyaml is unavailable and pip install failed: {error}")
     return yaml.safe_load(path.read_text())
 
 
