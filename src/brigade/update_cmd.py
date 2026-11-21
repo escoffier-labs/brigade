@@ -728,6 +728,19 @@ def installed_pypi_project() -> str:
     return LEGACY_PYPI_PROJECT
 
 
+def _pipx_copies_apps() -> bool:
+    """True where pipx copies app launchers into its bin directory instead of linking them."""
+    return os.name == "nt"
+
+
+def _retire_after_exit_hint(retire_command: list[str], install_command: list[str]) -> str:
+    return (
+        f"brigade update: installed {PYPI_PROJECT}. After this command exits, remove the old "
+        f"{LEGACY_PYPI_PROJECT} app and restore the brigade launcher with: "
+        f"{' '.join(retire_command)} ; {' '.join(install_command)}"
+    )
+
+
 def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, check=False, text=True)
 
@@ -800,9 +813,10 @@ def run_update(
             # `brigade` and `brigade-hook` replace the old links (--force), then removes the old
             # app so it cannot relink them on a later `pipx upgrade-all`. It runs last because
             # the old app's venv may be the one running this process. Where pipx copies apps
-            # instead of linking them (Windows), the uninstall removes `brigade` by name, so the
-            # new app is installed once more to restore its shims.
+            # instead of linking them (Windows), uninstall removes `brigade.exe` by name and then
+            # fails on the running interpreter, so there the user removes the old app after exit.
             retire_legacy = installed_project == LEGACY_PYPI_PROJECT and install_project != LEGACY_PYPI_PROJECT
+            retire_after_exit = retire_legacy and _pipx_copies_apps()
             cached_manifest_path = Path(
                 component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)
             )
@@ -815,8 +829,10 @@ def run_update(
             ]
             retire_command = [selected_paths.pipx_executable, "uninstall", LEGACY_PYPI_PROJECT]
             if dry_run:
-                for command in commands + ([retire_command, commands[0]] if retire_legacy else []):
+                for command in commands + ([retire_command] if retire_legacy and not retire_after_exit else []):
                     print(" ".join(command))
+                if retire_after_exit:
+                    print(_retire_after_exit_hint(retire_command, commands[0]))
                 return 0
             manifest_path = _cache_manifest(selected_paths, release)
             if manifest_path != cached_manifest_path:
@@ -825,17 +841,14 @@ def run_update(
                 if _returncode(selected_runner(command)) != 0:
                     raise UpdateError(f"update command failed: {' '.join(command)}")
             write_update_state(state_path, next_state)
-            if retire_legacy:
-                if _returncode(selected_runner(retire_command)) != 0:
-                    # The new app already owns `brigade`; a leftover old app is untidy, not broken.
-                    print(
-                        f"brigade update: installed {PYPI_PROJECT}; remove the old app with: {' '.join(retire_command)}",
-                        file=sys.stderr,
-                    )
-                elif _returncode(selected_runner(commands[0])) != 0:
-                    raise UpdateError(
-                        f"removed {LEGACY_PYPI_PROJECT} but could not restore {PYPI_PROJECT}; run: {' '.join(commands[0])}"
-                    )
+            if retire_after_exit:
+                print(_retire_after_exit_hint(retire_command, commands[0]), file=sys.stderr)
+            elif retire_legacy and _returncode(selected_runner(retire_command)) != 0:
+                # The new app already owns `brigade`; a leftover old app is untidy, not broken.
+                print(
+                    f"brigade update: installed {PYPI_PROJECT}; remove the old app with: {' '.join(retire_command)}",
+                    file=sys.stderr,
+                )
     except (UpdateError, OSError, UnicodeDecodeError, ValueError) as exc:
         print(f"brigade update: {exc}", file=sys.stderr)
         return 1
