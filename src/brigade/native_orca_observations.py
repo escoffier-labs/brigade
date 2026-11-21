@@ -1,4 +1,4 @@
-"""Project Orca 1.4.268 worker observations into the native-child families."""
+"""Project Orca worker observations into the native-child families."""
 
 from __future__ import annotations
 
@@ -24,12 +24,16 @@ def observe_argv(worker: WorkerReference) -> tuple[str, ...]:
     return (*_dispatch_argv("worker-show", worker), "--json", "--full")
 
 
-def _cancel_key(worker: WorkerReference) -> str:
+def cancel_key(worker: WorkerReference) -> str:
     return mutation_key({"handle": worker.handle_digest}, _STOP_DOMAIN)
 
 
 def cancel_argv(worker: WorkerReference) -> tuple[str, ...]:
-    return (*_dispatch_argv("worker-stop", worker), "--retry-request", _cancel_key(worker), "--json")
+    return (*_dispatch_argv("worker-stop", worker), "--retry-request", cancel_key(worker), "--json")
+
+
+def inbox_argv(worker: WorkerReference) -> tuple[str, ...]:
+    return (*CLI, "inbox", "--full", "--environment", "local", "--run", worker.run_id, "--json")
 
 
 def result_argv(worker: WorkerReference) -> tuple[str, ...]:
@@ -67,8 +71,6 @@ def _show(worker: WorkerReference, payload: object) -> tuple[Mapping[str, object
     shown_worker = _fields(reply.get("worker"))
     if shown_worker.get("dispatchId") != worker.dispatch_id:
         return {}, _awaiting(worker, "missing-evidence")
-    if shown_worker.get("state") in ("start_unknown", "stop_unknown", "unsupervised"):
-        return {}, _awaiting(worker, "acceptance-uncertain")
     return reply, None
 
 
@@ -78,6 +80,9 @@ def _agent_liveness(reply: Mapping[str, object]) -> Mapping[str, object]:
 
 def _exited(worker: WorkerReference, reply: Mapping[str, object]) -> bool:
     observation = _fields(reply.get("observation"))
+    liveness = _agent_liveness(reply)
+    if liveness.get("verdict") != "exited" or observation.get("status") == "live":
+        return False
     # A structured session can have no process but still restart on mail.
     if (
         observation.get("exactWorker") is True
@@ -89,12 +94,9 @@ def _exited(worker: WorkerReference, reply: Mapping[str, object]) -> bool:
     # A released PTY disappears from terminal inspection. The fleet projection
     # and the Dispatch's own resource row retain the proof after the pane closes.
     resource = _fields(reply.get("terminalResource"))
-    liveness = _agent_liveness(reply)
     return (
-        observation.get("status") != "live"
-        and resource.get("ownerDispatchId") == worker.dispatch_id
+        resource.get("ownerDispatchId") == worker.dispatch_id
         and resource.get("releaseState") == "released"
-        and liveness.get("verdict") == "exited"
         and liveness.get("source") in ("resource_release", "worker_stop")
     )
 
@@ -143,7 +145,7 @@ def _matching_report_id(worker: WorkerReference, message: Mapping[str, object], 
 
 
 def _report_id(worker: WorkerReference, worker_done: object, status: str) -> str | None:
-    # Use the coordinator's full check or inbox output. Only the full view keeps
+    # Use the coordinator's non-consuming inbox --full output. The full view keeps
     # each message's Run identity alongside the worker-provided payload.
     messages = result_fields(worker_done).get("messages")
     if not isinstance(messages, list):
@@ -158,7 +160,7 @@ def _report_id(worker: WorkerReference, worker_done: object, status: str) -> str
     # repeated worker_done with the same outcome as a duplicate without marking it
     # rejected (worker-report-settlement.ts at v1.4.268), so two matches are one
     # report sent twice. Take the smallest id so the choice does not depend on
-    # whether the caller read check or inbox.
+    # mailbox order.
     return min(matches) if matches else None
 
 
@@ -202,6 +204,14 @@ def classify_show(
     reply, refusal = _show(worker, payload)
     if refusal is not None:
         return refusal
+    if _fields(reply.get("worker")).get("state") in (
+        "start_unknown",
+        "outcome_unknown",
+        "stop_unknown",
+        "unsupervised",
+        "abandoned",
+    ):
+        return _awaiting(worker, "acceptance-uncertain")
     status = _fields(reply.get("dispatch")).get("status")
     if status == "pending":
         return _awaiting(worker, "pending-work", "queued")
@@ -226,6 +236,58 @@ def classify_show(
     )
 
 
+def settled_start(worker: WorkerReference, payload: object) -> bool:
+    """A later exact show can confirm that the original unknown start recovered."""
+    reply, refusal = _show(worker, payload)
+    if refusal is not None:
+        return False
+    state = _fields(reply.get("worker")).get("state")
+    dispatch = _fields(reply.get("dispatch")).get("status")
+    if dispatch == "dispatched" and state == "ready":
+        return _active(worker, reply).family == "active"
+    return (
+        isinstance(dispatch, str)
+        and dispatch in _TERMINAL_WORKER
+        and state == _TERMINAL_WORKER[dispatch]
+        and _exited(worker, reply)
+    )
+
+
+def resource_state(worker: WorkerReference, payload: object, *, retained_status: str | None) -> str | None:
+    """Project only bounded resource tokens from a correlated full show reply."""
+    reply, refusal = _show(worker, payload)
+    if refusal is not None:
+        return None
+    shown_worker = _fields(reply.get("worker"))
+    if shown_worker.get("state") == "abandoned":
+        return "abandoned-unknown"
+    resource = _fields(reply.get("terminalResource"))
+    if resource.get("ownerDispatchId") != worker.dispatch_id:
+        return "release-unverified"
+    if resource.get("releaseState") == "released":
+        expected = "stopped" if retained_status == "cancelled" else _TERMINAL_WORKER.get(retained_status or "")
+        expected_dispatch = "completed" if retained_status == "completed" else "failed"
+        if (
+            expected is not None
+            and shown_worker.get("state") == expected
+            and _fields(reply.get("dispatch")).get("status") == expected_dispatch
+            and resource.get("ownershipState") == "released"
+            and _exited(worker, reply)
+        ):
+            return "released"
+        return "release-unverified"
+    if resource.get("retainedReason") in ("user_kept", "user_requested"):
+        return "kept-open"
+    handle = resource.get("terminalHandle")
+    if (
+        isinstance(handle, str)
+        and handle.startswith("structworker_")
+        and handle == shown_worker.get("agentTerminalHandle")
+    ):
+        return "structured-tab-open"
+    return "worker-not-released"
+
+
 def parse_stop(
     worker: WorkerReference,
     payload: object,
@@ -240,7 +302,7 @@ def parse_stop(
     if (
         exit_code != 0
         or stop.get("dispatchId") != worker.dispatch_id
-        or _fields(stop.get("mutation")).get("requestId") != _cancel_key(worker)
+        or _fields(stop.get("mutation")).get("requestId") != cancel_key(worker)
         or stop.get("state") != "stopped"
         or stop.get("processAction") not in ("none", "closed_agent_terminal")
         or type(stop.get("alreadySettled")) is not bool

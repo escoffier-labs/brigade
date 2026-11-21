@@ -15,7 +15,7 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from . import run_journal, run_lifecycle, run_tasks
+from . import native_child_capacity, run_journal, run_lifecycle, run_tasks
 from . import native_child_journal as journal_core
 from . import run_task_journal as journal
 from .native_child_host import NativeChildHost
@@ -57,7 +57,9 @@ def ack(
         }
 
 
-def finalize(host: NativeChildHost, *, workspace: Path, run_id: str, owned_run: OwnedRun) -> dict[str, Any]:
+def finalize(
+    host: NativeChildHost, *, workspace: Path, run_id: str, owned_run: OwnedRun, require_released: bool = False
+) -> dict[str, Any]:
     """Close the run explicitly: completed only when every task is acked.
 
     An abandoned-unknown task refuses finalization. Releasing live-work
@@ -92,6 +94,10 @@ def finalize(host: NativeChildHost, *, workspace: Path, run_id: str, owned_run: 
                 "finalize-held",
                 "an unresolved task hold prevents finalization until an operator resolves it",
             )
+        if require_released and any(
+            reason != "awaiting-ack" for reason in native_child_capacity.capacity_reasons(events).values()
+        ):
+            raise refuse("finalize-live", "a claimed worker still needs terminal or release evidence")
         completed = all(
             result.status == "completed" and result.result_id is not None and result.acknowledged for result in results
         )
@@ -128,6 +134,7 @@ def status(
     workspace: Path,
     run_id: str,
     correlated: Callable[[Sequence[run_journal.RunEvent], str], bool],
+    include_capacity: bool = False,
 ) -> dict[str, Any]:
     """Read-only fixed tokens for every task, without native details.
 
@@ -138,6 +145,7 @@ def status(
     run_dir = journal_core.run_dir(workspace, run_id)
     meta = journal_core.read_meta(host, workspace, run_dir)
     events = journal_core.read_events(run_dir)
+    reasons = native_child_capacity.capacity_reasons(events) if include_capacity else {}
     rows = []
     for result in sorted(journal_core.read_tasks(run_dir), key=lambda item: item.handle.spec.task_id):
         task_id = result.handle.spec.task_id
@@ -155,6 +163,11 @@ def status(
                 "seat_digest": journal_core.digest({"seat": result.handle.spec.seat}, host.seat_digest_domain),
             }
         )
+        if include_capacity:
+            reason = reasons.get(task_id)
+            if reason == "awaiting-terminal" and not rows[-1]["correlated"]:
+                reason = "start-unconfirmed"
+            rows[-1].update(holds_capacity=reason is not None, capacity_reason=reason)
     return {
         "schema": host.status_schema,
         "run_id": run_dir.name,

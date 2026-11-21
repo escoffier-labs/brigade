@@ -1,4 +1,4 @@
-"""Orca 1.4.268 binding of the governed native child core."""
+"""Orca binding of the governed native child core."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from typing import Mapping
 from . import roster as roster_mod
 from .native_child_host import NativeChildError, NativeChildHost, TargetUnresolved
 
-ORCA_VERSION = "1.4.268"
+ORCA_VERSION = "1.4.269"
+SUPPORTED_VERSIONS = frozenset({"1.4.268", ORCA_VERSION})
 UNSUPPORTED = "orca-unsupported"
 STRUCTURAL_GAPS = frozenset(
     {
@@ -22,7 +23,7 @@ STRUCTURAL_GAPS = frozenset(
     }
 )
 
-# Orca's worker-start help and agent-session option catalogs at v1.4.268.
+# Orca's worker-start help and agent-session option catalogs at v1.4.269.
 # Provider-specific model/effort availability remains an Orca runtime check.
 _STANDARD_EFFORT = frozenset({"low", "medium", "high"})
 _EXTENDED_EFFORT = _STANDARD_EFFORT | {"xhigh", "max"}
@@ -54,7 +55,7 @@ class NativeTarget:
 
 
 def structural_gap(target: NativeTarget) -> str | None:
-    if target.orca_version != ORCA_VERSION:
+    if target.orca_version not in SUPPORTED_VERSIONS:
         return "version-unsupported"
     if target.agent not in AGENT_EFFORTS:
         return "driver-unsupported"

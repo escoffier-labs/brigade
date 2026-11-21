@@ -19,11 +19,12 @@ import os
 import re
 import sys
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from . import localio, native_child_admission, native_child_custody, roster as roster_mod
+from . import native_child_admission, native_child_custody, roster as roster_mod
+from . import native_child_enrollment as core
 from . import run_batch, run_journal, run_lifecycle, runguard
 from . import run_task_journal as journal
 from . import run_tasks
@@ -93,10 +94,6 @@ def _require_supported_platform() -> None:
         )
 
 
-def _create_run_dir(run_dir: Path) -> None:
-    native_child_custody.create_run_dir(run_dir)
-
-
 def write_delegation_asset(run_dir: Path, name: str, content: bytes) -> None:
     """Publish one owner-only asset atomically, refusing to replace a file."""
     _require_supported_platform()
@@ -134,23 +131,11 @@ def request_key(run_id: str, task_id: str, attempt_id: str) -> str:
     return REQUEST_KEY_PREFIX + hashlib.sha256(material).hexdigest()
 
 
-def asset_name(task_id: str) -> str:
-    """Return the run-local asset name for one task, without task text."""
-    if not journal.task_id(task_id):
-        raise ValueError("invalid task identity")
-    return "native-input-" + hashlib.sha256(task_id.encode("utf-8")).hexdigest() + ".json"
+asset_name = core.asset_name
 
 
 def delegation_input_bytes(*, task_id: str, seat: str, text: str, target: NativeTarget) -> bytes:
-    """Encode the exact retained delegation input for one task."""
-    payload = {
-        "schema": INPUT_SCHEMA,
-        "task_id": task_id,
-        "seat": seat,
-        "text": text,
-        "target": asdict(target),
-    }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return core.input_bytes(INPUT_SCHEMA, task_id=task_id, seat=seat, text=text, target=target)
 
 
 @dataclass(frozen=True)
@@ -260,25 +245,12 @@ class EnrollmentPlan:
     entries: tuple[EnrollmentTask, ...]
 
 
-def _clean_revision(workspace: Path) -> str:
-    from .fleet_t3_transport import SourceRevisionError, clean_source_revision
-
-    try:
-        return clean_source_revision(workspace, ignore_prefixes=(".brigade/",))
-    except SourceRevisionError as exc:
-        code = "source-dirty" if exc.code == "source-dirty" else "source-unavailable"
-        raise EnrollmentError(code, "the workspace source revision is not usable") from exc
+_clean_revision = core.clean_revision
 
 
 def plan_enrollment(*, workspace: Path, batch_path: Path, roster_path: Path | None = None) -> EnrollmentPlan:
     """Validate every refusal before any run state is written."""
-    payload = run_batch.load_batch(batch_path)
-    canonical = run_batch.validate_batch(payload)
-    for task in canonical["tasks"]:
-        if task["isolation"] != "worktree":
-            raise EnrollmentError("isolation-required", f"task {task['task_id']} must declare worktree isolation")
-    if canonical["synthesis"] is not None:
-        raise EnrollmentError("synthesis-unsupported", "batch synthesis is not part of native enrollment")
+    payload, canonical = core.validate_batch(batch_path)
     source_revision = _clean_revision(workspace)
     plan = run_batch.plan_batch(payload, base_sha=source_revision)
     loaded = _load_roster(workspace, roster_path)
@@ -302,8 +274,7 @@ def plan_enrollment(*, workspace: Path, batch_path: Path, roster_path: Path | No
         raise UnsupportedTasksError(
             tuple((task["task_id"], gaps[task["seat"]]) for task in canonical["tasks"] if task["seat"] in gaps)
         )
-    run_id = "t3-" + hashlib.sha256(canonical["request_id"].encode("utf-8")).hexdigest()
-    run_dir = runguard.lock_path(workspace).parent / "runs" / run_id
+    run_id, run_dir = core.run_location(HOST, workspace, canonical["request_id"])
     entries = []
     for task in canonical["tasks"]:
         target = targets[task["seat"]]
@@ -339,65 +310,6 @@ def plan_enrollment(*, workspace: Path, batch_path: Path, roster_path: Path | No
     )
 
 
-def _initialize_run(plan: EnrollmentPlan) -> None:
-    from . import aboyeur
-
-    _create_run_dir(plan.run_dir)
-    run_json = plan.run_dir / "run.json"
-    if not run_json.is_file():
-        aboyeur._write_json(
-            run_json,
-            {
-                "schema": "brigade.run.v1",
-                "kind": RUN_KIND,
-                "status": AWAITING_NATIVE_PARENT,
-                "task": "Native T3 enrollment",
-                "started_at": localio.utc_now_iso(),
-                "lock_workspace": str(plan.workspace),
-                "lifecycle_journal_requested": True,
-            },
-        )
-    run_lifecycle.prepare_lifecycle_journal(plan.run_dir, workspace=plan.workspace)
-
-
-def _check_marker(plan: EnrollmentPlan) -> None:
-    path = plan.run_dir / _MARKER_NAME
-    expected = {
-        "schema": SCHEMA,
-        "request_id": plan.request_id,
-        "fingerprint": plan.fingerprint,
-        "source_revision": plan.source_revision,
-    }
-    if not path.is_file():
-        localio.write_json(path, expected)
-        run_journal._fsync_directory(plan.run_dir)
-        return
-    if localio.read_json_dict(path) != expected:
-        raise EnrollmentError("request-conflict", "request_id already belongs to a different enrollment")
-
-
-def _accept(plan: EnrollmentPlan) -> None:
-    specs = tuple(
-        run_tasks.TaskSpec(entry.task_id, entry.seat, entry.template.payload_digest) for entry in plan.entries
-    )
-    run_tasks.accept_task_batch(plan.run_dir, workspace=plan.workspace, request_id=plan.request_id, specs=specs)
-
-
-def _record(plan: EnrollmentPlan) -> None:
-    for entry in plan.entries:
-        run_tasks.record_native_enrollment(
-            plan.run_dir,
-            workspace=plan.workspace,
-            task_id=entry.task_id,
-            enrollment=run_tasks.TaskEnrollment(
-                descriptor_version=journal.NATIVE_ENROLLMENT_DESCRIPTOR_VERSION,
-                asset_path=entry.asset_path,
-                asset_digest=entry.asset_digest,
-                template_digest=entry.template.template_digest,
-            ),
-        )
-
-
 def report(plan: EnrollmentPlan) -> dict[str, Any]:
     """Return the bounded public enrollment report, never input content."""
     return {
@@ -422,11 +334,25 @@ def enroll(*, batch_path: Path, target: Path, roster_path: Path | None = None) -
     plan = plan_enrollment(workspace=workspace, batch_path=batch_path, roster_path=roster_path)
     try:
         with owned_run(workspace, plan.run_dir):
-            _initialize_run(plan)
-            _check_marker(plan)
+            core.initialize_run(HOST, workspace, plan.run_dir, "Native T3 enrollment")
+            core.check_marker(
+                plan.run_dir / _MARKER_NAME,
+                schema=SCHEMA,
+                request_id=plan.request_id,
+                fingerprint=plan.fingerprint,
+                source_revision=plan.source_revision,
+            )
             _publish_assets(plan)
-            _accept(plan)
-            _record(plan)
+            assets = tuple(
+                core.EnrollmentAsset(
+                    run_tasks.TaskSpec(entry.task_id, entry.seat, entry.template.payload_digest),
+                    entry.asset_path,
+                    entry.content,
+                    entry.template.template_digest,
+                )
+                for entry in plan.entries
+            )
+            core.record_enrollment(workspace, plan.run_dir, plan.request_id, assets)
     except journal.TaskJournalError as exc:
         raise EnrollmentError("journal-refused", "the task journal refused enrollment") from exc
     except (run_lifecycle.LifecycleJournalError, run_journal.RunJournalError) as exc:
@@ -443,20 +369,9 @@ def read_delegation_input(run_dir: Path, *, task_id: str) -> DelegationInput:
         (item for item in run_tasks.read_tasks(run_dir) if item.handle.spec.task_id == task_id),
         None,
     )
-    if result is None or result.enrollment is None:
+    if result is None:
         raise EnrollmentError("not-enrolled", "task has no native enrollment record")
-    raw = native_child_custody.read_asset(run_dir, result.enrollment.asset_path)
-    if hashlib.sha256(raw).hexdigest() != result.enrollment.asset_digest:
-        raise EnrollmentError("asset-digest", "retained delegation input failed digest verification")
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise EnrollmentError("asset-invalid", "retained delegation input is not valid JSON") from None
-    if not isinstance(payload, dict) or payload.get("schema") != INPUT_SCHEMA or payload.get("task_id") != task_id:
-        raise EnrollmentError("asset-invalid", "retained delegation input is not this task's input")
-    seat, text, raw_target = payload.get("seat"), payload.get("text"), payload.get("target")
-    if type(seat) is not str or type(text) is not str or not isinstance(raw_target, dict):
-        raise EnrollmentError("asset-invalid", "retained delegation input is incomplete")
+    seat, text, raw_target = core.read_input(INPUT_SCHEMA, run_dir, result)
     # A retained target is read back exactly as enrolled, including a legacy
     # `app-server` mode. New declarations are classified at open and a claim
     # re-applies the same closed structural decision in admission.evaluate.
