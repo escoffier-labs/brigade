@@ -921,13 +921,10 @@ def _outcome_ratchet_line(ratchet: object) -> str:
 
 
 def _trials_label(report: dict[str, Any]) -> str:
-    """Return ``trials=3 (attested=1 local=2)``, naming attested and local trials separately (#2779)."""
+    """Return ``trials: 12 local, 3 seen passing in CI (display only)``. The CI count never promotes (#2779)."""
     local = report.get("local_trials", "not recorded")
-    attested = report.get("attested_trials", "not recorded")
-    total = local + attested if isinstance(local, int) and isinstance(attested, int) else "not recorded"
-    return (
-        f"trials={brief_values.name(total)} (attested={brief_values.name(attested)} local={brief_values.name(local)})"
-    )
+    ci_seen = report.get("ci_observed_trials", "not recorded")
+    return f"trials: {brief_values.name(local)} local, {brief_values.name(ci_seen)} seen passing in CI (display only)"
 
 
 def _brief_section_failed(payload: dict[str, Any], label: str) -> bool:

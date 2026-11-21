@@ -1,21 +1,21 @@
-"""CI attestation for scoreable trials (#2779).
+"""CI observation for scoreable trials (#2779). Display only.
 
-Local session state may choose which trial is looked up and may veto, but the pass
-must come from a GitHub Actions check run on ``main``. ``gh api`` is always mocked.
+The host can show that CI was seen passing for a trial. State on the host is forgeable
+by a same-user agent, so that answer must never promote, rank, band or gate anything.
+``gh api`` is always mocked.
 """
 
 from __future__ import annotations
 
 import copy
 import datetime as dt
-import json
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from brigade import ci_attestation, scorecard, verify_trial
+from brigade import ci_attestation, outcome as outcome_core, scorecard, verify_trial
 from brigade.ci_attestation import GhNotFound, GhUnavailable
 
 from tests.test_scorecard import (
@@ -32,10 +32,11 @@ HEAD = "a" * 40
 BRANCH = "feat/trial"
 MANIFEST = "scorecard-skill-fixture"
 NOW = dt.datetime(2026, 11, 21, 12, 0, tzinfo=dt.timezone.utc)
+WORKFLOW_PATH = ".github/workflows/outcome-attest.yml"
 
 
 @pytest.fixture(autouse=True)
-def _attestation_enabled(monkeypatch):
+def _observation_enabled(monkeypatch):
     monkeypatch.delenv(ci_attestation.DISABLE_ENV, raising=False)
 
 
@@ -53,19 +54,11 @@ def merged_repo(scoreable_target: Path) -> tuple[Path, str]:
 
 
 def _world(merge: str) -> dict[str, Any]:
-    """The GitHub API as it looks when CI really attested the merged commit."""
+    """The GitHub API as it looks when the Actions check run passed on the merged commit."""
     return {
         f"repos/{SLUG}/commits/{HEAD}/pulls": [
-            {
-                "number": 7,
-                "merged_at": "2026-11-20T00:00:00Z",
-                "merge_commit_sha": merge,
-                "commits": 2,
-                "base": {"ref": "main"},
-                "head": {"ref": BRANCH, "repo": {"full_name": SLUG}},
-            }
+            {"number": 7, "merged_at": "2026-11-20T00:00:00Z", "merge_commit_sha": merge, "base": {"ref": "main"}}
         ],
-        f"repos/{SLUG}/pulls/7/commits": [{"sha": "b" * 40}, {"sha": HEAD}],
         f"repos/{SLUG}/commits/{merge}/check-runs": {
             "check_runs": [
                 {
@@ -74,19 +67,6 @@ def _world(merge: str) -> dict[str, Any]:
                     "head_sha": merge,
                     "status": "completed",
                     "conclusion": "success",
-                    "check_suite": {"id": 99},
-                }
-            ]
-        },
-        f"repos/{SLUG}/actions/runs": {
-            "workflow_runs": [
-                {
-                    "check_suite_id": 99,
-                    "path": ".github/workflows/outcome-attest.yml",
-                    "head_branch": "main",
-                    "event": "push",
-                    "head_sha": merge,
-                    "head_repository": {"full_name": SLUG},
                 }
             ]
         },
@@ -115,116 +95,53 @@ def _receipt() -> dict[str, Any]:
     }
 
 
-def _attest(target: Path, routes: dict[str, Any], **kwargs: Any) -> tuple[ci_attestation.Attestation, FakeGh]:
+def _observed(target: Path, routes: dict[str, Any]) -> tuple[bool, FakeGh]:
     gh = FakeGh(routes)
-    return ci_attestation.Attestor(target, gh_api=gh, now=lambda: NOW).attest(_receipt()), gh
+    return ci_attestation.CiObserver(target, gh_api=gh).observed(_receipt()), gh
 
 
-def test_a_passing_attestor_check_run_on_the_merged_commit_attests(merged_repo):
+def _check(routes: dict[str, Any], merge: str) -> dict[str, Any]:
+    return routes[f"repos/{SLUG}/commits/{merge}/check-runs"]["check_runs"][0]
+
+
+def test_a_passing_actions_check_run_on_the_merged_commit_is_observed(merged_repo):
     target, merge = merged_repo
-    result, gh = _attest(target, _world(merge))
-    assert result == ci_attestation.Attestation(True, "attested", merge)
-    assert not any("status" in call.split("?")[0].rsplit("/", 1)[-1] for call in gh.calls)
-
-
-def test_a_forged_commit_status_is_ignored_entirely(merged_repo):
-    target, merge = merged_repo
-    routes = _world(merge)
-    routes[f"repos/{SLUG}/commits/{merge}/check-runs"] = {"check_runs": []}
-    # A personal token can write this. It must never be read.
-    routes[f"repos/{SLUG}/commits/{merge}/status"] = {"state": "success", "statuses": [{"context": "outcome-attest"}]}
-    routes[f"repos/{SLUG}/commits/{merge}/statuses"] = [{"state": "success", "context": f"outcome-attest/{MANIFEST}"}]
-    result, gh = _attest(target, routes)
-    assert not result.attested
-    assert result.reason == "no_check_run"
-    assert not any(call.split("?")[0].endswith(("/status", "/statuses")) for call in gh.calls)
-
-
-def _mutate(routes: dict[str, Any], merge: str, section: str, **changes: Any) -> None:
-    key = {
-        "check": f"repos/{SLUG}/commits/{merge}/check-runs",
-        "run": f"repos/{SLUG}/actions/runs",
-    }[section]
-    inner = "check_runs" if section == "check" else "workflow_runs"
-    routes[key][inner][0].update(changes)
+    seen, gh = _observed(target, _world(merge))
+    assert seen is True
+    assert not any("statuses" in call for call in gh.calls), "commit statuses are never read"
 
 
 @pytest.mark.parametrize(
-    ("section", "changes", "reason"),
+    ("changes", "label"),
     [
-        ("check", {"app": {"slug": "some-third-party-app"}}, "check_not_github_actions"),
-        ("check", {"app": {"slug": "github-actions-lookalike"}}, "check_not_github_actions"),
-        ("check", {"conclusion": "failure"}, "check_not_success"),
-        ("check", {"status": "in_progress", "conclusion": None}, "check_not_success"),
-        ("check", {"head_sha": "c" * 40}, "check_not_github_actions"),
-        ("run", {"head_branch": "feature/evil"}, "run_not_attestor"),
-        ("run", {"event": "pull_request"}, "run_not_attestor"),
-        ("run", {"path": ".github/workflows/ci.yml"}, "run_not_attestor"),
-        ("run", {"check_suite_id": 12345}, "run_not_attestor"),
-        ("run", {"head_repository": {"full_name": "fork/widgets"}}, "run_not_attestor"),
+        ({"app": {"slug": "some-other-app"}}, "other_app"),
+        ({"app": {}}, "no_app"),
+        ({"head_sha": "c" * 40}, "other_head_sha"),
+        ({"conclusion": "failure"}, "failed"),
+        ({"status": "in_progress", "conclusion": None}, "not_completed"),
+        ({"name": "outcome-attest/another-manifest"}, "other_manifest"),
     ],
 )
-def test_a_check_run_that_is_not_from_the_main_attestor_workflow_does_not_attest(merged_repo, section, changes, reason):
+def test_a_check_run_that_is_not_a_matching_actions_pass_is_not_observed(merged_repo, changes, label):
     target, merge = merged_repo
     routes = _world(merge)
-    _mutate(routes, merge, section, **changes)
-    result, _ = _attest(target, routes)
-    assert (result.attested, result.reason) == (False, reason)
-
-
-def test_a_check_run_for_a_different_manifest_does_not_attest(merged_repo):
-    target, merge = merged_repo
-    routes = _world(merge)
-    _mutate(routes, merge, "check", name="outcome-attest/some-other-manifest")
-    assert _attest(target, routes)[0].reason == "no_check_run"
-
-
-def test_a_path_with_a_ref_suffix_still_names_the_attestor_workflow(merged_repo):
-    target, merge = merged_repo
-    routes = _world(merge)
-    _mutate(routes, merge, "run", path=".github/workflows/outcome-attest.yml@refs/heads/main")
-    assert _attest(target, routes)[0].attested
+    _check(routes, merge).update(changes)
+    assert _observed(target, routes)[0] is False, label
 
 
 @pytest.mark.parametrize(
     "change",
     [
-        {"merged_at": None},
-        {"base": {"ref": "release"}},
-        {"head": {"ref": "some-other-branch", "repo": {"full_name": SLUG}}},
-        {"head": {"ref": BRANCH, "repo": {"full_name": "fork/widgets"}}},
-        {"merge_commit_sha": HEAD},
-        {"commits": 5000},
+        lambda pr: pr.update(merged_at=None),
+        lambda pr: pr.update(base={"ref": "release"}),
+        lambda pr: pr.update(merge_commit_sha="short"),
     ],
 )
-def test_a_local_receipt_that_does_not_map_to_a_merged_main_pr_stays_local(merged_repo, change):
+def test_a_pull_request_that_is_not_merged_into_main_is_not_observed(merged_repo, change):
     target, merge = merged_repo
     routes = _world(merge)
-    routes[f"repos/{SLUG}/commits/{HEAD}/pulls"][0].update(change)
-    assert not _attest(target, routes)[0].attested
-
-
-def test_a_head_that_is_not_a_commit_of_the_pr_stays_local(merged_repo):
-    """A baseline commit already on main is returned by the API for an old PR. It must not map."""
-    target, merge = merged_repo
-    routes = _world(merge)
-    routes[f"repos/{SLUG}/pulls/7/commits"] = [{"sha": "b" * 40}]
-    assert _attest(target, routes)[0].reason == "no_merged_pr"
-
-
-@pytest.mark.parametrize("branch", ["main", "HEAD"])
-def test_a_receipt_from_main_or_a_detached_head_is_never_mapped(merged_repo, branch):
-    target, merge = merged_repo
-    receipt = _receipt()
-    receipt["git"]["branch"] = branch
-    result = ci_attestation.Attestor(target, gh_api=FakeGh(_world(merge)), now=lambda: NOW).attest(receipt)
-    assert not result.attested
-
-
-def test_a_merge_commit_that_is_not_on_origin_main_is_vetoed_locally(merged_repo):
-    target, _ = merged_repo
-    result, _ = _attest(target, _world("d" * 40))
-    assert (result.attested, result.reason) == (False, "commit_not_on_origin_main")
+    change(routes[f"repos/{SLUG}/commits/{HEAD}/pulls"][0])
+    assert _observed(target, routes)[0] is False
 
 
 @pytest.mark.parametrize("claims", ["no_git", "no_manifest", "short_head"])
@@ -238,34 +155,36 @@ def test_a_receipt_without_usable_claims_never_calls_the_api(merged_repo, claims
     else:
         receipt["git"]["head"] = "abc123"
     gh = FakeGh(_world(merge))
-    assert not ci_attestation.Attestor(target, gh_api=gh, now=lambda: NOW).attest(receipt).attested
+    assert ci_attestation.CiObserver(target, gh_api=gh).observed(receipt) is False
     assert gh.calls == []
 
 
 def test_a_workspace_without_a_github_origin_never_calls_the_api(scoreable_target):
     gh = FakeGh({})
-    assert not ci_attestation.Attestor(scoreable_target, gh_api=gh).attest(_receipt()).attested
+    assert ci_attestation.CiObserver(scoreable_target, gh_api=gh).observed(_receipt()) is False
     assert gh.calls == []
 
 
 def test_the_disable_switch_skips_the_api(merged_repo, monkeypatch):
     target, merge = merged_repo
     monkeypatch.setenv(ci_attestation.DISABLE_ENV, "off")
-    result, gh = _attest(target, _world(merge))
-    assert (result.attested, result.reason, gh.calls) == (False, "disabled", [])
+    seen, gh = _observed(target, _world(merge))
+    assert (seen, gh.calls) == (False, [])
 
 
-def test_offline_or_a_broken_gh_means_not_attested_and_never_raises(merged_repo):
-    target, merge = merged_repo
-    routes = {f"repos/{SLUG}/": GhUnavailable("no network")}
-    result, gh = _attest(target, routes)
-    assert (result.attested, result.reason) == (False, "offline")
-    assert not (target / ci_attestation.CACHE_RELATIVE_PATH).exists(), "an outage must not be cached as a verdict"
-    attestor = ci_attestation.Attestor(target, gh_api=gh, now=lambda: NOW)
-    attestor.attest(_receipt())
+def test_offline_or_a_broken_gh_is_not_observed_and_stops_calling_the_api(merged_repo):
+    target, _ = merged_repo
+    gh = FakeGh({f"repos/{SLUG}/": GhUnavailable("no network")})
+    observer = ci_attestation.CiObserver(target, gh_api=gh)
+    assert observer.observed(_receipt()) is False
     calls_after_first = len(gh.calls)
-    attestor.attest({**_receipt(), "git": {"head": "e" * 40, "branch": BRANCH}})
+    assert observer.observed({**_receipt(), "git": {"head": "e" * 40, "branch": BRANCH}}) is False
     assert len(gh.calls) == calls_after_first, "after one transport failure the run stops calling the API"
+
+
+def test_a_missing_commit_is_not_observed(merged_repo):
+    target, _ = merged_repo
+    assert _observed(target, {})[0] is False
 
 
 def test_an_unexpected_exception_in_the_transport_is_swallowed(merged_repo):
@@ -274,7 +193,17 @@ def test_an_unexpected_exception_in_the_transport_is_swallowed(merged_repo):
     def boom(_endpoint: str) -> Any:
         raise RuntimeError("surprise")
 
-    assert not ci_attestation.Attestor(target, gh_api=boom).attest(_receipt()).attested
+    assert ci_attestation.CiObserver(target, gh_api=boom).observed(_receipt()) is False
+
+
+def test_the_answer_is_memoised_per_commit_and_manifest(merged_repo):
+    target, merge = merged_repo
+    gh = FakeGh(_world(merge))
+    observer = ci_attestation.CiObserver(target, gh_api=gh)
+    assert observer.observed(_receipt()) is True
+    calls = len(gh.calls)
+    assert observer.observed(_receipt()) is True
+    assert len(gh.calls) == calls
 
 
 def test_default_gh_api_fails_closed_without_gh(monkeypatch):
@@ -298,175 +227,77 @@ def test_default_gh_api_maps_404_and_bad_json(monkeypatch):
         ci_attestation.default_gh_api("repos/a/b/commits/x/pulls")
 
 
-def _cache_path(target: Path) -> Path:
-    return target / ci_attestation.CACHE_RELATIVE_PATH
-
-
-def _cache_key() -> str:
-    return f"{SLUG}|{BRANCH}|{HEAD}|{MANIFEST}"
-
-
-def _write_cache(target: Path, entries: dict[str, Any]) -> None:
-    path = _cache_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"version": ci_attestation.CACHE_VERSION, "entries": entries}))
-
-
-def test_a_tampered_cache_claiming_attested_is_reconfirmed_and_rejected(merged_repo):
-    target, merge = merged_repo
-    _write_cache(
-        target,
-        {_cache_key(): {"result": "attested", "reason": "attested", "commit": merge, "checked_at": NOW.isoformat()}},
-    )
-    routes = _world(merge)
-    routes[f"repos/{SLUG}/commits/{merge}/check-runs"] = {"check_runs": []}
-    result, gh = _attest(target, routes)
-    assert not result.attested
-    assert gh.calls, "a cached attested must be re-confirmed from the API"
-
-
-def test_a_tampered_cache_claiming_attested_cannot_authorize_when_offline(merged_repo):
-    target, merge = merged_repo
-    _write_cache(target, {_cache_key(): {"result": "attested", "checked_at": NOW.isoformat()}})
-    result, _ = _attest(target, {f"repos/{SLUG}/": GhUnavailable("offline")})
-    assert not result.attested
-
-
-def test_a_forged_cache_cannot_turn_a_real_pass_into_a_different_commit(merged_repo):
-    target, merge = merged_repo
-    _write_cache(target, {_cache_key(): {"result": "attested", "commit": "f" * 40, "checked_at": NOW.isoformat()}})
-    result, _ = _attest(target, _world(merge))
-    assert result == ci_attestation.Attestation(True, "attested", merge)
-
-
-def test_a_real_pass_is_never_written_to_the_cache(merged_repo):
-    target, merge = merged_repo
-    assert _attest(target, _world(merge))[0].attested
-    assert not _cache_path(target).exists()
-
-
-def test_a_negative_result_is_cached_and_short_circuits_within_the_ttl(merged_repo):
-    target, merge = merged_repo
-    routes = _world(merge)
-    routes[f"repos/{SLUG}/commits/{merge}/check-runs"] = {"check_runs": []}
-    first, gh = _attest(target, routes)
-    assert first.reason == "no_check_run"
-    assert json.loads(_cache_path(target).read_text())["entries"][_cache_key()]["result"] == "not_attested"
-    second, gh2 = _attest(target, _world(merge))  # CI would now say yes, but the fresh negative stands
-    assert (second.attested, gh2.calls) == (False, [])
-
-
-def test_an_expired_negative_is_checked_again(merged_repo):
-    target, merge = merged_repo
-    old = NOW - dt.timedelta(seconds=ci_attestation.NEGATIVE_TTL_SECONDS + 1)
-    _write_cache(
-        target, {_cache_key(): {"result": "not_attested", "reason": "no_check_run", "checked_at": old.isoformat()}}
-    )
-    assert _attest(target, _world(merge))[0].attested
-
-
-@pytest.mark.parametrize("raw", ["not json", "[]", '{"version": 9, "entries": {}}', '{"version": 1, "entries": []}'])
-def test_a_corrupt_cache_is_ignored(merged_repo, raw):
-    target, merge = merged_repo
-    path = _cache_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(raw)
-    assert _attest(target, _world(merge))[0].attested
-
-
-def _eligible_local_trial(target: Path) -> None:
+def _eligible_local_trial(target: Path, run_id: str = "run-a", commands: list[Any] | None = None) -> None:
     skill = _write_skill_subject(target)
     fingerprint = verify_trial.subject_hash_for_path(target, str(skill.relative_to(target)))
     _write_verify_receipt(
         target,
-        "run-a",
+        run_id,
         binding=_fixture_binding(fingerprint=fingerprint, target=target),
-        commands=[_effectiveness_command()],
+        commands=[_effectiveness_command()] if commands is None else commands,
         extra={"git": {"head": HEAD, "branch": BRANCH, "dirty_files": 0}},
     )
 
 
-def _trial_counts(target: Path) -> tuple[int, int]:
+def _build_card(target: Path, monkeypatch, gh: Any) -> scorecard.SubjectScorecard:
+    monkeypatch.setattr(ci_attestation, "default_gh_api", gh)
     (card,) = scorecard.build_scorecards(target)
+    return card
+
+
+def test_a_ci_observed_trial_is_displayed_and_stays_local(merged_repo, monkeypatch):
+    target, merge = merged_repo
+    _eligible_local_trial(target)
+    card = _build_card(target, monkeypatch, FakeGh(_world(merge)))
     effectiveness = card.dimensions["effectiveness"]
-    return effectiveness["local_trials"], effectiveness["attested_trials"]
+    assert (effectiveness["local_trials"], effectiveness["attested_trials"]) == (1, 0)
+    assert card.ci_observed_trials == 1
+    assert [(audit.attestation, audit.ci_observed) for audit in card.receipt_trail] == [("local", True)]
 
 
-def _forge_session_state_and_cache(target: Path, merge: str) -> None:
-    """Hook state, work sessions and the attestation cache: all writable by the scored agent."""
-    state = target / ".brigade" / "work"
-    forged: dict[str, Any] = {
-        "sessions/forged.json": {"session_id": "forged", "attestation": "attested", "attested": True},
-        "claude-hooks/forged.json": {"producer": "claude-hook:forged", "attestation": "attested"},
-    }
-    for name, payload in forged.items():
-        path = state / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload))
-    _write_cache(
-        target,
-        {_cache_key(): {"result": "attested", "reason": "attested", "commit": merge, "checked_at": NOW.isoformat()}},
-    )
-
-
-def _forge_receipt(target: Path) -> None:
-    receipt_path = target / ".brigade" / "work" / "verify-runs" / "run-a" / "receipt.json"
-    receipt = json.loads(receipt_path.read_text())
-    receipt["attestation"] = "attested"
-    receipt["subject_binding"]["attestation"] = "attested"
-    receipt_path.write_text(json.dumps(receipt))
-
-
-def test_editing_local_state_alone_cannot_attest_a_local_trial(merged_repo, monkeypatch):
+def test_a_ci_observed_trial_gets_no_promotion_credit_it_did_not_already_have(merged_repo, monkeypatch):
     target, merge = merged_repo
     _eligible_local_trial(target)
-    # CI never attested this commit: the only check run on it came from another app.
-    world = _world(merge)
-    world[f"repos/{SLUG}/commits/{merge}/check-runs"]["check_runs"][0]["app"] = {"slug": "evil-app"}
-    monkeypatch.setattr(ci_attestation, "default_gh_api", FakeGh(world))
-    assert _trial_counts(target) == (1, 0)
+    seen = _build_card(target, monkeypatch, FakeGh(_world(merge)))
+    unseen = _build_card(target, monkeypatch, FakeGh({f"repos/{SLUG}/": GhUnavailable("offline")}))
+    assert (seen.ci_observed_trials, unseen.ci_observed_trials) == (1, 0)
+    # Every input a promotion decision reads is identical with and without the CI result.
+    assert seen.dimensions == unseen.dimensions
+    assert seen.utility_guardrails == unseen.utility_guardrails
+    assert seen.ineligible_summary == unseen.ineligible_summary
+    assert scorecard.classify_band(seen) == scorecard.classify_band(unseen)
+    assert scorecard.utility_gate_reason(seen) == scorecard.utility_gate_reason(unseen)
+    assert [a.attestation for a in seen.receipt_trail] == [a.attestation for a in unseen.receipt_trail]
+    config = outcome_core.ReconcileConfig()
+    decisions = [
+        scorecard.decide_scorecard(
+            card,
+            artifact_id=card.subject.artifact_id,
+            current_status="candidate",
+            last_action_ts=None,
+            now=NOW,
+            config=config,
+        )
+        for card in (seen, unseen)
+    ]
+    assert decisions[0] == decisions[1]
+    # The persisted scorecard form carries no CI field either.
+    assert scorecard.subject_scorecard_to_dict(seen) == scorecard.subject_scorecard_to_dict(unseen)
 
-    _forge_session_state_and_cache(target, merge)
-    assert _trial_counts(target) == (1, 0), "forged sessions, hook state and cache must not attest"
 
-    _forge_receipt(target)
-    cards = scorecard.build_scorecards(target)
-    assert all(card.dimensions["effectiveness"]["attested_trials"] == 0 for card in cards)
-
-    # Offline, the same forged state still attests nothing.
-    monkeypatch.setattr(ci_attestation, "default_gh_api", FakeGh({f"repos/{SLUG}/": GhUnavailable("offline")}))
-    assert all(card.dimensions["effectiveness"]["attested_trials"] == 0 for card in scorecard.build_scorecards(target))
-
-
-def test_only_the_ci_record_attests_the_same_trial(merged_repo, monkeypatch):
+def test_an_ineligible_trial_is_never_looked_up_in_ci(merged_repo, monkeypatch):
     target, merge = merged_repo
-    _eligible_local_trial(target)
-    monkeypatch.setattr(ci_attestation, "default_gh_api", FakeGh(_world(merge)))
-    assert _trial_counts(target) == (0, 1)
-
-
-def test_an_ineligible_trial_is_never_attested_even_when_ci_passed(merged_repo, monkeypatch):
-    target, merge = merged_repo
-    skill = _write_skill_subject(target)
-    fingerprint = verify_trial.subject_hash_for_path(target, str(skill.relative_to(target)))
-    _write_verify_receipt(
-        target,
-        "run-b",
-        binding=_fixture_binding(fingerprint=fingerprint, target=target),
-        commands=[],  # no effectiveness command: not scoreable
-        extra={"git": {"head": HEAD, "branch": BRANCH, "dirty_files": 0}},
-    )
+    _eligible_local_trial(target, run_id="run-b", commands=[])  # no effectiveness command: not scoreable
     gh = FakeGh(_world(merge))
     monkeypatch.setattr(ci_attestation, "default_gh_api", gh)
     audits = scorecard.audit_all_verify_receipts(target)
-    assert all(audit.attestation == "local" for audit in audits)
+    assert all(audit.attestation == "local" and audit.ci_observed is False for audit in audits)
     assert gh.calls == []
 
 
-def test_the_attestor_workflow_matches_the_contract_the_reader_checks():
+def test_the_workflow_matches_the_contract_the_reader_checks():
     root = Path(__file__).resolve().parents[1]
-    assert ci_attestation.ATTEST_WORKFLOW_PATH == ".github/workflows/outcome-attest.yml"
-    text = (root / ci_attestation.ATTEST_WORKFLOW_PATH).read_text()
+    text = (root / WORKFLOW_PATH).read_text()
     assert "pull_request_target" not in text
     assert "pull_request:" not in text
     assert "branches: [main]" in text

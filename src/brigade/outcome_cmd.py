@@ -2510,6 +2510,7 @@ def rank(
             local_trials, attested_trials = _scorecard_attestation_counts(scorecard_entry)
             entry["local_trials"] = local_trials
             entry["attested_trials"] = attested_trials
+            entry["ci_observed_trials"] = scorecard_entry.ci_observed_trials  # display only (#2779)
             if scorecard_entry.ineligible_summary:
                 entry["ineligible_summary"] = scorecard_entry.ineligible_summary
         ranking_payload.append(entry)
@@ -2543,6 +2544,7 @@ def rank(
         local_trials, attested_trials = _scorecard_attestation_counts(scorecard_entry)
         entry["local_trials"] = local_trials
         entry["attested_trials"] = attested_trials
+        entry["ci_observed_trials"] = scorecard_entry.ci_observed_trials  # display only (#2779)
         if scorecard_entry.ineligible_summary:
             entry["ineligible_summary"] = scorecard_entry.ineligible_summary
         ranking_payload.append(entry)
@@ -2587,6 +2589,7 @@ def rank(
             trials_tail = (
                 f" trials={int(scorecard_entry.dimensions.get('effectiveness', {}).get('trials', 0))}"
                 f" local={local_trials} attested={attested_trials}"
+                f" seen_passing_in_ci={scorecard_entry.ci_observed_trials} (display only)"
             )
         print(
             f"- {artifact_id} score={current.score:.3f} helped={current.helped} "

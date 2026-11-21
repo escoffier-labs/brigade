@@ -36,14 +36,14 @@ def test_line_lists_holds_and_leading_reason():
         "mode": "dry-run",
         "regression_holds": 2,
         "regression_hold_ids": ["skill-a", "skill-b"],
-        "local_trials": 2,
-        "attested_trials": 1,
+        "local_trials": 12,
+        "ci_observed_trials": 3,
         "ineligibility_rate": 1.0,
         "leading_reason": "unattributed",
     }
     assert briefing._outcome_ratchet_line(payload) == (
         "outcome_ratchet: generated_at=2026-11-17T07:30:00+00:00 "
-        "mode=dry-run regression_holds=2 (skill-a, skill-b) trials=3 (attested=1 local=2) "
+        "mode=dry-run regression_holds=2 (skill-a, skill-b) trials: 12 local, 3 seen passing in CI (display only) "
         "ineligibility_rate=1.0 leading=unattributed pending_physical_actions=0"
     )
 
@@ -147,4 +147,4 @@ def test_brief_payload_carries_the_proposal_counts_from_the_report(tmp_path):
 
 def test_line_labels_unrecorded_trial_counts_instead_of_guessing():
     line = briefing._outcome_ratchet_line({"present": True, "generated_at": NOW.isoformat(), "mode": "applied"})
-    assert "(attested=not recorded local=not recorded)" in line
+    assert "trials: not recorded local, not recorded seen passing in CI (display only)" in line

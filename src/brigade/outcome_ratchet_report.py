@@ -131,6 +131,7 @@ def build_report(
     regressions: list[dict[str, Any]] = []
     local_trials_total = 0
     attested_trials_total = 0
+    ci_observed_total = 0
     for item in items:
         decision = item.decision
         action = str(decision.action)
@@ -139,6 +140,7 @@ def build_report(
         local_trials, attested_trials = _decision_attestation_counts(item)
         local_trials_total += local_trials
         attested_trials_total += attested_trials
+        ci_observed_total += _decision_ci_observed(item)
         if code not in _REGRESSION_CODES:
             continue
         helped, hurt = _decision_counts(item)
@@ -174,6 +176,7 @@ def build_report(
             "stale_physical_actions": pending_set.stale_actions,
             "local_trials": local_trials_total,
             "attested_trials": attested_trials_total,
+            "ci_observed_trials": ci_observed_total,
         },
         "pending_physical": _pending_rows(recent),
         "stale_physical": _pending_rows(stale),
@@ -265,6 +268,12 @@ def reported_trial_counts(raw: Mapping[str, Any]) -> tuple[str, str]:
     return label("local_trials"), label("attested_trials")
 
 
+def reported_ci_observed(raw: Mapping[str, Any]) -> str:
+    """Render the CI-observed trial count from a report file. Informational only, and never trusted."""
+    value = raw.get("ci_observed_trials")
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else "not recorded"
+
+
 def proposal_counts(summary: Mapping[str, Any]) -> dict[str, int] | None:
     """Return the persisted inbox proposal counts, or None when the run did not file proposals."""
     raw = summary.get("outcome_proposals")
@@ -307,6 +316,7 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "present": True,
         "local_trials": local_label,
         "attested_trials": attested_label,
+        "ci_observed_trials": reported_ci_observed(summary),
         "outcome_proposals": proposal_counts(summary),
         "generated_at": report.get("generated_at"),
         "pending_physical_actions": pending_count,
@@ -330,6 +340,12 @@ def _decision_attestation_counts(item: Any) -> tuple[int, int]:
         int(effectiveness.get("local_trials", 0) or 0),
         int(effectiveness.get("attested_trials", 0) or 0),
     )
+
+
+def _decision_ci_observed(item: Any) -> int:
+    """Display-only count of trials whose CI check run was seen passing. Never read by a decision."""
+    value = getattr(getattr(item, "scorecard", None), "ci_observed_trials", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _decision_counts(item: Any) -> tuple[int, int]:

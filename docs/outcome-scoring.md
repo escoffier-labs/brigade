@@ -80,42 +80,19 @@ flowchart TD
 - **Promotion.** The weekly run is a dry run and changes no status. A promotion needs a person to run `brigade outcome reconcile --apply`, and even then it sets only the status and route policy marker.
 - **Regression response.** The weekly run reports the regression and files a review request. It does not roll anything back.
 
-The reason is the trust model. A receipt from ordinary work carries attribution the scored agent chose, and the local state around it (receipts, status, git, session files) is writable by that agent on a single-user host. Forgeable evidence may veto or raise a flag, and it never authorizes a change. The same limit applies to manifest trials produced by a hook session, because their ownership proof is local session state. Treat them as input to ranking and proposals, and read the dry run before you run `--apply`. The scorecard reports `local_trials` and `attested_trials` beside `trials`, and `outcome rank` and the weekly ratchet report show the same split. A trial is local unless CI attests it, as described in [Attested and local trials](#attested-and-local-trials). The detail is in [Attribution sources](#attribution-sources), [Producer session for a manifest trial](#producer-session-for-a-manifest-trial) and [Routing only](#routing-only).
+The reason is the trust model. A receipt from ordinary work carries attribution the scored agent chose, and the local state around it (receipts, status, git, session files) is writable by that agent on a single-user host. Forgeable evidence may veto or raise a flag, and it never authorizes a change. The same limit applies to manifest trials produced by a hook session, because their ownership proof is local session state. Treat them as input to ranking and proposals, and read the dry run before you run `--apply`. The scorecard reports `local_trials` and `attested_trials` beside `trials`, and `outcome rank` and the weekly ratchet report show the same split. A CI result can be shown beside them for information only, as described in [CI results shown on the host](#ci-results-shown-on-the-host-display-only). The detail is in [Attribution sources](#attribution-sources), [Producer session for a manifest trial](#producer-session-for-a-manifest-trial) and [Routing only](#routing-only).
 
-## Attested and local trials
+## CI results shown on the host (display only)
 
-A trial counts as **attested** only when a GitHub Actions run on `main` reran its manifest on the merged commit and passed. Every other trial is **local**, which is a recorded state and not a missing label. The brief line reads `trials=3 (attested=1 local=2)`, and `outcome rank --json` carries `local_trials` and `attested_trials` for each skill.
+Every trial scored on the workspace host is **local**. `local_trials` and `attested_trials` stay as the scorecard computes them, and `attested_trials` is zero until [#2591](https://github.com/escoffier-labs/brigade/issues/2591) lands.
 
-The attestor is `.github/workflows/outcome-attest.yml`. On each push to `main` it lists the verify manifests the pushed commits touch and reruns each one with `brigade work verify run --manifest <id>`. Each matrix job is a check run named `outcome-attest/<manifest>`, written by the `github-actions` app. The workflow holds `contents: read` and nothing else, because the job check runs need no write permission.
+Beside them the host can show a separate **seen passing in CI** count. It is informational. A same-user agent controls everything the host reads when it looks the result up (`PATH`, the `gh` config, receipts and the git remote), so the answer is forgeable and nothing on the host may promote, rank, band or gate from it. The count lives outside the scorecard dimensions, it is not written into the persisted scorecard, and the promotion decision reads none of it. The brief line reads `trials: 12 local, 3 seen passing in CI (display only)`, and `outcome rank` prints `seen_passing_in_ci=N (display only)` for each skill.
 
-Rank and reconcile read those check runs with `gh api`. A trial is attested only when all of these hold:
+The workflow `.github/workflows/outcome-attest.yml` is what produces the results. On each push to `main` it lists the verify manifests the pushed commits touch and reruns each one with `brigade work verify run --manifest <id>`. Each matrix job is a check run named `outcome-attest/<manifest>`, written by the `github-actions` app. The workflow holds `contents: read` and nothing else, because job check runs need no write permission.
 
-- The receipt names a manifest, a head commit and a same-repo branch.
-- That head is one of the commits of a merged pull request into `main`, and the pull request's head branch matches the receipt branch.
-- The pull request's merge commit is an ancestor of `origin/main` in the local clone.
-- A completed check run named `outcome-attest/<manifest>` exists on the merge commit, comes from the `github-actions` app and concluded `success`.
-- That check run belongs to a `push` run on `main` of `.github/workflows/outcome-attest.yml` on the same commit.
+The host reads those check runs with `gh api`. A trial counts as seen passing when the receipt names a manifest and a head commit, that commit belongs to a merged pull request into `main`, and a completed check run named `outcome-attest/<manifest>` on the merge commit comes from the `github-actions` app on that same commit and concluded `success`. Commit statuses are never read. Any failure to ask GitHub (no `gh`, no network, a rate limit, malformed output) means the trial is not counted and nothing raises into rank. Set `BRIGADE_CI_ATTESTATION=off` to skip the lookup. The repository is taken from the `origin` remote.
 
-```mermaid
-flowchart TD
-    A[Eligible local trial] --> B{Receipt names manifest, head and branch?}
-    B -- no --> L[local]
-    B -- yes --> C{Head is a commit of a merged same-repo PR into main?}
-    C -- no --> L
-    C -- yes --> D{Merge commit is an ancestor of origin/main?}
-    D -- no --> L
-    D -- yes --> E{Check run outcome-attest/manifest from github-actions, success?}
-    E -- no --> L
-    E -- yes --> F{Run is a push to main of the attestor workflow file?}
-    F -- no --> L
-    F -- yes --> T[attested]
-```
-
-Local state picks the trial and may veto it, but it never supplies the pass. Commit statuses are never read, since a personal token can write one and cannot write an Actions check run. Any failure to ask GitHub (no `gh`, no network, a rate limit, malformed output) leaves the trial local and never raises into rank. Set `BRIGADE_CI_ATTESTATION=off` to skip the lookup.
-
-Fetched answers are cached in `.brigade/memory-care/outcome/ci-attestation-cache.json` with a six hour TTL. The cache is writable by the scored agent, so it can only speed up a "not attested" answer. A cached "attested" is never read, and every attested trial is re-confirmed from the API on each run. The repository is taken from the `origin` remote. Pinning it out of band is a later slice.
-
-This slice only exposes the counts. Nothing promotes, installs or rolls back on an attested trial yet. A later change can gate promotion on `attested_trials`.
+Promotion decisions will come from a scheduled GitHub Actions job on `main` that reads the `outcome-attest/*` check runs. That job is a follow-up change. Until it lands, nothing promotes, installs or rolls back on a CI result.
 
 ## Workflow
 
