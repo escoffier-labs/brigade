@@ -446,6 +446,40 @@ def tree_removal_available() -> bool:
     return posix_available() and bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
 
 
+def pin_available() -> bool:
+    """Whether ``/proc/self/fd`` can pin a child process to a held directory."""
+    return posix_available() and sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir()
+
+
+# A directory tree deeper than this is refused rather than walked recursively.
+MAX_REMOVE_DEPTH = 512
+
+
+def remove_directory_contents(descriptor: int, *, depth: int = 0) -> None:
+    """Remove every entry under a held directory, never following a link.
+
+    The descriptor is the object, not the name, so a rename that swaps
+    another tree into the path cannot redirect the deletion. Directories are
+    opened no-follow and emptied through their own descriptor, then removed
+    with ``rmdir`` relative to this one. Anything that cannot be opened as a
+    plain directory is unlinked as a single entry.
+    """
+    if depth > MAX_REMOVE_DEPTH:
+        raise OSError(errno.ELOOP, "directory tree is too deep to remove")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    for name in [entry.name for entry in os.scandir(descriptor)]:
+        try:
+            child = os.open(name, directory_flags(), dir_fd=descriptor)
+        except OSError:
+            os.unlink(name, dir_fd=descriptor)
+            continue
+        try:
+            remove_directory_contents(child, depth=depth + 1)
+        finally:
+            os.close(child)
+        os.rmdir(name, dir_fd=descriptor)
+
+
 def remove_tree_child(parent: int, name: str) -> None:
     """Remove a child directory and everything under it, relative to its held parent.
 

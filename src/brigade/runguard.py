@@ -1541,19 +1541,17 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     if not worktree_path.exists():
         return
     root = git_root(repo)
-    held = _deliver_worktree_handoffs(worktree_path, root)
+    if not worktree_removal.bound_removal_available():
+        worktree_removal.remove_by_path(root, worktree_path, force=force)
+        return
+    held = worktree_removal.deliver_handoffs(worktree_path, root)
     if held is None:
         return
     try:
-        worktree_removal.remove_held(root, worktree_path, held, force=force)
+        worktree_removal.remove_held(root, held[0], force=force)
     finally:
-        for fd in held:
-            os.close(fd)
-
-
-def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> list[int] | None:
-    """Hand pending handoffs over, returning the held tree descriptors."""
-    return worktree_removal.deliver_handoffs(worktree_path, root)
+        for handle in held:
+            worktree_removal.close_hold(handle)
 
 
 def is_brigade_created_worktree(path: Path, repo_root: Path) -> bool:
