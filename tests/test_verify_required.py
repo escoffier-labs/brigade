@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -141,4 +143,7 @@ def test_test_placeholder_expands_to_distinct_argv_without_shell(repo, capsys):
     )
     assert cli.main(["work", "verify", "required", "-t", str(target), "--base", base]) == 0
     output = capsys.readouterr().out
-    assert output.splitlines()[0] == "focused 'tests/a file.py' 'tests/x;echo.py'"
+    argv = ["focused", "tests/a file.py", "tests/x;echo.py"]
+    # The hint is quoted for the host shell family, so the expected text differs on Windows.
+    expected = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+    assert output.splitlines()[0] == expected
