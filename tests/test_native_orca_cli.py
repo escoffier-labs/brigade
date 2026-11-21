@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, native_child_custody, native_t3_enrollment
+from brigade import cli, native_child_custody, native_t3_enrollment, run_tasks
 
 from tests.test_native_orca import DISPATCH, RUN, TASK, _fixture
 from tests.test_native_t3_claim import TASK_TEXT, _batch, _git, _run_dir, _workspace
@@ -68,6 +68,10 @@ class Coordinator:
     def observe(self, show, *args, **kwargs):
         return self.invoke("observe", self.run_id, "one", "--native-json", self.payload("show", show), *args, **kwargs)
 
+    def limit_one_worker(self):
+        roster = self.workspace / ".brigade" / "roster.toml"
+        roster.write_text(roster.read_text() + "\n[limits]\nmax_workers = 1\n")
+
     def status(self):
         return self.invoke("status", self.run_id, "--json")
 
@@ -89,6 +93,7 @@ def coordinator(tmp_path, capsys):
 
 
 def test_orca_1_4_269_ambiguous_start_restart_and_notice(coordinator):
+    coordinator.limit_one_worker()
     run_id = coordinator.open()
     receipt = coordinator.start()
     assert coordinator.open() == run_id  # new CLI invocation, same durable enrollment
@@ -99,6 +104,7 @@ def test_orca_1_4_269_ambiguous_start_restart_and_notice(coordinator):
     notice = json.loads((Path(__file__).parent / "fixtures/native_orca/start-unconfirmed-1.4.269.json").read_text())
     assert notice["orca_version"] == VERSION and "stablyai/orca#46155" in notice["source"]
     assert "Synthetic private text" not in coordinator.accept(notice["payload"], error="start-unknown")
+    coordinator.claim("two", SECOND_TASK, error="capacity-denied")
     assert coordinator.status()["tasks"][0]["capacity_reason"] == "start-unconfirmed"
     assert not coordinator.status()["tasks"][0]["correlated"]
     remote = json.loads(json.dumps(receipt))
@@ -131,13 +137,106 @@ def test_orca_1_4_269_recovers_only_the_original_worker_after_a_restart(coordina
 
 
 def test_orca_1_4_269_circuit_breaker_never_allocates_another_launch(coordinator):
-    coordinator.open()
+    coordinator.limit_one_worker()
+    run_id = coordinator.open()
     coordinator.start()
     refusal = _fixture("task-not-startable")
     refusal["error"]["data"].update(retryOf=DISPATCH, failureCount=3)
-    coordinator.accept(refusal, 1, error="circuit-broken")
+    result = coordinator.accept(refusal, 1)
+    assert result["reason"] == "circuit-broken"
+    status = coordinator.status()
+    assert status["capacity"]["live"] == 1
+    assert not status["tasks"][0]["correlated"]
+    coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
+    assert coordinator.status()["capacity"]["live"] == 0
     coordinator.claim(error="already-claimed")
-    assert not coordinator.status()["tasks"][0]["correlated"]
+    final = coordinator.invoke("finalize", run_id)
+    assert (final["status"], final["terminals"], final["acknowledged"]) == ("failed", 1, 1)
+
+
+@pytest.mark.parametrize("reason", ["start-failed", "start-refused"])
+def test_orca_1_4_269_definite_refusal_frees_capacity_after_ack(coordinator, reason):
+    coordinator.limit_one_worker()
+    run_id = coordinator.open()
+    ready = coordinator.start()
+    if reason == "start-failed":
+        refusal = json.loads(json.dumps(ready))
+        refusal["result"]["state"] = "failed"
+    else:
+        refusal = _fixture("task-not-startable")
+    result = coordinator.accept(refusal, 1)
+    assert result["status"] == "failed" and result["reason"] == reason
+    result_id = result["result_id"]
+    replay = coordinator.accept(refusal, 1)
+    assert replay["replayed"] and replay["result_id"] == result_id
+    coordinator.accept(ready, error="task-terminal")
+    row = coordinator.status()["tasks"][0]
+    assert row["terminal"] and row["start_refusal"] == reason and row["result_id"] == result_id
+    coordinator.claim("two", SECOND_TASK, error="capacity-denied")
+    coordinator.invoke("ack", run_id, "one", "--result-id", result_id)
+    assert coordinator.status()["capacity"]["live"] == 0
+    assert coordinator.claim("two", SECOND_TASK)["state"] == "claimed"
+
+
+@pytest.mark.parametrize("state", ["start_unknown", "outcome_unknown", "failed-with-residual-worker"])
+def test_orca_1_4_269_unknown_start_keeps_the_slot(coordinator, state):
+    coordinator.limit_one_worker()
+    run_id = coordinator.open()
+    receipt = coordinator.start()
+    if state == "failed-with-residual-worker":
+        receipt["result"].update(state="failed", recovery="This start left a worker session open.")
+    else:
+        receipt["result"]["state"] = state
+    coordinator.accept(receipt, 1, error="start-unknown")
+    row = coordinator.status()["tasks"][0]
+    assert row["capacity_reason"] == "start-unconfirmed" and not row["terminal"]
+    coordinator.claim("two", SECOND_TASK, error="capacity-denied")
+    coordinator.invoke("finalize", run_id, error="finalize-live")
+
+
+def test_orca_1_4_269_refusal_for_another_task_keeps_the_slot(coordinator):
+    coordinator.limit_one_worker()
+    coordinator.open()
+    coordinator.start()
+    refusal = _fixture("task-not-startable")
+    refusal["error"]["data"]["taskId"] = SECOND_TASK
+    coordinator.accept(refusal, 1, error="native-mismatch")
+    coordinator.claim("two", SECOND_TASK, error="capacity-denied")
+
+
+def test_orca_1_4_269_refusal_replay_repairs_an_interrupted_result(coordinator, monkeypatch):
+    coordinator.limit_one_worker()
+    run_id = coordinator.open()
+    ready = coordinator.start()
+    refusal = _fixture("task-not-startable")
+
+    def interrupted(*args, **kwargs):
+        raise run_tasks.TaskJournalError("simulated interrupted observation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_tasks, "observe_task", interrupted)
+        coordinator.accept(refusal, 1, error="observation-conflict")
+
+    row = coordinator.status()["tasks"][0]
+    assert row["start_refusal"] == "start-refused" and row["result_id"] is None
+    coordinator.accept(ready, error="task-terminal")
+    coordinator.claim("two", SECOND_TASK, error="capacity-denied")
+    repaired = coordinator.accept(refusal, 1)
+    coordinator.invoke("ack", run_id, "one", "--result-id", repaired["result_id"])
+    assert coordinator.status()["capacity"]["live"] == 0
+
+
+def test_orca_1_4_269_human_status_explains_the_refusal_and_capacity(coordinator, capsys):
+    coordinator.limit_one_worker()
+    run_id = coordinator.open()
+    coordinator.start()
+    coordinator.accept(_fixture("task-not-startable"), 1)
+    assert cli.main(["orca", "status", run_id, "--target", str(coordinator.workspace)]) == 0
+    out, err = capsys.readouterr()
+    assert not err
+    lines = out.splitlines()
+    assert lines[0].startswith(run_id) and lines[0].endswith("(workspace workers 1/1)")
+    assert lines[1] == "  one failed (start-refused) (holds capacity: awaiting-ack)"
 
 
 def test_orca_1_4_269_partial_completion_retained_tab_and_cleanup(coordinator):
@@ -145,9 +244,11 @@ def test_orca_1_4_269_partial_completion_retained_tab_and_cleanup(coordinator):
     coordinator.accept(coordinator.start())
     structured = _fixture("worker-show-structured")
     partial = coordinator.observe(structured)
-    assert partial["result_id"] is None
+    assert partial["result_id"] is None and partial["reason"] == "result-transfer-missing"
     coordinator.invoke("ack", run_id, "one", "--result-id", "a" * 64, error="task-nonterminal")
-    assert "inbox" in partial["inbox_argv"] and "--full" in partial["inbox_argv"]
+    inbox = partial["inbox_argv"]
+    assert "inbox" in inbox and "--full" in inbox
+    assert inbox[inbox.index("--limit") + 1] == "100"
     unreadable = _fixture("worker-show-structured")
     unreadable["result"]["projection"]["liveness"]["verdict"] = "unknown"
     mail = coordinator.payload("inbox", _fixture("worker-done"))

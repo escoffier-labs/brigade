@@ -33,7 +33,7 @@ def cancel_argv(worker: WorkerReference) -> tuple[str, ...]:
 
 
 def inbox_argv(worker: WorkerReference) -> tuple[str, ...]:
-    return (*CLI, "inbox", "--full", "--environment", "local", "--run", worker.run_id, "--json")
+    return (*CLI, "inbox", "--full", "--environment", "local", "--run", worker.run_id, "--limit", "100", "--json")
 
 
 def result_argv(worker: WorkerReference) -> tuple[str, ...]:

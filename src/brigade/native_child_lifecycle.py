@@ -165,9 +165,12 @@ def status(
         )
         if include_capacity:
             reason = reasons.get(task_id)
-            if reason == "awaiting-terminal" and not rows[-1]["correlated"]:
+            refusal = journal_core.start_refusal(events, task_id)
+            if reason == "awaiting-terminal" and refusal is None and not rows[-1]["correlated"]:
                 reason = "start-unconfirmed"
             rows[-1].update(holds_capacity=reason is not None, capacity_reason=reason)
+            if refusal is not None:
+                rows[-1].update(start_refusal=refusal, result_id=result.result_id)
     return {
         "schema": host.status_schema,
         "run_id": run_dir.name,

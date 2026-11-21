@@ -41,7 +41,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     claim.add_argument("--orca-run", required=True, help="Existing Orca Run for this workspace's coordinator.")
     claim.add_argument("--orca-task", required=True, help="Existing Orca Task in that Run with the enrolled brief.")
 
-    accepted = commands.add_parser("accepted", help="Record a full worker-start receipt for the claimed worker.")
+    accepted = commands.add_parser(
+        "accepted", help="Record a full worker-start receipt or a definite refusal for the claim."
+    )
     _run(accepted)
     _receipt(accepted, required=True)
 
@@ -56,6 +58,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Record worker-show evidence and read completion mail with inbox --full.",
         description=(
             "Record full worker-show JSON. Read completion mail with orca-ide orchestration inbox --full. "
+            "A missing worker_done leaves completion pending with result-transfer-missing. "
             "After release, supply a fresh worker-show to update capacity for a result already retained."
         ),
     )
@@ -71,7 +74,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     ack = commands.add_parser("ack", help="Acknowledge one exact terminal result.")
     _run(ack)
-    ack.add_argument("--result-id", required=True, help="Terminal result identity from observe or cancel.")
+    ack.add_argument("--result-id", required=True, help="Terminal result identity from accepted, observe, or cancel.")
 
     finalize = commands.add_parser("finalize", help="Close the run after claimed workers have settled and released.")
     _run(finalize, task=False)
@@ -141,8 +144,10 @@ def _describe(report: dict[str, Any]) -> None:
     print(f"{report['run_id']} {report['status']} (workspace workers {live}/{limit})")
     for task in report["tasks"]:
         reason = task["capacity_reason"]
-        suffix = f" (holds capacity: {reason})" if reason is not None else ""
-        print(f"  {task['task_id']} {task['state']}{suffix}")
+        refusal = task.get("start_refusal")
+        disposition = f" ({refusal})" if refusal is not None else ""
+        capacity_note = f" (holds capacity: {reason})" if reason is not None else ""
+        print(f"  {task['task_id']} {task['state']}{disposition}{capacity_note}")
 
 
 def dispatch(args: Any) -> int:

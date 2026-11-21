@@ -29,7 +29,7 @@ from . import roster as roster_mod
 from . import run_dirfd, run_journal, run_lifecycle, runguard, worktree_lease
 from . import run_task_journal as journal
 from .native_child_host import NativeChildCapacityError, NativeChildHost
-from .native_child_observations import RESOURCE_EVENT, RESOURCE_STATES
+from .native_child_observations import QUIESCENT_RESOURCE_STATES, RESOURCE_EVENT, RESOURCE_STATES
 
 MAX_RUN_ENTRIES = 512
 MAX_RUN_RECEIPT_BYTES = 262_144
@@ -222,7 +222,7 @@ def _live_claims(events: Sequence[run_journal.RunEvent]) -> dict[str, tuple[str,
                 or payload.get("attempt_id") != claims[task_id][1]
                 or not isinstance(reason, str)
                 or reason not in RESOURCE_STATES
-                or (resources.get(task_id) == "released" and reason != "released")
+                or (resources.get(task_id) in QUIESCENT_RESOURCE_STATES and reason != resources[task_id])
             ):
                 raise _Unverified("payload")
             resources[task_id] = reason
@@ -239,7 +239,7 @@ def _live_claims(events: Sequence[run_journal.RunEvent]) -> dict[str, tuple[str,
     live: dict[str, tuple[str, str]] = {}
     for task_id, (seat, _attempt) in claims.items():
         reason = held.get(task_id)
-        if reason is None and resources.get(task_id) != "released":
+        if reason is None and resources.get(task_id) not in QUIESCENT_RESOURCE_STATES:
             reason = resources.get(task_id)
         if reason is None:
             status, containment, result_id = observed.get(task_id, (None, None, None))

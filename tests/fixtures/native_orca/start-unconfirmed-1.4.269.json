@@ -1,6 +1,6 @@
 {
   "orca_version": "1.4.269",
-  "source": "Hand-written redacted inbox projection based on stablyai/orca#46155 and worker-start-unconfirmed-alert.test.ts",
+  "source": "Synthetic inbox message shape with redacted alert wording based on stablyai/orca#46155 and worker-start-unconfirmed-alert.test.ts",
   "payload": {
     "id": "rpc-example",
     "ok": true,

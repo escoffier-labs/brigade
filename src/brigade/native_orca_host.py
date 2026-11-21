@@ -10,6 +10,7 @@ from . import roster as roster_mod
 from .native_child_host import NativeChildError, NativeChildHost, TargetUnresolved
 
 ORCA_VERSION = "1.4.269"
+# PR #2825 adapter fixtures cover 1.4.268. Orca verb tests cover 1.4.269.
 SUPPORTED_VERSIONS = frozenset({"1.4.268", ORCA_VERSION})
 UNSUPPORTED = "orca-unsupported"
 STRUCTURAL_GAPS = frozenset(

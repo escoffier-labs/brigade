@@ -138,6 +138,10 @@ def result_fields(payload: object, *, ok: bool = True) -> Mapping[str, object]:
     return result if isinstance(result, Mapping) else {}
 
 
+class DefiniteStartRefusal(NativeChildError):
+    """A matching refusal that produced no live worker for this claim."""
+
+
 def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *, exit_code: int) -> WorkerReference:
     """Correlate a ready, replay-safe worker-start receipt, with no retry advice."""
     binding.checked_key()
@@ -150,19 +154,25 @@ def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *
         and payload.get("ok") is False
         and isinstance(error, Mapping)
         and error.get("code") == "task_not_startable"
+        and not reply
     ):
         data = error.get("data")
         if (
-            isinstance(data, Mapping)
-            and data.get("taskId") == binding.task_id
-            and valid_id(data.get("retryOf"), "ctx")
-            and type(data.get("failureCount")) is int
-            and data["failureCount"] >= 3
+            not isinstance(data, Mapping)
+            or data.get("taskId") != binding.task_id
+            or data.get("runId", binding.run_id) != binding.run_id
         ):
-            raise NativeChildError("circuit-broken", "Orca refused another start in the retained Task's retry chain")
-        raise NativeChildError("start-refused", "Orca refused to start the retained Task")
-    if reply.get("state") == "failed":
-        raise NativeChildError("start-failed", "Orca reported a failed worker start")
+            raise NativeChildError("native-mismatch", "the Orca start refusal does not match the retained claim")
+        if valid_id(data.get("retryOf"), "ctx") and type(data.get("failureCount")) is int and data["failureCount"] >= 3:
+            raise DefiniteStartRefusal(
+                "circuit-broken", "Orca refused another start in the retained Task's retry chain"
+            )
+        raise DefiniteStartRefusal("start-refused", "Orca refused to start the retained Task")
+    if exit_code != 0 and reply.get("state") == "failed" and result_fields(payload):
+        _start_reference(binding, target, reply)
+        # Orca can report failed and still retain a session from that start.
+        if reply.get("residualResources") == [] and reply.get("recovery") is None:
+            raise DefiniteStartRefusal("start-failed", "Orca reported a failed worker start")
     if exit_code != 0 or reply.get("state") != "ready" or not result_fields(payload):
         raise NativeChildError("start-unknown", "the Orca worker start was not confirmed")
     return _start_reference(binding, target, reply)

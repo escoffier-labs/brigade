@@ -16,6 +16,7 @@ from . import native_orca_enrollment as enrollment
 from . import native_orca_observations as observations
 from . import run_journal, run_tasks
 from .native_child_custody import owned_run
+from .native_child_observations import RESOURCE_EVENT
 from .native_orca_host import HOST
 
 CORRELATION_EVENT = "task.native-correlated"
@@ -198,6 +199,8 @@ def claimed_task(workspace: Path, run_id: str, task_id: str, *, resolving: bool 
 
 
 def _correlate(task: ClaimedTask, worker: dispatch.WorkerReference, *, mode: str, held: str | None) -> dict[str, Any]:
+    if journal.start_refusal(task.events, task.task_id) is not None:
+        raise journal.refuse("task-terminal", "the task already has a definite Orca start refusal")
     prior = task.correlated_worker()
     if prior is not None and prior != worker:
         if mode == "parent-reported" and task.verified.result.result_id is None:
@@ -238,10 +241,49 @@ def _correlate(task: ClaimedTask, worker: dispatch.WorkerReference, *, mode: str
     }
 
 
+def _record_start_refusal(task: ClaimedTask, reason: str) -> dict[str, Any]:
+    result = task.verified.result
+    prior = journal.start_refusal(task.events, task.task_id)
+    if task.correlated_worker() is not None or (prior is not None and prior != reason):
+        raise journal.refuse("accept-conflict", "the refusal contradicts the retained Orca start outcome")
+    if prior is None:
+        if result.result_id is not None:
+            raise journal.refuse("task-terminal", "the task already has a terminal result")
+        # Seal the no-worker verdict first. If the next write is interrupted,
+        # reporting the same receipt repairs the result without admitting a new launch.
+        task.append(RESOURCE_EVENT, {"reason": reason}, reason)
+    evidence = journal.digest(
+        {"intent": task.claim.intent_digest, "reason": reason}, "brigade.native-orca.start-refusal.v1"
+    )
+    try:
+        updated = run_tasks.observe_task(
+            task.run_dir,
+            workspace=task.workspace,
+            handle=result.handle,
+            observation=run_tasks.TaskObservation(
+                status="failed", artifact_kind="receipt", artifact_digest=evidence, containment="quiescent"
+            ),
+            expected_version=result.version,
+        )
+    except run_tasks.TaskJournalError:
+        raise journal.refuse("observation-conflict", "the journal refused the Orca start outcome") from None
+    return {
+        **task.report(CORRELATION_SCHEMA),
+        "mode": "start-refusal",
+        "reason": reason,
+        "status": updated.status,
+        "result_id": updated.result_id,
+        "replayed": result.result_id is not None,
+    }
+
+
 def accepted(*, workspace: Path, run_id: str, task_id: str, payload: object, exit_code: int) -> dict[str, Any]:
     with claimed_task(workspace, run_id, task_id) as task:
         task.require_unheld()
-        worker = dispatch.parse_start(task.binding, task.verified.target, payload, exit_code=exit_code)
+        try:
+            worker = dispatch.parse_start(task.binding, task.verified.target, payload, exit_code=exit_code)
+        except dispatch.DefiniteStartRefusal as exc:
+            return _record_start_refusal(task, exc.code)
         return _correlate(task, worker, mode="parent-reported", held=None)
 
 
@@ -252,8 +294,8 @@ def hold_resolve(
         result = task.verified.result
         held = journal.held(task.events, task_id)
         if abandon:
-            if result.result_id is not None:
-                raise journal.refuse("task-terminal", "the terminal result must stay available for acknowledgement")
+            if result.result_id is not None or journal.start_refusal(task.events, task.task_id) is not None:
+                raise journal.refuse("task-terminal", "the recorded outcome must remain available for acknowledgement")
             journal.close_lost_request(task.workspace, task.run_dir, task.events, result)
             if held != journal.ABANDONED:
                 journal.record_held(
