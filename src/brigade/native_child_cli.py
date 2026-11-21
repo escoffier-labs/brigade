@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .native_child_enrollment import UnsupportedTasksError
 from .native_child_host import NativeChildCapacityError, NativeChildCustodyError, NativeChildError
 from .native_child_journal import bound, refuse
 from .run_batch import BatchError
@@ -66,7 +67,11 @@ def emit(call: Any, *, output: Callable[[Any], None] | None = None, recovery: Ma
     try:
         report = call()
     except (NativeChildError, NativeChildCapacityError, NativeChildCustodyError, BatchError) as exc:
-        print(f"error [{exc.code}]: {bound(str(exc))}", file=sys.stderr)
+        if isinstance(exc, UnsupportedTasksError):
+            for task_id, reason in exc.entries:
+                print(f"error [{exc.code}]: task {task_id} {reason}", file=sys.stderr)
+        else:
+            print(f"error [{exc.code}]: {bound(str(exc))}", file=sys.stderr)
         if recovery and exc.code in recovery:
             print(recovery[exc.code], file=sys.stderr)
         return 2

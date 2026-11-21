@@ -10,8 +10,8 @@ from typing import Any
 from . import native_child_admission, native_child_custody, run_batch, run_journal, run_lifecycle, run_tasks
 from . import native_child_enrollment as core
 from . import native_child_journal as journal
-from .native_child_host import NativeChildCustodyError, NativeChildError
-from .native_orca_host import HOST, NativeTarget, target_for_seat
+from .native_child_host import NativeChildCustodyError
+from .native_orca_host import HOST, NativeTarget, declared_target, structural_gap
 
 SCHEMA = "brigade.orca_enrollment.v1"
 INPUT_SCHEMA = "brigade.orca_delegation_input.v1"
@@ -39,14 +39,12 @@ def enroll(*, workspace: Path, batch_path: Path, roster_path: Path | None = None
         task_id, seat, text = task["task_id"], task["seat"], task["text"]
         if seat not in roster.agents:
             raise journal.refuse("unknown-seat", f"seat {seat!r} is not in the roster")
-        try:
-            target = targets.get(seat)
-            if target is None:
-                target = targets[seat] = target_for_seat(roster, seat, source_revision=revision)
-        except NativeChildError as exc:
-            if exc.code != HOST.unsupported_code:
-                raise
-            unsupported.append(f"task {task_id} {exc}")
+        if seat not in targets:
+            targets[seat] = declared_target(roster, seat, source_revision=revision)
+        target = targets[seat]
+        gap = structural_gap(target)
+        if gap is not None:
+            unsupported.append((task_id, gap))
             continue
         spec = run_tasks.TaskSpec(task_id, seat, hashlib.sha256(text.encode("utf-8")).hexdigest())
         content = core.input_bytes(INPUT_SCHEMA, task_id=task_id, seat=seat, text=text, target=target)
@@ -54,7 +52,9 @@ def enroll(*, workspace: Path, batch_path: Path, roster_path: Path | None = None
             core.EnrollmentAsset(spec, core.asset_name(task_id), content, template_digest(run_id, spec, target))
         )
     if unsupported:
-        raise journal.refuse(HOST.unsupported_code, ", ".join(unsupported))
+        raise core.UnsupportedTasksError(
+            HOST.unsupported_code, "the batch contains unsupported Orca targets", tuple(unsupported)
+        )
     try:
         with native_child_custody.owned_run(workspace, run_dir):
             core.initialize_run(HOST, workspace, run_dir, "Native Orca enrollment")

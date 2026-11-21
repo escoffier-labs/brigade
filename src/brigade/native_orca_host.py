@@ -109,14 +109,19 @@ def _resolve_target(roster: roster_mod.Roster, seat: str, source_revision: str) 
     )
 
 
-def target_for_seat(roster: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
-    """Resolve the declaration at enrollment without granting launch authority."""
+def declared_target(roster: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
+    """Read an Orca declaration before classifying structural gaps."""
     try:
-        target = _resolve_target(roster, seat, source_revision)
+        return _resolve_target(roster, seat, source_revision)
     except TargetUnresolved as exc:
         if exc.missing:
             raise NativeChildError("seat-unbound", "the seat has no declared Orca target") from None
         raise NativeChildError("invalid-target", "the Orca target declaration is invalid") from None
+
+
+def target_for_seat(roster: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
+    """Resolve a supported declaration without granting launch authority."""
+    target = declared_target(roster, seat, source_revision=source_revision)
     require_supported_target(target)
     return target
 

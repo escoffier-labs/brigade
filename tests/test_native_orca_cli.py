@@ -146,6 +146,7 @@ def test_orca_1_4_269_partial_completion_retained_tab_and_cleanup(coordinator):
     structured = _fixture("worker-show-structured")
     partial = coordinator.observe(structured)
     assert partial["result_id"] is None
+    coordinator.invoke("ack", run_id, "one", "--result-id", "a" * 64, error="task-nonterminal")
     assert "inbox" in partial["inbox_argv"] and "--full" in partial["inbox_argv"]
     unreadable = _fixture("worker-show-structured")
     unreadable["result"]["projection"]["liveness"]["verdict"] = "unknown"
@@ -227,7 +228,11 @@ def test_orca_1_4_269_unsupported_hands_off_only_at_admission(coordinator):
     roster = coordinator.workspace / ".brigade" / "roster.toml"
     roster.write_text(roster.read_text().replace(VERSION, "1.4.265"))
     err = coordinator.invoke("open", coordinator.batch, error="orca-unsupported")
-    assert "brigade run batch" in err and "version-unsupported" in err
+    assert err.splitlines()[:2] == [
+        "error [orca-unsupported]: task one version-unsupported",
+        "error [orca-unsupported]: task two version-unsupported",
+    ]
+    assert "brigade run batch" in err
     assert not (coordinator.workspace / ".brigade" / "runs").exists()
 
 

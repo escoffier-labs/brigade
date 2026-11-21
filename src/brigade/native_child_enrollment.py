@@ -16,6 +16,14 @@ from .native_child_host import NativeChildHost
 from .run_task_journal import NATIVE_ENROLLMENT_DESCRIPTOR_VERSION, task_id
 
 
+class UnsupportedTasksError(EnrollmentError):
+    """A batch-wide structural refusal with one bounded token per affected task."""
+
+    def __init__(self, code: str, message: str, entries: tuple[tuple[str, str], ...]) -> None:
+        self.entries = entries
+        super().__init__(code, message)
+
+
 @dataclass(frozen=True)
 class EnrollmentAsset:
     spec: run_tasks.TaskSpec

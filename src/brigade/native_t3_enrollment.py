@@ -14,10 +14,8 @@ target declaration, the delegation input encoding and the verbs.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
-import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +26,7 @@ from . import native_child_enrollment as core
 from . import run_batch, run_journal, run_lifecycle, runguard
 from . import run_task_journal as journal
 from . import run_tasks
+from .native_child_cli import emit
 from .native_child_host import NativeChildCustodyError as EnrollmentError
 from .native_t3_contract import INHERIT_MODE, NativeIntentTemplate, NativeTarget
 from .native_t3_host import HOST
@@ -41,7 +40,6 @@ REQUEST_KEY_PREFIX = "brigade-t3:"
 REQUEST_KEY_DOMAIN = "brigade.t3.request-key.v1"
 ENROLLED_STATE = "enrolled"
 _MARKER_NAME = "t3-enrollment.json"
-_MAX_DIAGNOSTIC = 240
 _TARGET_STRING_FIELDS = (
     "origin_environment",
     "origin_thread",
@@ -55,7 +53,7 @@ _TARGET_FIELDS = frozenset({*_TARGET_REQUIRED, "options", "runtime_mode", "inter
 _OPTION_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*", re.ASCII)
 
 
-class UnsupportedTasksError(EnrollmentError):
+class UnsupportedTasksError(core.UnsupportedTasksError):
     """A batch holding tasks T3 structurally cannot run.
 
     Every entry names one affected task id and its closed structural token,
@@ -64,9 +62,8 @@ class UnsupportedTasksError(EnrollmentError):
     """
 
     def __init__(self, entries: tuple[tuple[str, str], ...]) -> None:
-        self.entries = tuple(entries)
-        named = ", ".join(f"{task_id} {token}" for task_id, token in self.entries)
-        super().__init__(UNSUPPORTED, f"tasks T3 cannot run: {named}")
+        named = ", ".join(f"{task_id} {token}" for task_id, token in entries)
+        super().__init__(UNSUPPORTED, f"tasks T3 cannot run: {named}", entries)
 
 
 @contextmanager
@@ -102,11 +99,6 @@ def write_delegation_asset(run_dir: Path, name: str, content: bytes) -> None:
 
 def _publish_assets(plan: EnrollmentPlan) -> None:
     native_child_custody.publish_assets(plan.run_dir, [(entry.asset_path, entry.content) for entry in plan.entries])
-
-
-def _bound(message: str) -> str:
-    text = " ".join(str(message).split())
-    return text if len(text) <= _MAX_DIAGNOSTIC else text[: _MAX_DIAGNOSTIC - 1] + "."
 
 
 def awaiting_native_parent(meta: Mapping[str, object]) -> bool:
@@ -390,19 +382,4 @@ def read_delegation_input(run_dir: Path, *, task_id: str) -> DelegationInput:
 
 def open_cli(args: Any) -> int:
     """Run ``brigade t3 open``: JSON on success, bounded refusals on stderr."""
-    try:
-        result = enroll(batch_path=args.batch_file, target=args.target, roster_path=args.roster)
-    except run_batch.BatchError as exc:
-        print(f"error [{exc.code}]: {_bound(str(exc))}", file=sys.stderr)
-        return 2
-    except UnsupportedTasksError as exc:
-        # One fixed line per affected task, naming only its caller-chosen id
-        # and the closed structural token. Task text never enters a refusal.
-        for task_id, token in exc.entries:
-            print(f"error [{exc.code}]: task {task_id} {token}", file=sys.stderr)
-        return 2
-    except EnrollmentError as exc:
-        print(f"error [{exc.code}]: {_bound(str(exc))}", file=sys.stderr)
-        return 2
-    print(json.dumps(result, sort_keys=True))
-    return 0
+    return emit(lambda: enroll(batch_path=args.batch_file, target=args.target, roster_path=args.roster))
