@@ -35,9 +35,9 @@ _RELEASE_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
 PYPI_PROJECT = "brigadestack"
-# The pre-0.32 package name. It stays published as a compatibility package that depends
-# on PYPI_PROJECT at the same version, so a pipx app installed under this name keeps
-# upgrading under it instead of gaining a second app that shadows `brigade`.
+# The pre-0.32 package name. Through 0.33 it stays published as a full build of the same
+# source at the same version, so a pipx app installed under this name keeps upgrading
+# under it instead of gaining a second app that shadows `brigade`.
 LEGACY_PYPI_PROJECT = "brigade-cli"
 PYPI_PROJECT_JSON_URL = f"https://pypi.org/pypi/{PYPI_PROJECT}/json"
 BETA_PREVIEW_BASE = "0.32.0"
@@ -717,7 +717,7 @@ def installed_pypi_project() -> str:
     """Name of the PyPI distribution this installation was made from.
 
     pipx records the requested package in ``pipx_metadata.json``, which is exact even
-    when the compatibility package pulled in its real dependency. Other layouts fall
+    when the install is a brigade-cli app. Other layouts fall
     back to the installed distribution metadata. Anything unknown is the real package.
     """
     try:

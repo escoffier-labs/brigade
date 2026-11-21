@@ -31,11 +31,17 @@ The same pin works with `pip install 'brigadestack==0.32.0.dev20261120'`. Bare
 `pipx install brigadestack` or `pip install brigadestack` resolves the latest stable
 release only; prerelease wheels are never selected as `latest`.
 
-`brigadestack` is the real PyPI package. `brigade-cli` is a compatibility package that
-depends on exactly `brigadestack==X.Y.Z` and installs the same `brigade` command.
+`brigadestack` is the real PyPI package. Through 0.33, `brigade-cli` is the same code under
+the old name: the release build publishes both from one tree with the same version,
+dependencies, extras and `brigade` package files, and only the distribution name and the
+console scripts differ (`brigade`, `brigade-cli` and `brigade-hook` for `brigade-cli`).
+It does not depend on `brigadestack`, so `pipx upgrade brigade-cli` is an ordinary in-place
+upgrade, and the publish job refuses to upload until an installed previous `brigade-cli`
+release upgrades to the built wheel and still runs. After 0.33 the last `brigade-cli`
+release becomes a stub that prints the migration command.
 `brigade update` on the stable channel upgrades the pipx app under the name it was
-installed with: an app named `brigade-cli` is reinstalled as `brigade-cli==X.Y.Z`
-(which pulls `brigadestack==X.Y.Z`), and any other install uses `brigadestack`.
+installed with: an app named `brigade-cli` is reinstalled as `brigade-cli==X.Y.Z`,
+and any other install uses `brigadestack`.
 Development wheels are published only as `brigadestack`, so `brigade update --channel beta`
 always installs `brigadestack`. On a machine whose pipx app is named `brigade-cli`, the beta
 update installs `brigadestack`, removes the `brigade-cli` app, installs `brigadestack` again

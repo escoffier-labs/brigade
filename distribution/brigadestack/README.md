@@ -4,35 +4,41 @@
 builds it, and it contains the whole CLI. On npm [`npm/feasibility`](../../npm/feasibility/README.md)
 builds it: a launcher that bundles the same wheel and a managed Python runtime.
 
-`brigade-cli` (PyPI) and `@escoffier-labs/brigade` (npm) are compatibility packages. Each
-depends on exactly `brigadestack` at the same version and declares its own `brigade` command,
-so `pipx upgrade brigade-cli` and `npm update --global @escoffier-labs/brigade` keep a working
-`brigade`. Their sources are
-[`distribution/brigade-cli/pypi`](../brigade-cli/pypi/README.md) and
+`brigade-cli` (PyPI) is the same code under the old name, and `@escoffier-labs/brigade` (npm)
+is a compatibility package. Through 0.33 the release build publishes `brigade-cli` as a full
+copy of the `brigadestack` build with only the distribution name and console scripts changed,
+so `pipx upgrade brigade-cli` stays an ordinary in-place upgrade. The npm package depends on
+exactly `brigadestack` at the same version and declares its own `brigade` command, so
+`npm update --global @escoffier-labs/brigade` keeps a working `brigade`. Their sources are
+[`distribution/brigade-cli/pypi`](../brigade-cli/pypi/README.md) (the long description only) and
 [`distribution/escoffier-labs-brigade/npm`](../escoffier-labs-brigade/npm/README.md).
 
 | Package | Contains | Commands |
 | --- | --- | --- |
 | PyPI `brigadestack` | the CLI | `brigade`, `brigadestack`, `brigade-hook` |
-| PyPI `brigade-cli` | metadata only, `brigadestack==<version>` | `brigade`, `brigade-cli`, `brigade-hook` |
+| PyPI `brigade-cli` | the same CLI, built from the same tree | `brigade`, `brigade-cli`, `brigade-hook` |
 | npm `brigadestack` | launcher, bundled `brigadestack` wheel, uv companions | `brigade`, `brigadestack` |
 | npm `@escoffier-labs/brigade` | launcher only, `brigadestack@<version>` | `brigade` |
 
 Both PyPI distributions use the existing CLI behavior, Python imports, workspace
 files, and storage formats. Install only one package per ecosystem globally: the real package
-and its compatibility package both link a `brigade` command. Documentation lives at
+and its old-name or compatibility package both link a `brigade` command. Documentation lives at
 [brigade.tools](https://brigade.tools/docs). The source repository is
 [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade/tree/main/distribution/brigadestack).
 
 ## Publishing the Python distributions
 
 Both distributions publish from `publish.yml` on a stable `vX.Y.Z` tag. The
-`build-and-publish` job builds the root project as `brigadestack` and
-`distribution/brigade-cli/pypi` as `brigade-cli` into one `dist/` directory, checks
-that exactly those four files carry the tag's version, and uploads them in one
-trusted-publishing step in the `pypi` environment. `scripts/version_sync.py` keeps
-the compatibility package's version and its `brigadestack==<version>` pin equal to
-the root version, and the tag check in `validate-release` covers it too.
+`build-and-publish` job builds the root project as `brigadestack`, then runs
+`scripts/stamp_brigade_cli.py` to write a temporary copy of the same tree under the
+distribution name `brigade-cli` (same version, dependencies, extras and files; the
+console scripts and long description differ; the checkout is never edited) and builds that
+too, into one `dist/` directory. It checks that exactly those four files carry the tag's
+version, then runs `scripts/check_cli_upgrade.py`: in a fresh venv it installs the newest
+older stable `brigade-cli` from PyPI, upgrades it to the built wheel and requires
+`brigade --version` to report the new version and `brigade-hook --help` to run. Only then
+does it upload all four files in one trusted-publishing step in the `pypi` environment.
+The tag check in `validate-release` covers the root version.
 
 Each PyPI project needs a trusted publisher for this workflow. Configure these exact
 fields on `brigadestack` and on `brigade-cli`:

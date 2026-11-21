@@ -117,18 +117,30 @@ def test_build_and_publish_builds_both_distributions_into_one_trusted_upload():
     job = text[text.index("  build-and-publish:") : text.index("  verify-version-check-endpoint:")]
 
     root_build = job.index("python -m build --outdir dist\n")
-    compat_build = job.index("python -m build --outdir dist distribution/brigade-cli/pypi")
+    stamp = job.index('python scripts/stamp_brigade_cli.py "$RUNNER_TEMP/brigade-cli-src"')
+    stamped_build = job.index('python -m build --outdir dist "$RUNNER_TEMP/brigade-cli-src"')
     version_check = job.index("Check both distributions share the release version")
+    upgrade_gate = job.index('python scripts/check_cli_upgrade.py --dist dist --version "${TAG#v}"')
     publish = job.index("      - name: Publish to PyPI")
-    assert root_build < compat_build < version_check < publish
+    assert root_build < stamp < stamped_build < version_check < upgrade_gate < publish
+    # The thin package is gone: brigade-cli is built from a stamped copy of this tree.
+    assert "distribution/brigade-cli/pypi" not in text.replace("distribution/brigade-cli/pypi/README.md", "")
     # One upload step, default dist/ directory, so both distributions ship together.
     assert job.count("pypa/gh-action-pypi-publish@") == 1
     assert "packages-dir" not in job
     for artifact in ("brigadestack-{version}-py3-none-any.whl", "brigade_cli-{version}-py3-none-any.whl"):
         assert artifact in job
-    assert "Python package: brigadestack==${VERSION} (brigade-cli==${VERSION} is the compatibility name)" in text
-    # The tag check also covers the compatibility package version.
-    assert '"distribution/brigade-cli/pypi/pyproject.toml"' in text
+    assert (
+        "Python package: brigadestack==${VERSION} (brigade-cli==${VERSION} is the same code under the old name)" in text
+    )
+    # The tag check covers the root version; the stamped copy cannot drift from it.
+    assert '"pyproject.toml"' in text
+
+
+def test_dev_publish_stays_brigadestack_only():
+    text = (ROOT / ".github" / "workflows" / "publish-dev.yml").read_text()
+    for name in ("brigade-cli", "brigade_cli", "stamp_brigade_cli", "check_cli_upgrade"):
+        assert name not in text
 
 
 def test_go_native_build_disables_setup_go_cache_for_the_cross_platform_matrix():
