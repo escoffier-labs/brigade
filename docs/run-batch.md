@@ -722,6 +722,7 @@ as each worker finishes, as the same sanitized projection the run receipt uses
 (no raw stdout or stderr captures). Failed workers retain their result receipt too. Skipped
 tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation
 and timeout preserve completed results and report unresolved tasks as stored.
+Per-task cancellation is described in [Cancellation](#cancellation).
 Exit 0 requires every task to be completed successfully and the run to pass
 finalization. Worker failures, cancellation, and timeout exit 1. Preflight and
 run-guard refusals retain their nonzero dispatch exit code and stderr reason.
@@ -729,6 +730,65 @@ Batch runs retain normal drift checkpoints, worker-result artifacts, final
 receipts, artifact collection, and lineage metadata without calling synthesis.
 Synthesis execution exits 2 with `synthesis-not-implemented`. Dry run still shows
 its requested seat. No synthesis model call or budget is created.
+
+## Cancellation
+
+`brigade runs tasks cancel <run> <task_id>... [--reason operator|parent|budget] [--json]`
+records that one selected assignment should not run. It never touches a sibling
+and never rewrites a completed result. `--reason` is a closed token; it is not
+free text.
+
+Cancellation intent and acknowledgement are separate facts. This release records
+only the intent (`task.cancel-requested`) and the containment it produces. An
+acknowledgement or containment record cannot be submitted yet: the inbox reserves
+the `ack` kind and refuses it with `ack-unsupported` rather than accept a request
+nothing reads.
+
+A task journal may only be written by the active run owner. A cancel request
+often comes from another process, so it never journals directly. It is first
+written as one closed `brigade.task_inbox_request.v1` document under
+`<run_dir>/task-inbox/`: kind, task id, reason token and a UTC timestamp, with no
+paths and no free text. Requests are created with an exclusive no-follow create
+and are never overwritten, so the first request for a task wins and a repeated
+request is a no-op. They are also never deleted, because the file is the replay
+source.
+
+The owner drains that inbox and appends the fact:
+
+- A live batch drains before each launch claim. An intent that arrives after the
+  attempt was prepared is journaled first, and the claim returns
+  `cancelled-before-launch` instead of a generic stale-history refusal.
+- `brigade runs tasks cancel` takes the workspace run lock without waiting. When
+  the batch is not live it drains immediately and reports `recorded`. When a live
+  batch holds the lock it reports `queued`; that batch journals the request before
+  its next launch.
+
+A task with a journaled intent is never launched. It is observed once as
+`cancelled` with containment `not-launched` on its deterministic attempt, which is
+the attempt its launch would have used. Replay and resume drain the inbox first,
+so a request that survived a crash is honored instead of launching the task. A
+sibling task in the same wave is unaffected and keeps its own result.
+
+An unknown task reports `unknown-task`, and a terminal task reports
+`already-terminal`; neither writes anything. A request whose task is in flight is
+still reported as `queued`, plus `live-termination-unavailable` in JSON and human
+output.
+
+This slice records intent only. It does not terminate a running worker, start
+watchers or change any process registry: a task that has already launched keeps
+running, and the recorded intent applies to its next launch attempt. Process
+termination and the separate containment record are the following slice.
+
+The inbox is bounded: at most 1024 request files of at most 4 KiB each. Exceeding
+either bound refuses with `inbox-overflow`. Malformed request files are skipped
+and reported by name. A symlinked inbox directory or request file is refused with
+`inbox-refused`. The batch treats any inbox refusal as a warning and keeps
+launching, so a damaged inbox cannot stop a batch.
+
+JSON output uses `brigade.runs_tasks_cancel.v1`, with `run_id`, `reason`, a
+`tasks` list of `{task_id, outcome, reason, live_termination}`, and `refusal`.
+Closed outcomes are `recorded`, `queued`, `already-terminal` and `unknown-task`.
+Exit 2 means at least one task was not recorded.
 
 See [kinds of delegated work](execution-model.md#kinds-of-delegated-work) for how
 batch tasks compare with ledger tasks, run-lineage children, remote fleet

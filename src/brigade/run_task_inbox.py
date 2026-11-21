@@ -1,0 +1,572 @@
+"""Durable per-run command inbox for task cancellation intent.
+
+A task fact may only be journaled by the active run owner; that check is what
+keeps a second process from rewriting another run's history. A cancel request
+can still arrive from anywhere: an operator in another terminal, a parent run,
+or a budget decision. So a request is first written as a bounded file under
+``<run_dir>/task-inbox/``, and only the owner journals it, either from the live
+batch before its next launch or from ``brigade runs tasks cancel`` when it can
+take the run lock itself.
+
+The inbox holds no paths and no free text. One request is a closed
+``brigade.task_inbox_request.v1`` document with a kind, a task id, a closed
+reason token and a UTC timestamp. Request files are created exclusively and are
+never overwritten, so the first request wins and a replay is a no-op. They are
+deliberately never deleted: the file is the replay source, and the journaled
+``task.cancel-requested`` fact makes draining idempotent.
+
+``ack`` is a reserved kind for the acknowledgement/containment slice that
+follows. It is refused here rather than silently accepted, so a caller cannot
+believe an acknowledgement was recorded when nothing reads it yet.
+"""
+
+from __future__ import annotations
+
+import errno
+import hashlib
+import json
+import os
+import re
+import stat
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+from uuid import uuid4
+
+from . import dirfd, localio, run_events, run_journal, runguard
+from . import run_task_journal as journal
+from . import run_tasks
+
+INBOX_SCHEMA = "brigade.task_inbox_request.v1"
+CANCEL_SCHEMA = "brigade.runs_tasks_cancel.v1"
+INBOX_DIRNAME = "task-inbox"
+KIND_CANCEL = "cancel"
+KIND_ACK = "ack"
+KINDS = frozenset({KIND_CANCEL, KIND_ACK})
+# Bounds are small on purpose: a run's inbox is a handful of operator requests,
+# never a queue. Exceeding either bound refuses instead of scanning forever.
+MAX_REQUEST_BYTES = 4096
+MAX_REQUESTS = 1024
+DEFAULT_REASON = "operator"
+
+# Closed outcomes. ``recorded`` means the journal now holds the intent,
+# ``queued`` means only the inbox file exists because a live batch owns the
+# journal, and the other two are refusals that write nothing.
+OUTCOME_RECORDED = "recorded"
+OUTCOME_QUEUED = "queued"
+OUTCOME_ALREADY_TERMINAL = "already-terminal"
+OUTCOME_UNKNOWN_TASK = "unknown-task"
+REFUSAL_OUTCOMES = frozenset({OUTCOME_ALREADY_TERMINAL, OUTCOME_UNKNOWN_TASK})
+LIVE_TERMINATION_UNAVAILABLE = "live-termination-unavailable"
+
+ERROR_CODES = frozenset(
+    {
+        "unknown-run",
+        "unknown-task",
+        "duplicate-task",
+        "no-task-journal",
+        "journal-unreadable",
+        "already-terminal",
+        "invalid-kind",
+        "invalid-reason",
+        "ack-unsupported",
+        "owner-required",
+        "inbox-refused",
+        "inbox-unavailable",
+        "inbox-overflow",
+    }
+)
+
+_NAME = re.compile(r"(?P<kind>cancel|ack)-(?P<key>[0-9a-f]{64})(?:-(?P<result>[A-Za-z0-9._:%-]+))?\.json", re.ASCII)
+_REQUEST_FIELDS = frozenset({"schema", "kind", "task_id", "reason", "requested_at"})
+
+
+class TaskInboxError(RuntimeError):
+    """One bounded inbox refusal; no journal fact has been written."""
+
+    def __init__(self, code: str, detail: str):
+        if code not in ERROR_CODES:
+            raise ValueError(f"unknown task inbox error code {code!r}")
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
+
+
+@dataclass(frozen=True)
+class CancelRequest:
+    """One validated inbox request, bounded and free of paths or free text."""
+
+    kind: str
+    task_id: str
+    reason: str
+    requested_at: str
+
+
+@dataclass(frozen=True)
+class Pending:
+    """Every readable request plus the names that were skipped as malformed."""
+
+    requests: tuple[CancelRequest, ...]
+    malformed: tuple[str, ...]
+
+
+def request_name(kind: str, task_id: str, result_id: str | None = None) -> str:
+    """The deterministic file name for one request: kind, identity hash, result."""
+    if kind not in KINDS:
+        raise TaskInboxError("invalid-kind", "inbox kind must be cancel or ack")
+    if not journal.task_id(task_id):
+        raise TaskInboxError("unknown-task", "a task id is not a valid task identity")
+    key = hashlib.sha256(task_id.encode("utf-8")).hexdigest()
+    suffix = "" if result_id is None else f"-{result_id}"
+    return f"{kind}-{key}{suffix}.json"
+
+
+def _inbox_path(run_dir: Path) -> Path:
+    return run_dir / INBOX_DIRNAME
+
+
+def _open_inbox(run_dir: Path, *, create: bool) -> int | None:
+    """Open the inbox directory without following a symlink, or ``None`` if absent."""
+    path = _inbox_path(run_dir)
+    try:
+        descriptor = dirfd.open_directory_chain(path, create=create, writable=True)
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise TaskInboxError("inbox-unavailable", "the task inbox could not be created") from None
+    except OSError as exc:
+        # ELOOP/ENOTDIR are the no-follow rejection of a symlinked component.
+        code = "inbox-refused" if exc.errno in {errno.ELOOP, errno.ENOTDIR} else "inbox-unavailable"
+        raise TaskInboxError(code, "the task inbox is not a contained directory") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise TaskInboxError("inbox-refused", "the task inbox is not a directory")
+        # A 0700 inbox is what submit creates. Anything looser is a shared
+        # directory this run did not make, so refuse instead of writing into it.
+        if dirfd.posix_available() and stat.S_IMODE(info.st_mode) & 0o077:
+            raise TaskInboxError("inbox-refused", "the task inbox has unsafe permissions")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _names(descriptor: int, path: Path) -> list[str]:
+    """Directory entries, excluding our temporary files and anything hidden."""
+    try:
+        if dirfd.posix_available() and os.scandir in os.supports_fd:
+            with os.scandir(descriptor) as entries:
+                names = [entry.name for entry in entries]
+        else:
+            names = os.listdir(path)
+    except OSError as exc:
+        raise TaskInboxError("inbox-unavailable", "the task inbox could not be read") from exc
+    return sorted(name for name in names if not name.startswith("."))
+
+
+def _fsync_directory(descriptor: int) -> None:
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        # Directory fsync is unavailable on some platforms; the file fsync and
+        # the exclusive create still bound the request.
+        pass
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short inbox write")
+        view = view[written:]
+
+
+def _exclusive_create(descriptor: int, name: str, data: bytes) -> bool:
+    """Publish under the final name only if it does not exist yet."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if dirfd.posix_available():
+        flags = dirfd.file_flags(flags)
+    try:
+        created = dirfd.open_child_file(descriptor, name, flags, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        _write_all(created, data)
+        os.fsync(created)
+    finally:
+        os.close(created)
+    return True
+
+
+def _publish(descriptor: int, name: str, data: bytes) -> bool:
+    """Publish a complete request atomically; never overwrite an existing one."""
+    temporary = f".tmp-{os.getpid()}-{uuid4().hex}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if dirfd.posix_available():
+        flags = dirfd.file_flags(flags)
+    created = dirfd.open_child_file(descriptor, temporary, flags, 0o600)
+    try:
+        _write_all(created, data)
+        os.fsync(created)
+    except BaseException:
+        os.close(created)
+        _unlink(descriptor, temporary)
+        raise
+    os.close(created)
+    try:
+        try:
+            dirfd.link_child(descriptor, temporary, name)
+        except FileExistsError:
+            return False
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                return False
+            if dirfd.posix_available():
+                raise
+            # Hard links are unavailable on some Windows filesystems. The
+            # exclusive create is the equivalent no-overwrite publication.
+            return _exclusive_create(descriptor, name, data)
+        else:
+            return True
+    finally:
+        _unlink(descriptor, temporary)
+
+
+def _unlink(descriptor: int, name: str) -> None:
+    try:
+        dirfd.unlink_child(descriptor, name)
+    except OSError:
+        pass
+
+
+def _document(kind: str, task_id: str, reason: str, requested_at: str) -> dict[str, Any]:
+    return {
+        "schema": INBOX_SCHEMA,
+        "kind": kind,
+        "task_id": task_id,
+        "reason": reason,
+        "requested_at": requested_at,
+    }
+
+
+def submit(
+    run_dir: Path,
+    kind: str,
+    task_id: str,
+    *,
+    reason: str | None = None,
+    result_id: str | None = None,
+) -> str:
+    """Write one durable request, or report that an identical one exists.
+
+    ``created`` and ``already-requested`` are both success. A different reason
+    for the same task keeps the request that arrived first.
+    """
+    if kind == KIND_ACK:
+        raise TaskInboxError(
+            "ack-unsupported",
+            "acknowledgement requests are reserved for a later release and are not read yet",
+        )
+    name = request_name(kind, task_id, result_id)
+    selected = DEFAULT_REASON if reason is None else reason
+    if selected not in journal.CANCEL_REASONS:
+        raise TaskInboxError("invalid-reason", "cancel reason must be operator, parent or budget")
+    try:
+        run_dir = run_journal.normalize_run_dir(Path(run_dir))
+    except (OSError, ValueError, run_journal.RunJournalError) as exc:
+        raise TaskInboxError("unknown-run", "run directory is not a run") from exc
+    if not run_dir.is_dir():
+        raise TaskInboxError("unknown-run", "run directory is not a run")
+    payload = _document(kind, task_id, selected, run_events.format_recorded_at(datetime.now(timezone.utc)))
+    data = run_events.canonical_bytes(payload)
+    descriptor = _open_inbox(run_dir, create=True)
+    assert descriptor is not None
+    try:
+        created = _publish(descriptor, name, data)
+        _fsync_directory(descriptor)
+    finally:
+        os.close(descriptor)
+    return "created" if created else "already-requested"
+
+
+def _request(document: Any, *, kind: str, key: str) -> CancelRequest | None:
+    """Validate one closed request document, or ``None`` when it is malformed."""
+    if not isinstance(document, Mapping) or set(document) != _REQUEST_FIELDS:
+        return None
+    if document["schema"] != INBOX_SCHEMA or document["kind"] != kind:
+        return None
+    task_id = document["task_id"]
+    if not journal.task_id(task_id):
+        return None
+    if hashlib.sha256(task_id.encode("utf-8")).hexdigest() != key:
+        return None
+    reason = document["reason"]
+    if reason not in journal.CANCEL_REASONS:
+        return None
+    requested_at = document["requested_at"]
+    if not run_events.is_valid_recorded_at(requested_at):
+        return None
+    return CancelRequest(kind, task_id, reason, requested_at)
+
+
+def _read(descriptor: int, name: str, path: Path) -> Any:
+    """Read one bounded request no-follow; a symlink or oversized file refuses."""
+    try:
+        info = dirfd.stat_child(descriptor, name)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TaskInboxError("inbox-unavailable", "an inbox request could not be inspected") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise TaskInboxError("inbox-refused", "an inbox request is not a regular file")
+    if info.st_size > MAX_REQUEST_BYTES:
+        raise TaskInboxError("inbox-overflow", "an inbox request exceeds the size bound")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if dirfd.posix_available():
+        flags = dirfd.file_flags(flags | os.O_NONBLOCK)
+    try:
+        opened = dirfd.open_child_file(descriptor, name, flags, 0)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise TaskInboxError("inbox-refused", "an inbox request is a symlink") from exc
+        raise TaskInboxError("inbox-unavailable", "an inbox request could not be read") from exc
+    with os.fdopen(opened, "rb") as handle:
+        data = handle.read(MAX_REQUEST_BYTES + 1)
+    if len(data) > MAX_REQUEST_BYTES:
+        raise TaskInboxError("inbox-overflow", "an inbox request exceeds the size bound")
+    try:
+        return json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def pending(run_dir: Path) -> Pending:
+    """Read every bounded request; malformed ones are skipped and reported."""
+    try:
+        run_dir = run_journal.normalize_run_dir(Path(run_dir))
+    except (OSError, ValueError, run_journal.RunJournalError) as exc:
+        raise TaskInboxError("unknown-run", "run directory is not a run") from exc
+    path = _inbox_path(run_dir)
+    descriptor = _open_inbox(run_dir, create=False)
+    if descriptor is None:
+        return Pending((), ())
+    try:
+        names = _names(descriptor, path)
+        if len(names) > MAX_REQUESTS:
+            raise TaskInboxError("inbox-overflow", "the task inbox exceeds the request bound")
+        requests: list[CancelRequest] = []
+        malformed: list[str] = []
+        for name in names:
+            matched = _NAME.fullmatch(name)
+            if matched is None:
+                # A stray non-request file is not a request; ignore it.
+                continue
+            document = _read(descriptor, name, path)
+            if document is None:
+                malformed.append(name)
+                continue
+            request = _request(document, kind=matched.group("kind"), key=matched.group("key"))
+            if request is None:
+                malformed.append(name)
+                continue
+            requests.append(request)
+        return Pending(tuple(requests), tuple(malformed))
+    finally:
+        os.close(descriptor)
+
+
+def drain(run_dir: Path, workspace: Path) -> dict[str, str]:
+    """Journal every pending cancel intent, under the active owner only.
+
+    Returns one closed outcome per named task. Requests are never deleted: the
+    journaled fact is what makes a later drain idempotent.
+    """
+    try:
+        run_dir = run_journal.normalize_run_dir(Path(run_dir))
+    except (OSError, ValueError, run_journal.RunJournalError) as exc:
+        raise TaskInboxError("unknown-run", "run directory is not a run") from exc
+    if not runguard.is_active_run_owner(workspace, run_dir):
+        raise TaskInboxError("owner-required", "only the active run owner journals a cancel intent")
+    cancels = [request for request in pending(run_dir).requests if request.kind == KIND_CANCEL]
+    outcomes: dict[str, str] = {}
+    if not cancels:
+        return outcomes
+    try:
+        with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
+            states = run_tasks._fold(run_dir.name, events)
+            for request in cancels:
+                current = states.get(request.task_id)
+                if current is None:
+                    outcomes.setdefault(request.task_id, "unknown")
+                    continue
+                if current.status in journal.TERMINAL:
+                    outcomes.setdefault(request.task_id, "terminal")
+                    continue
+                if current.cancel_requested:
+                    outcomes.setdefault(request.task_id, "already-requested")
+                    continue
+                event = journal.append(
+                    run_dir,
+                    workspace=workspace,
+                    event_type="task.cancel-requested",
+                    payload={"task_id": request.task_id, "reason": request.reason},
+                )
+                states[request.task_id] = replace(
+                    current,
+                    cancel_requested=True,
+                    cancel_reason=request.reason,
+                    version=event.event_digest,
+                )
+                outcomes[request.task_id] = "recorded"
+    except journal.TaskJournalError as exc:
+        raise TaskInboxError("journal-unreadable", "the task journal refused the cancel intent") from exc
+    return outcomes
+
+
+def _workspace(run_dir: Path, workspace: Path | None) -> Path:
+    if workspace is not None:
+        return Path(workspace).expanduser().resolve()
+    meta = localio.read_json_dict(run_dir / "run.json") or {}
+    resolved = runguard.resolve_run_lock_workspace(meta, run_dir)
+    if resolved is None:
+        raise TaskInboxError("unknown-run", "caller workspace could not be resolved")
+    return resolved
+
+
+def _ordered(task_ids: Sequence[str]) -> tuple[str, ...]:
+    if not task_ids:
+        raise TaskInboxError("unknown-task", "name at least one task to cancel")
+    seen: set[str] = set()
+    for task_id in task_ids:
+        if not journal.task_id(task_id):
+            raise TaskInboxError("unknown-task", "a task id is not a valid task identity")
+        if task_id in seen:
+            raise TaskInboxError("duplicate-task", f"task {task_id} is named more than once")
+        seen.add(task_id)
+    return tuple(task_ids)
+
+
+def _may_have_launched(state: run_tasks.TaskResult) -> bool:
+    """True when the worker may exist, so this release cannot stop it."""
+    return state.status != "queued" or state.handle.attempt_id is not None
+
+
+def cancel(
+    run_dir: Path,
+    task_ids: Sequence[str],
+    *,
+    reason: str = DEFAULT_REASON,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
+    """Record cancellation intent for selected tasks, or report why not."""
+    from . import run_lifecycle
+
+    try:
+        run_dir = run_journal.normalize_run_dir(Path(run_dir))
+    except (OSError, ValueError, run_journal.RunJournalError) as exc:
+        raise TaskInboxError("unknown-run", "run directory is not a run") from exc
+    if reason not in journal.CANCEL_REASONS:
+        raise TaskInboxError("invalid-reason", "cancel reason must be operator, parent or budget")
+    ordered = _ordered(task_ids)
+    workspace = _workspace(run_dir, workspace)
+    if not run_journal.bound_is_file(run_lifecycle._journal_path(run_dir)):
+        raise TaskInboxError("no-task-journal", f"no task journal in run {run_dir.name}")
+    try:
+        states = {result.handle.spec.task_id: result for result in run_tasks.read_tasks(run_dir)}
+    except (run_tasks.TaskJournalError, run_journal.RunJournalError) as exc:
+        raise TaskInboxError("journal-unreadable", f"task journal in run {run_dir.name} is not readable") from exc
+
+    rows: dict[str, dict[str, Any]] = {}
+    submitted: list[run_tasks.TaskResult] = []
+    for task_id in ordered:
+        state = states.get(task_id)
+        row = {"task_id": task_id, "outcome": OUTCOME_UNKNOWN_TASK, "reason": reason, "live_termination": None}
+        if state is None:
+            row["outcome"] = OUTCOME_UNKNOWN_TASK
+        elif state.status in journal.TERMINAL:
+            row["outcome"] = OUTCOME_ALREADY_TERMINAL
+        else:
+            submitted.append(state)
+            row["outcome"] = OUTCOME_QUEUED
+        rows[task_id] = row
+
+    # The request is durable before any attempt to take the run lock, so a
+    # live batch can read it between its launches even when this process never
+    # becomes the owner.
+    for state in submitted:
+        submit(run_dir, KIND_CANCEL, state.handle.spec.task_id, reason=reason)
+
+    drained: dict[str, str] | None = None
+    if submitted:
+        try:
+            # Non-blocking by default: a live batch keeps its lock, and this
+            # command reports queued instead of waiting for it.
+            with runguard.run_lock(workspace, run_dir=run_dir, stale_action="claim"):
+                drained = drain(run_dir, workspace)
+        except (runguard.RunLockError, OSError, TaskInboxError):
+            drained = None
+
+    for state in submitted:
+        row = rows[state.handle.spec.task_id]
+        if drained is None:
+            row["outcome"] = OUTCOME_QUEUED
+            if _may_have_launched(state):
+                row["live_termination"] = LIVE_TERMINATION_UNAVAILABLE
+            continue
+        outcome = drained.get(state.handle.spec.task_id)
+        if outcome in {"recorded", "already-requested"}:
+            row["outcome"] = OUTCOME_RECORDED
+        elif outcome == "terminal":
+            row["outcome"] = OUTCOME_ALREADY_TERMINAL
+        else:
+            row["outcome"] = OUTCOME_UNKNOWN_TASK
+    return {
+        "schema": CANCEL_SCHEMA,
+        "run_id": run_dir.name,
+        "reason": reason,
+        "tasks": [rows[task_id] for task_id in ordered],
+        "refusal": None,
+    }
+
+
+def refusal_payload(
+    error: TaskInboxError, *, run_id: str | None = None, reason: str = DEFAULT_REASON
+) -> dict[str, Any]:
+    """The closed refusal projection for ``--json``."""
+    return {
+        "schema": CANCEL_SCHEMA,
+        "run_id": run_id,
+        "reason": reason,
+        "tasks": [],
+        "refusal": {"code": error.code, "detail": error.detail},
+    }
+
+
+def render(payload: dict[str, Any]) -> str:
+    """Human output: what was recorded, or what could not be."""
+    refusal = payload.get("refusal")
+    if refusal is not None:
+        return f"error: {refusal['code']}: {refusal['detail']}"
+    lines = [f"run: {payload['run_id']}"]
+    live = []
+    for row in payload["tasks"]:
+        detail = f"task {row['task_id']}: {row['outcome']}"
+        if row["outcome"] in {OUTCOME_RECORDED, OUTCOME_QUEUED}:
+            detail += f" ({row['reason']})"
+        lines.append(detail)
+        if row.get("live_termination") == LIVE_TERMINATION_UNAVAILABLE:
+            live.append(row["task_id"])
+    for task_id in live:
+        lines.append(
+            f"task {task_id} may already be running: {LIVE_TERMINATION_UNAVAILABLE} in this release, "
+            "so the worker was not stopped. The request is recorded for its next launch attempt."
+        )
+    if any(row["outcome"] == OUTCOME_QUEUED for row in payload["tasks"]):
+        lines.append("A live batch journals queued requests before its next launch.")
+    lines.append("Brigade did not launch, stop, merge, push or publish anything.")
+    return "\n".join(lines)
