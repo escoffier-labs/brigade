@@ -909,6 +909,7 @@ def _outcome_ratchet_line(ratchet: object) -> str:
         f"outcome_ratchet: generated_at={brief_values.name(report.get('generated_at'))} "
         f"mode={brief_values.name(report.get('mode') or 'dry-run')} "
         f"regression_holds={brief_values.name(report.get('regression_holds'))} ({listed}) "
+        f"{_trials_label(report)} "
         f"ineligibility_rate={brief_values.name(report.get('ineligibility_rate'))} "
         f"leading={brief_values.name(report.get('leading_reason') or 'none')} "
         f"pending_physical_actions={brief_values.name(report.get('pending_physical_actions') or 0)}"
@@ -918,6 +919,13 @@ def _outcome_ratchet_line(ratchet: object) -> str:
             else ""
         )
     )
+
+
+def _trials_label(report: dict[str, Any]) -> str:
+    """Return ``trials: 12 local, 3 seen passing in CI (display only)``. The CI count never promotes (#2779)."""
+    local = report.get("local_trials", "not recorded")
+    ci_seen = report.get("ci_observed_trials", "not recorded")
+    return f"trials: {brief_values.name(local)} local, {brief_values.name(ci_seen)} seen passing in CI (display only)"
 
 
 def _brief_section_failed(payload: dict[str, Any], label: str) -> bool:

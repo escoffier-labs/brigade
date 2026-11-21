@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import outcome as outcome_core, outcome_cmd, verify_trial
+from . import ci_attestation, outcome as outcome_core, outcome_cmd, verify_trial
 
 SCORECARD_POLICY_VERSION = "scorecard.v1"
 EFFECTIVE_WILSON_MIN = 0.15
@@ -45,6 +45,9 @@ class ReceiptAudit:
     reused: bool
     evidence_unit_key: tuple[Any, ...] | None
     attestation: str = "local"
+    # Display only (#2779): CI was seen passing for this trial. Forgeable on the host, so
+    # nothing may read it to promote, rank, band or gate. ``attestation`` is untouched by it.
+    ci_observed: bool = False
 
 
 @dataclass
@@ -54,6 +57,9 @@ class SubjectScorecard:
     utility_guardrails: dict[str, Any]
     ineligible_summary: dict[str, int] = field(default_factory=dict)
     receipt_trail: list[ReceiptAudit] = field(default_factory=list)
+    # Display only (#2779): scored trials whose CI check run was seen passing. Kept out of
+    # ``dimensions`` so no decision code that reads the dimensions can pick it up.
+    ci_observed_trials: int = 0
 
 
 def _verify_runs_root(target: Path) -> Path:
@@ -304,6 +310,7 @@ def _audit_receipt(
     receipt_path: Path,
     receipt: dict[str, Any],
     target: Path,
+    ci_observer: ci_attestation.CiObserver | None = None,
 ) -> ReceiptAudit:
     binding = _binding_dict(receipt)
     projection = verify_trial.project_trial(
@@ -311,6 +318,7 @@ def _audit_receipt(
         target=target,
         patch_path=receipt_path.parent / "changes.patch",
     )
+    ci_observed = projection.eligible and ci_observer is not None and ci_observer.observed(receipt)
     reused = isinstance(receipt.get("reused_from"), str) and bool(receipt.get("reused_from"))
     unit_key = evidence_unit_key(receipt, binding) if binding is not None else None
     return ReceiptAudit(
@@ -326,6 +334,7 @@ def _audit_receipt(
         reused=reused,
         evidence_unit_key=unit_key,
         attestation=projection.attestation,
+        ci_observed=ci_observed,
     )
 
 
@@ -452,6 +461,7 @@ def _build_subject_scorecard(
     trials = helped + hurt
     local_trials = sum(1 for audit in deduped if audit.effectiveness in {1, -1} and audit.attestation == "local")
     attested_trials = sum(1 for audit in deduped if audit.effectiveness in {1, -1} and audit.attestation == "attested")
+    ci_observed_trials = sum(1 for audit in deduped if audit.effectiveness in {1, -1} and audit.ci_observed)
     wilson = outcome_core.wilson_lower_bound(helped, trials)
 
     receipt_durations = [audit.verifier_cost_s for audit in deduped if audit.verifier_cost_s is not None]
@@ -514,6 +524,7 @@ def _build_subject_scorecard(
         ),
         ineligible_summary=dict(sorted(ineligible_summary.items())),
         receipt_trail=sorted(audits, key=lambda item: (item.started_at or "", item.receipt_path)),
+        ci_observed_trials=ci_observed_trials,
     )
 
 
@@ -521,6 +532,9 @@ def build_scorecards(target: Path) -> list[SubjectScorecard]:
     target = target.expanduser().resolve()
     grouped: dict[tuple[str, str, str], list[ReceiptAudit]] = defaultdict(list)
     receipts_by_path: dict[str, dict[str, Any]] = {}
+    # One observer per build: it memoises the API answers, so many receipts for one merged
+    # commit cost one lookup, and it fails quiet to "not observed". Display only (#2779).
+    ci_observer = ci_attestation.CiObserver(target)
 
     for receipt_path in discover_verify_receipt_paths(target):
         receipt = _load_receipt(receipt_path)
@@ -537,7 +551,7 @@ def build_scorecards(target: Path) -> list[SubjectScorecard]:
         cohort_fp = current_fp or subject.content_fingerprint
         if not _fingerprints_match(subject.content_fingerprint, cohort_fp):
             continue
-        audit = _audit_receipt(receipt_path=receipt_path, receipt=receipt, target=target)
+        audit = _audit_receipt(receipt_path=receipt_path, receipt=receipt, target=target, ci_observer=ci_observer)
         normalized_fp = _normalize_fingerprint(cohort_fp) or cohort_fp
         grouped[(subject.artifact_kind, subject.artifact_id, normalized_fp)].append(audit)
 
