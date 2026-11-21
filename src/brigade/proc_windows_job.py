@@ -34,6 +34,7 @@ _LOG = logging.getLogger(__name__)
 INCOMPLETE_GROUP_EXIT_CODE = 125
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_CLASS = 9
+_TH32CS_SNAPTHREAD = 0x00000004
 _THREAD_SUSPEND_RESUME = 0x0002
 _BIND_DRAIN_SECONDS = 0.5
 
@@ -98,6 +99,60 @@ class OwnedWindowsJob:
             self._kernel32.CloseHandle(self._handle)
 
 
+def _declare_job_prototypes(kernel32: Any) -> bool:
+    """Declare the Win32 job prototypes so 64-bit handles are never truncated."""
+    import ctypes
+    from ctypes import wintypes
+
+    required = (
+        "CreateJobObjectW",
+        "SetInformationJobObject",
+        "AssignProcessToJobObject",
+        "TerminateJobObject",
+        "CloseHandle",
+    )
+    if any(getattr(kernel32, name, None) is None for name in required):
+        return False
+    kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return True
+
+
+def _declare_thread_prototypes(kernel32: Any) -> bool:
+    """Declare the Win32 thread prototypes used to resume a suspended child."""
+    from ctypes import wintypes
+
+    required = (
+        "CreateToolhelp32Snapshot",
+        "Thread32First",
+        "Thread32Next",
+        "OpenThread",
+        "ResumeThread",
+        "CloseHandle",
+    )
+    if any(getattr(kernel32, name, None) is None for name in required):
+        return False
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Thread32First.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    kernel32.Thread32First.restype = wintypes.BOOL
+    kernel32.Thread32Next.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    kernel32.Thread32Next.restype = wintypes.BOOL
+    kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel32.ResumeThread.restype = wintypes.DWORD
+    return True
+
+
 def create_windows_child_job() -> OwnedWindowsJob | None:
     """Create a kill-on-close job object on Windows; return None when unavailable."""
     if os.name != "nt":
@@ -109,6 +164,8 @@ def create_windows_child_job() -> OwnedWindowsJob | None:
         if loader_factory is None:
             return None
         kernel32 = loader_factory("kernel32", use_last_error=True)
+        if not _declare_job_prototypes(kernel32):
+            return None
         handle = kernel32.CreateJobObjectW(None, None)
         if not handle:
             return None
@@ -174,17 +231,14 @@ def _resume_windows_main_thread(kernel32: Any, pid: int) -> bool:
     """
     import ctypes
 
-    snapshot_factory = getattr(kernel32, "CreateToolhelp32Snapshot", None)
-    open_thread = getattr(kernel32, "OpenThread", None)
-    resume_thread = getattr(kernel32, "ResumeThread", None)
-    if snapshot_factory is None or open_thread is None or resume_thread is None:
+    if not _declare_thread_prototypes(kernel32):
         return False
+    invalid_handle = ctypes.c_void_p(-1).value
+    snapshot = None
     try:
-        th32cs_snapthread = 0x00000004
-        snapshot_factory.restype = ctypes.c_void_p
-        snapshot = snapshot_factory(th32cs_snapthread, 0)
-        invalid_handle = ctypes.c_void_p(-1).value
-        if snapshot is None or snapshot == invalid_handle:
+        snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+        if not snapshot or snapshot == invalid_handle:
+            snapshot = None
             return False
 
         class _ThreadEntry(ctypes.Structure):
@@ -210,7 +264,7 @@ def _resume_windows_main_thread(kernel32: Any, pid: int) -> bool:
                     break
         if thread_id is None:
             return False
-        thread = open_thread(_THREAD_SUSPEND_RESUME, False, thread_id)
+        thread = kernel32.OpenThread(_THREAD_SUSPEND_RESUME, False, thread_id)
         if not thread:
             return False
         try:
@@ -220,7 +274,7 @@ def _resume_windows_main_thread(kernel32: Any, pid: int) -> bool:
             # terminates the still-suspended child rather than leaving it
             # frozen on its job assignment until timeout.
             for _ in range(32):
-                previous = resume_thread(thread)
+                previous = kernel32.ResumeThread(thread)
                 if previous == 0xFFFFFFFF:
                     return False
                 if previous == 0:
@@ -231,10 +285,11 @@ def _resume_windows_main_thread(kernel32: Any, pid: int) -> bool:
     except Exception:
         return False
     finally:
-        try:
-            kernel32.CloseHandle(snapshot)
-        except Exception:
-            pass
+        if snapshot is not None:
+            try:
+                kernel32.CloseHandle(snapshot)
+            except Exception:
+                pass
 
 
 def bind_suspended_windows_child(

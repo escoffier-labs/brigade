@@ -1885,6 +1885,8 @@ def _fake_windows_kernel32(resume_results, *, open_thread_handle="granted"):
                 "openthread": open_thread,
                 "resumethread": resume_thread,
                 "closehandle": close_handle,
+                "assignprocesstojobobject": lambda handle, process_handle: 1,
+                "terminatejobobject": lambda handle, exit_code: 1,
             }
             fn = table.get(name.lower())
             if fn is not None:
@@ -1915,6 +1917,67 @@ def test_windows_resume_reports_false_when_openthread_fails():
     assert proc._resume_windows_main_thread(kernel32, 555) is False
     assert calls["resume"] == []
     assert calls["closed"] == [424242], "only the tool-help snapshot handle should be closed"
+
+
+def test_windows_bind_fails_and_kills_child_when_resume_returns_invalid_dword():
+    """#1744 review: the declared DWORD ResumeThread result keeps (DWORD)-1 a bind failure."""
+    kernel32, calls, thread_handle = _fake_windows_kernel32([0xFFFFFFFF])
+    job = proc_windows_job.OwnedWindowsJob(kernel32, 99)
+    killed = []
+
+    class StubProcess:
+        pid = 555
+        _handle = 424242
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            killed.append(True)
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    message = proc._bind_suspended_windows_child(job, StubProcess(), ["worker.exe"])
+
+    assert message is not None and "could not be resumed" in message
+    assert killed == [True]
+    assert calls["resume"] == [0xFFFFFFFF]
+    assert calls["closed"].count(thread_handle) == 1
+    assert 99 in calls["closed"]
+
+
+def test_windows_resume_fails_closed_when_the_snapshot_call_raises():
+    """#1744 review: a failed snapshot fails closed without closing an unbound handle."""
+    from types import SimpleNamespace
+
+    class _Func:
+        def __init__(self, fn):
+            self._fn = fn
+            self.restype = None
+            self.argtypes = None
+
+        def __call__(self, *args):
+            return self._fn(*args)
+
+    def snapshot_failure(*args):
+        raise OSError("snapshot failed")
+
+    def forbidden(*args):
+        raise AssertionError("no Win32 call is safe after a failed snapshot")
+
+    kernel32 = SimpleNamespace(
+        CreateToolhelp32Snapshot=_Func(snapshot_failure),
+        Thread32First=_Func(forbidden),
+        Thread32Next=_Func(forbidden),
+        OpenThread=_Func(forbidden),
+        ResumeThread=_Func(forbidden),
+        CloseHandle=_Func(forbidden),
+    )
+
+    assert proc._resume_windows_main_thread(kernel32, 555) is False
 
 
 def test_windows_bind_terminates_suspended_child_when_resume_fails(monkeypatch):
