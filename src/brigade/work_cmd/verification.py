@@ -1315,7 +1315,7 @@ def _verify_run_suggestion(target: Path, *, commands: list[str] | None = None, m
     if manifest_id:
         argv.append(f"--manifest={manifest_id}")
     else:
-        argv.extend(f"--command={command}" for command in commands or ["python -m pytest -q tests/test_example.py"])
+        argv.extend(f"--command={command}" for command in commands or ["<focused test command>"])
     return shlex.join(argv)
 
 

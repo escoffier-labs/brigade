@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -16,6 +17,8 @@ from . import helpers
 DEFAULT_CHECK_NAME = "ci-gate"
 _SCHEMA = "brigade.verify_ci.v1"
 _RECORD_DIR = ".brigade/work/verify-ci"
+# Brigade runtime state is never the work product, so it does not make a tree dirty.
+_STATE_DIR = ".brigade/work"
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _EXIT_CODES = {"passed": 0, "failed": 1, "pending": 2, "unknown": 2}
 
@@ -44,7 +47,9 @@ def _github_repository(target: Path) -> str | None:
     except (OSError, UnicodeError, ValueError):
         return None
     repository = path.rstrip("/").removesuffix(".git")
-    return repository if re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", repository) else None
+    if re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", repository) is None or repository.split("/")[1] in {".", ".."}:
+        return None
+    return repository
 
 
 def _named_runs(output: str, check_name: str) -> list[dict[str, Any]]:
@@ -103,7 +108,7 @@ def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> d
         return {"reason": "gh could not read check runs. Check authentication and connectivity."}
     try:
         runs = _named_runs(result.stdout, check_name)
-    except ValueError:
+    except (ValueError, RecursionError):
         return {"reason": "GitHub returned an unreadable check-run response."}
     if not runs:
         return {"reason": "No check run with that name was found for HEAD."}
@@ -123,13 +128,25 @@ def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> d
     fields = {"check_run_id": run["id"], "status": status, "conclusion": conclusion, "html_url": url}
     if status == "completed":
         return {**fields, "state": "passed" if conclusion == "success" else "failed"}
-    if status in {"queued", "in_progress"}:
+    if status in {"queued", "in_progress", "waiting", "requested", "pending"}:
         return {**fields, "state": "pending"}
     return {**fields, "reason": "GitHub returned an unrecognized check status."}
 
 
-def _record_path(target: Path, head: str) -> Path:
-    return target / _RECORD_DIR / f"{head}.json"
+def _record_path(target: Path, head: str, check_name: str = DEFAULT_CHECK_NAME) -> Path:
+    # One record per check, so a run for another check never replaces the required one.
+    if check_name == DEFAULT_CHECK_NAME:
+        return target / _RECORD_DIR / f"{head}.json"
+    digest = hashlib.sha256(check_name.encode("utf-8")).hexdigest()[:12]
+    return target / _RECORD_DIR / f"{head}.{digest}.json"
+
+
+def _tree_state(target: Path, head: str, tree: str) -> str:
+    """Return ``clean``, ``dirty`` or ``unreadable`` for the working tree against HEAD."""
+    live = localio.tree_fingerprint_with_head(target, extra_evidence_paths=(_STATE_DIR,))
+    if None in live:
+        return "unreadable"
+    return "clean" if live == (tree, head) else "dirty"
 
 
 def verify_ci(*, target: Path, check_name: str = DEFAULT_CHECK_NAME, json_output: bool = False) -> int:
@@ -139,8 +156,12 @@ def verify_ci(*, target: Path, check_name: str = DEFAULT_CHECK_NAME, json_output
         print("error: cannot resolve a committed HEAD and tree for --target", file=sys.stderr)
         return 2
     head, tree = identity
-    if localio.tree_fingerprint_with_head(target, extra_evidence_paths=(_RECORD_DIR,)) != (tree, head):
-        print("error: cannot confirm a clean tree at HEAD. Commit and push your changes first.", file=sys.stderr)
+    tree_state = _tree_state(target, head, tree)
+    if tree_state == "unreadable":
+        print("error: could not read the working tree state from git. Nothing was recorded.", file=sys.stderr)
+        return 2
+    if tree_state == "dirty":
+        print("error: the working tree differs from HEAD. Commit and push your changes first.", file=sys.stderr)
         return 2
 
     repository = _github_repository(target)
@@ -164,7 +185,7 @@ def verify_ci(*, target: Path, check_name: str = DEFAULT_CHECK_NAME, json_output
         **fetched,
     }
     try:
-        localio.write_json(_record_path(target, head), record)
+        localio.write_json(_record_path(target, head, check_name), record)
     except OSError:
         print("error: could not write the CI evidence record", file=sys.stderr)
         return 2
@@ -178,25 +199,43 @@ def verify_ci(*, target: Path, check_name: str = DEFAULT_CHECK_NAME, json_output
 
 
 def closeout_evidence(target: Path) -> dict[str, Any]:
+    """Return the stored record for the required check, or ``unknown``.
+
+    Closeout reads only the default required check. A record for another
+    check name, another commit, or a tree that has changed since is not
+    evidence for the work being closed.
+    """
     identity = _head_identity(target)
     head, tree = identity or (None, None)
+    unknown = {"head_sha": head, "tree_id": tree, "state": "unknown", "hint": "brigade work verify ci"}
     record = localio.read_json_dict(_record_path(target, head)) if head else None
-    if (
+    if not (
         record
         and record.get("schema") == _SCHEMA
+        and record.get("check_name") == DEFAULT_CHECK_NAME
         and record.get("head_sha") == head
         and record.get("tree_id") == tree
         and isinstance(record.get("state"), str)
         and record["state"] in _EXIT_CODES
     ):
-        return record
-    return {"head_sha": head, "tree_id": tree, "state": "unknown", "hint": "brigade work verify ci"}
+        return unknown
+    try:
+        tree_state = _tree_state(target, head, tree) if head and tree else "unreadable"
+    except OSError:
+        tree_state = "unreadable"
+    if tree_state == "dirty":
+        return {**unknown, "reason": "The working tree differs from HEAD, so the saved CI result does not cover it."}
+    if tree_state != "clean":
+        return {**unknown, "reason": "The working tree state could not be read from git."}
+    return record
 
 
 def closeout_summary(evidence: dict[str, Any]) -> str:
     summary = f"CI on HEAD: {evidence['state']}"
     if evidence.get("check_name"):
-        summary += f" ({evidence['check_name']}, {evidence['head_sha'][:12]})"
-    if detail := evidence.get("hint") or evidence.get("reason"):
-        summary += f". {detail}"
+        summary += f" ({evidence['check_name']}, {evidence['head_sha'][:12]}"
+        summary += f", fetched {evidence['fetched_at']})" if evidence.get("fetched_at") else ")"
+    for detail in (evidence.get("reason"), evidence.get("hint")):
+        if detail:
+            summary += f". {detail}"
     return summary

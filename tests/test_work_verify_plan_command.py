@@ -104,7 +104,7 @@ def test_plan_without_command_suggests_a_focused_example(tmp_path):
         "verify",
         "run",
         f"--target={target}",
-        "--command=python -m pytest -q tests/test_example.py",
+        "--command=<focused test command>",
     ]
     assert not (target / "default-executed").exists()
     assert not (caller / "default-executed").exists()
@@ -275,7 +275,7 @@ def test_empty_plan_and_missing_manifest_keep_actionable_selector(tmp_path):
     caller = tmp_path
     result, plan = _plan(target, caller)
     assert result.returncode == 1
-    assert "--command=python -m pytest -q tests/test_example.py" in shlex.split(plan["suggested_command"])
+    assert "--command=<focused test command>" in shlex.split(plan["suggested_command"])
     assert f"--target={target}" in shlex.split(plan["suggested_command"])
 
     result, plan = _plan(target, caller, ["--manifest=-missing ' manifest"])

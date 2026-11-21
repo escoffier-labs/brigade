@@ -196,8 +196,9 @@ def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, int, str]:
 def _verification_command_prefix(target: Path) -> str | None:
     """Return a pytest prefix to which the ranked file selectors are appended.
 
-    For npm projects, list candidates individually because test scripts vary
-    in how they handle file arguments.
+    Return ``None`` outside a recognized Python layout. For npm projects, list
+    candidates individually because test scripts vary in how they handle file
+    arguments.
     """
     if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
         if (target / "src").is_dir():
@@ -205,9 +206,8 @@ def _verification_command_prefix(target: Path) -> str | None:
         return "python3 -m pytest -q"
     if (target / "pytest.ini").is_file() or (target / "tests").is_dir():
         return "python3 -m pytest -q"
-    if (target / "package.json").is_file():
-        return None
-    return "python3 -m pytest -q"
+    # No recognized layout: do not guess a runner. The caller then asks for a command.
+    return None
 
 
 def _candidate_command_prefix(target: Path) -> str | None:

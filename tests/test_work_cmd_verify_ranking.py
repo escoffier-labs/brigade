@@ -323,7 +323,7 @@ def test_verify_plan_npm_lists_candidates_without_a_default(tmp_path, monkeypatc
         "verify",
         "run",
         f"--target={tmp_path.resolve()}",
-        "--command=python -m pytest -q tests/test_example.py",
+        "--command=<focused test command>",
     ]
     assert "suggested_from_graph_impact" not in payload
     assert payload["ranked_candidates"][0]["test_path"] == "src/mod.test.js"

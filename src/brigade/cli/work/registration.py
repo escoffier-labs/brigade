@@ -266,8 +266,8 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "Repo-relative changed file for GraphTrail affected-test ranking (repeatable). "
-            "When omitted, uses `git diff --name-only HEAD`. Advisory only; the worker still "
-            "chooses the command to run."
+            "When omitted, uses `git diff --name-only HEAD`. With no --command or --manifest, "
+            "the ranked suggestion becomes the planned command."
         ),
     )
     p_work_verify_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")

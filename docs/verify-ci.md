@@ -22,5 +22,17 @@ A checkout or record-writing error also returns 2 and reports the error on
 standard error. Only `passed` for the required check on the exact head commit
 counts as suite evidence. Local verification receipts describe local checks.
 
-`brigade work closeout` reads the saved CI record for the current commit and
-tree. Run `brigade work verify ci` again to refresh the result before closeout.
+`brigade work closeout` reads the saved record for `ci-gate` on the current
+commit and shows when it was fetched. It reports `unknown` when no such record
+exists, when the record names another check or commit, or when the working tree
+has changed since. Each check name has its own record, so `--check` never
+replaces the `ci-gate` result. Closeout does not contact GitHub: run
+`brigade work verify ci` again to refresh the result, for example after a job is
+re-run on the same commit.
+
+Limits:
+
+- The GitHub CLI must be version 2.48 or newer, because the command uses
+  `gh api --slurp`. An older version is reported as `unknown`.
+- The check is read from the `origin` remote. In a fork checkout, where the
+  required check ran on the upstream repository, the result is `unknown`.

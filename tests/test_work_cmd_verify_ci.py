@@ -63,6 +63,9 @@ def _fake_gh(monkeypatch, head, *runs, name="ci-gate", error=None, stdout=None, 
         calls.append(argv)
         assert argv[:3] == ["gh", "api", f"repos/example-org/example-repo/commits/{head}/check-runs"]
         assert f"check_name={name}" in argv
+        assert argv[argv.index("--method") + 1] == "GET"
+        assert "filter=all" in argv
+        assert argv[argv.index("--hostname") + 1] == _GITHUB_HOST
         assert kwargs.get("shell", False) is False
         assert kwargs["timeout"] > 0
         if isinstance(error, Exception):
@@ -84,6 +87,14 @@ def _ci(target, *options):
 
 def _record(target, head):
     return target / ".brigade" / "work" / "verify-ci" / f"{head}.json"
+
+
+def _closeout_ci(target, capsys):
+    assert work_cmd.start(target=target, title="CI evidence", force=False) == 0
+    assert work_cmd.end(target=target, note="done", handoff=False) == 0
+    capsys.readouterr()
+    assert work_cmd.closeout(target=target, session_id="latest", json_output=True) == 1
+    return json.loads(capsys.readouterr().out)["ci_verification"]
 
 
 def test_ci_help_exposes_check_name_and_json(capsys):
@@ -246,3 +257,93 @@ def test_closeout_reports_current_ci_fact_without_contacting_github(checkout, mo
         assert "CI on HEAD: passed" in console
     if record not in {"previous_head", "missing"}:
         assert len(calls) == 1
+
+
+def test_other_check_never_replaces_or_stands_in_for_the_required_check(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head, conclusion="failure"))
+    assert _ci(target) == 1
+    _fake_gh(monkeypatch, head, _check(head, name="lint"), name="lint")
+    assert _ci(target, "--check", "lint") == 0
+    capsys.readouterr()
+
+    required = json.loads(_record(target, head).read_text())
+    assert (required["check_name"], required["state"]) == ("ci-gate", "failed")
+    others = [path for path in _record(target, head).parent.iterdir() if path != _record(target, head)]
+    assert [json.loads(path.read_text())["check_name"] for path in others] == ["lint"]
+    assert _closeout_ci(target, capsys)["state"] == "failed"
+
+
+def test_closeout_ignores_a_required_record_that_names_another_check(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head))
+    assert _ci(target) == 0
+    payload = json.loads(_record(target, head).read_text())
+    payload["check_name"] = "lint"
+    localio.write_json(_record(target, head), payload)
+    capsys.readouterr()
+    assert _closeout_ci(target, capsys)["state"] == "unknown"
+
+
+def test_closeout_does_not_apply_passed_ci_to_uncommitted_changes(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head))
+    assert _ci(target) == 0
+    capsys.readouterr()
+    (target / "uncommitted.txt").write_text("changed after CI ran")
+
+    evidence = _closeout_ci(target, capsys)
+    assert evidence["state"] == "unknown"
+    assert "differs from HEAD" in evidence["reason"]
+    assert evidence["head_sha"] == head
+
+
+def test_ci_treats_pathologically_nested_json_as_unknown(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, stdout="[" * 200_000)
+    assert _ci(target) == 2
+    assert json.loads(capsys.readouterr().out)["state"] == "unknown"
+
+
+@pytest.mark.parametrize("conclusion", ["neutral", "skipped", "cancelled", "timed_out", "action_required", None])
+def test_ci_counts_only_success_as_passed(checkout, monkeypatch, capsys, conclusion):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head, conclusion=conclusion))
+    assert _ci(target) == 1
+    assert json.loads(capsys.readouterr().out)["state"] == "failed"
+
+
+@pytest.mark.parametrize("status", ["waiting", "requested", "pending"])
+def test_ci_reports_not_yet_started_runs_as_pending(checkout, monkeypatch, capsys, status):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head, status=status, conclusion=None))
+    assert _ci(target) == 2
+    assert json.loads(capsys.readouterr().out)["state"] == "pending"
+
+
+def test_ci_later_result_replaces_an_earlier_pass(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head))
+    assert _ci(target) == 0
+    _fake_gh(monkeypatch, head, error=True)
+    assert _ci(target) == 2
+    capsys.readouterr()
+    assert json.loads(_record(target, head).read_text())["state"] == "unknown"
+
+
+def test_ci_rejects_a_dot_repository_name(checkout, capsys):
+    target, _, _ = checkout
+    _git(target, "remote", "set-url", "origin", f"https://{_GITHUB_HOST}/example-org/..")
+    assert _ci(target) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert (payload["state"], payload["repository"]) == ("unknown", None)
+
+
+def test_ci_says_when_git_cannot_report_the_tree(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    monkeypatch.setattr(localio, "tree_fingerprint_with_head", lambda *args, **kwargs: (None, None))
+    assert _ci(target) == 2
+    error = capsys.readouterr().err
+    assert "could not read the working tree state" in error
+    assert "Commit and push" not in error
+    assert not _record(target, head).exists()
