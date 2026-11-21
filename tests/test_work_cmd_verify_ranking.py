@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import shlex
 
+import pytest
+
 from brigade import work_cmd
 from brigade.work_cmd import verify_ranking
 
@@ -361,3 +363,20 @@ def test_cli_verify_plan_passes_files(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert seen["files"] == ["src/a.py", "src/b.py"]
     assert seen["json_output"] is True
+
+
+@pytest.mark.parametrize(
+    "files,expected",
+    [
+        (["pyproject.toml"], "python3 -m pytest -q"),
+        (["setup.cfg"], "python3 -m pytest -q"),
+        (["go.mod"], None),
+        (["package.json"], None),
+        ([], None),
+    ],
+)
+def test_command_prefix_guesses_pytest_only_for_python_projects(tmp_path, files, expected):
+    for name in files:
+        (tmp_path / name).write_text("")
+    (tmp_path / "test").mkdir()
+    assert verify_ranking._verification_command_prefix(tmp_path) == expected

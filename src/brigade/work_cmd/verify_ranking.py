@@ -193,6 +193,9 @@ def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, int, str]:
     )
 
 
+_PYTHON_PROJECT_MARKERS = ("pyproject.toml", "pytest.ini", "setup.cfg", "setup.py", "tox.ini", "conftest.py")
+
+
 def _verification_command_prefix(target: Path) -> str | None:
     """Return a pytest prefix to which the ranked file selectors are appended.
 
@@ -204,9 +207,9 @@ def _verification_command_prefix(target: Path) -> str | None:
         if (target / "src").is_dir():
             return "PYTHONPATH=src python3 -m pytest -q"
         return "python3 -m pytest -q"
-    if (target / "pytest.ini").is_file() or (target / "tests").is_dir():
+    if (target / "tests").is_dir() or any((target / name).is_file() for name in _PYTHON_PROJECT_MARKERS):
         return "python3 -m pytest -q"
-    # No recognized layout: do not guess a runner. The caller then asks for a command.
+    # No Python project marker: do not guess a runner. The caller then asks for a command.
     return None
 
 

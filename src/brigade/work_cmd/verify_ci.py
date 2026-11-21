@@ -237,5 +237,5 @@ def closeout_summary(evidence: dict[str, Any]) -> str:
         summary += f", fetched {evidence['fetched_at']})" if evidence.get("fetched_at") else ")"
     for detail in (evidence.get("reason"), evidence.get("hint")):
         if detail:
-            summary += f". {detail}"
+            summary = f"{summary.rstrip('.')}. {detail}"
     return summary

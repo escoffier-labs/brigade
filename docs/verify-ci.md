@@ -1,13 +1,13 @@
 # CI evidence for HEAD
 
 Run `brigade work verify ci` in a clean Git checkout after pushing the commit.
-Use `--target` to select a different checkout, `--check` to select the
-repository's required check if it differs from `ci-gate`, and `--json` for
-machine-readable output. Authenticate the GitHub CLI (`gh`) for the checkout's
+Use `--target` to select a different checkout, `--check` to look at a check
+other than `ci-gate`, and `--json` for machine-readable output. Authenticate the GitHub CLI (`gh`) for the checkout's
 GitHub origin before running the command.
 
-Brigade records the newest run of the named check for the exact commit in
-`.brigade/work/verify-ci/<head-sha>.json`. The record includes the commit and
+Brigade records the newest run of `ci-gate` for the exact commit in
+`.brigade/work/verify-ci/<head-sha>.json`. A run with `--check` is recorded in
+its own file next to it. The record includes the commit and
 tree IDs, the check run ID, and the time Brigade fetched the result. A dirty
 checkout is refused before contacting GitHub or writing a record.
 
@@ -26,7 +26,9 @@ counts as suite evidence. Local verification receipts describe local checks.
 commit and shows when it was fetched. It reports `unknown` when no such record
 exists, when the record names another check or commit, or when the working tree
 has changed since. Each check name has its own record, so `--check` never
-replaces the `ci-gate` result. Closeout does not contact GitHub: run
+replaces the `ci-gate` result, and closeout does not show a `--check` result. A
+repository whose required check has another name therefore reads `unknown` at
+closeout for now. Closeout does not contact GitHub: run
 `brigade work verify ci` again to refresh the result, for example after a job is
 re-run on the same commit.
 
