@@ -992,7 +992,18 @@ mod tests {
         assert_eq!(run_ids(&reply).len(), 8);
 
         let captured = TRACED.lock().unwrap().clone();
-        assert!(!captured.is_empty());
+        // The fixture must plan the statements this guards, or the check below
+        // silently covers less than it claims.
+        for wanted in [
+            "harness='grokbot' AND run_id=? ORDER BY sequence DESC",
+            "SELECT seat FROM events WHERE harness='grokbot'",
+            "SELECT seat FROM events WHERE node_id=?",
+        ] {
+            assert!(
+                captured.iter().any(|sql| sql.contains(wanted)),
+                "the status read never planned {wanted}: {captured:#?}"
+            );
+        }
         let planner = rusqlite::Connection::open(&path).unwrap();
         for sql in captured {
             let mut statement = planner
