@@ -672,6 +672,7 @@ def test_npm_revalidation_is_read_only_and_pins_two_source_identities():
         "symlink",
         "extra-file",
         "other-accepted-repository",
+        "reused-name-id",
     ],
 )
 @pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
@@ -683,7 +684,15 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
     import zipfile
 
     workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-registry-revalidate.yml")
-    env = {**os.environ, **workflow["env"], "RUNNER_TEMP": str(tmp_path), "GITHUB_REPOSITORY": repository}
+    # The repository ID, not its name, is the identity: a reused name carries another ID.
+    repository_id = 123 if mutation == "reused-name-id" else 1238165856
+    env = {
+        **os.environ,
+        **workflow["env"],
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_REPOSITORY": repository,
+        "GITHUB_REPOSITORY_ID": "1238165856",
+    }
     proof = tmp_path / "npm-revalidation"
     proof.mkdir()
     archive = proof / "original-archives.zip"
@@ -722,8 +731,8 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
         "workflow_run": {
             "id": 39256315934,
             "head_sha": env["PACKAGING_SHA"],
-            "repository_id": 123,
-            "head_repository_id": 123,
+            "repository_id": repository_id,
+            "head_repository_id": repository_id,
         },
     }
     run = {
@@ -731,8 +740,8 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
         "head_sha": env["PACKAGING_SHA"],
         "event": "workflow_dispatch",
         "path": ".github/workflows/npm-publish.yml",
-        "repository": {"id": 123, "full_name": repository},
-        "head_repository": {"id": 123, "full_name": repository},
+        "repository": {"id": repository_id, "full_name": repository},
+        "head_repository": {"id": repository_id, "full_name": repository},
     }
     if mutation == "artifact-id":
         metadata["id"] += 1
@@ -772,7 +781,17 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
 
 @pytest.mark.parametrize(
     "mutation",
-    [None, "harness-head", "payload-head", "dirty", "provenance", "malformed-sha", "non-main", "third-repository"],
+    [
+        None,
+        "harness-head",
+        "payload-head",
+        "dirty",
+        "provenance",
+        "malformed-sha",
+        "non-main",
+        "third-repository",
+        "reused-name-id",
+    ],
 )
 @pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
 def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutation, repository):
@@ -812,9 +831,13 @@ def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutati
         "PACKAGING_SHA": heads["payload-source"],
         "GITHUB_SHA": heads["validation-harness"],
         "GITHUB_REPOSITORY": repository,
+        "GITHUB_REPOSITORY_ID": "1238165856",
         "GITHUB_REF": "refs/heads/main",
         "GITHUB_WORKFLOW_REF": f"{repository}/.github/workflows/npm-registry-revalidate.yml@refs/heads/main",
     }
+    if mutation == "reused-name-id":
+        # The name is accepted but the runner reports another repository ID: a reused name.
+        env["GITHUB_REPOSITORY_ID"] = "123"
     if mutation == "third-repository":
         env["GITHUB_REPOSITORY"] = "someone/brigade"
         env["GITHUB_WORKFLOW_REF"] = "someone/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/main"

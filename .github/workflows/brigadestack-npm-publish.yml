@@ -23,7 +23,7 @@ env:
 
 jobs:
   build:
-    if: (github.repository == 'escoffier-labs/brigade' || github.repository == 'escoffier-labs/brigadestack') && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    if: github.repository_id == '1238165856' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
@@ -114,7 +114,7 @@ jobs:
 
   publish:
     needs: build
-    if: (github.repository == 'escoffier-labs/brigade' || github.repository == 'escoffier-labs/brigadestack') && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    if: github.repository_id == '1238165856' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: npm

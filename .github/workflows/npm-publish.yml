@@ -84,7 +84,9 @@ jobs:
           # The release was attested under the repository name it recorded (one of the two accepted
           # names), so the signer workflow follows the manifest, not a fixed slug.
           repository=$(python scripts/verify_component_manifest_provenance.py --manifest "$manifest" --print-repository)
-          gh attestation verify "$manifest" --repo "$repository" --signer-workflow "$repository/.github/workflows/publish.yml"
+          gh attestation verify "$manifest" --repo "$repository" --signer-workflow "$repository/.github/workflows/publish.yml" --format json > "$RUNNER_TEMP/attestation.json"
+          # A name is only a label: require the certificate to name the Brigade repository ID.
+          python scripts/verify_component_manifest_provenance.py --check-attestation-json "$RUNNER_TEMP/attestation.json"
       # Retained artifacts in this public repository are public, not confidential.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

@@ -883,6 +883,26 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     if ($LASTEXITCODE -ne 0) { throw "invalid or duplicate release manifest keys" }
 }
 
+function Assert-RepositoryId {
+    param([string]$Repository)
+    # A name is only a label: after the rename anyone in the organization can create a new
+    # repository called escoffier-labs/brigade, and GitHub then stops redirecting that name.
+    # The immutable repository ID survives the rename, so a name is trusted only while it
+    # resolves to it. Keep in step with REPOSITORY_ID in scripts/published-artifact-acceptance.py.
+    $repositoryId = 1238165856
+    $headers = @{ Accept = "application/vnd.github+json" }
+    if ($env:GH_TOKEN) { $headers.Authorization = "Bearer $($env:GH_TOKEN)" }
+    try {
+        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository" -Headers $headers
+    } catch {
+        throw "repository lookup failed for ${Repository}: $($_.Exception.Message)"
+    }
+    $identifier = $response.id
+    if (($identifier -isnot [int] -and $identifier -isnot [long]) -or $identifier -ne $repositoryId) {
+        throw "repository $Repository is repository ID '$identifier', not $repositoryId"
+    }
+}
+
 function Get-ManifestRepository {
     param($Manifest)
     # The repository is renamed after 0.32.0 publishes. A release records the repository its
@@ -926,6 +946,8 @@ function Assert-ReleaseManifestAndAssets {
     $found = $false
     foreach ($candidate in @("escoffier-labs/brigade", "escoffier-labs/brigadestack")) {
         try {
+            # Resolve the name to the repository ID before any release request under it.
+            Assert-RepositoryId -Repository $candidate
             Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$candidate/releases/download/$tag/component-manifest-v1.json" -OutFile $manifestPath
             $found = $true
             break
@@ -937,6 +959,7 @@ function Assert-ReleaseManifestAndAssets {
     Assert-UniqueManifestKeys -ManifestPath $manifestPath -PythonExe $PythonExe
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $repository = Get-ManifestRepository -Manifest $manifest
+    Assert-RepositoryId -Repository $repository
     $base = "https://github.com/$repository/releases/download/$tag"
     Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $checksumsPath
     $checksums = @{}
@@ -1044,7 +1067,7 @@ function Invoke-CanonicalAttestationVerifier {
     if (-not $GhExe -or -not [IO.Path]::IsPathRooted($GhExe) -or -not (Test-Path -LiteralPath $GhExe -PathType Leaf)) {
         throw "canonical attestation verification failed: verifier unavailable"
     }
-    $arguments = @("attestation", "verify", $Subject, "--repo", $Repository, "--signer-workflow", "$Repository/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version")
+    $arguments = @("attestation", "verify", $Subject, "--repo", $Repository, "--signer-workflow", "$Repository/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version", "--format", "json")
     # Quote for Windows CreateProcess/CommandLineToArgvW, without a shell.
     $quoted = foreach ($argument in $arguments) {
         $escaped = [regex]::Replace($argument, '(\\*)"', '$1$1\"')
@@ -1064,14 +1087,30 @@ function Invoke-CanonicalAttestationVerifier {
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
-        $null = $stdout.GetAwaiter().GetResult()
+        $verified = $stdout.GetAwaiter().GetResult()
         $null = $stderr.GetAwaiter().GetResult()
-        return $process.ExitCode
+        if ($process.ExitCode -ne 0) { return $process.ExitCode }
     } catch {
         throw "canonical attestation verification failed: verifier process unavailable"
     } finally {
         $process.Dispose()
     }
+    # A name is only a label: every verified attestation's certificate must name the Brigade
+    # repository ID (verificationResult.signature.certificate.sourceRepositoryIdentifier, a
+    # decimal string in `gh attestation verify --format json`).
+    try {
+        # Windows PowerShell 5.1 emits a JSON array as one object; piping enumerates it in both editions.
+        $parsed = $verified | ConvertFrom-Json
+        $results = @($parsed | ForEach-Object { $_ })
+    } catch {
+        return 1
+    }
+    if ($results.Count -eq 0) { return 1 }
+    foreach ($result in $results) {
+        $identifier = $result.verificationResult.signature.certificate.sourceRepositoryIdentifier
+        if ($identifier -isnot [string] -or $identifier -cne "1238165856") { return 1 }
+    }
+    return 0
 }
 
 function Invoke-VerifiedCanonicalSmoke {
@@ -1093,6 +1132,7 @@ function Invoke-VerifiedCanonicalSmoke {
     # Attestations are signed under the repository name the release was built in, which
     # the manifest records, so --repo and the signer workflow both follow the manifest.
     $repository = Get-ManifestRepository -Manifest $manifest
+    Assert-RepositoryId -Repository $repository
     $revision = $null
     foreach ($id in @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")) {
         $current = $manifest.components.$id.component_revision

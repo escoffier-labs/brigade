@@ -37,6 +37,10 @@ RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
 # attestations are signed under that name, so verification uses the repository the manifest
 # records. Keep in step with src/brigade/update_cmd.py (tests/test_repository_rename_names.py).
 ACCEPTED_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
+# A name is only a label: after the rename anyone in the organization can create a new repository
+# called escoffier-labs/brigade, and GitHub then stops redirecting that name. The immutable
+# repository ID survives the rename, so every name above is trusted only while it resolves to it.
+REPOSITORY_ID = 1238165856
 GITHUB_API_HOST = "api.github.com"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigadestack/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
@@ -180,6 +184,46 @@ def _fetch_github_json_once(url: str) -> tuple[int, Any]:
         return exc.code, payload
 
 
+def fetch_repository(repository: str) -> tuple[int, Any]:
+    """GET /repos/<repository>. A pre-rename name redirects to the same repository ID."""
+    return _fetch_github_json_once(f"https://{GITHUB_API_HOST}/repos/{repository}")
+
+
+def require_repository_id(repository: str) -> None:
+    """Trust a repository name only while it resolves to the Brigade repository ID.
+
+    A pre-rename name keeps redirecting to the same ID until someone reuses it. A reused name
+    resolves to another repository, whose self-consistent release must never be accepted.
+    """
+    status, payload = fetch_repository(repository)
+    if status != 200 or not isinstance(payload, dict):
+        raise AcceptanceError(f"GitHub repository lookup failed for {repository}: HTTP {status}")
+    identifier = payload.get("id")
+    if type(identifier) is not int or identifier != REPOSITORY_ID:
+        raise AcceptanceError(f"GitHub repository {repository} is repository ID {identifier!r}, not {REPOSITORY_ID}")
+
+
+def require_attestation_repository_id(output: str) -> None:
+    """Require every verified attestation's certificate to name the Brigade repository ID.
+
+    `output` is `gh attestation verify --format json`; the certificate field is
+    verificationResult.signature.certificate.sourceRepositoryIdentifier, a decimal string.
+    """
+    try:
+        results = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("attestation verification output is not JSON") from exc
+    if not isinstance(results, list) or not results:
+        raise AcceptanceError("attestation verification returned no verified attestation")
+    for result in results:
+        certificate: Any = result
+        for key in ("verificationResult", "signature", "certificate"):
+            certificate = certificate.get(key) if isinstance(certificate, dict) else None
+        identifier = certificate.get("sourceRepositoryIdentifier") if isinstance(certificate, dict) else None
+        if identifier != str(REPOSITORY_ID):
+            raise AcceptanceError(f"attestation was signed for repository ID {identifier!r}, not {REPOSITORY_ID}")
+
+
 def wait_for_github_release_tag(
     version: str,
     *,
@@ -268,6 +312,7 @@ def verify_release_assets(
     *,
     fetch_bytes: BytesFetcher = fetch_bytes,
     repositories: Sequence[str] = ACCEPTED_REPOSITORIES,
+    identity_check: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Fetch the immutable release manifest and verify every native release asset.
 
@@ -278,13 +323,16 @@ def verify_release_assets(
     tag = f"v{version}"
     release_dir = destination / "release-assets"
     release_dir.mkdir(parents=True, exist_ok=True)
+    check_identity = identity_check or require_repository_id
     failure: Exception | None = None
     for candidate in repositories:
         try:
+            # Resolve the name to the repository ID before any release or asset request under it.
+            check_identity(candidate)
             manifest_bytes = fetch_bytes(_release_url(version, "component-manifest-v1.json", candidate))
             manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
             break
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (AcceptanceError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             failure = failure or exc
     else:
         raise AcceptanceError(f"could not fetch release component manifest: {failure}") from failure
@@ -297,6 +345,7 @@ def verify_release_assets(
     repository = manifest_repository(manifest)
     if repository not in repositories:
         raise AcceptanceError(f"release manifest records {repository}, expected {', '.join(repositories)}")
+    check_identity(repository)
 
     expected: dict[str, tuple[str, str]] = {}
     native_paths: dict[str, dict[str, Path]] = {component: {} for component in COMPONENT_IDS}
@@ -901,8 +950,9 @@ def smoke_verified_canonical_release(
     # The attestation is signed under the repository name the release was built in, which
     # the manifest records, so --repo and the signer workflow both follow the manifest.
     repository = manifest_repository(manifest)
+    require_repository_id(repository)
     for path in [manifest_path, *paths.values()]:
-        run_checked(
+        verified = run_checked(
             [
                 "gh",
                 "attestation",
@@ -916,10 +966,14 @@ def smoke_verified_canonical_release(
                 revisions[0],
                 "--source-ref",
                 f"refs/tags/v{version}",
+                "--format",
+                "json",
             ],
             runner=runner,
             env=env,
         )
+        # A name is only a label: the signing certificate must name the Brigade repository ID.
+        require_attestation_repository_id(verified.stdout)
     native_env = {
         key: value
         for key, value in env.items()
@@ -955,6 +1009,7 @@ def run_acceptance(
         repositories = (pinned_repository(),) if pin_workflow_repository else ACCEPTED_REPOSITORIES
         for index, candidate in enumerate(repositories):
             try:
+                require_repository_id(candidate)
                 wait_for_github_release_tag(version, repository=candidate)
                 break
             except AcceptanceError:

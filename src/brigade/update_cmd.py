@@ -482,9 +482,15 @@ def _lookup_release(http: UpdateHttp, suffix: str) -> tuple[Any, str]:
     first, *aliases = _RELEASE_REPOSITORIES
     rename_error: RepositoryRenamedError | None = None
     try:
-        return http.json(f"https://api.github.com/repos/{first}/releases/{suffix}"), first
+        raw = http.json(f"https://api.github.com/repos/{first}/releases/{suffix}")
     except RepositoryRenamedError as exc:
         rename_error = exc
+    else:
+        # The first slug answered directly, with no rename redirect. Before the rename that is this
+        # repository; after it, only a different repository that reused the old name answers this
+        # way. Trust the release only while the slug still resolves to this repository ID.
+        _verify_repository_identity(http, first)
+        return raw, first
     for repository in aliases:
         _verify_repository_identity(http, repository)
         return http.json(f"https://api.github.com/repos/{repository}/releases/{suffix}"), repository

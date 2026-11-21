@@ -31,7 +31,19 @@ def acceptance_module():
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # Names resolve to the real repository ID unless a test says a name was reused.
+    module.fetch_repository = lambda repository: (200, {"id": module.REPOSITORY_ID, "full_name": repository})
     return module
+
+
+REAL_ID = 1238165856
+
+
+def _attestation_json(identifier="1238165856"):
+    """What `gh attestation verify --format json` prints (field names read from a real v0.31.0 verification)."""
+    return json.dumps(
+        [{"verificationResult": {"signature": {"certificate": {"sourceRepositoryIdentifier": identifier}}}}]
+    )
 
 
 def _component(component_id, executable, *, status="healthy", detail="ok"):
@@ -1387,7 +1399,12 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
             failed = (case == "attestation" and "brigade-evidence-" in argv[3]) or (
                 case == "manifest-attestation" and argv[3].endswith(".json")
             )
-            return subprocess.CompletedProcess(argv, int(failed), "", "fixture attestation rejected" if failed else "")
+            return subprocess.CompletedProcess(
+                argv,
+                int(failed),
+                "" if failed else _attestation_json(),
+                "fixture attestation rejected" if failed else "",
+            )
         if Path(argv[0]).name.startswith("brigade-"):
             assert not set(secrets) & set(kwargs["env"])
         output = '{"jsonrpc":"2.0","id":1,"result":{}}' if len(argv) == 1 else "{}"
@@ -1554,15 +1571,21 @@ def _materialized_release(module, tmp_path, monkeypatch, *, manifest_repository,
     return release_dir
 
 
-def _signing_runner(signed_by, calls):
+def _signing_runner(signed_by, calls, *, certificate_id="1238165856"):
     """A gh stand-in: an attestation verifies only when --repo and the signer workflow name signed_by."""
 
     def runner(argv, **kwargs):
         calls.append(argv)
+        assert argv[-2:] == ["--format", "json"]
         repo = argv[argv.index("--repo") + 1]
         signer = argv[argv.index("--signer-workflow") + 1]
         ok = repo == signed_by and signer == f"{signed_by}/.github/workflows/publish.yml"
-        return subprocess.CompletedProcess(argv, 0 if ok else 1, "", "" if ok else "no matching attestation")
+        return subprocess.CompletedProcess(
+            argv,
+            0 if ok else 1,
+            _attestation_json(certificate_id) if ok else "",
+            "" if ok else "no matching attestation",
+        )
 
     return runner
 
@@ -1618,3 +1641,123 @@ def test_attestation_is_never_attempted_for_an_unaccepted_or_mixed_manifest_repo
             release_dir, "1.2.3", runner=_signing_runner(OLD_REPOSITORY, calls), env={}
         )
     assert calls == []
+
+
+# The names are labels; the immutable repository ID is the identity (#2816). After the rename an
+# organization member can create a new escoffier-labs/brigade, and a self-consistent impostor
+# release under it must never be accepted.
+
+
+def _reused_name(module, monkeypatch, reused):
+    """`reused` now names another repository, as GitHub does once a name is taken again."""
+
+    def lookup(repository):
+        return 200, {"id": 7 if repository == reused else REAL_ID, "full_name": repository}
+
+    monkeypatch.setattr(module, "fetch_repository", lookup)
+
+
+def test_acceptance_pins_the_repository_id_next_to_the_two_names(acceptance_module):
+    assert acceptance_module.REPOSITORY_ID == REAL_ID
+
+
+@pytest.mark.parametrize(
+    ("status", "payload"),
+    [(404, {}), (403, {}), (200, []), (200, {}), (200, {"id": 7}), (200, {"id": "1238165856"}), (200, {"id": True})],
+)
+def test_require_repository_id_rejects_anything_but_the_real_id(acceptance_module, monkeypatch, status, payload):
+    monkeypatch.setattr(acceptance_module, "fetch_repository", lambda repository: (status, payload))
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="repository"):
+        acceptance_module.require_repository_id(OLD_REPOSITORY)
+
+
+@pytest.mark.parametrize("repository", [OLD_REPOSITORY, NEW_REPOSITORY])
+def test_require_repository_id_accepts_either_name_with_the_real_id(acceptance_module, repository):
+    acceptance_module.require_repository_id(repository)
+
+
+def test_a_reused_old_name_cannot_serve_a_release(acceptance_module, tmp_path, monkeypatch):
+    # The impostor owns the old name and publishes a complete, self-consistent old-name release.
+    _reused_name(acceptance_module, monkeypatch, OLD_REPOSITORY)
+    _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY)
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        raise AssertionError(f"must not download from the impostor: {url}")
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="repository ID"):
+        acceptance_module.verify_release_assets("1.2.3", tmp_path, fetch_bytes=fetch, repositories=(OLD_REPOSITORY,))
+    assert fetched == []
+
+
+def test_a_new_name_release_still_verifies_while_the_old_name_is_reused(acceptance_module, tmp_path, monkeypatch):
+    _reused_name(acceptance_module, monkeypatch, OLD_REPOSITORY)
+    _, bodies, checksums = _release_fixture(repository=NEW_REPOSITORY)
+
+    result = _verify_fixture(acceptance_module, tmp_path, bodies, checksums, NEW_REPOSITORY)
+
+    assert acceptance_module.manifest_repository(result["manifest"]) == NEW_REPOSITORY
+
+
+def test_a_manifest_recording_a_reused_name_is_rejected_even_when_reached_through_the_real_one(
+    acceptance_module, tmp_path, monkeypatch
+):
+    # The manifest is reachable under the real name but claims the reused one.
+    _reused_name(acceptance_module, monkeypatch, OLD_REPOSITORY)
+    _, bodies, checksums = _release_fixture(repository=NEW_REPOSITORY)
+    _recorded_as(bodies, checksums, OLD_REPOSITORY)
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="repository ID"):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums, NEW_REPOSITORY)
+
+
+@pytest.mark.parametrize("repository", [OLD_REPOSITORY, NEW_REPOSITORY])
+def test_attestation_certificate_must_name_the_real_repository_id(acceptance_module, tmp_path, monkeypatch, repository):
+    release_dir = _materialized_release(acceptance_module, tmp_path, monkeypatch, manifest_repository=repository)
+
+    calls = []
+    acceptance_module.smoke_verified_canonical_release(
+        release_dir, "1.2.3", runner=_signing_runner(repository, calls), env={}
+    )
+    assert len(calls) == 4
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="repository ID"):
+        acceptance_module.smoke_verified_canonical_release(
+            release_dir, "1.2.3", runner=_signing_runner(repository, [], certificate_id="999"), env={}
+        )
+
+
+def test_attestation_check_is_skipped_for_a_manifest_naming_a_reused_name(acceptance_module, tmp_path, monkeypatch):
+    release_dir = _materialized_release(acceptance_module, tmp_path, monkeypatch, manifest_repository=OLD_REPOSITORY)
+    _reused_name(acceptance_module, monkeypatch, OLD_REPOSITORY)
+    calls = []
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="repository ID"):
+        acceptance_module.smoke_verified_canonical_release(
+            release_dir, "1.2.3", runner=_signing_runner(OLD_REPOSITORY, calls), env={}
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "not json",
+        "[]",
+        "{}",
+        "[{}]",
+        json.dumps([{"verificationResult": {"signature": {}}}]),
+        _attestation_json(1238165856),
+        _attestation_json(None),
+        _attestation_json("999"),
+    ],
+)
+def test_require_attestation_repository_id_rejects_malformed_or_foreign_output(acceptance_module, output):
+    with pytest.raises(acceptance_module.AcceptanceError):
+        acceptance_module.require_attestation_repository_id(output)
+
+
+def test_require_attestation_repository_id_accepts_the_real_id(acceptance_module):
+    acceptance_module.require_attestation_repository_id(_attestation_json())

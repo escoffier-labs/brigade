@@ -340,6 +340,9 @@ class FakeReleaseHttp:
 
     def json(self, url: str) -> Any:
         self.urls.append(url)
+        if url == f"https://api.github.com/repos/{RELEASE_REPOSITORY}":
+            # A name that answers directly must still resolve to the Brigade repository ID.
+            return {"id": 1238165856, "full_name": RELEASE_REPOSITORY}
         if url == f"https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/tags/{self.tag}":
             return self._release
         if url == f"https://api.github.com/repos/{RELEASE_REPOSITORY}/git/ref/tags/{self.tag}":

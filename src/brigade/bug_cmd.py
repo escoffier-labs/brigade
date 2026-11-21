@@ -32,6 +32,10 @@ RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
 # The repository is renamed to RENAMED_REPOSITORY after 0.32.0. REST follows a rename but
 # search and GraphQL do not, so current_repository() asks REST for the current name.
 ACCEPTED_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
+# A name is only a label: after the rename anyone in the organization can create a new repository
+# called escoffier-labs/brigade, and GitHub then stops redirecting that name. The immutable
+# repository ID survives the rename, so a report is filed only where the name resolves to it.
+REPOSITORY_ID = 1238165856
 ISSUES_URL = f"https://github.com/{REPOSITORY}/issues"
 # An issue URL under either accepted name, for reading back what gh returned or recorded.
 _ISSUE_URL = (
@@ -69,17 +73,27 @@ def gh(*args: str) -> str:
     return result.stdout.strip()
 
 
-def current_repository() -> str:
-    """The repository's current full name, one of the two accepted names.
+class RepositoryIdentityError(OSError):
+    """The Brigade repository name does not resolve to the Brigade repository ID."""
 
-    Falls back to the pre-rename name when the lookup fails or reports anything else, so a
-    redirect to an unexpected repository is never used as a target.
+
+def current_repository() -> str:
+    """The repository's current full name, verified against the immutable repository ID.
+
+    REST follows a rename, while search and GraphQL do not, so ask REST who owns the old name.
+    A name that has been reused resolves to another repository ID and is refused rather than
+    replaced by the old name, which would then be the impostor.
     """
     try:
-        name = gh("api", f"repos/{REPOSITORY}", "--jq", ".full_name")
+        raw = gh("api", f"repos/{REPOSITORY}", "--jq", "[.id, .full_name] | @tsv")
     except (OSError, subprocess.SubprocessError):
-        return REPOSITORY
-    return name if name in ACCEPTED_REPOSITORIES else REPOSITORY
+        raise RepositoryIdentityError(
+            f"could not confirm that {REPOSITORY} is the Brigade repository (the gh api lookup failed)"
+        ) from None
+    identifier, _, name = raw.partition("\t")
+    if identifier != str(REPOSITORY_ID) or name not in ACCEPTED_REPOSITORIES:
+        raise RepositoryIdentityError(f"{REPOSITORY} does not resolve to the Brigade repository ID {REPOSITORY_ID}")
+    return name
 
 
 def _normalize_fingerprint(text: str) -> str:
@@ -343,7 +357,10 @@ def _submit(via: str, bundle: dict[str, Any], markdown: str, comment_on: int | N
     with tempfile.TemporaryDirectory(prefix="brigade-bug-") as temporary:
         body = Path(temporary) / "body.md"
         write_text_atomic(body, markdown)
-        repository = current_repository()
+        try:
+            repository = current_repository()
+        except RepositoryIdentityError as exc:
+            raise ReportBlocked(f"Bug report blocked: {exc}, nothing was submitted") from None
         if comment_on is not None:
             gh("issue", "comment", str(comment_on), "--repo", repository, "--body-file", str(body))
             return f"https://github.com/{repository}/issues/{comment_on}"

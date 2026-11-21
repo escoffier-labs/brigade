@@ -134,14 +134,26 @@ def _release(manifest: dict, repository: str = REPOSITORY) -> tuple[dict, str, s
     return {"tag_name": TAG, "target_commitish": "main", "assets": assets}, checksums, manifest_body
 
 
+REPOSITORY_ID = 1238165856
+
+
 def _fetcher(
-    release: dict, checksums: str, manifest_body: str, *, tag_ref=None, tag_objects=None, repository: str = REPOSITORY
+    release: dict,
+    checksums: str,
+    manifest_body: str,
+    *,
+    tag_ref=None,
+    tag_objects=None,
+    repository: str = REPOSITORY,
+    repository_id: int = REPOSITORY_ID,
 ):
     base, api, ref_api, tag_api = _urls(repository)
     tag_ref = tag_ref or {"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": "a" * 40}}
     tag_objects = tag_objects or {}
 
     def fetch(url: str) -> tuple[int, str]:
+        if url == f"https://api.github.com/repos/{repository}":
+            return 200, json.dumps({"id": repository_id, "full_name": repository})
         if url == api:
             return 200, json.dumps(release)
         if url == ref_api:
@@ -616,3 +628,106 @@ def test_verifier_rejects_release_api_urls_under_a_third_repository(tmp_path):
 
     assert any("immutable Brigade release URL" in error for error in errors)
     assert any("URL does not match manifest" in error for error in errors)
+
+
+# The names are labels; the immutable repository ID is the identity. A reused old name resolves to
+# another repository, so a self-consistent impostor release must never verify (#2816).
+
+
+def test_verifier_pins_the_repository_id_next_to_the_two_names():
+    module = _module()
+
+    assert module.REPOSITORY_ID == REPOSITORY_ID == 1238165856
+
+
+@pytest.mark.parametrize("repository", [REPOSITORY, RENAMED_REPOSITORY])
+def test_verifier_accepts_either_name_when_it_resolves_to_the_real_repository_id(tmp_path, repository):
+    manifest = _manifest(repository)
+    release, checksums, body = _release(manifest, repository)
+    path = _write(tmp_path, manifest, body)
+
+    fetch = _fetcher(release, checksums, body, repository=repository, repository_id=REPOSITORY_ID)
+
+    assert _module().verify_manifest(path, fetch=fetch) == []
+
+
+@pytest.mark.parametrize("repository", [REPOSITORY, RENAMED_REPOSITORY])
+@pytest.mark.parametrize("impostor_id", [1, REPOSITORY_ID + 1, "1238165856", None, True])
+def test_verifier_rejects_a_reused_name_before_any_release_tag_or_asset_lookup(tmp_path, repository, impostor_id):
+    # The impostor publishes a complete, self-consistent release under the reused name.
+    manifest = _manifest(repository)
+    release, checksums, body = _release(manifest, repository)
+    path = _write(tmp_path, manifest, body)
+    inner = _fetcher(release, checksums, body, repository=repository, repository_id=impostor_id)
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        return inner(url)
+
+    errors = _module().verify_manifest(path, fetch=fetch)
+
+    assert any("repository ID" in error for error in errors)
+    assert seen == [f"https://api.github.com/repos/{repository}"]
+
+
+@pytest.mark.parametrize("status", [404, 403, 500])
+def test_verifier_rejects_a_repository_lookup_that_fails(tmp_path, status):
+    manifest = _manifest()
+    path = _write(tmp_path, manifest)
+
+    errors = _module().verify_manifest(path, fetch=lambda url: (status, "{}"))
+
+    assert errors == [f"GitHub repository lookup failed for {REPOSITORY}: HTTP {status}"]
+
+
+def test_verifier_rejects_a_repository_lookup_that_is_not_json(tmp_path):
+    path = _write(tmp_path, _manifest())
+
+    errors = _module().verify_manifest(path, fetch=lambda url: (200, "<html>"))
+
+    assert errors == [f"GitHub repository lookup returned invalid JSON for {REPOSITORY}"]
+
+
+def _attestation(identifier):
+    # The shape `gh attestation verify --format json` prints for a v0.31.0 release asset.
+    return [{"verificationResult": {"signature": {"certificate": {"sourceRepositoryIdentifier": identifier}}}}]
+
+
+def test_attestation_check_accepts_the_brigade_repository_id():
+    assert _module().attestation_repository_errors(json.dumps(_attestation("1238165856"))) == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _attestation("999"),
+        _attestation(1238165856),  # the certificate field is a decimal string
+        _attestation(None),
+        [],
+        {},
+        [{}],
+        [{"verificationResult": {"signature": {}}}],
+        _attestation("1238165856") + _attestation("999"),
+    ],
+)
+def test_attestation_check_rejects_any_other_or_missing_repository_id(payload):
+    assert _module().attestation_repository_errors(json.dumps(payload))
+
+
+def test_attestation_check_rejects_output_that_is_not_json():
+    assert _module().attestation_repository_errors("not json") == ["attestation verification output is not JSON"]
+
+
+@pytest.mark.parametrize(("identifier", "code"), [("1238165856", 0), ("2", 1)])
+def test_check_attestation_json_cli_exit_code_follows_the_repository_id(tmp_path, capsys, identifier, code):
+    path = tmp_path / "attestation.json"
+    path.write_text(json.dumps(_attestation(identifier)))
+
+    assert _module().main(["--check-attestation-json", str(path)]) == code
+    assert ("repository ID" in capsys.readouterr().err) == (code == 1)
+
+
+def test_check_attestation_json_cli_rejects_an_unreadable_file(tmp_path, capsys):
+    assert _module().main(["--check-attestation-json", str(tmp_path / "missing.json")]) == 1
+    assert "could not read attestation output" in capsys.readouterr().err

@@ -228,8 +228,8 @@ def test_reviewed_report_to_pending_finding(
         bodies = []
 
         def fake_gh(*args):
-            if args[0] == "api":  # the repository's current name, resolved over REST
-                return bug_cmd.REPOSITORY
+            if args[0] == "api":  # the repository's ID and current name, resolved over REST
+                return f"{bug_cmd.REPOSITORY_ID}\t{bug_cmd.REPOSITORY}"
             if args[:2] == ("search", "issues"):
                 return "[]"
             assert args[:2] == ("issue", "create")

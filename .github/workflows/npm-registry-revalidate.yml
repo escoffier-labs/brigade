@@ -65,6 +65,7 @@ jobs:
           proof = Path(os.environ['RUNNER_TEMP']) / 'npm-revalidation'
           proof.mkdir(exist_ok=True)
           assert os.environ['GITHUB_REPOSITORY'] in {'escoffier-labs/brigade', 'escoffier-labs/brigadestack'}
+          assert os.environ['GITHUB_REPOSITORY_ID'] == '1238165856', 'repository name is not the Brigade repository ID'
           assert os.environ['GITHUB_REF'] == 'refs/heads/main'
           assert os.environ['GITHUB_WORKFLOW_REF'] == os.environ['GITHUB_REPOSITORY'] + '/.github/workflows/npm-registry-revalidate.yml@' + os.environ['GITHUB_REF']
           identities = {}
@@ -113,6 +114,7 @@ jobs:
           assert run['id'] == metadata['workflow_run']['id'] == int(os.environ['ORIGINAL_RUN_ID'])
           assert run['head_sha'] == metadata['workflow_run']['head_sha'] == packaging
           assert run['repository']['full_name'] == run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          assert run['repository']['id'] == run['head_repository']['id'] == 1238165856
           assert run['repository']['id'] == run['head_repository']['id'] == metadata['workflow_run']['repository_id'] == metadata['workflow_run']['head_repository_id']
           assert run['event'] == 'workflow_dispatch' and run['path'] == '.github/workflows/npm-publish.yml'
           assert metadata['digest'] == 'sha256:' + expected_digest

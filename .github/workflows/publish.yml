@@ -450,7 +450,9 @@ jobs:
           while read -r _digest asset; do
             gh attestation verify "release-assets/$asset" --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish.yml" \
-              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF"
+              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --format json > "$RUNNER_TEMP/attestation.json"
+            # A name is only a label: require the certificate to name the Brigade repository ID.
+            python scripts/verify_component_manifest_provenance.py --check-attestation-json "$RUNNER_TEMP/attestation.json"
           done < release-assets/checksums.txt
 
   build-and-publish:

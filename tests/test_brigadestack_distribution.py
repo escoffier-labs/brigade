@@ -20,10 +20,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "distribution/brigadestack"  # npm bridge, flipped in the npm slice
 COMPAT = ROOT / "distribution/brigade-cli/pypi"
-MAIN_DISPATCH = (
-    "(github.repository == 'escoffier-labs/brigade' || github.repository == 'escoffier-labs/brigadestack')"
-    " && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'"
-)
+MAIN_DISPATCH = "github.repository_id == '1238165856' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'"
 
 
 @pytest.mark.parametrize(

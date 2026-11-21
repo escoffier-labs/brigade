@@ -25,6 +25,10 @@ RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
 # two names are accepted and never any other repository. Keep in step with
 # src/brigade/update_cmd.py (tests/test_repository_rename_names.py checks the pair).
 ACCEPTED_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
+# A name is only a label: after the rename anyone in the organization can create a new repository
+# called escoffier-labs/brigade, and GitHub then stops redirecting that name. The immutable
+# repository ID survives the rename, so every name above is trusted only while it resolves to it.
+REPOSITORY_ID = 1238165856
 COMPONENT_IDS = (
     "agent-notify",
     "brigade-code-graph",
@@ -113,6 +117,49 @@ def read_manifest_repository(manifest_path: Path) -> tuple[str | None, list[str]
     if repository is None and not errors:
         errors.append("component manifest records no repository")
     return (repository if not errors else None), errors
+
+
+def repository_identity_errors(repository: str, fetch: FetchFn) -> list[str]:
+    """Require a repository name to resolve to the Brigade repository ID before it is trusted.
+
+    A pre-rename name keeps redirecting to the same ID until someone reuses it, so old releases
+    still verify. A reused name resolves to another repository and is rejected here, before any
+    release, tag or asset lookup.
+    """
+    status, body = fetch(f"https://api.github.com/repos/{repository}")
+    if status != 200:
+        return [f"GitHub repository lookup failed for {repository}: HTTP {status}"]
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return [f"GitHub repository lookup returned invalid JSON for {repository}"]
+    identifier = payload.get("id") if isinstance(payload, dict) else None
+    if type(identifier) is not int or identifier != REPOSITORY_ID:
+        return [f"GitHub repository {repository} is repository ID {identifier!r}, not {REPOSITORY_ID}"]
+    return []
+
+
+def attestation_repository_errors(text: str) -> list[str]:
+    """Require every verified attestation's certificate to name the Brigade repository ID.
+
+    Input is the JSON `gh attestation verify --format json` prints. The certificate field is
+    verificationResult.signature.certificate.sourceRepositoryIdentifier, a decimal string.
+    """
+    try:
+        results = json.loads(text)
+    except json.JSONDecodeError:
+        return ["attestation verification output is not JSON"]
+    if not isinstance(results, list) or not results:
+        return ["attestation verification returned no verified attestation"]
+    errors: list[str] = []
+    for index, result in enumerate(results):
+        certificate: Any = result
+        for key in ("verificationResult", "signature", "certificate"):
+            certificate = certificate.get(key) if isinstance(certificate, dict) else None
+        identifier = certificate.get("sourceRepositoryIdentifier") if isinstance(certificate, dict) else None
+        if identifier != str(REPOSITORY_ID):
+            errors.append(f"attestation {index} was signed for repository ID {identifier!r}, not {REPOSITORY_ID}")
+    return errors
 
 
 def _release_api_urls(tag: str, filename: str) -> set[str]:
@@ -239,6 +286,11 @@ def verify_manifest(
             *repository_errors,
             *([] if repository_errors else ["component manifest records no repository"]),
         ]
+
+    # Trust the recorded name only while it resolves to the Brigade repository ID.
+    identity_errors = repository_identity_errors(repository, fetch)
+    if identity_errors:
+        return [*errors, *identity_errors]
 
     tag: str | None = None
     expected_native: dict[str, dict[str, Any]] = {}
@@ -416,11 +468,24 @@ def main(argv: list[str] | None = None) -> int:
         help="require the manifest to record this repository (one of the two accepted names)",
     )
     parser.add_argument(
+        "--check-attestation-json",
+        type=Path,
+        help="require the JSON `gh attestation verify --format json` wrote to this file to name the Brigade repository ID",
+    )
+    parser.add_argument(
         "--print-repository",
         action="store_true",
         help="print the one accepted repository the manifest records and exit without any network lookup",
     )
     args = parser.parse_args(argv)
+    if args.check_attestation_json is not None:
+        try:
+            attestation_errors = attestation_repository_errors(args.check_attestation_json.read_text())
+        except OSError as exc:
+            attestation_errors = [f"could not read attestation output ({exc})"]
+        for error in attestation_errors:
+            print(f"component manifest provenance: {error}", file=sys.stderr)
+        return 1 if attestation_errors else 0
     if args.print_repository:
         repository, errors = read_manifest_repository(args.manifest)
         for error in errors:

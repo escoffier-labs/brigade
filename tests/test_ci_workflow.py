@@ -1294,7 +1294,19 @@ def _extract_powershell_function(text: str, name: str) -> str:
 def _powershell_manifest_helpers(script: str) -> str:
     """The shared manifest helpers the extracted release functions call."""
     return "\n".join(
-        _extract_powershell_function(script, name) for name in ("Assert-UniqueManifestKeys", "Get-ManifestRepository")
+        _extract_powershell_function(script, name)
+        for name in ("Assert-UniqueManifestKeys", "Assert-RepositoryId", "Get-ManifestRepository")
+    )
+
+
+def _powershell_repository_stub(reused: str | None = None) -> str:
+    """Invoke-RestMethod stand-in for GET /repos/<name>; `reused` names a repository that is not Brigade's."""
+    return (
+        "\nfunction Invoke-RestMethod { param($Uri, $Headers)\n"
+        "$name = $Uri -replace '^https://api.github.com/repos/', ''\n"
+        "$id = 1238165856\n"
+        + (f"if ($name -ceq '{reused}') {{ $id = 7 }}\n" if reused else "")
+        + "return [pscustomobject]@{ id = $id; full_name = $name } }\n"
     )
 
 
@@ -1327,6 +1339,17 @@ REPOSITORY_DEFECT_MESSAGES = {
     "mixed-repository": "different repositories",
     "unknown-component": "unknown component",
 }
+
+
+def _reused_name_for(case: str, repository: str) -> str | None:
+    """The repository name an impostor now owns, for the reused-name cases."""
+    if case == "reused-name":
+        return repository  # the name serving the fixture was taken by another repository
+    if case == "other-name-reused":
+        return (
+            "escoffier-labs/brigade" if repository == "escoffier-labs/brigadestack" else "escoffier-labs/brigadestack"
+        )
+    return None
 
 
 def _powershell_line_consumes_success_stream(line: str) -> bool:
@@ -2810,6 +2833,8 @@ def _powershell_runtime_env() -> dict[str, str]:
         "third-repository",
         "mixed-repository",
         "unknown-component",
+        "reused-name",
+        "other-name-reused",
     ],
 )
 @pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
@@ -2856,6 +2881,7 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine, reposi
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\n"
         + function
+        + _powershell_repository_stub(_reused_name_for(case, repository))
         + "\nfunction Invoke-WebRequest { param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)\n"
         + f"if (-not $Uri.StartsWith('{base}')) {{ throw 'unexpected URL' }}\n"
         + "$name = $Uri.Split('/')[-1]\n"
@@ -2866,7 +2892,7 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine, reposi
     result = subprocess.run(
         [pwsh, "-NoProfile", "-File", str(harness)], text=True, capture_output=True, env=_powershell_runtime_env()
     )
-    if case in {"legacy", "additive"}:
+    if case in {"legacy", "additive", "other-name-reused"}:
         assert result.returncode == 0, result.stdout + result.stderr
         assert len(list((tmp_path / "out").iterdir())) == (27 if case == "legacy" else 42)
     else:
@@ -2877,6 +2903,8 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine, reposi
             "corrupt": "release asset digest mismatch",
             "extra": "exactly the manifest's native assets",
             "duplicate": "duplicate manifest key",
+            # The reused name is skipped, and the release is not served under the other name.
+            "reused-name": "could not download the release manifest",
             **REPOSITORY_DEFECT_MESSAGES,
         }
         assert expected[case] in result.stdout + result.stderr
@@ -2899,6 +2927,7 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine, reposi
         "mixed-repository",
         "unknown-component",
         "duplicate-key",
+        "reused-name",
     ],
 )
 @pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
@@ -2940,7 +2969,8 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case, repository
     harness = tmp_path / "canonical.ps1"
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\n$script:verified = 0\n$script:smoked = 0\n"
-        "$keys = @('GITHUB_TOKEN','GH_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_RUNTIME_TOKEN')\n"
+        + _powershell_repository_stub(_reused_name_for(case, repository))
+        + "$keys = @('GITHUB_TOKEN','GH_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_RUNTIME_TOKEN')\n"
         "foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, 'fixture-only', 'Process') }\n"
         + function
         + "\nfunction Invoke-CanonicalAttestationVerifier { param($GhExe, $Subject, $Revision, $Version, $Repository)\n"
@@ -2992,6 +3022,8 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case, repository
             if case == "smoke-failure"
             else "duplicate manifest key"
             if case == "duplicate-key"
+            else "repository ID '7'"
+            if case == "reused-name"
             else REPOSITORY_DEFECT_MESSAGES[case]
             if case in REPOSITORY_DEFECT_MESSAGES
             else "source commit"
@@ -3001,7 +3033,9 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case, repository
 
 
 @pytest.mark.parametrize("engine", ["powershell", "pwsh"])
-@pytest.mark.parametrize("case", ["ok", "rejected", "unavailable", "legacy", "smoke-failure", "newline"])
+@pytest.mark.parametrize(
+    "case", ["ok", "rejected", "unavailable", "legacy", "smoke-failure", "newline", "foreign-certificate"]
+)
 def test_windows_native_attestation_process_boundary(tmp_path, engine, case):
     """Exercise a real no-network executable after the production PATH rewrite."""
     if os.name != "nt" or not shutil.which(engine) or not shutil.which("powershell"):
@@ -3023,6 +3057,7 @@ class Stub {
         File.AppendAllLines(Environment.GetEnvironmentVariable("FIXTURE_LOG"), args);
         foreach (string key in new [] {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"})
             if (Environment.GetEnvironmentVariable(key) != "fixture-only") return 91;
+        Console.Out.WriteLine("[{\"verificationResult\":{\"signature\":{\"certificate\":{\"sourceRepositoryIdentifier\":\"" + Environment.GetEnvironmentVariable("FIXTURE_CERT_ID") + "\"}}}}]");
         return Environment.GetEnvironmentVariable("FIXTURE_REJECT") == "yes" ? 23 : 0;
     }
 }
@@ -3060,6 +3095,7 @@ class Stub {
         for name in (
             "Set-AcceptancePath",
             "Assert-UniqueManifestKeys",
+            "Assert-RepositoryId",
             "Get-ManifestRepository",
             "Invoke-CanonicalAttestationVerifier",
             "Invoke-VerifiedCanonicalSmoke",
@@ -3070,6 +3106,7 @@ class Stub {
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\n"
         + functions
+        + _powershell_repository_stub()
         + "\n$keys = @('GITHUB_TOKEN','GH_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_RUNTIME_TOKEN')\n"
         + "foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, 'fixture-only', 'Process') }\n"
         + f"$env:PATH = {literal(verifier_dir)} + ';' + $env:PATH\n"
@@ -3098,6 +3135,7 @@ class Stub {
             FIXTURE_LOG=str(log),
             FIXTURE_SMOKE=str(smoke),
             FIXTURE_REJECT="yes" if case == "rejected" else "no",
+            FIXTURE_CERT_ID="999" if case == "foreign-certificate" else "1238165856",
         ),
     )
     output = result.stdout + result.stderr
@@ -3121,7 +3159,7 @@ class Stub {
         "brigade-code-graph-mcp-windows-amd64.exe",
         "brigade-evidence-windows-amd64.exe",
     ]
-    count = 4 if case in {"ok", "smoke-failure"} else 1 if case == "rejected" else 0
+    count = 4 if case in {"ok", "smoke-failure"} else 1 if case in {"rejected", "foreign-certificate"} else 0
     expected = []
     for name in expected_subjects[:count]:
         expected.extend(
@@ -3137,6 +3175,8 @@ class Stub {
                 "a" * 40,
                 "--source-ref",
                 "refs/tags/v1.2.3",
+                "--format",
+                "json",
             ]
         )
     assert calls == expected
@@ -3240,3 +3280,51 @@ def test_windows_attestation_verifier_rejects_an_empty_repository(tmp_path, engi
 
     assert result.returncode != 0
     assert "repository is required" in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shell script as the verifier executable")
+@pytest.mark.parametrize("engine", ["pwsh", "powershell"])
+@pytest.mark.parametrize(
+    ("stdout", "exit_code", "expected"),
+    [
+        ('[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryIdentifier":"1238165856"}}}}]', 0, "0"),
+        ('[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryIdentifier":"999"}}}}]', 0, "1"),
+        ('[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryIdentifier":1238165856}}}}]', 0, "1"),
+        (
+            '[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryIdentifier":"1238165856"}}}},'
+            '{"verificationResult":{"signature":{"certificate":{"sourceRepositoryIdentifier":"999"}}}}]',
+            0,
+            "1",
+        ),
+        ("[]", 0, "1"),
+        ("not json", 0, "1"),
+        ("", 0, "1"),
+        ('[{"verificationResult":{"signature":{"certificate":{"sourceRepositoryIdentifier":"1238165856"}}}}]', 1, "1"),
+    ],
+)
+def test_powershell_attestation_verifier_requires_the_certificate_to_name_the_repository_id(
+    tmp_path, engine, stdout, exit_code, expected
+):
+    shell = shutil.which(engine)
+    if shell is None:
+        pytest.skip(f"{engine} unavailable; attestation verifier not executed")
+    verifier = tmp_path / "gh"
+    payload = tmp_path / "payload.json"
+    payload.write_text(stdout)
+    verifier.write_text(f"#!/bin/sh\ncat '{payload}'\nexit {exit_code}\n")
+    verifier.chmod(0o755)
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    harness = tmp_path / "certificate.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + _extract_powershell_function(script, "Invoke-CanonicalAttestationVerifier")
+        + f"\n$code = Invoke-CanonicalAttestationVerifier -GhExe '{verifier}' -Subject '/x' -Revision 'a' -Version '1.2.3'"
+        + " -Repository 'escoffier-labs/brigade'\nWrite-Output \"code=$code\"\n"
+    )
+
+    result = subprocess.run(
+        [shell, "-NoProfile", "-File", str(harness)], capture_output=True, text=True, env=_powershell_runtime_env()
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().splitlines()[-1] == f"code={expected}", result.stdout
