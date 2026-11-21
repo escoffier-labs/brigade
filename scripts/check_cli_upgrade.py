@@ -31,14 +31,18 @@ def version_key(version: str) -> tuple[int, ...]:
 
 
 def previous_stable(releases: dict[str, list[dict]], current: str) -> str:
-    """Return the newest stable, non-yanked release strictly older than ``current``."""
+    """Return the newest stable release strictly older than ``current`` with no yanked file.
+
+    The gate pins the release exactly, so a release with any yanked file is skipped: an exact pin
+    can still select a yanked wheel.
+    """
     candidates = [
         version
         for version, files in releases.items()
         if STABLE.fullmatch(version)
         and version_key(version) < version_key(current)
         and files
-        and not all(item.get("yanked") for item in files)
+        and not any(item.get("yanked") for item in files)
     ]
     if not candidates:
         raise ValueError(f"no stable {PACKAGE} release older than {current} is on PyPI")

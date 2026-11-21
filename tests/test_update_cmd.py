@@ -1576,69 +1576,130 @@ def _run_stable_update(tmp_path, channel="stable"):
     return result, commands
 
 
-def _stable_update_with(tmp_path, runner):
-    manifest = _manifest()
-    return update_cmd.run_update(
-        channel="stable",
-        paths=update_cmd.UpdatePaths(
-            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
-        ),
-        http=_Http(_release(manifest), manifest),
-        runner=runner,
-        now=lambda: "2026-07-20T12:00:00+00:00",
-    )
-
-
-def test_stable_update_migrates_a_brigade_cli_install_to_brigadestack(tmp_path, monkeypatch):
-    # brigade-cli's last release becomes a stub, so a stable update must never install it over a working CLI.
+def _migrate(tmp_path, monkeypatch, channel, runner, *, windows=False, venv_entries=()):
+    """Run an update of a brigade-cli pipx app and return (result, paths) with a fake pipx layout."""
     monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: windows)
+    venv_bin = tmp_path / "venvs" / "brigadestack" / "bin"
+    venv_bin.mkdir(parents=True)
+    for name in venv_entries:
+        (venv_bin / name).write_text("#!/bin/sh\n")
+    (tmp_path / "bin").mkdir()
+    paths = update_cmd.UpdatePaths(
+        data_root=tmp_path / "data",
+        cache_root=tmp_path / "cache",
+        brigade_executable=tmp_path / "bin" / "brigade",
+        pipx_venvs=tmp_path / "venvs",
+    )
+    manifest = _manifest()
+    http = _Http(_release(manifest), manifest) if channel == "stable" else _PypiHttp(_release(manifest), manifest)
+    result = update_cmd.run_update(
+        channel=channel, paths=paths, http=http, runner=runner, now=lambda: "2026-07-20T12:00:00+00:00"
+    )
+    return result, paths
+
+
+def _version(channel):
+    return "1.2.3" if channel == "stable" else BETA_VERSION
+
+
+def _no_state(tmp_path):
+    return not list((tmp_path / "data").rglob("*state*.json"))
+
+
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+def test_update_migrates_a_brigade_cli_install_and_runs_setup_from_the_new_environment(tmp_path, monkeypatch, channel):
+    # brigade-cli's last release becomes a stub, so an update must never install it over a working CLI.
     commands = []
-    assert _stable_update_with(tmp_path, lambda argv: commands.append(argv) or 0) == 0
-    install = ["pipx", "install", "--force", "brigadestack==1.2.3"]
+    result, paths = _migrate(tmp_path, monkeypatch, channel, lambda argv: commands.append(argv) or 0)
+    assert result == 0
+    install = ["pipx", "install", "--force", f"brigadestack=={_version(channel)}"]
     assert commands[:3] == [install, ["pipx", "uninstall", "brigade-cli"], install]
-    assert commands[3][1] == "setup"
+    # Setup runs from the brigadestack environment, not the bin-directory link the removal may have taken.
+    assert commands[3][:2] == [str(tmp_path / "venvs" / "brigadestack" / "bin" / "brigade"), "setup"]
+    assert str(paths.brigade_executable) not in commands[3]
     assert len(commands) == 4
     assert list((tmp_path / "data").rglob("*state*.json"))
 
 
-def test_stable_update_keeps_the_new_install_when_removing_the_old_app_fails(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+def test_update_records_nothing_when_the_old_app_cannot_be_removed(tmp_path, monkeypatch, capsys, channel):
     commands = []
 
     def runner(argv):
         commands.append(argv)
         return 1 if argv[1] == "uninstall" else 0
 
-    assert _stable_update_with(tmp_path, runner) == 0
-    assert commands[2] == commands[0]
-    assert commands[3][1] == "setup"
-    assert "pipx uninstall brigade-cli" in capsys.readouterr().err
+    result, _paths = _migrate(tmp_path, monkeypatch, channel, runner)
+    assert result == 1
+    # The second install still runs to restore launchers a partial removal took; setup and state do not.
+    install = ["pipx", "install", "--force", f"brigadestack=={_version(channel)}"]
+    assert commands == [install, ["pipx", "uninstall", "brigade-cli"], install]
+    assert _no_state(tmp_path)
+    err = capsys.readouterr().err
+    assert f"Finish with: pipx uninstall brigade-cli ; {' '.join(install)}" in err
+    assert "then run brigade update again" in err
 
 
-def test_stable_update_records_no_state_when_the_restoring_install_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+def test_failed_second_install_relinks_the_launchers_locally_and_records_nothing(
+    tmp_path, monkeypatch, capsys, channel
+):
     commands = []
 
     def runner(argv):
         commands.append(argv)
-        return 1 if len(commands) == 3 else 0  # the reinstall after the uninstall fails
+        return 1 if len(commands) == 3 else 0  # the install after the uninstall fails
 
-    assert _stable_update_with(tmp_path, runner) == 1
+    entries = ("brigade", "brigadestack", "brigade-hook")
+    result, paths = _migrate(tmp_path, monkeypatch, channel, runner, venv_entries=entries)
+    assert result == 1
     assert len(commands) == 3  # no setup
-    assert not list((tmp_path / "data").rglob("*state*.json"))
+    assert _no_state(tmp_path)
+    for name in entries:
+        link = paths.brigade_executable.parent / name
+        assert link.is_symlink()
+        assert link.resolve() == (tmp_path / "venvs" / "brigadestack" / "bin" / name).resolve()
+    assert not list((tmp_path / "bin").glob(".*update-link"))
+    err = capsys.readouterr().err
+    assert "relinked to the existing brigadestack environment" in err
+    assert f"Restore with: pipx install --force brigadestack=={_version(channel)}" in err
 
 
-def test_stable_update_prints_the_retire_commands_after_exit_where_pipx_copies_apps(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: True)
+def test_failed_second_install_replaces_a_stale_launcher_and_reports_when_nothing_can_be_relinked(
+    tmp_path, monkeypatch, capsys
+):
     commands = []
-    assert _stable_update_with(tmp_path, lambda argv: commands.append(argv) or 0) == 0
-    assert commands[0] == ["pipx", "install", "--force", "brigadestack==1.2.3"]
+
+    def runner(argv):
+        commands.append(argv)
+        return 1 if len(commands) == 3 else 0
+
+    result, paths = _migrate(tmp_path, monkeypatch, "stable", runner)  # no brigadestack environment entries
+    assert result == 1
+    assert not (paths.brigade_executable.parent / "brigade").exists()
+    err = capsys.readouterr().err
+    assert "no brigadestack environment could be relinked" in err
+    assert "Restore with: pipx install --force brigadestack==1.2.3" in err
+
+
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+def test_windows_migration_leaves_the_old_app_and_records_that_retirement_is_pending(
+    tmp_path, monkeypatch, capsys, channel
+):
+    # Copy-mode pipx (Windows) uninstalls `brigade.exe` by name and cannot delete the running
+    # interpreter, so the update must not remove the app it is running from. State is not written, or the
+    # next update would stop at "already owns" and never retire the old app.
+    commands = []
+    result, _paths = _migrate(tmp_path, monkeypatch, channel, lambda argv: commands.append(argv) or 0, windows=True)
+    assert result == 1
+    assert commands[0] == ["pipx", "install", "--force", f"brigadestack=={_version(channel)}"]
+    assert commands[1][1] == "setup"
     assert all(command[1] != "uninstall" for command in commands)
-    assert "pipx uninstall brigade-cli ; pipx install --force brigadestack==1.2.3" in capsys.readouterr().err
+    assert _no_state(tmp_path)
+    err = capsys.readouterr().err
+    assert "retiring the old brigade-cli app is pending" in err
+    assert "pipx uninstall brigade-cli ; pipx install --force brigadestack==" in err
 
 
 def test_stable_update_upgrades_a_brigadestack_install_under_its_own_name(tmp_path, monkeypatch):
@@ -1673,78 +1734,6 @@ def test_beta_update_resolves_and_installs_brigadestack_even_on_a_brigade_cli_in
     assert commands[3][1] == "setup"
     assert len(commands) == 4
     assert update_cmd.PYPI_PROJECT_JSON_URL == "https://pypi.org/pypi/brigadestack/json"
-
-
-def test_beta_update_keeps_the_new_install_when_removing_the_old_app_fails(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
-    manifest = _manifest()
-    commands = []
-
-    def runner(argv):
-        commands.append(argv)
-        return 1 if argv[1] == "uninstall" else 0
-
-    result = update_cmd.run_update(
-        channel="beta",
-        paths=update_cmd.UpdatePaths(
-            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
-        ),
-        http=_PypiHttp(_release(manifest), manifest),
-        runner=runner,
-        now=lambda: "2026-07-20T12:00:00+00:00",
-    )
-    assert result == 0
-    assert commands[1] == ["pipx", "uninstall", "brigade-cli"]
-    assert commands[2] == commands[0]
-    assert commands[3][1] == "setup"
-    assert "pipx uninstall brigade-cli" in capsys.readouterr().err
-
-
-def test_beta_update_records_no_state_when_the_restoring_install_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
-    manifest = _manifest()
-    commands = []
-
-    def runner(argv):
-        commands.append(argv)
-        return 1 if len(commands) == 3 else 0  # the reinstall after the uninstall fails
-
-    result = update_cmd.run_update(
-        channel="beta",
-        paths=update_cmd.UpdatePaths(
-            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
-        ),
-        http=_PypiHttp(_release(manifest), manifest),
-        runner=runner,
-        now=lambda: "2026-07-20T12:00:00+00:00",
-    )
-    assert result == 1
-    assert len(commands) == 3  # no setup
-    assert not list((tmp_path / "data").rglob("*state*.json"))
-
-
-def test_beta_update_leaves_the_old_app_for_after_exit_where_pipx_copies_apps(tmp_path, monkeypatch, capsys):
-    # Copy-mode pipx (Windows) uninstalls `brigade.exe` by name and cannot delete the running
-    # interpreter, so the update must not remove the app it is running from.
-    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: True)
-    manifest = _manifest()
-    commands = []
-    result = update_cmd.run_update(
-        channel="beta",
-        paths=update_cmd.UpdatePaths(
-            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
-        ),
-        http=_PypiHttp(_release(manifest), manifest),
-        runner=lambda argv: commands.append(argv) or 0,
-        now=lambda: "2026-07-20T12:00:00+00:00",
-    )
-    assert result == 0
-    assert all(command[1] != "uninstall" for command in commands)
-    err = capsys.readouterr().err
-    assert "pipx uninstall brigade-cli ; pipx install --force brigadestack==" in err
 
 
 def test_beta_update_of_a_brigadestack_install_removes_nothing(tmp_path, monkeypatch):

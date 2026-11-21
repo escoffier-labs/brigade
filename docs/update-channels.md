@@ -44,12 +44,22 @@ release becomes a stub that prints the migration command.
 it over a working CLI. Development wheels are published only as `brigadestack`, which is also
 why the beta channel never installs `brigade-cli`. On a machine whose pipx app is named
 `brigade-cli`, the update installs `brigadestack`, removes the `brigade-cli` app, installs
-`brigadestack` again (older pipx removes launchers by name), and only then runs setup and
-records the update. If removing the old app fails, the update still succeeds and prints the
-`pipx uninstall brigade-cli` command; if the second install fails, no state is recorded. On Windows,
-where pipx copies launchers and cannot remove the running app, the update instead prints the
-two commands to run after it exits: `pipx uninstall brigade-cli`, then the same
-`pipx install --force brigadestack==<version>` to restore the `brigade` launcher.
+`brigadestack` again (older pipx removes launchers by name), and only then runs setup, from the
+`brigadestack` pipx environment, and records the update. The update is recorded only when the old
+app is gone:
+
+- If removing the old app fails, the update does not run setup and records nothing. It prints the
+  commands to finish (`pipx uninstall brigade-cli ; pipx install --force brigadestack==<version>`)
+  and exits non-zero. Run `brigade update` again afterwards.
+- If the second install fails after the old app was removed, the update relinks `brigade`,
+  `brigadestack` and `brigade-hook` in the pipx bin directory to the existing `brigadestack`
+  environment without the network, so `brigade` keeps running, then records nothing and exits
+  non-zero with the install command to retry. If that environment is gone, it says so.
+- On Windows, where pipx copies launchers and cannot remove the running app, the update installs
+  `brigadestack` and runs setup, but does not record the update because retiring the old app is
+  pending. It exits non-zero and prints the two commands to run after it exits:
+  `pipx uninstall brigade-cli`, then the same `pipx install --force brigadestack==<version>` to
+  restore the `brigade` launcher. Run `brigade update` again to record it.
 
 Run `brigade update` for the production default. `brigade update --channel beta`
 selects the newest non-yanked exact `0.32.0.devYYYYMMDD` wheel for the `0.32`

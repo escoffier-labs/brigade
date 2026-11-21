@@ -146,14 +146,43 @@ def test_python_distributions_are_built_checked_and_published_by_three_separate_
     assert "distribution/brigade-cli/pypi" not in text.replace("distribution/brigade-cli/pypi/README.md", "")
     assert 'python scripts/check_cli_upgrade.py --dist dist --version "${TAG#v}"' in _run_text(gate)
 
-    # The publish job only uploads the artifact the gate checked: the same name, one upload step.
+    # The gate runs a previous PyPI release's code with the runner's artifact credentials, which could
+    # replace a same-named artifact. So both downstream jobs download by the immutable ID the build job
+    # exposes as a job output, and the publish job verifies the files against a build-job manifest.
     [uploaded] = _uses(build, "actions/upload-artifact@")
-    [checked] = _uses(gate, "actions/download-artifact@")
-    [published] = _uses(publish, "actions/download-artifact@")
-    assert uploaded["with"]["name"] == checked["with"]["name"] == published["with"]["name"] == "python-dist"
-    assert uploaded["with"]["path"] == "dist/"
-    assert checked["with"]["path"] == published["with"]["path"] == "dist"
-    assert [step.get("name") for step in publish["steps"] if "run" in step] == []
+    assert uploaded["id"] == "upload"
+    assert uploaded["with"]["name"] == "python-dist" and uploaded["with"]["path"] == "dist/"
+    assert build["outputs"] == {
+        "artifact-id": "${{ steps.upload.outputs.artifact-id }}",
+        "artifact-digest": "${{ steps.upload.outputs.artifact-digest }}",
+        "dist-manifest": "${{ steps.manifest.outputs.dist-manifest }}",
+    }
+    manifest = next(step for step in build["steps"] if step.get("id") == "manifest")
+    assert "sha256sum" in manifest["run"] and "sort" in manifest["run"]
+    assert "dist-manifest<<" in manifest["run"] and '"$GITHUB_OUTPUT"' in manifest["run"]
+    steps = [step.get("id") for step in build["steps"]]
+    assert steps.index("manifest") < steps.index("upload")
+    by_id = "${{ needs.build-python-dist.outputs.artifact-id }}"
+    for job in (gate, publish):
+        [downloaded] = _uses(job, "actions/download-artifact@")
+        assert downloaded["with"]["artifact-ids"] == by_id
+        assert "name" not in downloaded["with"]
+        assert downloaded["with"]["path"] == "dist"
+        assert downloaded["with"]["merge-multiple"] is True
+    verify = next(step for step in publish["steps"] if step.get("name", "").startswith("Verify dist/"))
+    assert verify["env"] == {"DIST_MANIFEST": "${{ needs.build-python-dist.outputs.dist-manifest }}"}
+    assert "needs.build-python-dist.outputs.dist-manifest" not in verify["run"]  # env, never interpolated
+    for check in ("unexpected file", "missing file", "hashes to", "rglob"):
+        assert check in verify["run"]
+    names = [step.get("name") for step in publish["steps"]]
+    assert names.index(verify["name"]) < names.index("Publish to PyPI")
+    assert [step.get("name") for step in publish["steps"] if "run" in step] == [verify["name"]]
+    # No download anywhere addresses python-dist by name, where a replaced artifact would be picked up.
+    for name, job in jobs.items():
+        for step in _uses(job, "actions/download-artifact@"):
+            assert step["with"].get("name") != "python-dist", name
+    assert "digest-mismatch" not in text  # the action's default is to fail on a mismatch
+    # One upload step in the publishing job, default dist/ directory, so all four files ship together.
     [upload] = [step for step in publish["steps"] if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@")]
     assert "packages-dir" not in upload.get("with", {})
     assert text.count("pypa/gh-action-pypi-publish@") == 1

@@ -459,6 +459,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Job outputs cannot be changed by later jobs. Downstream jobs address the artifact by this ID and
+    # the publish job verifies every file against this manifest, because check-cli-upgrade runs code
+    # from a PyPI release that inherits the runner's artifact credentials and could replace a
+    # same-named artifact.
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      dist-manifest: ${{ steps.manifest.outputs.dist-manifest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -502,7 +510,17 @@ jobs:
               print(f"::error::dist/ holds {sorted(found)}, expected {sorted(expected)}")
               sys.exit(1)
           EOF
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      - name: Record a SHA-256 manifest of dist/
+        id: manifest
+        run: |
+          {
+            echo "dist-manifest<<DIST_MANIFEST_EOF"
+            (cd dist && LC_ALL=C sha256sum -- * | LC_ALL=C sort -k2)
+            echo "DIST_MANIFEST_EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Upload dist/
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: python-dist
           path: dist/
@@ -520,7 +538,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: python-dist
+          artifact-ids: ${{ needs.build-python-dist.outputs.artifact-id }}
+          merge-multiple: true
           path: dist
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
@@ -543,8 +562,43 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: python-dist
+          artifact-ids: ${{ needs.build-python-dist.outputs.artifact-id }}
+          merge-multiple: true
           path: dist
+      - name: Verify dist/ is exactly the files build-python-dist recorded
+        env:
+          DIST_MANIFEST: ${{ needs.build-python-dist.outputs.dist-manifest }}
+        run: |
+          python3 - <<'EOF'
+          import hashlib, os, pathlib, sys
+
+          expected = {}
+          for line in os.environ["DIST_MANIFEST"].splitlines():
+              digest, separator, name = line.partition("  ")
+              if not separator or not digest or not name or name in expected:
+                  print(f"::error::malformed or duplicate manifest line {line!r}")
+                  sys.exit(1)
+              expected[name] = digest
+          if not expected:
+              print("::error::the build job recorded an empty manifest")
+              sys.exit(1)
+          root = pathlib.Path("dist")
+          actual = {
+              path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in root.rglob("*")
+              if path.is_file()
+          }
+          problems = [f"unexpected file {name}" for name in sorted(actual.keys() - expected.keys())]
+          problems += [f"missing file {name}" for name in sorted(expected.keys() - actual.keys())]
+          problems += [
+              f"{name} hashes to {actual[name]}, expected {expected[name]}"
+              for name in sorted(actual.keys() & expected.keys())
+              if actual[name] != expected[name]
+          ]
+          for problem in problems:
+              print(f"::error::{problem}")
+          sys.exit(1 if problems else 0)
+          EOF
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:

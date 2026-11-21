@@ -261,13 +261,14 @@ def test_the_two_sdists_hold_the_same_files_outside_the_generated_egg_info(built
     assert any(name.startswith("tests/test_") for name in real)
 
 
-def test_previous_stable_picks_the_newest_older_non_yanked_stable_release():
+def test_previous_stable_picks_the_newest_older_stable_release_with_no_yanked_file():
     gate = _load_script("check_cli_upgrade")
     live = [{"yanked": False}]
     releases = {
         "0.30.0": live,
         "0.31.0": live,
         "0.31.1": [{"yanked": True}],
+        "0.31.2": [{"yanked": False}, {"yanked": True}],
         "0.32.0": live,
         "0.32.0.dev20261120": live,
         "0.33.0rc1": live,
