@@ -615,10 +615,28 @@ the request was refused before the lookup or the lookup timed out, and it stays
 the label for the health family (`/health` and `/ready`), which never waits on
 a reader for a label.
 
+The same line's `stage` names where the request was when the line was written:
+`received` (before the credential lookup), `credential-lookup` (inside it),
+`handler` (authenticated, in admission or a native handler), `writer` (waiting
+on a native writer's commit), `upstream` (waiting on or streaming from Python),
+or `replying` (the reply is built and its body is streaming). A request the
+client cancels keeps the stage it had reached, so a disconnect reads back to
+the phase that stalled.
+
 Python reads pick up enrollments and revocations by opening a new connection
 per request. The Rust readers see them because every request starts a new
 read transaction, which sees all committed data. There is no token cache and
 no result cache anywhere in the hub.
+
+`GET /status` without `?all=1` ranks only the runs whose latest event can still
+be inside the active 30-minute view: `events_received_at` finds the runs with an
+event at or after a date-only bound, which is the calendar date of the window's
+start minus a day (the day covers a receipt written with a UTC offset, and a
+date sorts at or below every timestamp spelling on it), and one `events_run_seq`
+lookup per candidate resolves the winning event by sequence, then receipt, then
+digest. The candidate scan therefore covers between about 24.5 and 48.5 hours of
+events, not 30 minutes; the parsed-age test still applies the window per row.
+`?all=1` returns every run, so it ranks the journal, as it did before.
 
 ### Admission and backpressure
 

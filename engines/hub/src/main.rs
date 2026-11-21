@@ -544,10 +544,17 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     use brigade_hub::{
         modes::{Mode, family},
         shadow,
-        telemetry::RequestLog,
+        telemetry::{RequestLog, Stage, StageSlot},
     };
     let started = std::time::Instant::now();
     let f = family(req.method().as_str(), req.uri().path(), "");
+    // A request that carries its own slot keeps it, so a test can read the
+    // stage an abandoned request reached.
+    let stage = req
+        .extensions()
+        .get::<StageSlot>()
+        .cloned()
+        .unwrap_or_default();
     // Create the log first so a request cancelled during the lookup is still counted.
     let mut log = RequestLog {
         telemetry: app.telemetry.clone(),
@@ -555,6 +562,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         family: f,
         status: 500,
         credential_kind: "anonymous",
+        stage: stage.clone(),
         request_bytes: Arc::default(),
         response_bytes: 0,
         start: started,
@@ -580,6 +588,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     // handle_inner fills this in for POST /messages once the body is buffered.
     let action_family = FamilySlot::default();
     parts.extensions.insert(action_family.clone());
+    parts.extensions.insert(stage.clone());
     let body = body.into_data_stream().map(move |item| {
         if let Ok(bytes) = &item {
             request_bytes.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -621,6 +630,11 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
                 if let Some(peer) = peer {
                     request.extensions_mut().insert(peer);
                 }
+                // Each attempt keeps the same request log and stage slot, so a
+                // retry that stalls still names its own phase. The credential
+                // label and action family are not carried: this path is always
+                // GET /health, which sets neither.
+                request.extensions_mut().insert(stage.clone());
                 request
             });
             let python = handle_inner(State(app.clone()), request).await;
@@ -630,6 +644,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
                 Ok(bytes) => bytes,
                 Err(_) => {
                     log.status = StatusCode::BAD_GATEWAY.as_u16();
+                    stage.set(Stage::Replying);
                     return upstream_error(StatusCode::BAD_GATEWAY, "upstream-body-error", false);
                 }
             };
@@ -674,6 +689,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         log.credential_kind = kind;
     }
     log.status = response.status().as_u16();
+    stage.set(Stage::Replying);
     // The label is final here, before the body streams. Tests read the same
     // line the request log emits, keyed by this app's telemetry.
     #[cfg(test)]
@@ -697,6 +713,15 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     Response::from_parts(parts, Body::from_stream(stream))
 }
 async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Body> {
+    use brigade_hub::telemetry::{Stage, StageSlot};
+    // The request log names the phase this request reached when its line is
+    // written; a disconnect keeps the phase that stalled.
+    let stage = req.extensions().get::<StageSlot>().cloned();
+    let mark = |next: Stage| {
+        if let Some(slot) = &stage {
+            slot.set(next);
+        }
+    };
     if req
         .uri()
         .path_and_query()
@@ -866,6 +891,9 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         }
     }
     let browser = admission::browser(req.uri().path());
+    if app.lookup.is_some() {
+        mark(Stage::CredentialLookup);
+    }
     let credential = match &app.lookup {
         Some(lookup) => match lookup
             .credential(
@@ -900,6 +928,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         },
         None => None,
     };
+    mark(Stage::Handler);
     let source = req
         .extensions()
         .get::<SocketAddr>()
@@ -926,6 +955,10 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
     };
     let headers_only = credential.lane != admission::Lane::Credential && length > 256 * 1024;
     let (parts, body) = req.into_parts();
+    // Each native route authenticates its own token again on the lookup pool.
+    // A request that stalls in one of those reads stalled in the lookup, not in
+    // the handler it was about to reach.
+    mark(Stage::CredentialLookup);
     let native = app
         .registration
         .as_ref()
@@ -984,6 +1017,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         },
         None => None,
     };
+    mark(Stage::Handler);
     let mut budget = if headers_only {
         vec![]
     } else {
@@ -1145,6 +1179,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         req.headers().clone(),
     );
     let total_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    mark(Stage::Upstream);
     let mut result = tokio::time::timeout(header_timeout, app.client.request(req)).await;
     if retry && matches!(&result, Ok(Err(e)) if e.is_connect()) {
         let mut request = Request::builder()

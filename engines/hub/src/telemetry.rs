@@ -336,14 +336,86 @@ pub struct RequestLog {
     pub family: &'static str,
     pub status: u16,
     pub credential_kind: &'static str,
+    /// The phase the request had reached. A cancelled request keeps the phase
+    /// that stalled, which its status and credential label alone cannot show.
+    pub stage: StageSlot,
     pub request_bytes: std::sync::Arc<AtomicU64>,
     pub response_bytes: u64,
     pub start: Instant,
 }
+/// Where a request was when its log line was written. Labels are bounded strings
+/// and carry no request data.
+///
+/// A request that reaches a response always logs `replying`, including the
+/// early 503 refusals, because `handle` marks the reply before the line is
+/// recorded. The field therefore names a stall point only for a request the
+/// client abandons; that request keeps the last phase it entered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Stage {
+    /// Admitted by the front; no credential lookup has started.
+    Received,
+    /// Inside the credential lookup pool.
+    CredentialLookup,
+    /// Authenticated, in admission or a native handler.
+    Handler,
+    /// Waiting on a native write's commit. The routes that share the hub
+    /// writer set it: registration, claims, messages and heartbeat. Memory
+    /// writes go through the memory store's own writer and stay `handler`.
+    Writer,
+    /// Waiting for the Python upstream's headers. Once it answers, its body
+    /// streams under `replying`, so a stall in that body does not read as
+    /// `upstream`.
+    Upstream,
+    /// The reply is built; its body is streaming to the client.
+    Replying,
+}
+impl Stage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::CredentialLookup => "credential-lookup",
+            Self::Handler => "handler",
+            Self::Writer => "writer",
+            Self::Upstream => "upstream",
+            Self::Replying => "replying",
+        }
+    }
+    fn code(self) -> u8 {
+        self as u8
+    }
+    fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::CredentialLookup,
+            2 => Self::Handler,
+            3 => Self::Writer,
+            4 => Self::Upstream,
+            5 => Self::Replying,
+            _ => Self::Received,
+        }
+    }
+}
+/// The stage slot a request carries through its phases. Clones share it.
+#[derive(Clone, Debug, Default)]
+pub struct StageSlot(std::sync::Arc<std::sync::atomic::AtomicU8>);
+impl StageSlot {
+    pub fn set(&self, stage: Stage) {
+        self.0.store(stage.code(), Ordering::Relaxed);
+    }
+    pub fn get(&self) -> Stage {
+        Stage::from_code(self.0.load(Ordering::Relaxed))
+    }
+}
+/// Set the stage on the slot the front attached to this request, if any.
+pub fn mark(parts: &axum::http::request::Parts, stage: Stage) {
+    if let Some(slot) = parts.extensions.get::<StageSlot>() {
+        slot.set(stage);
+    }
+}
 impl RequestLog {
     /// The one request line this log writes, before it is emitted.
     pub fn line(&self) -> serde_json::Value {
-        serde_json::json!({"event":"request","request_id":self.id,"family":self.family,"status":self.status,"latency_seconds":self.start.elapsed().as_secs_f64(),"credential_kind":self.credential_kind,"request_bytes":self.request_bytes.load(Ordering::Relaxed),"response_bytes":self.response_bytes})
+        serde_json::json!({"event":"request","request_id":self.id,"family":self.family,"status":self.status,"latency_seconds":self.start.elapsed().as_secs_f64(),"credential_kind":self.credential_kind,"stage":self.stage.get().label(),"request_bytes":self.request_bytes.load(Ordering::Relaxed),"response_bytes":self.response_bytes})
     }
 }
 impl Drop for RequestLog {
@@ -388,6 +460,41 @@ mod tests {
             .find_map(|line| line.strip_prefix(&prefix))
             .unwrap_or_else(|| panic!("{name}{{{labels}}} missing"))
             .to_owned()
+    }
+
+    /// The request line names the phase, and a cancelled request keeps the
+    /// phase that stalled rather than the label it started with.
+    #[test]
+    fn request_line_names_the_stage_it_reached() {
+        let slot = StageSlot::default();
+        let log = RequestLog {
+            telemetry: Arc::new(Telemetry::default()),
+            id: 7,
+            family: "status",
+            status: 500,
+            credential_kind: "unchecked",
+            stage: slot.clone(),
+            request_bytes: Arc::default(),
+            response_bytes: 0,
+            start: Instant::now(),
+        };
+        assert_eq!(log.line()["stage"], "received");
+        for (stage, label) in [
+            (Stage::CredentialLookup, "credential-lookup"),
+            (Stage::Handler, "handler"),
+            (Stage::Writer, "writer"),
+            (Stage::Upstream, "upstream"),
+            (Stage::Replying, "replying"),
+        ] {
+            slot.set(stage);
+            assert_eq!(log.line()["stage"], label);
+            assert_eq!(slot.get(), stage);
+        }
+        // The earlier fields keep their meaning and stay on the line.
+        let line = log.line();
+        assert_eq!(line["credential_kind"], "unchecked");
+        assert_eq!(line["family"], "status");
+        assert_eq!(line["status"], 500);
     }
 
     #[test]
